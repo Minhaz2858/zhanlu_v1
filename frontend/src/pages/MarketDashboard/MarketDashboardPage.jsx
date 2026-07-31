@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
 import SnapshotGrid from './components/SnapshotGrid';
+import PriceChart from './components/PriceChart';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
 
@@ -79,6 +80,13 @@ export default function MarketDashboardPage() {
           </div>
         )}
         {snapshotQuery.data && <SnapshotGrid items={snapshotQuery.data} />}
+        {snapshotQuery.data && snapshotQuery.data.length > 0 && (
+          <div className="mt-6 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {snapshotQuery.data.map((s) => (
+              <PriceChart key={s.id} productId={s.id} days={30} />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

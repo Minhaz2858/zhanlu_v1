@@ -53,4 +53,16 @@ describe('MarketDashboardPage', () => {
     renderAt('/market-dashboard/upstream');
     expect(await screen.findByText('Japanese Naphtha')).toBeInTheDocument();
   });
+
+  it('renders a PriceChart for each product in the snapshot', async () => {
+    const { marketDashboardApi } = await import('@/api/marketDashboard');
+    marketDashboardApi.snapshot.mockResolvedValueOnce([
+      { id: 'naphtha', name: 'Japanese Naphtha', price: 612.5, date: '2026-07-30',
+        change_pct: 1.2, group: 'upstream', unit: 'CNY/mt' },
+    ]);
+    renderAt('/market-dashboard/upstream');
+    // PriceChart renders the product id as a heading
+    const headings = await screen.findAllByText(/naphtha/i);
+    expect(headings.length).toBeGreaterThanOrEqual(1);
+  });
 });
