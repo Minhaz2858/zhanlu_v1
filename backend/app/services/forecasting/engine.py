@@ -407,6 +407,77 @@ class ForecastEngine:
         y = df.set_index("t")["y"].astype(float)
         return y
 
+    # ── Truth-anchor variants (Task 4) ─────────────────────────────
+
+    def compute_target_anchored(
+        self,
+        target_id: str,
+        horizons: list[int] | None = None,
+        seasonal_period: int = _DEFAULT_SEASONAL_PERIOD,
+    ) -> dict | None:
+        """Like compute_target(), but also returns the source data for truth-gating.
+
+        Returns:
+            None if target not found.
+            {
+                "run": ForecastRun | None,    # the engine's run, or None on compute failure
+                "source_table": str,           # the datasource table
+                "sample_size": int,            # number of non-null rows
+                "anchor_rows": list[dict],     # first/last rows for LLM inspection
+            }
+        """
+        target = self._db.query(ForecastTarget).filter(
+            ForecastTarget.id == target_id,
+            ForecastTarget.is_deleted == False,
+        ).first()
+        if not target:
+            return None
+
+        ds = target.datasource or {}
+        source_table = ds.get("table", "unknown")
+
+        # Pull raw series and capture anchor before running the engine
+        y = self._fetch_series(target)
+        if y is None:
+            return {
+                "run": None,
+                "source_table": source_table,
+                "sample_size": 0,
+                "anchor_rows": [],
+            }
+
+        clean = y.dropna()
+        sample_size = len(clean)
+        seen_dates: set[str] = set()
+        anchor_rows: list[dict] = []
+        for idx, val in clean.head(10).items():
+            d = str(idx.date())
+            seen_dates.add(d)
+            anchor_rows.append({"date": d, "value": float(val)})
+        for idx, val in clean.tail(10).items():
+            d = str(idx.date())
+            if d not in seen_dates:
+                anchor_rows.append({"date": d, "value": float(val)})
+
+        # Now run the full pipeline. Be robust: a thin series may cause the
+        # ensemble to raise (ValueError: no forecasts to blend). In that case
+        # we still want to return the truth-anchor data so the LLM can report
+        # insufficient_data correctly.
+        try:
+            run = self.compute_target(target_id, horizons, seasonal_period)
+        except Exception as exc:
+            logger.warning(
+                "compute_target raised for %s: %s — returning anchor only",
+                target_id, exc,
+            )
+            run = None
+        return {
+            "run": run,
+            "source_table": source_table,
+            "sample_size": sample_size,
+            "anchor_rows": anchor_rows,
+        }
+
 
 # ── helpers ────────────────────────────────────────────────────────────
 

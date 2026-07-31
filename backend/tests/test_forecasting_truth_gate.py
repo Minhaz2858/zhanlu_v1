@@ -119,3 +119,64 @@ def test_config_min_sample_size_is_honored():
     )
     assert out["success"] is False
     assert "≥20" in out["message"]
+
+
+# ── Integration tests with ForecastEngine ────────────────────────
+
+import pandas as pd
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from app.database import Base
+from app.models.forecasting import ForecastTarget
+from app.services.forecasting.engine import ForecastEngine
+
+
+@pytest.fixture
+def in_memory_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    return Session()
+
+
+def test_engine_with_no_targets_returns_empty(in_memory_db):
+    fe = ForecastEngine(in_memory_db)
+    out = fe.compute_target_anchored(target_id="nonexistent")
+    assert out is None  # no target row → None, no fabrication
+
+
+def test_engine_with_thin_target_returns_anchored_with_low_sample(in_memory_db, monkeypatch):
+    """If target has only 3 data points, anchored method should return sample_size=3."""
+    target = ForecastTarget(
+        id="tgt-thin",
+        org_id="org-1",
+        app_id="app-1",
+        product_key="thin",
+        name="Thin",
+        datasource={
+            "table": "fake_table",
+            "time_column": "date",
+            "measure": "value",
+        },
+    )
+    in_memory_db.add(target)
+    in_memory_db.commit()
+
+    def fake_fetch(target):
+        # Real _fetch_series returns a Series indexed by date-typed values from
+        # the warehouse. Use a DatetimeIndex so the implementation's idx.date() works.
+        return pd.Series(
+            [100.0, 101.0, 102.0],
+            index=pd.to_datetime(["2025-01-01", "2025-01-02", "2025-01-03"]),
+        )
+
+    fe = ForecastEngine(in_memory_db)
+    monkeypatch.setattr(fe, "_fetch_series", fake_fetch)
+    out = fe.compute_target_anchored(target_id="tgt-thin")
+    if out is not None:
+        assert "source_table" in out
+        assert "sample_size" in out
+        assert out["sample_size"] == 3
+        assert "anchor_rows" in out
