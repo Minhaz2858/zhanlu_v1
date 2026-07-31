@@ -331,5 +331,7 @@ def _expected_points(t_series: pd.DatetimeIndex, granularity: str) -> float:
 
 
 def _quote(name: str) -> str:
-    """Double-quote an identifier for SQL safety."""
-    return f'"{name}"'
+    """Backtick-quote an identifier for MySQL safety. Idempotent on already-quoted input."""
+    if name.startswith("`") and name.endswith("`"):
+        return name
+    return f"`{name}`"
