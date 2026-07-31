@@ -785,14 +785,14 @@ for _name, _schema, _handler, _enabled, _desc in (
         "forecast_discover",
         FORECAST_DISCOVER_SCHEMA,
         _forecast_discover,
-        False,
+        True,
         "Scan a data source for forecastable time series and register targets.",
     ),
     (
         "forecast_run",
         FORECAST_RUN_SCHEMA,
         _forecast_run,
-        False,
+        True,
         "Run the forecasting pipeline for one or all active targets (heavy ML).",
     ),
     (
