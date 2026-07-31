@@ -2,13 +2,31 @@ import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
+import SnapshotGrid from './components/SnapshotGrid';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
 
 export default function MarketDashboardPage() {
   const { section } = useParams();
+  const isValidSection = VALID_SECTIONS.includes(section);
 
-  if (!VALID_SECTIONS.includes(section)) {
+  // All hooks MUST be called before any conditional return (React Rules of Hooks).
+  const enabledQuery = useQuery({
+    queryKey: ['market-dashboard', 'enabled'],
+    queryFn: marketDashboardApi.enabled,
+    staleTime: 30_000,
+  });
+
+  const snapshotQuery = useQuery({
+    queryKey: ['market-dashboard', 'snapshot', section],
+    queryFn: () => marketDashboardApi.snapshot(
+      section === 'overview' ? undefined : section
+    ),
+    enabled: isValidSection && enabledQuery.data?.enabled && enabledQuery.data?.reachable,
+    staleTime: 60_000,
+  });
+
+  if (!isValidSection) {
     return (
       <div className="p-8">
         <h1 className={TYPO.pageTitle}>Unknown section: {section}</h1>
@@ -18,12 +36,6 @@ export default function MarketDashboardPage() {
       </div>
     );
   }
-
-  const enabledQuery = useQuery({
-    queryKey: ['market-dashboard', 'enabled'],
-    queryFn: marketDashboardApi.enabled,
-    staleTime: 30_000,
-  });
 
   if (enabledQuery.isLoading) {
     return <div className="p-8 text-sm text-slate-500">Checking EDIA availability…</div>;
@@ -57,9 +69,17 @@ export default function MarketDashboardPage() {
   return (
     <div className="p-8">
       <h1 className={TYPO.pageTitle}>EDIA Market Dashboard — {section}</h1>
-      <p className={TYPO.listText + ' mt-1 text-slate-500'}>
-        Snapshot + chart components will be wired in Phase C/D/E.
-      </p>
+      <div className="mt-4">
+        {snapshotQuery.isLoading && (
+          <p className={TYPO.listText + ' text-slate-500'}>Loading snapshot…</p>
+        )}
+        {snapshotQuery.isError && (
+          <div className="rounded border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+            Failed to load snapshot: {snapshotQuery.error?.message || 'unknown'}
+          </div>
+        )}
+        {snapshotQuery.data && <SnapshotGrid items={snapshotQuery.data} />}
+      </div>
     </div>
   );
 }
