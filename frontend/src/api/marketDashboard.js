@@ -40,6 +40,22 @@ export const marketDashboardApi = {
     getJson(`/api/market-dashboard/history/${productId}`, { days }),
   regional: (productId) =>
     getJson(`/api/market-dashboard/regional/${productId}`),
+  regionalBatch: (productIds) =>
+    getJson('/api/market-dashboard/regional-batch', {
+      product_ids: productIds.join(','),
+    }),
+  forecastBaseBatch: (productIds, day = 7) =>
+    getJson('/api/market-dashboard/forecast-base-batch', {
+      product_ids: productIds.join(','),
+      day,
+    }),
+  events: (hours = 168, reviewStatus = 'approved', minUsefulnessScore = 0) =>
+    getJson('/api/market-dashboard/events/latest', {
+      hours,
+      review_status: reviewStatus,
+      min_usefulness_score: minUsefulnessScore,
+    }),
+  fxRate: () => getJson('/api/market-dashboard/fx/usd-cny'),
   news: (group, limit = 18) =>
     getJson('/api/market-dashboard/news', { group, limit }),
 };

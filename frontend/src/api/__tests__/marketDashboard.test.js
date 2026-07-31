@@ -16,9 +16,7 @@ describe('marketDashboardApi', () => {
       json: async () => ({ enabled: true, reachable: true, reason: 'ok' }),
     });
     const r = await marketDashboardApi.enabled();
-    expect(authFetch).toHaveBeenCalledWith('/api/market-dashboard/enabled', {
-      method: 'GET',
-    });
+    expect(authFetch).toHaveBeenCalledWith('/api/market-dashboard/enabled', { method: 'GET' });
     expect(r).toEqual({ enabled: true, reachable: true, reason: 'ok' });
   });
 
@@ -53,5 +51,35 @@ describe('marketDashboardApi', () => {
       json: async () => ({ detail: 'edia_unavailable' }),
     });
     await expect(marketDashboardApi.enabled()).rejects.toThrow(/edia_unavailable/);
+  });
+
+  it('regionalBatch(productIds) hits /regional-batch with product_ids', async () => {
+    authFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ items: {}, errors: {} }) });
+    await marketDashboardApi.regionalBatch(['crude_oil', 'naphtha']);
+    const [url] = authFetch.mock.calls[0];
+    expect(url).toBe('/api/market-dashboard/regional-batch?product_ids=crude_oil%2Cnaphtha');
+  });
+
+  it('forecastBaseBatch(productIds, day) hits /forecast-base-batch', async () => {
+    authFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ day: 7, base_by_product: {} }) });
+    await marketDashboardApi.forecastBaseBatch(['cracked_c5'], 7);
+    const [url] = authFetch.mock.calls[0];
+    expect(url).toContain('/api/market-dashboard/forecast-base-batch');
+    expect(url).toContain('day=7');
+    expect(url).toContain('product_ids=');
+  });
+
+  it('events(hours, reviewStatus, minScore) hits /events/latest', async () => {
+    authFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ events: [], count: 0 }) });
+    await marketDashboardApi.events(168, 'approved', 0);
+    const [url] = authFetch.mock.calls[0];
+    expect(url).toBe('/api/market-dashboard/events/latest?hours=168&review_status=approved&min_usefulness_score=0');
+  });
+
+  it('fxRate() hits /fx/usd-cny', async () => {
+    authFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ price: 7.2, unit: 'CNY/USD' }) });
+    await marketDashboardApi.fxRate();
+    const [url] = authFetch.mock.calls[0];
+    expect(url).toBe('/api/market-dashboard/fx/usd-cny');
   });
 });
