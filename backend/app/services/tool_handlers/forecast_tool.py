@@ -178,19 +178,53 @@ async def _forecast_run(
     org_id, _app_id = _resolve_org_context(context)
 
     def _do_work() -> dict:
+        from app.services.forecasting.truth_gate import wrap_forecast_result
+
         engine = ForecastEngine(db)
 
         if target_id:
             target = db.get(ForecastTarget, target_id)
             if not target or target.is_deleted:
                 return {"success": False, "error": f"ForecastTarget {target_id!r} not found."}
-            run = engine.compute_target(target_id, horizons, seasonal_period)
-            if run is None:
-                return {"success": False, "error": f"Compute failed for target {target_id!r}."}
-            runs = [run]
-        else:
-            runs = engine.compute_all(org_id, horizons, seasonal_period)
 
+            anchored = engine.compute_target_anchored(
+                target_id, horizons, seasonal_period
+            )
+            if anchored is None:
+                return {"success": False, "error": f"Compute failed for target {target_id!r}."}
+
+            run = anchored["run"]
+            raw_runs: list[dict] = []
+            if run is not None:
+                horizon_key = str(max(horizons))
+                horizon_payload = (run.results or {}).get(horizon_key, {}) or {}
+                raw_runs = [
+                    {
+                        "target_id": run.target_id,
+                        "horizon_days": max(horizons),
+                        "point_estimate": (
+                            horizon_payload.get("base", [None])[0]
+                            if horizon_payload else None
+                        ),
+                        "scenarios": horizon_payload,
+                        "methodology": (run.model_detail or {}).get("metric", "ensemble"),
+                        "confidence": run.confidence,
+                        "below_naive_baseline": run.below_naive_baseline,
+                        "as_of_date": run.as_of_date.isoformat() if run.as_of_date else None,
+                        "model_detail": run.model_detail,
+                    }
+                ]
+
+            gated = wrap_forecast_result(
+                raw_runs=raw_runs,
+                anchor_rows=anchored["anchor_rows"],
+                source_table=anchored["source_table"],
+                sample_size=anchored["sample_size"],
+            )
+            return gated
+
+        # bulk path — unchanged
+        runs = engine.compute_all(org_id, horizons, seasonal_period)
         return {
             "success": True,
             "runs": [

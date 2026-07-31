@@ -180,3 +180,85 @@ def test_engine_with_thin_target_returns_anchored_with_low_sample(in_memory_db, 
         assert "sample_size" in out
         assert out["sample_size"] == 3
         assert "anchor_rows" in out
+
+
+# ── Tool handler tests ──────────────────────────────────────────
+
+import asyncio
+from unittest.mock import MagicMock, patch
+
+
+def test_forecast_run_with_thin_data_returns_insufficient_data():
+    """When the engine returns 3 data points, the tool returns insufficient_data."""
+    from app.services.tool_handlers.forecast_tool import _forecast_run
+
+    fake_engine = MagicMock()
+    fake_engine.compute_target_anchored.return_value = {
+        "run": None,
+        "source_table": "actual_price",
+        "sample_size": 3,
+        "anchor_rows": [],
+    }
+    fake_db = MagicMock()
+    fake_db.get.return_value = MagicMock(is_deleted=False)
+
+    with patch(
+        "app.services.tool_handlers.forecast_tool.ForecastEngine",
+        return_value=fake_engine,
+    ):
+        result = asyncio.run(_forecast_run(
+            args={"target_id": "tgt-1"},
+            db=fake_db,
+            user_id="u-1",
+            context={},
+        ))
+
+    assert result["success"] is False
+    assert result["reason"] == "insufficient_data"
+    assert result["sample_size"] == 3
+    assert result["source_table"] == "actual_price"
+
+
+def test_forecast_run_with_full_data_returns_anchored_response():
+    """When the engine returns 30+ data points, the tool returns success + data_anchor."""
+    from app.services.tool_handlers.forecast_tool import _forecast_run
+
+    fake_run = MagicMock()
+    fake_run.target_id = "tgt-1"
+    fake_run.below_naive_baseline = False
+    fake_run.confidence = 0.8
+    fake_run.as_of_date = None
+    fake_run.model_detail = {"ensemble_mape": 0.05}
+    fake_run.results = {
+        "7": {"base": [120.0] * 7, "bull": [130.0] * 7, "bear": [110.0] * 7}
+    }
+
+    fake_engine = MagicMock()
+    fake_engine.compute_target_anchored.return_value = {
+        "run": fake_run,
+        "source_table": "actual_price",
+        "sample_size": 365,
+        "anchor_rows": [
+            {"date": "2026-01-01", "value": 100.0},
+            {"date": "2026-12-31", "value": 365.0},
+        ],
+    }
+    fake_db = MagicMock()
+    fake_db.get.return_value = MagicMock(is_deleted=False)
+
+    with patch(
+        "app.services.tool_handlers.forecast_tool.ForecastEngine",
+        return_value=fake_engine,
+    ):
+        result = asyncio.run(_forecast_run(
+            args={"target_id": "tgt-1"},
+            db=fake_db,
+            user_id="u-1",
+            context={},
+        ))
+
+    assert result["success"] is True
+    assert "data_anchor" in result
+    assert result["data_anchor"]["sample_size"] == 365
+    assert "runs" in result
+    assert result["runs"][0]["target_id"] == "tgt-1"
