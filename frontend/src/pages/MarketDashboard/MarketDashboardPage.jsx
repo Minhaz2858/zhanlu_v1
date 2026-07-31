@@ -2,10 +2,12 @@ import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
+import { PRODUCTS_WITH_FORECAST } from '@/constants/marketDashboard';
 import SnapshotGrid from './components/SnapshotGrid';
 import PriceChart from './components/PriceChart';
 import RegionalTable from './components/RegionalTable';
 import NewsPanel from './components/NewsPanel';
+import ForecastCard from './components/ForecastCard';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
 
@@ -82,6 +84,9 @@ export default function MarketDashboardPage() {
           </div>
         )}
         {snapshotQuery.data && <SnapshotGrid items={snapshotQuery.data} />}
+        <div className="mt-6">
+          <ForecastCard productIds={PRODUCTS_WITH_FORECAST} day={7} />
+        </div>
         {snapshotQuery.data && snapshotQuery.data.length > 0 && (
           <div className="mt-6 grid grid-cols-1 gap-3 lg:grid-cols-2">
             {snapshotQuery.data.map((s) => (

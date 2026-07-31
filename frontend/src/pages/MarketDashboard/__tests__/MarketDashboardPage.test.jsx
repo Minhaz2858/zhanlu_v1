@@ -10,6 +10,15 @@ vi.mock('@/api/marketDashboard', () => ({
     history: vi.fn().mockResolvedValue([]),
     regional: vi.fn().mockResolvedValue({ product_id: '', regions: [] }),
     news: vi.fn().mockResolvedValue({ items: [], note: '' }),
+    forecastBaseBatch: vi.fn().mockResolvedValue({
+      day: 7,
+      base_by_product: { cracked_c5: 6200, cracked_c9: 6200 },
+    }),
+    events: vi.fn().mockResolvedValue({ events: [], count: 0 }),
+    fxRate: vi.fn().mockResolvedValue({
+      price: 7.2, unit: "CNY/USD", as_of_date: "2026-07-31",
+      data_source: "static_fallback", available: true,
+    }),
   },
 }));
 
@@ -61,7 +70,6 @@ describe('MarketDashboardPage', () => {
         change_pct: 1.2, group: 'upstream', unit: 'CNY/mt' },
     ]);
     renderAt('/market-dashboard/upstream');
-    // PriceChart renders the product id as a heading
     const headings = await screen.findAllByText(/naphtha/i);
     expect(headings.length).toBeGreaterThanOrEqual(1);
   });
@@ -76,17 +84,28 @@ describe('MarketDashboardPage', () => {
     expect(await screen.findByText(/naphtha — regional/i)).toBeInTheDocument();
   });
 
-  it('renders NewsPanel with the v1 info banner', async () => {
+  it('renders ForecastCard with 7-day outlook title', async () => {
+    renderAt('/market-dashboard/overview');
+    expect(await screen.findByText(/7-day price outlook/i)).toBeInTheDocument();
+  });
+
+  it('renders NewsPanel (events-driven)', async () => {
     const { marketDashboardApi } = await import('@/api/marketDashboard');
-    marketDashboardApi.snapshot.mockResolvedValueOnce([
-      { id: 'naphtha', name: 'Japanese Naphtha', price: 612.5, date: '2026-07-30',
-        change_pct: 1.2, group: 'upstream', unit: 'CNY/mt' },
-    ]);
-    marketDashboardApi.news.mockResolvedValueOnce({
-      items: [],
-      note: "Industry news requires EDIA's AI event pipeline (not part of this v1 read-only mirror).",
+    marketDashboardApi.events.mockResolvedValueOnce({
+      events: [
+        {
+          event_id: 'evt-1',
+          headline: 'Test event',
+          event_type: 'price_signal',
+          direction: 'up',
+          usefulness_score: 5.0,
+          affected_commodities: ['naphtha'],
+          detected_at: '2026-07-31T10:00:00',
+        },
+      ],
+      count: 1,
     });
     renderAt('/market-dashboard/upstream');
-    expect(await screen.findByText(/AI event pipeline/i)).toBeInTheDocument();
+    expect(await screen.findByText('Test event')).toBeInTheDocument();
   });
 });
