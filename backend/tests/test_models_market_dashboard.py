@@ -2,16 +2,20 @@
 from app.models import market_dashboard as m
 
 
-def test_product_table_map_has_six_known_products():
-    assert set(m.PRODUCT_TABLE_MAP.keys()) == {
-        "naphtha", "mixed_c5", "isoprene", "piperylene", "dcpd", "sis_rubber"
-    }
+def test_product_table_map_has_known_products():
+    keys = set(m.PRODUCT_TABLE_MAP.keys())
+    # Core mapped products
+    for pid in ("naphtha", "mixed_c5", "isoprene", "piperylene", "dcpd", "sis_rubber"):
+        assert pid in keys, f"{pid} missing from PRODUCT_TABLE_MAP"
+    # New mappings added after EDIA schema probe
+    for pid in ("crude_oil", "cracked_c5", "sis"):
+        assert pid in keys, f"{pid} missing from PRODUCT_TABLE_MAP"
 
 
 def test_product_table_map_shape():
     cfg = m.PRODUCT_TABLE_MAP["naphtha"]
     assert cfg["table"] == "裂解C5"
-    assert cfg["value_col"] == "日本石脑油Japanese naphtha"
+    assert cfg["supplier_name"] == "日本石脑油"
     assert "label_en" in cfg and "label_zh" in cfg
 
 

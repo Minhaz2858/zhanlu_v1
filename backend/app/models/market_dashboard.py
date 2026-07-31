@@ -1,8 +1,14 @@
 """Read-only SQLAlchemy Table objects for EDIA's MySQL warehouse.
 
 Tables are autoloaded on first use — we never call Base.metadata.create_all
-and never issue INSERT/UPDATE/DELETE. This module mirrors EDIA's
-backend/src/db/market_db.py mapping verbatim.
+and never issue INSERT/UPDATE/DELETE.
+
+EDIA's warehouse uses a unified long-table schema (all tables share the
+same column structure). The old EDIA market_db.py used wide-table column
+names as value_col — that schema no longer exists. The warehouse now
+uses 厂商名supplier_name to distinguish different price series within
+the same table (e.g., 裂解C5 table contains naphtha, Brent, Yangzi C5
+as different supplier_name values).
 """
 import logging
 from typing import Optional
@@ -13,46 +19,77 @@ from app.core.mysql_db import get_mysql_engine
 
 logger = logging.getLogger(__name__)
 
-# product_id -> {table, value_col, label_en, label_zh, group}
+# Unified EDIA schema column names (all tables share these)
+DATE_COL = "日期Time"
+PRICE_COL = "价格price"
+SUPPLIER_COL = "厂商名supplier_name"
+PRODUCT_NAME_COL = "产品名material_name"
+UNIT_COL = "单位unit"
+
+# product_id -> {table, supplier_name, label_en, label_zh, group}
+# supplier_name is the 厂商名supplier_name value that identifies the
+# specific price series within the table.
 PRODUCT_TABLE_MAP: dict[str, dict] = {
+    "crude_oil": {
+        "table": "裂解C5",
+        "supplier_name": "布伦特",
+        "label_en": "Crude Oil (Brent)",
+        "label_zh": "原油(布伦特)",
+        "group": "upstream",
+    },
     "naphtha": {
         "table": "裂解C5",
-        "value_col": "日本石脑油Japanese naphtha",
+        "supplier_name": "日本石脑油",
         "label_en": "Japanese Naphtha",
         "label_zh": "日本石脑油",
         "group": "upstream",
     },
+    "cracked_c5": {
+        "table": "裂解C5",
+        "supplier_name": "裂解C5均价",
+        "label_en": "Cracked C5 (Avg)",
+        "label_zh": "裂解碳五(均价)",
+        "group": "upstream",
+    },
     "mixed_c5": {
         "table": "裂解C5",
-        "value_col": "扬子裂解C5Yangzi Cracking C5",
+        "supplier_name": "扬子裂解C5",
         "label_en": "Yangzi Cracked C5",
         "label_zh": "扬子裂解C5",
         "group": "upstream",
     },
     "isoprene": {
         "table": "异戊二烯",
-        "value_col": "华东市场价East China market price",
+        "supplier_name": "华东市场价",
         "label_en": "Isoprene (East China)",
         "label_zh": "异戊二烯",
         "group": "midstream",
     },
     "piperylene": {
         "table": "间戊二烯",
-        "value_col": "华东市场价East China market price",
+        "supplier_name": "华东市场价",
         "label_en": "Piperylene (East China)",
         "label_zh": "间戊二烯",
         "group": "midstream",
     },
     "dcpd": {
         "table": "双环戊二烯",
-        "value_col": "华东市场价East China market price",
+        "supplier_name": "华东市场价",
         "label_en": "DCPD (East China)",
         "label_zh": "双环戊二烯",
         "group": "midstream",
     },
     "sis_rubber": {
         "table": "SIS",
-        "value_col": "巴陵1105Baling 1105",
+        "supplier_name": "巴陵1105",
+        "label_en": "SIS Rubber (Baling 1105)",
+        "label_zh": "SIS橡胶",
+        "group": "downstream",
+    },
+    # Alias: PRODUCT_GROUP_MAP uses "sis" (not "sis_rubber")
+    "sis": {
+        "table": "SIS",
+        "supplier_name": "巴陵1105",
         "label_en": "SIS Rubber (Baling 1105)",
         "label_zh": "SIS橡胶",
         "group": "downstream",

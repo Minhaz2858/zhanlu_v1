@@ -32,9 +32,10 @@ def test_get_market_snapshot_for_unmapped_product_returns_note(monkeypatch):
     monkeypatch.setattr(svc, "is_edia_reachable_cached", lambda: True)
     monkeypatch.setattr(svc, "_read_product_history_rows", lambda pid: [])
     snap = svc.get_market_snapshot(group="upstream")
-    crude = next(s for s in snap if s.id == "crude_oil")
-    assert crude.price is None
-    assert "not configured" in (crude.note or "")
+    # cracked_c9 is still unmapped (no table in EDIA warehouse)
+    cracked = next(s for s in snap if s.id == "cracked_c9")
+    assert cracked.price is None
+    assert "not configured" in (cracked.note or "")
 
 
 def test_get_market_snapshot_mapped_product_uses_history(monkeypatch):
@@ -83,11 +84,8 @@ def test_get_regional_prices_unmapped_returns_empty(monkeypatch):
         "mysql+pymysql://x",
     )
     monkeypatch.setattr(svc, "is_edia_reachable_cached", lambda: True)
-    monkeypatch.setattr(
-        "app.services.market_dashboard_service.get_product_table",
-        lambda pid: None,
-    )
-    r = svc.get_regional_prices("crude_oil")
+    # cracked_c9 is still unmapped (no table in EDIA warehouse)
+    r = svc.get_regional_prices("cracked_c9")
     assert r.regions == []
     assert "not configured" in (r.note or "")
 

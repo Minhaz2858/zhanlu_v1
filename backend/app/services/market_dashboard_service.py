@@ -16,6 +16,7 @@ from app.config import settings
 from app.core.mysql_db import get_mysql_engine, is_edia_reachable
 from app.models.market_dashboard import (
     PRODUCT_TABLE_MAP, PRODUCT_GROUP_MAP, PRODUCT_LABELS, get_product_table,
+    DATE_COL, PRICE_COL, SUPPLIER_COL,
 )
 from app.schemas.market_dashboard import MarketSnapshot, PriceHistoryPoint
 
@@ -41,9 +42,8 @@ def _require_edia():
 def _read_product_history_rows(product_id: str) -> list[tuple]:
     """Return [(date_str, price_float), ...] from EDIA's table for a product.
 
-    Uses raw SQL (SELECT * FROM table) + result.keys() to find the value
-    column index — mirrors EDIA's market_db.py approach. The first column
-    is always the date index (EDIA's Excel-ingestion convention).
+    Uses the unified EDIA schema: filters by 厂商名supplier_name to get
+    the specific price series, reads 日期Time + 价格price columns.
     """
     cfg = PRODUCT_TABLE_MAP.get(product_id)
     if cfg is None:
@@ -51,33 +51,28 @@ def _read_product_history_rows(product_id: str) -> list[tuple]:
     eng = get_mysql_engine()
     if eng is None:
         return []
-    value_col = cfg["value_col"]
+    supplier = cfg["supplier_name"]
     table_name = cfg["table"]
-    stmt = text(f"SELECT * FROM `{table_name}`")
+    stmt = text(
+        f"SELECT `{DATE_COL}` AS d, `{PRICE_COL}` AS p "
+        f"FROM `{table_name}` "
+        f"WHERE `{SUPPLIER_COL}` = :supplier "
+        f"ORDER BY `{DATE_COL}` ASC"
+    )
     out: list[tuple] = []
     with eng.connect() as conn:
-        result = conn.execute(stmt)
-        rows = result.fetchall()
-        cols = list(result.keys())
-    if not cols or value_col not in cols:
-        logger.warning(
-            "EDIA column %r not in table %r (cols=%s)",
-            value_col, table_name, cols[:6],
-        )
-        return []
-    date_idx = 0
-    value_idx = cols.index(value_col)
-    for r in rows:
-        raw_date = str(r[date_idx] or "")
-        raw_price = r[value_idx]
-        if raw_price is None:
-            continue
-        try:
-            price_val = float(raw_price)
-        except (TypeError, ValueError):
-            continue
-        date_str = raw_date.replace("/", "-")[:10]
-        out.append((date_str, round(price_val, 2)))
+        result = conn.execute(stmt, {"supplier": supplier})
+        for row in result:
+            raw_date = str(row[0] or "")
+            raw_price = row[1]
+            if raw_price is None:
+                continue
+            try:
+                price_val = float(raw_price)
+            except (TypeError, ValueError):
+                continue
+            date_str = raw_date.replace("/", "-")[:10]
+            out.append((date_str, round(price_val, 2)))
     return out
 
 
@@ -152,7 +147,7 @@ def get_market_snapshot(group: Optional[str] = None) -> list[MarketSnapshot]:
             daily_reference_date=(rows[-2][0] if len(rows) > 1 else None),
             weekly_gap_value=round(last_price - weekly_prev, 2) if weekly_prev else None,
             weekly_reference_date=(weekly_rows[0][0] if len(weekly_rows) > 0 else None),
-            data_source_detail=f"EDIA MySQL: {PRODUCT_TABLE_MAP[pid]['table']}",
+            data_source_detail=f"EDIA MySQL: {PRODUCT_TABLE_MAP[pid]['table']} / {PRODUCT_TABLE_MAP[pid]['supplier_name']}",
         ))
     return snapshots
 
@@ -173,49 +168,59 @@ from app.schemas.market_dashboard import (
     RegionalPriceData, RegionalPriceRegion, NewsListResponse,
 )
 
-# Column-name fragments that look like a regional price (per EDIA's
-# "华东市场价East China market price" convention).
-_REGIONAL_TOKENS = ("华东", "华南", "华北", "East China", "South China", "North China")
+# Supplier-name fragments that look like a regional price.
+_REGIONAL_TOKENS = ("华东", "华南", "华中", "华北", "上海", "East China", "South China", "North China")
 
 
 def get_regional_prices(product_id: str) -> RegionalPriceData:
-    """v1 simplified regional payload: one region per matching column.
+    """v1 simplified regional payload: one region per matching supplier_name.
 
-    No spread or cost-floor analysis (those depend on EDIA's naphtha cost
-    model, which is out of scope for the read-only mirror).
+    Scans distinct 厂商名supplier_name values for regional-looking names
+    (华东市场价, 华南市场价, 上海石化, etc.) and returns the latest
+    price for each. No spread or cost-floor analysis.
     """
     _require_edia()
-    tbl = get_product_table(product_id)
+    cfg = PRODUCT_TABLE_MAP.get(product_id)
     eng = get_mysql_engine()
-    if tbl is None or eng is None:
+    if cfg is None or eng is None:
         return RegionalPriceData(
             product_id=product_id,
             regions=[],
             note="table mapping not configured in v1",
         )
-    cols = list(tbl.columns.keys())
-    region_cols = [c for c in cols if any(tok in c for tok in _REGIONAL_TOKENS)]
-    if not region_cols:
+    table_name = cfg["table"]
+    # Get distinct regional suppliers
+    distinct_stmt = text(
+        f"SELECT DISTINCT `{SUPPLIER_COL}` FROM `{table_name}` "
+        f"WHERE `{SUPPLIER_COL}` IS NOT NULL"
+    )
+    region_suppliers: list[str] = []
+    with eng.connect() as conn:
+        for row in conn.execute(distinct_stmt):
+            name = row[0]
+            if name and any(tok in str(name) for tok in _REGIONAL_TOKENS):
+                region_suppliers.append(str(name))
+    if not region_suppliers:
         return RegionalPriceData(
             product_id=product_id,
             regions=[],
-            note="no regional columns detected in EDIA table",
+            note="no regional suppliers detected in EDIA table",
         )
-    date_col = cols[0]
     regions: list[RegionalPriceRegion] = []
-    for col in region_cols:
+    for supplier in region_suppliers:
         stmt = text(
-            f"SELECT `{date_col}` AS d, `{col}` AS p "
-            f"FROM `{PRODUCT_TABLE_MAP[product_id]['table']}` "
-            f"WHERE `{col}` IS NOT NULL "
-            f"ORDER BY `{date_col}` DESC LIMIT 1"
+            f"SELECT `{DATE_COL}` AS d, `{PRICE_COL}` AS p "
+            f"FROM `{table_name}` "
+            f"WHERE `{SUPPLIER_COL}` = :supplier "
+            f"AND `{PRICE_COL}` IS NOT NULL "
+            f"ORDER BY `{DATE_COL}` DESC LIMIT 1"
         )
         try:
             with eng.connect() as conn:
-                row = conn.execute(stmt).first()
+                row = conn.execute(stmt, {"supplier": supplier}).first()
         except Exception as exc:
             logger.warning("EDIA regional query failed for %s.%s: %s",
-                           product_id, col, exc)
+                           product_id, supplier, exc)
             continue
         if not row or row[1] is None:
             continue
@@ -223,14 +228,13 @@ def get_regional_prices(product_id: str) -> RegionalPriceData:
             price = float(row[1])
         except (TypeError, ValueError):
             continue
-        label = col.split("East")[0].split("South")[0].split("North")[0] or col
         regions.append(RegionalPriceRegion(
-            price_type=col,
-            label=label.strip() or col,
+            price_type=supplier,
+            label=supplier,
             is_internal=False,
             price=round(price, 2),
             change_pct=None,
-            date=str(row[0])[:10] if row[0] else "",
+            date=str(row[0])[:10].replace("/", "-") if row[0] else "",
             days_stale=0,
         ))
     return RegionalPriceData(
