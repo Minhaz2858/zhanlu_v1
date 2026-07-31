@@ -1,0 +1,11 @@
+name: daily-briefing
+version: 1.0.0
+description: Start your day with a prioritized sales briefing. Works standalone when
+  you tell me your meetings and priorities, supercharged when you connect your calendar,
+  CRM, and email. Trigger with "morning briefing", "daily brief", "what's on my plate
+  today", "prep my day", or "start my day".
+category: daily-briefing
+source: bundled
+requires_sandbox: false
+artifact_types:
+- md

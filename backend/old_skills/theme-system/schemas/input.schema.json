@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Theme System Input",
+  "type": "object",
+  "properties": {
+    "instruction": {
+      "type": "string",
+      "description": "Natural language instruction for theme application"
+    },
+    "artifact_type": {
+      "type": "string",
+      "enum": ["pptx", "docx", "html", "dashboard"],
+      "description": "The type of artifact to theme"
+    },
+    "artifact_path": {
+      "type": "string",
+      "description": "Path to the input artifact in sandbox /workspace/input"
+    },
+    "theme_name": {
+      "type": "string",
+      "enum": [
+        "arctic-frost",
+        "botanical-garden",
+        "desert-rose",
+        "forest-canopy",
+        "golden-hour",
+        "midnight-galaxy",
+        "modern-minimalist",
+        "ocean-depths",
+        "sunset-boulevard",
+        "tech-innovation"
+      ],
+      "description": "Name of a preset theme to apply"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["light", "dark"],
+      "default": "light",
+      "description": "Color mode to apply"
+    },
+    "custom_theme": {
+      "$ref": "theme.schema.json",
+      "description": "A custom theme definition. Required if theme_name is not provided."
+    },
+    "options": {
+      "type": "object",
+      "properties": {
+        "font_scale": {
+          "type": "number",
+          "default": 1.0,
+          "description": "Scale factor for font sizes"
+        },
+        "force_override": {
+          "type": "boolean",
+          "default": false,
+          "description": "Override existing inline styles in the artifact"
+        },
+        "skip_validation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip WCAG contrast validation (not recommended)"
+        }
+      },
+      "additionalProperties": true
+    }
+  },
+  "required": ["instruction", "artifact_type", "artifact_path"],
+  "anyOf": [
+    { "required": ["theme_name"] },
+    { "required": ["custom_theme"] }
+  ]
+}

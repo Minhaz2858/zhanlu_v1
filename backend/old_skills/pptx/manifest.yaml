@@ -1,0 +1,14 @@
+name: pptx
+version: 1.1.0
+description: "Create, read, and edit PowerPoint .pptx presentations \u2014 executive\
+  \ decks, quarterly reviews, board presentations, and business proposals. Use for:\
+  \ Zhanlu executive briefings, stakeholder reports, project proposals."
+category: productivity
+source: bundled
+requires_sandbox: false
+artifact_types:
+- pptx
+- pdf
+- md
+dependencies:
+- theme-system

@@ -1,0 +1,27 @@
+name: dashboard-ui-polish
+display_name: Dashboard UI Polish
+version: 1.0.0
+description: >
+  Apply the design system to dashboards: theme tokens only (no hardcoded
+  hex), typography scale, card anatomy, dark-mode chart theming,
+  empty/error/loading state copy, and accessibility.
+summary: >
+  Token-only colors, typography scale, card anatomy, dark-mode theming,
+  state design, a11y for dashboard components.
+category: visualization
+tags:
+  - dashboard
+  - design-system
+  - tokens
+  - dark-mode
+  - accessibility
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - dashboard
+requires_sandbox: false
+entry_point:
+  type: markdown
+  file: SKILL.md

@@ -1,0 +1,49 @@
+# Skill review policy pack — rules for the skill review pipeline
+#
+# Applied when a SkillCandidate is submitted for review.
+
+name: skill_review
+version: "1.0"
+description: Rules for skill candidate review pipeline
+
+rules:
+  # Untrusted skills must be tested in sandbox before review
+  - id: untrusted_requires_test
+    condition: "trust_level == 'untrusted' and not has_test_results"
+    decision: require_confirm
+    description: "Untrusted skills must pass sandbox testing before review"
+
+  # Skills with artifact generation require validation
+  - id: artifact_skill_requires_validation
+    condition: "has_artifact_type and not has_validators"
+    decision: require_confirm
+    description: "Artifact-generating skills should have validators"
+
+  # Code skills require code review
+  - id: code_skill_requires_review
+    condition: "source_type == 'code'"
+    decision: require_confirm
+    description: "Code-submitted skills require manual code review"
+
+  # Auto-approve simple description-based skills
+  - id: auto_approve_simple
+    condition: "trust_level == 'verified' and complexity == 'simple'"
+    decision: allow
+    description: "Verified simple skills can be auto-approved"
+
+review_steps:
+  - step: "quarantine"
+    description: "Skill enters quarantine upon creation"
+    auto_advance: true
+
+  - step: "testing"
+    description: "Automated sandbox testing"
+    auto_advance: true
+
+  - step: "in_review"
+    description: "Human review"
+    auto_advance: false
+
+  - step: "approved"
+    description: "Approved and published as SkillProfile"
+    auto_advance: false

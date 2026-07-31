@@ -1,0 +1,15 @@
+{
+  "Rules": [
+    {
+      "ID": "expire-after-7d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": 7,
+        "DeleteMarker": true
+      }
+    }
+  ]
+}

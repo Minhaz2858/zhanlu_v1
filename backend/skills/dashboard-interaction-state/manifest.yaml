@@ -1,0 +1,26 @@
+name: dashboard-interaction-state
+display_name: Dashboard Interaction State
+version: 1.0.0
+description: >
+  Design live-dashboard interaction: refresh/polling UX, last-updated
+  indicators, per-widget skeletons, stale-data and error handling, popup vs
+  inline behavior, and optional KPI delta semantics.
+summary: >
+  Polling/refresh UX, no-flash updates, skeletons, per-widget errors,
+  KPI unit/compare_column/subtitle semantics.
+category: visualization
+tags:
+  - dashboard
+  - polling
+  - loading-states
+  - ux
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - dashboard
+requires_sandbox: false
+entry_point:
+  type: markdown
+  file: SKILL.md

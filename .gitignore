@@ -1,0 +1,38 @@
+# Zhanlu — gitignore
+
+# Environment secrets
+.env
+
+# MinIO local data
+infra/minio/data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# SQLite databases
+*.db
+*.sqlite
+
+# Agent workspaces
+agent_workspace/
+ohmo/
+.worktrees/
+
+# Uploads
+uploads/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules

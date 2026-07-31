@@ -1,0 +1,12 @@
+name: buddy-sings
+version: 1.0.0
+description: "Use when user wants their Claude Code pet (/buddy) to sing a song. Triggers\
+  \ on any request that combines the concept of their Claude Code buddy, pet, or companion\
+  \ with singing or music. Supports multilingual triggers \u2014 match equivalent\
+  \ phrases in any language.\n"
+license: MIT
+category: buddy-sings
+source: bundled
+requires_sandbox: false
+artifact_types:
+- md

@@ -1,0 +1,12 @@
+[
+  {
+    "id": "f25644f2",
+    "name": "echo-hello-daily",
+    "schedule": "1d",
+    "prompt": "echo hello",
+    "created_at": 1783922884.852365,
+    "next_run_at": 1784009284.8523653,
+    "last_run_at": null,
+    "status": "active"
+  }
+]

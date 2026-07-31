@@ -1,0 +1,41 @@
+{
+  "name": "Project",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "color": {
+      "type": "string",
+      "default": "#D37435"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived"
+      ],
+      "default": "active"
+    },
+    "created_by": {
+      "type": "string",
+      "description": "User id who created the project; used for permission scoping"
+    },
+    "member_count": {
+      "type": "number",
+      "description": "Cached count of agents + KBs + files belonging to this project. Updated when items are linked/unlinked.",
+      "default": 0
+    },
+    "last_activity_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Last time anything in this project was created/updated. Drives the 'Recent' sort."
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

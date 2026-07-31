@@ -1,0 +1,21 @@
+name: 3d-gen
+version: 1.0.0
+description: 'Generate 3D model descriptions and reference views from text or images.
+  Full 3D model generation (Meshy/Tripo/Luma integration) is coming soon. For now,
+  generates high-quality reference images that external 3D tools can use as input.
+  Triggers on requests for 3D models, 3D assets, 3D printing files, or game-ready
+  models.
+
+  '
+summary: 3D model reference generation from text/images. Full 3D API integration coming
+  soon. For now, creates reference views that can be piped to external 3D tools like
+  Meshy or Tripo.
+category: 3d-gen
+tags:
+- 3d
+- model
+- generation
+- mesh
+- asset
+source: bundled
+requires_sandbox: false

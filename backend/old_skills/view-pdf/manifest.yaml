@@ -1,0 +1,11 @@
+name: view-pdf
+version: 1.0.0
+description: "Interactive PDF viewer. Use when the user wants to open, show, or view\
+  \ a PDF and collaborate on it visually \u2014 annotate, highlight, stamp, fill form\
+  \ fields, place signature/initials, or review markup together. Not for summarization\
+  \ or text extraction (use native Read instead)."
+category: view-pdf
+source: bundled
+requires_sandbox: false
+artifact_types:
+- pdf

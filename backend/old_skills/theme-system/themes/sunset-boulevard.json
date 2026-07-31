@@ -1,0 +1,100 @@
+{
+  "name": "sunset-boulevard",
+  "description": "A warm and vibrant theme inspired by golden hour sunsets for energetic and creative presentations.",
+  "best_for": [
+    "Creative pitches",
+    "Marketing presentations",
+    "Lifestyle brands",
+    "Event promotions"
+  ],
+  "colors": {
+    "light": {
+      "primary": "#b0452f",
+      "secondary": "#f4a261",
+      "surface": "#fdf3e3",
+      "background": "#fffdf8",
+      "text": "#264653",
+      "text_muted": "#5a6a73",
+      "border": "#e8dcc8",
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "error": "#dc2626",
+      "info": "#0ea5e9"
+    },
+    "dark": {
+      "primary": "#f4a261",
+      "secondary": "#e76f51",
+      "surface": "#264653",
+      "background": "#1a3038",
+      "text": "#fdf3e3",
+      "text_muted": "#d0b5b0",
+      "border": "#3d5060",
+      "success": "#22c55e",
+      "warning": "#fbbf24",
+      "error": "#ef4444",
+      "info": "#38bdf8"
+    }
+  },
+  "fonts": {
+    "heading": "Merriweather",
+    "body": "Inter",
+    "mono": "JetBrains Mono"
+  },
+  "typography": {
+    "heading_scale": [
+      2.5,
+      2.0,
+      1.5,
+      1.25,
+      1.0
+    ],
+    "body_size": "16px",
+    "line_height": "1.6"
+  },
+  "spacing": {
+    "unit": 4,
+    "scale": [
+      0,
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ]
+  },
+  "radius": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "full": 9999
+  },
+  "shadows": {
+    "sm": "0 1px 2px rgba(0,0,0,0.05)",
+    "md": "0 4px 6px rgba(0,0,0,0.07)",
+    "lg": "0 10px 15px rgba(0,0,0,0.1)"
+  },
+  "source_palette": {
+    "origin": "anthropics/theme-factory",
+    "colors": [
+      {
+        "name": "Burnt Orange",
+        "hex": "#e76f51"
+      },
+      {
+        "name": "Coral",
+        "hex": "#f4a261"
+      },
+      {
+        "name": "Warm Sand",
+        "hex": "#e9c46a"
+      },
+      {
+        "name": "Deep Purple",
+        "hex": "#264653"
+      }
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+name: dashboard-layout-architecture
+display_name: Dashboard Layout Architecture
+version: 1.0.0
+description: >
+  Compose dashboard widgets into a professional layout: information
+  hierarchy (KPI row, trends, breakdown, detail table), responsive grid
+  behavior, ordering, and density rules. Compose with dashboard-generation.
+summary: >
+  Widget ordering (KPIs first, table last), 3-6 widget composition,
+  responsive grid rules, titles, whitespace.
+category: visualization
+tags:
+  - dashboard
+  - layout
+  - grid
+  - design
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - dashboard
+requires_sandbox: false
+entry_point:
+  type: markdown
+  file: SKILL.md

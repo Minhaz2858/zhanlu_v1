@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Theme Token Definition",
+  "description": "Structured design tokens for a single theme. Used by custom_theme input and all preset themes.",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique theme identifier (kebab-case)",
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable theme description"
+    },
+    "best_for": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Recommended use cases"
+    },
+    "colors": {
+      "type": "object",
+      "properties": {
+        "light": { "$ref": "#/$defs/colorSet" },
+        "dark": { "$ref": "#/$defs/colorSet" }
+      },
+      "required": ["light"]
+    },
+    "fonts": {
+      "type": "object",
+      "properties": {
+        "heading": { "type": "string", "description": "Font family for headings" },
+        "body": { "type": "string", "description": "Font family for body text" },
+        "mono": { "type": "string", "description": "Monospace font family" }
+      },
+      "required": ["heading", "body"]
+    },
+    "typography": {
+      "type": "object",
+      "properties": {
+        "heading_scale": {
+          "type": "array",
+          "items": { "type": "number" },
+          "description": "Font size multipliers for h1-h5 (rem units)",
+          "minItems": 5,
+          "maxItems": 5
+        },
+        "body_size": { "type": "string", "description": "Base body font size" },
+        "line_height": { "type": "string", "description": "Body line height" }
+      }
+    },
+    "spacing": {
+      "type": "object",
+      "properties": {
+        "unit": { "type": "integer", "default": 4 },
+        "scale": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Spacing scale in pixels"
+        }
+      }
+    },
+    "radius": {
+      "type": "object",
+      "properties": {
+        "sm": { "type": "integer" },
+        "md": { "type": "integer" },
+        "lg": { "type": "integer" },
+        "full": { "type": "integer" }
+      }
+    },
+    "shadows": {
+      "type": "object",
+      "properties": {
+        "sm": { "type": "string" },
+        "md": { "type": "string" },
+        "lg": { "type": "string" }
+      }
+    },
+    "source_palette": {
+      "type": "object",
+      "description": "Original 4-color palette this theme was derived from (attribution)",
+      "properties": {
+        "origin": { "type": "string" },
+        "colors": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "hex": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
+            }
+          }
+        }
+      }
+    }
+  },
+  "required": ["name", "colors", "fonts"],
+  "$defs": {
+    "colorSet": {
+      "type": "object",
+      "properties": {
+        "primary": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "secondary": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "surface": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "background": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "text": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "text_muted": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "border": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "success": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "warning": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "error": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" },
+        "info": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$" }
+      },
+      "required": ["primary", "secondary", "surface", "background", "text", "border"]
+    }
+  }
+}

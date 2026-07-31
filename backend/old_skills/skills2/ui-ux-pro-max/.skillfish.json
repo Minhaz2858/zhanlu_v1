@@ -1,0 +1,10 @@
+{
+  "version": 2,
+  "name": "ui-ux-pro-max",
+  "owner": "nextlevelbuilder",
+  "repo": "ui-ux-pro-max-skill",
+  "path": ".claude/skills/ui-ux-pro-max",
+  "branch": "main",
+  "sha": "75e1acaafe8b08e59d4b86fc253ac7873aff6bba",
+  "source": "manual"
+}

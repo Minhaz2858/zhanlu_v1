@@ -1,0 +1,87 @@
+{
+  "name": "UserFile",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "file_type": {
+      "type": "string"
+    },
+    "size": {
+      "type": "number",
+      "default": 0
+    },
+    "file_url": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "upload",
+        "ai_generated"
+      ],
+      "default": "upload"
+    },
+    "resource_kind": {
+      "type": "string",
+      "enum": [
+        "chatbot",
+        "automation_result",
+        "report",
+        "dashboard",
+        "html_file",
+        "document",
+        "data_file"
+      ],
+      "default": "document"
+    },
+    "project": {
+      "type": "string"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id. Agents in this project automatically inherit this file at runtime."
+    },
+    "session_id": {
+      "type": "string",
+      "description": "\u5173\u8054\u7684\u804a\u5929\u4f1a\u8bdd ID\uff0c\u7528\u4e8e\u6309\u4f1a\u8bdd\u5f52\u96c6\u6587\u4ef6"
+    },
+    "agent_name": {
+      "type": "string"
+    },
+    "slides": {
+      "type": "array",
+      "description": "PPTX \u5e7b\u706f\u7247\u6570\u636e\uff08\u4ec5 file_type=pptx \u65f6\u4f7f\u7528\uff09\uff0c\u7528\u4e8e\u5185\u8054\u9884\u89c8",
+      "items": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "bullets": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "title"
+        ]
+      },
+      "default": []
+    },
+    "read": {
+      "type": "boolean",
+      "default": false
+    },
+    "pinned": {
+      "type": "boolean",
+      "default": false
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

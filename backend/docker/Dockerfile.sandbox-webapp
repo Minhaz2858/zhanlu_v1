@@ -1,0 +1,22 @@
+# ── Zhanlu Sandbox Webapp ─────────────────────────────────────────────
+# For generated web apps, React snippets, dashboards, and static HTML builds.
+# Per runbook §7.4.
+# Build: docker compose build sandbox-webapp
+
+FROM node:20-slim
+
+# ── Use Aliyun mirror for apt ───────────────────────────────────────
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+    /etc/apt/sources.list.d/debian.sources 2>/dev/null || true
+
+# ── Use Aliyun mirror for npm ───────────────────────────────────────
+RUN npm config set registry https://registry.npmmirror.com
+
+RUN useradd -m -u 10001 sandbox
+WORKDIR /workspace
+
+RUN npm install -g pnpm vite typescript
+
+USER sandbox
+
+ENTRYPOINT ["bash", "-lc"]

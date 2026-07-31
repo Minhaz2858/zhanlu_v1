@@ -1,0 +1,20 @@
+name: video-gen
+version: 1.0.0
+description: 'Generate videos from text descriptions using MiniMax Hailuo video models.
+  Use when the user wants to create video clips, animations, or visual scenes from
+  a description. Supports async (return task_id) and sync (wait for result) modes.
+  Video generation takes 1-5 minutes.
+
+  '
+summary: Generate videos from text using MiniMax Hailuo-2.3. Async by default, returns
+  downloadable URL when complete. Describe the scene, action, and style in detail.
+  Takes 1-5 minutes per video.
+category: video-gen
+tags:
+- video
+- generation
+- AI
+- animation
+- creative
+source: bundled
+requires_sandbox: false

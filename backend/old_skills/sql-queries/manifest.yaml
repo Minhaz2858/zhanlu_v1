@@ -1,0 +1,9 @@
+name: sql-queries
+version: 1.0.0
+description: Write correct, performant SQL across all major data warehouse dialects
+  (Snowflake, BigQuery, Databricks, PostgreSQL, etc.). Use when writing queries, optimizing
+  slow SQL, translating between dialects, or building complex analytical queries with
+  CTEs, window functions, or aggregations.
+category: sql-queries
+source: bundled
+requires_sandbox: false

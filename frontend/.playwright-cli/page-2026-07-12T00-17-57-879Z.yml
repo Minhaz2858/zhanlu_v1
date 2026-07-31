@@ -1,0 +1,161 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - heading "UI Component Test Suite" [level=1] [ref=e5]
+    - paragraph [ref=e6]: Renders all Phase 3–7 governed-AI components with mock data + an interactive form.
+  - generic [ref=e7]:
+    - heading "1. ArtifactPreviewCard" [level=2] [ref=e8]
+    - generic [ref=e9]:
+      - generic [ref=e10]:
+        - generic [ref=e17]:
+          - paragraph [ref=e18]: Q3 Sales Report (Mock)
+          - generic [ref=e19]:
+            - generic [ref=e20]: MD
+            - generic [ref=e21]: v2
+            - generic [ref=e22]: 24.0 KB
+        - generic [ref=e23]: Preview Ready
+      - generic [ref=e27]:
+        - button "Preview" [ref=e28] [cursor=pointer]
+        - link "Download" [ref=e31] [cursor=pointer]:
+          - /url: /api/artifacts/test-art-001/download
+  - generic [ref=e35]:
+    - heading "2. PlanEditor" [level=2] [ref=e36]
+    - generic [ref=e37]:
+      - generic [ref=e38]:
+        - generic [ref=e39]:
+          - generic [ref=e40]: Execution Plan
+          - generic [ref=e41]: 4 steps
+        - generic [ref=e42]: draft
+      - paragraph [ref=e44]: Generate Q3 report from sales data, validate, and publish.
+      - generic [ref=e45]:
+        - generic [ref=e47]:
+          - generic [ref=e53]:
+            - generic [ref=e54]:
+              - generic [ref=e55]: Query Sales DB
+              - generic [ref=e56]: Data Query
+            - paragraph [ref=e57]: Fetch Q3 sales records
+            - generic [ref=e58]: 12 rows
+          - generic [ref=e61]: Pending
+        - generic [ref=e68]:
+          - generic [ref=e74]:
+            - generic [ref=e75]:
+              - generic [ref=e76]: Build Report
+              - generic [ref=e77]: Sandbox
+            - paragraph [ref=e78]: Generate markdown report from query results
+          - generic [ref=e79]: Pending
+        - generic [ref=e86]:
+          - generic [ref=e90]:
+            - generic [ref=e91]:
+              - generic [ref=e92]: Validate Quality
+              - generic [ref=e93]: Skill
+            - paragraph [ref=e94]: Check report completeness
+          - generic [ref=e95]: Pending
+        - generic [ref=e102]:
+          - generic [ref=e107]:
+            - generic [ref=e108]:
+              - generic [ref=e109]: Publish
+              - generic [ref=e110]: Agent
+            - paragraph [ref=e111]: Send to stakeholders
+          - generic [ref=e112]: Pending
+      - generic [ref=e117]:
+        - button "Approve Plan" [ref=e118] [cursor=pointer]
+        - button "Reject" [ref=e122] [cursor=pointer]
+  - generic [ref=e125]:
+    - generic [ref=e126]:
+      - heading "3. ActivityRail" [level=2] [ref=e127]
+      - generic [ref=e128]:
+        - button "Running" [ref=e129] [cursor=pointer]
+        - button "Done" [ref=e130] [cursor=pointer]
+    - generic [ref=e131]:
+      - generic [ref=e132]: Activity
+      - generic [ref=e135]:
+        - generic [ref=e136]: Init
+        - generic [ref=e144]: Goal
+        - generic [ref=e152]: Context
+        - generic [ref=e160]: Plan
+        - generic [ref=e168]: Gate
+        - generic [ref=e181]:
+          - generic [ref=e182]: Act
+          - generic [ref=e183]: • Executing plan
+        - generic [ref=e184]: Observe
+        - generic [ref=e191]: Verify
+        - generic [ref=e198]: Finalize
+      - generic [ref=e205]:
+        - paragraph [ref=e206]: Observations (2)
+        - generic [ref=e207]:
+          - generic [ref=e209]:
+            - button "nl2sql" [ref=e213] [cursor=pointer]
+            - generic [ref=e217]: 340ms
+          - generic [ref=e219]:
+            - button "sandbox" [ref=e222] [cursor=pointer]
+            - generic [ref=e226]: 5000ms
+  - generic [ref=e227]:
+    - heading "4. SandboxTimeline (idle render)" [level=2] [ref=e228]
+    - generic [ref=e229]:
+      - generic [ref=e230]:
+        - generic [ref=e235]: Sandbox Execution
+        - generic [ref=e236]: mock-job
+        - generic [ref=e237]: Queued
+      - generic [ref=e242]: Waiting for execution to start...
+  - generic [ref=e246]:
+    - heading "5. Interactive Form" [level=2] [ref=e247]
+    - generic [ref=e248]:
+      - generic [ref=e249]:
+        - generic [ref=e250]: Task Name
+        - textbox "e.g. Generate Q3 report" [ref=e251]
+      - generic [ref=e252]:
+        - generic [ref=e253]: Priority
+        - combobox [ref=e254]:
+          - option "Low"
+          - option "Medium" [selected]
+          - option "High"
+      - generic [ref=e255]:
+        - checkbox "Notify on completion" [checked] [ref=e256]
+        - generic [ref=e257]: Notify on completion
+      - generic [ref=e258]:
+        - generic [ref=e259]: Notes
+        - textbox [ref=e260]
+      - button "Submit Task" [ref=e261] [cursor=pointer]
+  - generic [ref=e262]:
+    - generic [ref=e263]:
+      - heading "6. Backend API Response Probe" [level=2] [ref=e264]
+      - button "Run Probes" [ref=e265] [cursor=pointer]
+    - table [ref=e270]:
+      - rowgroup [ref=e271]:
+        - row [ref=e272]:
+          - columnheader "Endpoint" [ref=e273]
+          - columnheader "Status" [ref=e274]
+          - columnheader "HTTP" [ref=e275]
+          - columnheader "Latency" [ref=e276]
+      - rowgroup [ref=e277]:
+        - row [ref=e278]:
+          - cell "Governance Cost" [ref=e279]
+          - cell "OK" [ref=e280]
+          - cell "200" [ref=e281]
+          - cell "18ms" [ref=e282]
+        - row [ref=e283]:
+          - cell "Governance Audit" [ref=e284]
+          - cell "OK" [ref=e285]
+          - cell "200" [ref=e286]
+          - cell "24ms" [ref=e287]
+        - row [ref=e288]:
+          - cell "Artifacts List" [ref=e289]
+          - cell "OK" [ref=e290]
+          - cell "200" [ref=e291]
+          - cell "22ms" [ref=e292]
+        - row [ref=e293]:
+          - cell "Data Snapshots" [ref=e294]
+          - cell "OK" [ref=e295]
+          - cell "200" [ref=e296]
+          - cell "20ms" [ref=e297]
+        - row [ref=e298]:
+          - cell "Agent Studio" [ref=e299]
+          - cell "OK" [ref=e300]
+          - cell "200" [ref=e301]
+          - cell "22ms" [ref=e302]
+        - row [ref=e303]:
+          - cell "Skill Studio" [ref=e304]
+          - cell "OK" [ref=e305]
+          - cell "200" [ref=e306]
+          - cell "26ms" [ref=e307]
+    - paragraph [ref=e308]: "Note: HTTP 200 = data returned. 404/422 = endpoint exists but no data / bad params. Network error = backend unreachable."
+  - contentinfo [ref=e266]: UITest page — remove after verification.

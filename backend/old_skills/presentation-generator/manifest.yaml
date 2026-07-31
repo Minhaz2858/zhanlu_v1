@@ -1,0 +1,15 @@
+name: presentation-generator
+version: 1.0.0
+description: Generate interactive HTML presentations with neobrutalism styling, ASCII
+  art decorations, and Agency brand colors. Outputs HTML (interactive with navigation),
+  PNG (individual slides via Playwright), and PDF. References brand-agency skill for
+  colors and typography. Use when creating presentations, slide decks, pitch materials,
+  or visual summaries.
+category: presentation-generator
+source: bundled
+requires_sandbox: false
+artifact_types:
+- pptx
+- pdf
+- html
+- md

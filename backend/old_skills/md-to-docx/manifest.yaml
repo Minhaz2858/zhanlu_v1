@@ -1,0 +1,10 @@
+name: md-to-docx
+version: 1.0.0
+description: "Convert Markdown files to professionally formatted Word (.docx) documents\
+  \ with embedded PNG images \u2014 pure JavaScript, no external tools required"
+category: md-to-docx
+source: bundled
+requires_sandbox: false
+artifact_types:
+- docx
+- md

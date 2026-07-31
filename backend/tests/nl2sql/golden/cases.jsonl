@@ -1,0 +1,10 @@
+{"id": "g01", "question": "show all customers", "expected_sql": "SELECT id, name FROM customers", "tables": ["customers"], "category": "basic_select"}
+{"id": "g02", "question": "how many customers do we have", "expected_sql": "SELECT COUNT(*) FROM customers", "tables": ["customers"], "category": "aggregation"}
+{"id": "g03", "question": "show total revenue per region", "expected_sql": "SELECT region, SUM(revenue) FROM sales GROUP BY region", "tables": ["sales"], "category": "group_by"}
+{"id": "g04", "question": "list customers with their orders", "expected_sql": "SELECT c.name, o.total FROM customers c JOIN orders o ON c.id = o.customer_id", "tables": ["customers", "orders"], "category": "join"}
+{"id": "g05", "question": "show orders from last month", "expected_sql": "SELECT * FROM orders WHERE order_date >= DATE('now', '-1 month')", "tables": ["orders"], "category": "date_filter"}
+{"id": "g06", "question": "find customers who have not placed any orders", "expected_sql": "SELECT c.name FROM customers c LEFT JOIN orders o ON c.id = o.customer_id WHERE o.id IS NULL", "tables": ["customers", "orders"], "category": "null_handling"}
+{"id": "g07", "question": "show top 5 products by sales", "expected_sql": "SELECT product, SUM(amount) AS total FROM orders GROUP BY product ORDER BY total DESC LIMIT 5", "tables": ["orders"], "category": "order_limit"}
+{"id": "g08", "question": "revenue by quarter", "expected_sql": "SELECT STRFTIME('%Y-Q', order_date) AS quarter, SUM(revenue) FROM sales GROUP BY quarter", "tables": ["sales"], "category": "date_func"}
+{"id": "g09", "question": "customers from EU or US regions", "expected_sql": "SELECT name FROM customers WHERE region IN ('EU', 'US')", "tables": ["customers"], "category": "in_clause"}
+{"id": "g10", "question": "average order value per customer", "expected_sql": "SELECT c.name, AVG(o.amount) FROM customers c JOIN orders o ON c.id = o.customer_id GROUP BY c.name", "tables": ["customers", "orders"], "category": "avg_join"}

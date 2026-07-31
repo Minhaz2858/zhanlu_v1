@@ -1,0 +1,12 @@
+name: grafana-api
+version: 1.0.0
+description: "Work with a Grafana instance — search and read dashboards, run datasource queries (Prometheus, Loki, PostgreSQL, etc.), inspect alert rules and silences, post annotations, and manage folders. Use whenever the user mentions a Grafana dashboard, panel, or alert."
+category: monitoring
+# source enum is {bundled, user, marketplace, generated}; original upstream is "anthropics/claude-tag-plugins@main"
+source: marketplace
+requires_sandbox: false
+artifact_types: []
+prerequisites:
+  env:
+    - GRAFANA_URL
+    - GRAFANA_TOKEN

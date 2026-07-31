@@ -1,0 +1,10 @@
+name: executive-briefing
+version: 1.0.0
+description: Transforms research findings into executive-ready briefings. Automatically
+  activated when user mentions 'executive', 'briefing', 'C-suite', 'board', 'leadership',
+  or 'presentation'.
+category: executive-briefing
+source: bundled
+requires_sandbox: false
+artifact_types:
+- pptx

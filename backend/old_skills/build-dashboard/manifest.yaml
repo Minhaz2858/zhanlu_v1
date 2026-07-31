@@ -1,0 +1,13 @@
+name: build-dashboard
+version: 1.0.0
+description: Build an interactive HTML dashboard with charts, filters, and tables.
+  Use when creating an executive overview with KPI cards, turning query results into
+  a shareable self-contained report, building a team monitoring snapshot, or needing
+  multiple charts with filters in one browser-openable file.
+category: build-dashboard
+source: bundled
+requires_sandbox: false
+artifact_types:
+- pptx
+- html
+- md

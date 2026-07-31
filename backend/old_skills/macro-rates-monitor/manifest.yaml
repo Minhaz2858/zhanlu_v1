@@ -1,0 +1,17 @@
+name: macro-rates-monitor
+version: 1.0.0
+description: "Build macroeconomic and rates dashboards combining macro indicators, yield curves, inflation breakevens, and swap rates. Use when monitoring macro conditions, analyzing yield curve shape, decomposing real vs nominal rates, assessing policy rate expectations, or evaluating financial conditions."
+category: finance
+# source enum is {bundled, user, marketplace, generated}; original upstream is "anthropics/financial-services@main"
+source: marketplace
+requires_sandbox: false
+artifact_types:
+- html
+prerequisites:
+  mcp_tools:
+    - qa_macroeconomic
+    - interest_rate_curve
+    - inflation_curve
+    - ir_swap
+    - tscc_historical_pricing_summaries
+  note: "Requires the LSEG (Refinitiv) MCP server. Not functional without it; skill body serves as methodology guidance only in Zhanlu deployments."

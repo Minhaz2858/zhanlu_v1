@@ -1,0 +1,28 @@
+{
+  "name": "ChatSession",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "project": {
+      "type": "string",
+      "default": "\u672a\u5206\u7ec4"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id. Used by the Project Detail page to surface this session under Recent Chats."
+    },
+    "starred": {
+      "type": "boolean",
+      "default": false
+    },
+    "last_message_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "title"
+  ]
+}

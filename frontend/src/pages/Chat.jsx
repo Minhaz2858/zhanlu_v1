@@ -1,0 +1,2416 @@
+import { useState, useEffect, useRef, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { base44 } from '@/api/base44Client';
+import { appParams } from '@/lib/app-params';
+import { authFetch } from '@/api/authFetch';
+import { useLanguage } from '@/lib/LanguageProvider';
+import { useChatSession } from '@/lib/ChatSessionContext';
+import { toast } from 'sonner';
+import ChatInput from '@/components/chat/ChatInput';
+import MessageBubble from '@/components/chat/MessageBubble';
+import RelatedContent from '@/components/chat/RelatedContent';
+import ArtifactPanel from '@/components/chat/ArtifactPanel';
+import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
+import TracePanel from '@/components/chat/TracePanel';
+import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock } from 'lucide-react';
+import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
+import ChatFilesModal from '@/components/chat/ChatFilesModal';
+import ScheduledPanel from '@/components/chat/ScheduledPanel';
+import ChatThinkingIndicator from '@/components/chat/ChatThinkingIndicator';
+import AutomationDraftCard from '@/components/chat/AutomationDraftCard';
+import DashboardDockPanel from '@/components/dashboard/DashboardDockPanel';
+import { buildSkillContext, buildDefaultSkillContext } from '@/lib/skillContext';
+import { watchForDashboardEdits } from '@/lib/dashboardStreamWatcher';
+import { streamAgentResponse, createAgentConversation, steerAgentConversation } from '@/api/agentEnhanced';
+import useStreamState from '@/hooks/useStreamState';
+import { classifyIntent, formatHint } from '@/lib/intentClassifier';
+import { detectLang } from '@/lib/detectLang';
+import { detectFileFormatRequest } from '@/lib/fileFormatRequest';
+import { saveDraft, clearDraft } from '@/lib/draftManager';
+import { decideRefresh, isRunInFlight } from '@/lib/chatPoll';
+import { pickCreateProject } from '@/lib/createResourceProject';
+
+const CATEGORIES = [
+  { key: 'production', icon: Factory },
+  { key: 'maintenance', icon: Wrench },
+  { key: 'quality', icon: ShieldCheck },
+  { key: 'safety', icon: HardHat },
+  { key: 'supply', icon: Truck },
+  { key: 'energy', icon: Gauge },
+];
+
+export default function Chat() {
+  const { t, lang, aiLang } = useLanguage();
+  const navigate = useNavigate();
+  const isEn = lang === 'en';
+
+  // --- Session state (lifted to ChatSessionContext) -------------------------
+  // The session list, active selection, and "next new chat will land in this
+  // project" staging all live in the context now. The unified sidebar
+  // (`Sidebar.jsx`) reads them to render the list; this page reads them to
+  // drive the active conversation. This split was introduced when the chat
+  // session list was merged into the main nav sidebar (Option A: unified
+  // sidebar) — see `ChatSessionContext.jsx` for the full rationale.
+  const {
+    activeId,
+    sessions,
+    pendingProject,
+    pendingProjectId,
+    setActiveId,
+    setPendingProject,
+    prependSession,
+    touchSession,
+    adoptSessionProject,
+    getSession,
+    newChat: contextNewChat,
+    refreshSessions,
+    deleteSession,
+    renameSession,
+    chatGeneration,
+  } = useChatSession();
+
+  const [messages, setMessages] = useState([]);
+
+  // Pre-compute the file-format request associated with each assistant
+  // message, derived from the most recent user message before it. Used
+  // to enforce strict format matching in the inline artifact preview
+  // (the user asked for a DOCX, so only DOCX artifacts are previewed).
+  const userFormatByMessage = useMemo(() => {
+    const map = {};
+    let last = null;
+    for (const m of messages || []) {
+      if (m.hidden) continue;
+      if (m.role === 'user') {
+        last = detectFileFormatRequest(m.content);
+      } else if (m.role === 'assistant' && last) {
+        map[m.id] = last;
+      }
+    }
+    return map;
+  }, [messages]);
+  const [loading, setLoading] = useState(false);
+  // Chat-input draft: persisted to localStorage via the shared
+  // ``draftManager`` so a typed-but-not-sent message survives a page
+  // refresh (and a route change that re-mounts this page). Cleared
+  // on every successful send (see handleSend / handleClear /
+  // handleBatchClarifySubmit / handleNewChat) so the user doesn't
+  // accidentally re-send a stale draft after switching sessions.
+  //
+  // We use a single global key (``chat_input_draft``) rather than
+  // a per-session key because the chat page is the only place the
+  // input is rendered and a stale draft is harmless — the next
+  // ``onChange`` overwrites it and the next send clears it.
+  const [inputValue, setInputValue] = useState(() => {
+    try {
+      const raw = typeof window !== 'undefined'
+        ? window.localStorage.getItem('draft:chat_input_draft')
+        : null;
+      if (!raw) return '';
+      const parsed = JSON.parse(raw);
+      return typeof parsed === 'string' ? parsed : '';
+    } catch {
+      return '';
+    }
+  });
+  // Mirror inputValue to localStorage on every change. The chat
+  // input is the only place the user is actively typing, so we
+  // disable draftManager's debounce (debounceMs=0) — a "type then
+  // immediately refresh" gesture would otherwise lose the last
+  // keystrokes that arrived within the debounce window. The cost
+  // is one localStorage.setItem per keystroke, which is negligible.
+  // The effect runs after the initial mount, which is fine because
+  // the useState initializer already restored the value above.
+  useEffect(() => {
+    saveDraft('chat_input_draft', inputValue, 0);
+  }, [inputValue]);
+
+  // Handle ?session=<chat_session_id> deep links: when /automation's Run now
+  // button fires, it navigates here so the user can watch the run stream
+  // live in the conversation that created the task. The session id is
+  // AutomationTask.session_id, NOT the AgentConversation id used by ?conv=.
+  // (For tasks without a session_id, /automation uses ?newTask=1 + ?prefill=
+  // instead — see the next useEffect below.)
+  //
+  // Why this effect re-runs on `sessions` / `activeId` change: the
+  // ChatSessionContext loads its session list asynchronously, so
+  // when the user first lands on /chat?session=<sid> the list is
+  // often empty — ``getSession(target)`` returns null and the old
+  // effect bailed without ever calling ``handleSelectSession``.
+  // Now we switch the active session unconditionally and use
+  // ``getSession`` only for the (optional) URL rewrite from
+  // ``?session=`` to the canonical ``?conv=<conversation_id>`` form.
+  useEffect(() => {
+    try {
+      const target = new URLSearchParams(window.location.search).get('session');
+      if (!target) return;
+      // Switch the active session if it hasn't been switched yet.
+      // (Re-runs when activeId / sessions change are no-ops because
+      // ``target !== activeId`` is false after the first switch.)
+      if (target !== activeId && handleSelectSession) {
+        handleSelectSession(target);
+      }
+      // Update the URL to use ?conv=<conversation_id> if the session
+      // is now in the loaded list. Runs every time ``sessions``
+      // changes so the rewrite happens as soon as the list arrives.
+      // The set+delete pair is idempotent — re-running on a URL
+      // that's already in ?conv= form is a no-op.
+      const exists = getSession ? getSession(target) : null;
+      if (exists?.conversation_id) {
+        const url = new URL(window.location.href);
+        url.searchParams.set('conv', exists.conversation_id);
+        url.searchParams.delete('session');
+        window.history.replaceState({}, '', url.toString());
+      }
+    } catch { /* SSR / test env */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, sessions]);
+  const [chips, setChips] = useState([]);
+  const [activeSkill, setActiveSkill] = useState(null);
+  const [activeAgent, setActiveAgent] = useState(null);
+  const [previewResult, setPreviewResult] = useState(null);
+  const [openArtifact, setOpenArtifact] = useState(null);
+  const [traceMsg, setTraceMsg] = useState(null);
+  const [filesOpen, setFilesOpen] = useState(false);
+  // Scheduled automation panel (Manus-style). Only shown when the current
+  // session has an AutomationTask linked to it (session_id == task.session_id).
+  const [scheduledOpen, setScheduledOpen] = useState(false);
+  // Deep-link target: when a "📅 Scheduled update" chat message's "Open run"
+  // button is clicked, we open the Scheduled panel and focus this run.
+  const [focusExecutionId, setFocusExecutionId] = useState(null);
+  const openRun = (executionId) => {
+    setFocusExecutionId(executionId);
+    setScheduledOpen(true);
+  };
+  // The automation task for the current session (null if none). Fetched
+  // whenever the active session changes so we can decide whether to render
+  // the "Scheduled" button in the header.
+  const [sessionAutomation, setSessionAutomation] = useState(null);
+  // Latest execution of this session's automation task (from the by-session
+  // poll). Drives the "agent is working" indicator while a run is in flight.
+  const [latestExecution, setLatestExecution] = useState(null);
+  const [attachments, setAttachments] = useState([]);
+  const [streamingId, setStreamingId] = useState(null);
+  const [streamingConvId, setStreamingConvId] = useState(null);  // P2: conv id of the in-flight v3 stream (for steer routing)
+  const [steerMarkers, setSteerMarkers] = useState([]);  // P2: inline markers rendered next to the messages
+  // P2 (conversational dashboards): persistent dock panel state. `open` toggles
+  // mount/unmount of the panel; `viewerRef` lets the stream watcher tell the
+  // DashboardViewer to refetch without prop-drilling. `seenRef` dedupes the
+  // watcher per message id so the panel doesn't re-open on every chunk.
+  const [dashboardOpen, setDashboardOpen] = useState(false);
+  const dashboardViewerRef = useRef(null);
+  const dashboardSeenRef = useRef(new Map());
+  const [loadStatus, setLoadStatus] = useState('idle'); // 'idle' | 'loading' | 'loaded' | 'error'
+  // P3: pending automation draft — shown as an editable card right after
+  // the user submits the New-Automation dialog. The prefill is captured
+  // here, parsed into fields, and the user can refine any field inline
+  // before the agent actually creates the task. The card auto-dismisses
+  // when the agent confirms creation, or when the user clicks ×.
+  const [pendingDraft, setPendingDraft] = useState(null); // { prefill: string, lang: 'zh' | 'en' } | null
+  const scrollRef = useRef(null);
+  const inputRef = useRef(null);
+  const genRef = useRef(0);
+  const persistTimerRef = useRef(null);
+  // P3-bis: guard for the ?autorun=1 deep link (used by /automation's
+  // "Run Now" button). The autorun useEffect below depends on
+  // ``activeId`` and re-runs whenever the session changes; without this
+  // ref a same-session re-render would re-send the prefill and
+  // duplicate the user message. Reset on URL change (the effect
+  // itself checks the URL on every run).
+  const autorunProcessedRef = useRef(false);
+  const streamState = useStreamState();
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const prefill = params.get('prefill');
+    // `?newTask=1` flags that the user came from the New-Automation
+    // dialog (or similar structured creation entry point) and wants a
+    // brand-new session — never append to the currently-active one.
+    // Combined with the project params, this routes the prefill into a
+    // fresh chat that lives in the right project, mirroring the
+    // Manus-style "one chat per task" flow.
+    const newTask = params.get('newTask') === '1';
+    const dialogProjectName = params.get('projectName') || null;
+    const dialogProjectId = params.get('projectId') || null;
+    // `?autorun=1` is set by /automation's "Run Now" button — it
+    // hands the run off to the LLM by injecting a structured
+    // "Run Automation Task: ..." prompt and auto-sending it. The
+    // auto-send has to wait for ``activeId`` to be set by the
+    // session deep-link effect above, so it's handled in a separate
+    // useEffect below that depends on ``activeId``. Skip the
+    // prefill processing here to avoid double-sending.
+    const autorun = params.get('autorun') === '1';
+    if (prefill && !autorun) {
+      if (isAutomationRequest(prefill)) {
+        // Stash the prefill as a pending draft BEFORE sending so the
+        // editable summary card can mount before the agent starts
+        // streaming. The card stays visible until the user dismisses
+        // it (or the agent confirms the task is created).
+        setPendingDraft({ prefill, lang });
+        // Resolve the new-task options. We prefer the dialog's project
+        // (if provided) so the user gets the project they were just in,
+        // not whatever project the sidebar happens to have selected.
+        const sessionOpts = newTask
+          ? {
+              newSessionTitle: t.sessionList.newTask,
+              newSessionProject: dialogProjectName,
+              newSessionProjectId: dialogProjectId,
+            }
+          : {};
+        handleSend(prefill, sessionOpts);
+        // Strip the newTask/project params from the URL so a refresh
+        // (or back-button) doesn't re-trigger the same flow.
+        if (newTask) {
+          try {
+            const newParams = new URLSearchParams(window.location.search);
+            newParams.delete('newTask');
+            newParams.delete('projectName');
+            newParams.delete('projectId');
+            const qs = newParams.toString();
+            const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
+            window.history.replaceState({}, '', newUrl);
+          } catch { /* best-effort — the state is already correct */ }
+        }
+      } else {
+        setInputValue(prefill);
+      }
+    }
+    // Project-scoped entry point: when the user clicks an agent on a
+    // project's page we land here with ?project=<id>&projectName=<name>.
+    // Stage the project into the context so the next ChatSession
+    // created from this page is auto-tagged with the right project.
+    const projectId = params.get('project');
+    const projectName = params.get('projectName');
+    if (projectName) {
+      try { setPendingProject(decodeURIComponent(projectName), projectId || null); } catch { setPendingProject(projectName, projectId || null); }
+    } else if (projectId) {
+      setPendingProject(null, projectId);
+    }
+    // Stash the project context so the agent conversation can be
+    // tagged with the same project_id (so data-source runtime
+    // inherits project KBs).  This must happen even when no agent
+    // is specified — the project-only chat path auto-selects
+    // ``general_assistant`` and needs this context to scope the
+    // data-source runtime.
+    if (projectId) {
+      try { sessionStorage.setItem('zhanlu:lastProjectContext', JSON.stringify({
+        projectId,
+        projectName: projectName ? decodeURIComponent(projectName) : '',
+      })); } catch { /* noop */ }
+    }
+    const agentId = params.get('agent');
+    if (agentId) {
+      base44.entities.AgentApp.get(agentId).then((agent) => {
+        setActiveAgent(agent);
+        // The chat input no longer shows a "DB: …" chip or a "Read
+        // from my database" quick action — the agent's data-source
+        // binding is still consumed by the data-source runtime at
+        // execution time. We deliberately don't resolve the bound
+        // Kbs here to keep this code path minimal.
+      }).catch(() => {});
+    }
+    // Open an existing agent conversation: the user clicked a row
+    // in the Project Detail "Recent Chats" list. We rehydrate the
+    // chat pane with the conversation's stored messages and set
+    // the active agent from the conv's ``agent_name`` (looked up
+    // by name — we don't get the agent id from the conv record).
+    //
+    // Note: agent_name is stored on the conv record, but we accept
+    // ?agentName= as a query-param override for two reasons:
+    //   1. It avoids a round-trip when the caller already has the
+    //      agent name (e.g. the Recent Chats row).
+    //   2. It future-proofs the case where an agent gets renamed —
+    //      the conv record's agent_name is then stale, but the
+    //      caller can still pass the current name.
+    const convId = params.get('conv');
+    const convAgentName = params.get('agentName') || null;
+    if (convId) {
+      base44.entities.AgentConversation.get(convId).then(async (conv) => {
+        if (!conv) return;
+        // Hydrate the message list from the conversation record.
+        // The stored shape is ``[{role, content, tool_calls,
+        // created_date, id, ...}]`` which is the same shape the
+        // chat page already consumes.
+        setMessages(Array.isArray(conv.messages) ? conv.messages : []);
+        setLoadStatus('loaded');
+        // Resolve the agent by name (the conv record stores
+        // ``agent_name`` but not the AgentApp id). We do a
+        // best-effort list and filter — the typical case has a
+        // small number of agents so the cost is negligible. If
+        // the agent can't be found, we just leave activeAgent
+        // null and the runtime will fall through to the
+        // no-agent path (which auto-resolves general_assistant
+        // for the next user message).
+        const wantedName = convAgentName || conv.agent_name;
+        if (wantedName) {
+          try {
+            const agents = await base44.entities.AgentApp.list();
+            const agent = agents.find((a) => a.name === wantedName);
+            if (agent) setActiveAgent(agent);
+          } catch { /* best-effort */ }
+        }
+      }).catch(() => {
+        // 404 or network error — leave the chat empty and let
+        // the user start a new session.
+      });
+    }
+    // Clean the transient params (?agent=, ?prefill=, ?project=,
+    // ?projectName=, ?agentName=) from the URL but PRESERVE
+    // ?conv= — that's the deep-link to the current conversation
+    // and the user must be able to reload / share the page
+    // without losing the session. We push the URL on every
+    // handleAgentSend anyway (see handleAgentSend), so this
+    // cleanup is only for the initial navigation params.
+    //
+    // For ?autorun=1 the prefill is consumed by the autorun useEffect
+    // below, so we leave ?prefill= (and ?autorun=) alone here to
+    // avoid a race where this effect strips the param before the
+    // autorun useEffect can read it.
+    try {
+      const url = new URL(window.location.href);
+      const skipForAutorun = url.searchParams.get('autorun') === '1';
+      ['agent', 'prefill', 'project', 'projectName', 'agentName'].forEach((k) => {
+        if (skipForAutorun && (k === 'prefill' || k === 'autorun')) return;
+        url.searchParams.delete(k);
+      });
+      window.history.replaceState({}, '', url.toString());
+    } catch {
+      // Older browsers / non-browser envs — fall back to the
+      // previous behavior of clearing the URL entirely.
+      window.history.replaceState({}, '', '/');
+    }
+  }, []);
+  // P3-bis: ?autorun=1 deep-link from /automation's "Run Now" button.
+  // The button builds a structured "Run Automation Task: ..." prompt
+  // and navigates here. We:
+  //   1. Wait for the session deep-link effect above to set
+  //      ``activeId`` (this effect depends on it).
+  //   2. Show the prompt in the input box briefly (UX: the user
+  //      sees their own request as it's being typed in).
+  //   3. Call ``handleSend(prefill)`` so the LLM receives the
+  //      prompt and calls ``execute_automation`` — the
+  //      dispatcher's ``_notify_chat`` then streams the result
+  //      back into the SAME session, giving the user the
+  //      "request + inline response" view they wanted.
+  //   4. Strip ?prefill= and ?autorun= from the URL.
+  //
+  // Why a separate useEffect (not the existing prefill one):
+  // the existing prefill useEffect runs once on mount with the
+  // closure's ``activeId`` (which is null or stale at that point
+  // because the session deep-link effect is queued in the same
+  // render but its setState is committed later). Depending on
+  // ``activeId`` here makes us re-run after the session is
+  // actually set, so ``handleSend`` lands in the right session.
+  useEffect(() => {
+    if (!activeId) return;
+    if (autorunProcessedRef.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const prefill = params.get('prefill');
+    const autorun = params.get('autorun') === '1';
+    if (!autorun || !prefill) return;
+    autorunProcessedRef.current = true;
+    // Surface the prompt in the input box first so the user sees
+    // the request appear as if they had typed it themselves.
+    setInputValue(prefill);
+    // Send it. ``handleSend`` reads ``activeId`` from its closure,
+    // which is the value committed by this re-render (i.e. the
+    // task's dedicated session), so the message + LLM stream
+    // land in the right conversation.
+    handleSend(prefill);
+    // Strip the autorun params from the URL — same rationale as
+    // the prefill useEffect above.
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('prefill');
+      url.searchParams.delete('autorun');
+      window.history.replaceState({}, '', url.toString());
+    } catch { /* best-effort — the state is already correct */ }
+  }, [activeId]);
+  useEffect(() => {
+    // Whenever the active session changes, reset transient chat-page
+    // state — the preview pane, the previous result panel, any
+    // attached skills/chips, and draft attachments.
+    //
+    // Agent clearing rule: clear ``activeAgent`` ONLY when switching to
+    // an existing session (one that already has a ``conversation_id``).
+    // When ``handleSend`` creates a brand-new session and calls
+    // ``setActiveId(sid)``, the session exists but ``conversation_id``
+    // is still null — we must NOT clear the agent the user just
+    // selected, otherwise the chip disappears between "send" and
+    // "conversation created". For existing sessions, clearing is
+    // safe because the separate effect below re-resolves the agent
+    // from the conversation's ``agent_name`` (or leaves it null for
+    // agent-less general chats).
+    const _s = activeId ? getSession(activeId) : null;
+    const _isNewSession = activeId && (!_s || !_s.conversation_id);
+    setOpenArtifact(null);
+    setPreviewResult(null);
+    setChips([]);
+    setActiveSkill(null);
+    if (!_isNewSession) setActiveAgent(null);
+    setAttachments([]);
+    if (activeId) loadMessages(activeId);
+    else setMessages([]);
+    // Watch ``chatGeneration`` (NOT just ``activeId``) so this effect
+    // also re-fires when the user clicks "+ New Task" in a state
+    // where ``activeId`` was already null — e.g. when the chat was
+    // opened via a ``?conv=<id>`` deep link, which populates
+    // ``messages`` without ever setting ``activeId``. Without
+    // ``chatGeneration`` in the deps, that state's "+ New Task"
+    // click would silently no-op.
+  }, [activeId, chatGeneration]);
+
+  // When activeId becomes null (user clicked "+ New Task" via
+  // contextNewChat, or the active session was deleted), the URL's
+  // ?conv= is now stale — a reload would resume the previous
+  // conversation. SelectSession keeps the URL in sync for the
+  // non-null case; this effect handles the null case. handleNewChat
+  // also clears the URL explicitly (idempotent — we end up here
+  // anyway because it calls contextNewChat which nulls activeId).
+  useEffect(() => {
+    if (activeId) return;
+    try {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has('conv')) {
+        url.searchParams.delete('conv');
+        window.history.replaceState({}, '', url.toString());
+      }
+    } catch { /* SSR / test env */ }
+  }, [activeId]);
+
+  // Auto-restore the active agent when opening a session that has a
+  // linked AgentConversation (conversation_id set on the ChatSession
+  // record). This is the missing piece that makes the sidebar reopen
+  // flow feel project/agent-aware: previously the chat input showed no
+  // project chip and no agent tag, and the next send fell through to
+  // the generic LLM proxy — the agent "forgot" everything about the
+  // session. We resolve the agent by name from the AgentConversation,
+  // same approach as the ?conv=<id> URL handler.
+  useEffect(() => {
+    if (!activeId) return;
+    const s = getSession(activeId);
+    if (!s || !s.conversation_id) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const conv = await base44.entities.AgentConversation.get(s.conversation_id);
+        if (cancelled || !conv) return;
+        const wantedName = conv.agent_name;
+        if (!wantedName) return;
+        const agents = await base44.entities.AgentApp.list();
+        const agent = agents.find((a) => a.name === wantedName);
+        if (cancelled) return;
+        if (agent) setActiveAgent(agent);
+      } catch { /* best-effort — leave activeAgent null, the next
+                   send will auto-resolve general_assistant if the
+                   project chip is set */ }
+    })();
+    return () => { cancelled = true; };
+    // Re-run when activeId changes OR when the session's
+    // conversation_id field changes (e.g. a new link was just written).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, getSession ? getSession(activeId)?.conversation_id : null]);
+  // Auto-scroll and the floating "Jump to latest" button were removed
+  // (2026-07-29, user request): the viewport now stays wherever the
+  // user put it; new messages simply append without moving the view.
+
+  // Debounced persistence to localStorage so the chat survives refreshes
+  useEffect(() => {
+    if (!activeId || loadStatus !== 'loaded') return;
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(() => {
+      try {
+        const cacheKey = `zhanlu:messages:${activeId}`;
+        localStorage.setItem(cacheKey, JSON.stringify(messages.slice(0, 200)));
+      } catch { /* best-effort */ }
+    }, 300);
+    return () => {
+      if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    };
+  }, [messages, activeId, loadStatus]);
+
+  // ---- Detect whether the current session has a scheduled automation -----
+  // The Manus-style "Scheduled" button only appears when this session is the
+  // origin of an AutomationTask (task.session_id == activeId). We fetch on
+  // every activeId change so the button shows / hides as the user switches
+  // between chats.
+  useEffect(() => {
+    if (!activeId) {
+      setSessionAutomation(null);
+      return undefined;
+    }
+    let cancelled = false;
+    let timer = null;
+    let pollCount = 0;
+    // Previous /by-session payload so decideRefresh can detect execution
+    // id/status transitions (and stop polling once the latest execution is
+    // stable-terminal). Null on the first poll.
+    let prevPayload = null;
+    const POLL_INTERVAL_MS = 2500;
+    // Safety cap so a stuck non-terminal execution (e.g. a task whose status
+    // never flips back to idle) can't poll forever. Must exceed the slowest
+    // realistic run: an LLM data_sync run measured ~104s (07:36:39→07:38:23),
+    // and a 40-poll/100s cap gave up ~4s BEFORE the response was written —
+    // the exact "agent not responding" regression. 360 polls ≈ 15 min, which
+    // covers long LLM runs while still bounding a genuinely stuck execution.
+    // (Quick runs stop far earlier via decideRefresh's stable-terminal stop.)
+    const MAX_POLLS = 360;
+
+    async function checkSession() {
+      try {
+        const res = await authFetch(`/api/automations/by-session/${activeId}`);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (cancelled) return;
+        setSessionAutomation(data.task || null);
+        // Track the latest execution so the UI can show an "agent is working"
+        // indicator while a run is in flight (the executor is async, so
+        // without this the user sees the request bubble then silence).
+        setLatestExecution(
+          Array.isArray(data.executions) && data.executions.length > 0
+            ? data.executions[0]
+            : null,
+        );
+        // decideRefresh tells us whether to reload the message list (the
+        // background executor writes the marker + agent response AFTER the
+        // initial mount-time load, so without these reloads the user would
+        // only ever see the user bubble). Silent so we don't flash the
+        // empty-state spinner on a poll that has messages already.
+        const decision = decideRefresh(prevPayload, data);
+        if (decision.reload) {
+          loadMessages(activeId, { silent: true });
+        }
+        prevPayload = data;
+        pollCount += 1;
+        if (decision.keepPolling && pollCount < MAX_POLLS) {
+          timer = setTimeout(checkSession, POLL_INTERVAL_MS);
+        }
+      } catch {
+        if (cancelled) return;
+        setSessionAutomation(null);
+        // Network blip — retry once more, then stop (don't spin on a dead
+        // server).
+        if (pollCount < 2) {
+          pollCount += 1;
+          timer = setTimeout(checkSession, POLL_INTERVAL_MS);
+        }
+      }
+    }
+    checkSession();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
+  }, [activeId]);
+
+  async function loadMessages(sid, opts) {
+    const silent = !!(opts && opts.silent);
+    if (!silent) setLoadStatus('loading');
+    const cacheKey = `zhanlu:messages:${sid}`;
+    let msgs = null;
+
+    // Primary: load from backend
+    try {
+      // Sort by created_date (server clock), NOT `order`: the order column
+      // mixes tiny sequential indexes (chat turns, ``current.length``) with
+      // epoch timestamps (scheduled-run updates from ``_notify_chat``), so
+      // sorting by it grouped user inputs and agent activity into separate
+      // regions instead of interleaving them chronologically.
+      msgs = await base44.entities.ChatMessage.filter({ session_id: sid }, 'created_date', 200);
+      // Cache to localStorage on success
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify(msgs.slice(0, 200)));
+      } catch { /* best-effort cache write */ }
+    } catch {
+      // Retry once after 500ms backoff
+      await new Promise((r) => setTimeout(r, 500));
+      try {
+        // Sort by created_date (server clock), NOT `order`: the order column
+      // mixes tiny sequential indexes (chat turns, ``current.length``) with
+      // epoch timestamps (scheduled-run updates from ``_notify_chat``), so
+      // sorting by it grouped user inputs and agent activity into separate
+      // regions instead of interleaving them chronologically.
+      msgs = await base44.entities.ChatMessage.filter({ session_id: sid }, 'created_date', 200);
+        try {
+          localStorage.setItem(cacheKey, JSON.stringify(msgs.slice(0, 200)));
+        } catch { /* best-effort */ }
+      } catch {
+        // Fallback to localStorage cache
+        try {
+          const cached = localStorage.getItem(cacheKey);
+          if (cached) {
+            msgs = JSON.parse(cached);
+            toast.info('Loaded from local cache', { duration: 3000 });
+          }
+        } catch { /* noop */ }
+      }
+    }
+
+    setMessages(msgs || []);
+    setLoadStatus('loaded');
+  }
+
+  // P2 mid-turn steer: post the current input to the in-flight v3 stream
+  // without starting a new stream. Best-effort; a 429 (queue full) or 404
+  // (conversation gone) surfaces a toast. On success the input is cleared
+  // and an optimistic local marker is rendered immediately — the
+  // authoritative marker arrives as a `steer` SSE event a moment later.
+  async function handleSteer(text) {
+    const trimmed = (text || '').trim();
+    if (!trimmed) return;
+    if (!streamingConvId) {
+      // No in-flight stream — fall through to the normal send path.
+      return handleSend(trimmed);
+    }
+    const localId = `steer-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    setSteerMarkers((prev) => [...prev, { id: localId, text: trimmed, status: 'pending' }]);
+    setInputValue('');
+    clearDraft('chat_input_draft');
+    try {
+      await steerAgentConversation(streamingConvId, trimmed);
+      setSteerMarkers((prev) => prev.map((m) => (m.id === localId ? { ...m, status: 'sent' } : m)));
+    } catch (e) {
+      setSteerMarkers((prev) => prev.map((m) => (m.id === localId ? { ...m, status: 'error', error: e?.message } : m)));
+      toast.error(e?.message || 'Steer failed');
+    }
+  }
+
+  async function handleSend(text, opts = {}) {
+    const gen = ++genRef.current;
+    const { hidden = false, newSessionTitle = null, newSessionProject = null, newSessionProjectId = null } = opts; // hidden=true → don't render the bubble
+    // `newSession*` opts are used when the caller wants the message to
+    // land in a brand-new session (e.g. from the New-Automation dialog)
+    // rather than appending to the currently-active one. The session is
+    // created and set active BEFORE the message is added so handleSend
+    // can pick it up via `activeId` on the next render.
+    let sid = activeId;
+    let current = [...messages];
+    const skill = activeSkill;
+    // The selected skill is shown as a chip next to the input — we do
+    // NOT need to echo ``/${skill}`` into the user-visible message text.
+    // The previous behavior prepended the slash token to ``fullText``,
+    // which made the user's own message read like
+    // "/frontend-design how do I make a button?" — UX noise that also
+    // confused the LLM into thinking the user issued a slash command
+    // rather than asking a question. The skill's methodology is now
+    // injected into the SYSTEM prompt (not the user turn) via
+    // ``skillContext`` below.
+    const fullText = text;
+    // `newSessionTitle` doubles as the "force a brand-new session"
+    // signal — even if the user already has an active session, we
+    // create a fresh one. This is what the New-Automation dialog
+    // relies on: each new task must land in its own clean chat
+    // (Manus-style) regardless of which session the user was just in.
+    const forceNewSession = Boolean(newSessionTitle);
+    if (!sid || forceNewSession) {
+      // Title resolution: caller may have passed `newSessionTitle`
+      // (e.g. "新建任务" from the New-Automation dialog). Otherwise
+      // fall back to a snippet of the user text.
+      const titleSource = newSessionTitle || fullText;
+      const session = await base44.entities.ChatSession.create({
+        title: titleSource.slice(0, 24),
+        // Store null (not the "Ungrouped" i18n string) for sessions
+        // without a bound project. The "Ungrouped" label is purely
+        // a UI display string for the sidebar's group header and
+        // the project picker — it is NOT a stored value. Storing
+        // the string here caused two bugs:
+        //   1. The chat input showed a "Ungrouped" chip with an X
+        //      button for the implicit default state, which is
+        //      confusing because the user has nothing selected.
+        //   2. Legacy rows that got the string written have to be
+        //      normalized on read (see ChatSessionContext.
+        //      selectSession) before they can be rendered
+        //      correctly.
+        // Existing legacy rows are handled by the read-side
+        // normalization; new rows are clean.
+        project: newSessionProject || pendingProject || null,
+        // Set the FK too (in addition to the legacy name) so the
+        // session shows up in the project's "Recent Chats" list and
+        // any project-scoped queries pick it up. Both fields are
+        // written so legacy readers keep working unchanged.
+        ...(newSessionProjectId ? { project_id: newSessionProjectId } : (pendingProjectId ? { project_id: pendingProjectId } : {})),
+        last_message_at: new Date().toISOString(),
+      });
+      sid = session.id;
+      setActiveId(sid);
+      prependSession(session);
+    }
+    const userMsg = await base44.entities.ChatMessage.create({
+      session_id: sid, role: 'user', content: fullText, order: current.length,
+    });
+    // Mark synthetic / auto-injected user messages so the renderer can
+    // hide them. The text is still sent to the LLM (so it sees the
+    // directive) but the chat bubble is suppressed.
+    if (hidden) userMsg.hidden = true;
+    current = [...current, userMsg];
+    setMessages(current);
+    setInputValue('');
+    clearDraft('chat_input_draft');
+    setActiveSkill(null);
+    setAttachments([]);
+    setLoading(true);
+    // Single source of truth for the Stop button — must happen before any
+    // await so the AbortController exists for the fetch / SSE call below.
+    streamState.startSending();
+    // --- Chat without an explicit agent: ALWAYS auto-select
+    // ``general_assistant`` so the conversation runs through the agent
+    // runtime (which injects the date anchor, project KBs, memory,
+    // and — critically — the real-time tools ``web_search``,
+    // ``web_extract``, and ``agent_browser``). This applies to EVERY
+    // chat that has no user-picked agent, including Ungrouped chats
+    // with no project. The previous condition ``&& pendingProjectId``
+    // meant Ungrouped chats silently fell through to the
+    // ``InvokeLLMStream`` proxy, which has no tools and no date
+    // anchor — so the LLM would answer with stale training data for
+    // simple questions like "what's today's date". Removing the gate
+    // makes every chat get the full agent runtime, which is the
+    // user-expected behavior (consistent with what the user already
+    // gets on any project).
+    //
+    // IMPORTANT: we use ``effectiveAgent`` only as a local handle for
+    // routing the request — we do NOT call ``setActiveAgent(...)`` on
+    // the auto-resolved agent. ``general_assistant`` is a platform
+    // system agent and is hidden from the UI (chip, agent picker, My
+    // Space), so persisting it to the active-agent state would cause
+    // the user to see "general_assistant" pinned in their input bar
+    // even though they never picked it. The next send runs the
+    // auto-select again, so the silent resolution is stable across
+    // multiple messages.
+    let effectiveAgent = activeAgent;
+    if (!effectiveAgent) {
+      try {
+        const _agents = await base44.entities.AgentApp.list();
+        effectiveAgent = _agents.find((a) => a.name === 'general_assistant') || null;
+        // Deliberately do NOT setActiveAgent here — see comment above.
+        // Fallback: if the list endpoint didn't return general_assistant
+        // (e.g. backend owner-scoping excludes system agents with
+        // created_by_id=NULL), use a minimal agent object so the full
+        // agent runtime path (tools, memory, web search) is still taken.
+        // The backend resolves AgentApp by name, so name is sufficient.
+        if (!effectiveAgent) {
+          effectiveAgent = { name: 'general_assistant' };
+        }
+      } catch { /* fall through to generic path */ }
+    }
+    // --- CREATE-automation requests must go through the structured
+    // path. The agent (general_assistant or any custom agent) has
+    // native tools like file-writing and code-execution that always
+    // fail for creating resources — and the structured
+    // ``create_resource`` field only exists in the non-agent path.
+    // Force the non-agent route for CREATE so the dialog → draft card
+    // → ``[[RESULT]]`` pipeline works. RUN requests are deliberately
+    // left in the agent path so the LLM can call ``execute_automation``
+    // with the task name (the agent has the proper tool for that).
+    if (effectiveAgent && isCreateAutomationRequest(fullText)) {
+      effectiveAgent = null;
+    }
+    // --- P2 mid-turn steer: if a v3 agent stream is already in flight,
+    // route the message through the steer endpoint instead of starting a
+    // new stream. Falls through to the normal agent path otherwise.
+    if (effectiveAgent && streamState.isActive && streamingConvId) {
+      return handleSteer(fullText);
+    }
+    // --- Agent mode: route through the v3 conversations endpoint so the
+    // backend can run the full agent loop (system prompt, memory, skills,
+    // ``prepare_data_source_runtime`` for the bound KnowledgeBases,
+    // tool calling, guardrails). The previous flow used
+    // ``InvokeLLMStream`` which is a raw LLM proxy with no tools.
+    if (effectiveAgent) {
+      const fileUrls = attachments.map((a) => a.file_url);
+      const aiMsg = await base44.entities.ChatMessage.create({
+        session_id: sid, role: 'assistant', content: '', order: current.length,
+      });
+      if (gen !== genRef.current) {
+        // A newer generation took over before we even started streaming.
+        streamState.reset();
+        return;
+      }
+      setMessages((prev) => [...prev, aiMsg]);
+      setStreamingId(aiMsg.id);
+      setLoading(false);
+      // P2 (conversational dashboards): fresh message → fresh dedupe count.
+      dashboardSeenRef.current.set(aiMsg.id, 0);
+      try {
+        const effectiveAiLang = aiLang === 'auto' ? (detectLang(fullText) || 'zh') : aiLang;
+        // Resolve the conv id to reuse. Source of truth, in priority
+        // order:
+        //   1. streamingConvId — set inside handleAgentSend after
+        //      the first create. Synchronous for same-session
+        //      follow-up sends (React state is updated by the time
+        //      the user types the next message).
+        //   2. The active ChatSession's conversation_id — written
+        //      at the end of the first createAgentConversation()
+        //      call. Persists across page reloads (assuming the
+        //      write landed before the reload).
+        //   3. The URL's ?conv= param — most-recent source, lets
+        //      the user reload mid-stream and continue.
+        //
+        // If all three are missing, handleAgentSend will lazily
+        // create a new AgentConversation.
+        let resumeConvId = streamingConvId;
+        if (!resumeConvId && sid) {
+          const sess = getSession ? getSession(sid) : null;
+          resumeConvId = sess?.conversation_id || null;
+        }
+        if (!resumeConvId) {
+          try {
+            const urlConv = new URLSearchParams(window.location.search).get('conv');
+            if (urlConv) resumeConvId = urlConv;
+          } catch { /* SSR / test env */ }
+        }
+        await handleAgentSend(fullText, {
+          activeAgent: effectiveAgent,
+          sid,
+          gen,
+          sessionId: resumeConvId,
+          aiMsg,
+          fileUrls,
+          lang: effectiveAiLang,
+        });
+      } finally {
+        if (gen === genRef.current) {
+          setLoading(false);
+          setStreamingId(null);
+          // Always drain the stream state when this generation finishes
+          // its work, otherwise the Stop button stays visible.
+          if (streamState.isActive) streamState.complete();
+        }
+      }
+      return;
+    }
+    try {
+      // AI output language: controlled by separate aiLang setting (decoupled from UI language).
+      //   'auto' → detect language from user input, fallback to Chinese
+      //   'zh'   → always respond in Chinese
+      //   'en'   → always respond in English
+      const effectiveAiLang = aiLang === 'auto' ? (detectLang(fullText) || 'zh') : aiLang;
+      const langInstruction = effectiveAiLang === 'en'
+        ? 'Always respond in English.'
+        : '请使用中文回复。';
+      const historyLabelUser = effectiveAiLang === 'en' ? 'User' : '用户';
+      const historyLabelAssistant = effectiveAiLang === 'en' ? 'Assistant' : '助手';
+      const history = current.map((m) => `${m.role === 'user' ? historyLabelUser : historyLabelAssistant}: ${m.content}`).join('\n');
+      // Skill context is built directly from the selected skill OBJECT
+      // (``activeSkill`` is now the full Tool row, not a string token).
+      // This eliminates the previous fragile lookup
+      // (``tools.find(t => t.trigger?.includes(skill) || t.name?.toLowerCase().includes(skill))``
+      // which returned the wrong skill for short tokens like "pdf"
+      // matching "PDF Generator" first). The user picked a specific
+      // skill row; we use it verbatim.
+      // Skill context: custom-skill methodology takes priority.
+      // When no custom skill is active, inject the default-skills hint
+      // so the LLM knows the 6 built-in artifact skills are available.
+      const skillContext = buildSkillContext(skill);
+      const defaultSkillContext = buildDefaultSkillContext(skill);
+      let agentContext = '';
+      if (activeAgent) {
+        const topoMap = { standalone: '独立运行', sequence: '顺序协作', loop: '循环协作', parallel: '并行协作' };
+        const parts = [`当前已加载智能体「${activeAgent.name}」。`, `描述：${activeAgent.description || ''}`];
+        if (activeAgent.agent_type) parts.push(`智能体类型：${{ sequential: '顺序型', reactive: '反应型', deliberative: '慎思型' }[activeAgent.agent_type] || activeAgent.agent_type}`);
+        if (activeAgent.capabilities?.length) parts.push(`工具：${activeAgent.capabilities.join('、')}`);
+        const layers = [
+          ['角色定位', activeAgent.prompt_identity], ['边界约束', activeAgent.prompt_boundary],
+          ['推理流程', activeAgent.prompt_reasoning], ['职能与工具', activeAgent.prompt_tools], ['输出规范', activeAgent.prompt_output],
+        ].filter(([, v]) => v && v.trim());
+        if (layers.length) {
+          parts.push('【五层宪法提示词】');
+          layers.forEach(([label, val]) => parts.push(`【${label}】\n${val}`));
+        } else if (activeAgent.system_prompt) {
+          parts.push(`核心指令：${activeAgent.system_prompt}`);
+        }
+        if (activeAgent.skills?.length) {
+          parts.push(`可用技能：${activeAgent.skills.join('、')}`);
+          // Equipped skills need their full methodology (skill_md body) in
+          // the system prompt — otherwise the LLM only sees the names and
+          // has no idea what those skills DO. AgentApp.skills is a JSON
+          // array of skill NAMES (not ids), so we look them up by name.
+          // Lookup is case-insensitive + whitespace-trimmed to handle
+          // trivial drift between the config form and the tool row.
+          try {
+            const toolRows = await base44.entities.Tool.list();
+            const wanted = new Set(
+              (activeAgent.skills || []).map((s) => (s || '').trim().toLowerCase()).filter(Boolean)
+            );
+            // If a row's name matches any equipped name (and there may be
+            // multiple rows with the same name — keep the one with the
+            // longest skill_md so the LLM gets the richest body).
+            // Dedupe by lowercase name so the LLM doesn't see two
+            // "writing-plans" blocks with conflicting methodologies.
+            const equipped = toolRows
+              .filter((r) => wanted.has((r.name || '').trim().toLowerCase()))
+              .sort((a, b) => (b.skill_md?.length || 0) - (a.skill_md?.length || 0));
+            const seen = new Set();
+            const equippedUnique = equipped.filter((r) => {
+              const k = (r.name || '').trim().toLowerCase();
+              if (seen.has(k)) return false;
+              seen.add(k);
+              return true;
+            });
+            if (equippedUnique.length) {
+              parts.push('【已装载技能 - 严格遵循以下方法论执行】');
+              for (const r of equippedUnique) {
+                parts.push(`### 技能: ${r.name}`);
+                if (r.description) parts.push(`描述: ${r.description}`);
+                if (r.trigger) parts.push(`触发词: ${r.trigger}`);
+                if (r.skill_md && String(r.skill_md).trim()) {
+                  parts.push(`方法论:\n${r.skill_md}`);
+                } else {
+                  parts.push('(无方法论正文 - 仅按名称识别，可按描述自主推断)');
+                }
+              }
+            }
+          } catch { /* noop — the names-only line above still stands as a fallback */ }
+        }
+        if (activeAgent.knowledge_bases?.length) {
+          try {
+            const allKbs = await base44.entities.KnowledgeBase.list();
+            const allowed = allKbs.filter((kb) => activeAgent.knowledge_bases.includes(kb.id));
+            if (allowed.length) {
+              parts.push('【可访问数据源（仅限以下知识库，严禁访问未列出的数据库）】');
+              allowed.forEach((kb) => {
+                const dbLabel = t.kb.dbTypes[kb.db_type] || kb.db_type || 'DB';
+                const loc = kb.host || kb.api_url || '';
+                parts.push(`• ${kb.name}（${dbLabel}）：${loc}${kb.database_name ? `/${kb.database_name}` : ''}`);
+              });
+            }
+          } catch { /* noop */ }
+        }
+        if (activeAgent.topology && activeAgent.topology !== 'standalone') {
+          parts.push(`协作拓扑：${topoMap[activeAgent.topology] || activeAgent.topology}`);
+          if (activeAgent.sub_agents?.length) parts.push(`委派子 Agent：${activeAgent.sub_agents.join('、')}`);
+        }
+        parts.push(`控制约束：调用上限${activeAgent.max_call_count ?? 50}次，重试${activeAgent.max_retries ?? 3}次，数据${activeAgent.data_read ? '可读' : '禁读'}${activeAgent.data_write ? '/可写' : '/禁写'}${activeAgent.human_fallback ? '，高风险转人工' : ''}`);
+        if (activeAgent.trace_enabled) {
+          const lvl = activeAgent.log_level || 'info';
+          const lvlHint = lvl === 'debug' ? '记录全部细节：思考链全文、工具完整入参出参' : lvl === 'info' ? '记录关键节点：每步标题与要点' : lvl === 'warn' ? '仅记录警告及以上步骤' : '仅记录异常步骤';
+          parts.push(`可追溯：已启用全链路埋点（日志级别 ${lvl}，${lvlHint}）。请在 trace 字段输出 3-6 个高层执行节点，记录目标分析、工具或数据操作、验证与输出组装；detail 仅说明做了什么和得到什么结果，不输出隐藏思维链。每项含 step、type、title、detail、status、duration_ms。`);
+        }
+        parts.push('请以该智能体的身份、能力边界与推理框架回复用户。主动规划并连续完成多步骤任务；先给成果，再给简洁依据；仅在缺少关键信息或高风险操作时询问用户，并在输出前核验事实、数据与工具结果。');
+        agentContext = `\n${parts.join('\n')}`;
+      }
+      // --- Deterministic intent classification (no LLM call) ---
+      const intent = classifyIntent(fullText);
+      const intentHint = formatHint(intent);
+
+      let automationContext = '';
+      if (!activeAgent) {
+        // The ``AUTOMATION_AGENT_PROMPT`` data-source list is only
+        // useful for CREATE flows (the LLM needs to know which DBs are
+        // available to bind the new task to). For RUN flows the agent
+        // has ``execute_automation`` and doesn't need the data-source
+        // catalog injected here.
+        const hasCreateAutomation = current.some((m) => m.role === 'user' && isCreateAutomationRequest(m.content));
+        if (isCreateAutomationRequest(fullText) || hasCreateAutomation) {
+          try {
+            const kbs = await base44.entities.KnowledgeBase.list();
+            const dbSources = kbs.filter((kb) => kb.source_kind === 'database' || kb.type === 'business_db');
+            const sourceList = dbSources.length
+              ? dbSources.map((kb) => `• ${kb.name}（${t.kb.dbTypes[kb.db_type] || kb.db_type || 'DB'}）`).join('\n')
+              : '（暂无已配置的数据库连接，可稍后在详情页配置）';
+            automationContext = `\n${AUTOMATION_AGENT_PROMPT}\n\n【可用数据源】\n${sourceList}`;
+          } catch {
+            automationContext = `\n${AUTOMATION_AGENT_PROMPT}`;
+          }
+        }
+      }
+      const systemPrompt = `${baseSystemPrompt}${skillContext}${defaultSkillContext}${agentContext}${automationContext}\n${langInstruction}${intentHint ? `\n\n【当前意图检测】${intentHint}` : ''}`;
+      const fileUrls = attachments.map((a) => a.file_url);
+      const fileNote = fileUrls.length ? `\n用户附带了 ${fileUrls.length} 个文件，请结合文件内容回复。` : '';
+      // Per-request schema — makes `create_resource` required when the
+      // user is asking to create an automation task. This is the
+      // strongest signal we can give the LLM that the response MUST
+      // contain the field, preventing it from going off to file-writing
+      // or code-execution tools (which always fail in this app).
+      const responseSchema = buildResponseSchema(fullText, current);
+      // --- Create AI message placeholder for real-time streaming ---
+      const aiMsg = await base44.entities.ChatMessage.create({
+        session_id: sid, role: 'assistant', content: '', order: current.length,
+      });
+      if (gen !== genRef.current) {
+        // A newer generation took over before SSE started.
+        streamState.reset();
+        return;
+      }
+      setMessages((prev) => [...prev, aiMsg]);
+      setStreamingId(aiMsg.id);
+      setLoading(false);
+      // P2 (conversational dashboards): fresh message → fresh dedupe count.
+      dashboardSeenRef.current.set(aiMsg.id, 0);
+
+      // --- Stream LLM response in real-time via SSE ---
+      let fullContent = '';
+      let aborted = false;
+      try {
+        streamState.startStreaming();
+        const streamRes = await authFetch(`/api/apps/${appParams.appId}/integration-endpoints/Core/InvokeLLMStream`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            prompt: `${systemPrompt}\n\n对话历史:\n${history}${fileNote}\n\n请回复:`,
+            response_json_schema: responseSchema,
+            model: 'gpt_5_4',
+            ...(fileUrls.length ? { file_urls: fileUrls } : {}),
+          }),
+          signal: streamState.abortRef.current?.signal,
+        });
+        if (!streamRes.ok) throw new Error(`Stream failed: ${streamRes.status}`);
+        const reader = streamRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
+        while (true) {
+          if (gen !== genRef.current) return;
+          const { done, value } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith('data: ')) continue;
+            try {
+              const evt = JSON.parse(line.slice(6));
+              if (evt.error) throw new Error(evt.error);
+              if (evt.delta) {
+                fullContent += evt.delta;
+                const partial = extractPartialText(fullContent);
+                if (partial && gen === genRef.current) {
+                  setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: partial } : m)));
+                }
+              }
+              if (evt.done) fullContent = evt.content;
+            } catch (parseErr) {
+              if (parseErr && parseErr.message && !parseErr.message.includes('JSON')) throw parseErr;
+            }
+          }
+        }
+        // Normal end-of-stream — clear the in-flight flag so the
+        // Stop button disappears immediately and the user can send again.
+        if (gen === genRef.current) streamState.complete();
+      } catch (streamErr) {
+        // AbortError: user clicked Stop. Mark aborted so we don't run the
+        // non-streaming fallback and append a "Stopped generating." hint.
+        if (streamErr && (streamErr.name === 'AbortError' || streamErr.code === 20)) {
+          aborted = true;
+          if (gen === genRef.current) {
+            const stoppedText = lang === 'en' ? '\n\n[Stopped generating.]' : '\n\n[已停止生成。]';
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, content: (m.content || '') + stoppedText } : m
+            ));
+            // Stop button should disappear immediately when the user cancels
+            streamState.complete();
+          }
+          return;
+        }
+        // Fallback to non-streaming InvokeLLM if SSE fails
+        if (gen !== genRef.current) return;
+        const res = await base44.integrations.Core.InvokeLLM({
+          prompt: `${systemPrompt}\n\n对话历史:\n${history}${fileNote}\n\n请回复:`,
+          response_json_schema: responseSchema,
+          model: 'gpt_5_4',
+          ...(fileUrls.length ? { file_urls: fileUrls } : {}),
+        });
+        const resData = (res && typeof res === 'object' ? res : {}) || {};
+        fullContent = resData.text ? JSON.stringify(resData) : (resData.response ? JSON.stringify(resData.response) : JSON.stringify(resData));
+        if (gen === genRef.current) {
+          setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: resData.text || resData.response || '...' } : m)));
+        }
+        // The fallback path never went through `streamState.complete()`, so
+        // the input bar can stay stuck on "responding" even though the user
+        // already got a reply. Flip the state now — the outer `finally` will
+        // also do this, but doing it here keeps the indicator honest if any
+        // later step throws before the finally runs.
+        if (streamState.isActive) streamState.complete();
+      }
+
+      // --- Parse complete JSON response ---
+      let data = {};
+      try {
+        data = JSON.parse(fullContent);
+        if (typeof data !== 'object' || data === null) data = { text: String(fullContent) };
+      } catch {
+        data = { text: fullContent };
+      }
+
+      let reply = data.text || '';
+      // Hoisted entity map so the auto-retry branch below can reuse it
+      // when the first response missed `create_resource`.
+      const ENTITY_MAP = { report: 'Report', file: 'UserFile', agent: 'AgentApp', kb: 'KnowledgeBase', automation: 'AutomationTask', flow: 'DecisionFlow' };
+      if (data.create_resource && data.create_resource.type) {
+        const cr = data.create_resource;
+        let parsedFields = {};
+        try { parsedFields = typeof cr.fields === 'string' ? JSON.parse(cr.fields) : (cr.fields || {}); } catch { parsedFields = {}; }
+        try {
+          if (cr.type === 'file' && ['html', 'htm'].includes((parsedFields.file_type || '').toLowerCase()) && parsedFields.html_content) {
+            const fileName = /\.html?$/i.test(cr.name) ? cr.name : `${cr.name}.html`;
+            const htmlFile = new File([parsedFields.html_content], fileName, { type: 'text/html' });
+            const uploaded = await base44.integrations.Core.UploadFile({ file: htmlFile });
+            parsedFields = { ...parsedFields, file_url: uploaded.file_url, source: 'ai_generated', resource_kind: 'html_file' };
+            delete parsedFields.html_content;
+          }
+          const entityName = ENTITY_MAP[cr.type];
+          if (entityName) {
+            // Stamp every non-report resource with the originating
+            // session id when we have one. This used to be limited to
+            // `file` resources, but the sidebar now uses
+            // `AutomationTask.session_id` to render a small clock
+            // icon on the originating chat session so users can
+            // easily find the "control room" for an automation.
+            // `report` keeps its own { title, ... } shape; reports
+            // don't currently surface a per-session badge.
+            // Prefer the LLM-parsed project (from the create-dialog's
+            // "- Project：X" prefill) over the ambient chat chip, so an
+            // explicit dialog selection isn't silently overwritten with
+            // "Ungrouped" when no chip is set. See lib/createResourceProject.js.
+            const projectFallback = pickCreateProject(parsedFields, pendingProject, t.sessionList.ungrouped);
+            const payload = cr.type === 'report'
+              ? { title: cr.name, ...parsedFields }
+              : { name: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback } : {}) };
+            const created = await base44.entities[entityName].create(payload);
+            // Manus-style: when an automation is created from a chat, rename
+            // the current session to the automation's name so the sidebar
+            // shows "Inventory Anomaly Inspection" (not "新建任务" / the first
+            // 24 chars of the user's message). We do THREE things to make
+            // the rename visible in the sidebar no matter how it's rendered:
+            //   1. optimistic context update via renameSession (instant)
+            //   2. direct backend update of ChatSession.title (persistence)
+            //   3. refreshSessions() to force the sidebar to re-read the
+            //      server truth (covers the case where the optimistic
+            //      update doesn't reach the sidebar in time, e.g. when a
+            //      fresh session was just prependSession'd in the same tick).
+            if (cr.type === 'automation' && sid && cr.name) {
+              try {
+                if (renameSession) renameSession(sid, cr.name);
+                await base44.entities.ChatSession.update(sid, { title: cr.name });
+                if (refreshSessions) refreshSessions();
+              } catch { /* non-fatal — sidebar will catch up on next refresh */ }
+            }
+            // Notify other mount points (SessionList) that a new automation
+            // exists so they refresh their automation-derived UI (e.g. the
+            // Clock badge on the originating chat session row). Without this,
+            // the badge only appears on the next page load or navigation.
+            if (cr.type === 'automation') {
+              try {
+                window.dispatchEvent(new CustomEvent('zhanlu:automation-created', {
+                  detail: { id: created && created.id, name: cr.name, session_id: sid },
+                }));
+              } catch { /* non-fatal */ }
+            }
+            let docxUrl = null;
+            let pptxUrl = null;
+            if (cr.type === 'report') {
+              try {
+                const res = await base44.functions.invoke('generateReportDocx', { title: cr.name, markdown: parsedFields.summary || '', sessionId: sid, project: pendingProject || t.sessionList.ungrouped });
+                docxUrl = res.data?.file_url || res?.file_url;
+                if (docxUrl) await base44.entities.Report.update(created.id, { file_url: docxUrl });
+              } catch { /* DOCX generation optional */ }
+            }
+            if (cr.type === 'file' && parsedFields.file_type === 'pptx' && Array.isArray(parsedFields.slides)) {
+              try {
+                const res = await base44.functions.invoke('generatePptx', { title: cr.name, slides: parsedFields.slides });
+                pptxUrl = res.data?.file_url || res?.file_url;
+                if (pptxUrl) await base44.entities.UserFile.update(created.id, { file_url: pptxUrl });
+              } catch { /* PPTX generation optional */ }
+            }
+            reply += `${reply ? '\n\n' : ''}[[RESULT]]\n${JSON.stringify({ type: cr.type, id: created.id, name: cr.name, fields: parsedFields, draft: false, ...(parsedFields.file_url ? { file_url: parsedFields.file_url } : {}), ...(docxUrl ? { file_url: docxUrl } : {}), ...(pptxUrl ? { file_url: pptxUrl } : {}) })}\n[[END]]`;
+          }
+        } catch {
+          reply += `${reply ? '\n\n' : ''}[[RESULT]]\n${JSON.stringify({ type: cr.type, name: cr.name, fields: parsedFields, draft: true })}\n[[END]]`;
+        }
+      }
+      // The agent has now either created the resource (cr.type === 'automation'
+      // and we got an id back) or saved a draft. Either way, the
+      // editable draft card has served its purpose — dismiss it so
+      // the chat focuses on the result card.
+      if (data.create_resource && data.create_resource.type === 'automation') {
+        setPendingDraft(null);
+      }
+      // Auto-retry guard: if the user asked to create an automation
+      // task but the LLM failed to output `create_resource` (it went
+      // to file/code tools instead), inject a corrective follow-up and
+      // make ONE more call. If that also fails, surface the error to
+      // the draft card so the user can hit Retry themselves. Only
+      // applies to CREATE flows — RUN flows use the agent's
+      // ``execute_automation`` tool and have no ``create_resource``
+      // requirement.
+      const askedForAutomation = isCreateAutomationRequest(fullText)
+        || (Array.isArray(current) && current.some((m) => m?.role === 'user' && isCreateAutomationRequest(m?.content)));
+      const resourceCreated = !!(data.create_resource && data.create_resource.type);
+      if (askedForAutomation && !resourceCreated && gen === genRef.current) {
+        try {
+          // Persist the failed attempt so the user can see what the
+          // agent said before we retry.
+          const failedReply = reply || data.text || JSON.stringify(data);
+          await base44.entities.ChatMessage.update(aiMsg.id, { content: failedReply, ...(trace ? { trace } : {}) });
+          setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: failedReply, ...(trace ? { trace } : {}) } : m)));
+          // Inject a corrective user message + a system note in the
+          // conversation history, then re-run the LLM with an extra-
+          // strict schema that requires `create_resource` and bans all
+          // tool use in the prompt.
+          const systemNote = effectiveAiLang === 'en'
+            ? '[System] Your previous reply did not include a `create_resource` field, so the automation was not created. Reply again with ONLY a JSON object that contains `text` and `create_resource: { type: "automation", name, fields }`. Do NOT use any file, code-execution, or shell tool — they all fail in this app.'
+            : '[系统] 你上一条回复没有包含 `create_resource` 字段，因此自动化任务没有被创建。请重新回复，只输出一个 JSON 对象，包含 `text` 和 `create_resource: { type: "automation", name, fields }`。严禁使用任何文件、代码执行、shell 工具——它们在此应用中全部不可用。';
+          const correctiveMsg = await base44.entities.ChatMessage.create({
+            session_id: sid, role: 'user', content: systemNote, order: current.length + 1,
+          });
+          setMessages((prev) => [...prev, correctiveMsg]);
+          // Re-run with a tighter schema. The system prompt already
+          // contains the strict "do not use file tools" language, but
+          // we append an extra reminder to the user-side prompt.
+          const retryAiMsg = await base44.entities.ChatMessage.create({
+            session_id: sid, role: 'assistant', content: '', order: current.length + 2,
+          });
+          setMessages((prev) => [...prev, retryAiMsg]);
+          setStreamingId(retryAiMsg.id);
+          const retryCurrent = [...current, aiMsg, correctiveMsg];
+          const retryHistory = retryCurrent.map((m) => `${m.role === 'user' ? historyLabelUser : historyLabelAssistant}: ${m.content}`).join('\n');
+          const retryRes = await authFetch(`/api/apps/${appParams.appId}/integration-endpoints/Core/InvokeLLMStream`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              prompt: `${systemPrompt}\n\n对话历史:\n${retryHistory}${fileNote}\n\n请回复:`,
+              response_json_schema: responseSchema,
+              model: 'gpt_5_4',
+              ...(fileUrls.length ? { file_urls: fileUrls } : {}),
+            }),
+            signal: streamState.abortRef.current?.signal,
+          });
+          if (!retryRes.ok) throw new Error(`Retry stream failed: ${retryRes.status}`);
+          // Reuse the same streaming pipeline (parse events, accumulate
+          // buffer, extract final JSON). The streaming block above is
+          // too tangled to factor out cleanly, so we re-do the parse
+          // and creation here.
+          const retryReader = retryRes.body.getReader();
+          const retryDecoder = new TextDecoder();
+          let retryBuffer = '';
+          let retryFull = '';
+          while (true) {
+            if (gen !== genRef.current) break;
+            const { done, value } = await retryReader.read();
+            if (done) break;
+            retryBuffer += retryDecoder.decode(value, { stream: true });
+            const lines = retryBuffer.split('\n');
+            retryBuffer = lines.pop();
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue;
+              try {
+                const evt = JSON.parse(line.slice(6));
+                if (evt.error) throw new Error(evt.error);
+                if (evt.delta) retryFull += evt.delta;
+                if (evt.done && typeof evt.response === 'string') retryFull = evt.response;
+              } catch (err) { if (err.message && err.message !== 'Unexpected end of JSON input') throw err; }
+            }
+          }
+          let retryData = {};
+          try { retryData = JSON.parse(retryFull || '{}'); } catch { retryData = { text: retryFull }; }
+          let retryReplyText = retryData.text || '';
+          if (retryData.create_resource && retryData.create_resource.type) {
+            const cr2 = retryData.create_resource;
+            let pf = {};
+            try { pf = typeof cr2.fields === 'string' ? JSON.parse(cr2.fields) : (cr2.fields || {}); } catch { pf = {}; }
+            try {
+              const e2 = ENTITY_MAP[cr2.type];
+              if (e2) {
+                const payload2 = cr2.type === 'report' ? { title: cr2.name, ...pf } : { name: cr2.name, ...pf };
+                const created2 = await base44.entities[e2].create(payload2);
+                // Same bulletproof rename as the main create_resource path
+                // (see comment there). The retry fires when the agent's
+                // first response lacked create_resource, so the rename is
+                // essential here too.
+                if (cr2.type === 'automation' && sid && cr2.name) {
+                  try {
+                    if (renameSession) renameSession(sid, cr2.name);
+                    await base44.entities.ChatSession.update(sid, { title: cr2.name });
+                    if (refreshSessions) refreshSessions();
+                  } catch { /* non-fatal */ }
+                }
+                retryReplyText += `${retryReplyText ? '\n\n' : ''}[[RESULT]]\n${JSON.stringify({ type: cr2.type, id: created2.id, name: cr2.name, fields: pf, draft: false })}\n[[END]]`;
+                if (cr2.type === 'automation') {
+                  setPendingDraft(null);
+                  try {
+                    window.dispatchEvent(new CustomEvent('zhanlu:automation-created', {
+                      detail: { id: created2 && created2.id, name: cr2.name, session_id: sid },
+                    }));
+                  } catch { /* non-fatal */ }
+                }
+              }
+            } catch {
+              retryReplyText += `${retryReplyText ? '\n\n' : ''}[[RESULT]]\n${JSON.stringify({ type: cr2.type, name: cr2.name, fields: pf, draft: true })}\n[[END]]`;
+            }
+          }
+          if (!retryReplyText.trim()) retryReplyText = JSON.stringify(retryData);
+          const retryTrace = Array.isArray(retryData.trace) ? retryData.trace : null;
+          if (gen !== genRef.current) return;
+          setMessages((prev) => prev.map((m) => (m.id === retryAiMsg.id ? { ...m, content: retryReplyText, ...(retryTrace ? { trace: retryTrace } : {}) } : m)));
+          await base44.entities.ChatMessage.update(retryAiMsg.id, { content: retryReplyText, ...(retryTrace ? { trace: retryTrace } : {}) });
+          // If the retry STILL didn't create the resource, surface
+          // the error in the draft card so the user can manually retry.
+          const stillMissing = !!(retryData.create_resource && retryData.create_resource.type);
+          if (askedForAutomation && !stillMissing) {
+            setPendingDraft((d) => d ? { ...d, error: effectiveAiLang === 'en' ? 'The agent could not create the task. Please retry or edit the values.' : 'Agent 暂时无法创建任务，请重试或调整内容。' } : d);
+          }
+        } catch (retryErr) {
+          // Give up gracefully — leave the draft card open and let
+          // the user retry from the UI.
+          if (gen === genRef.current) {
+            setPendingDraft((d) => d ? { ...d, error: effectiveAiLang === 'en' ? 'The agent could not create the task. Please retry or edit the values.' : 'Agent 暂时无法创建任务，请重试或调整内容。' } : d);
+          }
+        }
+        setStreamingId(null);
+        await base44.entities.ChatSession.update(sid, { last_message_at: new Date().toISOString() });
+        touchSession(sid);
+        return;
+      }
+      if (!reply.trim()) reply = JSON.stringify(data);
+      const trace = Array.isArray(data.trace) && data.trace.length > 0 ? data.trace : null;
+      if (gen !== genRef.current) return;
+      setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: reply, ...(trace ? { trace } : {}) } : m)));
+      setStreamingId(null);
+      await base44.entities.ChatMessage.update(aiMsg.id, { content: reply, ...(trace ? { trace } : {}) });
+      await base44.entities.ChatSession.update(sid, { last_message_at: new Date().toISOString() });
+      touchSession(sid);
+    } catch (e) {
+      if (gen !== genRef.current) return;
+      // Bug 1 fix (applied to legacy handleSend path): don't surface raw
+      // error text in the chat. Show a clean, localized message instead.
+      // The raw error is still available in the browser console for debugging.
+      console.error('[Chat stream error]', e);
+      const friendlyErr = lang === 'en'
+        ? "Sorry, I hit an error while responding. Please try again."
+        : "抱歉，回复时出错了，请重试。";
+      const errMsg = await base44.entities.ChatMessage.create({
+        session_id: sid, role: 'assistant', content: friendlyErr, order: current.length,
+      });
+      if (gen !== genRef.current) return;
+      setMessages((prev) => [...prev, errMsg]);
+      if (gen === genRef.current) streamState.error();
+    } finally {
+      if (gen === genRef.current) {
+        setLoading(false);
+        setStreamingId(null);
+        // Defensive: ensure the stream state is always drained, even on
+        // unexpected early returns. complete() is a no-op if already done.
+        if (streamState.isActive) streamState.complete();
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Agent-mode send: routes through /agents/conversations/v3/.../stream so
+  // the backend runs the full agent loop (system prompt, memory, skill
+  // prompts, ``prepare_data_source_runtime`` for the agent's bound
+  // KnowledgeBases, tool calling, anti-hallucination guardrails). The
+  // previous Chat.jsx flow used ``InvokeLLMStream`` which is a raw LLM
+  // proxy with no tools — that's why the Industry Research Analyst agent
+  // couldn't query the database even though it had ``db_zhanlu_no2`` bound.
+  // -------------------------------------------------------------------------
+  async function handleAgentSend(text, { activeAgent, sid, gen, sessionId, aiMsg, fileUrls, lang }) {
+    // Lazily create a backend conversation bound to this agent. The
+    // v3 endpoint keys off ``conv.agent_name`` and runs the data-source
+    // runtime against the matching AgentApp.
+    let convId = sessionId;
+    if (!convId) {
+      // Read the project context that was stashed by the project-scoped
+      // entry point (``?project=&projectName=``). Falls back gracefully
+      // to an empty object so existing chat flows (no project) keep
+      // working unchanged.
+      let projectCtx = {};
+      try {
+        const raw = sessionStorage.getItem('zhanlu:lastProjectContext');
+        if (raw) projectCtx = JSON.parse(raw) || {};
+      } catch { /* noop */ }
+      const conv = await createAgentConversation(activeAgent.name, {
+        description: activeAgent.description || '',
+        agent_app_id: activeAgent.id,
+        // Tag the conversation with the project so the data-source
+        // runtime inherits the project's KBs and the conversation
+        // shows up in the project's "Recent Chats" list.
+        ...(projectCtx.projectId ? { project_id: projectCtx.projectId } : {}),
+        ...(projectCtx.projectName ? { project_name: projectCtx.projectName } : {}),
+        ...(projectCtx.projectName ? { project: projectCtx.projectName } : {}),
+      },
+      // Derive the conversation title from the first user message
+      // (trimmed, whitespace-normalized, truncated to 60 chars).
+      //
+      // Previously the metadata object carried the agent's name as
+      // a ``name`` field, which the backend (``agents.py`` line
+      // 1854-1855) silently treated as the title — so every
+      // conversation inherited the agent's name (e.g.
+      // "general_assistant") and the Project Detail "Recent Chats"
+      // list became unreadable. The top-level ``title`` field is
+      // the backend's documented contract for the conversation
+      // name; pass it explicitly so the metadata object is free to
+      // carry other fields (or nothing).
+      //
+      // We don't pass a title for empty messages so the backend's
+      // default "New Conversation" kicks in (passing "" would store
+      // an empty title).
+      text ? text.trim().replace(/\s+/g, ' ').slice(0, 60) : undefined);
+      convId = conv.id;
+      // Link the AgentConversation to the ChatSession so the agent can be
+      // auto-restored when this session is reopened from the sidebar.
+      //
+      // Both columns are added by migration 029 to the ChatSession
+      // table (FK to agent_conversations + a plain agent_name string).
+      // Before 029 the generic entity service silently dropped both
+      // keys because the ChatSession model didn't declare them — the
+      // HTTP request returned 200, the frontend assumed the write
+      // succeeded, and on the next reload both fields were None.
+      //
+      // IMPORTANT: we AWAIT this write (it used to be fire-and-forget)
+      // so that the next handleSend in the same ChatSession can read
+      // ``session.conversation_id`` and reuse the same
+      // AgentConversation. The previous fire-and-forget caused a race:
+      // the second send happened before the write completed, the
+      // resume path saw ``conversation_id = null``, and a brand-new
+      // AgentConversation was created — leaving the previous conv
+      // orphaned and the Recent Chats list polluted with one row per
+      // user message.
+      if (sid) {
+        try {
+          await base44.entities.ChatSession.update(sid, {
+            conversation_id: convId,
+            agent_name: activeAgent.name,
+          });
+        } catch { /* best-effort — the link only matters for future reopens */ }
+      }
+      // Persist the conv id in the URL so the user can:
+      //   1. See the chat id in the address bar (the original
+      //      "no chat id showing" complaint).
+      //   2. Reload the page mid-conversation and resume.
+      //   3. Bookmark or share a specific session.
+      // We use replaceState (not pushState) so the back button
+      // doesn't accumulate one entry per user message.
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('conv', convId);
+        // Preserve any other useful params (project, agentName) so
+        // a reload re-hydrates the full context.
+        if (projectCtx.projectId) url.searchParams.set('project', projectCtx.projectId);
+        if (projectCtx.projectName) url.searchParams.set('projectName', projectCtx.projectName);
+        window.history.replaceState({}, '', url.toString());
+      } catch { /* SSR / test env */ }
+    }
+    // P2: publish the conv id so subsequent Send clicks can route to
+    // the steer endpoint while this stream is in flight.
+    setStreamingConvId(convId);
+    setSteerMarkers([]);  // clear any markers from a prior stream
+    let fullContent = '';
+    let toolCalls = [];
+    let activitySteps = [];
+    let currentPhase = null;  // latest Claude-style phase headline { state, verb, title }
+    let liveTraceSteps = [];  // P0: accumulate trace_step events incrementally
+    let reasoningText = '';   // P0: accumulate reasoning from reasoning_done
+    let finalArtifacts = [];  // artifacts extracted from the done event's conversation
+    let aborted = false;
+    try {
+      streamState.startStreaming();
+      const stream = streamAgentResponse(
+        convId,
+        {
+          role: 'user',
+          content: text,
+          ...(fileUrls && fileUrls.length ? { file_urls: fileUrls } : {}),
+          ...(lang ? { lang } : {}),
+        },
+        streamState.abortRef.current?.signal,
+      );
+      for await (const evt of stream) {
+        if (gen !== genRef.current) {
+          // A newer generation has taken over — drain our state so the
+          // Stop button doesn't stick around for the old generation.
+          streamState.reset();
+          return { convId, fullContent, toolCalls };
+        }
+        if (!evt || typeof evt !== 'object') continue;
+        if (evt.type === 'fsm_state' && evt.state) {
+          // FSM cognitive-loop state transition (init/goal/plan/act/verify/...).
+          // Stored on the message so ActivitySteps can show the planning pipeline.
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, fsm_state: evt.state } : m
+            ));
+          }
+        } else if (evt.type === 'plan_summary' && evt.plan) {
+          // Decomposed execution plan from the FSM — nodes + status.
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, plan_summary: evt.plan } : m
+            ));
+          }
+        } else if (evt.type === 'tool_progress' && Array.isArray(evt.tool_calls)) {
+          toolCalls = evt.tool_calls;
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, tool_calls: toolCalls } : m
+            ));
+          }
+        } else if (evt.type === 'activity_step' && evt.step && typeof evt.step.number === 'number') {
+          // Upsert: update if step number exists, otherwise append
+          const incoming = evt.step;
+          const existingIdx = activitySteps.findIndex(s => s.number === incoming.number);
+          if (existingIdx >= 0) {
+            activitySteps[existingIdx] = { ...activitySteps[existingIdx], ...incoming };
+          } else {
+            activitySteps.push(incoming);
+          }
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, activity_steps: [...activitySteps] } : m
+            ));
+          }
+        } else if (evt.type === 'phase' && evt.verb) {
+          // Claude-style phase headline (Fathoming / Fabricating / …).
+          // Keep the latest one on the message; ActivitySteps renders it
+          // above the step list.
+          currentPhase = { state: evt.state, verb: evt.verb, title: evt.title };
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, phase: currentPhase } : m
+            ));
+          }
+        } else if (evt.type === 'artifact_created' && evt.artifact) {
+          // Live artifact (Claude-style side panel): the moment an artifact
+          // exists mid-turn, attach it to the message and auto-open the
+          // preview pane for the first one — no waiting for `done`.
+          const art = evt.artifact;
+          const artId = art.artifact_id || art.id;
+          if (artId && !finalArtifacts.some((a) => (a.artifact_id || a.id) === artId)) {
+            finalArtifacts = [...finalArtifacts, art];
+          }
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, artifacts: [...finalArtifacts] } : m
+            ));
+            // Auto-open only the FIRST live artifact; later ones don't
+            // yank the pane away if the user already opened/closed one.
+            setOpenArtifact((cur) => cur || art);
+          }
+        } else if (evt.type === 'trace_step' && evt.step) {
+          // P0: incremental trace_step from the v3 SSE. Append to the
+          // live trace; ReasoningSummary will render these.
+          liveTraceSteps.push(evt.step);
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, trace_steps: [...liveTraceSteps] } : m
+            ));
+          }
+        } else if (evt.type === 'reasoning_done' && typeof evt.reasoning === 'string') {
+          // P0: reasoning_done captures the full reasoning text. We accept
+          // any subsequent reasoning_done as a final replace (multiple
+          // iterations each emit one — we keep the last non-empty one).
+          if (evt.reasoning) {
+            reasoningText = evt.reasoning;
+            if (gen === genRef.current) {
+              setMessages((prev) => prev.map((m) =>
+                m.id === aiMsg.id ? { ...m, reasoning: reasoningText } : m
+              ));
+            }
+          }
+        } else if (evt.type === 'delta' && typeof evt.content === 'string') {
+          fullContent += evt.content;
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+            ));
+          }
+        } else if (evt.type === 'error') {
+          // Bug 1 fix: don't surface raw server error text in the chat.
+          // Show a clean, localized message instead. The raw error is
+          // still available in the browser console for debugging.
+          const friendlyErr = lang === 'en'
+            ? "Sorry, I hit an error while responding. Please try again."
+            : "抱歉，回复时出错了，请重试。";
+          console.error('[Chat stream error]', evt.message || evt);
+          fullContent = fullContent || friendlyErr;
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+            ));
+          }
+        } else if (evt.type === 'steer' && Array.isArray(evt.messages) && evt.messages.length) {
+          // P2: server-side ack that one or more steer messages were
+          // drained and injected as user messages. The local optimistic
+          // markers were already added by handleSteer (status: 'pending')
+          // — flip matching ones to 'sent' so the UI confirms delivery.
+          // Defensive: we match by exact text content so out-of-order
+          // SSE acks still reconcile.
+          if (gen === genRef.current) {
+            setSteerMarkers((prev) => {
+              const remaining = [...prev];
+              for (const sm of evt.messages) {
+                const idx = remaining.findIndex((m) => m.text === sm && m.status === 'pending');
+                if (idx >= 0) remaining[idx] = { ...remaining[idx], status: 'sent' };
+              }
+              return remaining;
+            });
+          }
+        } else if (evt.type === 'done') {
+          fullContent = typeof evt.content === 'string' ? evt.content : fullContent;
+          // The done event carries the authoritative assistant message
+          // (with full tool_calls + artifacts) inside evt.conversation.
+          // Extract them so charts (report_card_payload in tool_calls) and
+          // file artifact cards survive a page refresh — previously these
+          // were only held in memory and lost on reload because the
+          // chat_messages row was never updated with them.
+          const convMsgs = evt.conversation?.messages || [];
+          const lastAssistant = [...convMsgs].reverse().find((m) => m?.role === 'assistant');
+          if (Array.isArray(lastAssistant?.tool_calls) && lastAssistant.tool_calls.length) {
+            toolCalls = lastAssistant.tool_calls;
+          } else if (Array.isArray(evt.fsm_tool_calls) && evt.fsm_tool_calls.length) {
+            toolCalls = evt.fsm_tool_calls;
+          }
+          if (Array.isArray(lastAssistant?.artifacts) && lastAssistant.artifacts.length) {
+            finalArtifacts = lastAssistant.artifacts;
+          }
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id
+                ? {
+                    ...m,
+                    content: fullContent,
+                    tool_calls: toolCalls,
+                    ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
+                  }
+                : m
+            ));
+            // P2 (conversational dashboards): scan the freshly-pushed
+            // tool_calls for a completed dashboard tool. When one is
+            // detected, auto-open the dock panel and ask the viewer to
+            // refetch so the user sees the new chart live.
+            const seen = dashboardSeenRef.current.get(aiMsg.id) || 0;
+            const nextSeen = watchForDashboardEdits(toolCalls, seen, {
+              onOpen: () => setDashboardOpen(true),
+              onRefresh: () => dashboardViewerRef.current?.refresh?.(),
+            });
+            if (nextSeen !== seen) dashboardSeenRef.current.set(aiMsg.id, nextSeen);
+          }
+          // FIX: the agent flow used to leave the stream state stuck in
+          // 'streaming' after a normal `done` event, so the Stop button
+          // stayed visible. Drain the state here so the input flips back
+          // to Send.
+          if (gen === genRef.current) streamState.complete();
+        }
+      }
+      // Defensive: if the stream ended without emitting `done` (e.g. the
+      // server closed the connection), still drain the state.
+      if (gen === genRef.current && streamState.isActive) streamState.complete();
+    } catch (streamErr) {
+      // AbortError → user clicked Stop. Append a hint and stop.
+      if (streamErr && (streamErr.name === 'AbortError' || streamErr.code === 20)) {
+        aborted = true;
+        if (gen === genRef.current) {
+          const stoppedText = lang === 'en' ? '\n\n[Stopped generating.]' : '\n\n[已停止生成。]';
+          setMessages((prev) => prev.map((m) =>
+            m.id === aiMsg.id ? { ...m, content: (m.content || '') + stoppedText } : m
+          ));
+        }
+        return { convId, fullContent, toolCalls, aborted: true };
+      }
+      if (gen === genRef.current) {
+        // Bug 1 fix: don't surface raw network/stream errors in the chat
+        // content. Show a clean, localized message. The raw error is
+        // still available in the browser console for debugging. This
+        // also stops the raw error from being persisted to the DB via
+        // the ChatMessage.update call below.
+        console.error('[Chat stream error]', streamErr);
+        const friendlyErr = lang === 'en'
+          ? "Sorry, the connection was interrupted. Please try again."
+          : "抱歉，连接中断了，请重试。";
+        fullContent = fullContent || friendlyErr;
+        setMessages((prev) => prev.map((m) =>
+          m.id === aiMsg.id ? { ...m, content: fullContent } : m
+        ));
+        streamState.error();
+      }
+    }
+    // Persist the final assistant message + tool_calls + artifacts +
+    // activity_steps so charts and file cards survive a page refresh.
+    try {
+      await base44.entities.ChatMessage.update(aiMsg.id, {
+        content: fullContent,
+        ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
+        ...(activitySteps.length ? { activity_steps: activitySteps } : {}),
+        ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
+        ...(currentPhase ? { phase: currentPhase } : {}),
+      });
+      await base44.entities.ChatSession.update(sid, { last_message_at: new Date().toISOString() });
+      touchSession(sid);
+    } catch { /* best-effort persist */ }
+    // P2: clear the streaming conv id now that the in-flight stream is
+    // done — the next Send click should start a new stream, not steer.
+    setStreamingConvId((cur) => (cur === convId ? null : cur));
+    return { convId, fullContent, toolCalls, aborted };
+  }
+
+  async function handleClear() {
+    genRef.current++;
+    setStreamingId(null);
+    setActiveSkill(null);
+    setActiveAgent(null);
+    setChips([]);
+    setInputValue('');
+    clearDraft('chat_input_draft');
+    // Also abort any in-flight stream so the Stop button doesn't linger.
+    if (streamState.isActive) streamState.reset();
+    if (activeId) {
+      await base44.entities.ChatMessage.deleteMany({ session_id: activeId });
+      setMessages([]);
+    }
+  }
+
+  async function handleDelete(s) {
+    // Delegates to ChatSessionContext (which already removes the
+    // session from the sidebar list and deletes the backend row).
+    // We only need to handle the chat-page-local side effects: bump
+    // the generation counter so any in-flight stream is invalidated,
+    // and clear the messages if the deleted session is currently
+    // active.
+    genRef.current++;
+    setStreamingId(null);
+    if (activeId === s.id) {
+      setMessages([]);
+      // Context clears activeId; the active session is gone.
+    }
+    await deleteSession(s);
+  }
+
+  function handleSelectSession(id) {
+    // Route selection through the context so the SessionList in the
+    // sidebar highlights the new active row. Previously this lived
+    // in the SessionList's onSelect callback; now SessionList just
+    // calls `selectSession` from the context.
+    genRef.current++;
+    setStreamingId(null);
+    setActiveId(id);
+    // Adopt the session's project so the next new chat inherits it
+    // (consistent with the previous behavior).
+    adoptSessionProject(id);
+    setOpenArtifact(null);
+  }
+
+  function handleNewChat(project) {
+    // "+ New Task" or "+" on a project group. The actual session
+    // creation happens lazily on first send; here we just reset the
+    // in-flight state and stage the project.
+    genRef.current++;
+    setStreamingId(null);
+    setStreamingConvId(null);  // clear the resume handle so the next send creates a new conv
+    setMessages([]);
+    setChips([]);
+    setActiveSkill(null);
+    setActiveAgent(null);
+    setAttachments([]);
+    setOpenArtifact(null);
+    contextNewChat(project || pendingProject);
+    // Clear the ?conv= URL param so a reload / share of this
+    // address doesn't accidentally resume the previous
+    // conversation. The user explicitly asked for the chat id
+    // to be visible — but the moment they click "+ New Task",
+    // the previous id no longer applies.
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('conv');
+      // Keep project / projectName so the new chat starts in the
+      // same project group.
+      if (project) {
+        // Pending project — let the user pick the project first;
+        // we don't have its id at this point.
+      }
+      window.history.replaceState({}, '', url.toString());
+    } catch { /* SSR / test env */ }
+  }
+
+  // (handleStar and handleRename were removed — the context's
+  // `starSession` and `renameSession` already handle the optimistic
+  // UI update + backend persistence.)
+
+  function handleAddChip(key) {
+    setChips((prev) => (prev.includes(key) ? prev : [...prev, key]));
+  }
+  function handleRemoveChip(key) {
+    setChips((prev) => prev.filter((k) => k !== key));
+  }
+  function handleSelectItem(item) {
+    setActiveSkill(item.skillObj);
+    setInputValue(item.text);
+  }
+  function handlePickSkill(skillObj) { setActiveSkill(skillObj); }
+  function handlePickAgent(agent) { setActiveAgent(agent); }
+  function handleRemoveSkill() {
+    setActiveSkill(null);
+  }
+  function handleRemoveAgent() {
+    setActiveAgent(null);
+  }
+  function handleSelectOption(label) {
+    // When the option label starts with a system-prompt marker,
+    // treat it as a hidden synthetic message (auto-collect flow).
+    if (label.startsWith('【系统提示】')) {
+      handleSend(label, { hidden: true });
+    } else {
+      handleSend(label);
+    }
+  }
+  async function handleSaved(updated) {
+    setPreviewResult(updated);
+    setMessages((prev) => prev.map((m) => {
+      if (m.role !== 'assistant' || !(m.content || '').includes('[[RESULT]]')) return m;
+      const regex = /(\[\[RESULT\]\]\s*\n?)([\s\S]*?)(\[\[END\]\])/g;
+      const newContent = m.content.replace(regex, (full, pre, json, post) => {
+        try {
+          const parsed = JSON.parse(json.trim());
+          if (parsed.draft && parsed.name === updated.name && parsed.type === updated.type) {
+            return `${pre}${JSON.stringify({ type: updated.type, id: updated.id, name: updated.name })}${post}`;
+          }
+        } catch { /* leave block as-is */ }
+        return full;
+      });
+      if (newContent !== m.content) {
+        base44.entities.ChatMessage.update(m.id, { content: newContent });
+        return { ...m, content: newContent };
+      }
+      return m;
+    }));
+  }
+  function handleSelectOther() {
+    inputRef.current?.focus();
+  }
+
+  // Batch clarify submit: send the assembled answers as a single user message.
+  function handleBatchClarifySubmit(answerText) {
+    handleSend(answerText);
+  }
+
+  // Preview a created agent: navigate to its config page.
+  function handleAgentPreview(agentId) {
+    if (agentId) navigate(`/my-space/agent/${agentId}`);
+  }
+
+  // Run a created agent: load it into the current chat session.
+  async function handleAgentRun(agentId) {
+    if (!agentId) return;
+    try {
+      const agent = await base44.entities.AgentApp.get(agentId);
+      setActiveAgent(agent);
+      setInputValue('');
+      // No explicit clearDraft here: the useEffect on
+      // [inputValue] mirrors the cleared value to localStorage
+      // on the next tick, so the draft is empty on refresh.
+      // Bound Kbs are no longer surfaced in the chat input (no more
+      // "DB: …" chip / "Read from my database" button). The binding
+      // itself is still on ``agent.knowledge_bases`` and is consumed
+      // by the backend data-source runtime at execution time.
+    } catch { /* noop */ }
+  }
+
+  // Manus-style side panel was removed in the Claude-style redesign; the
+  // artifact preview now opens as a right-anchored pane (see ArtifactPreviewPane).
+
+  async function ensureSession(firstText) {
+    if (activeId) return activeId;
+    const session = await base44.entities.ChatSession.create({
+      title: (firstText || t.chat.coreTitle).slice(0, 24),
+      // See the parallel comment in handleSend: do NOT store the
+      // Ungrouped i18n string. Store null so the chat input chip
+      // can be hidden cleanly (no "Ungrouped" chip for the
+      // implicit default) and so project-scoped queries can
+      // filter on ``project_id IS NULL`` consistently.
+      project: pendingProject || null,
+      // Set the project FK too when the user came in via a project
+      // page — keeps the session visible in that project's
+      // "Recent Chats" tab and lets project-scoped queries find it.
+      ...(pendingProjectId ? { project_id: pendingProjectId } : {}),
+      last_message_at: new Date().toISOString(),
+    });
+    setActiveId(session.id);
+    prependSession(session);
+    return session.id;
+  }
+
+  async function handleUploadFile(file) {
+    const { file_url } = await base44.integrations.Core.UploadFile({ file });
+    const sid = await ensureSession(file.name);
+    const ext = (file.name.split('.').pop() || '').toLowerCase();
+    const kind = ['csv', 'xls', 'xlsx', 'json', 'tsv'].includes(ext) ? 'data_file'
+      : ['html', 'htm'].includes(ext) ? 'html_file' : 'document';
+    await base44.entities.UserFile.create({
+      name: file.name, file_type: ext, size: file.size, file_url, source: 'upload',
+      resource_kind: kind, session_id: sid, project: pendingProject || t.sessionList.ungrouped,
+    });
+    setAttachments((prev) => [...prev, { name: file.name, file_url }]);
+  }
+
+  return (
+    <div className="flex h-full">
+      <PanelGroup direction="horizontal" className="flex-1 min-w-0">
+        <Panel id="chat-panel" order={1} defaultSize={100} minSize={30}>
+        <div className="flex h-full flex-col">
+        {activeId || messages.length > 0 ? (
+          <>
+            <div className="flex items-center justify-between border-b border-border px-6 py-2">
+              {/* Project context banner — shown when the user entered
+                  chat from a project page (via the "chat with agent"
+                  shortcut). Clicking the breadcrumb returns to the
+                  project. Hidden when the chat is not project-scoped. */}
+              {pendingProject ? (
+                <button
+                  type="button"
+                  onClick={() => { if (pendingProjectId) navigate(`/my-space/project/${pendingProjectId}`); }}
+                  className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                  title={isEn ? 'Back to project' : '返回项目'}
+                >
+                  <FolderKanban className="h-3.5 w-3.5 text-primary" />
+                  <span className="font-medium text-foreground">{pendingProject}</span>
+                  <ArrowLeft className="h-3 w-3" />
+                </button>
+              ) : <span />}
+              <div className="flex items-center gap-1.5">
+                {/* Manus-style Scheduled button — only rendered when the
+                    current session is the origin of an automation. */}
+                {sessionAutomation && (
+                  <button
+                    onClick={() => setScheduledOpen(true)}
+                    className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
+                    title={isEn ? 'Scheduled automation' : '定时任务'}
+                  >
+                    <Clock className="h-3.5 w-3.5" />
+                    {isEn ? 'Scheduled' : '定时任务'}
+                  </button>
+                )}
+                <button onClick={() => setFilesOpen(true)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground">
+                  <FolderOpen className="h-3.5 w-3.5" /> {t.chat.chatFiles.title}
+                </button>
+              </div>
+            </div>
+            <div ref={scrollRef} className="relative flex-1 space-y-6 overflow-y-auto px-6 py-6">
+              <div className="mx-auto max-w-5xl space-y-6">
+                {loadStatus === 'loading' && messages.length === 0 ? (
+                  <div className="animate-pulse space-y-6 py-8">
+                    {[1, 2, 3].map((i) => (
+                      <div key={i} className={`flex gap-3 ${i % 2 === 0 ? 'flex-row-reverse' : ''}`}>
+                        <div className="h-8 w-8 shrink-0 rounded-full bg-secondary" />
+                        <div className={`flex flex-col gap-2 ${i % 2 === 0 ? 'items-end' : 'items-start'}`}>
+                          <div className="h-14 rounded-2xl bg-secondary" style={{ width: `${180 + i * 70}px` }} />
+                          <div className="h-3 rounded-full bg-secondary" style={{ width: `${100 + i * 30}px` }} />
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="space-y-6">
+                  {pendingDraft && (
+                    <AutomationDraftCard
+                      prefill={pendingDraft.prefill}
+                      lang={pendingDraft.lang}
+                      error={pendingDraft.error}
+                      onAppendToInput={(text) => {
+                        setInputValue((cur) => (cur ? `${cur}\n${text}` : text));
+                        // Focus the input so the user can review and send
+                        requestAnimationFrame(() => {
+                          try { document.querySelector('textarea[data-chat-input]')?.focus(); } catch {}
+                        });
+                      }}
+                      onDismiss={() => setPendingDraft(null)}
+                      onRetry={() => {
+                        // Clear the error and re-send the prefill as a
+                        // fresh user message so the LLM gets another
+                        // chance to create the task.
+                        setPendingDraft((d) => d ? { ...d, error: null } : d);
+                        const fresh = pendingDraft.prefill;
+                        if (fresh) {
+                          setInputValue(fresh);
+                          requestAnimationFrame(() => {
+                            try { document.querySelector('textarea[data-chat-input]')?.focus(); } catch {}
+                          });
+                        }
+                      }}
+                    />
+                  )}
+                  {messages.filter((m) => !m.hidden).map((m) => {
+                    const isStreaming = m.id === streamingId;
+                    const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
+                    return (
+                      <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={openRun} userRequestedFormat={userFormatByMessage[m.id] || null} />
+                    );
+                  })}
+                  </div>
+                )}
+                {loading && <ChatThinkingIndicator />}
+                {/* "Agent is working" indicator for an in-flight automation
+                    run. The executor runs async (trigger_now returns
+                    immediately), so without this the user clicks Run Now, sees
+                    the request bubble, then silence until the result lands —
+                    which read as "not responding". Show the SAME thinking
+                    indicator a normal LLM chat uses while the latest execution
+                    of this session's task is non-terminal. */}
+                {!loading && isRunInFlight(latestExecution) && (
+                  <ChatThinkingIndicator />
+                )}
+                {steerMarkers.length > 0 && (
+                  <div className="flex flex-col items-center gap-1 pt-2">
+                    {steerMarkers.map((sm) => {
+                      const prefix = lang === 'en' ? '→ steer' : '→ 引导';
+                      const statusText = sm.status === 'pending'
+                        ? (lang === 'en' ? 'sending…' : '发送中…')
+                        : sm.status === 'error'
+                          ? (lang === 'en' ? 'failed' : '失败')
+                          : '';
+                      const tone = sm.status === 'error'
+                        ? 'text-red-500'
+                        : sm.status === 'pending'
+                          ? 'text-amber-600 dark:text-amber-400'
+                          : 'text-muted-foreground';
+                      return (
+                        <div
+                          key={sm.id}
+                          className={`inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/40 px-2.5 py-0.5 text-xs ${tone}`}
+                          title={sm.status === 'error' ? sm.error : undefined}
+                        >
+                          <span className="italic">{prefix}: {sm.text}</span>
+                          {statusText && <span className="text-[10px] opacity-75">· {statusText}</span>}
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </div>
+            <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} />
+          </>
+        ) : (
+          <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
+            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
+              <Bot className="h-6 w-6 text-primary" />
+            </div>
+            <h1 className="font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
+            <div className="mt-8 w-full max-w-4xl">
+              <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name) => setPendingProject(name, null)} centered />
+              {chips.length > 0 && (
+                <RelatedContent
+                  chips={chips}
+                  related={t.chat.related}
+                  categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})}
+                  onRemoveChip={handleRemoveChip}
+                  onSelectItem={handleSelectItem}
+                />
+              )}
+            </div>
+          </div>
+        )}
+        </div>
+        </Panel>
+        {scheduledOpen && (
+          <>
+            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
+            <Panel id="scheduled-panel" order={2} defaultSize={30} minSize={22} maxSize={65}>
+              <ScheduledPanel
+                sessionId={activeId}
+                focusExecutionId={focusExecutionId}
+                onClose={() => setScheduledOpen(false)}
+              />
+            </Panel>
+          </>
+        )}
+        {previewResult && (
+          <>
+            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
+            <Panel id="artifact-panel" order={3} defaultSize={30} minSize={20} maxSize={75}>
+              <ArtifactPanel result={previewResult} onClose={() => setPreviewResult(null)} onSaved={handleSaved} sessionId={activeId} />
+            </Panel>
+          </>
+        )}
+        {openArtifact && (
+          <>
+            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
+            <Panel id="artifact-preview-panel" order={4} defaultSize={42} minSize={25} maxSize={70}>
+              <div className="h-full overflow-hidden p-2">
+                <ArtifactPreviewPane artifact={openArtifact} onClose={() => setOpenArtifact(null)} />
+              </div>
+            </Panel>
+          </>
+        )}
+        {dashboardOpen && (
+          <>
+            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
+            <Panel id="dashboard-panel" order={5} defaultSize={42} minSize={25} maxSize={70}>
+              <div className="h-full overflow-hidden">
+                <DashboardDockPanel
+                  conversationId={activeId}
+                  viewerRef={dashboardViewerRef}
+                  onClose={() => setDashboardOpen(false)}
+                />
+              </div>
+            </Panel>
+          </>
+        )}
+      </PanelGroup>
+        {traceMsg && <TracePanel message={traceMsg} onClose={() => setTraceMsg(null)} />}
+        <ChatFilesModal sessionId={activeId} open={filesOpen} onOpenChange={setFilesOpen} />
+        </div>
+        );
+        }
+
+function streamText(text, onChunk, isCancelled) {
+  return new Promise((resolve) => {
+    if (!text || !text.trim()) { resolve(); return; }
+    const tokens = text.match(/\s*\S+|\s+/g) || [];
+    const batchSize = tokens.length > 200 ? 6 : tokens.length > 100 ? 4 : 2;
+    let i = 0;
+    let acc = '';
+    function tick() {
+      if (isCancelled()) { resolve(); return; }
+      if (i >= tokens.length) { resolve(); return; }
+      const end = Math.min(i + batchSize, tokens.length);
+      while (i < end) { acc += tokens[i]; i++; }
+      onChunk(acc);
+      setTimeout(tick, 18);
+    }
+    tick();
+  });
+}
+
+// Date anchor + real-time capability block. The backend's
+// ``agent_prompts._runtime_context_block`` injects the same idea on
+// the agent path; this duplicate is for the legacy
+// ``InvokeLLMStream`` fallback that the no-agent branch may still
+// hit. Without it, the LLM defaults to its training-data cutoff
+// and answers with stale dates for simple questions like "what's
+// today". Evaluated at module-load time — the boot-time date is a
+// coarse anchor; the backend's per-turn date (above) is the
+// authoritative one.
+const _now = new Date();
+const _tz = (typeof Intl !== 'undefined' && Intl.DateTimeFormat)
+  ? Intl.DateTimeFormat().resolvedOptions().timeZone
+  : 'UTC';
+const _dateAnchor = `[CURRENT DATE & TIME]
+Today is ${_now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric', timeZone: _tz })} (ISO: ${_now.toISOString().slice(0, 10)}, local time ${_now.toLocaleTimeString()}, timezone ${_tz}).
+Use this date to resolve relative references such as "today", "yesterday", "this week", or "latest".
+
+[REAL-TIME DATA ACCESS — Hard Rule]
+You DO have real-time data access through your tools. When the user asks about current events, news, prices, weather, scores, market data, or anything that may have changed after your training data, you MUST call the appropriate tool (web_search for general queries, web_extract for a specific URL, agent_browser for interactive pages). NEVER claim you lack real-time or internet access — the tools are always available. If a tool call fails, retry once, then fall back to a clearly-labeled "I could not fetch live data" answer — never say "I don't have real-time access".
+
+`;
+
+const baseSystemPrompt = `${_dateAnchor}你是战颅认知核心助手，一个企业级 AI 智能平台的核心中枢。
+
+你的能力：
+1. 通过对话帮助用户创建、配置和管理：Agent 应用、自动化任务、知识库、工具技能、报表、决策编排流程。
+2. 调用用户已创建的资源和能力。
+3. 提供业务分析、数据洞察和决策建议。
+
+回复原则（默认行动优先 — 对标 Claude 等现代 AI 助手）：
+- 默认直接行动：当请求足够清晰时，立即完成工作。对未明确的细节采用合理默认值，在一句话内说明所做的关键假设，然后继续执行，不要为了确认可推断的细节而暂停。
+- 只有真正受阻时才提问——即缺失的信息是必需的、无法合理推断、且错误猜测会造成不可逆损害时。一次最多提出一个最高价值的问题，其余维度直接采用默认值继续。
+- 绝不预告"我还有几个问题要问"。回复结构仅有 text、trace、create_resource 三个字段——不存在 clarify、clarify_batch、step、total。如确需提问，直接写在 text 中。
+- 简洁、可执行，优先给出结论与下一步行动。
+- 结合上下文，避免冗长无关内容。
+- 使用 Markdown 格式化（填入 text 字段）。
+
+【结构化回复规则 — Hard Rules】
+- 比较/对比类问题：必须使用 Markdown 表格展示（Period | Metric | Value 三列），用粗体标注优胜方。
+- 排名类问题：必须使用带序号的 Markdown 表格（Rank | Name | Value），注明总量与区间。
+- 走势/趋势类问题：必须使用 Markdown 表格（Period | Value | MoM/YoY Change），含百分比变化。
+- 解释/说明类问题：开头先给一句 TL;DR 结论，再用标题分段阐述，末尾附 2-3 条 Key Insights。
+- 所有回复必须以"Key Insights / 关键发现"要点列表收尾，每条以 `- ` 开头。
+
+【专业智能体工作标准】
+- 先识别用户真实目标、已有上下文和成功标准，再作答；不要机械复述问题。
+- 在内部完成分析、拆解、执行与核验，但只向用户展示简洁的推理摘要，不暴露冗长思维链。
+- 能直接完成的任务直接完成；只有缺少会实质改变结果的信息时才提问，且一次最多一个问题。
+- 【重要】默认直接创建资源：当消息中已包含足够基本信息（名称+类型/描述）时，立即用 create_resource 创建，未指定维度采用合理默认值，绝不为了收集配置维度而提问。仅当关键字段确实缺失、无法合理推断、且错误创建会造成不可逆后果时，才在 text 中用一句话提出唯一一个问题。
+- 多步骤任务应自主连续完成，除非涉及高风险、不可逆操作或明确需要用户决策。
+- 使用工具、技能或数据后核验结果；明确区分事实、推断与不确定信息，绝不编造数据或执行结果。
+- 回答采用渐进式结构：先给直接结论或成果，再给关键依据与下一步；复杂内容使用标题、列表和表格。
+- 记住本次对话中用户确认的偏好、术语和格式，并在后续回复中保持一致。
+- 当 trace 可用时，输出 3-6 个高层执行节点，描述做了什么和结果，不输出隐藏思维链。
+
+【关键规则 - 资源创建引导】遵循"默认直接创建"原则（对标 Claude 等现代 AI 助手）：当消息中已包含足够基本信息（名称+类型/描述）时，立即用 create_resource 创建资源，未指定的维度采用合理默认值，并在 text 中一句话说明所采用的默认值。绝不为收集配置维度而提问。
+
+【自动化任务 - 由自动化助手处理】当用户请求创建自动化任务（automation）时，由"自动化助手"接管：默认直接创建任务，采用合理默认值；仅当数据来源完全不明确且无法推断时，才在 text 中用一句话提出唯一一个问题。详见下方"自动化助手模式"指令（检测到自动化请求时自动注入）。绝不提问数据库类型、连接串、凭证、交付渠道、通知目标、接收人路由等细节。
+
+【其他资源类型（Agent、知识库、决策流程、报表等）】当消息中已包含足够基本信息（名称+类型/描述）时，直接创建。仅当关键字段确实缺失、无法合理推断、且错误创建会造成不可逆后果时，才在 text 中用一句话提出唯一一个问题，用户回答后立即创建。
+
+【资源创建 - 行动优先（最高优先级）】
+行为标准对标 Claude 等现代 AI 助手：默认直接行动，而非提问。
+- 当用户要求创建智能体（Agent）等资源时，【默认直接创建】：用合理默认值填充未指定维度（用途/能力/场景/数据范围），立即输出 create_resource 字段。
+- 只有当名称或类型完全不明确、无法合理推断时，才在 text 中用一句话提出唯一一个问题。
+- 绝不预告"我还有几个问题"。
+- 用户可在创建后通过更新调整，这比来回提问成本更低。
+
+【正确示例】用户说"帮我创建一个智能体"：
+{ "text": "已创建智能体「自动化助手」。采用默认配置：用途=自动化任务，能力=web_search+memory，模型=gpt-4o。如需调整告诉我。", "create_resource": { "type": "agent", "name": "自动化助手", "fields": "..." } }
+
+【错误示例】（不要这样做）：
+❌ { "text": "好的，首先请告诉我...\n1. 主要用途是什么？\n2. 需要哪些能力？\n3. 数据访问范围？" }
+
+输出格式提醒：回复结构仅包含 text、trace、create_resource 三个字段。不存在 clarify、clarify_batch、step、total 字段——如需提问，直接写在 text 中。
+
+【资源创建规则】当配置全部完成（所有维度已确认）、资源可创建部署时：
+- 【仪表盘最高优先级规则】只要用户要求 dashboard/仪表盘，即使名称含“报告/report”，也必须创建 type=file 的完整 HTML 仪表盘，禁止创建 type=report；fields 必须含 file_type=html、resource_kind=dashboard、html_content=完整可运行页面。
+- 输出 create_resource 字段，包含 type（automation/agent/kb/flow/report/file）、name（最终名称）、fields（与目标实体字段对应的对象）。
+- fields 字段映射：
+  - automation(AutomationTask)：{ type, description, schedule }
+  - agent(AgentApp)：{ description, capabilities[], model }
+  - kb(KnowledgeBase)：{ type, description }
+  - flow(DecisionFlow)：{ description, steps }
+  - report(Report)：{ type, summary }
+  - file(UserFile)：{ file_type, file_url, source, resource_kind }。当用户要求创建 HTML 页面、网页、仪表盘或 Web App 时，必须创建 file 资源，不要只在 text 中输出代码；fields 使用 { file_type: "html", html_content: "完整可运行的 HTML 文档", source: "ai_generated", resource_kind: "html_file" }，html_content 必须包含从 <!DOCTYPE html> 到 </html> 的完整代码，系统会自动上传并在 Artifact 中提供实时预览与代码视图。当 file_type 为 pptx 时，fields 必须包含 slides 数组：[{ "title": "幻灯片标题", "bullets": ["要点1", "要点2"] }]，系统会自动生成 PPTX 文件。请结合用户数据与已加载技能产出结构化幻灯片，每页含标题与 2-5 条要点。
+- text 字段输出配置摘要和执行结果说明。系统会自动创建资源并展示结果卡片，你无需在 text 中提供查看链接。`;
+
+const AUTOMATION_AGENT_PROMPT = `【自动化助手模式已激活】
+你现在是"自动化助手"，一个专精于通过对话构建自动化任务的专家智能体。
+
+【HARD CONSTRAINTS - 最高优先级，违反即视为错误】
+- 你【只】能通过在响应中输出 JSON 字段 \`create_resource\` 来创建自动化任务。没有任何其他方式。
+- 严禁使用任何文件操作工具（write_to_file / read_file / edit_file / 等）。工作区目录没有写权限，文件操作永远会失败。
+- 严禁使用任何代码执行工具（run_code / execute_python / shell / 等）。它们同样无法用于创建任务。
+- 严禁尝试"分步创建"（先写配置文件、再执行、再验证）。系统不支持这种工作流。
+- 如果你不知道某个值，采用合理默认值。默认值永远比"调用工具失败"更好。
+- 唯一允许的输出格式：JSON 对象，包含 text（Markdown 回复给用户）、trace（可选执行追踪）、create_resource（任务创建指令，必须存在）。
+
+【响应结构 — 强制】
+对于自动化任务请求，你的响应【必须】形如：
+{
+  "text": "已为你创建自动化任务「xxx」…[可选：1-2 句关键假设]",
+  "create_resource": {
+    "type": "automation",
+    "name": "任务名称",
+    "fields": "{\\"type\\":\\"data_sync\\",\\"description\\":\\"...\\",\\"schedule\\":\\"...\\",\\"project\\":\\"...\\"}"
+  }
+}
+fields 是 JSON 字符串，包含 type/description/schedule/project 等键值对。type 字段取自下方的【任务类型】白名单，schedule 字段直接使用用户给定的字符串。
+
+【首次响应 - 自我介绍】当这是对话的第一条回复时，你【必须】先自我介绍：
+- 中文：「自动化助手已就位 👋 我将帮你完成自动化任务的配置。」
+- English: "Automation Agent is here 👋 I'll help you set up your automation."
+然后简要确认已收到的任务信息（名称、类型、调度等），并直接创建任务（采用合理默认值）。仅当数据来源完全不明确且无法推断时，才提出唯一一个问题。
+
+核心原则（对标 Claude 等现代 AI 助手）：默认直接创建任务，采用合理默认值。仅当数据来源完全不明确且无法推断时，才提出唯一一个问题，回答后立即创建。绝不超过 1 个问题。
+
+用户的平台已配置好数据连接（知识库/数据库连接器）。【绝不询问】数据库类型、连接串、凭证、交付渠道、通知目标、接收人路由等细节——这些在任务详情页后续配置。
+
+默认推断规则（能推断则直接创建，不提问）：
+1. 数据来源：若仅有一个已配置数据连接，直接使用它；若有多个但用户描述已暗示，采用最匹配的；仅在完全不明确时才在 text 中提出唯一一个问题，将下方"可用数据源"作为选项。
+2. 执行动作：从用户描述推断（生成报表/发送告警/同步/清洗数据等），写入 create_resource，不提问。
+3. 触发条件：从描述推断。schedule 字段直接使用用户给定的字符串（如 "Daily 08:00"、"Weekly Mon-Fri 09:00"、"Custom: 0 8 * * *" 等）。
+
+提问规则：
+- 仅在数据来源无法推断时，在 text 中提唯一一个问题，提供 2-4 个可点选选项（使用下方"可用数据源"）。
+- 用户回答后，【立即】输出 create_resource 创建 AutomationTask（type=automation，fields 包含 type/description/schedule/project）。
+- text 字段只放配置摘要与下一步行动。
+- 严禁在 text 中列出编号问题清单。
+
+【常见错误模式 - 严禁触发】
+❌ "我先写一个任务定义文件…" → 写文件永远会失败，请直接输出 create_resource
+❌ "让我用代码创建任务…" → 代码执行不创建任务，请直接输出 create_resource
+❌ "工作区权限不允许，我换一种方式…" → 不存在"另一种方式"，请直接输出 create_resource
+❌ 在 text 中只描述计划、不输出 create_resource → 用户拿不到任务，必须输出 create_resource`;
+
+// P3: "Create a new automation task" / Chinese variants. The create path
+// has its own structured ``create_resource`` flow (draft card → LLM fills
+// the schema → backend persists), which is incompatible with the agent
+// runtime's tool-calling loop. We force the non-agent route for create
+// requests and require ``create_resource`` in the response schema.
+function isCreateAutomationRequest(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  return /(?:create a new |帮我新建一个|新建)(?:automation task|自动化任务)/i.test(t);
+}
+
+// P3: "Run my X now" / "Execute X" / "Trigger X" / "Fire X now" — these
+// are automation *actions*, NOT free-form chat. We previously tried
+// to route them through the agent's ``execute_automation`` chat tool
+// (so the LLM would "auto-send" the prefill from /automation's Run Now
+// button), but in practice the chat is usually using a *custom* agent
+// (e.g. the user's own "test" agent) whose toolset does not include
+// ``execute_automation`` — the LLM then falls back to other tools and
+// the user sees the run turn into an "I've completed the requested
+// changes" config-edit response. Reliable path: have /automation fire
+// ``POST /api/automations/{id}/run`` directly and let the dispatcher's
+// ``_notify_chat`` stream the result into the task's owning session.
+// This helper is kept around for any future "intercept typed RUN
+// requests in chat" work, but is not currently wired into the prefill
+// flow.
+function isRunAutomationRequest(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  return /^(?:run|execute|trigger|fire)\s+(?:my\s+)?[^\n]{1,200}?\s+now\s*[!.]?$/i.test(t);
+}
+
+// Legacy alias: was a union of create + run, now just create. New code
+// should prefer the narrow ``isCreateAutomationRequest`` helper; the
+// 5 call sites in this file all want the create-only semantics
+// (force non-agent path, require create_resource, etc).
+function isAutomationRequest(text) {
+  return isCreateAutomationRequest(text);
+}
+
+const CLARIFY_SCHEMA = {
+  type: 'object',
+  properties: {
+    text: { type: 'string', description: '给用户的 Markdown 回复' },
+    trace: {
+      type: ['array', 'null'],
+      description: '本次回复的执行追踪步骤（仅当智能体启用可追溯时输出）',
+      items: {
+        type: 'object',
+        properties: {
+          step: { type: 'number', description: '步骤序号，从1开始' },
+          type: { type: 'string', enum: ['thinking', 'tool', 'output'], description: 'thinking=推理思考, tool=工具调用, output=输出组装' },
+          title: { type: 'string', description: '步骤标题' },
+          detail: { type: 'string', description: '该步骤具体内容：思考过程/工具入参出参/输出说明' },
+          status: { type: 'string', enum: ['success', 'failed', 'skipped'], description: '执行状态' },
+          duration_ms: { type: 'number', description: '该步骤耗时（毫秒）' },
+        },
+        required: ['step', 'type', 'title'],
+      },
+    },
+    create_resource: {
+      type: ['object', 'null'],
+      description: '当资源配置全部完成、可创建部署时输出此字段。配置未完成或普通问答时为 null。',
+      properties: {
+        type: { type: 'string', enum: ['automation', 'agent', 'kb', 'flow', 'report', 'file'], description: '资源类型' },
+        name: { type: 'string', description: '资源最终名称' },
+        fields: { type: 'string', description: 'JSON 字符串，包含与目标实体字段对应的配置键值对。HTML 页面必须使用 file_type=html、resource_kind=html_file，并在 html_content 中提供完整可运行 HTML；PPTX 必须包含 slides 数组：[{ title, bullets:[] }]' },
+      },
+      required: ['type', 'name', 'fields'],
+    },
+  },
+  required: ['text'],
+};
+
+/**
+ * Build the JSON schema for the LLM response, with `create_resource`
+ * marked REQUIRED when the request is an automation request. This is
+ * the strongest prompt-level signal we can give the model: the LLM
+ * literally cannot return a "valid" response without the field, which
+ * prevents it from going off to file-writing/code-execution tools.
+ *
+ * Falls back to the base schema (create_resource optional) for all
+ * other cases — general chat shouldn't be forced to create a resource.
+ */
+function buildResponseSchema(fullText, historyMsgs) {
+  const isAutomation = isCreateAutomationRequest(fullText)
+    || (Array.isArray(historyMsgs) && historyMsgs.some((m) => m?.role === 'user' && isCreateAutomationRequest(m?.content)));
+  if (!isAutomation) return CLARIFY_SCHEMA;
+  // Deep clone so we don't mutate the module-level schema object.
+  const schema = JSON.parse(JSON.stringify(CLARIFY_SCHEMA));
+  schema.required = Array.from(new Set([...(schema.required || []), 'create_resource']));
+  // Tighten the description so the LLM knows the field is mandatory.
+  if (schema.properties.create_resource) {
+    schema.properties.create_resource.description =
+      '【必填】当前请求是创建自动化任务，必须输出此字段，type=automation。' +
+      '严禁通过其他方式（文件、代码、shell）创建任务——这些方式全部不可用。';
+  }
+  return schema;
+}
+
+function extractPartialText(accumulated) {
+  // Extract the "text" field value from a partially-streamed JSON string.
+  // Returns the unescaped partial text, or '' if not yet available.
+  const match = accumulated.match(/"text"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  if (!match) return '';
+  return match[1]
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\r')
+    .replace(/\\"/g, '"')
+    .replace(/\\\\/g, '\\')
+    .replace(/\\t/g, '\t');
+}

@@ -1,0 +1,6 @@
+name: template-skill
+version: 1.0.0
+description: Replace with description of the skill and when Claude should use it.
+category: template-skill
+source: bundled
+requires_sandbox: false

@@ -1,0 +1,9 @@
+{
+  "instruction": "Apply the ocean-depths theme to the sample sales report deck.",
+  "artifact_type": "pptx",
+  "artifact_path": "/workspace/input/sample.pptx",
+  "theme_name": "ocean-depths",
+  "mode": "light",
+  "custom_theme": null,
+  "options": {}
+}

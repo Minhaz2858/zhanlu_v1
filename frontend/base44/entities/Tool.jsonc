@@ -1,0 +1,112 @@
+{
+  "name": "Tool",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": [
+        "system_skill",
+        "custom_tool"
+      ]
+    },
+    "trigger": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "default": "general"
+    },
+    "enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "call_count": {
+      "type": "number",
+      "default": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "idle",
+        "error"
+      ],
+      "default": "active"
+    },
+    "source": {
+      "type": "string",
+      "enum": [
+        "github",
+        "file",
+        "builtin"
+      ],
+      "default": "builtin"
+    },
+    "github_url": {
+      "type": "string"
+    },
+    "skill_file_url": {
+      "type": "string"
+    },
+    "version": {
+      "type": "string",
+      "default": "1.0.0"
+    },
+    "license": {
+      "type": "string",
+      "default": "MIT"
+    },
+    "platform": {
+      "type": "string",
+      "default": "minimax"
+    },
+    "skill_id": {
+      "type": "number",
+      "default": 10001
+    },
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "skill_md": {
+      "type": "string",
+      "description": "SKILL.md markdown body content (after frontmatter)"
+    },
+    "references": {
+      "type": "array",
+      "description": "_references/ folder files",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      },
+      "default": []
+    },
+    "publisher": {
+      "type": "string",
+      "description": "Skill publisher or author name"
+    }
+  },
+  "required": [
+    "name",
+    "kind"
+  ]
+}

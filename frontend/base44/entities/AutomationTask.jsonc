@@ -1,0 +1,88 @@
+{
+  "name": "AutomationTask",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "project": {
+      "type": "string",
+      "description": "\u6240\u5c5e\u9879\u76ee ID\uff0cglobal \u8868\u793a\u5168\u5c40\u901a\u7528",
+      "default": "global"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id. Preferred for joins/filter; falls back to project name string when null."
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "data_sync",
+        "report_generation",
+        "approval_flow",
+        "agent_inspection",
+        "data_cleaning"
+      ]
+    },
+    "description": {
+      "type": "string"
+    },
+    "schedule": {
+      "type": "string"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "running",
+        "paused",
+        "completed",
+        "failed"
+      ],
+      "default": "running"
+    },
+    "last_run": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "last_result": {
+      "type": "string"
+    },
+    "execution_history": {
+      "type": "array",
+      "description": "\u5386\u53f2\u6267\u884c\u8bb0\u5f55\u5217\u8868\uff0c\u6309\u65f6\u95f4\u5012\u5e8f\u5b58\u50a8",
+      "items": {
+        "type": "object",
+        "properties": {
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failed",
+              "skipped"
+            ],
+            "default": "success"
+          },
+          "result": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "timestamp"
+        ]
+      },
+      "default": []
+    },
+    "session_id": {
+      "type": "string",
+      "description": "FK to ChatSession.id. Set by the chat agent when the automation is created via the structured `create_resource` field so the sidebar can mark the originating session with a clock icon."
+    }
+  },
+  "required": [
+    "name",
+    "type"
+  ]
+}

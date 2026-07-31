@@ -1,0 +1,13 @@
+name: datadog-api
+version: 1.0.0
+description: "Query and manage Datadog monitoring data — logs, metrics, monitors, dashboards, events, SLOs, traces, and incidents. Use whenever the user wants to search logs, look at a metric, check which monitors are alerting, investigate a trace, pull SLO status, mute an alert, or ask what's happening in Datadog."
+category: monitoring
+# source enum is {bundled, user, marketplace, generated}; original upstream is "anthropics/claude-tag-plugins@main"
+source: marketplace
+requires_sandbox: false
+artifact_types: []
+prerequisites:
+  env:
+    - DD_API_KEY
+    - DD_APP_KEY
+    - DD_SITE

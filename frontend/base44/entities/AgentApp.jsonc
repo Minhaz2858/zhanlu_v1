@@ -1,0 +1,426 @@
+{
+  "name": "AgentApp",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "project": {
+      "type": "string",
+      "description": "\u6240\u5c5e\u9879\u76ee\uff0cglobal \u8868\u793a\u5168\u5c40\u901a\u7528",
+      "default": "global"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id (new). Use this for joins and filtering. Falls back to project name string when null. Agents in this project auto-inherit its KBs and files at runtime."
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "model": {
+      "type": "string"
+    },
+    "agent_type": {
+      "type": "string",
+      "enum": [
+        "sequential",
+        "reactive",
+        "deliberative"
+      ],
+      "default": "sequential"
+    },
+    "prompt_identity": {
+      "type": "string"
+    },
+    "prompt_boundary": {
+      "type": "string"
+    },
+    "prompt_reasoning": {
+      "type": "string"
+    },
+    "prompt_tools": {
+      "type": "string"
+    },
+    "prompt_output": {
+      "type": "string"
+    },
+    "skills": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "knowledge_bases": {
+      "type": "array",
+      "description": "\u6388\u6743\u8bbf\u95ee\u7684\u77e5\u8bc6\u5e93/\u6570\u636e\u5e93\u8fde\u63a5 ID \u5217\u8868\uff0c\u4ec5\u5141\u8bb8\u667a\u80fd\u4f53\u8bbf\u95ee\u6b64\u5217\u8868\u4e2d\u7684\u6570\u636e\u6e90",
+      "items": {
+        "type": "string"
+      },
+      "default": []
+    },
+    "topology": {
+      "type": "string",
+      "enum": [
+        "standalone",
+        "sequence",
+        "loop",
+        "parallel"
+      ],
+      "default": "standalone"
+    },
+    "sub_agents": {
+      "type": "array",
+      "description": "\u7b80\u6d01\u6a21\u5f0f\uff1a\u5185\u5d4c\u5b50\u667a\u80fd\u4f53\u5b9a\u4e49\uff08\u975e\u5916\u90e8\u5173\u8054\uff09\uff0c\u6bcf\u4e2a\u5b50\u667a\u80fd\u4f53\u62e5\u6709\u4e0e\u6839\u667a\u80fd\u4f53\u4e00\u81f4\u7684\u5b8c\u6574\u914d\u7f6e\u7ed3\u6784\uff0c\u652f\u6301\u9012\u5f52\u5d4c\u5957",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "agent_type": {
+            "type": "string",
+            "enum": [
+              "sequential",
+              "reactive",
+              "deliberative"
+            ],
+            "default": "sequential"
+          },
+          "prompt_identity": {
+            "type": "string"
+          },
+          "prompt_boundary": {
+            "type": "string"
+          },
+          "prompt_reasoning": {
+            "type": "string"
+          },
+          "prompt_tools": {
+            "type": "string"
+          },
+          "prompt_output": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "knowledge_bases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "topology": {
+            "type": "string",
+            "enum": [
+              "standalone",
+              "sequence",
+              "loop",
+              "parallel"
+            ],
+            "default": "standalone"
+          },
+          "sub_agents": {
+            "type": "array"
+          },
+          "max_call_count": {
+            "type": "number",
+            "default": 50
+          },
+          "max_retries": {
+            "type": "number",
+            "default": 3
+          },
+          "max_iterations": {
+            "type": "number",
+            "default": 5
+          },
+          "data_read": {
+            "type": "boolean",
+            "default": true
+          },
+          "data_write": {
+            "type": "boolean",
+            "default": false
+          },
+          "human_fallback": {
+            "type": "boolean",
+            "default": false
+          },
+          "trace_enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "log_level": {
+            "type": "string",
+            "enum": [
+              "debug",
+              "info",
+              "warn",
+              "error"
+            ],
+            "default": "info"
+          },
+          "temperature": {
+            "type": "number",
+            "default": 0.7
+          },
+          "top_p": {
+            "type": "number",
+            "default": 1
+          },
+          "max_tokens": {
+            "type": "number",
+            "default": 4096
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "draft",
+              "deployed"
+            ],
+            "default": "active"
+          }
+        },
+        "required": [
+          "name"
+        ]
+      }
+    },
+    "flow_mode": {
+      "type": "boolean",
+      "default": false,
+      "description": "\u9ad8\u7ea7\u7f16\u6392\u6a21\u5f0f\u5f00\u5173\uff1a\u542f\u7528\u540e\u4ee5\u53ef\u7ec4\u5408\u6d41\u7a0b(flow)\u66ff\u4ee3\u7b80\u6d01\u62d3\u6251(sub_agents)"
+    },
+    "flow": {
+      "type": "array",
+      "description": "\u9ad8\u7ea7\u7f16\u6392\uff1a\u987a\u5e8f\u4e3b\u5e72\u6d41\u7a0b\uff0c\u53ef\u5728\u4efb\u610f\u4f4d\u7f6e\u63d2\u5165\u667a\u80fd\u4f53/\u5faa\u73af\u5757/\u5e76\u884c\u5757\uff0c\u652f\u6301\u5c42\u5c42\u5d4c\u5957",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "agent",
+              "loop",
+              "parallel"
+            ],
+            "default": "agent"
+          },
+          "name": {
+            "type": "string"
+          },
+          "description": {
+            "type": "string"
+          },
+          "model": {
+            "type": "string"
+          },
+          "agent_type": {
+            "type": "string",
+            "enum": [
+              "sequential",
+              "reactive",
+              "deliberative"
+            ],
+            "default": "sequential"
+          },
+          "prompt_identity": {
+            "type": "string"
+          },
+          "prompt_boundary": {
+            "type": "string"
+          },
+          "prompt_reasoning": {
+            "type": "string"
+          },
+          "prompt_tools": {
+            "type": "string"
+          },
+          "prompt_output": {
+            "type": "string"
+          },
+          "skills": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "knowledge_bases": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "default": []
+          },
+          "capabilities": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "max_iterations": {
+            "type": "number",
+            "default": 5
+          },
+          "max_call_count": {
+            "type": "number",
+            "default": 50
+          },
+          "max_retries": {
+            "type": "number",
+            "default": 3
+          },
+          "data_read": {
+            "type": "boolean",
+            "default": true
+          },
+          "data_write": {
+            "type": "boolean",
+            "default": false
+          },
+          "human_fallback": {
+            "type": "boolean",
+            "default": false
+          },
+          "trace_enabled": {
+            "type": "boolean",
+            "default": true
+          },
+          "log_level": {
+            "type": "string",
+            "enum": [
+              "debug",
+              "info",
+              "warn",
+              "error"
+            ],
+            "default": "info"
+          },
+          "temperature": {
+            "type": "number",
+            "default": 0.7
+          },
+          "top_p": {
+            "type": "number",
+            "default": 1
+          },
+          "max_tokens": {
+            "type": "number",
+            "default": 4096
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "active",
+              "draft",
+              "deployed"
+            ],
+            "default": "active"
+          },
+          "flow": {
+            "type": "array"
+          },
+          "branches": {
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "name"
+        ]
+      }
+    },
+    "max_call_count": {
+      "type": "number",
+      "default": 50
+    },
+    "max_retries": {
+      "type": "number",
+      "default": 3
+    },
+    "max_iterations": {
+      "type": "number",
+      "default": 5
+    },
+    "data_read": {
+      "type": "boolean",
+      "default": true
+    },
+    "data_write": {
+      "type": "boolean",
+      "default": false
+    },
+    "human_fallback": {
+      "type": "boolean",
+      "default": false
+    },
+    "trace_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "log_level": {
+      "type": "string",
+      "enum": [
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "default": "info"
+    },
+    "temperature": {
+      "type": "number",
+      "default": 0.7
+    },
+    "top_p": {
+      "type": "number",
+      "default": 1
+    },
+    "max_tokens": {
+      "type": "number",
+      "default": 4096
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "draft",
+        "deployed"
+      ],
+      "default": "active"
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

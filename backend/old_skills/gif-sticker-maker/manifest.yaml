@@ -1,0 +1,19 @@
+name: gif-sticker-maker
+version: 1.0.0
+description: 'Convert photos (people, pets, objects, logos) into 4 animated GIF stickers
+  with captions.
+
+  Use when: user wants to create cartoon stickers, GIF expressions, emoji packs, animated
+  avatars,
+
+  or convert photos to Funko Pop / Pop Mart blind box style animations.
+
+  Triggers: sticker, GIF, cartoon, emoji, expression pack, avatar animation.
+
+  '
+license: MIT
+category: gif-sticker-maker
+source: bundled
+requires_sandbox: false
+artifact_types:
+- md

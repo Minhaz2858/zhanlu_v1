@@ -1,0 +1,68 @@
+skill_key: theme-system
+name: Theme System
+version: 1.0.0
+status: active
+description: >
+  Apply structured design tokens (colors, fonts, spacing) to artifacts.
+  Provides 10 curated pre-set themes and supports custom theme generation.
+  Works across PPTX, DOCX, HTML, and dashboard artifacts.
+
+artifact_types:
+  - theme
+  - pptx
+  - docx
+  - html
+  - dashboard
+
+runtime:
+  type: sandbox
+  image: zhanlu-sandbox-python:latest
+  entrypoint: scripts/apply_theme.py
+  timeout_seconds: 60
+  memory_mb: 512
+  cpu: "1"
+  network: disabled
+
+schemas:
+  input_schema: schemas/input.schema.json
+  output_schema: schemas/output.schema.json
+  theme_schema: schemas/theme.schema.json
+
+permissions:
+  requires_sandbox: true
+  can_access_datasource: false
+  can_write_artifact: true
+  can_send_external: false
+  allow_network: false
+
+validation:
+  require_output_manifest: true
+  require_validation_report: true
+  require_source_refs: false
+
+governance:
+  approval_required_for_external_share: false
+  review_required_for_custom_version: true
+
+themes:
+  preset_count: 10
+  presets:
+    - arctic-frost
+    - botanical-garden
+    - desert-rose
+    - forest-canopy
+    - golden-hour
+    - midnight-galaxy
+    - modern-minimalist
+    - ocean-depths
+    - sunset-boulevard
+    - tech-innovation
+
+source:
+  origin: adapted-from-anthropics-theme-factory
+  original_license: MIT
+  adaptation_notes: >
+    Original skill was prompt-only (markdown files with 4 hex colors each).
+    Converted to structured JSON token files with light/dark mode support,
+    professional font pairings, semantic colors, and WCAG AA validation.
+    Original color palettes preserved as design inspiration.

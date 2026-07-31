@@ -1,0 +1,57 @@
+- generic [ref=e3]:
+  - complementary [ref=e4]:
+    - generic [ref=e5]:
+      - generic [ref=e6]: S
+      - generic [ref=e7]:
+        - generic [ref=e8]: 战颅系统
+        - generic [ref=e9]: Synexia
+      - button "收起侧栏" [ref=e10] [cursor=pointer]
+    - navigation [ref=e14]:
+      - link "认知中枢" [ref=e15] [cursor=pointer]:
+        - /url: /
+      - link "自动化任务" [ref=e18] [cursor=pointer]:
+        - /url: /automation
+      - link "我的空间" [ref=e23] [cursor=pointer]:
+        - /url: /my-space
+      - link "市场" [ref=e34] [cursor=pointer]:
+        - /url: /market
+      - link "工具包" [ref=e40] [cursor=pointer]:
+        - /url: /toolkit
+    - button "访 访客用户 用户" [ref=e45] [cursor=pointer]:
+      - generic [ref=e46]: 访
+      - generic [ref=e47]:
+        - generic [ref=e48]: 访客用户
+        - generic [ref=e49]: 用户
+  - main [ref=e52]:
+    - generic [ref=e53]:
+      - generic [ref=e54]:
+        - generic [ref=e55]:
+          - generic [ref=e56]:
+            - button "新建任务" [ref=e57] [cursor=pointer]
+            - button "收起侧栏" [ref=e59] [cursor=pointer]
+          - generic [ref=e63]:
+            - button "未分组" [ref=e64] [cursor=pointer]
+            - button "新建项目" [ref=e70] [cursor=pointer]
+        - generic [ref=e73]:
+          - paragraph [ref=e74]: 暂无历史会话
+          - generic [ref=e75]:
+            - button "未分组 0" [ref=e76] [cursor=pointer]:
+              - generic [ref=e79]: 未分组
+              - generic [ref=e80]: "0"
+            - paragraph [ref=e82]: 暂无任务
+      - generic [ref=e86]:
+        - heading "战颅认知核心" [level=1] [ref=e91]
+        - generic [ref=e95]:
+          - textbox "向战颅描述你想创建或执行的任务…" [ref=e96]
+          - generic [ref=e97]:
+            - button "上传文件/图片" [ref=e99] [cursor=pointer]
+            - generic [ref=e101]:
+              - button "语音输入" [ref=e102] [cursor=pointer]
+              - button "发送" [disabled] [ref=e106]
+        - generic [ref=e110]:
+          - button "生产制造" [ref=e111] [cursor=pointer]
+          - button "设备运维" [ref=e114] [cursor=pointer]
+          - button "质量管控" [ref=e117] [cursor=pointer]
+          - button "安全环保" [ref=e121] [cursor=pointer]
+          - button "供应链" [ref=e127] [cursor=pointer]
+          - button "能源管理" [ref=e133] [cursor=pointer]

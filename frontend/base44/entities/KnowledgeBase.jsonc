@@ -1,0 +1,80 @@
+{
+  "name": "KnowledgeBase",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "project": {
+      "type": "string",
+      "description": "\u6240\u5c5e\u9879\u76ee ID\uff0cglobal \u8868\u793a\u5168\u5c40\u901a\u7528",
+      "default": "global"
+    },
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id. Agents in this project automatically inherit this KB at runtime."
+    },
+    "description": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string",
+      "enum": [
+        "vector_db",
+        "business_db",
+        "memory_file"
+      ]
+    },
+    "source_kind": {
+      "type": "string",
+      "enum": [
+        "database",
+        "file"
+      ]
+    },
+    "db_type": {
+      "type": "string"
+    },
+    "host": {
+      "type": "string"
+    },
+    "port": {
+      "type": "number"
+    },
+    "database_name": {
+      "type": "string"
+    },
+    "username": {
+      "type": "string"
+    },
+    "password": {
+      "type": "string"
+    },
+    "api_url": {
+      "type": "string"
+    },
+    "file_type": {
+      "type": "string"
+    },
+    "file_url": {
+      "type": "string"
+    },
+    "item_count": {
+      "type": "number",
+      "default": 0
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "syncing",
+        "error",
+        "paused"
+      ],
+      "default": "active"
+    }
+  },
+  "required": [
+    "name"
+  ]
+}

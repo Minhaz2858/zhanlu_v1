@@ -1,0 +1,79 @@
+import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
+import { render, cleanup } from '@testing-library/react';
+import ArtifactPreviewPane from './ArtifactPreviewPane';
+
+beforeEach(() => {
+  localStorage.setItem('zhanlu_lang', 'en');
+  globalThis.fetch = vi.fn();
+});
+
+afterEach(() => {
+  cleanup();
+  vi.restoreAllMocks();
+});
+
+function mockFetchPdfOk() {
+  // PdfFaithfulPreview needs the fetch to return an application/pdf blob
+  // and the body to expose headers.get('content-type').
+  const blob = new Blob(['%PDF-1.4 fake'], { type: 'application/pdf' });
+  globalThis.fetch.mockResolvedValue({
+    ok: true,
+    status: 200,
+    headers: { get: (name) => (name.toLowerCase() === 'content-type' ? 'application/pdf' : null) },
+    blob: async () => blob,
+  });
+}
+
+describe('ArtifactPreviewPane (artifact_source routing)', () => {
+  it('routes an automation_file docx to /api/automations/files/{id}/preview (not the broken /api/artifacts/ endpoint)', async () => {
+    const artifact = {
+      id: 'auto-file-uuid-123',
+      type: 'docx',
+      title: 'Daily Sales Data Sync',
+      file_name: 'Daily Sales Data Sync.docx',
+      file_size: 56 * 1024,
+      file_url: '/api/automations/files/auto-file-uuid-123/download',
+      source: 'automation_file',
+      has_preview: true,
+    };
+    mockFetchPdfOk();
+
+    render(<ArtifactPreviewPane artifact={artifact} onClose={() => {}} />);
+
+    // The fix: PdfFaithfulPreview must call the automation-files endpoint,
+    // not /api/artifacts/{id}/preview (which 404s for AutomationFile IDs).
+    await vi.waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+    const calledUrls = globalThis.fetch.mock.calls.map((c) => c[0]);
+    expect(calledUrls).toContain('/api/automations/files/auto-file-uuid-123/preview');
+    expect(calledUrls).not.toContain(
+      '/api/artifacts/auto-file-uuid-123/preview?format=pdf',
+    );
+  });
+
+  it('routes an Artifact-table docx to /api/artifacts/{id}/preview?format=pdf (backward compat)', async () => {
+    const artifact = {
+      id: 'artifact-uuid-456',
+      artifact_id: 'artifact-uuid-456',
+      type: 'docx',
+      title: 'Internal Report',
+      file_name: 'Internal Report.docx',
+      file_size: 33 * 1024,
+      file_url: '/api/artifacts/artifact-uuid-456/download',
+      source: 'artifact',
+      has_preview: true,
+    };
+    mockFetchPdfOk();
+
+    render(<ArtifactPreviewPane artifact={artifact} onClose={() => {}} />);
+
+    await vi.waitFor(() => {
+      expect(globalThis.fetch).toHaveBeenCalled();
+    });
+    const calledUrls = globalThis.fetch.mock.calls.map((c) => c[0]);
+    expect(calledUrls).toContain(
+      '/api/artifacts/artifact-uuid-456/preview?format=pdf',
+    );
+  });
+});

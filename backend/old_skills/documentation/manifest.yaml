@@ -1,0 +1,9 @@
+name: documentation
+version: 1.0.0
+description: "Write and maintain technical documentation. Trigger with \"write docs\
+  \ for\", \"document this\", \"create a README\", \"write a runbook\", \"onboarding\
+  \ guide\", or when the user needs help with any form of technical writing \u2014\
+  \ API docs, architecture docs, or operational runbooks."
+category: documentation
+source: bundled
+requires_sandbox: false

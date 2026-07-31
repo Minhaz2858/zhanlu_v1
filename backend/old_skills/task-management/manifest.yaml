@@ -1,0 +1,8 @@
+name: task-management
+version: 1.0.0
+description: "Lightweight task tracking through a shared TASKS.md file with optional visual kanban-style dashboard. Use when the user asks about their tasks, wants to add/complete tasks, or needs help tracking commitments."
+category: productivity
+# source enum is {bundled, user, marketplace, generated}; original upstream is "anthropics/knowledge-work-plugins@main"
+source: marketplace
+requires_sandbox: false
+artifact_types: []

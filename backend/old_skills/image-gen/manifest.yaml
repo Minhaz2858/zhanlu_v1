@@ -1,0 +1,20 @@
+name: image-gen
+version: 1.0.0
+description: 'Generate images from text descriptions using MiniMax image-01 model.
+  Use when the user wants to create images, illustrations, concept art, or visual
+  content from a description. Supports aspect ratio and batch generation. For DALL-E/OpenAI
+  images, use the `image_generation` tool.
+
+  '
+summary: Generate images from text prompts using MiniMax image-01. Supports custom
+  aspect ratios (1:1, 16:9, etc.) and batch generation (1-9 images). Use `mm_image_gen`
+  tool with a detailed prompt.
+category: image-gen
+tags:
+- image
+- generation
+- AI
+- creative
+- visual
+source: bundled
+requires_sandbox: false

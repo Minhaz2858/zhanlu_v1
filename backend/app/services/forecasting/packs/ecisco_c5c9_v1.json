@@ -1,0 +1,527 @@
+{
+  "pack_key": "ecisco_c5c9",
+  "pack_version": "1",
+  "products": [
+    {
+      "product_key": "naphtha",
+      "name": "Naphtha",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "japan_cif",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "naphtha"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 1.0,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 1
+      }
+    },
+    {
+      "product_key": "cracked_c5",
+      "name": "Cracked C5",
+      "aliases": [
+        "mixed_c5"
+      ],
+      "source_hints": {
+        "price_source": "yangzi",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "cracked_c5"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            1,
+            2
+          ],
+          "adjustment_pct": -1.0
+        },
+        {
+          "months": [
+            3,
+            4,
+            5
+          ],
+          "adjustment_pct": 0.5
+        }
+      ],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.75,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 2
+      },
+      "below_naive_flag": true
+    },
+    {
+      "product_key": "cracked_c9",
+      "name": "Cracked C9",
+      "aliases": [
+        "mixed_c9"
+      ],
+      "source_hints": {
+        "price_source": "yangzi_basf",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "cracked_c9"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.65,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 3
+      },
+      "below_naive_flag": true
+    },
+    {
+      "product_key": "isoprene",
+      "name": "Isoprene",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "east_china",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "isoprene"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            2,
+            3
+          ],
+          "adjustment_pct": 0.8
+        }
+      ],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.6,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 4
+      }
+    },
+    {
+      "product_key": "piperylene",
+      "name": "Piperylene",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "east_china",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "piperylene"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            2,
+            3
+          ],
+          "adjustment_pct": 1.2
+        }
+      ],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.55,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 5
+      }
+    },
+    {
+      "product_key": "dcpd",
+      "name": "Dcpd",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "east_china",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "dcpd"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            11,
+            12,
+            1,
+            2
+          ],
+          "adjustment_pct": -3.0
+        },
+        {
+          "months": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8
+          ],
+          "adjustment_pct": 1.5
+        }
+      ],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.5,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 6
+      }
+    },
+    {
+      "product_key": "raffinate_c5",
+      "name": "Raffinate C5",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "erp_sale_order_weighted",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "raffinate_c5"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.55,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 7
+      }
+    },
+    {
+      "product_key": "sis",
+      "name": "Sis",
+      "aliases": [
+        "sis_rubber"
+      ],
+      "source_hints": {
+        "price_source": "baling_1105",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "sis"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.45,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 8
+      }
+    },
+    {
+      "product_key": "blowing_agent",
+      "name": "Blowing Agent",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "erp_sale_order_weighted",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "blowing_agent"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.45,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 9
+      }
+    },
+    {
+      "product_key": "c5_resin",
+      "name": "C5 Resin",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "erp_sale_order_weighted",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "c5_resin"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            11,
+            12,
+            1,
+            2
+          ],
+          "adjustment_pct": -2.5
+        },
+        {
+          "months": [
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9
+          ],
+          "adjustment_pct": 1.0
+        }
+      ],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.45,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 10
+      }
+    },
+    {
+      "product_key": "hydrogenated_c9",
+      "name": "Hydrogenated C9",
+      "aliases": [
+        "c9_resin"
+      ],
+      "source_hints": {
+        "price_source": "partner_forecast_price",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "hydrogenated_c9"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.5,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 11
+      }
+    },
+    {
+      "product_key": "trimethylbenzene",
+      "name": "Trimethylbenzene",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "partner_forecast_price",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "trimethylbenzene"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.5,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 12
+      }
+    },
+    {
+      "product_key": "styrene",
+      "name": "Styrene",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "sinopec_sh",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "styrene"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            11,
+            12,
+            1
+          ],
+          "adjustment_pct": -1.5
+        }
+      ],
+      "causal_defaults": {
+        "naphtha_elasticity": 0.47,
+        "cascade_factor": 0.82
+      },
+      "report_config": {
+        "include_in_weekly_report": true,
+        "report_order": 13
+      },
+      "below_naive_flag": true
+    },
+    {
+      "product_key": "crude_oil",
+      "name": "Crude Oil",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "brent",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "crude_oil"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {},
+      "report_config": {
+        "include_in_weekly_report": false,
+        "report_order": null
+      }
+    },
+    {
+      "product_key": "butadiene",
+      "name": "Butadiene",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "east_china_jiangyin",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "butadiene"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [
+        {
+          "months": [
+            11,
+            12,
+            1,
+            2
+          ],
+          "adjustment_pct": -2.0
+        }
+      ],
+      "causal_defaults": {},
+      "report_config": {
+        "include_in_weekly_report": false,
+        "report_order": null
+      }
+    },
+    {
+      "product_key": "sbs",
+      "name": "Sbs",
+      "aliases": [],
+      "source_hints": {
+        "price_source": "east_china_791h",
+        "table": "monthly_prices",
+        "time_col": "date",
+        "measure": "price",
+        "dims": {
+          "product": "sbs"
+        },
+        "granularity": "monthly",
+        "region": "east_china"
+      },
+      "seasonal_rules": [],
+      "causal_defaults": {},
+      "report_config": {
+        "include_in_weekly_report": false,
+        "report_order": null
+      }
+    }
+  ],
+  "guardrails": {
+    "min_history": 14,
+    "max_mape": 0.3,
+    "below_naive_action": "fallback_to_naive_with_warning"
+  },
+  "report_template": {
+    "title": "Ecisco C5/C9 Weekly Forecast Report",
+    "sections": [
+      "summary",
+      "price_forecasts_3d_7d_30d",
+      "accuracy_table",
+      "seasonal_adjustments",
+      "risk_flags",
+      "recommendations"
+    ],
+    "chart_defaults": {
+      "type": "bar",
+      "x_key": "product",
+      "y_keys": [
+        "3d_base",
+        "7d_base",
+        "30d_base"
+      ]
+    }
+  }
+}

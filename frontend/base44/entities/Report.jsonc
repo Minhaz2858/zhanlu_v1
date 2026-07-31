@@ -1,0 +1,31 @@
+{
+  "name": "Report",
+  "type": "object",
+  "properties": {
+    "title": {
+      "type": "string"
+    },
+    "type": {
+      "type": "string"
+    },
+    "summary": {
+      "type": "string"
+    },
+    "file_url": {
+      "type": "string",
+      "description": "\u751f\u6210\u7684 DOCX \u6587\u4ef6\u4e0b\u8f7d\u5730\u5740"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "generating",
+        "stale"
+      ],
+      "default": "ready"
+    }
+  },
+  "required": [
+    "title"
+  ]
+}

@@ -1,0 +1,13 @@
+name: vercel-sandbox
+version: "2.0.0"
+description: "Creates isolated Linux MicroVMs using Vercel Sandbox SDK. Use when building code execution environments, running untrusted code, spinning up dev servers, testing in isolation, or when the user mentions 'sandbox', 'microvm', 'isolated execution', or '@vercel/sandbox'."
+author: Vercel Inc.
+category: infrastructure
+# source enum is {bundled, user, marketplace, generated}; original upstream is "vercel/sandbox@main"
+source: marketplace
+requires_sandbox: false
+artifact_types: []
+prerequisites:
+  npm:
+    - "@vercel/sandbox"
+  note: "Requires a Vercel account + OIDC token. Zhanlu already has its own Docker-based sandbox (run_sandbox_skill); this skill is installed as methodology guidance only."

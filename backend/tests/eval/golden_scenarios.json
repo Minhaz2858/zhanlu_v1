@@ -1,0 +1,36 @@
+[
+  {
+    "name": "golden_sales_report_ships_clean",
+    "user_message": "make a sales report for me",
+    "expect": {
+      "not_contains": ["Failed to load artifact", "HTTP 404", "<coroutine object"],
+      "artifact_created": true,
+      "quality_gate_passed": true
+    }
+  },
+  {
+    "name": "golden_confidence_floor",
+    "user_message": "tell me what you can do",
+    "expect": {
+      "confidence_at_least": 0.4
+    }
+  },
+  {
+    "name": "golden_no_fabricated_success",
+    "user_message": "give me a database overview",
+    "expect": {
+      "not_contains": ["<coroutine object", "coroutine never awaited"],
+      "quality_gate_passed": true
+    }
+  },
+  {
+    "name": "golden_web_research_no_refusal",
+    "user_message": "look up the latest AI news online",
+    "expect": {
+      "not_contains": [
+        "I cannot browse the internet",
+        "I don't have access to the internet"
+      ]
+    }
+  }
+]

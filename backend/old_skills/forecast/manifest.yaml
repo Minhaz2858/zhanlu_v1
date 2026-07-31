@@ -1,0 +1,11 @@
+name: forecast
+version: 1.0.0
+description: Generate a weighted sales forecast with best/likely/worst scenarios,
+  commit vs. upside breakdown, and gap analysis. Use when preparing a quarterly forecast
+  call, assessing gap-to-quota from a pipeline CSV, deciding which deals to commit
+  vs. call upside, or checking pipeline coverage against your number.
+category: forecast
+source: bundled
+requires_sandbox: false
+artifact_types:
+- md

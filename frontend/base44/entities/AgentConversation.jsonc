@@ -1,0 +1,63 @@
+{
+  "name": "AgentConversation",
+  "type": "object",
+  "properties": {
+    "agent_name": {
+      "type": "string",
+      "description": "Owning agent name; e.g. agent_builder, skill_agent, automation_agent, or a user AgentApp.name."
+    },
+    "title": {
+      "type": "string"
+    },
+    "messages": {
+      "type": "array",
+      "description": "Chronological list of role + content message entries.",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "user",
+              "assistant",
+              "system",
+              "tool"
+            ]
+          },
+          "content": {
+            "type": "string"
+          },
+          "timestamp": {
+            "type": "string",
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "role",
+          "content"
+        ]
+      },
+      "default": []
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "active",
+        "archived",
+        "deleted"
+      ],
+      "default": "active"
+    },
+    "metadata": {
+      "type": "object",
+      "description": "Free-form metadata blob (e.g. citations, source refs, tool names used)."
+    },
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id. When set, this conversation appears in the project's Recent Chats section alongside ChatSession entries."
+    }
+  },
+  "required": [
+    "agent_name"
+  ]
+}

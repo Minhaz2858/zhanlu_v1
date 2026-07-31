@@ -1,0 +1,10 @@
+name: pptx-author
+version: 1.0.0
+description: "Produce a .pptx file on disk (headless) instead of driving a live PowerPoint\
+  \ document \u2014 for managed-agent sessions with no open Office app."
+category: pptx-author
+source: bundled
+requires_sandbox: false
+artifact_types:
+- pptx
+- xlsx
