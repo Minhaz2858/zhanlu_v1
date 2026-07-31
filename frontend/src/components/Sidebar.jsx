@@ -3,10 +3,13 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useChatSession } from '@/lib/ChatSessionContext';
-import { Plus, Workflow, Boxes, Store, Wrench, PanelLeftClose, PanelLeftOpen } from 'lucide-react';
+import { Plus, Workflow, Boxes, Store, Wrench, PanelLeftClose, PanelLeftOpen, LayoutDashboard, ChevronDown } from 'lucide-react';
 import UserMenu from '@/components/UserMenu';
 import ThemeToggle from '@/components/ThemeToggle';
 import SessionList from '@/components/chat/SessionList';
+import { useScreenSize } from '@/hooks/useScreenSize';
+import { useQuery } from '@tanstack/react-query';
+import { marketDashboardApi } from '@/api/marketDashboard';
 
 /**
  * Sidebar — the app's single unified sidebar.
@@ -112,13 +115,43 @@ export default function Sidebar() {
     navigate('/');
   }
 
-  // Width: expanded always uses 256px — the session list is shown on
-  // every route now, and a constant width avoids layout shift when
-  // navigating. Collapsed state always uses 64px regardless of route.
-  const widthClass = collapsed ? 'w-16' : 'w-64';
+  // Width: expanded uses the current screen tier's sidebarWidth (see
+  // lib/screen-config.js) — narrower on small laptops (compact), wider
+  // on 2K/4K (wide/ultra). Collapsed state always uses 64px regardless
+  // of route. Inline style (not a Tailwind class) keeps
+  // `transition-[width]` animatable for both manual collapse and tier
+  // changes, while flex-shrink-0 keeps the rail from being squeezed.
+  const { settings } = useScreenSize();
+  const sidebarWidth = collapsed ? 64 : settings.sidebarWidth;
+
+  // ── Dashboard accordion ──────────────────────────────────────────
+  // Read-only mirror of EDIA's MySQL warehouse. Auto-expands on
+  // /market-dashboard/* routes. Hidden entirely when EDIA is not
+  // configured (no dead nav items in dev environments).
+  const enabledQuery = useQuery({
+    queryKey: ['market-dashboard', 'enabled'],
+    queryFn: marketDashboardApi.enabled,
+    staleTime: 60_000,
+  });
+  const isDashboardRoute = location.pathname.startsWith('/market-dashboard');
+  const [dashboardOpen, setDashboardOpen] = useState(isDashboardRoute);
+  useEffect(() => {
+    if (isDashboardRoute) setDashboardOpen(true);
+  }, [isDashboardRoute]);
+
+  const dashboardItems = [
+    { to: '/market-dashboard/overview', label: 'Overview' },
+    { to: '/market-dashboard/upstream', label: 'Upstream' },
+    { to: '/market-dashboard/midstream', label: 'Midstream' },
+    { to: '/market-dashboard/downstream', label: 'Downstream' },
+  ];
+  const showAccordion = !enabledQuery.isLoading && enabledQuery.data?.enabled === true;
 
   return (
-    <aside className={`relative flex h-screen shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200 ${widthClass}`}>
+    <aside
+      style={{ width: sidebarWidth }}
+      className="relative flex h-screen shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200"
+    >
       <div className={`flex items-center px-3 py-5 ${collapsed ? 'justify-center' : 'gap-2.5'}`}>
         {collapsed ? (
           <button
@@ -226,6 +259,36 @@ export default function Sidebar() {
             </NavLink>
           ))}
         </nav>
+        {showAccordion && !collapsed && (
+          <div className="mt-2 border-t border-sidebar-border pt-2">
+            <button
+              type="button"
+              onClick={() => setDashboardOpen((v) => !v)}
+              className="flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-sm font-semibold text-sidebar-foreground hover:bg-sidebar-accent"
+              aria-expanded={dashboardOpen}
+            >
+              <LayoutDashboard className="h-4 w-4 shrink-0" />
+              <span className="flex-1 text-left">Dashboard</span>
+              <ChevronDown
+                className={`h-3.5 w-3.5 transition-transform ${dashboardOpen ? 'rotate-180' : ''}`}
+              />
+            </button>
+            {dashboardOpen && (
+              <nav className="mt-1 space-y-0.5">
+                {dashboardItems.map((item) => (
+                  <NavLink
+                    key={item.to}
+                    to={item.to}
+                    className={linkClass}
+                    style={{ paddingLeft: '2rem' }}
+                  >
+                    <span className="text-xs">{item.label}</span>
+                  </NavLink>
+                ))}
+              </nav>
+            )}
+          </div>
+        )}
         {/* Chat session list: on EVERY route when the sidebar is
             expanded — chat history must be reachable at all times.
             When collapsed, the icon strip is intentionally minimal —

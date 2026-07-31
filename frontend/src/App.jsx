@@ -38,6 +38,7 @@ const ResourceDetail = lazy(() => import('@/pages/ResourceDetail'));
 const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
 const UITest = lazy(() => import('@/pages/UITest'));
 const DashboardView = lazy(() => import('@/pages/DashboardView'));
+const MarketDashboardPage = lazy(() => import('@/pages/MarketDashboard/MarketDashboardPage'));
 
 // Shared fallback for any suspended lazy route — matches the app's loading
 // spinner so navigation feels seamless instead of flashing blank content.
@@ -100,6 +101,7 @@ const AuthenticatedApp = () => {
           <Route path="/agent-builder" element={<AgentBuilder />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/dashboard/:id" element={<DashboardView />} />
+          <Route path="/market-dashboard/:section" element={<MarketDashboardPage />} />
         </Route>
       </Route>
       <Route path="*" element={<PageNotFound />} />
