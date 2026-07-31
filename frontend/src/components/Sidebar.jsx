@@ -126,8 +126,10 @@ export default function Sidebar() {
 
   // ── Dashboard accordion ──────────────────────────────────────────
   // Read-only mirror of EDIA's MySQL warehouse. Auto-expands on
-  // /market-dashboard/* routes. Hidden entirely when EDIA is not
-  // configured (no dead nav items in dev environments).
+  // /market-dashboard/* routes. Always visible so users can discover
+  // the feature even on servers where the data source is not yet
+  // configured — the page itself shows a friendly "data source
+  // offline" banner in that case.
   const enabledQuery = useQuery({
     queryKey: ['market-dashboard', 'enabled'],
     queryFn: marketDashboardApi.enabled,
@@ -145,7 +147,9 @@ export default function Sidebar() {
     { to: '/market-dashboard/midstream', label: 'Midstream' },
     { to: '/market-dashboard/downstream', label: 'Downstream' },
   ];
-  const showAccordion = !enabledQuery.isLoading && enabledQuery.data?.enabled === true;
+  // enabledQuery is still fetched so the query is warm when the user
+  // navigates to the dashboard page, but the accordion is no longer
+  // gated on it — see the comment above for rationale.
 
   return (
     <aside
@@ -259,7 +263,7 @@ export default function Sidebar() {
             </NavLink>
           ))}
         </nav>
-        {showAccordion && !collapsed && (
+        {!collapsed && (
           <div className="mt-2 border-t border-sidebar-border pt-2">
             <button
               type="button"

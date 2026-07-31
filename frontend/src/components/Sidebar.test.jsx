@@ -1,9 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 
-const { mockList, mockAuth, mockProjectList, mockAutomationList } = vi.hoisted(() => ({
+const { mockList, mockAuth, mockProjectList, mockAutomationList, mockDashboardEnabled } = vi.hoisted(() => ({
   mockList: vi.fn().mockResolvedValue([]),
   mockProjectList: vi.fn().mockResolvedValue([]),
   // Sidebar/SessionList fetches the full AutomationTask list once on
@@ -14,6 +15,12 @@ const { mockList, mockAuth, mockProjectList, mockAutomationList } = vi.hoisted((
   // whole suite just to keep it green.
   mockAutomationList: vi.fn().mockResolvedValue([]),
   mockAuth: { me: vi.fn().mockResolvedValue({ name: 'Tester', email: 't@x.com' }) },
+  // Sidebar uses useQuery to check whether EDIA is enabled so it can
+  // (in older versions) gate the dashboard accordion. The test only
+  // cares about the rest of the sidebar's behavior, so default to a
+  // disabled-EDIA response — keeps the test focused and avoids a
+  // real network call to /api/market-dashboard/enabled.
+  mockDashboardEnabled: vi.fn().mockResolvedValue({ enabled: false, reachable: false, reason: 'unconfigured' }),
 }));
 
 vi.mock('@/api/base44Client', () => ({
@@ -34,19 +41,44 @@ vi.mock('@/lib/AuthContext', () => ({
   useAuth: () => ({ logout: vi.fn() }),
 }));
 
+vi.mock('@/api/marketDashboard', () => ({
+  marketDashboardApi: {
+    enabled: mockDashboardEnabled,
+  },
+}));
+
+// The screen-adaptation work moved the sidebar width from a
+// `w-64`/`w-60` Tailwind class to a screen-tier-driven inline style
+// (see `lib/screen-config.js`). For these tests we don't care about
+// the actual pixel width, just that the sidebar is in its
+// "expanded" (non-collapsed) state — so stub the hook to return a
+// known value.
+vi.mock('@/hooks/useScreenSize', () => ({
+  useScreenSize: () => ({ isMobile: false, settings: { sidebarWidth: 256 } }),
+}));
+
 const { default: Sidebar } = await import('@/components/Sidebar');
 const { ChatSessionProvider, useChatSession } = await import('@/lib/ChatSessionContext');
 
 function renderAtRoute(initialEntries) {
+  // Wrap in QueryClientProvider — Sidebar now uses useQuery for the
+  // market-dashboard enabled probe (it always shows the dashboard
+  // accordion, but it still queries /enabled to keep the cache warm
+  // for when the user navigates to /market-dashboard/*).
+  const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     React.createElement(
-      MemoryRouter,
-      { initialEntries },
+      QueryClientProvider,
+      { client: qc },
       React.createElement(
-        ChatSessionProvider,
-        null,
-        React.createElement(Sidebar),
-        React.createElement(InjectActiveId),
+        MemoryRouter,
+        { initialEntries },
+        React.createElement(
+          ChatSessionProvider,
+          null,
+          React.createElement(Sidebar),
+          React.createElement(InjectActiveId),
+        ),
       ),
     )
   );
@@ -102,8 +134,9 @@ describe('Sidebar (unified)', () => {
     // the Ungrouped label (zh default). On non-chat routes both are
     // absent. (It appears twice, so use the All variant.)
     await waitFor(() => expect(screen.getAllByText('未分组').length).toBeGreaterThan(0));
-    // Chat routes use the wider w-64 sidebar.
-    expect(document.querySelector('aside').className).toMatch(/w-64/);
+    // Chat routes use the wider sidebar (set via inline style after
+    // the screen-adaptation work — previously `w-64` Tailwind class).
+    expect(document.querySelector('aside').style.width).toBe('256px');
   });
 
   it('shows the session list on non-chat routes too (history always visible)', async () => {
@@ -114,10 +147,10 @@ describe('Sidebar (unified)', () => {
     expect(screen.getByText(LABELS.nav_automation)).toBeInTheDocument();
     expect(screen.getByText(LABELS.newTask)).toBeInTheDocument();
     // SessionList mounts → the Ungrouped label appears (dropdown +
-    // group header). The sidebar also keeps the wide w-64 layout so
+    // group header). The sidebar also keeps the wide layout so
     // the width doesn't shift when navigating between routes.
     await waitFor(() => expect(screen.getAllByText('未分组').length).toBeGreaterThan(0));
-    expect(document.querySelector('aside').className).toMatch(/w-64/);
+    expect(document.querySelector('aside').style.width).toBe('256px');
   });
 
   it('hides the chat content while collapsed on the chat route', async () => {
@@ -298,14 +331,18 @@ describe('Sidebar (unified)', () => {
 
     render(
       React.createElement(
-        MemoryRouter,
-        { initialEntries: ['/'] },
+        QueryClientProvider,
+        { client: new QueryClient({ defaultOptions: { queries: { retry: false } } }) },
         React.createElement(
-          ChatSessionProvider,
-          null,
-          React.createElement(SetProject),
-          React.createElement(Sidebar),
-          React.createElement(ProjectDisplay),
+          MemoryRouter,
+          { initialEntries: ['/'] },
+          React.createElement(
+            ChatSessionProvider,
+            null,
+            React.createElement(SetProject),
+            React.createElement(Sidebar),
+            React.createElement(ProjectDisplay),
+          ),
         ),
       ),
     );
