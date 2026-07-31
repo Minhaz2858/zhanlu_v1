@@ -16,6 +16,8 @@ from app.deps import get_current_user_required
 from app.schemas.market_dashboard import (
     EnabledResponse, MarketSnapshot, PriceHistoryPoint,
     RegionalPriceData, NewsListResponse,
+    RegionalBatchResponse, ForecastBaseBatchResponse,
+    EventsResponse, FxRateResponse,
 )
 from app.services import market_dashboard_service as svc
 
@@ -72,3 +74,49 @@ def get_news(
 ) -> NewsListResponse:
     """Return industry news (v1: empty list with explanatory note)."""
     return svc.get_news_events(group=group, limit=limit)
+
+
+# ── Phase 7 (verbatim port): batch + new endpoints ─────────────────
+
+
+@router.get("/regional-batch", response_model=RegionalBatchResponse)
+def get_regional_batch(
+    product_ids: str = Query(..., description="comma-separated product ids"),
+    user=Depends(get_current_user_required),
+) -> RegionalBatchResponse:
+    """Return regional prices for multiple products in one request."""
+    ids = [p.strip() for p in product_ids.split(",") if p.strip()]
+    return svc.get_regional_prices_batch(ids)
+
+
+@router.get("/forecast-base-batch", response_model=ForecastBaseBatchResponse)
+def get_forecast_base_batch(
+    product_ids: str = Query(..., description="comma-separated product ids"),
+    day: int = Query(7, ge=1, le=30),
+    user=Depends(get_current_user_required),
+) -> ForecastBaseBatchResponse:
+    """Return 7-day-ahead forecast base prices for the requested products."""
+    ids = [p.strip() for p in product_ids.split(",") if p.strip()]
+    return svc.get_forecast_base_batch(ids, day=day)
+
+
+@router.get("/events/latest", response_model=EventsResponse)
+def get_events_latest(
+    hours: int = Query(168, ge=1, le=8760),
+    review_status: str = Query("approved"),
+    min_usefulness_score: int = Query(0, ge=0, le=100),
+    user=Depends(get_current_user_required),
+) -> EventsResponse:
+    """Return latest intelligence events (news) from the warehouse."""
+    return svc.get_events_latest(
+        hours=hours, review_status=review_status,
+        min_usefulness_score=min_usefulness_score,
+    )
+
+
+@router.get("/fx/usd-cny", response_model=FxRateResponse)
+def get_fx(
+    user=Depends(get_current_user_required),
+) -> FxRateResponse:
+    """Return the USD-CNY FX rate (v1: static 7.20)."""
+    return svc.get_fx_rate()

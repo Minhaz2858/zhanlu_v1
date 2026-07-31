@@ -260,3 +260,186 @@ def get_news_events(group=None, limit=18) -> NewsListResponse:
             "(not part of this v1 read-only mirror)."
         ),
     )
+
+
+# ── Phase 7 (verbatim port): batch + new endpoint service functions ─
+
+import json as _json
+from datetime import date, timedelta
+
+from app.schemas.market_dashboard import (
+    RegionalBatchResponse, ForecastBaseBatchResponse,
+    EventsResponse, EventItem, FxRateResponse,
+)
+from app.models.market_dashboard import MATERIAL_FORECAST_IDS
+
+
+def get_regional_prices_batch(product_ids: list[str]) -> RegionalBatchResponse:
+    """Batch version of get_regional_prices. Per-product errors captured."""
+    _require_edia()
+    items: dict = {}
+    errors: dict = {}
+    for pid in product_ids:
+        try:
+            items[pid] = get_regional_prices(pid)
+        except Exception as exc:
+            logger.warning("EDIA regional-batch failed for %s: %s", pid, exc)
+            errors[pid] = str(exc)
+    return RegionalBatchResponse(items=items, errors=errors)
+
+
+def get_forecast_base_batch(
+    product_ids: list[str], day: int = 7
+) -> ForecastBaseBatchResponse:
+    """Read 7-day-ahead forecast prices from v_forecast_price.
+
+    day=1 → max forecast date; day=7 → +6 days; day=30 → +29 days.
+    Returns null for products not in MATERIAL_FORECAST_IDS or with no data.
+    """
+    from app.core.mysql_db import get_mysql_engine
+    _require_edia()
+    eng = get_mysql_engine()
+    out: dict = {}
+    if eng is None:
+        return ForecastBaseBatchResponse(
+            day=day, base_by_product={pid: None for pid in product_ids}
+        )
+    # Step 1: max forecast date
+    try:
+        with eng.connect() as conn:
+            max_row = conn.execute(text(
+                "SELECT MAX(forecast_date) FROM v_forecast_price"
+            )).first()
+    except Exception as exc:
+        logger.warning("EDIA forecast max-date query failed: %s", exc)
+        return ForecastBaseBatchResponse(
+            day=day, base_by_product={pid: None for pid in product_ids}
+        )
+    if not max_row or not max_row[0]:
+        return ForecastBaseBatchResponse(
+            day=day, base_by_product={pid: None for pid in product_ids}
+        )
+    max_date = max_row[0]
+    target_date = max_date + timedelta(days=day - 1)
+    # Step 2: per-product forecast
+    for pid in product_ids:
+        material_ids = MATERIAL_FORECAST_IDS.get(pid, [])
+        if not material_ids:
+            out[pid] = None
+            continue
+        try:
+            placeholders = ",".join([f":mid_{i}" for i in range(len(material_ids))])
+            params: dict = {f"mid_{i}": m for i, m in enumerate(material_ids)}
+            params["d"] = target_date
+            with eng.connect() as conn:
+                rows = conn.execute(text(
+                    f"SELECT predicted_price FROM v_forecast_price "
+                    f"WHERE material_id IN ({placeholders}) "
+                    f"AND forecast_date = :d"
+                ), params).fetchall()
+        except Exception as exc:
+            logger.warning("EDIA forecast query failed for %s: %s", pid, exc)
+            out[pid] = None
+            continue
+        if rows:
+            prices = [float(r[0]) for r in rows if r[0] is not None]
+            out[pid] = round(sum(prices) / len(prices), 2) if prices else None
+        else:
+            out[pid] = None
+    return ForecastBaseBatchResponse(day=day, base_by_product=out)
+
+
+def _safe_json_list(raw) -> list[str]:
+    if raw is None or raw == "":
+        return []
+    if isinstance(raw, list):
+        return [str(x) for x in raw]
+    try:
+        v = _json.loads(raw)
+        return [str(x) for x in v] if isinstance(v, list) else []
+    except (TypeError, ValueError):
+        return []
+
+
+def get_events_latest(
+    hours: int = 168, review_status: str = "approved",
+    min_usefulness_score: int = 0,
+) -> EventsResponse:
+    """Read latest events from the intelligence_events MySQL table.
+
+    Maps the MySQL row directly to the EventItem shape used by EDIA's
+    /api/events/latest (1:1 field mapping).
+    """
+    from app.core.mysql_db import get_mysql_engine
+    _require_edia()
+    eng = get_mysql_engine()
+    if eng is None:
+        return EventsResponse(events=[], count=0)
+    # Match EDIA's response fields. intelligence_events has these columns:
+    #   event_id, headline, event_type, direction, impact_magnitude,
+    #   certainty, source_credibility, usefulness_score, relevance_score,
+    #   affected_commodities (JSON), causal_chain_hint, source_url,
+    #   full_text, raw_quote, relevance_to_c5_c9, source_label, summary,
+    #   review_status, detected_at, key_entities (JSON), time_horizon,
+    #   geographic_scope
+    stmt = text("""
+        SELECT event_id, headline, event_type, direction, impact_magnitude,
+               certainty, source_credibility, usefulness_score, relevance_score,
+               affected_commodities, causal_chain_hint, source_url, full_text,
+               raw_quote, relevance_to_c5_c9, source_label, summary,
+               detected_at, time_horizon, geographic_scope, key_entities
+        FROM intelligence_events
+        WHERE review_status = :rs
+          AND usefulness_score >= :min_score
+          AND detected_at >= NOW() - INTERVAL :hours HOUR
+        ORDER BY detected_at DESC
+        LIMIT 100
+    """)
+    try:
+        with eng.connect() as conn:
+            rows = conn.execute(stmt, {
+                "rs": review_status, "min_score": min_usefulness_score,
+                "hours": hours,
+            }).fetchall()
+    except Exception as exc:
+        logger.warning("EDIA events query failed: %s", exc)
+        return EventsResponse(events=[], count=0)
+    events: list[EventItem] = []
+    for r in rows:
+        events.append(EventItem(
+            event_id=str(r[0] or ""),
+            headline=str(r[1] or ""),
+            event_type=r[2],
+            direction=r[3],
+            impact_magnitude=float(r[4]) if r[4] is not None else None,
+            certainty=r[5],
+            source_credibility=r[6],
+            usefulness_score=float(r[7]) if r[7] is not None else None,
+            relevance_score=float(r[8]) if r[8] is not None else None,
+            affected_commodities=_safe_json_list(r[9]),
+            causal_chain_hint=r[10],
+            source_url=r[11],
+            full_text=r[12],
+            raw_quote=r[13],
+            relevance_to_c5_c9=r[14],
+            source_label=r[15],
+            summary=r[16],
+            detected_at=str(r[17] or ""),
+            time_horizon=r[18],
+            geographic_scope=r[19],
+            key_entities=_safe_json_list(r[20]),
+        ))
+    return EventsResponse(events=events, count=len(events))
+
+
+def get_fx_rate() -> FxRateResponse:
+    """Static USD-CNY rate for v1. v2 can read from a market data source."""
+    return FxRateResponse(
+        price=7.20,
+        unit="CNY/USD",
+        as_of_date=str(date.today()),
+        series_product_id="usd_cny",
+        series_price_type="spot",
+        data_source="static_fallback",
+        available=True,
+    )

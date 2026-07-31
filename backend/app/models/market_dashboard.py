@@ -151,3 +151,12 @@ def get_product_table(product_id: str) -> Optional[Table]:
             cfg["table"], _metadata, autoload_with=eng
         )
     return _table_cache[product_id]
+
+
+# Mapping from product_id → list of material_ids in the v_forecast_price view.
+# Products not in this dict have no forecast data in the warehouse and will
+# return null from the forecast endpoint.
+MATERIAL_FORECAST_IDS: dict[str, list[str]] = {
+    "cracked_c5": ["103319", "103320", "103321", "103322"],
+    "cracked_c9": ["103323", "103324", "103325", "103326"],
+}

@@ -69,3 +69,60 @@ class EnabledResponse(BaseModel):
     enabled: bool
     reachable: bool
     reason: Optional[str] = None  # "not_configured" | "configured_unreachable" | "ok"
+
+
+# ── Phase 7 (verbatim port): batch + new endpoints ─────────────────
+
+class RegionalBatchResponse(BaseModel):
+    """Batch response for /regional-batch — one RegionalPriceData per product."""
+    items: dict[str, RegionalPriceData] = Field(default_factory=dict)
+    errors: dict[str, str] = Field(default_factory=dict)
+
+
+class ForecastBaseBatchResponse(BaseModel):
+    """Batch response for /forecast-base-batch — 7-day-ahead forecast prices."""
+    day: int
+    base_by_product: dict[str, Optional[float]] = Field(default_factory=dict)
+
+
+class FxRateResponse(BaseModel):
+    """USD-CNY FX rate (v1: static)."""
+    price: Optional[float]
+    unit: str
+    as_of_date: Optional[str]
+    series_product_id: str
+    series_price_type: str
+    data_source: str
+    available: bool
+
+
+class EventItem(BaseModel):
+    """An intelligence event from EDIA's /api/events/latest (verbatim shape)."""
+    event_id: str
+    headline: str
+    detected_at: str
+    source_url: Optional[str] = None
+    event_type: Optional[str] = None
+    direction: Optional[str] = None
+    impact_magnitude: Optional[float] = None
+    certainty: Optional[str] = None
+    source_credibility: Optional[str] = None
+    usefulness_score: Optional[float] = None
+    relevance_score: Optional[float] = None
+    affected_commodities: list[str] = Field(default_factory=list)
+    causal_chain_hint: Optional[str] = None
+    raw_quote: Optional[str] = None
+    full_text: Optional[str] = None
+    relevance_to_c5_c9: Optional[str] = None
+    source_label: Optional[str] = None
+    summary: Optional[str] = None
+    quality_tier: Optional[str] = None
+    time_horizon: Optional[str] = None
+    geographic_scope: Optional[str] = None
+    key_entities: list[str] = Field(default_factory=list)
+
+
+class EventsResponse(BaseModel):
+    """Response for /events/latest."""
+    events: list[EventItem] = Field(default_factory=list)
+    count: int = 0
