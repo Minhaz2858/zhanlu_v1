@@ -31,7 +31,7 @@ function renderAt(path) {
 describe('MarketDashboardPage', () => {
   it('renders the section name from the URL', async () => {
     renderAt('/market-dashboard/upstream');
-    expect(await screen.findByText(/upstream/i)).toBeInTheDocument();
+    expect(await screen.findByText(/EDIA Market Dashboard — upstream/i)).toBeInTheDocument();
   });
 
   it('renders overview section header', async () => {
@@ -64,5 +64,29 @@ describe('MarketDashboardPage', () => {
     // PriceChart renders the product id as a heading
     const headings = await screen.findAllByText(/naphtha/i);
     expect(headings.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('renders RegionalTable for each product in the snapshot', async () => {
+    const { marketDashboardApi } = await import('@/api/marketDashboard');
+    marketDashboardApi.snapshot.mockResolvedValueOnce([
+      { id: 'naphtha', name: 'Japanese Naphtha', price: 612.5, date: '2026-07-30',
+        change_pct: 1.2, group: 'upstream', unit: 'CNY/mt' },
+    ]);
+    renderAt('/market-dashboard/upstream');
+    expect(await screen.findByText(/naphtha — regional/i)).toBeInTheDocument();
+  });
+
+  it('renders NewsPanel with the v1 info banner', async () => {
+    const { marketDashboardApi } = await import('@/api/marketDashboard');
+    marketDashboardApi.snapshot.mockResolvedValueOnce([
+      { id: 'naphtha', name: 'Japanese Naphtha', price: 612.5, date: '2026-07-30',
+        change_pct: 1.2, group: 'upstream', unit: 'CNY/mt' },
+    ]);
+    marketDashboardApi.news.mockResolvedValueOnce({
+      items: [],
+      note: "Industry news requires EDIA's AI event pipeline (not part of this v1 read-only mirror).",
+    });
+    renderAt('/market-dashboard/upstream');
+    expect(await screen.findByText(/AI event pipeline/i)).toBeInTheDocument();
   });
 });

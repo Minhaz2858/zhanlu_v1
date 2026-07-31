@@ -4,6 +4,8 @@ import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
 import SnapshotGrid from './components/SnapshotGrid';
 import PriceChart from './components/PriceChart';
+import RegionalTable from './components/RegionalTable';
+import NewsPanel from './components/NewsPanel';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
 
@@ -87,6 +89,16 @@ export default function MarketDashboardPage() {
             ))}
           </div>
         )}
+        {snapshotQuery.data && snapshotQuery.data.length > 0 && (
+          <div className="mt-6 grid grid-cols-1 gap-3 lg:grid-cols-2">
+            {snapshotQuery.data.map((s) => (
+              <RegionalTable key={`r-${s.id}`} productId={s.id} />
+            ))}
+          </div>
+        )}
+        <div className="mt-6">
+          <NewsPanel group={section === 'overview' ? undefined : section} />
+        </div>
       </div>
     </div>
   );
