@@ -33,6 +33,7 @@ def test_seed_targets_have_datasource_with_required_fields(in_memory_db):
         assert "measure" in ds, f"Target {t.product_key} missing 'measure'"
         assert "dimensions" in ds, f"Target {t.product_key} missing 'dimensions'"
         assert isinstance(ds["dimensions"], list), "dimensions must be a list"
+        assert "kb_id" in ds, f"Target {t.product_key} missing 'kb_id' (engine cannot find KB)"
 
 
 def test_seed_is_idempotent(in_memory_db):

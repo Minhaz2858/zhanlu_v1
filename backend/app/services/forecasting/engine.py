@@ -51,6 +51,33 @@ class ForecastEngine:
             run = engine.compute_target(t.id)
     """
 
+    # Map db_type → identifier-quoting style. Different SQL dialects use
+    # different identifier quotes: MySQL uses backticks, Postgres uses
+    # double quotes, SQL Server uses square brackets, etc. The previous
+    # implementation hardcoded Postgres-style double quotes which broke
+    # against MySQL.
+    _IDENTIFIER_QUOTES: dict[str, tuple[str, str]] = {
+        "mysql":     ("`", "`"),
+        "mariadb":   ("`", "`"),
+        "postgres":  ('"', '"'),
+        "postgresql":('"', '"'),
+        "sqlite":    ('"', '"'),
+        "mssql":     ("[", "]"),
+        "sqlserver": ("[", "]"),
+        "oracle":    ('"', '"'),
+    }
+
+    @classmethod
+    def _quote_identifier(cls, name: str, db_type: str | None) -> str:
+        """Quote an SQL identifier for the given db_type. Falls back to
+        double quotes (Postgres style) for unknown dialects."""
+        if not name:
+            return name
+        open_q, close_q = cls._IDENTIFIER_QUOTES.get(
+            (db_type or "").lower(), ('"', '"')
+        )
+        return f"{open_q}{name}{close_q}"
+
     def __init__(self, db: Session) -> None:
         self._db = db
 
@@ -365,27 +392,39 @@ class ForecastEngine:
         tc = ds.get("time_column")
         mc = ds.get("measure")
         dims = ds.get("dimensions", [])
-        kb_id = target.org_id  # KB lookup: assumes org_id maps to kb configuration
+        # Prefer kb_id from datasource; fall back to org_id for legacy targets.
+        kb_id = ds.get("kb_id") or target.org_id
 
         if not table or not tc or not mc:
             logger.warning("Target %s: missing datasource config", target.id)
             return None
 
+        # Look up the KB to learn its db_type so we can quote identifiers
+        # correctly (MySQL needs backticks, Postgres needs double quotes, etc.).
+        from app.models.knowledge_base import KnowledgeBase
+        kb = self._db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == kb_id,
+            KnowledgeBase.is_deleted == False,
+        ).first()
+        db_type = (kb.db_type if kb else None) or None
+
+        q = lambda n: self._quote_identifier(n, db_type)  # noqa: E731
+
         query_svc = QueryService(self._db)
 
-        dim_selects = ", ".join(f'"{d}"' for d in dims)
-        dim_group = ", ".join(f'"{d}"' for d in dims) if dims else ""
+        dim_selects = ", ".join(q(d) for d in dims)
+        dim_group = ", ".join(q(d) for d in dims) if dims else ""
 
-        group_clause = f'"{tc}"'
+        group_clause = q(tc)
         if dim_group:
             group_clause += f", {dim_group}"
 
         sql = (
-            f'SELECT "{tc}" AS t, '
+            f'SELECT {q(tc)} AS t, '
             f'{dim_selects + ", " if dim_selects else ""}'
-            f'AVG("{mc}") AS y '
-            f'FROM "{table}" '
-            f'WHERE "{tc}" IS NOT NULL AND "{mc}" IS NOT NULL '
+            f'AVG({q(mc)}) AS y '
+            f'FROM {q(table)} '
+            f'WHERE {q(tc)} IS NOT NULL AND {q(mc)} IS NOT NULL '
             f"GROUP BY {group_clause} "
             f"ORDER BY t"
         )

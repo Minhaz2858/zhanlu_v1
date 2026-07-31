@@ -9,9 +9,15 @@ ForecastTarget row — forecast_run will return "not found" and the truth_gate
 
 from __future__ import annotations
 
+import os
+
 from sqlalchemy.orm import Session
 
 from app.models.forecasting import ForecastTarget
+
+# KB id for the MySQL warehouse. Override via env var to seed against a
+# different KB (e.g. for testing).
+DEFAULT_WAREHOUSE_KB_ID = "650a2505-3012-4968-87bf-80d79ac27da8"
 
 # product_key → (lz_view_table, material_name, time_column, measure)
 SEED_PRODUCTS = [
@@ -27,11 +33,19 @@ SEED_PRODUCTS = [
 ]
 
 
-def seed_forecast_targets(db: Session, org_id: str = "default-org", app_id: str = "default-app") -> int:
+def seed_forecast_targets(
+    db: Session,
+    org_id: str = "default-org",
+    app_id: str = "default-app",
+    kb_id: str | None = None,
+) -> int:
     """Idempotently create ForecastTarget rows for the 9 products with data.
 
     Returns the number of rows created (excluding pre-existing).
     """
+    if kb_id is None:
+        kb_id = os.environ.get("WAREHOUSE_KB_ID", DEFAULT_WAREHOUSE_KB_ID)
+
     created = 0
     for product_key, table, material, time_col, measure in SEED_PRODUCTS:
         existing = (
@@ -50,6 +64,7 @@ def seed_forecast_targets(db: Session, org_id: str = "default-org", app_id: str 
             product_key=product_key,
             name=product_key.replace("_", " ").title(),
             datasource={
+                "kb_id": kb_id,
                 "table": table,
                 "time_column": time_col,
                 "measure": measure,
