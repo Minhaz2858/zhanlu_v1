@@ -4,11 +4,21 @@
 
 **Goal:** Make the partially-ported `forecast_agent` subagent in the Ecisco BI project work end-to-end so a user can ask a forecasting question and get a data-grounded answer (or an explicit insufficient-data verdict) — never a hallucinated number.
 
-**Architecture:** The `forecast_agent` (defined at `app/services/agent_definitions/__init__.py:782`) and `orchestrator_agent` (line 822) are already wired correctly. We enable the two heavy forecast tools at the registry level, repoint the `ecisco_c5c9_v1` pack to a real warehouse table, and add a thin `truth_gate` module that wraps engine results with a `data_anchor` (source rows) and converts thin-data cases into explicit `insufficient_data` verdicts. No new agents, no new prompts, no API contract changes.
+**Architecture:** The `forecast_agent` (defined at `app/services/agent_definitions/__init__.py:782`) and `orchestrator_agent` (line 822) are already wired correctly. We enable the two heavy forecast tools at the registry level, register real `ForecastTarget` rows for the 9 products with LZ view data, fix the MySQL quoting bug in discovery, and add a thin `truth_gate` module that wraps engine results with a `data_anchor` (source rows) and converts thin-data cases into explicit `insufficient_data` verdicts. No new agents, no new prompts, no API contract changes.
 
 **Tech Stack:** FastAPI + SQLAlchemy + pandas + statsmodels (existing) + Python 3.11 (existing) + pymysql (existing).
 
 **Spec:** `docs/superpowers/specs/2026-07-31-ecisco-bi-forecasting-true-answers-design.md`
+
+## Revision History
+
+- **2026-07-31 v2:** Task 2 replaced. Pre-flight discovery (Task 1) revealed:
+  - The `ecisco_c5c9_v1` pack is **not used** by the engine — it reads `target.datasource` from `ForecastTarget` rows in zhanlu's Postgres.
+  - The warehouse IS reachable, with rich C5/C9 data in `lz_v_*_data` views and Chinese material names (e.g. `裂解C5`).
+  - The pack's schema keys (`time_col`, `dims` dict) don't match the engine's (`time_column`, `dimensions` list).
+  - User chose Option 1 (per-product repoint + name mapping) but the cleaner realization is: **register `ForecastTarget` rows directly for 9 products with LZ view data** (no pack rewrite). The 7 products without warehouse data get no `ForecastTarget` row and return the existing "not found" error.
+  - Discovery's `_quote` function uses Postgres double-quotes, which is wrong for MySQL. Fixed to use backticks.
+  - Decision record: `docs/superpowers/notes/2026-07-31-pack-target-decision.md`
 
 ## Global Constraints
 
@@ -90,132 +100,297 @@ git commit -m "docs(forecasting): record pre-flight pack target decision"
 
 ---
 
-## Task 2: Repoint `ecisco_c5c9_v1.json` to the real warehouse table
+## Task 2: Seed ForecastTarget rows for 9 products + fix MySQL quoting
 
 **Files:**
-- Modify: `backend/app/services/forecasting/packs/ecisco_c5c9_v1.json` (16 `"table": "monthly_prices"` fields → new table name from Task 1)
-- Create: `backend/tests/test_pack_ecisco_c5c9_v1.py` (new)
+- Create: `backend/scripts/seed_forecast_targets.py` (new, idempotent, registers 9 ForecastTarget rows)
+- Modify: `backend/app/services/forecasting/discovery.py` (line 333-335, fix `_quote` to use backticks for MySQL)
+- Create: `backend/tests/test_seed_forecast_targets.py` (new)
 
-**Goal:** The pack loads cleanly with the new table reference, and we have a test that catches any future regression where the table name drifts back to a non-existent name.
+**Goal:** `forecast_run` finds real data for 9 of 16 Ecisco products. The other 7 products simply have no `ForecastTarget` row, so `forecast_run` returns the existing "not found" error (which the truth_gate in Task 5 will format honestly). The MySQL quoting bug in discovery is fixed so future `forecast_discover` calls work on the warehouse.
 
-- [ ] **Step 1: Write the failing test**
+**Why this instead of repointing the pack:** the engine reads `target.datasource` from `ForecastTarget` rows in zhanlu's Postgres, not from the pack. The pack is aspirational; seeding real `ForecastTarget` rows is what makes `forecast_run` work. The pack rewrite is deferred to a follow-up.
 
-Create `backend/tests/test_pack_ecisco_c5c9_v1.py`:
+- [ ] **Step 1: Write the failing test for `_quote` (MySQL-safe)**
+
+Append to `backend/tests/test_forecasting_truth_gate.py` (we'll consolidate tests for this task here, or create a new file `backend/tests/test_discovery_quote.py`):
 
 ```python
-"""Pack ecisco_c5c9_v1 must point at a real warehouse table."""
+# backend/tests/test_discovery_quote.py
+"""Tests for discovery._quote — must use MySQL-safe identifier quoting."""
 
-import json
-import os
-from pathlib import Path
+from app.services.forecasting.discovery import _quote
+
+
+def test_quote_uses_backticks_for_mysql():
+    """_quote must produce backtick-quoted identifiers, not double-quoted.
+    MySQL uses backticks; double-quoted identifiers are invalid by default."""
+    assert _quote("actual_price") == "`actual_price`"
+
+
+def test_quote_handles_weird_column_names():
+    """Real warehouse has columns like 'biz_date(业务日期)'. The quote function
+    must handle them without error and produce a valid MySQL identifier."""
+    out = _quote("biz_date(业务日期)")
+    assert out.startswith("`") and out.endswith("`")
+    # Should not contain unescaped backticks inside
+    assert out.count("`") == 2
+
+
+def test_quote_handles_already_quoted_input():
+    """If the name is already backtick-quoted, don't double-wrap."""
+    out = _quote("`actual_price`")
+    assert out == "`actual_price`", "Already-quoted names should not be re-wrapped"
+```
+
+- [ ] **Step 2: Run the test to verify it fails**
+
+```bash
+cd /home/ysk2025/zhanlu_7_30/.worktrees/forecasting/backend
+docker exec zhanlu-backend bash -c "PYTHONPATH=. python -m pytest tests/test_discovery_quote.py -v"
+```
+
+Expected: 1 of 3 tests fails (`test_quote_uses_backticks_for_mysql`). The other 2 may pass depending on the current implementation; if they pass, that's OK — they still cover the new behavior.
+
+- [ ] **Step 3: Fix `_quote` in `backend/app/services/forecasting/discovery.py`**
+
+Replace lines 333-335:
+
+```python
+def _quote(name: str) -> str:
+    """Backtick-quote an identifier for MySQL safety. Idempotent on already-quoted input."""
+    if name.startswith("`") and name.endswith("`"):
+        return name
+    return f"`{name}`"
+```
+
+- [ ] **Step 4: Re-run to verify the test passes**
+
+```bash
+docker exec zhanlu-backend bash -c "PYTHONPATH=. python -m pytest tests/test_discovery_quote.py -v"
+```
+
+Expected: all 3 pass.
+
+- [ ] **Step 5: Write the failing test for the seed script**
+
+Create `backend/tests/test_seed_forecast_targets.py`:
+
+```python
+"""Seed script must register 9 ForecastTargets for products with LZ view data."""
 
 import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
-PACK_PATH = (
-    Path(__file__).parent.parent
-    / "app/services/forecasting/packs/ecisco_c5c9_v1.json"
-)
-
-
-def _load_pack() -> dict:
-    with open(PACK_PATH) as f:
-        return json.load(f)
+from app.database import Base
+from app.models.forecasting import ForecastTarget
 
 
-def test_pack_file_exists():
-    assert PACK_PATH.is_file(), f"Pack not found at {PACK_PATH}"
+@pytest.fixture
+def in_memory_db():
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    return Session()
 
 
-def test_pack_uses_real_table_not_monthly_prices():
-    """Pack must NOT reference 'monthly_prices' (does not exist in warehouse)."""
-    pack = _load_pack()
-    seen = set()
-    for product in pack["products"]:
-        tbl = product.get("source_hints", {}).get("table")
-        seen.add(tbl)
-    assert "monthly_prices" not in seen, (
-        "Pack still references missing 'monthly_prices' table. "
-        f"Tables in pack: {seen}"
-    )
+def test_seed_creates_nine_forecast_targets(in_memory_db):
+    from app.services.forecasting.seed_targets import seed_forecast_targets
+    n = seed_forecast_targets(in_memory_db, org_id="org-1", app_id="app-1")
+    assert n == 9, f"Expected 9 targets, got {n}"
 
 
-def test_pack_all_products_share_same_table():
-    """All 16 products should share the target table."""
-    pack = _load_pack()
-    tables = {
-        p.get("source_hints", {}).get("table")
-        for p in pack["products"]
-    }
-    assert len(tables) == 1, f"Pack has multiple tables: {tables}"
+def test_seed_targets_have_datasource_with_required_fields(in_memory_db):
+    from app.services.forecasting.seed_targets import seed_forecast_targets
+    seed_forecast_targets(in_memory_db, org_id="org-1", app_id="app-1")
+    targets = in_memory_db.query(ForecastTarget).all()
+    for t in targets:
+        ds = t.datasource
+        assert "table" in ds, f"Target {t.product_key} missing 'table' in datasource"
+        assert "time_column" in ds, f"Target {t.product_key} missing 'time_column'"
+        assert "measure" in ds, f"Target {t.product_key} missing 'measure'"
+        assert "dimensions" in ds, f"Target {t.product_key} missing 'dimensions'"
+        assert isinstance(ds["dimensions"], list), "dimensions must be a list"
 
 
-@pytest.mark.parametrize("expected_table", [
-    os.environ.get("FORECAST_PACK_TABLE", "actual_price"),
-])
-def test_pack_table_matches_decision(expected_table):
-    pack = _load_pack()
-    actual = pack["products"][0]["source_hints"]["table"]
-    assert actual == expected_table, (
-        f"Pack table is {actual!r}, expected {expected_table!r}. "
-        "Update FORECAST_PACK_TABLE env or repoint the pack."
-    )
+def test_seed_is_idempotent(in_memory_db):
+    from app.services.forecasting.seed_targets import seed_forecast_targets
+    seed_forecast_targets(in_memory_db, org_id="org-1", app_id="app-1")
+    seed_forecast_targets(in_memory_db, org_id="org-1", app_id="app-1")
+    n = in_memory_db.query(ForecastTarget).count()
+    assert n == 9, f"Seed should be idempotent; got {n} targets after 2 runs"
 ```
 
-- [ ] **Step 2: Run the test to verify it fails (TDD)**
+- [ ] **Step 6: Run the test to verify it fails (function not defined)**
 
-Run:
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend
-PYTHONPATH=. ./venv/bin/python -m pytest tests/test_pack_ecisco_c5c9_v1.py -v
+docker exec zhanlu-backend bash -c "PYTHONPATH=. python -m pytest tests/test_seed_forecast_targets.py -v"
 ```
 
-Expected: 1 failure — `test_pack_uses_real_table_not_monthly_prices` and `test_pack_table_matches_decision` both fail because the pack still says `monthly_prices`. The other tests should pass.
+Expected: ALL 3 fail with `ModuleNotFoundError: No module named 'app.services.forecasting.seed_targets'`.
 
-- [ ] **Step 3: Repoint the pack**
+- [ ] **Step 7: Write the seed module**
 
-Run (replace `<NEW_TABLE>` with the value from Task 1's decision record):
+Create `backend/app/services/forecasting/seed_targets.py`:
+
+```python
+"""One-time seed for ForecastTarget rows in zhanlu's Postgres.
+
+Registers 9 products that have data in the MySQL warehouse's LZ views.
+The 7 remaining pack products (naphtha, raffinate_c5, c5_resin, hydrogenated_c9,
+crude_oil, butadiene, sbs) have no warehouse data and intentionally get no
+ForecastTarget row — forecast_run will return "not found" and the truth_gate
+(Task 5) will surface that honestly.
+"""
+
+from __future__ import annotations
+
+from sqlalchemy.orm import Session
+
+from app.models.forecasting import ForecastTarget
+
+# product_key → (lz_view_table, material_name, time_column, measure)
+SEED_PRODUCTS = [
+    ("cracked_c5",     "lz_v_裂解c5_data",    "裂解C5",   "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("cracked_c9",     "lz_v_裂解c9_data",    "裂解C9",   "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("isoprene",       "lz_v_异戊二烯_data",  "异戊二烯", "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("piperylene",     "lz_v_间戊二烯_data",  "间戊二烯", "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("dcpd",           "lz_v_双环戊二烯_data", "双环戊二烯", "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("sis",            "lz_v_sis_data",        "SIS",     "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("blowing_agent",  "lz_v_戊烷泡发剂_data",  "戊烷泡发剂", "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("trimethylbenzene", "lz_v_混三甲苯_data",  "混三甲苯", "biz_date(业务日期)", "tax_price(含税单价)"),
+    ("styrene",        "lz_v_苯乙烯_data",      "苯乙烯",   "biz_date(业务日期)", "tax_price(含税单价)"),
+]
+
+
+def seed_forecast_targets(db: Session, org_id: str, app_id: str) -> int:
+    """Idempotently create ForecastTarget rows for the 9 products with data.
+
+    Returns the number of rows created (excluding pre-existing).
+    """
+    created = 0
+    for product_key, table, material, time_col, measure in SEED_PRODUCTS:
+        existing = (
+            db.query(ForecastTarget)
+            .filter(
+                ForecastTarget.product_key == product_key,
+                ForecastTarget.org_id == org_id,
+            )
+            .first()
+        )
+        if existing is not None:
+            continue
+        target = ForecastTarget(
+            org_id=org_id,
+            app_id=app_id,
+            product_key=product_key,
+            name=product_key.replace("_", " ").title(),
+            datasource={
+                "table": table,
+                "time_column": time_col,
+                "measure": measure,
+                "dimensions": [f"material_name(产品名称)"],
+                "material_filter": material,
+            },
+        )
+        db.add(target)
+        created += 1
+    db.commit()
+    return created
+```
+
+- [ ] **Step 8: Re-run the test to verify it passes**
 
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend
-NEW_TABLE="<NEW_TABLE>"  # e.g. "actual_price" or "v_lz_data"
-python -c "
-import json
-from pathlib import Path
-p = Path('app/services/forecasting/packs/ecisco_c5c9_v1.json')
-data = json.loads(p.read_text())
-for prod in data['products']:
-    prod['source_hints']['table'] = '$NEW_TABLE'
-p.write_text(json.dumps(data, indent=2, ensure_ascii=False))
-print(f'Repointed {len(data[\"products\"])} products to $NEW_TABLE')
+docker exec zhanlu-backend bash -c "PYTHONPATH=. python -m pytest tests/test_seed_forecast_targets.py -v"
+```
+
+Expected: all 3 pass. If they don't, the issue is likely:
+- `app.models.forecasting.ForecastTarget` schema mismatch — check the actual model fields
+- `Base` import path — use `from app.database import Base` (not `app.db.base.Base`)
+
+- [ ] **Step 9: Run the seed against the real zhanlu Postgres**
+
+This is a one-time operation. Use the production DB credentials and verify before committing.
+
+```bash
+docker exec zhanlu-backend bash -c "PYTHONPATH=. python -c \"
+from app.database import SessionLocal
+from app.services.forecasting.seed_targets import seed_forecast_targets
+db = SessionLocal()
+n = seed_forecast_targets(db, org_id='default-org', app_id='ecisco-bi')
+print(f'Created {n} ForecastTarget rows')
+\""
+```
+
+Expected: `Created 9 ForecastTarget rows` (or 0 if already seeded, indicating idempotency worked).
+
+- [ ] **Step 10: Commit**
+
+```bash
+cd /home/ysk2025/zhanlu_7_30/.worktrees/forecasting
+git add backend/app/services/forecasting/discovery.py \
+        backend/app/services/forecasting/seed_targets.py \
+        backend/scripts/seed_forecast_targets.py \
+        backend/tests/test_discovery_quote.py \
+        backend/tests/test_seed_forecast_targets.py
+git -c user.email=plan@local -c user.name=plan commit -m "fix(forecasting): seed 9 ForecastTarget rows + fix MySQL quoting in discovery
+
+The pack-based approach is not used by the engine. Instead, register
+ForecastTarget rows directly for the 9 products with LZ view data in
+the warehouse. Fix _quote() in discovery to use MySQL-safe backticks
+so future forecast_discover runs work.
+
+The 7 pack products without warehouse data intentionally get no
+ForecastTarget row. forecast_run will return 'not found' for them,
+which the truth_gate in Task 5 will surface as insufficient_data.
+
+Refs: docs/superpowers/notes/2026-07-31-pack-target-decision.md
 "
 ```
 
-Verify by running:
-```bash
-cd /home/ysk2025/zhanlu_7_30/backend
-grep -c '"table":' app/services/forecasting/packs/ecisco_c5c9_v1.json
-grep '"table":' app/services/forecasting/packs/ecisco_c5c9_v1.json | head -2
+- [ ] **Step 11: Add the runnable CLI wrapper**
+
+Create `backend/scripts/seed_forecast_targets.py` (a thin wrapper so operators can run it):
+
+```python
+#!/usr/bin/env python3
+"""CLI: seed ForecastTarget rows for the Ecisco BI Ecisco project.
+
+Usage:
+    docker exec zhanlu-backend python /app/scripts/seed_forecast_targets.py
+    docker exec zhanlu-backend python /app/scripts/seed_forecast_targets.py --org-id org-1 --app-id ecisco-bi
+"""
+import sys
+import argparse
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from app.database import SessionLocal  # noqa: E402
+from app.services.forecasting.seed_targets import seed_forecast_targets  # noqa: E402
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--org-id", default="default-org")
+    parser.add_argument("--app-id", default="ecisco-bi")
+    args = parser.parse_args()
+
+    db = SessionLocal()
+    try:
+        n = seed_forecast_targets(db, org_id=args.org_id, app_id=args.app_id)
+        print(f"Created {n} ForecastTarget rows for org={args.org_id}, app={args.app_id}")
+    finally:
+        db.close()
+
+
+if __name__ == "__main__":
+    main()
 ```
 
-Expected: 16 occurrences of `"table":`, all with the new table name (no more `monthly_prices`).
-
-- [ ] **Step 4: Re-run the test to verify it passes**
-
-Run:
-```bash
-cd /home/ysk2025/zhanlu_7_30/backend
-PYTHONPATH=. ./venv/bin/python -m pytest tests/test_pack_ecisco_c5c9_v1.py -v
-```
-
-Expected: all 5 tests pass.
-
-- [ ] **Step 5: Commit**
-
-```bash
-cd /home/ysk2025/zhanlu_7_30
-git add backend/app/services/forecasting/packs/ecisco_c5c9_v1.json backend/tests/test_pack_ecisco_c5c9_v1.py
-git commit -m "fix(forecasting): repoint ecisco_c5c9_v1 pack from missing monthly_prices to real table"
-```
+This is the second `seed_forecast_targets.py` file (the one in `scripts/` is a CLI wrapper; the one in `app/services/forecasting/` is the importable module). Step 7 created the module; Step 11 creates the wrapper.
 
 ---
 
