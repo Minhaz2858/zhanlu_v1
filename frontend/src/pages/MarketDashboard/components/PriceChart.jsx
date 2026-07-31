@@ -7,7 +7,6 @@ import {
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from '../lib/typography';
 import { getChartTheme, rechartsTooltipStyle } from '../lib/chartTheme';
-import { NO_DATA_LABEL } from '../lib/priceChange';
 
 /**
  * useDarkMode — self-contained dark mode detection.
