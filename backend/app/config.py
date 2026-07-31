@@ -51,6 +51,16 @@ class Settings(BaseSettings):
             )
         return v
 
+    # ── EDIA Market Dashboard — read-only mirror of EDIA's MySQL warehouse.
+    # Empty = dashboard routes return 503 (the rest of zhanlu is unaffected).
+    # Example: mysql+pymysql://root:PASSWORD@10.10.10.49:3306/aipdp_data_warehouse_prod
+    EDIA_MYSQL_URL: str = ""
+
+    @property
+    def is_edia_enabled(self) -> bool:
+        """True when EDIA_MYSQL_URL is set (the dashboard will at least try)."""
+        return bool(self.EDIA_MYSQL_URL)
+
     # Auth
     JWT_SECRET: str = ""
     JWT_ALGORITHM: str = "HS256"
