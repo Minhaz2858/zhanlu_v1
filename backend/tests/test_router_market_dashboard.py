@@ -56,3 +56,28 @@ def test_history_returns_503_when_unreachable(monkeypatch, client):
     r = client.get("/api/market-dashboard/history/naphtha?days=30")
     assert r.status_code == 503
     assert r.json()["detail"] == "edia_unreachable"
+
+
+def test_regional_endpoint_503_when_unconfigured(monkeypatch, client):
+    monkeypatch.setattr(
+        "app.services.market_dashboard_service.settings.EDIA_MYSQL_URL", ""
+    )
+    r = client.get("/api/market-dashboard/regional/naphtha")
+    assert r.status_code == 503
+    assert r.json()["detail"] == "edia_unavailable"
+
+
+def test_news_endpoint_returns_empty_with_note(monkeypatch, client):
+    monkeypatch.setattr(
+        "app.services.market_dashboard_service.settings.EDIA_MYSQL_URL",
+        "mysql+pymysql://x",
+    )
+    monkeypatch.setattr(
+        "app.services.market_dashboard_service.is_edia_reachable_cached",
+        lambda: True,
+    )
+    r = client.get("/api/market-dashboard/news?group=upstream&limit=18")
+    assert r.status_code == 200
+    data = r.json()
+    assert data["items"] == []
+    assert "AI event pipeline" in (data["note"] or "")

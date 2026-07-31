@@ -75,3 +75,29 @@ def test_get_price_history_unmapped_returns_empty(monkeypatch):
     monkeypatch.setattr(svc, "is_edia_reachable_cached", lambda: True)
     monkeypatch.setattr(svc, "_read_product_history_rows", lambda pid: [])
     assert svc.get_price_history("crude_oil", days=30) == []
+
+
+def test_get_regional_prices_unmapped_returns_empty(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_dashboard_service.settings.EDIA_MYSQL_URL",
+        "mysql+pymysql://x",
+    )
+    monkeypatch.setattr(svc, "is_edia_reachable_cached", lambda: True)
+    monkeypatch.setattr(
+        "app.services.market_dashboard_service.get_product_table",
+        lambda pid: None,
+    )
+    r = svc.get_regional_prices("crude_oil")
+    assert r.regions == []
+    assert "not configured" in (r.note or "")
+
+
+def test_get_news_events_v1_returns_empty_with_note(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.market_dashboard_service.settings.EDIA_MYSQL_URL",
+        "mysql+pymysql://x",
+    )
+    monkeypatch.setattr(svc, "is_edia_reachable_cached", lambda: True)
+    r = svc.get_news_events(group="upstream", limit=18)
+    assert r.items == []
+    assert "AI event pipeline" in (r.note or "")

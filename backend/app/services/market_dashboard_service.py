@@ -165,3 +165,94 @@ def _within_7d(d_str: str, ref_date_str: str) -> bool:
     except ValueError:
         return False
     return (ref - timedelta(days=7)) <= d <= ref
+
+
+# ── Phase E: regional + news (v1 simplified) ──────────────────────────
+
+from app.schemas.market_dashboard import (
+    RegionalPriceData, RegionalPriceRegion, NewsListResponse,
+)
+
+# Column-name fragments that look like a regional price (per EDIA's
+# "华东市场价East China market price" convention).
+_REGIONAL_TOKENS = ("华东", "华南", "华北", "East China", "South China", "North China")
+
+
+def get_regional_prices(product_id: str) -> RegionalPriceData:
+    """v1 simplified regional payload: one region per matching column.
+
+    No spread or cost-floor analysis (those depend on EDIA's naphtha cost
+    model, which is out of scope for the read-only mirror).
+    """
+    _require_edia()
+    tbl = get_product_table(product_id)
+    eng = get_mysql_engine()
+    if tbl is None or eng is None:
+        return RegionalPriceData(
+            product_id=product_id,
+            regions=[],
+            note="table mapping not configured in v1",
+        )
+    cols = list(tbl.columns.keys())
+    region_cols = [c for c in cols if any(tok in c for tok in _REGIONAL_TOKENS)]
+    if not region_cols:
+        return RegionalPriceData(
+            product_id=product_id,
+            regions=[],
+            note="no regional columns detected in EDIA table",
+        )
+    date_col = cols[0]
+    regions: list[RegionalPriceRegion] = []
+    for col in region_cols:
+        stmt = text(
+            f"SELECT `{date_col}` AS d, `{col}` AS p "
+            f"FROM `{PRODUCT_TABLE_MAP[product_id]['table']}` "
+            f"WHERE `{col}` IS NOT NULL "
+            f"ORDER BY `{date_col}` DESC LIMIT 1"
+        )
+        try:
+            with eng.connect() as conn:
+                row = conn.execute(stmt).first()
+        except Exception as exc:
+            logger.warning("EDIA regional query failed for %s.%s: %s",
+                           product_id, col, exc)
+            continue
+        if not row or row[1] is None:
+            continue
+        try:
+            price = float(row[1])
+        except (TypeError, ValueError):
+            continue
+        label = col.split("East")[0].split("South")[0].split("North")[0] or col
+        regions.append(RegionalPriceRegion(
+            price_type=col,
+            label=label.strip() or col,
+            is_internal=False,
+            price=round(price, 2),
+            change_pct=None,
+            date=str(row[0])[:10] if row[0] else "",
+            days_stale=0,
+        ))
+    return RegionalPriceData(
+        product_id=product_id,
+        regions=regions,
+        note="v1 simplified: no spread/cost-floor analysis",
+    )
+
+
+def get_news_events(group=None, limit=18) -> NewsListResponse:
+    """v1 returns an empty list with an explanatory note.
+
+    EDIA sources news from /api/events/latest — an AI-detected market-event
+    pipeline stored in a separate system, not in the
+    aipdp_data_warehouse_prod warehouse we mirror. Replicating that pipeline
+    is out of scope for v1; the frontend renders an info banner instead.
+    """
+    _require_edia()
+    return NewsListResponse(
+        items=[],
+        note=(
+            "Industry news requires EDIA's AI event pipeline "
+            "(not part of this v1 read-only mirror)."
+        ),
+    )

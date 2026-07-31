@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, Query
 from app.deps import get_current_user_required
 from app.schemas.market_dashboard import (
     EnabledResponse, MarketSnapshot, PriceHistoryPoint,
+    RegionalPriceData, NewsListResponse,
 )
 from app.services import market_dashboard_service as svc
 
@@ -52,3 +53,22 @@ def get_history(
     user=Depends(get_current_user_required),
 ) -> list[PriceHistoryPoint]:
     return svc.get_price_history(product_id, days=days)
+
+
+@router.get("/regional/{product_id}", response_model=RegionalPriceData)
+def get_regional(
+    product_id: str,
+    user=Depends(get_current_user_required),
+) -> RegionalPriceData:
+    """Return per-region prices for a product (v1 simplified)."""
+    return svc.get_regional_prices(product_id)
+
+
+@router.get("/news", response_model=NewsListResponse)
+def get_news(
+    group: Optional[str] = Query(None, pattern="^(upstream|midstream|downstream)$"),
+    limit: int = Query(18, ge=1, le=50),
+    user=Depends(get_current_user_required),
+) -> NewsListResponse:
+    """Return industry news (v1: empty list with explanatory note)."""
+    return svc.get_news_events(group=group, limit=limit)
