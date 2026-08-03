@@ -10,6 +10,7 @@ ForecastAccuracyLog, ForecastBusinessRule).
 from __future__ import annotations
 
 import logging
+import math
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -251,8 +252,8 @@ class ForecastEngine:
             "models_run": models_run,
             "models_failed": models_failed,
             "weights": ensemble_result.weights,
-            "ensemble_mape": bt.ensemble_mape,
-            "naive_mape": bt.naive_mape,
+            "ensemble_mape": bt.ensemble_mape if math.isfinite(bt.ensemble_mape) else None,
+            "naive_mape": bt.naive_mape if math.isfinite(bt.naive_mape) else None,
             "metric": bt.metric,
         }
 
@@ -270,6 +271,13 @@ class ForecastEngine:
         self._db.add(run)
 
         # --- Write ForecastAccuracyLog ---
+        # Sanitize per_model_mape: replace non-finite values (Infinity, NaN)
+        # with None so the JSON column doesn't reject them. XGBoost can
+        # produce Infinity MAPE on degenerate series (e.g. all-zero targets).
+        per_model_safe = {
+            name: (None if (m is None or not math.isfinite(m)) else m)
+            for name, m in per_model_mape.items()
+        }
         for name, mape in per_model_mape.items():
             for h in horizons:
                 log_entry = ForecastAccuracyLog(
@@ -277,17 +285,18 @@ class ForecastEngine:
                     org_id=target.org_id,
                     app_id=target.app_id,
                     horizon_days=h,
-                    mape=mape if mape < float("inf") else None,
+                    mape=mape if (mape is not None and math.isfinite(mape)) else None,
                     naive_mape=bt.naive_mape
-                    if bt.naive_mape < float("inf")
+                    if (bt.naive_mape is not None and math.isfinite(bt.naive_mape))
                     else None,
                     skill_vs_naive=(
                         (mape - bt.naive_mape)
-                        if mape < float("inf") and bt.naive_mape < float("inf")
+                        if (mape is not None and math.isfinite(mape)
+                            and bt.naive_mape is not None and math.isfinite(bt.naive_mape))
                         else None
                     ),
                     below_naive_baseline=guard_result.below_naive_baseline,
-                    per_model=per_model_mape,
+                    per_model=per_model_safe,
                 )
                 self._db.add(log_entry)
 

@@ -64,6 +64,9 @@ RUNTIME_ENABLED_TOOLS = [
     "clarify", "slash_confirm", "approval", "interrupt", "checkpoint_manager",
     # Run the user's own tasks (capped recursion)
     "execute_automation",
+    # Forecasting (for nightly Ecisco BI forecast scheduler)
+    "forecast_discover", "forecast_run", "forecast_get",
+    "forecast_accuracy", "forecast_rules", "forecast_report", "forecast_ppt",
 ]
 
 _FORBIDDEN_TOOLS = frozenset({
