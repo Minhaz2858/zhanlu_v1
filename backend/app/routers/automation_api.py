@@ -839,4 +839,79 @@ def delete_automation(task_id: str, db: Session = Depends(get_db)):
     return {"success": True, "id": task_id}
 
 
+# ── Nightly forecast bootstrap ─────────────────────────────────────────
+
+
+@router.post("/bootstrap-nightly-forecast")
+def bootstrap_nightly_forecast(
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Create the idempotent nightly forecast automation task.
+
+    Ensures:
+      1. The 12 Ecisco BI forecast targets exist (via seed_ecisco_forecast_targets)
+      2. The automation_runtime_agent exists for this (org, app)
+      3. An AutomationTask with cron=0 2 * * *, skip_confirmation=true exists
+
+    Returns the existing task if already created. Idempotent.
+    """
+    from app.config import settings
+
+    if not getattr(settings, "NIGHTLY_FORECAST_ENABLED", True):
+        raise HTTPException(status_code=403, detail="Nightly forecast is disabled")
+
+    from app.services.automation_runtime import ensure_automation_runtime_agent
+    from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
+
+    org_id = getattr(user, "org_id", None) or "default-org"
+    app_id = getattr(user, "app_id", None) or "default-app"
+    cron = getattr(settings, "NIGHTLY_FORECAST_CRON", "0 2 * * *")
+
+    # 1. Ensure targets exist (idempotent)
+    seed_ecisco_forecast_targets(db, org_id=org_id, app_id=app_id)
+
+    # 2. Ensure runtime agent exists (idempotent)
+    runtime = ensure_automation_runtime_agent(db, org_id, app_id)
+
+    # 3. Find or create the automation task (idempotent by name + org)
+    existing = db.query(AutomationTask).filter(
+        AutomationTask.name == "Nightly Ecisco BI Forecast",
+        AutomationTask.org_id == org_id,
+        AutomationTask.is_deleted == False,  # noqa: E712
+    ).first()
+    if existing:
+        return {"task_id": existing.id, "status": "exists", "cron": cron}
+
+    task = AutomationTask(
+        name="Nightly Ecisco BI Forecast",
+        type="scheduled",
+        description=(
+            "Silent nightly ML forecast for all 12 Ecisco BI dashboard "
+            "products. Writes to forecast_runs; dashboard reads via "
+            "/forecast-base-batch."
+        ),
+        org_id=org_id,
+        app_id=app_id,
+        agent_id=runtime.id,
+        created_by_id=getattr(user, "id", None),
+        schedule=cron,
+        cron_expression=cron,
+        timezone="UTC",
+        skip_confirmation="true",
+        output_format="json",
+        prompt=(
+            "Run the `forecast_run` tool with no arguments (target_id=null) "
+            "to refresh forecasts for all active targets in this org. "
+            "Do not chat, summarize, or output any narrative — just call the "
+            "tool, report success/failure counts, and end."
+        ),
+        status="active",
+    )
+    db.add(task)
+    db.commit()
+    db.refresh(task)
+    return {"task_id": task.id, "status": "created", "cron": cron}
+
+
 __all__ = ["router"]
