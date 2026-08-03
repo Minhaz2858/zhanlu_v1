@@ -363,6 +363,29 @@ class Settings(BaseSettings):
     # to prevent impact on existing deployments until explicitly enabled.
     FORECASTING_ENABLED: bool = False
 
+    # ── Nightly forecast scheduler ─────────────────────────────
+    # Gates the /bootstrap-nightly-forecast endpoint. When False, the
+    # endpoint returns 403. The engine itself is gated by FORECASTING_ENABLED.
+    NIGHTLY_FORECAST_ENABLED: bool = True
+    # Cron expression for the nightly forecast run. Default: 2 AM daily.
+    NIGHTLY_FORECAST_CRON: str = "0 2 * * *"
+
+    # ── Ecisco BI feature flags (EDIA 5.1.2 → zhanlu migration) ─────────
+    # Master switch for EDIA-specific delegated tools in the ecisco_bi_assistant
+    # agent.  When False, the agent runs as a plain general assistant with
+    # standard zhanlu tools only.
+    ECISCO_BI_AGENT_ENABLED: bool = False
+
+    # Per-module gates — each enables one category of EDIA ported services.
+    # All default False so the agent is safe to register in every deployment;
+    # enable progressively as phases 5A→5F are completed and tested.
+    ECISCO_BI_KNOWLEDGE_GRAPH_ENABLED: bool = False   # 5A
+    ECISCO_BI_PRICING_ENABLED: bool = False           # 5B
+    ECISCO_BI_PERCEPTION_ENABLED: bool = False        # 5C
+    ECISCO_BI_INTEL_ENHANCED_ENABLED: bool = False    # 5D
+    ECISCO_BI_WEEKLY_REPORT_ENABLED: bool = False     # 5E
+    ECISCO_BI_ERP_WRITEBACK_ENABLED: bool = False     # 5F
+
     # ── Sandbox (runbook §6) ────────────────────────────────────────────
     SANDBOX_ENABLED: bool = False
 

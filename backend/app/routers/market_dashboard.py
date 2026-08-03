@@ -17,7 +17,7 @@ from app.schemas.market_dashboard import (
     EnabledResponse, MarketSnapshot, PriceHistoryPoint,
     RegionalPriceData, NewsListResponse,
     RegionalBatchResponse, ForecastBaseBatchResponse,
-    EventsResponse, FxRateResponse,
+    EventsResponse, FxRateResponse, OverviewBundle,
 )
 from app.services import market_dashboard_service as svc
 
@@ -97,7 +97,7 @@ def get_forecast_base_batch(
 ) -> ForecastBaseBatchResponse:
     """Return 7-day-ahead forecast base prices for the requested products."""
     ids = [p.strip() for p in product_ids.split(",") if p.strip()]
-    return svc.get_forecast_base_batch(ids, day=day)
+    return svc.get_forecast_base_batch_v2(ids, day=day)
 
 
 @router.get("/events/latest", response_model=EventsResponse)
@@ -120,3 +120,30 @@ def get_fx(
 ) -> FxRateResponse:
     """Return the USD-CNY FX rate (v1: static 7.20)."""
     return svc.get_fx_rate()
+
+
+@router.get("/overview", response_model=OverviewBundle)
+def get_overview(
+    no_cache: bool = Query(False, description="Bypass the in-memory cache."),
+    forecast_day: int = Query(7, ge=1, le=30),
+    user=Depends(get_current_user_required),
+) -> OverviewBundle:
+    """One-shot payload (snapshot + regional + forecast + fx) for the
+    Chemical Market Overview page. 30-second in-memory cache is shared
+    across requests so the dashboard doesn't hammer the EDIA MySQL
+    warehouse. Pass `?no_cache=1` (or call invalidate endpoint) to force
+    a fresh fetch — used by the Refresh button in the UI.
+    """
+    return svc.get_overview_bundle(
+        bypass_cache=no_cache, forecast_day=forecast_day,
+    )
+
+
+@router.post("/overview/refresh", response_model=dict)
+def post_overview_refresh(
+    user=Depends(get_current_user_required),
+) -> dict:
+    """Drop the in-memory overview cache (e.g. after a DB write triggers
+    the frontend to invalidate caches globally)."""
+    dropped = svc.invalidate_overview_cache()
+    return {"invalidated": dropped, "key_prefix": "overview:bundle:"}
