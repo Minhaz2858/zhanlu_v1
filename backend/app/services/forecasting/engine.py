@@ -24,6 +24,7 @@ from app.models.forecasting import (
 )
 from app.services.db.query_service import QueryService
 from app.services.forecasting.backtest import BacktestResult, evaluate
+from app.services.forecasting.edia_source import EdiaMysqlDataSource
 from app.services.forecasting.discovery import discover
 from app.services.forecasting.ensemble import EnsembleResult, blend, run_models
 from app.services.forecasting.guard import GuardResult, evaluate_guard
@@ -388,6 +389,27 @@ class ForecastEngine:
     def _fetch_series(self, target: ForecastTarget) -> pd.Series | None:
         """Pull the raw time series from the user's datasource."""
         ds = target.datasource or {}
+
+        # ── EDIA MySQL branch ─────────────────────────────────────
+        # When the datasource descriptor names edia_mysql as the source,
+        # read directly from the EDIA MySQL mirror via EdiaMysqlDataSource.
+        # This bypasses the KB/QueryService path entirely and is used by
+        # the nightly forecast scheduler for the 12 dashboard products.
+        if ds.get("source") == "edia_mysql":
+            try:
+                src = EdiaMysqlDataSource()
+                df = src.read_history(ds)
+                # Convert DataFrame to Series indexed by datetime, as the
+                # downstream pipeline (quality → models → ensemble) expects.
+                return pd.Series(df["y"].values, index=df["ds"])
+            except Exception as exc:
+                logger.warning(
+                    "EdiaMysqlDataSource failed for target %s: %s",
+                    target.id, exc,
+                )
+                return None
+
+        # ── Existing KB-backed path (unchanged) ──────────────────
         table = ds.get("table")
         tc = ds.get("time_column")
         mc = ds.get("measure")
