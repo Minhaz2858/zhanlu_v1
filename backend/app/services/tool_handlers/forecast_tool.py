@@ -54,6 +54,14 @@ def _resolve_org_context(context: dict | None) -> tuple[str, str]:
 
 def _serialize_target(t: ForecastTarget) -> dict:
     """Convert a ForecastTarget row to a safe dict for tool responses."""
+    ds = t.datasource or {}
+    # Extract material_code from product_key for SKU targets
+    # (e.g. "ecisco.c5_resin.201000018" → "201000018")
+    material_code = None
+    parts = t.product_key.split(".")
+    if len(parts) >= 3 and parts[0] == "ecisco":
+        material_code = parts[2]
+
     return {
         "id": t.id,
         "product_key": t.product_key,
@@ -61,9 +69,14 @@ def _serialize_target(t: ForecastTarget) -> dict:
         "level": t.level,
         "quality_grade": t.quality_grade,
         "status": t.status,
-        "granularity": (t.datasource or {}).get("granularity"),
+        "granularity": ds.get("granularity"),
         "source": t.source,
         "include_in_weekly_report": t.include_in_weekly_report,
+        "report_order": t.report_order,
+        # SKU fields (None for md_t_lz_price products)
+        "material_code": material_code,
+        "datasource_table": ds.get("table"),
+        "datasource_where": ds.get("where"),
     }
 
 
@@ -173,6 +186,7 @@ async def _forecast_run(
         seasonal_period (int): Expected seasonal cycle (default 7).
     """
     target_id = args.get("target_id")
+    product_id = args.get("product_id")
     horizons = args.get("horizons", [3, 7, 30])
     seasonal_period = int(args.get("seasonal_period", 7))
     org_id, _app_id = _resolve_org_context(context)
@@ -223,6 +237,36 @@ async def _forecast_run(
             )
             return gated
 
+        if product_id:
+            # Run all SKU targets for an ERP product family
+            prefix = f"ecisco.{product_id}."
+            sku_targets = db.query(ForecastTarget).filter(
+                ForecastTarget.product_key.like(f"{prefix}%"),
+                ForecastTarget.org_id == org_id,
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            ).all()
+            if not sku_targets:
+                return {"success": False, "error": f"No SKU targets found for product '{product_id}'."}
+            results = []
+            for tgt in sku_targets:
+                anchored = engine.compute_target_anchored(
+                    str(tgt.id), horizons, seasonal_period
+                )
+                if anchored and anchored.get("run"):
+                    run = anchored["run"]
+                    horizon_key = str(max(horizons))
+                    horizon_payload = (run.results or {}).get(horizon_key, {}) or {}
+                    results.append({
+                        "target_id": run.target_id,
+                        "product_key": tgt.product_key,
+                        "material_code": tgt.product_key.split(".")[-1] if "." in tgt.product_key else None,
+                        "horizon_days": max(horizons),
+                        "point_estimate": horizon_payload.get("base", [None])[0] if horizon_payload else None,
+                        "confidence": run.confidence,
+                        "below_naive_baseline": run.below_naive_baseline,
+                    })
+            return {"success": True, "runs": results, "count": len(results)}
+
         # bulk path — unchanged
         runs = engine.compute_all(org_id, horizons, seasonal_period)
         return {
@@ -268,6 +312,14 @@ FORECAST_RUN_SCHEMA = {
                         "run all active targets for the org."
                     ),
                 },
+                "product_id": {
+                    "type": "string",
+                    "description": (
+                        "ERP product family to run all SKU targets for "
+                        "(e.g. 'c5_resin', 'raffinate_c5'). "
+                        "Alternative to target_id for batch SKU runs."
+                    ),
+                },
                 "horizons": {
                     "type": "array",
                     "items": {"type": "integer"},
@@ -281,6 +333,77 @@ FORECAST_RUN_SCHEMA = {
                 },
             },
             "required": [],
+        },
+    },
+}
+
+
+# ======================================================================
+# forecast_list_skus  (lightweight read — SKU drill-down)
+# ======================================================================
+
+async def _forecast_list_skus(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """List all SKU-level forecast targets for an ERP product family.
+
+    Required args:
+        product_id  (str): The dashboard product_id (e.g. 'c5_resin',
+                           'raffinate_c5').
+    """
+    product_id = args.get("product_id")
+    if not product_id:
+        return {"success": False, "error": "product_id is required."}
+
+    org_id, _app_id = _resolve_org_context(context)
+    prefix = f"ecisco.{product_id}."
+
+    targets = db.query(ForecastTarget).filter(
+        ForecastTarget.product_key.like(f"{prefix}%"),
+        ForecastTarget.org_id == org_id,
+        ForecastTarget.is_deleted == False,  # noqa: E712
+    ).order_by(ForecastTarget.report_order.asc()).all()
+
+    if not targets:
+        return {
+            "success": True,
+            "skus": [],
+            "count": 0,
+            "message": f"No SKU targets found for product '{product_id}'.",
+        }
+
+    return {
+        "success": True,
+        "skus": [_serialize_target(t) for t in targets],
+        "count": len(targets),
+    }
+
+
+FORECAST_LIST_SKUS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "forecast_list_skus",
+        "description": (
+            "List all SKU-level forecast targets for an ERP product family "
+            "(c5_resin or raffinate_c5). Returns material_code, target_id, "
+            "report_order, and whether each SKU is the primary (highest volume) "
+            "for its family. Safe for the user-facing agent."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {
+                    "type": "string",
+                    "description": (
+                        "The dashboard product_id to list SKUs for. "
+                        "Must be an ERP product: 'c5_resin' or 'raffinate_c5'."
+                    ),
+                },
+            },
+            "required": ["product_id"],
         },
     },
 }
@@ -829,6 +952,13 @@ for _name, _schema, _handler, _enabled, _desc in (
         _forecast_ppt,
         True,
         "Generate a themed PowerPoint deck from cached forecast data with scenario charts and KPI tiles.",
+    ),
+    (
+        "forecast_list_skus",
+        FORECAST_LIST_SKUS_SCHEMA,
+        _forecast_list_skus,
+        True,
+        "List all SKU-level forecast targets for an ERP product family.",
     ),
 ):
     registry.register(
