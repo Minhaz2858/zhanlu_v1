@@ -120,8 +120,6 @@ def evaluate(
     if not origins:
         origins.append(min_train)
 
-    n_folds = len(origins)
-
     # Check if ANY actual value is zero → use RMSE instead of MAPE
     use_rmse = bool((y == 0).any())
     metric = "RMSE" if use_rmse else "MAPE"
@@ -136,17 +134,25 @@ def evaluate(
     errors_by_horizon: dict[int, dict[str, list[float]]] = {
         h: {name: [] for name in all_model_names} for h in horizons
     }
-    residuals_by_horizon: dict[int, list[float]] = {h: [] for h in horizons}
+    # Per-model residuals so conformal calibration (Phase D) can use the
+    # BEST model's residuals rather than the seasonal_naive benchmark
+    # (which is systematically too wide).  `residuals_by_horizon` is
+    # resolved to the best model after the loop.
+    residuals_by_model_horizon: dict[str, dict[int, list[float]]] = {
+        name: {h: [] for h in horizons} for name in all_model_names
+    }
     # Directional: per-model, at primary horizon.
     dir_correct: dict[str, int] = {name: 0 for name in all_model_names}
-    dir_total: int = 0
+    dir_total_per_model: dict[str, int] = {name: 0 for name in all_model_names}
 
+    evaluated_folds = 0
     for T in origins:
         y_train = y.iloc[:T]
         y_actual = y.iloc[T:T + h_max]
         if len(y_actual) < primary_h:
             continue
 
+        evaluated_folds += 1
         last_train_val = float(y_train.iloc[-1])
 
         for name in all_model_names:
@@ -172,36 +178,30 @@ def evaluate(
                 actual_h = float(y_actual.iloc[h - 1])
                 pred_h = float(pred_arr[h - 1])
                 resid = actual_h - pred_h
-                # Collect residuals for the ENSEMBLE (use first non-naive model's
-                # prediction as a representative; but to keep it simple and
-                # model-agnostic, we collect residuals from the seasonal_naive
-                # benchmark — the honesty gate — so scenarios calibrate against
-                # a consistent baseline).  Actually: collect from the BEST model
-                # per fold is complex; instead collect from each model and we
-                # use the ensemble's residuals downstream.  For now, collect
-                # seasonal_naive residuals (the benchmark) at each horizon —
-                # this is what feeds conformal calibration.
-                if name == "seasonal_naive":
-                    residuals_by_horizon[h].append(resid)
+                residuals_by_model_horizon[name][h].append(resid)
                 err = _error_metric(actual_h, pred_h, use_rmse)
                 errors_by_horizon[h][name].append(err)
 
-            # Directional accuracy at primary horizon.
+            # Directional accuracy at primary horizon (count per model).
             if primary_h <= len(pred_arr) and primary_h <= len(y_actual):
                 pred_dir = float(pred_arr[primary_h - 1]) - last_train_val
                 actual_dir = float(y_actual.iloc[primary_h - 1]) - last_train_val
-                if name == "seasonal_naive":
-                    dir_total += 1
+                dir_total_per_model[name] += 1
                 if (pred_dir > 0) == (actual_dir > 0):
                     dir_correct[name] += 1
 
-    # Aggregate per-horizon MAPE.
+    # Aggregate per-horizon MAPE (or RMSE — sqrt applied here for RMSE path).
     per_horizon_mape: dict[int, dict[str, float]] = {}
     for h in horizons:
         per_horizon_mape[h] = {}
         for name in all_model_names:
             errs = [e for e in errors_by_horizon[h][name] if np.isfinite(e)]
-            per_horizon_mape[h][name] = float(np.mean(errs)) if errs else float("inf")
+            if not errs:
+                per_horizon_mape[h][name] = float("inf")
+            elif use_rmse:
+                per_horizon_mape[h][name] = float(np.sqrt(np.mean(errs)))
+            else:
+                per_horizon_mape[h][name] = float(np.mean(errs))
 
     # Backward-compat: per_model_mape = mean across horizons (excluding inf-only).
     per_model_mape: dict[str, float] = {}
@@ -220,11 +220,26 @@ def evaluate(
 
     naive_mape = per_model_mape.get("seasonal_naive", float("inf"))
 
-    # Directional accuracy.
+    # Resolve residuals_by_horizon to the BEST model (lowest mean per_model_mape,
+    # excluding baselines) — conformal calibration calibrates against the model
+    # whose forecast is actually published (the ensemble is dominated by it).
+    best_model = min(
+        (n for n in per_model_mape
+         if n not in ("naive_last", "seasonal_naive", "mean_reversion")
+         and np.isfinite(per_model_mape[n])),
+        key=lambda n: per_model_mape[n],
+        default="seasonal_naive",
+    )
+    residuals_by_horizon: dict[int, list[float]] = {
+        h: residuals_by_model_horizon[best_model].get(h, [])
+        for h in horizons
+    }
+
+    # Directional accuracy (per-model denominator).
     directional_accuracy: dict[str, float] = {}
     for name in all_model_names:
-        if dir_total > 0:
-            directional_accuracy[name] = dir_correct[name] / dir_total
+        if dir_total_per_model[name] > 0:
+            directional_accuracy[name] = dir_correct[name] / dir_total_per_model[name]
 
     # Backward-compat flattened residuals at primary horizon.
     flat_residuals = list(residuals_by_horizon.get(primary_h, []))
@@ -233,7 +248,7 @@ def evaluate(
         per_model_mape=per_model_mape,
         ensemble_mape=ensemble_mape,
         naive_mape=naive_mape,
-        n_folds=n_folds,
+        n_folds=evaluated_folds,
         residuals=flat_residuals,
         metric=metric,
         per_horizon_mape=per_horizon_mape,
