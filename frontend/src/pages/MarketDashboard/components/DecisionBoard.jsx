@@ -51,7 +51,7 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
 
   if (isLoading) {
     return (
-      <div className="mx-6 mt-4 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900">
+      <div className="mx-6 mt-4 shrink-0 rounded-lg border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900">
         AI 决策看板加载中…
       </div>
     );
@@ -61,8 +61,11 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
     return null;
   }
 
+  // shrink-0 is REQUIRED: the page root is a flex column with h-full +
+  // overflow-y-auto. Without it, flex-shrink squeezes this card (it has
+  // overflow-hidden, so min-height collapses) and clips the expanded row.
   return (
-    <div className="mx-6 mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+    <div className="mx-6 mt-4 shrink-0 overflow-hidden rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
       <div className="border-b border-slate-100 px-4 py-3 dark:border-slate-800">
         <div className="flex items-center gap-2">
           <Sparkles className="h-4 w-4 text-violet-500" />
