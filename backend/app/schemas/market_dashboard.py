@@ -157,6 +157,48 @@ class SkuForecastMeta(BaseModel):
     forecast_confidence: Optional[float] = None
 
 
+class SkuBrief(BaseModel):
+    """Compact SKU row for the decision board expanded card."""
+    material_code: str
+    name: str
+    forecast_base: Optional[float] = None
+
+
+class DecisionBoardProduct(BaseModel):
+    """One product row on the decision board (plain-language bundle)."""
+    id: str
+    name_zh: str
+    name_en: str
+    code: str
+    current_price: Optional[float] = None
+    price_date: Optional[str] = None
+    forecast_base: Optional[float] = None
+    expected_change_pct: Optional[float] = None  # fraction, 0.029 = +2.9%
+    p_rise: Optional[float] = None               # fraction [0,1]
+    action: str = "watch"                        # buy|hold|sell|watch
+    action_label_zh: str = "建议观望"
+    confidence: str = "low"                      # high|medium|low
+    trust_tier: Optional[str] = None
+    trust_label_zh: Optional[str] = None
+    trust_color: Optional[str] = None            # green|yellow|orange|red
+    directional_accuracy: Optional[float] = None  # fraction [0,1]
+    intel_event_count: int = 0
+    intel_bias: str = "neutral"                  # up|down|neutral
+    volatility_regime: Optional[str] = None      # NORMAL|MODERATE|HIGH
+    one_liner_zh: str = ""
+    narrative_zh: str = ""
+    skus: list[SkuBrief] = []
+
+
+class DecisionBoardResponse(BaseModel):
+    """GET /market-dashboard/decision-board payload."""
+    group: str
+    day: int
+    generated_at: str
+    briefing_zh: str
+    products: list[DecisionBoardProduct] = []
+
+
 class ForecastBaseBatchResponse(BaseModel):
     """Batch response for /forecast-base-batch — 7-day-ahead forecast prices.
 
