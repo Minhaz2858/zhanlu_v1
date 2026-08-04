@@ -29,6 +29,7 @@ from app.services.forecasting.accuracy_tracker import (
     detect_drift,
 )
 from app.services.forecasting.backtest import BacktestResult, evaluate
+from app.services.forecasting.conformal import calibrate as conformal_calibrate
 from app.services.forecasting.edia_source import EdiaMysqlDataSource
 from app.services.forecasting.discovery import discover
 from app.services.forecasting.ensemble import EnsembleResult, blend, run_models
@@ -47,6 +48,9 @@ from app.services.forecasting.reconcile import (
     CoherenceReport,
     apply_coherence,
     check_coherence,
+)
+from app.services.forecasting.price_change_probability import (
+    compute as compute_price_change_probability,
 )
 from app.services.forecasting.scenarios import ScenarioResult, generate
 
@@ -523,17 +527,40 @@ class ForecastEngine:
                 "policy": policy_report,
                 "domain_signals": domain_signals_report,
                 "trust_tier": trust_tier_report,
+                "probability": probability_report,
             }
         except Exception as exc:
             logger.warning("Explanation failed for %s: %s", target.product_key, exc)
 
-        # --- Scenarios ---
+        # --- Scenarios (with conformal calibrated intervals) ---
+        cal = conformal_calibrate(bt.residuals_by_horizon) if bt.residuals_by_horizon else None
         scenarios_result = generate(
             guard_result.published_forecast,
             residuals=bt.residuals,
             mape=bt.ensemble_mape,
             horizons=horizons,
+            calibration=cal,
         )
+
+        # --- Price-change probability (Phase D) ---
+        last_actual = float(y_model.iloc[-1]) if len(y_model) > 0 else None
+        probability_report: dict = {}
+        if cal is not None and last_actual:
+            try:
+                for h in horizons:
+                    pcp = compute_price_change_probability(
+                        guard_result.published_forecast,
+                        last_actual=last_actual,
+                        calibration=cal,
+                        horizon=h,
+                    )
+                    probability_report[str(h)] = {
+                        "p_rise": round(pcp.p_rise, 3),
+                        "p_rise_gt": {str(k): round(v, 3) for k, v in pcp.p_rise_gt.items()},
+                        "expected_change_pct": round(pcp.expected_change_pct, 4),
+                    }
+            except Exception as exc:
+                logger.warning("Price-change probability failed for %s: %s", target.product_key, exc)
 
         # --- Build results JSON ---
         results = {

@@ -109,12 +109,21 @@ class TrustTierMeta(BaseModel):
     reason_en: Optional[str] = None
 
 
+class ProbabilityOverlayMeta(BaseModel):
+    """Price-change probability for one horizon (Phase D)."""
+    horizon: int
+    p_rise: float  # P(price[T+h] > price[T])
+    p_rise_gt: dict[str, float] = {}  # threshold% -> P(rise > threshold)
+    expected_change_pct: Optional[float] = None
+
+
 class ForecastOverlayMeta(BaseModel):
     """Combined per-product overlay metadata bundle."""
     product_id: str
     intelligence: Optional[IntelligenceOverlayMeta] = None
     policy: Optional[PolicyOverlayMeta] = None
     trust_tier: Optional[TrustTierMeta] = None
+    probability: Optional[list[ProbabilityOverlayMeta]] = None
 
 
 class SkuForecastMeta(BaseModel):

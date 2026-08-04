@@ -894,7 +894,7 @@ def get_forecast_base_batch_v2(
     from app.models.forecasting import ForecastTarget, ForecastRun
     from app.schemas.market_dashboard import (
         ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
-        SkuForecastMeta, TrustTierMeta,
+        ProbabilityOverlayMeta, SkuForecastMeta, TrustTierMeta,
     )
 
     out: dict = {pid: None for pid in product_ids}
@@ -948,8 +948,10 @@ def get_forecast_base_batch_v2(
                 elif isinstance(base, (int, float)):
                     out[pid] = float(base)
 
-                # Phase 6: extract overlay metadata from explanation
-                explanation = horizon_payload.get("explanation") or {}
+                # Phase 6: extract overlay metadata from the run's
+                # separate explanation column (NOT from horizon_payload —
+                # that only carries base/bull/bear).
+                explanation = (run.explanation if hasattr(run, "explanation") else None) or {}
                 intel_raw = explanation.get("intelligence") or {}
                 policy_raw = explanation.get("policy") or {}
 
@@ -985,12 +987,35 @@ def get_forecast_base_batch_v2(
                         reason_en=trust_raw.get("reason_en"),
                     )
 
-                if intel_meta or policy_meta or trust_meta:
+                # Phase D: probability overlay
+                probability_list: list = []
+                prob_report = explanation.get("probability") or {}
+                for h_str, p_info in prob_report.items():
+                    if not isinstance(p_info, dict):
+                        continue
+                    try:
+                        h_int = int(h_str)
+                    except (ValueError, TypeError):
+                        continue
+                    pr = p_info.get("p_rise")
+                    if pr is None:
+                        continue
+                    pr_gt_raw = p_info.get("p_rise_gt") or {}
+                    pr_gt = {str(k): float(v) for k, v in pr_gt_raw.items() if v is not None}
+                    probability_list.append(ProbabilityOverlayMeta(
+                        horizon=h_int,
+                        p_rise=float(pr),
+                        p_rise_gt=pr_gt,
+                        expected_change_pct=p_info.get("expected_change_pct"),
+                    ))
+
+                if intel_meta or policy_meta or trust_meta or probability_list:
                     overlay[pid] = ForecastOverlayMeta(
                         product_id=pid,
                         intelligence=intel_meta,
                         policy=policy_meta,
                         trust_tier=trust_meta,
+                        probability=probability_list if probability_list else None,
                     )
 
         # ── ERP products: prefix lookup for SKU-level targets ──
@@ -1218,12 +1243,21 @@ def invalidate_overview_cache() -> int:
 
 def _build_overlay_meta(
     product_id: str, horizon_payload: dict,
+    explanation: Optional[dict] = None,
 ) -> Optional["ForecastOverlayMeta"]:
-    """Phase 6: Build overlay metadata from a ForecastRun horizon_payload."""
+    """Phase 6: Build overlay metadata from a ForecastRun horizon_payload.
+
+    *explanation* should be the dict from the ForecastRun's separate
+    ``explanation`` JSON column (NOT from ``horizon_payload`` — that only
+    contains ``{base, bull, bear}``).  Falls back to
+    ``horizon_payload.get("explanation")`` for backward compat.
+    """
     from app.schemas.market_dashboard import (
         ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
+        ProbabilityOverlayMeta,
     )
-    explanation = horizon_payload.get("explanation") or {}
+    if explanation is None:
+        explanation = horizon_payload.get("explanation") or {}
     intel_raw = explanation.get("intelligence") or {}
     policy_raw = explanation.get("policy") or {}
 
@@ -1259,12 +1293,35 @@ def _build_overlay_meta(
             reason_en=trust_raw.get("reason_en"),
         )
 
-    if intel_meta or policy_meta or trust_meta:
+    # Phase D: probability overlay (price-change probability per horizon)
+    probability_list: list[ProbabilityOverlayMeta] = []
+    prob_report = explanation.get("probability") or {}
+    for h_str, p_info in prob_report.items():
+        if not isinstance(p_info, dict):
+            continue
+        try:
+            h_int = int(h_str)
+        except (ValueError, TypeError):
+            continue
+        p_rise = p_info.get("p_rise")
+        if p_rise is None:
+            continue
+        p_rise_gt_raw = p_info.get("p_rise_gt") or {}
+        p_rise_gt = {str(k): float(v) for k, v in p_rise_gt_raw.items() if v is not None}
+        probability_list.append(ProbabilityOverlayMeta(
+            horizon=h_int,
+            p_rise=float(p_rise),
+            p_rise_gt=p_rise_gt,
+            expected_change_pct=p_info.get("expected_change_pct"),
+        ))
+
+    if intel_meta or policy_meta or trust_meta or probability_list:
         return ForecastOverlayMeta(
             product_id=product_id,
             intelligence=intel_meta,
             policy=policy_meta,
             trust_tier=trust_meta,
+            probability=probability_list if probability_list else None,
         )
     return None
 
@@ -1352,7 +1409,11 @@ def get_forecast_chart(
                     data_quality = "good"
 
                     # ---- Phase 6: Extract overlay metadata ----
-                    overlay_meta = _build_overlay_meta(product_id, horizon_payload)
+                    # explanation is a separate column on ForecastRun — NOT
+                    # embedded in horizon_payload (which only has base/bull/bear).
+                    overlay_meta = _build_overlay_meta(
+                        product_id, horizon_payload, latest.explanation,
+                    )
 
                     # ---- Step-function previous AI across the PAST zone ----
                     # For each past date D, find the newest run with

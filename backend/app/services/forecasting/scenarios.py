@@ -10,10 +10,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from app.services.forecasting.conformal import ConformalCalibration
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +43,7 @@ def generate(
     mape: float | None = None,
     horizons: list[int] | None = None,
     fallback_std: float | None = None,
+    calibration: "ConformalCalibration | None" = None,
 ) -> ScenarioResult:
     """Generate base/bull/bear for specified horizons.
 
@@ -60,6 +64,10 @@ def generate(
         If *residuals* is None or empty, use this standard deviation
         for ±1-sigma bands.  If also None, default is 10% of the mean
         absolute forecast value.
+    calibration : ConformalCalibration or None
+        When provided, bull/bear bounds use per-horizon conformal
+        intervals (calibrated coverage ~1-alpha) instead of the
+        25th/75th residual percentile.  Preferred over *residuals*.
 
     Returns
     -------
@@ -77,20 +85,25 @@ def generate(
         padded[:len(values)] = values
         point_forecast = pd.Series(padded, name=point_forecast.name)
 
-    # Determine bounds
-    if residuals and len(residuals) >= 5:
-        lower_quantile = float(np.percentile(residuals, 25))
-        upper_quantile = float(np.percentile(residuals, 75))
-        bounds_source = "residuals"
-    else:
-        # Fallback: ±1 sigma around zero
-        if fallback_std is not None:
-            sigma = fallback_std
+    use_conformal = calibration is not None
+
+    # Determine bounds (non-conformal path: single quantile for all horizons)
+    if not use_conformal:
+        if residuals and len(residuals) >= 5:
+            lower_quantile = float(np.percentile(residuals, 25))
+            upper_quantile = float(np.percentile(residuals, 75))
+            bounds_source = "residuals"
         else:
-            sigma = 0.1 * float(np.abs(point_forecast.values[:h_max]).mean() + 1e-10)
-        lower_quantile = -sigma
-        upper_quantile = sigma
-        bounds_source = "sigma"
+            # Fallback: ±1 sigma around zero
+            if fallback_std is not None:
+                sigma = fallback_std
+            else:
+                sigma = 0.1 * float(np.abs(point_forecast.values[:h_max]).mean() + 1e-10)
+            lower_quantile = -sigma
+            upper_quantile = sigma
+            bounds_source = "sigma"
+    else:
+        bounds_source = "conformal"
 
     # Confidence label
     if mape is not None and mape < float("inf"):
@@ -108,8 +121,13 @@ def generate(
 
     for h in horizons:
         base = pd.Series(point_forecast.values[:h], name="base")
-        bull = pd.Series(base.values + upper_quantile, name="bull")
-        bear = pd.Series(base.values + lower_quantile, name="bear")
+        if use_conformal:
+            lo, hi = calibration.interval(point_forecast, horizon=h)
+            bull = pd.Series(hi.values[:h], name="bull")
+            bear = pd.Series(lo.values[:h], name="bear")
+        else:
+            bull = pd.Series(base.values + upper_quantile, name="bull")
+            bear = pd.Series(base.values + lower_quantile, name="bear")
         horizon_scenarios[h] = {"base": base, "bull": bull, "bear": bear}
 
     return ScenarioResult(

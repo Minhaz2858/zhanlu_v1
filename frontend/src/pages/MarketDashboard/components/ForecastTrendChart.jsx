@@ -273,7 +273,7 @@ export default function ForecastTrendChart({ productId, productName }) {
             </span>
           )}
           {/* Phase B: Trust tier badge */}
-          {data.overlay?.trust_tier && (
+          {data?.overlay?.trust_tier && (
             <div
               className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium"
               style={{
@@ -303,6 +303,30 @@ export default function ForecastTrendChart({ productId, productName }) {
               {data.overlay.trust_tier.badge_label_en}
             </div>
           )}
+          {/* Phase D: Price-change probability badge (primary 7d horizon) */}
+          {data?.overlay?.probability && data.overlay.probability.length > 0 && (() => {
+            const p7 = data.overlay.probability.find(p => p.horizon === 7)
+                       || data.overlay.probability[0]
+            if (!p7) return null
+            const prob = p7.p_rise
+            const tintBg = prob > 0.6 ? '#dcfce7' : prob < 0.4 ? '#fee2e2' : '#f1f5f9'
+            const tintFg = prob > 0.6 ? '#166534' : prob < 0.4 ? '#991b1b' : '#475569'
+            const dot = prob > 0.6 ? '#22c55e' : prob < 0.4 ? '#ef4444' : '#94a3b8'
+            const sign = (p7.expected_change_pct ?? 0) >= 0 ? '↑' : '↓'
+            return (
+              <div
+                className="relative inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium"
+                style={{ backgroundColor: tintBg, color: tintFg }}
+                title={`P(rise) at ${p7.horizon}d: ${(prob * 100).toFixed(0)}%  · expected ${sign} ${(Math.abs(p7.expected_change_pct ?? 0) * 100).toFixed(1)}%`}
+              >
+                <span
+                  className="inline-block h-2 w-2 rounded-full"
+                  style={{ backgroundColor: dot }}
+                />
+                {p7.horizon}d · {(prob * 100).toFixed(0)}% rise
+              </div>
+            )
+          })()}
           {/* Phase 7: SKU badge for ERP products */}
           {isErpProduct && skuCount > 0 && (
             <div className="relative">
