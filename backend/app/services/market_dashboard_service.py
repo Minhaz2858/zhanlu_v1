@@ -894,7 +894,7 @@ def get_forecast_base_batch_v2(
     from app.models.forecasting import ForecastTarget, ForecastRun
     from app.schemas.market_dashboard import (
         ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
-        SkuForecastMeta,
+        SkuForecastMeta, TrustTierMeta,
     )
 
     out: dict = {pid: None for pid in product_ids}
@@ -973,11 +973,24 @@ def get_forecast_base_batch_v2(
                         applied_factor=policy_raw.get("applied_factor"),
                     )
 
-                if intel_meta or policy_meta:
+                trust_raw = explanation.get("trust_tier") or {}
+                trust_meta = None
+                if trust_raw:
+                    trust_meta = TrustTierMeta(
+                        tier=trust_raw.get("tier", "medium"),
+                        badge_color=trust_raw.get("badge_color", "yellow"),
+                        badge_label_zh=trust_raw.get("badge_label_zh", ""),
+                        badge_label_en=trust_raw.get("badge_label_en", ""),
+                        reason_zh=trust_raw.get("reason_zh"),
+                        reason_en=trust_raw.get("reason_en"),
+                    )
+
+                if intel_meta or policy_meta or trust_meta:
                     overlay[pid] = ForecastOverlayMeta(
                         product_id=pid,
                         intelligence=intel_meta,
                         policy=policy_meta,
+                        trust_tier=trust_meta,
                     )
 
         # ── ERP products: prefix lookup for SKU-level targets ──
@@ -1234,11 +1247,24 @@ def _build_overlay_meta(
             applied_factor=policy_raw.get("applied_factor"),
         )
 
-    if intel_meta or policy_meta:
+    trust_raw = explanation.get("trust_tier") or {}
+    trust_meta: Optional[TrustTierMeta] = None
+    if trust_raw:
+        trust_meta = TrustTierMeta(
+            tier=trust_raw.get("tier", "medium"),
+            badge_color=trust_raw.get("badge_color", "yellow"),
+            badge_label_zh=trust_raw.get("badge_label_zh", ""),
+            badge_label_en=trust_raw.get("badge_label_en", ""),
+            reason_zh=trust_raw.get("reason_zh"),
+            reason_en=trust_raw.get("reason_en"),
+        )
+
+    if intel_meta or policy_meta or trust_meta:
         return ForecastOverlayMeta(
             product_id=product_id,
             intelligence=intel_meta,
             policy=policy_meta,
+            trust_tier=trust_meta,
         )
     return None
 

@@ -272,6 +272,37 @@ export default function ForecastTrendChart({ productId, productName }) {
               {data.overlay.intelligence.active_event_count} intel
             </span>
           )}
+          {/* Phase B: Trust tier badge */}
+          {data.overlay?.trust_tier && (
+            <div
+              className="inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium"
+              style={{
+                backgroundColor:
+                  data.overlay.trust_tier.badge_color === 'green' ? '#dcfce7' :
+                  data.overlay.trust_tier.badge_color === 'yellow' ? '#fef9c3' :
+                  data.overlay.trust_tier.badge_color === 'orange' ? '#ffedd5' :
+                  data.overlay.trust_tier.badge_color === 'red' ? '#fee2e2' : '#f1f5f9',
+                color:
+                  data.overlay.trust_tier.badge_color === 'green' ? '#166534' :
+                  data.overlay.trust_tier.badge_color === 'yellow' ? '#854d0e' :
+                  data.overlay.trust_tier.badge_color === 'orange' ? '#9a3412' :
+                  data.overlay.trust_tier.badge_color === 'red' ? '#991b1b' : '#475569',
+              }}
+              title={data.overlay.trust_tier.reason_en || data.overlay.trust_tier.reason_zh}
+            >
+              <span
+                className="inline-block h-1.5 w-1.5 rounded-full"
+                style={{
+                  backgroundColor:
+                    data.overlay.trust_tier.badge_color === 'green' ? '#22c55e' :
+                    data.overlay.trust_tier.badge_color === 'yellow' ? '#eab308' :
+                    data.overlay.trust_tier.badge_color === 'orange' ? '#f97316' :
+                    data.overlay.trust_tier.badge_color === 'red' ? '#ef4444' : '#94a3b8',
+                }}
+              />
+              {data.overlay.trust_tier.badge_label_en}
+            </div>
+          )}
           {/* Phase 7: SKU badge for ERP products */}
           {isErpProduct && skuCount > 0 && (
             <div className="relative">

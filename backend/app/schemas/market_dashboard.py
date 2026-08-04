@@ -99,11 +99,22 @@ class PolicyOverlayMeta(BaseModel):
     applied_factor: Optional[float] = None
 
 
+class TrustTierMeta(BaseModel):
+    """User-facing trust tier for a product's forecast (Phase B)."""
+    tier: str  # "high" | "medium" | "directional" | "low"
+    badge_color: str  # "green" | "yellow" | "orange" | "red"
+    badge_label_zh: str
+    badge_label_en: str
+    reason_zh: Optional[str] = None
+    reason_en: Optional[str] = None
+
+
 class ForecastOverlayMeta(BaseModel):
     """Combined per-product overlay metadata bundle."""
     product_id: str
     intelligence: Optional[IntelligenceOverlayMeta] = None
     policy: Optional[PolicyOverlayMeta] = None
+    trust_tier: Optional[TrustTierMeta] = None
 
 
 class SkuForecastMeta(BaseModel):
