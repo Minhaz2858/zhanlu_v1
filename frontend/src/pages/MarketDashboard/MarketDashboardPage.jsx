@@ -8,6 +8,7 @@ import OverviewDashboard from './components/OverviewDashboard';
 import ObservedDataStrip from './components/ObservedDataStrip';
 import ForecastTrendChart from './components/ForecastTrendChart';
 import PriceTransmissionChain from './components/PriceTransmissionChain';
+import DecisionBoard from './components/DecisionBoard';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
 
@@ -145,6 +146,16 @@ export default function MarketDashboardPage() {
         labels={stripLabels}
         selectedId={selectedProductId}
         onSelect={setSelectedProductId}
+      />
+      <DecisionBoard
+        group={section}
+        selectedId={selectedProductId}
+        onSelectProduct={setSelectedProductId}
+      />
+      <DecisionBoard
+        group={section}
+        selectedId={selectedProductId}
+        onSelectProduct={setSelectedProductId}
       />
       {snapshotQuery.isLoading && (
         <div className="px-6 py-4">

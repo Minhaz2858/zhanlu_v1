@@ -12,6 +12,7 @@ vi.mock('@/api/marketDashboard', () => ({
     regionalBatch: vi.fn().mockResolvedValue({ items: {}, errors: {} }),
     news: vi.fn().mockResolvedValue({ items: [], note: '' }),
     forecastBaseBatch: vi.fn().mockResolvedValue({ day: 7, base_by_product: {} }),
+    decisionBoard: vi.fn().mockResolvedValue({ group: '', day: 7, generated_at: '', briefing_zh: '', products: [] }),
     forecastChart: vi.fn().mockResolvedValue({
       product_id: 'x',
       points: [
