@@ -79,10 +79,55 @@ class RegionalBatchResponse(BaseModel):
     errors: dict[str, str] = Field(default_factory=dict)
 
 
+# ── Phase 6: Forecast overlay metadata (intelligence + policy) ──────
+
+class IntelligenceOverlayMeta(BaseModel):
+    """Per-product intelligence overlay snapshot."""
+    active_event_count: int = 0
+    bias_direction: str = "neutral"     # "up" | "down" | "neutral"
+    impact_tier: Optional[str] = None   # "tier1" | "tier2" | "tier3"
+    confidence: Optional[float] = None
+    summary: Optional[str] = None
+
+
+class PolicyOverlayMeta(BaseModel):
+    """Per-product policy service snapshot."""
+    volatility_regime: Optional[str] = None  # "NORMAL" | "MODERATE" | "HIGH"
+    vol_multiplier: Optional[float] = None
+    bias_pct: Optional[float] = None
+    diagnosis_bias: Optional[float] = None
+    applied_factor: Optional[float] = None
+
+
+class ForecastOverlayMeta(BaseModel):
+    """Combined per-product overlay metadata bundle."""
+    product_id: str
+    intelligence: Optional[IntelligenceOverlayMeta] = None
+    policy: Optional[PolicyOverlayMeta] = None
+
+
+class SkuForecastMeta(BaseModel):
+    """Metadata for one SKU (material_code) within a product family."""
+    material_code: str
+    target_id: str
+    name: str
+    report_order: int
+    is_primary: bool = False
+    row_count: Optional[int] = None
+    forecast_base: Optional[float] = None
+    forecast_confidence: Optional[float] = None
+
+
 class ForecastBaseBatchResponse(BaseModel):
-    """Batch response for /forecast-base-batch — 7-day-ahead forecast prices."""
+    """Batch response for /forecast-base-batch — 7-day-ahead forecast prices.
+
+    Phase 6: includes overlay metadata per product.
+    Phase 7: includes SKU drill-down data for ERP products.
+    """
     day: int
     base_by_product: dict[str, Optional[float]] = Field(default_factory=dict)
+    overlay_by_product: dict[str, Optional[ForecastOverlayMeta]] = Field(default_factory=dict)
+    sku_forecasts_by_product: dict[str, list[SkuForecastMeta]] = Field(default_factory=dict)
 
 
 class FxRateResponse(BaseModel):
@@ -134,13 +179,73 @@ class OverviewBundle(BaseModel):
     Returns everything the EDIA overview dashboard needs in a single
     round-trip so the page renders without waiting on a waterfall of
     separate /snapshot /regional-batch /forecast-base-batch /fx calls.
+
+    Phase 6: includes forecast_overlay_by_product.
     """
     snapshot: list[MarketSnapshot] = Field(default_factory=list)
     regional: dict[str, RegionalPriceData] = Field(default_factory=dict)
     regional_errors: dict[str, str] = Field(default_factory=dict)
     forecast_day: int = 7
     forecast_base_by_product: dict[str, Optional[float]] = Field(default_factory=dict)
+    forecast_overlay_by_product: dict[str, Optional[ForecastOverlayMeta]] = Field(default_factory=dict)  # Phase 6
     fx: FxRateResponse
     cached: bool = False  # True when this response came from the in-memory cache
     cache_age_ms: int = 0  # how old the cached payload is (0 when freshly built)
+
+
+# ── Forecast chart (past + forecast merged timeline) ────────────────
+
+class ForecastChartPoint(BaseModel):
+    """Single date point on the merged past+forecast chart."""
+    date: str
+    actual: Optional[float] = None       # past actual price
+    previous_ai: Optional[float] = None  # previous AI rec price (step-function)
+    prev_ai_low: Optional[float] = None  # previous AI bear (range band lower)
+    prev_ai_high: Optional[float] = None # previous AI bull (range band upper)
+    exec_in: Optional[float] = None      # actual price when executed IN range (green dot)
+    exec_out: Optional[float] = None     # actual price when executed OUTSIDE range (red dot)
+    base: Optional[float] = None         # forecast base
+    bull: Optional[float] = None         # forecast bull (upper)
+    bear: Optional[float] = None         # forecast bear (lower)
+    zone: str = "past"                   # "past" | "today" | "forecast"
+
+
+class ForecastChartResponse(BaseModel):
+    """Full forecast chart payload for a product.
+
+    Phase 6: includes overlay metadata (intelligence + policy).
+    """
+    product_id: str
+    points: list[ForecastChartPoint] = Field(default_factory=list)
+    data_quality: str = "good"           # "good" | "insufficient"
+    as_of_date: Optional[str] = None     # forecast run date
+    previous_ai_date: Optional[str] = None
+    product_name: str = ""
+    executed_in_range_count: int = 0     # count of past dates inside AI range
+    executed_outside_range_count: int = 0  # count of past dates outside AI range
+    overlay: Optional[ForecastOverlayMeta] = None  # Phase 6
+
+
+# ── Price transmission chain (3-tier upstream flow) ─────────────────
+
+class PriceChainNode(BaseModel):
+    """One product node in the price transmission chain."""
+    product_id: str
+    name_en: str
+    name_zh: str
+    current_price: Optional[float] = None
+    change_pct_30d: Optional[float] = None
+    sparkline: list[float] = Field(default_factory=list)
+    percentile: Optional[float] = None
+    percentile_remark: Optional[str] = None
+    erp_exec_price: Optional[float] = None
+    trend_start_date: Optional[str] = None
+    trend_end_date: Optional[str] = None
+    group: str = "upstream"
+
+
+class PriceChainResponse(BaseModel):
+    """3-tier price transmission chain."""
+    tiers: list[list[PriceChainNode]] = Field(default_factory=list)
+    as_of_date: Optional[str] = None
 
