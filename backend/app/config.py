@@ -382,6 +382,13 @@ class Settings(BaseSettings):
     # Cron expression for the nightly forecast run. Default: 2 AM daily.
     NIGHTLY_FORECAST_CRON: str = "0 2 * * *"
 
+    # ── Forecast Phase 1 enhancement flags ─────────────────────
+    FORECAST_EXOG_ENABLED: bool = True
+    FORECAST_PREPROCESS_ENABLED: bool = True
+    FORECAST_CASCADE_ENABLED: bool = True
+    FORECAST_ADAPTIVE_WEIGHTS_FACTOR: float = 0.3
+    FORECAST_DRIFT_THRESHOLD_PCT: float = 20.0
+
     # ── Ecisco BI feature flags (EDIA 5.1.2 → zhanlu migration) ─────────
     # Master switch for EDIA-specific delegated tools in the ecisco_bi_assistant
     # agent.  When False, the agent runs as a plain general assistant with

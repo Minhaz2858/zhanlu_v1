@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { MessageSquare, Boxes, Grid3x3 } from 'lucide-react';
+import { MessageSquare, Boxes, Folder, Grid3x3, User } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import MoreSheet from './MoreSheet';
 
@@ -18,7 +18,8 @@ export default function BottomTabBar() {
 
   const tabs = [
     { to: '/chat', label: t.mobile.chat, icon: MessageSquare },
-    { to: '/my-space', label: t.mobile.mySpace, icon: Boxes },
+    { to: '/from-personal', label: t.mobile.fromPersonal, icon: User },
+    { to: '/my-files', label: t.mobile.myFiles, icon: Folder },
   ];
 
   return (

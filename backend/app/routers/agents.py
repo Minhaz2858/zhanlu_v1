@@ -1965,6 +1965,29 @@ async def create_conversation(
     project_id = body.get("project_id")
     if not project_id and isinstance(metadata, dict):
         project_id = metadata.get("project_id")
+    # Validate ``project_id`` against the live ``projects`` table. The
+    # frontend caches project context in ``sessionStorage['zhanlu:lastProjectContext']``
+    # and can outlive the actual project — e.g. an admin deletes the
+    # project (or it was hard-deleted) but the user's browser still
+    # holds the stale UUID. Sending that into the FK column surfaces
+    # as a 500 IntegrityError and the user sees "agents are not
+    # responding" with no clue why. Fall back to ``None`` so the
+    # conversation is created against the agent's default data-source
+    # scope (graceful degradation rather than a hard failure).
+    if project_id:
+        from app.models.project import Project as _Project  # local import: avoids module-load cycles
+        _project_row = (
+            db.query(_Project.id)
+            .filter(_Project.id == project_id, _Project.is_deleted == False)  # noqa: E712
+            .first()
+        )
+        if _project_row is None:
+            # Stale or non-existent project id — drop it. Also strip
+            # ``project_id``/``project_name`` from the stored metadata
+            # so the conversation isn't tagged with a phantom project.
+            project_id = None
+            if isinstance(metadata, dict):
+                metadata = {k: v for k, v in metadata.items() if k not in ("project_id", "project_name", "project")}
     conv = AgentConversation(
         agent_name=body.get("agent_name"),
         title=title,
@@ -1973,6 +1996,7 @@ async def create_conversation(
         created_by_id=created_by,
         # Tag the conversation with the project the user selected so the
         # data-source runtime scopes to that project's KBs + context.
+        # If validation above dropped a stale project_id, this stays None.
         project_id=project_id,
     )
     conv.metadata_ = metadata

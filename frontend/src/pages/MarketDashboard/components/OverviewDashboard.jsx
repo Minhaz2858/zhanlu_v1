@@ -739,6 +739,7 @@ export default function OverviewDashboard({
   const usdrmb = hasFxRate ? fxRate.price : null;
 
   const weeklyForecastBaseByProduct = bundle?.forecast_base_by_product || {};
+  const forecastOverlayByProduct = bundle?.forecast_overlay_by_product || {}; // Phase 6
 
   /* Regional row payload by product_id. The bundle returns the schema used
    * by the regional-batch endpoint: { items: { product_id: { regions: [...] } } }
@@ -1196,6 +1197,30 @@ export default function OverviewDashboard({
                               {formatAbsoluteChange(item.price, null, forecastGap)}
                             </div>
                           </div>
+                          {/* Phase 6: inline overlay badges */}
+                          {(() => {
+                            const ov = forecastOverlayByProduct[item.id];
+                            if (!ov) return null;
+                            const vol = ov.policy?.volatility_regime;
+                            const intelCount = ov.intelligence?.active_event_count;
+                            const intelDir = ov.intelligence?.bias_direction;
+                            if (!vol && !intelCount) return null;
+                            return (
+                              <div className="flex flex-wrap gap-1 mt-1.5">
+                                {vol && (
+                                  <span className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium leading-tight bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400">
+                                    <span className="w-2 h-2 rounded-full bg-current inline-block" />
+                                    {vol}
+                                  </span>
+                                )}
+                                {intelCount > 0 && (
+                                  <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium leading-tight ${intelDir === 'up' ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : intelDir === 'down' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>
+                                    {intelDir === 'up' ? '↑' : intelDir === 'down' ? '↓' : '—'} Intel
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })()}
                         </article>
                       );
                     })}

@@ -2,11 +2,13 @@ import { useState, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { useAuth } from '@/lib/AuthContext';
 import { useTranslate } from '@/lib/useTranslate';
 import PageHeader from '@/components/PageHeader';
 import { Button } from '@/components/ui/button';
-import { Save, Play, Trash2, Loader2, ChevronRight, Copy } from 'lucide-react';
+import { Save, Play, Trash2, Loader2, ChevronRight, Copy, Users } from 'lucide-react';
 import DuplicateAgentDialog from '@/components/agent/DuplicateAgentDialog';
+import ResourceAccessDialog from '@/components/ResourceAccessDialog';
 import AgentTeamTree from '@/components/agent/AgentTeamTree';
 import FlowTree from '@/components/agent/FlowTree';
 import BlockConfig from '@/components/agent/BlockConfig';
@@ -92,6 +94,7 @@ export default function AgentConfig() {
   const { id } = useParams();
   const navigate = useNavigate();
   const { t, lang } = useLanguage();
+  const { isAdmin } = useAuth();
   const [agent, setAgent] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -99,6 +102,7 @@ export default function AgentConfig() {
   const [form, setForm] = useState(DEFAULT_FORM);
   const [selectedPath, setSelectedPath] = useState([]);
   const [dupOpen, setDupOpen] = useState(false);
+  const [accessDialogOpen, setAccessDialogOpen] = useState(false);
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [id]);
 
@@ -237,6 +241,11 @@ export default function AgentConfig() {
         title={translate(form.name) || t.agentConfig.title}
         action={
           <div className="flex gap-2">
+            {isAdmin && (
+              <Button onClick={() => setAccessDialogOpen(true)} size="sm" variant="outline" className="gap-1.5">
+                <Users className="h-3.5 w-3.5" /> {t.agentConfig.manageAccess || 'Access'}
+              </Button>
+            )}
             <Button onClick={() => navigate(`/?agent=${id}`)} size="sm" className="gap-1.5">
               <Play className="h-3.5 w-3.5" /> {t.agentConfig.runAgent}
             </Button>
@@ -321,6 +330,16 @@ export default function AgentConfig() {
         </div>
       </div>
       <DuplicateAgentDialog open={dupOpen} onOpenChange={setDupOpen} agent={form} onDone={(newId) => navigate(`/my-space/agent/${newId}`)} />
+
+      {/* ── Admin: Manage Access dialog ── */}
+      {accessDialogOpen && (
+        <ResourceAccessDialog
+          resourceType="agent"
+          resourceId={id}
+          resourceName={form.name || `Agent ${id}`}
+          onClose={() => setAccessDialogOpen(false)}
+        />
+      )}
     </div>
   );
 }

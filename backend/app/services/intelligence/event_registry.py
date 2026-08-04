@@ -43,12 +43,36 @@ class IntelligenceEventRegistry:
             return raw_value
         return "approved"
 
+    @staticmethod
+    def _compute_auto_approval(event: ExtractedEvent, desired_status: str) -> str:
+        """Phase 5: Auto-approve events that meet quality thresholds.
+
+        Rules:
+        - impact_magnitude >= 0.7 (high impact) AND relevance_score >= 0.7 (direct)
+          AND source_credibility in {tier1, tier2} → auto_approved
+        - Otherwise leave status unchanged.
+        - Never auto-approve an already-rejected event.
+        """
+        if desired_status == "rejected":
+            return desired_status
+        impact = event.impact_magnitude
+        relevance = event.relevance_score
+        credibility = (event.source_credibility or "tier2").strip().lower()
+        if impact >= 0.70 and relevance >= 0.70 and credibility in {"tier1", "tier2"}:
+            return "auto_approved"
+        return desired_status
+
     async def upsert_event(self, event: ExtractedEvent, org_id: str = "default-org") -> IntelligenceEvent:
         """Insert or update an event. Returns the persisted ORM model."""
         db = self._db
         stmt = select(IntelligenceEvent).where(IntelligenceEvent.event_id == event.event_id)
         result = await db.execute(stmt)
         existing = result.scalar_one_or_none()
+
+        desired_status = (
+            event.review_status or self._default_review_status()
+        ).strip().lower()
+        final_status = self._compute_auto_approval(event, desired_status)
 
         payload = {
             "event_id": event.event_id,
@@ -71,13 +95,22 @@ class IntelligenceEventRegistry:
             "detected_at": event.detected_at,
             "impact_magnitude": event.impact_magnitude,
             "relevance_score": event.relevance_score,
-            "review_status": (event.review_status or self._default_review_status()).strip().lower(),
+            "review_status": final_status,
             "usefulness_score": int(event.usefulness_score or 0),
             "reviewed_by": (event.reviewed_by or "").strip(),
             "reviewed_at": (event.reviewed_at or "").strip(),
             "review_note": (event.review_note or "").strip(),
             "org_id": org_id,
         }
+
+        if final_status == "auto_approved" and desired_status != "auto_approved":
+            logger.info(
+                "[auto-approval] %s → auto_approved (impact=%.2f, relevance=%.2f, credibility=%s)",
+                event.event_id,
+                event.impact_magnitude,
+                event.relevance_score,
+                event.source_credibility,
+            )
 
         if existing:
             for key, val in payload.items():
@@ -88,6 +121,15 @@ class IntelligenceEventRegistry:
                 if key in ("review_status", "usefulness_score", "reviewed_by",
                            "reviewed_at", "review_note") and not val:
                     continue
+                # Phase 5: Never downgrade auto_approved or rejected events
+                if key == "review_status":
+                    existing_status = getattr(existing, "review_status", "")
+                    if existing_status in ("auto_approved", "rejected") and val not in ("auto_approved", "rejected"):
+                        logger.debug(
+                            "[auto-approval] preserving existing status=%s for %s (incoming=%s)",
+                            existing_status, event.event_id, val,
+                        )
+                        continue
                 setattr(existing, key, val)
             existing.updated_date = datetime.utcnow()
             await db.flush()
@@ -231,7 +273,7 @@ class IntelligenceEventRegistry:
     async def get_review_summary(self, hours: int = 168, org_id: Optional[str] = None) -> dict[str, Any]:
         """Get review status summary for events in the last ``hours`` hours."""
         events = await self.list_recent_events(hours=hours, org_id=org_id, limit=10000)
-        buckets: dict[str, list] = {"approved": [], "pending": [], "rejected": []}
+        buckets: dict[str, list] = {"approved": [], "auto_approved": [], "pending": [], "rejected": []}
         for ev in events:
             status = ev.review_status or "approved"
             buckets.setdefault(status, []).append(ev)
@@ -246,6 +288,7 @@ class IntelligenceEventRegistry:
             "hours": hours,
             "total_events": total,
             "approved_count": counts.get("approved", 0),
+            "auto_approved_count": counts.get("auto_approved", 0),
             "pending_count": counts.get("pending", 0),
             "rejected_count": counts.get("rejected", 0),
             "usefulness_avg": avg_usefulness,

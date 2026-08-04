@@ -1,5 +1,5 @@
 import { useNavigate } from 'react-router-dom';
-import { Workflow, Store, Wrench, Settings, X } from 'lucide-react';
+import { Workflow, Store, Wrench, Settings, X, Building2 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 
 /**
@@ -14,6 +14,7 @@ export default function MoreSheet({ open, onClose }) {
   if (!open) return null;
 
   const items = [
+    { to: '/from-company', label: t.sidebar.fromCompany, icon: Building2 },
     { to: '/automation', label: t.sidebar.automation, icon: Workflow },
     { to: '/market', label: t.sidebar.market, icon: Store },
     { to: '/toolkit', label: t.sidebar.toolkit, icon: Wrench },

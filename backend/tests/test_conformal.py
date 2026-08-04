@@ -49,3 +49,19 @@ def test_higher_alpha_gives_narrower_interval():
     _, hi90 = cal90.interval(point, horizon=7)
     _, hi70 = cal70.interval(point, horizon=7)
     assert hi70.iloc[0] < hi90.iloc[0]
+
+
+def test_scenarios_use_conformal_when_provided():
+    """scenarios.generate() should use conformal bands when calibration is given."""
+    from app.services.forecasting.scenarios import generate
+
+    point = pd.Series(np.linspace(100, 110, 30))
+    res = {7: list(np.random.default_rng(2).normal(0, 3, 100))}
+    cal = calibrate(res, alpha=0.1)
+    sc = generate(point, residuals=None, horizons=[7], calibration=cal)
+    base = sc.horizons[7]["base"]
+    bull = sc.horizons[7]["bull"]
+    bear = sc.horizons[7]["bear"]
+    assert (bull > base).all()
+    assert (bear < base).all()
+    assert sc.bounds_source == "conformal"

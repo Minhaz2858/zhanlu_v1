@@ -46,8 +46,6 @@ export default function AgentsView({ scope = null }) {
   const myAgents = agents.filter(
     (a) => !(a.resource_type === 'company' || a.is_shared_with_me)
   );
-  const showCompany = scope !== 'personal';
-  const showPersonal = scope !== 'company';
 
   if (loading) {
     return (
@@ -60,42 +58,46 @@ export default function AgentsView({ scope = null }) {
   return (
     <div className="space-y-8">
       {/* ── COMPANY AGENTS ── */}
-      {showCompany && (<>
-      <SectionHeader
-        icon={Building2}
-        title="Company Agents"
-        badge="Admin configured"
-        lang={lang}
-      />
-      {companyAgents.length === 0 ? (
-        <EmptyState
-          message={lang === 'en' ? 'No company agents assigned yet.' : '暂无公司分配的智能体。'}
-          hint={lang === 'en' ? 'Your admin can assign shared agents for you to use.' : '管理员可以为您分配共享智能体。'}
-          lang={lang}
-        />
-      ) : (
-        <AgentGrid agents={companyAgents} tr={tr} t={t} navigate={navigate} />
+      {scope !== 'personal' && (
+        <>
+          <SectionHeader
+            icon={Building2}
+            title="Company Agents"
+            badge="Admin configured"
+            lang={lang}
+          />
+          {companyAgents.length === 0 ? (
+            <EmptyState
+              message={lang === 'en' ? 'No company agents assigned yet.' : '暂无公司分配的智能体。'}
+              hint={lang === 'en' ? 'Your admin can assign shared agents for you to use.' : '管理员可以为您分配共享智能体。'}
+              lang={lang}
+            />
+          ) : (
+            <AgentGrid agents={companyAgents} tr={tr} t={t} navigate={navigate} />
+          )}
+        </>
       )}
-      </>)}
 
       {/* ── MY AGENTS ── */}
-      {showPersonal && (<>
-      <SectionHeader
-        icon={Bot}
-        title="My Agents"
-        badge="Created by me"
-        lang={lang}
-      />
-      {myAgents.length === 0 ? (
-        <EmptyState
-          message={t.mySpace.empty + (t.mySpace.tabs.agent || 'Agents')}
-          hint={t.mySpace.emptyHint}
-          lang={lang}
-        />
-      ) : (
-        <AgentGrid agents={myAgents} tr={tr} t={t} navigate={navigate} />
+      {scope !== 'company' && (
+        <>
+          <SectionHeader
+            icon={Bot}
+            title="My Agents"
+            badge="Created by me"
+            lang={lang}
+          />
+          {myAgents.length === 0 ? (
+            <EmptyState
+              message={t.mySpace.empty + (t.mySpace.tabs.agent || 'Agents')}
+              hint={t.mySpace.emptyHint}
+              lang={lang}
+            />
+          ) : (
+            <AgentGrid agents={myAgents} tr={tr} t={t} navigate={navigate} />
+          )}
+        </>
       )}
-      </>)}
     </div>
   );
 }

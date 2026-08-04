@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { useAuth } from '@/lib/AuthContext';
 import { useTranslate } from '@/lib/useTranslate';
 import { useChatSession } from '@/lib/ChatSessionContext';
 import { Button } from '@/components/ui/button';
@@ -11,13 +12,14 @@ import { Badge } from '@/components/ui/badge';
 import AddAgentToProjectDialog from '@/components/project/AddAgentToProjectDialog';
 import AddKbToProjectDialog from '@/components/project/AddKbToProjectDialog';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
+import ResourceAccessDialog from '@/components/ResourceAccessDialog';
 import { toast } from '@/components/ui/use-toast';
 import {
   ArrowLeft, Bot, Database, MessageSquare, Cog,
   Sparkles, Check, X, Trash2, Plus, Loader2, Folder,
   ArrowUpRight, Zap, Settings2, ListChecks,
   Pencil, Save, MoreVertical, FileStack, Layers,
-  Clock, Calendar, ChevronRight, Activity, AlertCircle,
+  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users,
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
@@ -59,6 +61,7 @@ const SECTIONS = [
  */
 export default function ProjectDetail() {
   const { t, lang } = useLanguage();
+  const { isAdmin } = useAuth();
   const { id: projectId } = useParams();
   const navigate = useNavigate();
   // `newChat` is the ChatSessionContext's "drop the current active
@@ -93,6 +96,7 @@ export default function ProjectDetail() {
 
   // ── Modals / sheets ──
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
+  const [accessDialogOpen, setAccessDialogOpen] = useState(false);
   const [kbDialogOpen, setKbDialogOpen] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
   const [createAutoOpen, setCreateAutoOpen] = useState(false);
@@ -575,6 +579,16 @@ export default function ProjectDetail() {
                 )}
               </div>
               <div className="flex gap-2">
+                {isAdmin && (
+                  <Button
+                    size="sm" variant="outline"
+                    className="gap-1.5"
+                    onClick={() => setAccessDialogOpen(true)}
+                  >
+                    <Users className="h-3.5 w-3.5" />
+                    {isEn ? 'Access' : '访问权限'}
+                  </Button>
+                )}
                 <Button
                   size="sm" variant="outline"
                   className="gap-1.5"
@@ -857,6 +871,16 @@ export default function ProjectDetail() {
           </div>
         </SheetContent>
       </Sheet>
+
+      {/* ── Admin: Manage Access dialog ── */}
+      {accessDialogOpen && (
+        <ResourceAccessDialog
+          resourceType="project"
+          resourceId={projectId}
+          resourceName={project?.name || `Project ${projectId}`}
+          onClose={() => setAccessDialogOpen(false)}
+        />
+      )}
     </div>
   );
 }

@@ -70,6 +70,14 @@ def _apply_owner(model, query, owner_id, include_shared=False, db=None):
     """
     if owner_id is None:
         return query
+
+    # User is self-scoped by id — check BEFORE the created_by_id branch
+    # because User inherits created_by_id from TimestampedBase (it is a
+    # column on the table for audit, but ownership is through primary key).
+    if getattr(model, "__name__", "") == "User":
+        query = query.filter(model.id == owner_id)
+        return query
+
     if hasattr(model, "created_by_id"):
         # Shared-with-me subquery — only for shareable models on the read path.
         shared_clause = None
@@ -77,14 +85,11 @@ def _apply_owner(model, query, owner_id, include_shared=False, db=None):
             from app.models.resource_share import ResourceShare
             model_name = getattr(model, "__name__", "")
             resource_type = "project" if model_name == "Project" else "agent"
-            shared_ids = (
-                db.query(ResourceShare.resource_id)
-                .filter(
-                    ResourceShare.resource_type == resource_type,
-                    ResourceShare.shared_with_user_id == owner_id,
-                    ResourceShare.is_deleted == False,
-                )
-                .subquery()
+            from sqlalchemy import select as sa_select
+            shared_ids = sa_select(ResourceShare.resource_id).where(
+                ResourceShare.resource_type == resource_type,
+                ResourceShare.shared_with_user_id == owner_id,
+                ResourceShare.is_deleted == False,
             )
             shared_clause = model.id.in_(shared_ids)
 
@@ -106,12 +111,6 @@ def _apply_owner(model, query, owner_id, include_shared=False, db=None):
                 )
             else:
                 query = query.filter(model.created_by_id == owner_id)
-    elif getattr(model, "__name__", "") == "User":
-        # The User model has no ``created_by_id`` (a user account is not
-        # "owned" by another user). Scope to the caller's own record so the
-        # generic entity API can only read/update/delete the authenticated
-        # user themselves — never anyone else's account. (CRITICAL IDOR fix.)
-        query = query.filter(model.id == owner_id)
     return query
 
 

@@ -8,16 +8,14 @@ import PageHeader from '@/components/PageHeader';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
 import KbSetupDialog from '@/components/kb/KbSetupDialog';
 import KbCard from '@/components/kb/KbCard';
-import FilesView from '@/components/files/FilesView';
 import ProjectsView from '@/components/project/ProjectsView';
 import StepsAgentBuilder from '@/components/agentbuilder/StepsAgentBuilder';
 import ProjectCreateDialog from '@/components/project/ProjectCreateDialog';
 import { Button } from '@/components/ui/button';
-import { Plus, Bot, Database, FileText, Trash2, Play, Loader2, Folder, FileEdit, FolderKanban, Archive, LayoutDashboard } from 'lucide-react';
+import { Plus, Bot, Database, Trash2, Play, Loader2, Folder, FileEdit, FolderKanban, Archive } from 'lucide-react';
 import { hasDraft as hasDraftData, clearDraft, flushDraft, loadDraft } from '@/lib/draftManager';
 import { filterUserAgents } from '@/lib/systemAgents';
-import { listDashboards, deleteDashboard } from '@/api/dashboards';
-import DashboardPopup from '@/components/dashboard/DashboardPopup';
+import AgentsView from '@/components/agent/AgentsView';
 
 const AGENT_DRAFT_KEYS = {
   form: 'agent_steps_form',
@@ -43,8 +41,6 @@ export default function MySpace() {
   const [draftInfo, setDraftInfo] = useState(null);
   // Project context for "New Agent" opened from Project Detail (?initialProjectId=…).
   const [initialProjectId, setInitialProjectId] = useState(null);
-  // Live dashboard popup (same-page overlay) opened from the Dashboards tab.
-  const [openDashboardId, setOpenDashboardId] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
 
@@ -72,9 +68,7 @@ export default function MySpace() {
   const TABS = [
     { key: 'project', label: t.mySpace.tabs.project || 'Projects', icon: FolderKanban, entity: 'Project' },
     { key: 'agent', label: t.mySpace.tabs.agent, icon: Bot, entity: 'AgentApp' },
-    { key: 'file', label: t.mySpace.tabs.file, icon: FileText, entity: 'UserFile' },
     { key: 'kb', label: t.mySpace.tabs.kb, icon: Database, entity: 'KnowledgeBase' },
-    { key: 'dashboard', label: t.mySpace.tabs.dashboard, icon: LayoutDashboard, entity: 'Dashboard' },
   ];
   const current = TABS.find((x) => x.key === tab);
 
@@ -127,12 +121,6 @@ export default function MySpace() {
   async function load() {
     setLoading(true);
     try {
-      if (tab === 'dashboard') {
-        // Dashboards are served by the dedicated /api/dashboards endpoint
-        // (not base44.entities), so fetch them directly.
-        setItems(await listDashboards());
-        return;
-      }
       const raw = await base44.entities[current.entity].list('-updated_date', 200);
       // My Space → Agents shows the USER's own agents only. Platform
       // system agents (general_assistant, agent_builder, skill_agent,
@@ -197,7 +185,7 @@ export default function MySpace() {
             </button>
           ))}
         </div>
-        {tab !== 'file' && tab !== 'project' && tab !== 'dashboard' && (
+        {tab !== 'project' && (
           <Button onClick={() => (tab === 'kb' ? openNewKb() : tab === 'agent' ? setBuilderOpen(true) : setDialogOpen(true))} size="sm" variant="outline" className="mb-1 shrink-0 relative">
             <Plus className="h-4 w-4" /> {t.common.new} {t.createDialog.resourceLabels[tab]}
             {tab === 'agent' && draftInfo && (
@@ -210,36 +198,10 @@ export default function MySpace() {
         )}
       </div>
 
-      {tab === 'file' ? (
-        <FilesView />
-      ) : tab === 'project' ? (
+      {tab === 'project' ? (
         <ProjectsView />
-      ) : tab === 'dashboard' ? (
-        loading ? (
-          <div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
-        ) : items.length === 0 ? (
-          <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-20 text-center">
-            <LayoutDashboard className="mb-3 h-8 w-8 text-muted-foreground/40" />
-            <p className="text-sm text-muted-foreground">{lang === 'en' ? 'No dashboards yet.' : '暂无仪表盘。'}</p>
-            <p className="mt-1 text-xs text-muted-foreground">{lang === 'en' ? 'Ask an agent to build a live dashboard.' : '让智能体创建一个实时仪表盘。'}</p>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {items.map((d) => (
-              <div key={d.id} onClick={() => setOpenDashboardId(d.id)} className="group flex cursor-pointer flex-col rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-sm">
-                <div className="mb-2 flex items-start gap-2">
-                  <LayoutDashboard className="mt-0.5 h-4 w-4 text-primary" />
-                  <h3 className="flex-1 font-display text-base text-foreground group-hover:text-primary">{d.name}</h3>
-                </div>
-                <p className="mb-3 flex-1 text-xs text-muted-foreground">{d.description || (lang === 'en' ? 'Live dashboard' : '实时仪表盘')}</p>
-                <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => setOpenDashboardId(d.id)} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-foreground hover:bg-secondary"><Play className="h-3 w-3" /> {t.common.run}</button>
-                  <button onClick={async () => { await deleteDashboard(d.id); load(); }} className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:text-destructive"><Trash2 className="h-3 w-3" /> {t.common.delete}</button>
-                </div>
-              </div>
-            ))}
-          </div>
-        )
+      ) : tab === 'agent' ? (
+        <AgentsView />
       ) : loading ? (
         <div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
       ) : items.length === 0 ? (
@@ -248,94 +210,16 @@ export default function MySpace() {
           <p className="text-sm text-muted-foreground">{t.mySpace.empty}{current.label}</p>
           <p className="mt-1 text-xs text-muted-foreground">{t.mySpace.emptyHint}</p>
         </div>
-      ) : tab === 'agent' && draftInfo ? (
-        // Draft banner shown above the Agent list — tells the user exactly
-        // where their unfinished Agent lives.
-        <>
-          <div className="mb-4 flex items-center justify-between gap-3 rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3">
-            <div className="flex min-w-0 items-center gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-300">
-                <FileEdit className="h-4 w-4" />
-              </div>
-              <div className="min-w-0">
-                <p className="truncate text-sm font-medium text-foreground">
-                  {lang === 'en' ? 'Unfinished agent draft' : '有未完成的智能体草稿'}
-                </p>
-                <p className="truncate text-xs text-muted-foreground">
-                  {draftInfo.summary}
-                  {draftInfo.hasConfig && (
-                    <span className="ml-1 text-amber-600 dark:text-amber-300">
-                      · {lang === 'en' ? 'in step 2 (configure)' : '在第 2 步（对话配置）'}
-                    </span>
-                  )}
-                </p>
-              </div>
-            </div>
-            <div className="flex shrink-0 items-center gap-2">
-              <Button variant="ghost" size="sm" onClick={discardAgentDrafts} className="text-muted-foreground">
-                <Trash2 className="h-3 w-3 mr-1" />
-                {lang === 'en' ? 'Discard' : '放弃'}
-              </Button>
-              <Button size="sm" onClick={continueAgentDraft} className="gap-1">
-                {lang === 'en' ? 'Continue' : '继续'}
-                <Play className="h-3 w-3" />
-              </Button>
-            </div>
-          </div>
-          {/* then the normal card grid */}
-          <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-            {items.map((it) => (
-              <div key={it.id} onClick={() => navigate(`/my-space/agent/${it.id}`)} className="group flex cursor-pointer flex-col rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-sm">
-                <div className="mb-2 flex items-start gap-2">
-                  <current.icon className="mt-0.5 h-4 w-4 text-primary" />
-                  <h3 className="flex-1 font-display text-base text-foreground group-hover:text-primary">{translate(it.name || it.title)}</h3>
-                </div>
-                <p className="mb-3 flex-1 text-xs text-muted-foreground">{(it.description || it.summary) ? translate(it.description || it.summary) : '—'}</p>
-                <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => navigate(`/?agent=${it.id}`)} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-foreground hover:bg-secondary"><Play className="h-3 w-3" /> {t.common.run}</button>
-                  <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                    <Folder className="h-3 w-3" />
-                    {it.project && it.project !== 'global' ? it.project : t.automation.ungrouped}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </>
-      ) : (
+      ) : tab === 'kb' ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
-          {items.map((it) =>
-            tab === 'kb' ? (
-              <KbCard key={it.id} item={it} t={t} translate={translate} onClick={() => navigate(`/my-space/kb/${it.id}`)} onEdit={openEditKb} onTogglePause={togglePauseKb} onDelete={(item) => remove(item.id)} onReindex={reindexKb} />
-            ) : (
-              <div key={it.id} onClick={() => navigate(tab === 'agent' ? `/my-space/agent/${it.id}` : `/my-space/${tab}/${it.id}`)} className="group flex cursor-pointer flex-col rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-sm">
-                <div className="mb-2 flex items-start gap-2">
-                  <current.icon className="mt-0.5 h-4 w-4 text-primary" />
-                  <h3 className="flex-1 font-display text-base text-foreground group-hover:text-primary">{translate(it.name || it.title)}</h3>
-                </div>
-                <p className="mb-3 flex-1 text-xs text-muted-foreground">{(it.description || it.summary || it.file_type) ? translate(it.description || it.summary || it.file_type) : '—'}</p>
-                <div className="mt-3 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => { if (tab === 'agent') navigate(`/?agent=${it.id}`); }} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-foreground hover:bg-secondary"><Play className="h-3 w-3" /> {t.common.run}</button>
-                  {tab === 'agent' ? (
-                    <span className="inline-flex items-center gap-1 text-xs text-muted-foreground">
-                      <Folder className="h-3 w-3" />
-                      {it.project && it.project !== 'global' ? it.project : t.automation.ungrouped}
-                    </span>
-                  ) : (
-                    <button onClick={() => remove(it.id)} className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground hover:text-destructive"><Trash2 className="h-3 w-3" /> {t.common.delete}</button>
-                  )}
-                </div>
-              </div>
-            )
-          )}
+          {items.map((it) => (
+            <KbCard key={it.id} item={it} t={t} translate={translate} onClick={() => navigate(`/my-space/kb/${it.id}`)} onEdit={openEditKb} onTogglePause={togglePauseKb} onDelete={(item) => remove(item.id)} onReindex={reindexKb} />
+          ))}
         </div>
-      )}
+      ) : null}
 
       <CreateResourceDialog open={dialogOpen} onOpenChange={setDialogOpen} resourceType={tab} />
       {tab === 'kb' && <KbSetupDialog open={kbOpen} onOpenChange={setKbOpen} editItem={kbEdit} onSaved={handleKbSaved} />}
-      {openDashboardId && (
-        <DashboardPopup dashboardId={openDashboardId} variant="myspace" onClose={() => setOpenDashboardId(null)} />
-      )}
     </div>
   );
 }

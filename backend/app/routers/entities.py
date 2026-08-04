@@ -80,6 +80,34 @@ def _resource_type_for_creator(user) -> str:
     return "company" if getattr(user, "role", "user") == "admin" else "personal"
 
 
+def _check_shareable_write(
+    model_class, entity_name: str, record_id: str, user, db: Session,
+) -> None:
+    """Pre-check write access for shareable entities (Project, AgentApp).
+
+    For shareable entities, if the record is visible to the caller via a
+    ResourceShare but the caller is NOT the owner, raise 403 so the user
+    gets a clear "view-only" message instead of a confusing 404.  If the
+    record doesn't exist at all, raise 404.  For owner-writes and
+    non-shareable entities, this is a pass-through.
+    """
+    if not _include_shared(entity_name):
+        return
+    visible = entity_service.get_record(
+        model_class, record_id, db,
+        owner_id=_owner_id(entity_name, user),
+        include_shared=True,
+    )
+    if visible is None:
+        raise HTTPException(status_code=404, detail=f"{entity_name} not found")
+    if not visible.get("can_edit", True):
+        raise HTTPException(
+            status_code=403,
+            detail="This resource was shared with you as view-only — "
+                   "ask the owner to make changes or revoke the share.",
+        )
+
+
 def register_entity_router(
     entity_name: str,
     model_class: Type[Base],
@@ -230,6 +258,7 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
+        _check_shareable_write(model_class, entity_name, record_id, user, db)
         result = entity_service.update_record(model_class, record_id, data, db, owner_id=_owner_id(entity_name, user))
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
@@ -243,6 +272,7 @@ def register_entity_router(
         db: Session = Depends(get_db),
         user=Depends(get_current_user_required),
     ):
+        _check_shareable_write(model_class, entity_name, record_id, user, db)
         success = entity_service.soft_delete_record(model_class, record_id, db, owner_id=_owner_id(entity_name, user))
         if not success:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")

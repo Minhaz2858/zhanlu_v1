@@ -21,10 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 class XGBoostReg(ForecastModel):
-    """XGBoost regression on lag + calendar features."""
+    """XGBoost regression on lag + calendar features (+ optional exogenous)."""
 
     name: str = "xgboost_reg"
     min_history: int = 60  # needs sufficient data for lag features
+    uses_exog: bool = False  # set True when exogenous features are supplied
 
     def __init__(self) -> None:
         import xgboost as xgb  # lazy — ImportError caught by registry
@@ -34,12 +35,15 @@ class XGBoostReg(ForecastModel):
         self._last_values: np.ndarray | None = None
         self._n_lags: int = 14
         self._seasonal_period: int = 7
+        self._exog_feature_names: list[str] = []
+        self._exog_last: pd.DataFrame | None = None
 
     # ------------------------------------------------------------------
     def fit(
         self,
         y: pd.Series,
         seasonal_period: int | None = None,
+        exog: pd.DataFrame | None = None,
         **kwargs,
     ) -> None:
         _ = kwargs
@@ -56,9 +60,28 @@ class XGBoostReg(ForecastModel):
         n_lags = min(self._n_lags, len(y) - 10)
         self._n_lags = max(3, n_lags)
 
-        # Build feature matrix: lags + seasonal lag + day-of-week
         values = y.values.astype(float)
-        X, Y = self._build_features(values, self._n_lags, self._seasonal_period)
+        X_endo, Y = self._build_features(values, self._n_lags, self._seasonal_period)
+
+        # Merge exogenous features if provided
+        if exog is not None and len(exog) > 0:
+            self.uses_exog = True
+            # Align exog to y (drop rows before first usable lag)
+            exog_slice = exog.loc[y.index[n_lags:]].copy()
+            common_exog = exog_slice.reindex(y.index[n_lags:])
+            if common_exog.isna().all().all():
+                logger.warning("Exog features all NaN after alignment — ignoring")
+                X = X_endo
+            else:
+                common_exog = common_exog.fillna(0.0)
+                self._exog_feature_names = list(common_exog.columns)
+                X_exog = common_exog.values.astype(float)
+                min_rows = min(len(X_endo), len(X_exog))
+                X = np.hstack([X_endo[:min_rows], X_exog[:min_rows]])
+                Y = Y[:min_rows]
+                self._exog_last = exog.iloc[-1:] if len(exog) > 0 else None
+        else:
+            X = X_endo
 
         if len(X) < 10:
             raise ModelFitError(
@@ -78,25 +101,30 @@ class XGBoostReg(ForecastModel):
         self._last_values = values
 
     # ------------------------------------------------------------------
-    def forecast(self, h: int) -> pd.Series:
+    def forecast(self, h: int, exog_future: pd.DataFrame | None = None) -> pd.Series:
         if self._model is None or self._last_values is None:
             raise ModelFitError("XGBoostReg.forecast() called before fit()")
         if h < 1:
             raise ModelFitError(f"horizon must be >= 1, got {h}")
 
-        # Start with a sliding window of last known values
         window = list(self._last_values[-self._n_lags:])
         predictions: list[float] = []
 
         for step in range(h):
-            # Absolute position for calendar features
             abs_step = len(self._last_values) + step
             features = self._make_single_features(
                 window, abs_step, self._n_lags, self._seasonal_period
             )
+            # Append exogenous features if available
+            if self.uses_exog and exog_future is not None and len(exog_future) > step:
+                exog_row = exog_future.iloc[step].values.astype(float)
+                features = np.hstack([features, exog_row])
+            elif self.uses_exog and self._exog_last is not None:
+                exog_row = self._exog_last.iloc[0].values.astype(float)
+                features = np.hstack([features, exog_row])
+
             pred = float(self._model.predict(features.reshape(1, -1))[0])
             predictions.append(pred)
-            # Slide window: drop oldest, append prediction
             window.pop(0)
             window.append(pred)
 

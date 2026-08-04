@@ -189,6 +189,7 @@ export const AuthProvider = ({ children }) => {
       authError,
       appPublicSettings,
       authChecked,
+      isAdmin: user?.role === 'admin',
       logout,
       navigateToLogin,
       checkUserAuth,

@@ -18,11 +18,15 @@ from app.services.auth_service import auth_service
 logger = logging.getLogger(__name__)
 
 
-def ensure_superadmin() -> None:
+def ensure_superadmin(db=None) -> None:
     """Seed (or update) the single super-admin account from env vars.
 
     Idempotent — safe to call on every startup.  Wrapped in a try/except
     so a misconfiguration never blocks the server from starting.
+
+    Args:
+        db: Optional SQLAlchemy Session.  When None (startup path), creates its
+            own session via SessionLocal.  Pass a session directly in tests.
     """
     from app.config import settings
 
@@ -39,7 +43,11 @@ def ensure_superadmin() -> None:
         )
         return
 
-    db = SessionLocal()
+    close_on_exit = False
+    if db is None:
+        db = SessionLocal()
+        close_on_exit = True
+
     try:
         existing = db.query(User).filter(
             User.email == email, User.is_deleted == False
@@ -72,4 +80,5 @@ def ensure_superadmin() -> None:
         logger.exception("ensure_superadmin: failed — server will still start")
         db.rollback()
     finally:
-        db.close()
+        if close_on_exit:
+            db.close()

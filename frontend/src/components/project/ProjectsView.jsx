@@ -257,8 +257,6 @@ export default function ProjectsView({ scope = null }) {
     () => visible.filter((p) => !(p.resource_type === 'company' || p.is_shared_with_me)),
     [visible]
   );
-  const showCompany = scope !== 'personal';
-  const showPersonal = scope !== 'company';
 
   // True when there is at least one archived row in the loaded set —
   // the toolbar toggle only renders when it's actionable.
@@ -366,74 +364,78 @@ export default function ProjectsView({ scope = null }) {
       ) : (
         <div className="space-y-8">
           {/* ── COMPANY PROJECTS ── */}
-          {showCompany && (<>
-          <SectionHeader
-            icon={Building2}
-            title={isEn ? 'Company Projects' : '公司项目'}
-            badge={isEn ? 'Admin configured' : '管理员配置'}
-          />
-          {companyProjects.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-10 text-center">
-              <FolderKanban className="mb-3 h-8 w-8 text-muted-foreground/40" />
-              <p className="text-sm text-muted-foreground">
-                {isEn ? 'No company projects assigned yet.' : '暂无公司分配的项目。'}
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {isEn ? 'Your admin can assign shared projects for you to use.' : '管理员可以为您分配共享项目。'}
-              </p>
-            </div>
-          ) : (
-            <ProjectGrid
-              projects={companyProjects}
-              counts={counts}
-              lang={lang}
-              isEn={isEn}
-              formatRelativeTime={formatRelativeTime}
-              navigate={navigate}
-              rename={rename}
-              unarchive={unarchive}
-              openArchive={openArchive}
-            />
+          {scope !== 'personal' && (
+            <>
+              <SectionHeader
+                icon={Building2}
+                title={isEn ? 'Company Projects' : '公司项目'}
+                badge={isEn ? 'Admin configured' : '管理员配置'}
+              />
+              {companyProjects.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-10 text-center">
+                  <FolderKanban className="mb-3 h-8 w-8 text-muted-foreground/40" />
+                  <p className="text-sm text-muted-foreground">
+                    {isEn ? 'No company projects assigned yet.' : '暂无公司分配的项目。'}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {isEn ? 'Your admin can assign shared projects for you to use.' : '管理员可以为您分配共享项目。'}
+                  </p>
+                </div>
+              ) : (
+                <ProjectGrid
+                  projects={companyProjects}
+                  counts={counts}
+                  lang={lang}
+                  isEn={isEn}
+                  formatRelativeTime={formatRelativeTime}
+                  navigate={navigate}
+                  rename={rename}
+                  unarchive={unarchive}
+                  openArchive={openArchive}
+                />
+              )}
+            </>
           )}
-          </>)}
 
           {/* ── MY PROJECTS ── */}
-          {showPersonal && (<>
-          <div className="flex items-center justify-between">
-            <SectionHeader
-              icon={FolderKanban}
-              title={isEn ? 'My Projects' : '我的项目'}
-              badge={isEn ? 'Created by me' : '个人创建'}
-            />
-            <Button size="sm" onClick={() => setCreateOpen(true)} className="gap-1.5">
-              <Plus className="h-3.5 w-3.5" />
-              {isEn ? 'New Project' : '新建项目'}
-            </Button>
-          </div>
-          {myProjects.length === 0 ? (
-            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-10 text-center">
-              <FolderKanban className="mb-3 h-8 w-8 text-muted-foreground/40" />
-              <p className="text-sm text-muted-foreground">
-                {isEn ? 'No personal projects yet.' : '暂无个人项目。'}
-              </p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {isEn ? 'Create your first project to get started.' : '创建您的第一个项目开始使用。'}
-              </p>
-            </div>
-          ) : (
-            <ProjectGrid
-              projects={myProjects}
-              counts={counts}
-              lang={lang}
-              isEn={isEn}
-              formatRelativeTime={formatRelativeTime}
-              navigate={navigate}
-              rename={rename}
-              unarchive={unarchive}
-              openArchive={openArchive}
-            />
+          {scope !== 'company' && (
+            <>
+              <div className="flex items-center justify-between">
+                <SectionHeader
+                  icon={FolderKanban}
+                  title={isEn ? 'My Projects' : '我的项目'}
+                  badge={isEn ? 'Created by me' : '个人创建'}
+                />
+                <Button size="sm" onClick={() => setCreateOpen(true)} className="gap-1.5">
+                  <Plus className="h-3.5 w-3.5" />
+                  {isEn ? 'New Project' : '新建项目'}
+                </Button>
+              </div>
+              {myProjects.length === 0 ? (
+                <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-10 text-center">
+                  <FolderKanban className="mb-3 h-8 w-8 text-muted-foreground/40" />
+                  <p className="text-sm text-muted-foreground">
+                    {isEn ? 'No personal projects yet.' : '暂无个人项目。'}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {isEn ? 'Create your first project to get started.' : '创建您的第一个项目开始使用。'}
+                  </p>
+                </div>
+              ) : (
+                <ProjectGrid
+                  projects={myProjects}
+                  counts={counts}
+                  lang={lang}
+                  isEn={isEn}
+                  formatRelativeTime={formatRelativeTime}
+                  navigate={navigate}
+                  rename={rename}
+                  unarchive={unarchive}
+                  openArchive={openArchive}
+                />
+              )}
+            </>
           )}
-          </>)}
         </div>
       )}
 

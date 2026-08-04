@@ -104,6 +104,16 @@ class ForecastRun(TimestampedBase):
     # JSON: {models_run: [...], weights: {ets: 0.4, arima: 0.3, ...}, failed: [...]}
     model_detail: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # ── Exogenous features (Phase 1 enhancement) ──────────────
+    exog_features_used: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
+    cleaning_notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # ── Explanation + coherence (Phase 1 enhancement) ──────────
+    explanation: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    cleaning_report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    coherence_report: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    exog_degraded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
 
 class ForecastAccuracyLog(TimestampedBase):
     """Nightly backtest record — per-model MAPE and naive comparison.
@@ -124,6 +134,11 @@ class ForecastAccuracyLog(TimestampedBase):
     n_backtests: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     window_start: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     window_end: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # ── Realized accuracy (Phase 1 enhancement) ────────────────
+    realized_error: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    realized_mape: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    evaluated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
 
     # ── Accuracy metrics ──────────────────────────────────────
     mape: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
