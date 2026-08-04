@@ -871,6 +871,10 @@ PRODUCT_FORECAST_TARGET_KEY: dict[str, str] = {
     "styrene":        "ecisco.styrene",
 }
 
+# ERP product_ids whose forecasts are keyed by material_code (SKU-level).
+# The forecast target product_key is "ecisco.<product_id>.<material_code>".
+_ERP_PRODUCT_KEYS: set[str] = {"c5_resin", "raffinate_c5"}
+
 
 def get_forecast_base_batch_v2(
     product_ids: list[str], day: int = 7, db=None
@@ -883,10 +887,19 @@ def get_forecast_base_batch_v2(
 
     The forecast_runs table is populated by the nightly automation task
     (cron 0 2 * * *) which calls ForecastEngine.compute_all().
+
+    Phase 6: Populates overlay_by_product with intelligence + policy metadata.
+    Phase 7: Populates sku_forecasts_by_product for ERP products.
     """
     from app.models.forecasting import ForecastTarget, ForecastRun
+    from app.schemas.market_dashboard import (
+        ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
+        SkuForecastMeta,
+    )
 
     out: dict = {pid: None for pid in product_ids}
+    overlay: dict = {pid: None for pid in product_ids}
+    sku_forecasts: dict = {pid: [] for pid in product_ids if pid in _ERP_PRODUCT_KEYS}
     horizon_key = f"{day}d"  # results JSON uses "3d"/"7d"/"30d" keys
 
     owns_session = db is None
@@ -894,51 +907,140 @@ def get_forecast_base_batch_v2(
         from app.database import SessionLocal
         db = SessionLocal()
     try:
-        # Build product_id → product_key map for the requested IDs
-        pid_to_key = {
-            pid: PRODUCT_FORECAST_TARGET_KEY[pid]
-            for pid in product_ids
-            if pid in PRODUCT_FORECAST_TARGET_KEY
-        }
-        if not pid_to_key:
-            return ForecastBaseBatchResponse(day=day, base_by_product=out)
+        # ── Separate md_t_lz_price products (direct key) from ERP products (prefix lookup) ──
+        md_lz_pids = [pid for pid in product_ids if pid in PRODUCT_FORECAST_TARGET_KEY and pid not in _ERP_PRODUCT_KEYS]
+        erp_pids = [pid for pid in product_ids if pid in _ERP_PRODUCT_KEYS]
 
-        # Bulk-load targets by product_key
-        keys = list(pid_to_key.values())
-        targets = db.query(ForecastTarget).filter(
-            ForecastTarget.product_key.in_(keys),
-            ForecastTarget.org_id == "default-org",
-            ForecastTarget.is_deleted == False,  # noqa: E712
-        ).all()
+        # ── md_t_lz_price products: direct product_key lookup (existing logic) ──
+        if md_lz_pids:
+            pid_to_key = {
+                pid: PRODUCT_FORECAST_TARGET_KEY[pid]
+                for pid in md_lz_pids
+            }
+            keys = list(pid_to_key.values())
+            targets = db.query(ForecastTarget).filter(
+                ForecastTarget.product_key.in_(keys),
+                ForecastTarget.org_id == "default-org",
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            ).all()
 
-        # Reverse map for lookups
-        key_to_pid = {v: k for k, v in pid_to_key.items()}
+            # Reverse map for lookups
+            key_to_pid = {v: k for k, v in pid_to_key.items()}
 
-        for tgt in targets:
-            pid = key_to_pid.get(tgt.product_key)
-            if pid is None:
+            for tgt in targets:
+                pid = key_to_pid.get(tgt.product_key)
+                if pid is None:
+                    continue
+                # Latest ForecastRun for this target
+                run = db.query(ForecastRun).filter(
+                    ForecastRun.target_id == tgt.id,
+                    ForecastRun.is_deleted == False,  # noqa: E712
+                ).order_by(ForecastRun.created_date.desc()).first()
+                if not run or not run.results:
+                    continue
+                horizon_payload = run.results.get(horizon_key) or {}
+                base = horizon_payload.get("base")
+                if base is None:
+                    continue
+                # `base` is a list (from pd.Series.tolist()); take first point
+                if isinstance(base, list) and len(base) > 0:
+                    out[pid] = float(base[0])
+                elif isinstance(base, (int, float)):
+                    out[pid] = float(base)
+
+                # Phase 6: extract overlay metadata from explanation
+                explanation = horizon_payload.get("explanation") or {}
+                intel_raw = explanation.get("intelligence") or {}
+                policy_raw = explanation.get("policy") or {}
+
+                intel_meta = None
+                if intel_raw:
+                    intel_meta = IntelligenceOverlayMeta(
+                        active_event_count=int(intel_raw.get("active_event_count", 0)),
+                        bias_direction=str(intel_raw.get("bias_direction", "neutral")),
+                        impact_tier=intel_raw.get("impact_tier"),
+                        confidence=intel_raw.get("confidence"),
+                        summary=intel_raw.get("summary"),
+                    )
+
+                policy_meta = None
+                if policy_raw:
+                    policy_meta = PolicyOverlayMeta(
+                        volatility_regime=policy_raw.get("volatility_regime"),
+                        vol_multiplier=policy_raw.get("vol_multiplier"),
+                        bias_pct=policy_raw.get("bias_pct"),
+                        diagnosis_bias=policy_raw.get("diagnosis_bias"),
+                        applied_factor=policy_raw.get("applied_factor"),
+                    )
+
+                if intel_meta or policy_meta:
+                    overlay[pid] = ForecastOverlayMeta(
+                        product_id=pid,
+                        intelligence=intel_meta,
+                        policy=policy_meta,
+                    )
+
+        # ── ERP products: prefix lookup for SKU-level targets ──
+        for pid in erp_pids:
+            prefix = f"ecisco.{pid}."
+            sku_targets = db.query(ForecastTarget).filter(
+                ForecastTarget.product_key.like(f"{prefix}%"),
+                ForecastTarget.org_id == "default-org",
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            ).order_by(ForecastTarget.report_order.asc()).all()
+
+            if not sku_targets:
                 continue
-            # Latest ForecastRun for this target
-            run = db.query(ForecastRun).filter(
-                ForecastRun.target_id == tgt.id,
-                ForecastRun.is_deleted == False,  # noqa: E712
-            ).order_by(ForecastRun.created_date.desc()).first()
-            if not run or not run.results:
-                continue
-            horizon_payload = run.results.get(horizon_key) or {}
-            base = horizon_payload.get("base")
-            if base is None:
-                continue
-            # `base` is a list (from pd.Series.tolist()); take first point
-            if isinstance(base, list) and len(base) > 0:
-                out[pid] = float(base[0])
-            elif isinstance(base, (int, float)):
-                out[pid] = float(base)
+
+            sku_list: list[SkuForecastMeta] = []
+            for tgt in sku_targets:
+                # Extract material_code from product_key: "ecisco.c5_resin.CODE" → "CODE"
+                material_code = tgt.product_key[len(prefix):]
+
+                # Latest ForecastRun for this SKU target
+                run = db.query(ForecastRun).filter(
+                    ForecastRun.target_id == tgt.id,
+                    ForecastRun.is_deleted == False,  # noqa: E712
+                ).order_by(ForecastRun.created_date.desc()).first()
+
+                sku_base = None
+                sku_confidence = None
+                if run and run.results:
+                    horizon_payload = run.results.get(horizon_key) or {}
+                    base = horizon_payload.get("base")
+                    if isinstance(base, list) and len(base) > 0:
+                        sku_base = float(base[0])
+                    elif isinstance(base, (int, float)):
+                        sku_base = float(base)
+                    sku_confidence = run.confidence
+
+                sku_meta = SkuForecastMeta(
+                    material_code=material_code,
+                    target_id=str(tgt.id),
+                    name=tgt.name,
+                    report_order=tgt.report_order or 99,
+                    is_primary=(tgt.report_order is not None and tgt.report_order <= 12),
+                    forecast_base=sku_base,
+                    forecast_confidence=sku_confidence,
+                )
+                sku_list.append(sku_meta)
+
+                # Primary SKU (first in list, lowest report_order) feeds the main forecast
+                if sku_meta.is_primary and sku_base is not None and out[pid] is None:
+                    out[pid] = sku_base
+
+            sku_forecasts[pid] = sku_list
+
     finally:
         if owns_session:
             db.close()
 
-    return ForecastBaseBatchResponse(day=day, base_by_product=out)
+    return ForecastBaseBatchResponse(
+        day=day,
+        base_by_product=out,
+        overlay_by_product=overlay,
+        sku_forecasts_by_product=sku_forecasts,
+    )
 
 
 def _safe_json_list(raw) -> list[str]:
@@ -1070,8 +1172,8 @@ def get_overview_bundle(
     regional = regional_resp.items
     regional_errors = regional_resp.errors
 
-    # 3. Forecast 7-day base per product.
-    forecast_resp = get_forecast_base_batch(pids, day=forecast_day)
+    # 3. Forecast 7-day base per product + overlay (v2, Phase 6).
+    forecast_resp = get_forecast_base_batch_v2(pids, day=forecast_day)
 
     # 4. FX (static for v1).
     fx = get_fx_rate()
@@ -1082,6 +1184,7 @@ def get_overview_bundle(
         regional_errors=regional_errors,
         forecast_day=forecast_day,
         forecast_base_by_product=forecast_resp.base_by_product,
+        forecast_overlay_by_product=forecast_resp.overlay_by_product,  # Phase 6
         fx=fx,
         cached=False,
         cache_age_ms=0,
@@ -1096,3 +1199,407 @@ def get_overview_bundle(
 def invalidate_overview_cache() -> int:
     """Drop overview cache entries. Returns count dropped."""
     return _cache_invalidate_prefix("overview:bundle:")
+
+
+# ── Forecast chart: merged past + forecast timeline ───────────────────
+
+def _build_overlay_meta(
+    product_id: str, horizon_payload: dict,
+) -> Optional["ForecastOverlayMeta"]:
+    """Phase 6: Build overlay metadata from a ForecastRun horizon_payload."""
+    from app.schemas.market_dashboard import (
+        ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
+    )
+    explanation = horizon_payload.get("explanation") or {}
+    intel_raw = explanation.get("intelligence") or {}
+    policy_raw = explanation.get("policy") or {}
+
+    intel_meta: Optional[IntelligenceOverlayMeta] = None
+    if intel_raw:
+        intel_meta = IntelligenceOverlayMeta(
+            active_event_count=int(intel_raw.get("active_event_count", 0)),
+            bias_direction=str(intel_raw.get("bias_direction", "neutral")),
+            impact_tier=intel_raw.get("impact_tier"),
+            confidence=intel_raw.get("confidence"),
+            summary=intel_raw.get("summary"),
+        )
+
+    policy_meta: Optional[PolicyOverlayMeta] = None
+    if policy_raw:
+        policy_meta = PolicyOverlayMeta(
+            volatility_regime=policy_raw.get("volatility_regime"),
+            vol_multiplier=policy_raw.get("vol_multiplier"),
+            bias_pct=policy_raw.get("bias_pct"),
+            diagnosis_bias=policy_raw.get("diagnosis_bias"),
+            applied_factor=policy_raw.get("applied_factor"),
+        )
+
+    if intel_meta or policy_meta:
+        return ForecastOverlayMeta(
+            product_id=product_id,
+            intelligence=intel_meta,
+            policy=policy_meta,
+        )
+    return None
+
+
+def get_forecast_chart(
+    product_id: str, days: int = 30, db=None,
+) -> "ForecastChartResponse":
+    """Return merged past-actual + step-function previous-AI + forecast timeline.
+
+    EDIA overlay-chart semantics:
+      - Left zone (past): actual price (royal-blue), step-function previous-AI
+        dashed line, subtle past-range band (prev_ai_low / prev_ai_high),
+        and executed-in/out-of-range scatter dots.
+      - Right zone (forecast): bull / base / bear dotted curves fanning from
+        today.  No green band — the trio of dotted lines IS the range.
+      - Boundary bridging: today point seeded with base=bull=bear=actual so
+        lines connect smoothly.
+
+    Phase 6: Includes overlay metadata (intelligence + policy) from the
+    latest ForecastRun's explanation.
+    """
+    from app.schemas.market_dashboard import (
+        ForecastChartPoint, ForecastChartResponse,
+        ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
+    )
+    from app.models.forecasting import ForecastTarget, ForecastRun
+    from datetime import date as dt_date
+
+    label = PRODUCT_LABELS.get(product_id, {"en": product_id, "zh": product_id})
+
+    # 1. Past price history
+    history_rows = _read_product_history_rows(product_id)
+
+    # 2. Forecast runs — fetch ALL (not just 2) for step-function AI review
+    target_key = PRODUCT_FORECAST_TARGET_KEY.get(product_id)
+    forecast_curves: dict[str, list[float]] = {}
+    previous_ai_series: dict[str, Optional[float]] = {}
+    prev_ai_low_series: dict[str, Optional[float]] = {}
+    prev_ai_high_series: dict[str, Optional[float]] = {}
+    exec_in_by_date: dict[str, float] = {}
+    exec_out_by_date: dict[str, float] = {}
+    data_quality = "insufficient"
+    as_of_date: Optional[str] = None
+    previous_ai_date: Optional[str] = None
+    executed_in_count = 0
+    executed_out_count = 0
+    overlay_meta: Optional[ForecastOverlayMeta] = None  # Phase 6
+
+    owns_session = db is None
+    if owns_session:
+        from app.database import SessionLocal
+        db = SessionLocal()
+    try:
+        if target_key:
+            tgt = db.query(ForecastTarget).filter(
+                ForecastTarget.product_key == target_key,
+                ForecastTarget.org_id == "default-org",
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            ).first()
+
+            if tgt:
+                runs = db.query(ForecastRun).filter(
+                    ForecastRun.target_id == tgt.id,
+                    ForecastRun.is_deleted == False,  # noqa: E712
+                ).order_by(ForecastRun.created_date.desc()).limit(10).all()
+
+                if runs:
+                    # Latest run = forecast curves
+                    latest = runs[0]
+                    horizon_payload = (
+                        (latest.results or {}).get(f"{days}d")
+                        or (latest.results or {}).get(str(days))
+                        or {}
+                    )
+                    for k in ("base", "bull", "bear"):
+                        raw = horizon_payload.get(k)
+                        if isinstance(raw, list) and len(raw) > 0:
+                            forecast_curves[k] = [float(v) for v in raw]
+                        elif isinstance(raw, (int, float)):
+                            forecast_curves[k] = [float(raw)]
+                    as_of_date = (
+                        latest.created_date.strftime("%Y-%m-%d")
+                        if latest.created_date else None
+                    )
+                    data_quality = "good"
+
+                    # ---- Phase 6: Extract overlay metadata ----
+                    overlay_meta = _build_overlay_meta(product_id, horizon_payload)
+
+                    # ---- Step-function previous AI across the PAST zone ----
+                    # For each past date D, find the newest run with
+                    # created_date <= D, then lookup curves[offset] where
+                    # offset = days between run_date and D.
+                    #
+                    # Runs sorted oldest-first for the scan.
+                    runs_sorted = sorted(runs, key=lambda r: r.created_date)
+
+                    if history_rows:
+                        # Use only the last `days` entries for the past zone
+                        recent_history = history_rows[-days:] if len(history_rows) >= days else history_rows
+
+                        for d_str, _actual_val in recent_history:
+                            try:
+                                d_date = dt_date.fromisoformat(d_str)
+                            except (ValueError, TypeError):
+                                continue
+
+                            # Find newest run <= this date
+                            best_run = None
+                            for r in runs_sorted:
+                                rd = r.created_date.date() if hasattr(r.created_date, "date") else r.created_date
+                                if rd <= d_date:
+                                    best_run = r
+                                else:
+                                    break  # runs_sorted is oldest-first → rest are newer
+
+                            if best_run is None:
+                                continue
+
+                            best_date = best_run.created_date.date() if hasattr(best_run.created_date, "date") else best_run.created_date
+                            offset = (d_date - best_date).days
+                            if offset < 0:
+                                continue
+
+                            bp = (best_run.results or {}).get(f"{days}d") or (best_run.results or {}).get(str(days)) or {}
+                            base_arr = bp.get("base")
+                            bull_arr = bp.get("bull")
+                            bear_arr = bp.get("bear")
+
+                            if isinstance(base_arr, list) and 0 <= offset < len(base_arr):
+                                previous_ai_series[d_str] = float(base_arr[offset])
+                            elif isinstance(base_arr, (int, float)):
+                                previous_ai_series[d_str] = float(base_arr)
+                            if isinstance(bull_arr, list) and 0 <= offset < len(bull_arr):
+                                prev_ai_high_series[d_str] = float(bull_arr[offset])
+                            if isinstance(bear_arr, list) and 0 <= offset < len(bear_arr):
+                                prev_ai_low_series[d_str] = float(bear_arr[offset])
+
+                            # Executed-dot classification
+                            lo = prev_ai_low_series.get(d_str)
+                            hi = prev_ai_high_series.get(d_str)
+                            if lo is not None and hi is not None and _actual_val is not None:
+                                if lo <= _actual_val <= hi:
+                                    exec_in_by_date[d_str] = _actual_val
+                                else:
+                                    exec_out_by_date[d_str] = _actual_val
+
+                    # Tally counts
+                    executed_in_count = len(exec_in_by_date)
+                    executed_out_count = len(exec_out_by_date)
+
+                    # Previous AI date = newest run that is NOT the latest
+                    if len(runs) > 1:
+                        prev_ai_run = runs[1]
+                        previous_ai_date = (
+                            prev_ai_run.created_date.strftime("%Y-%m-%d")
+                            if prev_ai_run.created_date else None
+                        )
+    finally:
+        if owns_session:
+            db.close()
+
+    # 3. Merge into timeline points with boundary bridging
+    today = dt_date.today()
+    today_str = today.isoformat()
+
+    actual_by_date: dict[str, float] = {}
+    for date_str, price in history_rows:
+        actual_by_date[date_str] = price
+
+    # Past dates from history (last `days` entries)
+    all_dates_set = set()
+    recent_history: list[tuple[str, float]] = []
+    if history_rows:
+        recent_history = history_rows[-days:] if len(history_rows) >= days else history_rows
+        for d, _ in recent_history:
+            all_dates_set.add(d)
+
+    # Forecast dates: build from today forward
+    forecast_len = len(forecast_curves.get("base", []))
+    for i in range(forecast_len):
+        fwd_date = (today + timedelta(days=i)).isoformat()
+        all_dates_set.add(fwd_date)
+
+    # Include previous AI dates
+    for d in list(previous_ai_series.keys()) + list(exec_in_by_date.keys()) + list(exec_out_by_date.keys()):
+        all_dates_set.add(d)
+
+    # Always include today for boundary bridging
+    all_dates_set.add(today_str)
+
+    all_dates = sorted(all_dates_set)
+
+    # Boundary-bridging: today point gets actual price as base/bull/bear seed
+    today_actual = actual_by_date.get(today_str)
+
+    points: list[ForecastChartPoint] = []
+    for d in all_dates:
+        zone = "past" if d < today_str else ("today" if d == today_str else "forecast")
+        actual = actual_by_date.get(d)
+        previous_ai = previous_ai_series.get(d)
+        prev_low = prev_ai_low_series.get(d)
+        prev_high = prev_ai_high_series.get(d)
+        exec_in = exec_in_by_date.get(d)
+        exec_out = exec_out_by_date.get(d)
+
+        # Forecast curves mapped by offset from today
+        base_val = None
+        bull_val = None
+        bear_val = None
+
+        if zone == "today":
+            # Boundary bridge: seed forecast curves from actual
+            if today_actual is not None:
+                base_val = today_actual
+                bull_val = today_actual
+                bear_val = today_actual
+        elif zone == "forecast" and forecast_curves.get("base"):
+            try:
+                parsed = dt_date.fromisoformat(d)
+                offset = (parsed - today).days
+            except (ValueError, TypeError):
+                offset = None
+            if offset is not None and 0 <= offset < forecast_len:
+                base_val = _safe_idx(forecast_curves.get("base"), offset)
+                bull_val = _safe_idx(forecast_curves.get("bull"), offset)
+                bear_val = _safe_idx(forecast_curves.get("bear"), offset)
+
+        # Also add actual to today point for the big dot
+        if zone == "today" and actual is None:
+            actual = today_actual
+
+        # Include any point that carries data
+        has_data = (
+            actual is not None
+            or previous_ai is not None
+            or base_val is not None
+            or exec_in is not None
+            or exec_out is not None
+            or prev_low is not None
+            or prev_high is not None
+        )
+        if has_data:
+            points.append(ForecastChartPoint(
+                date=d,
+                actual=actual,
+                previous_ai=previous_ai,
+                prev_ai_low=prev_low,
+                prev_ai_high=prev_high,
+                exec_in=exec_in,
+                exec_out=exec_out,
+                base=base_val,
+                bull=bull_val,
+                bear=bear_val,
+                zone=zone,
+            ))
+
+    return ForecastChartResponse(
+        product_id=product_id,
+        points=points,
+        data_quality=data_quality,
+        as_of_date=as_of_date,
+        previous_ai_date=previous_ai_date,
+        product_name=label.get("en", product_id),
+        executed_in_range_count=executed_in_count,
+        executed_outside_range_count=executed_out_count,
+        overlay=overlay_meta,  # Phase 6
+    )
+
+
+def _safe_idx(lst: Optional[list], idx: int) -> Optional[float]:
+    """Safely get a float at an index from a list, returning None on any error."""
+    if lst is None:
+        return None
+    try:
+        return float(lst[idx])
+    except (IndexError, TypeError, ValueError):
+        return None
+
+
+# ── Price transmission chain (3-tier upstream flow) ────────────────────
+
+# Hardcoded 3-tier chain: crude → naphtha → cracked C5/C9 → derivatives
+_PRICE_CHAIN_TIERS: list[list[str]] = [
+    ["crude_oil"],
+    ["naphtha"],
+    ["cracked_c5", "cracked_c9"],
+    ["isoprene", "piperylene", "dcpd"],
+]
+
+
+def get_price_chain(db=None) -> "PriceChainResponse":
+    """Return 3-tier upstream price transmission chain.
+
+    Each node includes: current price, 30d change, sparkline (last 30
+    daily prices), percentile vs ~3yr data, and a percentile remark.
+    """
+    from app.schemas.market_dashboard import PriceChainNode, PriceChainResponse
+
+    tiers: list[list[PriceChainNode]] = []
+
+    for tier_pids in _PRICE_CHAIN_TIERS:
+        tier_nodes: list[PriceChainNode] = []
+        for pid in tier_pids:
+            label = PRODUCT_LABELS.get(pid, {"en": pid, "zh": pid})
+
+            # Full history
+            history = _read_product_history_rows(pid)
+
+            # Last 30 daily prices for sparkline
+            sparkline = [p for _, p in history[-30:]] if history else []
+
+            # Current price = last history value
+            current_price = sparkline[-1] if sparkline else None
+
+            # 30-day change pct
+            change_pct_30d: Optional[float] = None
+            if len(history) >= 2:
+                # Compare last price to price ~30 days ago (or earliest if <30)
+                compare_idx = max(0, len(history) - 31)
+                old_price = history[compare_idx][1]
+                if old_price and old_price != 0 and current_price:
+                    change_pct_30d = round(
+                        (current_price - old_price) / old_price * 100, 1
+                    )
+
+            # Percentile within ~3 years of data
+            percentile: Optional[float] = None
+            percentile_remark: Optional[str] = None
+            if history and current_price is not None:
+                all_prices = [p for _, p in history]
+                if len(all_prices) >= 10:
+                    below = sum(1 for p in all_prices if p < current_price)
+                    percentile = round(below / len(all_prices) * 100, 1)
+                    if percentile >= 90:
+                        percentile_remark = f"At {percentile}th percentile in ~3 years — relatively high"
+                    elif percentile <= 10:
+                        percentile_remark = f"At {percentile}th percentile in ~3 years — relatively low"
+                    else:
+                        percentile_remark = f"At {percentile}th percentile in ~3 years — mid range"
+
+            # Trend date range
+            trend_start: Optional[str] = history[0][0] if history else None
+            trend_end: Optional[str] = history[-1][0] if history else None
+
+            tier_nodes.append(PriceChainNode(
+                product_id=pid,
+                name_en=label.get("en", pid),
+                name_zh=label.get("zh", pid),
+                current_price=round(current_price, 2) if current_price else None,
+                change_pct_30d=change_pct_30d,
+                sparkline=sparkline,
+                percentile=percentile,
+                percentile_remark=percentile_remark,
+                trend_start_date=trend_start,
+                trend_end_date=trend_end,
+                group=label.get("group", "upstream"),
+            ))
+        tiers.append(tier_nodes)
+
+    return PriceChainResponse(
+        tiers=tiers,
+        as_of_date=date.today().isoformat(),
+    )
