@@ -49,6 +49,8 @@ export const marketDashboardApi = {
       product_ids: productIds.join(','),
       day,
     }),
+  decisionBoard: (group, day = 7) =>
+    getJson('/api/market-dashboard/decision-board', { group, day }),
   /** Single-shot bundle for the chemical market overview page.
    *  Backend has a 30-second in-memory cache; pass noCache=true to bypass. */
   overview: ({ noCache = false, forecastDay = 7 } = {}) =>
