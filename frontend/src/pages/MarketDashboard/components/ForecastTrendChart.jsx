@@ -327,6 +327,55 @@ export default function ForecastTrendChart({ productId, productName }) {
               </div>
             )
           })()}
+          {/* Phase E1+E2: directional edge + buy/hold/sell decision (primary 7d horizon) */}
+          {(() => {
+            const d7 = data?.overlay?.decision?.find(d => d.horizon === 7)
+                       || data?.overlay?.decision?.[0]
+            if (!d7) return null
+            const actionColors = {
+              buy: { bg: '#dcfce7', fg: '#166534', dot: '#22c55e' },
+              sell: { bg: '#fee2e2', fg: '#991b1b', dot: '#ef4444' },
+              hold: { bg: '#e0e7ff', fg: '#3730a3', dot: '#6366f1' },
+              watch: { bg: '#f1f5f9', fg: '#475569', dot: '#94a3b8' },
+            }
+            const confOpacity = { high: '1', medium: '0.85', low: '0.6' }[d7.confidence] || '0.6'
+            const c = actionColors[d7.action] || actionColors.watch
+            const edgeMeta = data?.overlay?.directional?.find(d => d.horizon === 7)
+                          || data?.overlay?.directional?.[0]
+            const edgeBadge = edgeMeta
+              ? (edgeMeta.status === 'edge'
+                  ? `Directional edge: ${(edgeMeta.accuracy * 100).toFixed(0)}% (p=${(edgeMeta.p_value ?? 1).toExponential(1)})`
+                  : `No directional edge (acc=${(edgeMeta.accuracy ?? 0).toFixed(2)})`)
+              : null
+            return (
+              <div className="inline-flex items-center gap-1.5">
+                <div
+                  className="relative inline-flex items-center gap-1.5 rounded-md px-2 py-0.5 text-[11px] font-medium"
+                  style={{ backgroundColor: c.bg, color: c.fg, opacity: confOpacity }}
+                  title={`${d7.rationale}${edgeBadge ? ' · ' + edgeBadge : ''}`}
+                >
+                  <span
+                    className="inline-block h-2 w-2 rounded-full"
+                    style={{ backgroundColor: c.dot }}
+                  />
+                  {d7.action.toUpperCase()} ({d7.confidence})
+                </div>
+                {edgeMeta && (
+                  <div
+                    className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium"
+                    style={{
+                      backgroundColor: edgeMeta.status === 'edge' ? '#fef9c3' : '#f1f5f9',
+                      color: edgeMeta.status === 'edge' ? '#854d0e' : '#64748b',
+                    }}
+                    title={`Walk-forward directional accuracy ${(edgeMeta.accuracy * 100).toFixed(1)}% on ${edgeMeta.n_test} test samples (binomial p=${(edgeMeta.p_value ?? 1).toExponential(2)}). 'edge' if p < 0.01.`}
+                  >
+                    dir: {(edgeMeta.accuracy * 100).toFixed(0)}%
+                    {edgeMeta.status === 'edge' ? ' ✓' : ''}
+                  </div>
+                )}
+              </div>
+            )
+          })()}
           {/* Phase 7: SKU badge for ERP products */}
           {isErpProduct && skuCount > 0 && (
             <div className="relative">

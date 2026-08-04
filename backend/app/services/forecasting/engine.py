@@ -482,55 +482,15 @@ class ForecastEngine:
                 )
                 policy_report = None
 
-        # --- Step 9: Explanation + drift detection (Phase 1) ---
+        # --- Step 9: Explanation + trust + directional + decision ---
+        # Built AFTER probability_report (Phase D) so directional+decision
+        # can consume probability values. Previously this block was built
+        # BEFORE probability_report was defined, raising NameError and
+        # silently leaving run.explanation = None — which broke Phase 6/7
+        # overlay-meta badges. Now assembled in correct order.
         drift_status = detect_drift(self._db, target.product_key)
         explanation_dict: dict | None = None
         xgb_exog = forecasts.get("xgboost_exog")
-        try:
-            explanation = explain_forecast(
-                product_key=target.product_key,
-                forecast_values=ensemble_result.point_forecast.tolist()[:h_max],
-                previous_forecast=None,  # No previous comparison in single mode
-                xgboost_model=xgb_exog,
-                feature_names=features_used,
-                cleaning_report=cleaning_report if cleaning_report else None,
-                coherence_report=coherence_report if coherence_report else None,
-                drift_status=drift_status,
-                honesty_gate_triggered=guard_result.below_naive_baseline,
-            )
-            # --- Trust tier (Phase B) ---
-            trust_tier_report: dict | None = None
-            try:
-                from app.services.forecasting.forecast_trust_tier import (
-                    classify_cadence,
-                    compute_forecast_trust_tier,
-                )
-                _parts = (target.product_key or "").split(".")
-                _product_id = _parts[1] if len(_parts) >= 2 else (target.product_key or "")
-                _cadence = classify_cadence(_product_id, row_count=None)
-                trust_tier_report = compute_forecast_trust_tier(
-                    product_id=_product_id,
-                    below_naive=guard_result.below_naive_baseline,
-                    cadence_class=_cadence,
-                    mape=None,
-                )
-            except Exception as exc:
-                logger.warning("[trust-tier] failed for %s: %s", target.product_key, exc)
-
-            explanation_dict = {
-                "summary": explanation.summary,
-                "confidence": explanation.confidence,
-                "drivers": [{"feature": d.feature, "weight": d.weight} for d in explanation.drivers],
-                "coherence_flags": explanation.coherence_flags,
-                "drift_warning": explanation.drift_warning,
-                "intelligence": intelligence_report,
-                "policy": policy_report,
-                "domain_signals": domain_signals_report,
-                "trust_tier": trust_tier_report,
-                "probability": probability_report,
-            }
-        except Exception as exc:
-            logger.warning("Explanation failed for %s: %s", target.product_key, exc)
 
         # --- Scenarios (with conformal calibrated intervals) ---
         cal = conformal_calibrate(bt.residuals_by_horizon) if bt.residuals_by_horizon else None
@@ -561,6 +521,106 @@ class ForecastEngine:
                     }
             except Exception as exc:
                 logger.warning("Price-change probability failed for %s: %s", target.product_key, exc)
+
+        # --- Phase E1: directional classifier (per horizon) ---
+        from app.services.forecasting.directional_classifier import backtest_directional
+        from app.services.forecasting.decision_engine import recommend
+
+        directional_report: dict = {}
+        decision_report: dict = {}
+        for h in horizons:
+            h_int = int(h)
+            try:
+                dir_result = backtest_directional(data, horizons=(h_int,))
+            except Exception as exc:
+                logger.warning(
+                    "[directional] failed for %s h=%d: %s",
+                    target.product_key, h_int, exc,
+                )
+                dir_result = {"status": "no_edge"}
+
+            acc = dir_result.get("logistic")
+            directional_report[str(h)] = {
+                "accuracy": acc,
+                "n_test": int(dir_result.get("n_test", 0) or 0),
+                "p_value": dir_result.get("p_value"),
+                "status": dir_result.get("status", "no_edge"),
+            }
+
+            # Decision needs trust_tier which is built below; placeholder for now
+            decision_report[str(h)] = None
+
+        # --- Step 9: Explanation + trust tier + decisions (Phase E) ---
+        try:
+            explanation = explain_forecast(
+                product_key=target.product_key,
+                forecast_values=ensemble_result.point_forecast.tolist()[:h_max],
+                previous_forecast=None,  # No previous comparison in single mode
+                xgboost_model=xgb_exog,
+                feature_names=features_used,
+                cleaning_report=cleaning_report if cleaning_report else None,
+                coherence_report=coherence_report if coherence_report else None,
+                drift_status=drift_status,
+                honesty_gate_triggered=guard_result.below_naive_baseline,
+            )
+
+            # --- Trust tier (Phase B) ---
+            trust_tier_report: dict | None = None
+            try:
+                from app.services.forecasting.forecast_trust_tier import (
+                    classify_cadence,
+                    compute_forecast_trust_tier,
+                )
+                _parts = (target.product_key or "").split(".")
+                _product_id = _parts[1] if len(_parts) >= 2 else (target.product_key or "")
+                _cadence = classify_cadence(_product_id, row_count=None)
+                trust_tier_report = compute_forecast_trust_tier(
+                    product_id=_product_id,
+                    below_naive=guard_result.below_naive_baseline,
+                    cadence_class=_cadence,
+                    mape=None,
+                )
+            except Exception as exc:
+                logger.warning("[trust-tier] failed for %s: %s", target.product_key, exc)
+
+            # --- Phase E2: decision engine (per horizon) ---
+            # Now we have trust_tier, fill in decisions
+            tier = (trust_tier_report or {}).get("tier") or "low"
+            for h_key in decision_report.keys():
+                prob_h = probability_report.get(h_key) or {}
+                p_rise = float(prob_h.get("p_rise", 0.5) or 0.5)
+                exp_chg = prob_h.get("expected_change_pct")
+                exp_chg_f = float(exp_chg) if exp_chg is not None else 0.0
+                dir_h = directional_report.get(h_key) or {}
+                decision = recommend(
+                    p_rise=p_rise,
+                    expected_change_pct=exp_chg_f,
+                    directional_acc=dir_h.get("accuracy"),
+                    directional_status=dir_h.get("status"),
+                    trust_tier=str(tier),
+                )
+                decision_report[h_key] = {
+                    "action": decision.action,
+                    "confidence": decision.confidence,
+                    "rationale": decision.rationale,
+                }
+
+            explanation_dict = {
+                "summary": explanation.summary,
+                "confidence": explanation.confidence,
+                "drivers": [{"feature": d.feature, "weight": d.weight} for d in explanation.drivers],
+                "coherence_flags": explanation.coherence_flags,
+                "drift_warning": explanation.drift_warning,
+                "intelligence": intelligence_report,
+                "policy": policy_report,
+                "domain_signals": domain_signals_report,
+                "trust_tier": trust_tier_report,
+                "probability": probability_report,
+                "directional": directional_report,
+                "decision": decision_report,
+            }
+        except Exception as exc:
+            logger.warning("Explanation failed for %s: %s", target.product_key, exc)
 
         # --- Build results JSON ---
         results = {

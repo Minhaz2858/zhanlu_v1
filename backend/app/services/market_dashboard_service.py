@@ -893,8 +893,9 @@ def get_forecast_base_batch_v2(
     """
     from app.models.forecasting import ForecastTarget, ForecastRun
     from app.schemas.market_dashboard import (
-        ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
-        ProbabilityOverlayMeta, SkuForecastMeta, TrustTierMeta,
+        DecisionMeta, DirectionalEdgeMeta, ForecastOverlayMeta,
+        IntelligenceOverlayMeta, PolicyOverlayMeta, ProbabilityOverlayMeta,
+        SkuForecastMeta, TrustTierMeta,
     )
 
     out: dict = {pid: None for pid in product_ids}
@@ -1009,13 +1010,56 @@ def get_forecast_base_batch_v2(
                         expected_change_pct=p_info.get("expected_change_pct"),
                     ))
 
-                if intel_meta or policy_meta or trust_meta or probability_list:
+                # Phase E1: directional edge list
+                directional_list: list = []
+                dir_report = explanation.get("directional") or {}
+                for h_str, d_info in dir_report.items():
+                    if not isinstance(d_info, dict):
+                        continue
+                    try:
+                        h_int = int(h_str)
+                    except (ValueError, TypeError):
+                        continue
+                    acc = d_info.get("accuracy")
+                    if acc is None:
+                        continue
+                    directional_list.append(DirectionalEdgeMeta(
+                        horizon=h_int,
+                        accuracy=float(acc),
+                        n_test=int(d_info.get("n_test", 0) or 0),
+                        p_value=float(d_info.get("p_value", 1.0) or 1.0),
+                        status=str(d_info.get("status", "no_edge")),
+                    ))
+
+                # Phase E2: decision list
+                decision_list: list = []
+                dec_report = explanation.get("decision") or {}
+                for h_str, dec_info in dec_report.items():
+                    if not isinstance(dec_info, dict):
+                        continue
+                    try:
+                        h_int = int(h_str)
+                    except (ValueError, TypeError):
+                        continue
+                    decision_list.append(DecisionMeta(
+                        horizon=h_int,
+                        action=str(dec_info.get("action", "watch")),
+                        confidence=str(dec_info.get("confidence", "low")),
+                        rationale=str(dec_info.get("rationale", "")),
+                    ))
+
+                if (
+                    intel_meta or policy_meta or trust_meta
+                    or probability_list or directional_list or decision_list
+                ):
                     overlay[pid] = ForecastOverlayMeta(
                         product_id=pid,
                         intelligence=intel_meta,
                         policy=policy_meta,
                         trust_tier=trust_meta,
                         probability=probability_list if probability_list else None,
+                        directional=directional_list if directional_list else None,
+                        decision=decision_list if decision_list else None,
                     )
 
         # ── ERP products: prefix lookup for SKU-level targets ──
@@ -1253,8 +1297,8 @@ def _build_overlay_meta(
     ``horizon_payload.get("explanation")`` for backward compat.
     """
     from app.schemas.market_dashboard import (
-        ForecastOverlayMeta, IntelligenceOverlayMeta, PolicyOverlayMeta,
-        ProbabilityOverlayMeta,
+        DecisionMeta, DirectionalEdgeMeta, ForecastOverlayMeta,
+        IntelligenceOverlayMeta, PolicyOverlayMeta, ProbabilityOverlayMeta,
     )
     if explanation is None:
         explanation = horizon_payload.get("explanation") or {}
@@ -1315,13 +1359,56 @@ def _build_overlay_meta(
             expected_change_pct=p_info.get("expected_change_pct"),
         ))
 
-    if intel_meta or policy_meta or trust_meta or probability_list:
+    # Phase E1: directional edge list
+    directional_list: list[DirectionalEdgeMeta] = []
+    dir_report = explanation.get("directional") or {}
+    for h_str, d_info in dir_report.items():
+        if not isinstance(d_info, dict):
+            continue
+        try:
+            h_int = int(h_str)
+        except (ValueError, TypeError):
+            continue
+        acc = d_info.get("accuracy")
+        if acc is None:
+            continue
+        directional_list.append(DirectionalEdgeMeta(
+            horizon=h_int,
+            accuracy=float(acc),
+            n_test=int(d_info.get("n_test", 0) or 0),
+            p_value=float(d_info.get("p_value", 1.0) or 1.0),
+            status=str(d_info.get("status", "no_edge")),
+        ))
+
+    # Phase E2: decision list
+    decision_list: list[DecisionMeta] = []
+    dec_report = explanation.get("decision") or {}
+    for h_str, dec_info in dec_report.items():
+        if not isinstance(dec_info, dict):
+            continue
+        try:
+            h_int = int(h_str)
+        except (ValueError, TypeError):
+            continue
+        decision_list.append(DecisionMeta(
+            horizon=h_int,
+            action=str(dec_info.get("action", "watch")),
+            confidence=str(dec_info.get("confidence", "low")),
+            rationale=str(dec_info.get("rationale", "")),
+        ))
+
+    if (
+        intel_meta or policy_meta or trust_meta
+        or probability_list or directional_list or decision_list
+    ):
         return ForecastOverlayMeta(
             product_id=product_id,
             intelligence=intel_meta,
             policy=policy_meta,
             trust_tier=trust_meta,
             probability=probability_list if probability_list else None,
+            directional=directional_list if directional_list else None,
+            decision=decision_list if decision_list else None,
         )
     return None
 

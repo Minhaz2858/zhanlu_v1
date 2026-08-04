@@ -117,6 +117,23 @@ class ProbabilityOverlayMeta(BaseModel):
     expected_change_pct: Optional[float] = None
 
 
+class DirectionalEdgeMeta(BaseModel):
+    """Phase E1 directional classifier result (per horizon)."""
+    horizon: int
+    accuracy: float  # walk-forward CV accuracy [0,1]
+    n_test: int      # number of test samples used
+    p_value: float   # binomial p-value against null p=0.5
+    status: str      # "edge" | "no_edge"
+
+
+class DecisionMeta(BaseModel):
+    """Phase E2 buy/hold/sell decision (per horizon)."""
+    horizon: int
+    action: str              # "buy" | "hold" | "sell" | "watch"
+    confidence: str          # "high" | "medium" | "low"
+    rationale: str
+
+
 class ForecastOverlayMeta(BaseModel):
     """Combined per-product overlay metadata bundle."""
     product_id: str
@@ -124,6 +141,8 @@ class ForecastOverlayMeta(BaseModel):
     policy: Optional[PolicyOverlayMeta] = None
     trust_tier: Optional[TrustTierMeta] = None
     probability: Optional[list[ProbabilityOverlayMeta]] = None
+    directional: Optional[list[DirectionalEdgeMeta]] = None  # Phase E1
+    decision: Optional[list[DecisionMeta]] = None             # Phase E2
 
 
 class SkuForecastMeta(BaseModel):
