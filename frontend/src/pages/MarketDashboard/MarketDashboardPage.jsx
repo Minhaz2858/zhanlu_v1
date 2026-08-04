@@ -152,11 +152,6 @@ export default function MarketDashboardPage() {
         selectedId={selectedProductId}
         onSelectProduct={setSelectedProductId}
       />
-      <DecisionBoard
-        group={section}
-        selectedId={selectedProductId}
-        onSelectProduct={setSelectedProductId}
-      />
       {snapshotQuery.isLoading && (
         <div className="px-6 py-4">
           <p className={TYPO.listText + ' text-slate-500'}>Loading snapshot…</p>
