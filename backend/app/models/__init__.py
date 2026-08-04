@@ -68,6 +68,8 @@ from app.models.forecasting import (
     ForecastBusinessRule,
     DomainPackInstall,
 )
+from app.models.intelligence import IntelligenceEvent, IntelligenceIngestionStatus
+from app.models.resource_share import ResourceShare
 
 __all__ = [
     "TimestampedBase",
@@ -144,4 +146,7 @@ __all__ = [
     "ForecastAccuracyLog",
     "ForecastBusinessRule",
     "DomainPackInstall",
+    "IntelligenceEvent",
+    "IntelligenceIngestionStatus",
+    "ResourceShare",
 ]

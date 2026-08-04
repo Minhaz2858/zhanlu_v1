@@ -366,23 +366,32 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "retention_days": 30,
             },
         },
-        # ── Ecisco BI Orchestrator Agent ────────────────────────────────
-        # User-facing entry point of the EDIA pipeline.  Replaces the old
-        # ``ecisco_bi`` single-agent config.  Delegates to perception,
-        # RAG research, diagnosis, forecast, pricing, data, and report
-        # sub-agents (all code-only BUILTIN_AGENTS).
+        # ── Ecisco BI Assistant Agent ────────────────────────────────────
+        # Default agent for the Ecisco BI project.  Replaces the old
+        # ``orchestrator_agent`` and ``ecisco_bi`` single-agent configs.
+        # Covers the full EDIA pipeline: perception, RAG research,
+        # diagnosis, forecast, pricing, decision, knowledge graph,
+        # weekly report, ERP writeback, and intelligence layers.
+        # Uses hybrid routing: direct Python calls for fast paths,
+        # delegation tools for complex reasoning.
+        # Auto-selected when the user is in the Ecisco BI project.
         {
-            "name": "orchestrator_agent",
+            "name": "ecisco_bi_assistant",
             "description": (
-                "EDIA Orchestrator — entry point of the Ecisco BI pipeline "
-                "for C5/C9 petrochemical domain intelligence. Classifies "
-                "intent, extracts context, and routes to perception, RAG, "
-                "diagnosis, forecast, pricing, and report sub-agents."
+                "Ecisco BI Assistant — default general-purpose agent for "
+                "the Ecisco BI C5/C9 petrochemical domain intelligence "
+                "platform. Covers market perception, diagnosis, forecasting, "
+                "pricing, decision, knowledge graph, weekly reports, ERP "
+                "writeback, and intelligence layers. Uses hybrid routing: "
+                "direct Python service calls for fast paths, delegation "
+                "tools for complex multi-step reasoning."
             ),
             "project": "Ecisco BI",
             "capabilities": [
-                "orchestration", "forecasting", "reporting",
-                "data_query", "diagnosis", "pricing", "web_research",
+                "orchestration", "perception", "diagnosis", "forecasting",
+                "pricing", "decision", "knowledge_graph", "reporting",
+                "weekly_report", "erp_writeback", "data_query",
+                "intelligence", "web_research",
             ],
             "model": "gpt-4o",
             "agent_type": "sequential",
@@ -390,33 +399,66 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
             "status": "active",
             "tool_config": {
                 "enabled_tools": _tools_in_registry(registry, [
+                    # EDIA pipeline delegation tools (12 ask_* tools)
                     "ask_perception", "ask_rag_research", "ask_diagnosis",
                     "ask_forecast_agent", "ask_pricing", "ask_data_agent",
-                    "ask_report_agent",
-                    "create_artifact",
-                    "web_search", "web_extract",
-                    "memory", "todo",
+                    "ask_report_agent", "ask_intelligence",
+                    "ask_knowledge_graph", "ask_decision", "ask_macro_override",
+                    "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback",
+                    # Full general_assistant toolset (mirrors the
+                    # general_assistant config above) so data sub-agents
+                    # (e.g. list_data_sources / describe_schema / execute_query)
+                    # are not blocked by the parent agent's allowlist.
+                    "create_artifact", "execute_automation",
+                    "web_search", "web_extract", "url_safety", "x_search",
+                    "agent_browser",
+                    "memory", "todo", "kanban", "session_search",
+                    "read_file", "write_file", "image_generation",
+                    "execute_code", "delegate_task",
+                    "run_sandbox_skill", "fuzzy_match", "patch_parser",
+                    "process_registry_list", "process_registry_tail",
+                    "process_registry_kill",
+                    "clarify", "slash_confirm", "approval", "interrupt",
+                    "checkpoint_manager", "osv_check", "tirith_security",
+                    "skills", "skills_hub", "skills_guard",
+                    "skill_provenance", "skill_usage", "Skill", "load_skill_body",
+                    "update_env_config", "docker_compose_restart",
                 ]),
             },
             **_BASE_HARNESS,
             "manifest_json": {
-                "agent_name": "orchestrator_agent",
+                "agent_name": "ecisco_bi_assistant",
                 "version": "1.0.0",
-                "mission": "Orchestrate Ecisco C5/C9 petrochemical domain intelligence via the EDIA pipeline",
+                "mission": "Serve as the default Ecisco BI assistant for C5/C9 petrochemical domain intelligence, covering the full EDIA 6-stage pipeline",
                 "task_scope": [
                     "market_analysis", "forecasting", "pricing",
-                    "diagnosis", "weekly_report", "data_analysis",
+                    "decision", "diagnosis", "weekly_report",
+                    "knowledge_graph", "erp_writeback", "data_analysis",
                 ],
                 "boundaries": {
                     "allowed": [
                         "ask_perception", "ask_rag_research", "ask_diagnosis",
                         "ask_forecast_agent", "ask_pricing", "ask_data_agent",
-                        "ask_report_agent", "create_artifact",
-                        "web_search", "web_extract",
+                        "ask_report_agent", "ask_intelligence",
+                        "ask_knowledge_graph", "ask_decision", "ask_macro_override",
+                        "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback",
+                        "create_artifact", "execute_automation",
+                        "web_search", "web_extract", "url_safety", "x_search",
+                        "agent_browser",
+                        "memory", "todo", "kanban", "session_search",
+                        "read_file", "write_file", "image_generation",
+                        "execute_code", "delegate_task",
+                        "run_sandbox_skill", "fuzzy_match", "patch_parser",
+                        "process_registry_list", "process_registry_tail",
+                        "process_registry_kill",
+                        "clarify", "slash_confirm", "approval", "interrupt",
+                        "checkpoint_manager", "osv_check", "tirith_security",
+                        "skills", "skills_hub", "skills_guard",
+                        "skill_provenance", "skill_usage", "Skill", "load_skill_body",
+                        "update_env_config", "docker_compose_restart",
                     ],
                     "forbidden": [
                         "agent_creation", "skill_creation", "automation_creation",
-                        "code_execution", "file_operations",
                     ],
                 },
                 "risk_tier": "low",
@@ -430,10 +472,11 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "allowed_domains": [],
                 "retention_days": 30,
             },
-            # orchestrator_agent is user-facing — do NOT hide behind
+            # ecisco_bi_assistant is user-facing — do NOT hide behind
             # is_system=True.  The frontend's filterUserAgents() uses
             # is_system to decide what to show in "My Space" and the agent
-            # picker, and this agent is designed to be selected by end users.
+            # picker, and this agent is designed to be selected by end users
+            # (and auto-selected in the Ecisco BI project).
             "is_system": False,
         },
     ]
@@ -564,7 +607,7 @@ def ensure_system_agents(db=None) -> None:
         else:
             logger.debug("System agents already present — nothing to do")
 
-        # ── Ensure the Ecisco BI project exists and the orchestrator_agent
+        # ── Ensure the Ecisco BI project exists and the ecisco_bi_assistant
         # is linked to it via ProjectAgent.  This makes the EDIA pipeline
         # available on every deployment without requiring a manual re-seed.
         #
@@ -576,6 +619,34 @@ def ensure_system_agents(db=None) -> None:
             from app.models.project import Project
             from app.models.project_agent import ProjectAgent
 
+            # ── One-time rename: orchestrator_agent → ecisco_bi_assistant ──
+            # Idempotent — renames any remaining old rows on each startup.
+            # If both old and new rows exist, deletes the old one (dedup).
+            old_agent = db.query(AgentApp).filter(
+                AgentApp.name == "orchestrator_agent",
+                AgentApp.is_deleted == False,
+            ).first()
+            new_agent_check = db.query(AgentApp).filter(
+                AgentApp.name == "ecisco_bi_assistant",
+                AgentApp.is_deleted == False,
+            ).first()
+            if old_agent and new_agent_check:
+                # Both exist — soft-delete the old row, keep the new one.
+                old_agent.is_deleted = True
+                db.commit()
+                logger.info(
+                    "Dedup: soft-deleted leftover orchestrator_agent row "
+                    "(agent_id=%s, newer ecisco_bi_assistant at agent_id=%s)",
+                    old_agent.id, new_agent_check.id,
+                )
+            elif old_agent:
+                old_agent.name = "ecisco_bi_assistant"
+                db.commit()
+                logger.info(
+                    "Renamed orchestrator_agent → ecisco_bi_assistant "
+                    "(agent_id=%s)", old_agent.id,
+                )
+
             ecisco_project = db.query(Project).filter(
                 Project.name == "Ecisco BI",
                 Project.is_deleted == False,
@@ -585,9 +656,10 @@ def ensure_system_agents(db=None) -> None:
                     name="Ecisco BI",
                     description=(
                         "Ecisco BI — EDIA pipeline for C5/C9 petrochemical "
-                        "domain intelligence. Contains Orchestrator, "
+                        "domain intelligence. Contains Ecisco BI Assistant, "
                         "Perception, RAG Research, Diagnosis, Forecasting, "
-                        "Pricing, Data, and Report Generation agents."
+                        "Pricing, Decision, Knowledge Graph, Weekly Report, "
+                        "ERP Writeback, and Report Generation agents."
                     ),
                     color="#8B5CF6",
                     status="active",
@@ -619,32 +691,32 @@ def ensure_system_agents(db=None) -> None:
                 db.commit()
                 logger.info("Promoted Ecisco BI project to is_system=True (id=%s)", ecisco_project.id)
 
-            # Link the orchestrator_agent AgentApp to the Ecisco BI project
-            orch_agent = db.query(AgentApp).filter(
-                AgentApp.name == "orchestrator_agent",
+            # Link the ecisco_bi_assistant AgentApp to the Ecisco BI project
+            bio_agent = db.query(AgentApp).filter(
+                AgentApp.name == "ecisco_bi_assistant",
                 AgentApp.is_deleted == False,
             ).first()
-            if orch_agent:
+            if bio_agent:
                 # Sync the legacy string field too
-                orch_agent.project = "Ecisco BI"
-                orch_agent.project_id = ecisco_project.id
+                bio_agent.project = "Ecisco BI"
+                bio_agent.project_id = ecisco_project.id
 
                 # Ensure the ProjectAgent many-to-many row exists
                 existing_pa = db.query(ProjectAgent).filter(
                     ProjectAgent.project_id == ecisco_project.id,
-                    ProjectAgent.agent_id == orch_agent.id,
+                    ProjectAgent.agent_id == bio_agent.id,
                 ).first()
                 if not existing_pa:
                     pa = ProjectAgent(
                         project_id=ecisco_project.id,
-                        agent_id=orch_agent.id,
+                        agent_id=bio_agent.id,
                         role="primary",
                     )
                     db.add(pa)
                     db.commit()
                     logger.info(
-                        "Linked orchestrator_agent to Ecisco BI project (agent_id=%s)",
-                        orch_agent.id,
+                        "Linked ecisco_bi_assistant to Ecisco BI project (agent_id=%s)",
+                        bio_agent.id,
                     )
         except Exception as _proj_err:
             db.rollback()

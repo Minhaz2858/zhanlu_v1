@@ -84,6 +84,14 @@
     @apply border-border outline-ring/50;
   }
 
+  /* 全局横向滚动防护：桌面分辨率自适应的一部分，任何页面出现超宽
+     （如代码块、表格、侧面板同时展开）时裁剪而不是出现横向滚动条。
+     clip 比 hidden 更优：不产生滚动条，也不允许程序化横向滚动。 */
+  html,
+  body {
+    overflow-x: clip;
+  }
+
   body {
     @apply bg-background text-foreground font-body antialiased;
   }
@@ -119,4 +127,114 @@
 }
 .dark ::-webkit-scrollbar-thumb:hover {
   background: hsl(0 0% 30%);
+}
+
+/* ── Market Dashboard Overview (ported from EDIA_5.1.2) ───────
+   The overview UI in MarketDashboard/components/OverviewDashboard.jsx uses
+   semantic class names (.overview-product-unit, .overview-regional-row, …)
+   so it can be reskinned for both light and dark without rewriting JSX.
+   In `dark` mode we also use these selectors directly (the `.dark` class is
+   applied to <html> by next-themes, mirroring EDIA's `html.dark` pattern). */
+
+.overview-product-unit {
+  background-color: #ffffff;
+}
+
+.overview-product-label {
+  background-color: #f8fafc;
+}
+
+.overview-regional-panel {
+  background-color: rgb(248 250 252 / 0.8);
+}
+
+.overview-exec-primary {
+  color: #0f172a;
+}
+
+.overview-exec-muted {
+  color: #64748b;
+}
+
+.overview-exec-value {
+  color: #0f172a;
+}
+
+.overview-regional-internal {
+  background-color: rgb(241 245 249 / 0.7); /* slate-100 tint, neutral */
+}
+
+.overview-regional-internal .font-semibold,
+.overview-regional-internal .font-semibold.text-foreground {
+  color: hsl(17 12% 10%) !important; /* explicit dark text so internal rows never go white */
+}
+
+.dark .overview-product-unit,
+html.dark .overview-product-unit {
+  background-color: rgb(33 38 45 / 1) !important;
+  border-color: rgb(48 54 61 / 1) !important;
+}
+
+.dark .overview-product-label,
+html.dark .overview-product-label {
+  background-color: rgb(28 33 40 / 1) !important;
+  border-color: rgb(48 54 61 / 1) !important;
+}
+
+.dark .overview-regional-panel,
+html.dark .overview-regional-panel {
+  background-color: rgb(22 27 34 / 0.95) !important;
+  border-color: rgb(48 54 61 / 1) !important;
+}
+
+.dark .overview-regional-row,
+html.dark .overview-regional-row {
+  border-color: rgb(48 54 61 / 1) !important;
+}
+
+.dark .overview-exec-primary,
+html.dark .overview-exec-primary {
+  color: #f0f6fc !important;
+}
+
+.dark .overview-exec-muted,
+html.dark .overview-exec-muted {
+  color: #8b949e !important;
+}
+
+.dark .overview-exec-value,
+html.dark .overview-exec-value {
+  color: #f0f6fc !important;
+}
+
+.dark .overview-regional-internal,
+html.dark .overview-regional-internal {
+  background-color: rgb(33 38 45 / 0.7) !important; /* neutral dark gray, no rust */
+}
+
+.dark .overview-regional-internal .font-semibold,
+.dark .overview-regional-internal .font-semibold.text-foreground,
+html.dark .overview-regional-internal .font-semibold,
+html.dark .overview-regional-internal .font-semibold.text-foreground {
+  color: hsl(0 0% 92%) !important; /* light text on dark gray in dark mode */
+}
+
+/* ── Mobile safe-area helpers ─────────────────────────────
+   Bottom navigation and sheets must clear the iOS/Android
+   home-indicator / gesture bar. These utilities map the
+   device's safe-area insets so the mobile layout never hides
+   interactive content behind the system UI. */
+@layer utilities {
+  .pb-safe {
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .pt-safe {
+    padding-top: env(safe-area-inset-top);
+  }
+  .pl-safe {
+    padding-left: env(safe-area-inset-left);
+  }
+  .pr-safe {
+    padding-right: env(safe-area-inset-right);
+  }
 }

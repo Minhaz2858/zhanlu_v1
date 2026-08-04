@@ -108,6 +108,13 @@ class EdiaMysqlDataSource:
         df["y"] = pd.to_numeric(df["y"], errors="coerce")
         # Drop any rows that failed coercion (NaN y or NaT ds)
         df = df.dropna(subset=["ds", "y"])
+
+        # Deduplicate by date: multiple ERP order entries can land on the
+        # same PLANDATE with different prices. Average them into a single
+        # daily mean price. For md_t_lz_price this is a no-op — duplicate
+        # dates have identical prices, so AVG(price) = price.
+        df = df.groupby("ds", as_index=False).agg({"y": "mean"})
+
         df = df.sort_values("ds").reset_index(drop=True)
 
         if df.empty:

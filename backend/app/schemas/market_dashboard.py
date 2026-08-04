@@ -126,3 +126,21 @@ class EventsResponse(BaseModel):
     """Response for /events/latest."""
     events: list[EventItem] = Field(default_factory=list)
     count: int = 0
+
+
+class OverviewBundle(BaseModel):
+    """One-shot payload for the chemical market overview page.
+
+    Returns everything the EDIA overview dashboard needs in a single
+    round-trip so the page renders without waiting on a waterfall of
+    separate /snapshot /regional-batch /forecast-base-batch /fx calls.
+    """
+    snapshot: list[MarketSnapshot] = Field(default_factory=list)
+    regional: dict[str, RegionalPriceData] = Field(default_factory=dict)
+    regional_errors: dict[str, str] = Field(default_factory=dict)
+    forecast_day: int = 7
+    forecast_base_by_product: dict[str, Optional[float]] = Field(default_factory=dict)
+    fx: FxRateResponse
+    cached: bool = False  # True when this response came from the in-memory cache
+    cache_age_ms: int = 0  # how old the cached payload is (0 when freshly built)
+

@@ -118,7 +118,7 @@ def test_store_upsert_and_query(tmp_path, monkeypatch):
 
     monkeypatch.setattr(embedder_mod, "_load_model", lambda: FakeModel())
     embedder_mod.reset_for_tests()
-    monkeypatch.setattr(store_mod, "_CHROMA_DIR", str(tmp_path / "chroma"))
+    monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
     store_mod.reset_for_tests()
 
     store_mod.upsert_chunks(
@@ -160,7 +160,7 @@ def test_ingest_kb_end_to_end(tmp_path, monkeypatch):
 
     monkeypatch.setattr(embedder_mod, "_load_model", lambda: FakeModel())
     embedder_mod.reset_for_tests()
-    monkeypatch.setattr(store_mod, "_CHROMA_DIR", str(tmp_path / "chroma"))
+    monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
     store_mod.reset_for_tests()
 
     # in-memory SQLite so we don't touch the real Postgres
@@ -217,7 +217,7 @@ def test_ingest_kb_missing_file_sets_failed(tmp_path, monkeypatch):
 
     monkeypatch.setattr(embedder_mod, "_load_model", lambda: FakeModel())
     embedder_mod.reset_for_tests()
-    monkeypatch.setattr(store_mod, "_CHROMA_DIR", str(tmp_path / "chroma"))
+    monkeypatch.setenv("CHROMA_DIR", str(tmp_path / "chroma"))
     store_mod.reset_for_tests()
     monkeypatch.setattr(svc, "_upload_root", lambda: tmp_path / "uploads")
 

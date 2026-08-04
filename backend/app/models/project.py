@@ -27,6 +27,13 @@ class Project(TimestampedBase):
         Boolean, default=False, nullable=False
     )
 
+    # resource_type is stamped server-side at creation from the creator's
+    # role (admin→'company', user→'personal').  Immutable — clients can
+    # never change it via PUT (added to _IMMUTABLE_FIELDS).
+    resource_type: Mapped[str] = mapped_column(
+        String(20), default="personal", nullable=False, index=True,
+    )
+
     # Reverse relationship populated by ProjectMemory.project
     project_memories: Mapped[list["ProjectMemory"]] = relationship(
         "ProjectMemory",

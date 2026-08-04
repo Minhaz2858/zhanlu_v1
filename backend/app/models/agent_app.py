@@ -87,6 +87,13 @@ class AgentApp(TimestampedBase):
         Boolean, default=False, nullable=False, index=True,
     )
 
+    # resource_type is stamped server-side at creation from the creator's
+    # role (admin→'company', user→'personal').  Immutable — clients can
+    # never change it via PUT (added to _IMMUTABLE_FIELDS).
+    resource_type: Mapped[str] = mapped_column(
+        String(20), default="personal", nullable=False, index=True,
+    )
+
     # Functional role of the agent. NULL = a normal user agent.
     # "automation_runtime" = the hidden executor that runs scheduled
     # automations — never shown in user-facing agent lists, never used

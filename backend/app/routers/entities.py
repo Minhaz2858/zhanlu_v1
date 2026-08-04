@@ -25,6 +25,11 @@ from app.services import entity_service
 # general_assistant auto-selection still works. Marketplace agents/skills live
 # in separate tables (market_agent, marketplace_skills) and are unaffected.
 # KnowledgeBase remains shared (global catalog).
+#
+# Shareable entities (plan 2026-08-03, multi-tenant RBAC) additionally
+# include rows that were explicitly shared with the current user via
+# ResourceShare — but only on the READ path.  Writes (update/delete)
+# remain strictly owner-only.
 USER_SCOPED_ENTITIES = {
     "ChatSession",
     "ChatMessage",
@@ -41,6 +46,8 @@ USER_SCOPED_ENTITIES = {
     # via PUT /entities/User/{id} is impossible.
     "User",
 }
+
+_SHAREABLE_ENTITIES = {"Project", "AgentApp"}
 
 # Pagination safety: the Base44 SDK defaults to ``limit=None`` (fetch all). On a
 # large table that pulls every row into memory at once. Apply a sane default
@@ -61,6 +68,16 @@ def _owner_id(entity_name: str, user) -> str | None:
     if entity_name not in USER_SCOPED_ENTITIES:
         return None
     return getattr(user, "id", None)
+
+
+def _include_shared(entity_name: str) -> bool:
+    """Whether read paths should include shared-with-me rows."""
+    return entity_name in _SHAREABLE_ENTITIES
+
+
+def _resource_type_for_creator(user) -> str:
+    """Derive resource_type from the creator's role (admin→'company', else 'personal')."""
+    return "company" if getattr(user, "role", "user") == "admin" else "personal"
 
 
 def register_entity_router(
@@ -100,9 +117,16 @@ def register_entity_router(
         # memory in one shot. Explicit limits are clamped to a hard max.
         effective_limit = limit if limit is not None else DEFAULT_LIST_LIMIT
         effective_limit = min(effective_limit, MAX_LIST_LIMIT)
+        inc_shared = _include_shared(entity_name)
         if q:
-            return entity_service.filter_records(model_class, db, q, sort, effective_limit, skip, owner_id=owner)
-        return entity_service.list_records(model_class, db, sort, effective_limit, skip, owner_id=owner)
+            return entity_service.filter_records(
+                model_class, db, q, sort, effective_limit, skip,
+                owner_id=owner, include_shared=inc_shared,
+            )
+        return entity_service.list_records(
+            model_class, db, sort, effective_limit, skip,
+            owner_id=owner, include_shared=inc_shared,
+        )
 
     # --- POST / (create) ---
     @router.post("")
@@ -113,7 +137,13 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         created_by = user.id if user else None
-        return entity_service.create_record(model_class, data, db, created_by)
+        extra = {}
+        if _include_shared(entity_name) and user:
+            extra["resource_type"] = _resource_type_for_creator(user)
+        return entity_service.create_record(
+            model_class, data, db, created_by,
+            extra_fields=extra if extra else None,
+        )
 
     # --- DELETE / (delete many by query) ---
     @router.delete("")
@@ -182,7 +212,11 @@ def register_entity_router(
         # Accept anonymous identities so unauthenticated browsing still works.
         user=Depends(get_current_user_required),
     ):
-        result = entity_service.get_record(model_class, record_id, db, owner_id=_owner_id(entity_name, user))
+        result = entity_service.get_record(
+            model_class, record_id, db,
+            owner_id=_owner_id(entity_name, user),
+            include_shared=_include_shared(entity_name),
+        )
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
         return result

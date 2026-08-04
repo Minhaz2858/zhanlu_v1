@@ -36,7 +36,7 @@ def _apply_tenant(model, query):
     return query
 
 
-def _apply_owner(model, query, owner_id):
+def _apply_owner(model, query, owner_id, include_shared=False, db=None):
     """Apply per-user ownership isolation (created_by_id filter).
 
     This is the "real software" data-isolation layer: a user only ever sees
@@ -58,24 +58,54 @@ def _apply_owner(model, query, owner_id):
 
     Platform-shipped but user-facing rows (is_system=False, created_by_id=NULL)
     are also visible to all users. These are seeded by ``ensure_system_agents``
-    with an explicit is_system=False (e.g. ``orchestrator_agent``) so they appear in
+    with an explicit is_system=False (e.g. ``ecisco_bi_assistant``) so they appear in
     the agent picker and "My Space" — they are platform templates that every
     user can select and chat with, but are not auto-managed by the runtime.
+
+    When ``include_shared=True`` and the model has a ``resource_type`` column
+    (Project, AgentApp), rows that were explicitly shared with the current
+    user via ``ResourceShare`` are also included.  This only affects the
+    **read path** — write paths (update/delete/restore) keep the default
+    ``include_shared=False`` so edit/delete remain owner-only.
     """
     if owner_id is None:
         return query
     if hasattr(model, "created_by_id"):
-        if hasattr(model, "is_system"):
-            query = query.filter(
-                (model.created_by_id == owner_id)
-                | (model.is_system == True)
-                | (
-                    model.created_by_id.is_(None)
-                    & (model.is_system == False)
+        # Shared-with-me subquery — only for shareable models on the read path.
+        shared_clause = None
+        if include_shared and hasattr(model, "resource_type") and db is not None:
+            from app.models.resource_share import ResourceShare
+            model_name = getattr(model, "__name__", "")
+            resource_type = "project" if model_name == "Project" else "agent"
+            shared_ids = (
+                db.query(ResourceShare.resource_id)
+                .filter(
+                    ResourceShare.resource_type == resource_type,
+                    ResourceShare.shared_with_user_id == owner_id,
+                    ResourceShare.is_deleted == False,
                 )
+                .subquery()
             )
+            shared_clause = model.id.in_(shared_ids)
+
+        if hasattr(model, "is_system"):
+            base_conditions = [
+                model.created_by_id == owner_id,
+                model.is_system == True,
+                model.created_by_id.is_(None) & (model.is_system == False),
+            ]
+            if shared_clause is not None:
+                base_conditions.append(shared_clause)
+            from sqlalchemy import or_
+            query = query.filter(or_(*base_conditions))
         else:
-            query = query.filter(model.created_by_id == owner_id)
+            if shared_clause is not None:
+                from sqlalchemy import or_
+                query = query.filter(
+                    or_(model.created_by_id == owner_id, shared_clause)
+                )
+            else:
+                query = query.filter(model.created_by_id == owner_id)
     elif getattr(model, "__name__", "") == "User":
         # The User model has no ``created_by_id`` (a user account is not
         # "owned" by another user). Scope to the caller's own record so the
@@ -93,7 +123,7 @@ def _get_valid_fields(model) -> set:
 # Server-managed fields that must NEVER be accepted from clients. These are
 # set exclusively by the backend (tenant scoping, ownership stamping, PKs).
 # ``password_hash``/``is_deleted`` are already excluded by ``_get_valid_fields``.
-_IMMUTABLE_FIELDS = {"id", "created_by_id", "org_id", "app_id"}
+_IMMUTABLE_FIELDS = {"id", "created_by_id", "org_id", "app_id", "resource_type"}
 
 # Per-model privileged fields clients must never write. ``role`` on User is the
 # privilege-escalation vector — without this, any authenticated user could
@@ -152,39 +182,98 @@ def _apply_updates(record, model, updates: dict) -> None:
         setattr(record, key, _coerce_for_model(model, key, value))
 
 
+_SHAREABLE_MODELS = {"Project", "AgentApp"}
+
+
+def _annotate_access(model, records: list, owner_id: str | None, db) -> list:
+    """Annotate serialized records with ``can_edit`` and ``is_shared_with_me``.
+
+    Only called for shareable models (Project, AgentApp) on the read path so
+    the frontend can decide whether to show edit/share/delete buttons.  The
+    annotation is appended to the dict returned by ``to_dict()``; it does not
+    exist on the ORM model itself.
+
+    ``can_edit`` → True when the caller owns the record (created_by_id match).
+    ``is_shared_with_me`` → True when the caller received a ResourceShare grant
+    but does NOT own the record (i.e. it was shared *to* them).
+    """
+    if not records or owner_id is None:
+        for r in records:
+            r["can_edit"] = True
+            r["is_shared_with_me"] = False
+        return records
+
+    model_name = getattr(model, "__name__", "")
+    if model_name not in _SHAREABLE_MODELS or not hasattr(model, "resource_type"):
+        return records
+
+    record_ids = [r["id"] for r in records]
+    resource_type = "project" if model_name == "Project" else "agent"
+
+    from app.models.resource_share import ResourceShare
+    shared_ids: set[str] = {
+        row[0] for row in db.query(ResourceShare.resource_id).filter(
+            ResourceShare.resource_type == resource_type,
+            ResourceShare.resource_id.in_(record_ids),
+            ResourceShare.shared_with_user_id == owner_id,
+            ResourceShare.is_deleted == False,
+        ).all()
+    }
+
+    for r in records:
+        r["can_edit"] = r.get("created_by_id") == owner_id
+        r["is_shared_with_me"] = (
+            r["id"] in shared_ids
+            and r.get("created_by_id") != owner_id
+        )
+
+    return records
+
+
 def list_records(
     model, db: Session, sort: str | None = None,
     limit: int | None = None, skip: int | None = None,
     owner_id: str | None = None,
+    include_shared: bool = False,
 ) -> list:
     """List non-deleted records with optional sorting and pagination.
 
     ``owner_id`` (optional) scopes the result to rows the identity created —
     used for user-owned entities so each user sees only their own data.
+
+    ``include_shared`` (optional) adds rows shared with the owner via
+    ResourceShare — only for shareable models (Project, AgentApp) on reads.
     """
     query = db.query(model).filter(model.is_deleted == False)
     query = _apply_tenant(model, query)
-    query = _apply_owner(model, query, owner_id)
+    query = _apply_owner(model, query, owner_id,
+                         include_shared=include_shared, db=db)
     query = query.order_by(*parse_sort(model, sort))
     if skip:
         query = query.offset(skip)
     if limit:
         query = query.limit(limit)
-    return [r.to_dict() for r in query.all()]
+    records = [r.to_dict() for r in query.all()]
+    return _annotate_access(model, records, owner_id, db)
 
 
 def filter_records(
     model, db: Session, q: str | None = None,
     sort: str | None = None, limit: int | None = None,
     skip: int | None = None, owner_id: str | None = None,
+    include_shared: bool = False,
 ) -> list:
     """Filter non-deleted records by MongoDB-style query with sorting and pagination.
 
     ``owner_id`` (optional) additionally scopes to the identity's own rows.
+
+    ``include_shared`` (optional) adds rows shared with the owner via
+    ResourceShare — only for shareable models (Project, AgentApp) on reads.
     """
     query = db.query(model).filter(model.is_deleted == False)
     query = _apply_tenant(model, query)
-    query = _apply_owner(model, query, owner_id)
+    query = _apply_owner(model, query, owner_id,
+                         include_shared=include_shared, db=db)
     conditions = parse_query(model, q)
     for cond in conditions:
         query = query.filter(cond)
@@ -193,26 +282,44 @@ def filter_records(
         query = query.offset(skip)
     if limit:
         query = query.limit(limit)
-    return [r.to_dict() for r in query.all()]
+    records = [r.to_dict() for r in query.all()]
+    return _annotate_access(model, records, owner_id, db)
 
 
-def get_record(model, record_id: str, db: Session, owner_id: str | None = None) -> dict | None:
+def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
+                include_shared: bool = False) -> dict | None:
     """Get a single non-deleted record by ID.
 
     ``owner_id`` (optional) scopes the lookup to the identity's own rows —
     a non-owner gets None (record hidden), which the router surfaces as 404.
+
+    ``include_shared`` (optional) also matches records shared with the
+    owner via ResourceShare — only for shareable models (Project, AgentApp).
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == False
-    )), owner_id).first()
-    return record.to_dict() if record else None
+    )), owner_id, include_shared=include_shared, db=db).first()
+    if not record:
+        return None
+    result = record.to_dict()
+    _annotate_access(model, [result], owner_id, db)
+    return result
 
 
-def create_record(model, data: dict, db: Session, created_by_id: str | None = None) -> dict:
-    """Create a new record, filtering to valid columns only."""
+def create_record(model, data: dict, db: Session, created_by_id: str | None = None,
+                  extra_fields: dict | None = None) -> dict:
+    """Create a new record, filtering to valid columns only.
+
+    ``extra_fields`` (optional) are injected server-side AFTER filtering
+    (they bypass _filter_data).  Used to stamp ``resource_type`` on Project
+    and AgentApp from the creator's role without the client needing to know
+    about the column.
+    """
     filtered = _filter_data(model, data)
     if created_by_id and "created_by_id" in _get_valid_fields(model):
         filtered["created_by_id"] = created_by_id
+    if extra_fields:
+        filtered.update(extra_fields)
 
     record = model(**filtered)
     db.add(record)

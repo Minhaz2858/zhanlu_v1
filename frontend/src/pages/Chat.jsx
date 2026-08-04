@@ -23,6 +23,7 @@ import { buildSkillContext, buildDefaultSkillContext } from '@/lib/skillContext'
 import { watchForDashboardEdits } from '@/lib/dashboardStreamWatcher';
 import { streamAgentResponse, createAgentConversation, steerAgentConversation } from '@/api/agentEnhanced';
 import useStreamState from '@/hooks/useStreamState';
+import { useScreenSize } from '@/hooks/useScreenSize';
 import { classifyIntent, formatHint } from '@/lib/intentClassifier';
 import { detectLang } from '@/lib/detectLang';
 import { detectFileFormatRequest } from '@/lib/fileFormatRequest';
@@ -43,6 +44,11 @@ export default function Chat() {
   const { t, lang, aiLang } = useLanguage();
   const navigate = useNavigate();
   const isEn = lang === 'en';
+  // 桌面分辨率档位（见 lib/screen-config.js）：驱动下方五个面板的
+  // 默认/最小/最大尺寸，保证小屏（compact）不挤压聊天区、大屏
+  // （wide/ultra）侧面板适度放大。仅影响面板尺寸，不触碰消息逻辑。
+  const { settings } = useScreenSize();
+  const { panels } = settings;
 
   // --- Session state (lifted to ChatSessionContext) -------------------------
   // The session list, active selection, and "next new chat will land in this
@@ -124,6 +130,38 @@ export default function Chat() {
     saveDraft('chat_input_draft', inputValue, 0);
   }, [inputValue]);
 
+  // Flush the latest inputValue to localStorage *synchronously* on
+  // page-unload / tab-hide so a fast refresh (F5 / Ctrl-R / close-tab)
+  // can't drop the keystrokes that are still sitting in React's commit
+  // queue. The mirror effect above only fires AFTER React commits; if
+  // the user refreshes in the same frame as their last keystroke, the
+  // queued effect is discarded by the browser. The handlers below run
+  // while the page is still alive and write directly, so the next load
+  // sees the latest value.
+  const inputValueRef = useRef(inputValue);
+  useEffect(() => { inputValueRef.current = inputValue; }, [inputValue]);
+  useEffect(() => {
+    const flush = () => {
+      try {
+        localStorage.setItem(
+          'draft:chat_input_draft',
+          JSON.stringify(inputValueRef.current ?? ''),
+        );
+      } catch { /* localStorage unavailable — best effort */ }
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('beforeunload', flush);
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, []);
+
   // Handle ?session=<chat_session_id> deep links: when /automation's Run now
   // button fires, it navigates here so the user can watch the run stream
   // live in the conversation that created the task. The session id is
@@ -191,6 +229,11 @@ export default function Chat() {
   const [attachments, setAttachments] = useState([]);
   const [streamingId, setStreamingId] = useState(null);
   const [streamingConvId, setStreamingConvId] = useState(null);  // P2: conv id of the in-flight v3 stream (for steer routing)
+  // Mirror streamingId into a ref so async helpers (loadMessages merge) can
+  // read the latest value without capturing a stale closure — the polling
+  // effect only depends on activeId, so it would otherwise freeze streamingId.
+  const streamingIdRef = useRef(null);
+  useEffect(() => { streamingIdRef.current = streamingId; }, [streamingId]);
   const [steerMarkers, setSteerMarkers] = useState([]);  // P2: inline markers rendered next to the messages
   // P2 (conversational dashboards): persistent dock panel state. `open` toggles
   // mount/unmount of the panel; `viewerRef` lets the stream watcher tell the
@@ -306,6 +349,24 @@ export default function Chat() {
         // execution time. We deliberately don't resolve the bound
         // Kbs here to keep this code path minimal.
       }).catch(() => {});
+    }
+    // Auto-select ecisco_bi_assistant when entering the Ecisco BI
+    // project without an explicit agent param. The ecisco_bi_assistant
+    // replaces the legacy orchestrator_agent and covers the complete
+    // EDIA 6-stage pipeline (perception→diagnosis→forecast→pricing→
+    // decision→weekly report) plus knowledge graph and ERP writeback.
+    // Users who manually pick a different agent are not overridden.
+    if (!agentId && projectName) {
+      (async () => {
+        try {
+          const decodedName = decodeURIComponent(projectName);
+          if (decodedName === 'Ecisco BI') {
+            const _agents = await base44.entities.AgentApp.list();
+            const eciscoAgent = _agents.find((a) => a.name === 'ecisco_bi_assistant');
+            if (eciscoAgent) setActiveAgent(eciscoAgent);
+          }
+        } catch { /* silent — project-scoped fallback handled in handleSend */ }
+      })();
     }
     // Open an existing agent conversation: the user clicked a row
     // in the Project Detail "Recent Chats" list. We rehydrate the
@@ -644,7 +705,39 @@ export default function Chat() {
       }
     }
 
-    setMessages(msgs || []);
+    // Merge the fetched list with the CURRENT local state instead of blindly
+    // overwriting. This polling-driven load can resolve BEFORE the just-sent
+    // user message has committed to the DB (handleSend's ChatMessage.create is
+    // still in flight), so a naive setMessages(msgs) wipes the just-added
+    // bubble — the user sees "message sent, bubble missing" until a full page
+    // refresh (by which time the server has it). We preserve:
+    //   (a) local messages whose id is NOT in the fetch — in-flight bubbles the
+    //       server hasn't committed yet (the user message, the just-created
+    //       assistant placeholder), and
+    //   (b) the actively-streaming message — its local partial content is
+    //       fresher than the server's empty placeholder, so a poll mid-stream
+    //       must not blank it.
+    // Overlapping ids otherwise use the server version (streaming content is
+    // committed on completion, so the server copy is authoritative once
+    // streamingId clears). De-dup by id, then sort chronologically.
+    setMessages((prev) => {
+      const fetched = Array.isArray(msgs) ? msgs.filter(Boolean) : [];
+      const fetchedIds = new Set(fetched.map((m) => m.id));
+      const streamId = streamingIdRef.current;
+      const preserved = (prev || []).filter((m) => {
+        if (!m || !m.id) return false;
+        if (!fetchedIds.has(m.id)) return true;   // in-flight, not committed
+        if (m.id === streamId) return true;        // streaming, local fresher
+        return false;
+      });
+      const preservedIds = new Set(preserved.map((m) => m.id));
+      const fetchedKept = fetched.filter((m) => !preservedIds.has(m.id));
+      const merged = [...fetchedKept, ...preserved];
+      merged.sort(
+        (a, b) => new Date(a.created_date || 0) - new Date(b.created_date || 0),
+      );
+      return merged;
+    });
     setLoadStatus('loaded');
   }
 
@@ -778,7 +871,20 @@ export default function Chat() {
     if (!effectiveAgent) {
       try {
         const _agents = await base44.entities.AgentApp.list();
-        effectiveAgent = _agents.find((a) => a.name === 'general_assistant') || null;
+        // When inside the Ecisco BI project, auto-select
+        // ecisco_bi_assistant (replaces legacy orchestrator_agent).
+        // Respect the user's manual choice if activeAgent is already set.
+        if (pendingProject === 'Ecisco BI') {
+          const eciscoAgent = _agents.find((a) => a.name === 'ecisco_bi_assistant');
+          if (eciscoAgent) {
+            effectiveAgent = eciscoAgent;
+          }
+        }
+        // Fallback: general_assistant for all other projects or if
+        // ecisco_bi_assistant is not found.
+        if (!effectiveAgent) {
+          effectiveAgent = _agents.find((a) => a.name === 'general_assistant') || null;
+        }
         // Deliberately do NOT setActiveAgent here — see comment above.
         // Fallback: if the list endpoint didn't return general_assistant
         // (e.g. backend owner-scoping excludes system agents with
@@ -1940,7 +2046,7 @@ export default function Chat() {
   return (
     <div className="flex h-full">
       <PanelGroup direction="horizontal" className="flex-1 min-w-0">
-        <Panel id="chat-panel" order={1} defaultSize={100} minSize={30}>
+        <Panel id="chat-panel" order={1} defaultSize={panels.chat.defaultSize} minSize={panels.chat.minSize}>
         <div className="flex h-full flex-col">
         {activeId || messages.length > 0 ? (
           <>
@@ -2004,7 +2110,7 @@ export default function Chat() {
                         setInputValue((cur) => (cur ? `${cur}\n${text}` : text));
                         // Focus the input so the user can review and send
                         requestAnimationFrame(() => {
-                          try { document.querySelector('textarea[data-chat-input]')?.focus(); } catch {}
+                          try { inputRef.current?.focus(); } catch {}
                         });
                       }}
                       onDismiss={() => setPendingDraft(null)}
@@ -2017,7 +2123,7 @@ export default function Chat() {
                         if (fresh) {
                           setInputValue(fresh);
                           requestAnimationFrame(() => {
-                            try { document.querySelector('textarea[data-chat-input]')?.focus(); } catch {}
+                            try { inputRef.current?.focus(); } catch {}
                           });
                         }
                       }}
@@ -2129,7 +2235,7 @@ export default function Chat() {
         {dashboardOpen && (
           <>
             <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
-            <Panel id="dashboard-panel" order={5} defaultSize={42} minSize={25} maxSize={70}>
+            <Panel id="dashboard-panel" order={5} defaultSize={panels.dashboard.defaultSize} minSize={panels.dashboard.minSize} maxSize={panels.dashboard.maxSize}>
               <div className="h-full overflow-hidden">
                 <DashboardDockPanel
                   conversationId={activeId}

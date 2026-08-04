@@ -17,6 +17,13 @@ import Register from '@/pages/Register';
 import ForgotPassword from '@/pages/ForgotPassword';
 import ResetPassword from '@/pages/ResetPassword';
 import { LanguageProvider } from '@/lib/LanguageProvider';
+import useIsMobile from '@/hooks/useIsMobile';
+import { MobileModeProvider, useMobileMode } from '@/lib/mobileMode';
+import MobileFrame from '@/components/MobileFrame';
+import MobileLayout from '@/components/mobile/MobileLayout';
+import MobileDetailShell from '@/components/mobile/MobileDetailShell';
+import MobileChatPage from '@/pages/mobile/MobileChatPage';
+import MobileMySpacePage from '@/pages/mobile/MobileMySpacePage';
 
 // Secondary routes are code-split so they don't bloat the initial bundle.
 // Each becomes its own lazy chunk, downloaded on first navigation. Chat.jsx
@@ -69,44 +76,98 @@ const AuthenticatedApp = () => {
     return <UserNotRegisteredError />;
   }
 
-  // Render the main app
-  return (
-    <LanguageProvider>
-    <Suspense fallback={<RouteFallback />}>
-    <Routes>
-      {/* Auth pages — use their own AuthLayout, not the app shell. These
-          must be registered so the SDK's redirectToLogin() (→ /login) and
-          the Register/ForgotPassword links work. Previously missing, which
-          meant a Guest could never reach the login page. */}
+  // Mobile device detection: a genuine phone (width ≤ 1024 + touch) OR a
+  // desktop user who explicitly forced the mobile UI for debugging. On
+  // mobile we render a separate, lightweight route tree (MobileLayout +
+  // bottom tabs + phone frame) instead of the desktop AppLayout + sidebar.
+  const isMobileDevice = useIsMobile();
+  const { forceMobile } = useMobileMode();
+  const isMobile = isMobileDevice || forceMobile;
+
+  // Auth pages are shared across both route trees.
+  const authRoutes = (
+    <>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
-      <Route element={<ProtectedRoute />}>
-        <Route element={<AppLayout />}>
-          <Route path="/" element={<Chat />} />
-          <Route path="/chat" element={<Chat />} />
-          <Route path="/automation" element={<AutomationTasks />} />
-          <Route path="/automation/:id" element={<AutomationTaskDetail />} />
-          <Route path="/my-space" element={<MySpace />} />
-          <Route path="/my-space/project/:id" element={<ProjectDetail />} />
-          <Route path="/my-space/agent/:id" element={<AgentConfig />} />
-          <Route path="/my-space/:type/:id" element={<ResourceDetail />} />
-          <Route path="/market" element={<Market />} />
-          <Route path="/market/:id" element={<MarketAgentDetail />} />
-          <Route path="/toolkit" element={<Toolkit />} />
-          <Route path="/toolkit/:id" element={<ToolDetail />} />
-          <Route path="/skill-agent" element={<SkillAgent />} />
-          <Route path="/skills/executions" element={<SkillExecutions />} />
-          <Route path="/agent-builder" element={<AgentBuilder />} />
-          <Route path="/settings" element={<Settings />} />
-          <Route path="/dashboard/:id" element={<DashboardView />} />
-          <Route path="/market-dashboard/:section" element={<MarketDashboardPage />} />
+    </>
+  );
+
+  const mobileRoutes = (
+    <Route element={<ProtectedRoute />}>
+      <Route element={<MobileFrame />}>
+        <Route element={<MobileLayout />}>
+          <Route path="/" element={<MobileChatPage />} />
+          <Route path="/chat" element={<MobileChatPage />} />
+          <Route path="/my-space" element={<MobileMySpacePage />} />
+          {/* Deep-linked detail routes — reuse the desktop pages inside a
+              mobile shell (back bar + scroll region) so phones don't fall
+              through to the 404 page. Kept inside MobileLayout so they
+              share the ChatSessionProvider. */}
+          <Route
+            path="/my-space/project/:id"
+            element={
+              <MobileDetailShell>
+                <ProjectDetail />
+              </MobileDetailShell>
+            }
+          />
+          <Route
+            path="/my-space/agent/:id"
+            element={
+              <MobileDetailShell>
+                <AgentConfig />
+              </MobileDetailShell>
+            }
+          />
+          <Route
+            path="/my-space/:type/:id"
+            element={
+              <MobileDetailShell>
+                <ResourceDetail />
+              </MobileDetailShell>
+            }
+          />
         </Route>
       </Route>
-      <Route path="*" element={<PageNotFound />} />
-    </Routes>
-    </Suspense>
+    </Route>
+  );
+
+  const desktopRoutes = (
+    <Route element={<ProtectedRoute />}>
+      <Route element={<AppLayout />}>
+        <Route path="/" element={<Chat />} />
+        <Route path="/chat" element={<Chat />} />
+        <Route path="/automation" element={<AutomationTasks />} />
+        <Route path="/automation/:id" element={<AutomationTaskDetail />} />
+        <Route path="/my-space" element={<MySpace />} />
+        <Route path="/my-space/project/:id" element={<ProjectDetail />} />
+        <Route path="/my-space/agent/:id" element={<AgentConfig />} />
+        <Route path="/my-space/:type/:id" element={<ResourceDetail />} />
+        <Route path="/market" element={<Market />} />
+        <Route path="/market/:id" element={<MarketAgentDetail />} />
+        <Route path="/toolkit" element={<Toolkit />} />
+        <Route path="/toolkit/:id" element={<ToolDetail />} />
+        <Route path="/skill-agent" element={<SkillAgent />} />
+        <Route path="/skills/executions" element={<SkillExecutions />} />
+        <Route path="/agent-builder" element={<AgentBuilder />} />
+        <Route path="/settings" element={<Settings />} />
+        <Route path="/dashboard/:id" element={<DashboardView />} />
+        <Route path="/market-dashboard/:section" element={<MarketDashboardPage />} />
+      </Route>
+    </Route>
+  );
+
+  return (
+    <LanguageProvider>
+      <Suspense fallback={<RouteFallback />}>
+        <Routes>
+          {authRoutes}
+          {isMobile ? mobileRoutes : desktopRoutes}
+          <Route path="*" element={<PageNotFound />} />
+        </Routes>
+      </Suspense>
     </LanguageProvider>
   );
 };
@@ -132,11 +193,13 @@ function App() {
   return (
     <AuthProvider>
       <QueryClientProvider client={queryClientInstance}>
-        <Router>
-          <ScrollToTop />
-          <AppRouter />
-        </Router>
-        <Toaster />
+        <MobileModeProvider>
+          <Router>
+            <ScrollToTop />
+            <AppRouter />
+          </Router>
+          <Toaster />
+        </MobileModeProvider>
       </QueryClientProvider>
     </AuthProvider>
   )

@@ -86,3 +86,16 @@ def get_current_user_required(
     if not user or getattr(user, "is_anonymous", False):
         raise HTTPException(status_code=401, detail="Authentication required")
     return user
+
+
+def require_admin(
+    user: User = Depends(get_current_user_required),
+) -> User:
+    """Admin-only guard — raises 403 if the caller is not an admin.
+
+    Use this on endpoints that should only be accessible to the super-admin
+    (e.g. user management, system settings).  Normal users get 403.
+    """
+    if getattr(user, "role", "user") != "admin":
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return user

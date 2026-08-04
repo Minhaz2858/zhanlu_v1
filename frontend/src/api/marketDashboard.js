@@ -49,6 +49,23 @@ export const marketDashboardApi = {
       product_ids: productIds.join(','),
       day,
     }),
+  /** Single-shot bundle for the chemical market overview page.
+   *  Backend has a 30-second in-memory cache; pass noCache=true to bypass. */
+  overview: ({ noCache = false, forecastDay = 7 } = {}) =>
+    getJson('/api/market-dashboard/overview', {
+      no_cache: noCache ? 1 : 0,
+      forecast_day: forecastDay,
+    }),
+  /** Drop the in-memory overview cache (returns {invalidated, key_prefix}). */
+  refreshOverview: async () => {
+    const res = await authFetch('/api/market-dashboard/overview/refresh', {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      throw new Error(`overview refresh failed: ${res.status}`);
+    }
+    return res.json();
+  },
   events: (hours = 168, reviewStatus = 'approved', minUsefulnessScore = 0) =>
     getJson('/api/market-dashboard/events/latest', {
       hours,

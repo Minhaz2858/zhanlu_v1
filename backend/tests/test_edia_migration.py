@@ -2,9 +2,9 @@
 
 Validates: migration script correctness (product map, seasonal rules,
 causal elasticities, MAPE baselines, below-naive flags, pack JSON),
-feature flags (default False), agent definitions (orchestrator_agent,
+feature flags (default False), agent definitions (ecisco_bi_assistant,
 perception_agent, rag_research_agent, diagnosis_agent, pricing_agent,
-forecast_agent, report_agent in BUILTIN_AGENTS), and the orchestrator_agent
+forecast_agent, report_agent in BUILTIN_AGENTS), and the ecisco_bi_assistant
 system agent config.
 """
 
@@ -497,10 +497,10 @@ class TestAgentDefinitions:
 
     # ── EDIA Pipeline Agent Tests ────────────────────────────────────────
 
-    def test_orchestrator_agent_in_builtin_agents(self):
-        """orchestrator_agent exists in BUILTIN_AGENTS."""
+    def test_ecisco_bi_assistant_in_builtin_agents(self):
+        """ecisco_bi_assistant exists in BUILTIN_AGENTS."""
         names = [a.name for a in BUILTIN_AGENTS]
-        assert "orchestrator_agent" in names
+        assert "ecisco_bi_assistant" in names
 
     def test_perception_agent_in_builtin_agents(self):
         """perception_agent exists in BUILTIN_AGENTS."""
@@ -522,16 +522,16 @@ class TestAgentDefinitions:
         names = [a.name for a in BUILTIN_AGENTS]
         assert "pricing_agent" in names
 
-    def test_orchestrator_agent_has_delegation_tools(self):
-        """orchestrator_agent has delegation tools for all EDIA sub-agents."""
-        agent = next(a for a in BUILTIN_AGENTS if a.name == "orchestrator_agent")
+    def test_ecisco_bi_assistant_has_delegation_tools(self):
+        """ecisco_bi_assistant has delegation tools for all EDIA sub-agents."""
+        agent = next(a for a in BUILTIN_AGENTS if a.name == "ecisco_bi_assistant")
         expected = [
             "ask_perception", "ask_rag_research", "ask_diagnosis",
             "ask_forecast_agent", "ask_pricing", "ask_data_agent",
             "ask_report_agent",
         ]
         for tool in expected:
-            assert tool in agent.tools, f"orchestrator_agent missing tool: {tool}"
+            assert tool in agent.tools, f"ecisco_bi_assistant missing tool: {tool}"
 
     def test_perception_agent_has_data_and_web_tools(self):
         """perception_agent has ask_data_agent, web_search, search_documents."""
@@ -558,9 +558,9 @@ class TestAgentDefinitions:
         assert "ask_forecast_agent" in agent.tools
         assert "ask_diagnosis" in agent.tools
 
-    def test_orchestrator_agent_has_system_prompt(self):
-        """orchestrator_agent has a non-empty system_prompt."""
-        agent = next(a for a in BUILTIN_AGENTS if a.name == "orchestrator_agent")
+    def test_ecisco_bi_assistant_has_system_prompt(self):
+        """ecisco_bi_assistant has a non-empty system_prompt."""
+        agent = next(a for a in BUILTIN_AGENTS if a.name == "ecisco_bi_assistant")
         assert agent.system_prompt is not None
         assert len(agent.system_prompt) > 0
 
@@ -597,30 +597,30 @@ class TestAgentDefinitions:
 # ── System Agent Tests ──────────────────────────────────────────────────
 
 class TestSystemAgent:
-    """Validate orchestrator_agent system agent config (replaces ecisco_bi)."""
+    """Validate ecisco_bi_assistant system agent config (replaces ecisco_bi/orchestrator)."""
 
-    def test_orchestrator_agent_in_configs(self):
-        """orchestrator_agent IS always in configs (no feature flag needed)."""
+    def test_ecisco_bi_assistant_in_configs(self):
+        """ecisco_bi_assistant IS always in configs (no feature flag needed)."""
         configs = _build_system_agent_configs()
         names = [c["name"] for c in configs]
-        assert "orchestrator_agent" in names
+        assert "ecisco_bi_assistant" in names
 
-    def test_orchestrator_agent_not_is_system(self):
-        """orchestrator_agent is user-facing (is_system=False)."""
+    def test_ecisco_bi_assistant_not_is_system(self):
+        """ecisco_bi_assistant is user-facing (is_system=False)."""
         configs = _build_system_agent_configs()
-        orch = next(c for c in configs if c["name"] == "orchestrator_agent")
+        orch = next(c for c in configs if c["name"] == "ecisco_bi_assistant")
         assert orch.get("is_system") is False
 
-    def test_orchestrator_agent_project_is_ecisco_bi(self):
-        """orchestrator_agent project is 'Ecisco BI'."""
+    def test_ecisco_bi_assistant_project_is_ecisco_bi(self):
+        """ecisco_bi_assistant project is 'Ecisco BI'."""
         configs = _build_system_agent_configs()
-        orch = next(c for c in configs if c["name"] == "orchestrator_agent")
+        orch = next(c for c in configs if c["name"] == "ecisco_bi_assistant")
         assert orch["project"] == "Ecisco BI"
 
-    def test_orchestrator_agent_has_delegation_tools(self):
-        """orchestrator_agent has all EDIA delegation tools in allowed boundaries."""
+    def test_ecisco_bi_assistant_has_delegation_tools(self):
+        """ecisco_bi_assistant has all EDIA delegation tools in allowed boundaries."""
         configs = _build_system_agent_configs()
-        orch = next(c for c in configs if c["name"] == "orchestrator_agent")
+        orch = next(c for c in configs if c["name"] == "ecisco_bi_assistant")
         raw_tools = orch["manifest_json"]["boundaries"]["allowed"]
         expected_tools = [
             "ask_perception", "ask_rag_research", "ask_diagnosis",
@@ -628,21 +628,21 @@ class TestSystemAgent:
             "ask_report_agent", "create_artifact", "web_search", "web_extract",
         ]
         for tool in expected_tools:
-            assert tool in raw_tools, f"orchestrator_agent missing tool in boundaries: {tool}"
+            assert tool in raw_tools, f"ecisco_bi_assistant missing tool in boundaries: {tool}"
 
-    def test_orchestrator_agent_has_base_harness(self):
-        """orchestrator_agent has trace_enabled, log_level, memory_scope, output_contract."""
+    def test_ecisco_bi_assistant_has_base_harness(self):
+        """ecisco_bi_assistant has trace_enabled, log_level, memory_scope, output_contract."""
         configs = _build_system_agent_configs()
-        orch = next(c for c in configs if c["name"] == "orchestrator_agent")
+        orch = next(c for c in configs if c["name"] == "ecisco_bi_assistant")
         assert "trace_enabled" in orch
         assert orch["trace_enabled"] is True
         assert "output_contract" in orch
         assert "memory_scope" in orch
 
-    def test_orchestrator_agent_risk_tier_low(self):
-        """orchestrator_agent risk_tier is low."""
+    def test_ecisco_bi_assistant_risk_tier_low(self):
+        """ecisco_bi_assistant risk_tier is low."""
         configs = _build_system_agent_configs()
-        orch = next(c for c in configs if c["name"] == "orchestrator_agent")
+        orch = next(c for c in configs if c["name"] == "ecisco_bi_assistant")
         assert orch["manifest_json"]["risk_tier"] == "low"
 
 

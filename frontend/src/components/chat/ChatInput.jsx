@@ -150,6 +150,7 @@ export default function ChatInput({
           {!value.trim() && <AgentSuggestions agent={activeAgent} lang={lang} onSelect={onChange} />}
           <textarea
             ref={inputRef}
+            data-chat-input="true"
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onPaste={handlePaste}

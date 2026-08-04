@@ -54,7 +54,10 @@ logger = logging.getLogger(__name__)
 _DENIED_RECURSIVE = {
     "ask_orchestrator", "ask_perception", "ask_rag_research",
     "ask_diagnosis", "ask_pricing", "ask_forecast_agent",
-    "ask_report_agent", "ask_data_agent", "delegate_task",
+    "ask_report_agent", "ask_data_agent", "ask_intelligence",
+    "ask_knowledge_graph", "ask_decision", "ask_macro_override",
+    "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback",
+    "delegate_task",
     "create_agent", "update_agent", "create_skill", "update_skill",
     "create_automation", "update_automation", "send_message",
 }
@@ -335,11 +338,55 @@ async def _ask_pricing(args: dict, db: Session, user_id: str | None, context: di
 
 
 async def _ask_orchestrator(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
-    """Delegate a full EDIA pipeline request to the orchestrator_agent."""
+    """Delegate a full EDIA pipeline request to the ecisco_bi_assistant."""
     question = (args.get("question") or "").strip()
     if not question:
         return {"success": False, "error": "question is required"}
-    return await _run_sub_agent("orchestrator_agent", question, db, user_id, context, max_iterations=15)
+    return await _run_sub_agent("ecisco_bi_assistant", question, db, user_id, context, max_iterations=15)
+
+
+async def _ask_intelligence(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """Delegate an intelligence question to the intelligence_agent."""
+    question = (args.get("question") or "").strip()
+    if not question:
+        return {"success": False, "error": "question is required"}
+    return await _run_sub_agent("intelligence_agent", question, db, user_id, context)
+
+
+async def _ask_knowledge_graph(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """Direct knowledge graph query via Python service (no sub-agent delegation)."""
+    from app.services.knowledge_graph.tool import _handle_knowledge_graph
+    return await _handle_knowledge_graph(args, db, user_id, context)
+
+
+async def _ask_decision(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """Direct decision synthesis via Python service (no sub-agent delegation)."""
+    from app.services.decision.tool import _handle_ask_decision
+    return await _handle_ask_decision(args, db, user_id, context)
+
+
+async def _ask_macro_override(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """Direct macro override via Python service (no sub-agent delegation)."""
+    from app.services.pricing.tool import _handle_ask_macro_override
+    return await _handle_ask_macro_override(args, db, user_id, context)
+
+
+async def _ask_weekly_report(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """Weekly report generation via direct Python service (no sub-agent delegation)."""
+    from app.services.weekly_report.tool import _handle_ask_weekly_report
+    return await _handle_ask_weekly_report(args, db, user_id, context)
+
+
+async def _ask_erp_kpi(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """ERP KPI query via direct Python service (no sub-agent delegation)."""
+    from app.services.erp.tool import _handle_ask_erp_kpi
+    return await _handle_ask_erp_kpi(args, db, user_id, context)
+
+
+async def _ask_erp_writeback(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+    """ERP writeback via direct Python service (no sub-agent delegation)."""
+    from app.services.erp.tool import _handle_ask_erp_writeback
+    return await _handle_ask_erp_writeback(args, db, user_id, context)
 
 
 # ---------------------------------------------------------------------------
@@ -437,6 +484,76 @@ for _name, _schema, _handler, _desc in (
         ),
         _ask_orchestrator,
         "Ask the EDIA Orchestrator to run the full pipeline.",
+    ),
+    (
+        "ask_intelligence",
+        _make_schema(
+            "ask_intelligence",
+            "Ask the EDIA Intelligence Agent to retrieve market intelligence context: recent events, causal chain analyses, scenario probabilities, and auto-override decisions. Use this before pricing or diagnosis to inject event-aware context.",
+            "Intelligence Agent",
+        ),
+        _ask_intelligence,
+        "Ask the EDIA Intelligence Agent for market intelligence context.",
+    ),
+    (
+        "ask_knowledge_graph",
+        _make_schema(
+            "ask_knowledge_graph",
+            "Query the EDIA Knowledge Graph to discover product relationships (upstream/downstream), substitution chains, and market dependencies across the 12 C5/C9 products. Use this for product-resolution and chain-impact questions.",
+            "Knowledge Graph Agent",
+        ),
+        _ask_knowledge_graph,
+        "Query the knowledge graph for product relationships.",
+    ),
+    (
+        "ask_decision",
+        _make_schema(
+            "ask_decision",
+            "Ask the EDIA Decision Agent to produce a structured decision recommendation: evaluate pricing alternatives, apply critic gates, run the decision audit trail, and output a final decision with rationale, risks, and triggers.",
+            "Decision Agent",
+        ),
+        _ask_decision,
+        "Ask the EDIA Decision Agent for a decision recommendation.",
+    ),
+    (
+        "ask_macro_override",
+        _make_schema(
+            "ask_macro_override",
+            "Apply a macro-level override to any pricing recommendation — e.g. 'add 5% for naphtha due to crude disruption' or 'cap at ceiling for styrene'. Registers the override in the audit trail.",
+            "Macro Override",
+        ),
+        _ask_macro_override,
+        "Apply a macro-level pricing override.",
+    ),
+    (
+        "ask_weekly_report",
+        _make_schema(
+            "ask_weekly_report",
+            "Ask the EDIA Weekly Report Agent to generate a complete weekly report for a product or portfolio: pull data, compute charts, generate narrative, and produce a formatted report (JSON/PDF/Word/PPT).",
+            "Weekly Report Agent",
+        ),
+        _ask_weekly_report,
+        "Ask the EDIA Weekly Report Agent to generate a report.",
+    ),
+    (
+        "ask_erp_kpi",
+        _make_schema(
+            "ask_erp_kpi",
+            "Query ERP KPIs (sales volume, revenue, margin, inventory) for a given product and period from the EDIA MySQL mirror. Use this for data-backed reporting and decision context.",
+            "ERP KPI Agent",
+        ),
+        _ask_erp_kpi,
+        "Query ERP KPIs from the EDIA data warehouse.",
+    ),
+    (
+        "ask_erp_writeback",
+        _make_schema(
+            "ask_erp_writeback",
+            "Write a confirmed pricing decision or override back to the ERP system. Requires a decision_id or explicit pricing parameters. Records the writeback in the audit trail.",
+            "ERP Writeback Agent",
+        ),
+        _ask_erp_writeback,
+        "Write a pricing decision back to ERP.",
     ),
 ):
     registry.register(

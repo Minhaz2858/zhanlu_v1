@@ -182,7 +182,13 @@ def _run_auto_migrations():
             ("output_contract", "JSON"),
             ("evaluation_profile", "JSON"),
             ("project_id", "VARCHAR(36)"),
+            ("resource_type", "VARCHAR(20) DEFAULT 'personal' NOT NULL"),
         ],
+        "projects": [
+            ("resource_type", "VARCHAR(20) DEFAULT 'personal' NOT NULL"),
+        ],
+        "resource_shares": [],  # table creation only — triggers schema check
+
             "agent_memories": [
                 ("content_hash", "VARCHAR(64)"),
                 ("importance", "INTEGER DEFAULT 0"),
@@ -490,6 +496,13 @@ async def lifespan(app: FastAPI):
         ensure_system_agents()
     except Exception as e:
         startup_logger.warning("System agent seeding error (non-fatal): %s", e)
+
+    # Ensure super-admin account exists (idempotent, reads env vars)
+    try:
+        from app.services.ensure_superadmin import ensure_superadmin
+        ensure_superadmin()
+    except Exception as e:
+        startup_logger.warning("Super-admin seeding error (non-fatal): %s", e)
 
     # Normalize prompt_tools for all agents with bound KnowledgeBases.
     try:

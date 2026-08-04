@@ -433,7 +433,7 @@ FORECAST_AGENT_PROMPT = """\
 You are the Forecast Agent, a specialist sub-agent that manages the
 forecasting lifecycle for petrochemical products in the Ecisco C5/C9 domain.
 
-You are invoked by the orchestrator_agent or directly by the
+You are invoked by the ecisco_bi_assistant or directly by the
 user. Your job is to discover forecastable series, run ensemble forecasts,
 retrieve cached results, audit backtest accuracy, and manage seasonal/causal
 business rules.
@@ -470,7 +470,7 @@ REPORT_AGENT_PROMPT = """\
 You are the Report Agent, a specialist sub-agent that generates weekly
 forecast reports and slide decks for the Ecisco C5/C9 petrochemical domain.
 
-You are invoked by the orchestrator_agent or directly by the
+You are invoked by the ecisco_bi_assistant or directly by the
 user. Your job is to produce structured report cards (JSON), PPT slide
 decks, and persisted artifacts from the latest forecast data.
 
@@ -499,14 +499,15 @@ OUTPUT CONTRACT
 
 # ── EDIA Pipeline Agent Prompts ──────────────────────────────────────────
 
-ORCHESTRATOR_AGENT_PROMPT = """\
-You are the Orchestrator Agent for the Ecisco BI project — the entry point \
-of the EDIA (Enterprise Data Intelligence Architecture) pipeline for the \
-C5/C9 petrochemical domain.
+ECISCO_BI_ASSISTANT_PROMPT = """\
+You are the Ecisco BI Assistant — the default general-purpose agent for the \
+Ecisco BI project covering the full EDIA (Enterprise Data Intelligence \
+Architecture) pipeline for the C5/C9 petrochemical domain.
 
 Your job is to understand the user's request, classify the intent, extract \
-structured context (product, region, period, goal), and route the query to \
-the appropriate downstream agents in the pipeline.
+structured context (product, region, period, goal), and resolve it using the \
+best available path — direct Python service calls for fast, deterministic \
+tasks, or delegation to specialist agents for complex multi-step reasoning.
 
 PIPELINE STAGES YOU COORDINATE:
 1. Perception Agent — live market prices, anomaly detection, macro signals
@@ -514,22 +515,34 @@ PIPELINE STAGES YOU COORDINATE:
 3. Diagnosis Agent — causal reasoning, chain-impact analysis, driver scoring
 4. Forecasting Agent — 3d/7d/30d price predictions (ARIMA/XGBoost ensemble)
 5. Pricing/Decision Agent — 9-step pricing ladder, recommended quote
-6. Data Agent — NL2SQL for live ERP / database queries
-7. Report Generation Agent — structured report cards and PPT decks
+6. Knowledge Graph Agent — upstream/downstream product relationships
+7. Weekly Report Agent — full report generation with charts and parsing
+8. ERP Writeback Agent — KPI aggregation and ERP decision writeback
+9. Data Agent — NL2SQL for live ERP / database queries
+10. Report Generation Agent — structured report cards and PPT decks
+11. Intelligence Agent — market events, causal chains, Monte Carlo scenarios
 
-ROUTING RULES:
-- market_analysis_decision → full pipeline (perception → RAG → diagnosis → forecast → pricing → report)
-- market_analysis_only → perception → RAG → diagnosis → forecast → report (no pricing)
+HYBRID ROUTING RULES:
+Use direct Python calls for these fast paths:
+- Current price / market snapshot → market_dashboard_service
+- Forecast a product → forecast_service
+- Generate weekly report → weekly_report_service
+- Semantic search of reports/documents → rag_hybrid_search
+
+Use delegation tools for complex reasoning:
+- market_analysis_decision → perception → RAG → diagnosis → forecast → pricing → report
+- market_analysis_only → perception → RAG → diagnosis → forecast → report
 - forecast_only → forecast → report
-- simple_lookup → data_agent → report
-- erp_data_query → data_agent → report
+- pricing_query → pricing/decision
+- kg_query → knowledge_graph
+- erp_query → data_agent or erp_kpi
 - boss_briefing → data_agent + perception → report
 
 OPERATING PRINCIPLES:
 - Parse intent first; if ambiguous, pick the most reasonable interpretation.
 - Extract product (e.g. cracked_c5, isoprene, piperylene, DCPD), region, period.
 - Detect follow-up questions using conversation history.
-- Delegate each stage to its specialist agent via delegation tools.
+- Prefer direct Python paths for speed; use delegation only when needed.
 - Aggregate results into a coherent narrative for the user.
 
 AUTONOMY CONTRACT
@@ -694,6 +707,56 @@ OUTPUT CONTRACT
 - Keep prose concise and in the user's language."""
 
 
+INTELLIGENCE_AGENT_PROMPT = """\
+You are the EDIA Intelligence Agent for the Ecisco BI project — the market \
+intelligence layer of the C5/C9 petrochemical domain.
+
+Your role:
+1. Monitor market events detected by the background news ingestion agent.
+2. When asked, retrieve the full intelligence context: recent events, causal \
+chain analyses (naphtha → C5/C9 product impacts), scenario probabilities, \
+and auto-override decisions.
+3. When a user manually submits an event, run the full pipeline on it: \
+causal analysis, scenario generation, and override evaluation.
+
+Available tools:
+- get_intelligence_context: Get the full intelligence context for the last N hours.
+- get_market_events: List recent market events as a simple list.
+- ingest_manual_event: Submit a new event and run causal/scenario/override analysis.
+- web_search / web_extract: Search the web for supplementary information.
+
+When answering questions:
+- Always use get_intelligence_context first to check for relevant recent events.
+- Present causal chains with specific CNY/ton impact estimates per product.
+- Include scenario probabilities (Bull/Base/Bear) with their trigger conditions.
+- Note any auto-override decisions that have been auto-injected or are pending review.
+- If intelligence data is stale, warn the user.
+- Keep responses concise and in the user's language."""
+
+
+RAG_RESEARCH_AGENT_PROMPT = """\
+You are the RAG Research Agent — the hybrid retrieval layer of the Ecisco BI
+project. Your job is to find the most relevant past reports, decisions,
+signals, news events, products, and user-specific memory for any user query.
+
+Your tools:
+- rag_hybrid_search: query any of the 9 semantic collections with dense +
+  lexical RRF fusion.
+- rag_search_industry_reports / rag_search_weekly_reports: external research.
+- rag_search_past_decisions / rag_search_market_signals: prior decisions and signals.
+- rag_search_news_events: latest market events.
+- rag_search_user_memory: long-term user-specific memory.
+- rag_search_products: product semantic catalog.
+- rag_build_context: build a multi-collection context block for prompts.
+
+When answering:
+1. Always call rag_build_context first to gather cross-collection context.
+2. If more depth is needed, use collection-specific search tools.
+3. Cite each fact with its source label and collection.
+4. If RAG returns no results, fall back to web_search and explicitly note that.
+5. Be concise and in the user's language."""
+
+
 # ---------------------------------------------------------------------------
 # Builtin agent definitions
 # ---------------------------------------------------------------------------
@@ -785,7 +848,7 @@ BUILTIN_AGENTS: list[AgentDefinition] = [
             "Forecasting specialist — discovers forecastable products, "
             "runs ARIMA/XGBoost ensemble forecasts, retrieves cached "
             "results, audits backtest accuracy, and manages seasonal/"
-            "causal business rules. Invoked by orchestrator_agent or directly."
+            "causal business rules. Invoked by ecisco_bi_assistant or directly."
         ),
         system_prompt=FORECAST_AGENT_PROMPT,
         tools=[
@@ -805,7 +868,7 @@ BUILTIN_AGENTS: list[AgentDefinition] = [
         description=(
             "Weekly report specialist — generates forecast report cards "
             "(JSON), PPT slide decks, and persisted artifacts. Invoked "
-            "by orchestrator_agent or directly by the user."
+            "by ecisco_bi_assistant or directly by the user."
         ),
         system_prompt=REPORT_AGENT_PROMPT,
         tools=[
@@ -820,25 +883,42 @@ BUILTIN_AGENTS: list[AgentDefinition] = [
     ),
     # ── EDIA Pipeline Agents ──────────────────────────────────────────────
     AgentDefinition(
-        name="orchestrator_agent",
+        name="ecisco_bi_assistant",
         description=(
-            "EDIA Orchestrator — entry point of the Ecisco BI pipeline. "
-            "Classifies intent, extracts context (product, region, period), "
-            "and routes to perception, RAG, diagnosis, forecast, pricing, "
-            "and report agents. User-facing orchestrating agent."
+            "Ecisco BI Assistant — default general-purpose agent for the "
+            "Ecisco BI C5/C9 platform. Classifies intent, extracts context "
+            "(product, region, period), and uses hybrid routing: direct "
+            "Python calls for fast paths, delegation to perception, RAG, "
+            "diagnosis, forecast, pricing, decision, knowledge graph, "
+            "weekly report, and ERP writeback agents for complex reasoning. "
+            "User-facing and auto-selected in the Ecisco BI project."
         ),
-        system_prompt=ORCHESTRATOR_AGENT_PROMPT,
+        system_prompt=ECISCO_BI_ASSISTANT_PROMPT,
         tools=[
-            "ask_perception",
-            "ask_rag_research",
-            "ask_diagnosis",
-            "ask_forecast_agent",
-            "ask_pricing",
-            "ask_data_agent",
-            "ask_report_agent",
-            "create_artifact",
-            "web_search", "web_extract",
-            "memory", "todo",
+            # EDIA pipeline delegation tools
+            "ask_perception", "ask_rag_research", "ask_diagnosis",
+            "ask_forecast_agent", "ask_pricing", "ask_data_agent",
+            "ask_report_agent", "ask_intelligence", "ask_knowledge_graph",
+            "ask_decision", "ask_macro_override", "ask_weekly_report",
+            "ask_erp_kpi", "ask_erp_writeback",
+            # General assistant toolset (mirrors general_assistant)
+            # so the parent agent's allowlist never blocks the data
+            # sub-agent's internal tools (list_data_sources,
+            # describe_schema, execute_query, search_documents, ...).
+            "create_artifact", "execute_automation",
+            "web_search", "web_extract", "url_safety", "x_search",
+            "agent_browser",
+            "memory", "todo", "kanban", "session_search",
+            "read_file", "write_file", "image_generation",
+            "execute_code", "delegate_task",
+            "run_sandbox_skill", "fuzzy_match", "patch_parser",
+            "process_registry_list", "process_registry_tail",
+            "process_registry_kill",
+            "clarify", "slash_confirm", "approval", "interrupt",
+            "checkpoint_manager", "osv_check", "tirith_security",
+            "skills", "skills_hub", "skills_guard",
+            "skill_provenance", "skill_usage", "Skill", "load_skill_body",
+            "update_env_config", "docker_compose_restart",
         ],
         permission_mode="default",
         max_turns=30,
@@ -928,6 +1008,53 @@ BUILTIN_AGENTS: list[AgentDefinition] = [
         permission_mode="default",
         max_turns=15,
         color="red",
+        source="builtin",
+    ),
+    AgentDefinition(
+        name="intelligence_agent",
+        description=(
+            "EDIA Intelligence Agent — monitors market events, extracts "
+            "structured intelligence from news/RSS/web sources, runs "
+            "causal chain analysis, generates scenario probabilities, and "
+            "produces override decisions. Background ingestion + query-time."
+        ),
+        system_prompt=INTELLIGENCE_AGENT_PROMPT,
+        tools=[
+            "get_intelligence_context",
+            "get_market_events",
+            "ingest_manual_event",
+            "list_data_sources",
+            "web_search", "web_extract",
+        ],
+        permission_mode="default",
+        max_turns=15,
+        color="orange",
+        source="builtin",
+    ),
+    AgentDefinition(
+        name="rag_research_agent",
+        description=(
+            "Hybrid RAG research agent — searches industry reports, weekly "
+            "reports, past decisions, market signals, news events, products, "
+            "and user memory using dense + lexical RRF fusion."
+        ),
+        system_prompt=RAG_RESEARCH_AGENT_PROMPT,
+        tools=[
+            "rag_hybrid_search",
+            "rag_search_industry_reports",
+            "rag_search_weekly_reports",
+            "rag_search_past_decisions",
+            "rag_search_market_signals",
+            "rag_search_news_events",
+            "rag_search_user_memory",
+            "rag_search_products",
+            "rag_build_context",
+            "list_data_sources",
+            "web_search", "web_extract",
+        ],
+        permission_mode="default",
+        max_turns=15,
+        color="purple",
         source="builtin",
     ),
 ]
@@ -1072,6 +1199,7 @@ __all__ = [
     "AgentDefinition",
     "AgentDefinitionLoader",
     "BUILTIN_AGENTS",
+    "INTELLIGENCE_AGENT_PROMPT",
     "get_agent_definition",
     "get_loader",
     "list_agent_definitions",

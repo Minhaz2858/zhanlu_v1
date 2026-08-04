@@ -22,6 +22,7 @@ logger = logging.getLogger(__name__)
 MEMORY_CONSOLIDATION_INTERVAL = 30 * 60  # 30 minutes
 SKILL_CURATION_INTERVAL = 6 * 60 * 60   # 6 hours
 ALERT_CHECK_INTERVAL = 5 * 60            # 5 minutes
+NEWS_INGESTION_INTERVAL = 60 * 60        # 1 hour (intelligence layer)
 
 _running_tasks: list[asyncio.Task] = []
 
@@ -87,6 +88,20 @@ async def _run_alert_check_cycle() -> None:
         logger.debug("Alert check failed: %s", e)
 
 
+async def _run_news_ingestion_cycle() -> None:
+    """Run one news ingestion scan cycle for the intelligence layer."""
+    try:
+        from app.database import AsyncSessionLocal
+        from app.services.intelligence.news_ingestion_agent import NewsIngestionAgent
+
+        async with AsyncSessionLocal() as db:
+            agent = NewsIngestionAgent(db, org_id="default-org")
+            await agent.run_news_cycle(trigger="scheduled")
+            await db.commit()
+    except Exception as e:
+        logger.warning("News ingestion cycle failed: %s", e)
+
+
 async def _periodic_task(
     name: str,
     interval: int,
@@ -137,6 +152,10 @@ def start_scheduled_tasks() -> None:
             _periodic_task("alert_check", ALERT_CHECK_INTERVAL, _run_alert_check_cycle),
             name="sched-alert-check",
         ),
+        loop.create_task(
+            _periodic_task("news_ingestion", NEWS_INGESTION_INTERVAL, _run_news_ingestion_cycle),
+            name="sched-news-ingestion",
+        ),
     ]
 
     for task in tasks:
@@ -163,4 +182,5 @@ __all__ = [
     "MEMORY_CONSOLIDATION_INTERVAL",
     "SKILL_CURATION_INTERVAL",
     "ALERT_CHECK_INTERVAL",
+    "NEWS_INGESTION_INTERVAL",
 ]

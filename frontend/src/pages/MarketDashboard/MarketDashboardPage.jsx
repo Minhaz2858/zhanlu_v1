@@ -2,12 +2,12 @@ import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
-import { PRODUCTS_WITH_FORECAST } from '@/constants/marketDashboard';
 import SnapshotGrid from './components/SnapshotGrid';
 import PriceChart from './components/PriceChart';
 import RegionalTable from './components/RegionalTable';
 import NewsPanel from './components/NewsPanel';
 import ForecastCard from './components/ForecastCard';
+import OverviewDashboard from './components/OverviewDashboard';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
 
@@ -25,7 +25,7 @@ export default function MarketDashboardPage() {
   const snapshotQuery = useQuery({
     queryKey: ['market-dashboard', 'snapshot', section],
     queryFn: () => marketDashboardApi.snapshot(
-      section === 'overview' ? undefined : section
+      section === 'overview' ? undefined : section,
     ),
     enabled: isValidSection && enabledQuery.data?.enabled && enabledQuery.data?.reachable,
     staleTime: 60_000,
@@ -71,6 +71,13 @@ export default function MarketDashboardPage() {
     );
   }
 
+  // Overview section: pixel-faithful EDIA layout (sidebar + 3 price cards +
+  // 7-day forecast + industry intelligence + footer).
+  if (section === 'overview') {
+    return <OverviewDashboard snapshot={snapshotQuery.data || []} />;
+  }
+
+  // upstream / midstream / downstream: original per-section view.
   return (
     <div className="p-8">
       <h1 className={TYPO.pageTitle}>EDIA Market Dashboard — {section}</h1>
@@ -85,7 +92,7 @@ export default function MarketDashboardPage() {
         )}
         {snapshotQuery.data && <SnapshotGrid items={snapshotQuery.data} />}
         <div className="mt-6">
-          <ForecastCard productIds={PRODUCTS_WITH_FORECAST} day={7} />
+          <ForecastCard productIds={['cracked_c5', 'cracked_c9']} day={7} />
         </div>
         {snapshotQuery.data && snapshotQuery.data.length > 0 && (
           <div className="mt-6 grid grid-cols-1 gap-3 lg:grid-cols-2">

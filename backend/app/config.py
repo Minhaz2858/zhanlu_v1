@@ -224,6 +224,18 @@ class Settings(BaseSettings):
     # Used when an agent has no explicit tool_config.
     DEFAULT_TOOLSET_POSTURE: str = "coding"
 
+    # ── multi-tenant RBAC (Phase 1, plan 2026-08-03) ────────────────────
+    # When False, POST /apps/{app_id}/auth/register returns 403 — no new
+    # accounts can be created via the self-service registration flow.
+    # Default True for backward compatibility with existing deployments.
+    ALLOW_SELF_REGISTRATION: bool = True
+
+    # Super-admin bootstrap credentials — the idempotent startup seed reads
+    # these to create (or update) the single super-admin account.  If both
+    # are empty (default), no admin account is seeded (backward compat).
+    SUPERADMIN_EMAIL: str = ""
+    SUPERADMIN_PASSWORD: str = ""
+
     # Compaction settings (P0)
     COMPACTION_AUTO_THRESHOLD: float = 0.8  # context window usage threshold
     COMPACTION_MICROCOMPACT_THRESHOLD: int = 30000  # tokens to trigger microcompact

@@ -1,0 +1,11 @@
+{
+  "event_type": "crude_spike",
+  "description": "Oil up 3%%",
+  "naphtha_shock_pct": 2.5,
+  "crude_shock_pct": 0.0,
+  "product_shocks": {},
+  "confidence_penalty": 0.062,
+  "active": false,
+  "created_at": "2026-08-03T02:43:25.306825+00:00",
+  "expires_at": "2026-08-04T02:43:25.306825+00:00"
+}
