@@ -1,19 +1,25 @@
 """Scheduled background tasks — periodic memory + skill consolidation.
 
-Runs memory consolidation and skill curation on a periodic schedule using
-asyncio background tasks. Started at app startup, runs fire-and-forget.
+Runs memory consolidation, skill curation, nightly forecast, news ingestion,
+and alert checks on a periodic schedule using asyncio background tasks.
+Started at app startup.
 
 Schedule:
 - Memory consolidation: every 30 minutes per agent
 - Skill curation: every 6 hours (global)
 - Alert check: every 5 minutes
+- News ingestion: every 1 hour (intelligence layer)
+- Nightly forecast: daily at 2:00 AM UTC
 
 All tasks are non-fatal — failures are logged but never crash the app.
 """
 from __future__ import annotations
 
 import asyncio
+import datetime
 import logging
+import os
+import time
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -23,6 +29,8 @@ MEMORY_CONSOLIDATION_INTERVAL = 30 * 60  # 30 minutes
 SKILL_CURATION_INTERVAL = 6 * 60 * 60   # 6 hours
 ALERT_CHECK_INTERVAL = 5 * 60            # 5 minutes
 NEWS_INGESTION_INTERVAL = 60 * 60        # 1 hour (intelligence layer)
+
+NIGHTLY_HOUR_UTC = 2  # 2:00 AM UTC
 
 _running_tasks: list[asyncio.Task] = []
 
@@ -102,6 +110,141 @@ async def _run_news_ingestion_cycle() -> None:
         logger.warning("News ingestion cycle failed: %s", e)
 
 
+# ---- Nightly Forecast (2 AM UTC daily, NOT a UI-visible AutomationTask) -------
+
+def _calculate_seconds_until_2am() -> float:
+    """Return seconds from now until the next 02:00 UTC occurrence.
+
+    If the current time is exactly 02:00:00 UTC, returns 86400 (next day).
+    """
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target = now.replace(hour=NIGHTLY_HOUR_UTC, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += datetime.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+def _run_nightly_forecast_sync() -> dict:
+    """Run the forecast engine for all active Ecisco BI targets (sync).
+
+    Returns summary dict: {success, total, failures, elapsed_s}.
+    Called via asyncio.to_thread() to avoid blocking the event loop.
+    """
+    from app.database import SessionLocal
+    from app.models.forecasting import ForecastTarget
+    from app.services.forecasting.engine import ForecastEngine
+    from app.services.forecasting.seed_ecisco_targets import (
+        seed_ecisco_forecast_targets,
+        discover_and_seed_sku_targets,
+    )
+
+    db = SessionLocal()
+    try:
+        # 1. Seed targets (idempotent)
+        seeded = seed_ecisco_forecast_targets(db)
+        # 1b. Discover and seed ERP SKU targets (idempotent)
+        sku_seeded = discover_and_seed_sku_targets(db)
+        logger.info(
+            "[nightly-forecast] Seed complete — %d targets available",
+            seeded,
+        )
+
+        # 2. Fetch all active targets for the default org
+        targets = (
+            db.query(ForecastTarget)
+            .filter(
+                ForecastTarget.org_id == "default-org",
+                ForecastTarget.is_active == True,  # noqa: E712
+            )
+            .all()
+        )
+
+        if not targets:
+            logger.warning("[nightly-forecast] No active targets found")
+            return {"success": 0, "total": 0, "failures": [], "elapsed_s": 0.0}
+
+        # 3. Run forecast for each target (sequentially for safety)
+        engine = ForecastEngine(db)
+        success_count = 0
+        failures = []
+        t0 = time.monotonic()
+        for target in targets:
+            target_t0 = time.monotonic()
+            try:
+                engine.compute_target_anchored(target.id)
+                elapsed = time.monotonic() - target_t0
+                success_count += 1
+                logger.info(
+                    "[nightly-forecast] ✓ %s (%.1fs)",
+                    target.name,
+                    elapsed,
+                )
+            except Exception:
+                elapsed = time.monotonic() - target_t0
+                logger.exception(
+                    "[nightly-forecast] ✗ %s failed (%.1fs)",
+                    target.name,
+                    elapsed,
+                )
+                failures.append(target.name)
+
+        total_elapsed = time.monotonic() - t0
+        summary = {
+            "success": success_count,
+            "total": len(targets),
+            "failures": failures,
+            "elapsed_s": total_elapsed,
+        }
+        logger.info(
+            "[nightly-forecast] DONE — %d/%d succeeded in %.1fs%s",
+            success_count,
+            len(targets),
+            total_elapsed,
+            f"; failures: {failures}" if failures else "",
+        )
+        return summary
+    finally:
+        db.close()
+
+
+async def _run_nightly_forecast_cycle() -> None:
+    """Run the nightly forecast in a thread executor (non-blocking wrapper)."""
+    enabled = os.environ.get("NIGHTLY_FORECAST_ENABLED", "true").lower() not in (
+        "0", "false", "no",
+    )
+    if not enabled:
+        logger.info("[nightly-forecast] DISABLED by NIGHTLY_FORECAST_ENABLED=False")
+        return
+
+    try:
+        await asyncio.to_thread(_run_nightly_forecast_sync)
+    except Exception:
+        logger.exception("[nightly-forecast] Unhandled exception")
+
+
+async def _nightly_forecast_loop() -> None:
+    """Infinite loop: sleep until next 2 AM UTC, run cycle, repeat."""
+    while True:
+        delay = _calculate_seconds_until_2am()
+        next_run = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            seconds=delay
+        )
+        logger.info(
+            "[nightly-forecast] Next run in %.1f hours (%s UTC)",
+            delay / 3600,
+            next_run.isoformat(),
+        )
+        await asyncio.sleep(delay)
+        try:
+            await _run_nightly_forecast_cycle()
+        except Exception:
+            logger.exception(
+                "[nightly-forecast] Unhandled exception in nightly loop"
+            )
+        # Brief cooldown to prevent tight retry on persistent errors
+        await asyncio.sleep(5)
+
+
 async def _periodic_task(
     name: str,
     interval: int,
@@ -156,6 +299,10 @@ def start_scheduled_tasks() -> None:
             _periodic_task("news_ingestion", NEWS_INGESTION_INTERVAL, _run_news_ingestion_cycle),
             name="sched-news-ingestion",
         ),
+        loop.create_task(
+            _nightly_forecast_loop(),
+            name="sched-nightly-forecast",
+        ),
     ]
 
     for task in tasks:
@@ -183,4 +330,7 @@ __all__ = [
     "SKILL_CURATION_INTERVAL",
     "ALERT_CHECK_INTERVAL",
     "NEWS_INGESTION_INTERVAL",
+    "_calculate_seconds_until_2am",
+    "_run_nightly_forecast_cycle",
+    "_run_nightly_forecast_sync",
 ]

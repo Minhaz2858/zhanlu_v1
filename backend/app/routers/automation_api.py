@@ -862,7 +862,10 @@ def bootstrap_nightly_forecast(
         raise HTTPException(status_code=403, detail="Nightly forecast is disabled")
 
     from app.services.automation_runtime import ensure_automation_runtime_agent
-    from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
+    from app.services.forecasting.seed_ecisco_targets import (
+        seed_ecisco_forecast_targets,
+        discover_and_seed_sku_targets,
+    )
 
     org_id = getattr(user, "org_id", None) or "default-org"
     app_id = getattr(user, "app_id", None) or "default-app"
@@ -870,6 +873,10 @@ def bootstrap_nightly_forecast(
 
     # 1. Ensure targets exist (idempotent)
     seed_ecisco_forecast_targets(db, org_id=org_id, app_id=app_id)
+    # 1b. Discover and seed ERP SKU targets (idempotent)
+    sku_count = discover_and_seed_sku_targets(db, org_id=org_id, app_id=app_id)
+    if sku_count:
+        logger.info("[bootstrap] Seeded %d new ERP SKU targets for org=%s", sku_count, org_id)
 
     # 2. Ensure runtime agent exists (idempotent)
     runtime = ensure_automation_runtime_agent(db, org_id, app_id)
