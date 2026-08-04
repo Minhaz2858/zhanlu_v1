@@ -75,4 +75,12 @@ export const marketDashboardApi = {
   fxRate: () => getJson('/api/market-dashboard/fx/usd-cny'),
   news: (group, limit = 18) =>
     getJson('/api/market-dashboard/news', { group, limit }),
+  /** Upstream page: merged past+forecast timeline for a product. */
+  forecastChart: (productId, days = 30) =>
+    getJson(`/api/market-dashboard/forecast-chart/${productId}`, { days }),
+  /** List all SKU targets for an ERP product family (c5_resin, raffinate_c5). */
+  forecastListSkus: (productId) =>
+    getJson('/api/market-dashboard/forecast-skus', { product_id: productId }),
+  /** Upstream page: 3-tier price transmission chain. */
+  priceChain: () => getJson('/api/market-dashboard/price-chain'),
 };
