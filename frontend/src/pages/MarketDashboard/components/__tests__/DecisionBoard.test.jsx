@@ -72,4 +72,17 @@ describe('DecisionBoard', () => {
     fireEvent.click(row.closest('tr'));
     expect(onSelect).toHaveBeenCalledWith('isoprene');
   });
+
+  it('chevron expands the card showing full narrative', async () => {
+    renderBoard();
+    const btn = await screen.findByLabelText('展开 异戊二烯');
+    fireEvent.click(btn);
+    expect(
+      await screen.findByText(/异戊二烯现价 12,100 元\/吨/),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/方向准确率/)).toBeInTheDocument();
+    // collapse again
+    fireEvent.click(btn);
+    expect(screen.queryByText(/异戊二烯现价 12,100 元\/吨/)).not.toBeInTheDocument();
+  });
 });

@@ -2,8 +2,12 @@
 // expandable rows revealing a mini forecast chart + full AI narrative.
 import { useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
+import {
+  ResponsiveContainer, ComposedChart, Area, Line, XAxis, YAxis, Tooltip,
+} from 'recharts';
 import { Sparkles, ChevronDown } from 'lucide-react';
 import { marketDashboardApi } from '@/api/marketDashboard';
+import { normalizeForecastPoints } from '../lib/forecastChartMath';
 
 const ACTION_STYLES = {
   buy: 'bg-green-100 text-green-700 border-green-200 dark:bg-green-900/40 dark:text-green-300 dark:border-green-800',
@@ -94,6 +98,7 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
               <DecisionRow
                 key={p.id}
                 p={p}
+                day={data.day}
                 isSelected={isSelected}
                 isExpanded={isExpanded}
                 onSelect={() => onSelectProduct?.(p.id)}
@@ -107,7 +112,7 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
   );
 }
 
-function DecisionRow({ p, isSelected, isExpanded, onSelect, onToggle }) {
+function DecisionRow({ p, day, isSelected, isExpanded, onSelect, onToggle }) {
   const chgCls =
     p.expected_change_pct == null
       ? 'text-slate-400'
@@ -115,6 +120,7 @@ function DecisionRow({ p, isSelected, isExpanded, onSelect, onToggle }) {
         ? 'text-red-600 dark:text-red-400'   // 涨=red (CN convention)
         : 'text-green-600 dark:text-green-400';
   return (
+    <>
     <tr
       onClick={onSelect}
       className={`cursor-pointer border-b border-slate-50 transition-colors hover:bg-slate-50 dark:border-slate-800/60 dark:hover:bg-slate-800/40 ${
@@ -158,5 +164,79 @@ function DecisionRow({ p, isSelected, isExpanded, onSelect, onToggle }) {
         </button>
       </td>
     </tr>
+    {isExpanded && (
+      <tr className="border-b border-slate-100 dark:border-slate-800">
+        <td colSpan={9} className="bg-slate-50/60 px-4 py-3 dark:bg-slate-800/30">
+          <ExpandedCard p={p} day={day} />
+        </td>
+      </tr>
+    )}
+    </>
+  );
+}
+
+const VOL_ZH = { NORMAL: '正常', MODERATE: '偏高', HIGH: '剧烈' };
+const CONF_ZH = { high: '高', medium: '中', low: '低' };
+
+function ExpandedCard({ p, day }) {
+  const { data } = useQuery({
+    queryKey: ['market-dashboard', 'forecast-chart', p.id, 30],
+    queryFn: () => marketDashboardApi.forecastChart(p.id, 30),
+    staleTime: 60_000,
+  });
+  const { points } = normalizeForecastPoints(data?.points);
+
+  return (
+    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+      <div className="h-40 rounded border border-slate-100 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+        {points.length ? (
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
+              <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={(d) => String(d).slice(5)} />
+              <YAxis tick={{ fontSize: 10 }} domain={['auto', 'auto']} width={50} />
+              <Tooltip formatter={(v) => (v == null ? '—' : Number(v).toLocaleString())} />
+              <Area type="monotone" dataKey="actual" stroke="#2563eb" fill="#bfdbfe" strokeWidth={1.5} name="实际" />
+              <Line type="monotone" dataKey="base" stroke="#f59e0b" strokeDasharray="4 2" dot={false} name={`${day}日预测`} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        ) : (
+          <div className="flex h-full items-center justify-center text-xs text-slate-400">
+            走势图数据加载中…
+          </div>
+        )}
+      </div>
+
+      <div>
+        <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+          {p.narrative_zh}
+        </p>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-4">
+          <div>方向准确率<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.directional_accuracy == null ? '—' : `${Math.round(p.directional_accuracy * 100)}%`}</span></div>
+          <div>情报事件<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.intel_event_count} 条</span></div>
+          <div>波动状态<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{VOL_ZH[p.volatility_regime] || '—'}</span></div>
+          <div>置信度<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{CONF_ZH[p.confidence] || '低'}</span></div>
+        </div>
+        {p.skus?.length > 0 && (
+          <table className="mt-3 w-full text-xs">
+            <thead>
+              <tr className="text-left text-slate-400">
+                <th className="py-1 font-medium">物料代码</th>
+                <th className="py-1 font-medium">名称</th>
+                <th className="py-1 font-medium text-right">预测价</th>
+              </tr>
+            </thead>
+            <tbody>
+              {p.skus.map((s) => (
+                <tr key={s.material_code} className="border-t border-slate-100 dark:border-slate-700">
+                  <td className="py-1 font-mono">{s.material_code}</td>
+                  <td className="py-1">{s.name}</td>
+                  <td className="py-1 text-right tabular-nums">{fmtPrice(s.forecast_base)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </div>
   );
 }
