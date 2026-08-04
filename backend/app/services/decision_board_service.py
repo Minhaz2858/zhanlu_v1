@@ -149,3 +149,94 @@ def build_briefing(products: list[DecisionBoardProduct], day: int) -> str:
         if others else ""
     )
     return f"未来 {day} 天重点关注:" + ";".join(segs) + "。" + tail
+
+
+def _pick(items, day):
+    """Return the overlay entry whose horizon == day, else None."""
+    for it in items or []:
+        if getattr(it, "horizon", None) == day:
+            return it
+    return None
+
+
+def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResponse:
+    product_ids = PRODUCT_GROUP_MAP.get(group, [])
+    # get_market_snapshot enforces the EDIA fail-closed guard (503).
+    snapshots = {s.id: s for s in mds.get_market_snapshot(group)}
+    batch = mds.get_forecast_base_batch_v2(product_ids, day=day, db=db)
+
+    products: list[DecisionBoardProduct] = []
+    for pid in product_ids:
+        snap = snapshots.get(pid)
+        labels = PRODUCT_LABELS.get(pid, {})
+        overlay = (batch.overlay_by_product or {}).get(pid)
+        prob = _pick(overlay.probability if overlay else None, day)
+        dec = _pick(overlay.decision if overlay else None, day)
+        dire = _pick(overlay.directional if overlay else None, day)
+        intel = overlay.intelligence if overlay else None
+        policy = overlay.policy if overlay else None
+        trust = overlay.trust_tier if overlay else None
+
+        action = dec.action if dec else "watch"
+        confidence = dec.confidence if dec else "low"
+        p_rise = prob.p_rise if prob else None
+        exp_chg = prob.expected_change_pct if prob else None
+        intel_count = intel.active_event_count if intel else 0
+        intel_bias = intel.bias_direction if intel else "neutral"
+        vol = policy.volatility_regime if policy else None
+        name_zh = labels.get("label_zh", pid)
+        current = snap.price if snap else None
+        base = (batch.base_by_product or {}).get(pid)
+
+        trust_label = None
+        if trust is not None:
+            trust_label = trust.badge_label_zh or TRUST_LABELS_ZH.get(trust.tier)
+
+        skus = [
+            SkuBrief(material_code=s.material_code, name=s.name,
+                     forecast_base=s.forecast_base)
+            for s in (batch.sku_forecasts_by_product or {}).get(pid, [])
+        ]
+
+        products.append(DecisionBoardProduct(
+            id=pid,
+            name_zh=name_zh,
+            name_en=labels.get("label_en", pid),
+            code=pid,
+            current_price=current,
+            price_date=snap.date if snap else None,
+            forecast_base=base,
+            expected_change_pct=exp_chg,
+            p_rise=p_rise,
+            action=action,
+            action_label_zh=action_label(action),
+            confidence=confidence,
+            trust_tier=trust.tier if trust else None,
+            trust_label_zh=trust_label,
+            trust_color=trust.badge_color if trust else None,
+            directional_accuracy=dire.accuracy if dire else None,
+            intel_event_count=intel_count,
+            intel_bias=intel_bias,
+            volatility_regime=vol,
+            one_liner_zh=build_one_liner(
+                action=action, p_rise=p_rise, expected_change_pct=exp_chg,
+                intel_event_count=intel_count, intel_bias=intel_bias,
+            ),
+            narrative_zh=build_narrative(
+                name_zh=name_zh, day=day, current_price=current,
+                forecast_base=base, expected_change_pct=exp_chg, p_rise=p_rise,
+                action=action, confidence=confidence,
+                directional_accuracy=dire.accuracy if dire else None,
+                intel_event_count=intel_count, intel_bias=intel_bias,
+                volatility_regime=vol,
+            ),
+            skus=skus,
+        ))
+
+    return DecisionBoardResponse(
+        group=group,
+        day=day,
+        generated_at=datetime.now(timezone.utc).isoformat(),
+        briefing_zh=build_briefing(products, day),
+        products=products,
+    )

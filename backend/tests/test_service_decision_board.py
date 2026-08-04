@@ -85,3 +85,96 @@ def test_briefing_all_quiet():
     ]
     s = build_briefing(products, 7)
     assert "平稳" in s
+
+
+from app.schemas.market_dashboard import (
+    DecisionMeta, DirectionalEdgeMeta, ForecastBaseBatchResponse,
+    ForecastOverlayMeta, IntelligenceOverlayMeta, MarketSnapshot,
+    PolicyOverlayMeta, ProbabilityOverlayMeta, SkuForecastMeta, TrustTierMeta,
+)
+from app.services import decision_board_service as dbs
+
+
+def _snapshot(pid, price):
+    return MarketSnapshot(
+        id=pid, name=pid, group="midstream", price=price, date="2026-08-03",
+    )
+
+
+def _overlay(pid, action="buy", conf="medium"):
+    return ForecastOverlayMeta(
+        product_id=pid,
+        intelligence=IntelligenceOverlayMeta(active_event_count=3, bias_direction="up"),
+        policy=PolicyOverlayMeta(volatility_regime="NORMAL"),
+        trust_tier=TrustTierMeta(
+            tier="high", badge_color="green",
+            badge_label_zh="高可信", badge_label_en="High",
+        ),
+        probability=[ProbabilityOverlayMeta(horizon=7, p_rise=0.68, expected_change_pct=0.029)],
+        directional=[DirectionalEdgeMeta(horizon=7, accuracy=0.72, n_test=40, p_value=0.001, status="edge")],
+        decision=[DecisionMeta(horizon=7, action=action, confidence=conf, rationale="r")],
+    )
+
+
+def test_build_decision_board_composes(monkeypatch):
+    monkeypatch.setattr(
+        dbs.mds, "get_market_snapshot",
+        lambda group: [_snapshot(pid, 12100.0)
+                       for pid in ("isoprene", "piperylene", "dcpd", "raffinate_c5")],
+    )
+    monkeypatch.setattr(
+        dbs.mds, "get_forecast_base_batch_v2",
+        lambda product_ids, day=7, db=None: ForecastBaseBatchResponse(
+            day=day,
+            base_by_product={pid: 12450.0 for pid in product_ids},
+            overlay_by_product={pid: _overlay(pid) for pid in product_ids},
+            sku_forecasts_by_product={
+                "raffinate_c5": [SkuForecastMeta(
+                    material_code="C5R-001", target_id="tgt-001",
+                    name="抽余C5 SKU", report_order=1,
+                    is_primary=True, forecast_base=8100.0,
+                )],
+            },
+        ),
+    )
+    resp = dbs.build_decision_board("midstream", day=7)
+    assert resp.group == "midstream"
+    assert len(resp.products) == 4
+    iso = next(p for p in resp.products if p.id == "isoprene")
+    assert iso.name_zh == "异戊二烯"
+    assert iso.code == "isoprene"
+    assert iso.current_price == 12100.0
+    assert iso.forecast_base == 12450.0
+    assert iso.p_rise == 0.68
+    assert iso.action == "buy"
+    assert iso.action_label_zh == "建议备货"
+    assert iso.trust_label_zh == "高可信"
+    assert iso.directional_accuracy == 0.72
+    assert "12,100" in iso.narrative_zh
+    raf = next(p for p in resp.products if p.id == "raffinate_c5")
+    assert raf.skus[0].material_code == "C5R-001"
+    assert "异戊二烯" in resp.briefing_zh
+
+
+def test_build_decision_board_missing_overlay(monkeypatch):
+    monkeypatch.setattr(
+        dbs.mds, "get_market_snapshot",
+        lambda group: [_snapshot("isoprene", None)],
+    )
+    monkeypatch.setattr(
+        dbs.mds, "get_forecast_base_batch_v2",
+        lambda product_ids, day=7, db=None: ForecastBaseBatchResponse(
+            day=day,
+            base_by_product={"isoprene": None},
+            overlay_by_product={"isoprene": None},
+            sku_forecasts_by_product={},
+        ),
+    )
+    # limit group to a single product via PRODUCT_GROUP_MAP patch
+    monkeypatch.setattr(dbs, "PRODUCT_GROUP_MAP", {"midstream": ["isoprene"]})
+    resp = dbs.build_decision_board("midstream", day=7)
+    p = resp.products[0]
+    assert p.action == "watch"
+    assert p.action_label_zh == "建议观望"
+    assert p.one_liner_zh == "数据不足,建议观望"
+    assert "数据不足" in p.narrative_zh
