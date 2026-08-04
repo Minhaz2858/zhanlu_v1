@@ -62,6 +62,15 @@ class EdiaMysqlDataSource:
     def read_history(self, datasource: dict) -> pd.DataFrame:
         """Read history rows and return a DataFrame with columns ['ds', 'y'].
 
+        Phase F1: When ``datasource`` includes ``extra_sources`` (list of
+        additional source descriptors), this method unions them with the
+        primary source, deduplicates by date, and returns the longest
+        available history. Each extra_source has the same shape as a
+        primary datasource (table, time_col, measure, where). Used for
+        isoprene/styrene where ``md_t_lz_price`` only covers 2025-06→
+        2026-07 but ``lz_v_异戊二烯_data`` / ``lz_v_苯乙烯_data`` extend
+        back to 2025-03.
+
         Raises:
             RuntimeError: If EDIA MySQL is unreachable or the query returns
                 zero rows after sentinel filtering.
@@ -73,17 +82,60 @@ class EdiaMysqlDataSource:
                 "Check EDIA_MYSQL_URL in .env."
             )
 
-        table = datasource.get("table", "md_t_lz_price")
-        time_col = datasource.get("time_col", "FDATE")
-        measure = datasource.get("measure", "FTAXPRICE")
-        where = datasource.get("where", "1=1")
+        primary = _source_to_dict(datasource)
+        extras = [
+            _source_to_dict(extra) for extra in (datasource.get("extra_sources") or [])
+        ]
+        all_sources = [primary] + extras
+
+        dfs = []
+        for src in all_sources:
+            try:
+                df = self._read_single_source(eng, src)
+                if not df.empty:
+                    dfs.append(df)
+            except Exception as exc:
+                # Tolerate failures on extra sources — primary source must
+                # succeed; extras are best-effort enrichments. Re-raise if
+                # this IS the primary source.
+                if src is primary:
+                    raise RuntimeError(
+                        f"Primary source {src.get('table')} failed: {exc}"
+                    ) from exc
+                logger.warning("Extra source %s failed: %s", src.get("table"), exc)
+
+        if not dfs:
+            raise RuntimeError(
+                f"No rows returned from any source "
+                f"({[s.get('table') for s in all_sources]})."
+            )
+
+        df = pd.concat(dfs, ignore_index=True)
+        # Deduplicate by date — primary wins over extras (md_t_lz_price has
+        # clean daily prices; lz_v_*_data views may have duplicate dates
+        # for the same product). Primary rows come first in the concat, so
+        # keep="first" preserves them on overlap.
+        df = df.drop_duplicates(subset=["ds"], keep="first")
+        df = df.sort_values("ds").reset_index(drop=True)
+
+        if df.empty:
+            raise RuntimeError(
+                "No valid rows after sentinel/NaN filtering for any source."
+            )
+
+        return df[["ds", "y"]]
+
+    def _read_single_source(self, eng: Engine, src: dict) -> pd.DataFrame:
+        """Read a single source descriptor into a DataFrame."""
+        table = src.get("table", "md_t_lz_price")
+        time_col = src.get("time_col", "FDATE")
+        measure = src.get("measure", "FTAXPRICE")
+        where = src.get("where", "1=1")
 
         # NOTE: table/column names come from our own seeded datasource
         # descriptors (not user input), so interpolation is safe here.
-        # The `where` clause is also hardcoded in seed_ecisco_targets.py.
         # SQLite (used in tests) accepts backticks as identifier quotes;
-        # MySQL uses them natively. Postgres would need double quotes,
-        # but we only ever hit EDIA MySQL (and SQLite in tests).
+        # MySQL uses them natively.
         sql = text(
             f"SELECT `{time_col}` AS ds, `{measure}` AS y "
             f"FROM `{table}` "
@@ -96,30 +148,25 @@ class EdiaMysqlDataSource:
 
         if not rows:
             raise RuntimeError(
-                f"No rows returned from {table} WHERE {where}. "
-                "EDIA MySQL may be empty for this series."
+                f"No rows returned from {table} WHERE {where}."
             )
 
         df = pd.DataFrame(rows, columns=["ds", "y"])
-        # Parse datetime (FDATE comes back as datetime or str depending on driver)
         df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
-        # Drop sentinel strings before float coercion
         df = df[~df["y"].astype(str).isin(_SENTINEL_VALUES)]
         df["y"] = pd.to_numeric(df["y"], errors="coerce")
-        # Drop any rows that failed coercion (NaN y or NaT ds)
         df = df.dropna(subset=["ds", "y"])
-
-        # Deduplicate by date: multiple ERP order entries can land on the
-        # same PLANDATE with different prices. Average them into a single
-        # daily mean price. For md_t_lz_price this is a no-op — duplicate
-        # dates have identical prices, so AVG(price) = price.
+        # Within-source dedup by date (mean of multiple entries on same day)
         df = df.groupby("ds", as_index=False).agg({"y": "mean"})
-
         df = df.sort_values("ds").reset_index(drop=True)
+        return df
 
-        if df.empty:
-            raise RuntimeError(
-                f"No valid rows after sentinel/NaN filtering for {table} WHERE {where}."
-            )
 
-        return df[["ds", "y"]]
+def _source_to_dict(source: dict) -> dict:
+    """Normalize a datasource descriptor to the standard shape."""
+    return {
+        "table": source.get("table", "md_t_lz_price"),
+        "time_col": source.get("time_col", "FDATE"),
+        "measure": source.get("measure", "FTAXPRICE"),
+        "where": source.get("where", "1=1"),
+    }

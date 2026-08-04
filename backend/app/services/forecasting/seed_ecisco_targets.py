@@ -91,6 +91,17 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '异戊二烯-华东市场价'",
             "granularity": "day",
+            # Phase F1: union md_t_lz_price (2025-06+) with lz_v_*_data
+            # (2025-03+) for ~300 rows of history. Primary wins on date
+            # overlap; lz_v_*_data extends the back-half of the series.
+            "extra_sources": [
+                {
+                    "table": "lz_v_异戊二烯_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '异戊二烯'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 6,
@@ -147,6 +158,15 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '苯乙烯-中石化华东'",
             "granularity": "day",
+            # Phase F1: extend history via lz_v_*_data view (Phase F1)
+            "extra_sources": [
+                {
+                    "table": "lz_v_苯乙烯_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '苯乙烯'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 9,
