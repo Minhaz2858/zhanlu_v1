@@ -1,8 +1,10 @@
-"""Idempotent seeder for the 12 Ecisco BI dashboard forecast targets.
+"""Idempotent seeder for the Ecisco BI dashboard forecast targets.
 
 Each target maps a dashboard product_id (e.g. 'crude_oil') to a primary
-time series in EDIA's MySQL mirror (md_t_lz_price for 10 products, ERP
-sale_erp_v_*_data for raffinate_c5 and c5_resin).
+time series in EDIA's MySQL mirror. The 10 md_t_lz_price products are
+seeded statically below; the 2 ERP products (c5_resin, raffinate_c5) are
+discovered dynamically by discover_and_seed_sku_targets() — one target
+per material_code (SKU) with >= 50 rows of history.
 
 Run on boot via seed.py, or manually via the /bootstrap-nightly-forecast
 endpoint. Safe to re-run — skips targets that already exist (matched by
@@ -163,36 +165,6 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "include_in_weekly_report": True,
         "report_order": 11,
     },
-    # ERP fallback products — no FMATERIAL_NAME filter; these tables have
-    # PLANDATE / FTAXPRICE columns and no supplier dimension.
-    {
-        "product_key": "ecisco.c5_resin",
-        "name": "C5 Resin (ERP Order Book)",
-        "datasource": {
-            "source": "edia_mysql",
-            "table": "sale_erp_v_碳五石油树脂_data",
-            "time_col": "PLANDATE",
-            "measure": "FTAXPRICE",
-            "where": "1=1",
-            "granularity": "day",
-        },
-        "include_in_weekly_report": True,
-        "report_order": 12,
-    },
-    {
-        "product_key": "ecisco.raffinate_c5",
-        "name": "Raffinate C5 (ERP Order Book)",
-        "datasource": {
-            "source": "edia_mysql",
-            "table": "sale_erp_v_抽余碳五_data",
-            "time_col": "PLANDATE",
-            "measure": "FTAXPRICE",
-            "where": "1=1",
-            "granularity": "day",
-        },
-        "include_in_weekly_report": True,
-        "report_order": 12,
-    },
 ]
 
 
@@ -236,6 +208,147 @@ def seed_ecisco_forecast_targets(
         db.commit()
         logger.info(
             "seed_ecisco_forecast_targets: inserted %d new targets for org=%s",
+            inserted, org_id,
+        )
+    return inserted
+
+
+# ── ERP product families that need dynamic SKU discovery ───────────────
+# Each entry maps a dashboard product_id to its ERP table name.
+# The seeder queries SELECT DISTINCT material_code from these tables
+# and creates one ForecastTarget per SKU (material_code) with >= 50 rows.
+_ERP_PRODUCT_TABLES: dict[str, str] = {
+    "c5_resin":     "sale_erp_v_碳五石油树脂_data",
+    "raffinate_c5": "sale_erp_v_抽余碳五_data",
+}
+
+# Minimum row count for a SKU to be forecastable.
+_MIN_SKU_ROWS = 50
+
+
+def discover_and_seed_sku_targets(
+    db: Session,
+    org_id: str = "default-org",
+    app_id: str = "default-app",
+    engine=None,
+) -> int:
+    """Discover SKUs (material_code values) in ERP tables and seed one
+    ForecastTarget per SKU.
+
+    For each ERP product family (c5_resin, raffinate_c5):
+    1. Query SELECT DISTINCT material_code, COUNT(*) FROM <table>
+       WHERE FTAXPRICE > 0 GROUP BY material_code
+    2. Filter to SKUs with >= 50 rows (minimum for forecasting)
+    3. Sort by row count descending — primary SKU gets report_order=12,
+       secondary SKUs get 13, 14, ...
+    4. Insert ForecastTarget rows with product_key="ecisco.<family>.<code>"
+
+    Idempotent: skips targets that already exist (matched by product_key
+    + org_id). Safe to call on every boot.
+
+    Args:
+        db: SQLAlchemy session.
+        org_id: Org ID for the targets.
+        app_id: App ID for the targets.
+        engine: Optional SQLAlchemy engine for the ERP MySQL mirror.
+                If None, uses get_mysql_engine().
+
+    Returns:
+        Number of new ForecastTarget rows inserted.
+    """
+    from sqlalchemy import text as sa_text
+
+    if engine is None:
+        from app.core.mysql_db import get_mysql_engine
+        engine = get_mysql_engine()
+    if engine is None:
+        logger.warning(
+            "discover_and_seed_sku_targets: EDIA MySQL unreachable, "
+            "skipping SKU discovery."
+        )
+        return 0
+
+    inserted = 0
+    for family, table_name in _ERP_PRODUCT_TABLES.items():
+        try:
+            with engine.connect() as conn:
+                # Discover SKUs: material_code + row count, filtered by
+                # FTAXPRICE > 0 (exclude cancelled/reversed entries).
+                stmt = sa_text(
+                    f"SELECT material_code, COUNT(*) AS cnt "
+                    f"FROM `{table_name}` "
+                    f"WHERE FTAXPRICE > 0 "
+                    f"AND material_code IS NOT NULL "
+                    f"AND material_code != '' "
+                    f"GROUP BY material_code "
+                    f"ORDER BY cnt DESC"
+                )
+                rows = conn.execute(stmt).fetchall()
+        except Exception as exc:
+            logger.warning(
+                "discover_and_seed_sku_targets: query failed for %s: %s",
+                table_name, exc,
+            )
+            continue
+
+        # Filter to SKUs with enough history
+        qualified = [
+            (code, cnt) for code, cnt in rows
+            if cnt >= _MIN_SKU_ROWS
+        ]
+        if not qualified:
+            logger.info(
+                "discover_and_seed_sku_targets: no SKUs with >= %d rows in %s",
+                _MIN_SKU_ROWS, table_name,
+            )
+            continue
+
+        logger.info(
+            "discover_and_seed_sku_targets: %s — %d SKUs qualified (of %d total)",
+            family, len(qualified), len(rows),
+        )
+
+        for idx, (code, cnt) in enumerate(qualified):
+            product_key = f"ecisco.{family}.{code}"
+            # Primary SKU (idx=0) gets report_order=12 (family's original).
+            # Secondary SKUs get 13, 14, 15, ...
+            report_order = 12 + idx
+
+            existing = db.query(ForecastTarget).filter(
+                ForecastTarget.product_key == product_key,
+                ForecastTarget.org_id == org_id,
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            ).first()
+            if existing is not None:
+                continue
+
+            target = ForecastTarget(
+                org_id=org_id,
+                app_id=app_id,
+                product_key=product_key,
+                name=f"{family} SKU {code} (ERP, {cnt} rows)",
+                datasource={
+                    "source": "edia_mysql",
+                    "table": table_name,
+                    "time_col": "PLANDATE",
+                    "measure": "FTAXPRICE",
+                    "where": f"material_code = '{code}' AND FTAXPRICE > 0",
+                    "granularity": "day",
+                },
+                level=2,
+                quality_grade="B",
+                status="active",
+                source="seed_sku",
+                include_in_weekly_report=(idx == 0),  # only primary SKU
+                report_order=report_order,
+            )
+            db.add(target)
+            inserted += 1
+
+    if inserted:
+        db.commit()
+        logger.info(
+            "discover_and_seed_sku_targets: inserted %d new SKU targets for org=%s",
             inserted, org_id,
         )
     return inserted
