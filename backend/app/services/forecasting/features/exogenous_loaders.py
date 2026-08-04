@@ -9,6 +9,11 @@ Design rules:
 - Event flags are binary columns (1 = relevant event within lookback).
 - For Phase 1, data is fetched from EDIA MySQL via raw SQL (matching
   EdiaMysqlDataSource pattern), NOT via ORM.
+
+Phase F2: Added ``ErpTxLoader`` — reads ERP transaction prices from
+``sale_erp_v_{product}_data`` tables. These go back to 2018 (vs ~88 days
+for ``md_t_lz_price``) and serve as exogenous features for XGBoost,
+NOT as forecast targets (transaction prices ≠ market quotations).
 """
 
 from __future__ import annotations
@@ -193,3 +198,111 @@ class EventFlagLoader:
             logger.warning("EventFlagLoader failed: %s", exc)
 
         return flag_df
+
+
+# ---------------------------------------------------------------------------
+# ERP Transaction Price Loader (Phase F2)
+# ---------------------------------------------------------------------------
+
+class ErpTxLoader:
+    """Loads ERP transaction prices from ``sale_erp_v_{product}_data``.
+
+    ERP transactions (sales order actuals) differ from market quotations:
+      - Market quotation (md_t_lz_price): daily published price for the
+        product across regions/suppliers.
+      - ERP transaction: actual realized price on a sales order line item.
+
+    ERP tx prices are useful as exogenous features because they reflect
+    real execution prices — but they should NEVER be used as the
+    forecast target (transaction prices ≠ market prices, and orders are
+    sparse / intermittent).
+
+    Schema (from ``erp_mysql_schema.txt``)::
+
+        sale_erp_v_异戊二烯_data(
+            Unnamed: 0, qty, date, price, amount, product, supplier, ...
+        )
+
+    Returns a DataFrame with column ``erp_price`` (daily mean of all
+    transactions on that day), indexed by date.
+    """
+
+    def __init__(self, engine: Engine | None = None):
+        self._engine = engine
+
+    @property
+    def engine(self) -> Engine | None:
+        return self._engine or _resolve_mysql_engine()
+
+    def load(
+        self,
+        erp_table: str,
+        product_filter: str,
+        window_start: date,
+        window_end: date,
+    ) -> pd.DataFrame:
+        """Fetch ERP transaction prices for the given product.
+
+        Parameters
+        ----------
+        erp_table : str
+            Table name, e.g. ``"sale_erp_v_异戊二烯_data"``.
+        product_filter : str
+            Value of the ``product`` column to filter by, e.g.
+            ``"异戊二烯"``. May be empty to take all rows.
+        window_start, window_end : date
+            Inclusive date range.
+
+        Returns
+        -------
+        DataFrame with single ``erp_price`` column, indexed by date.
+        Empty DataFrame on failure or no data.
+        """
+        if self.engine is None or not erp_table:
+            return pd.DataFrame()
+
+        # Build WHERE clause with optional product filter
+        where = "WHERE `date` >= :start AND `date` <= :end"
+        params: dict = {
+            "start": window_start.isoformat(),
+            "end": window_end.isoformat(),
+        }
+        if product_filter:
+            where += " AND `product` = :product"
+            params["product"] = product_filter
+
+        sql = text(
+            f"SELECT `date` AS ds, `price` AS y "
+            f"FROM `{erp_table}` "
+            f"{where} "
+            f"ORDER BY `date` ASC"
+        )
+
+        try:
+            with self.engine.connect() as conn:
+                rows = conn.execute(sql, params).fetchall()
+        except Exception as exc:
+            logger.warning(
+                "ErpTxLoader failed for %s (filter=%s): %s",
+                erp_table, product_filter, exc,
+            )
+            return pd.DataFrame()
+
+        if not rows:
+            return pd.DataFrame()
+
+        df = pd.DataFrame(rows, columns=["ds", "y"])
+        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
+        df = df[~df["y"].astype(str).isin(_SENTINEL_VALUES)]
+        df["y"] = pd.to_numeric(df["y"], errors="coerce")
+        df = df.dropna(subset=["ds", "y"])
+        if df.empty:
+            return pd.DataFrame()
+
+        # Daily mean (multiple transactions per day)
+        daily = df.groupby("ds")["y"].mean().rename("erp_price")
+        daily = daily.sort_index()
+        mask = (daily.index >= pd.Timestamp(window_start)) & (
+            daily.index <= pd.Timestamp(window_end)
+        )
+        return pd.DataFrame(daily.loc[mask])
