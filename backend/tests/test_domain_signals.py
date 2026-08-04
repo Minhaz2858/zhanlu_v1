@@ -159,3 +159,19 @@ def test_combined_adjustment_no_rules_for_unknown_product():
     assert result["causal_pct"] == 0.0
     assert result["total_pct"] == 0.0
     assert result["applied_rules"] == []
+
+
+# ── Naphtha fetcher ─────────────────────────────────────────────────────────
+
+def test_fetch_naphtha_returns_none_when_no_target():
+    """No naphtha ForecastTarget → None (graceful degradation)."""
+    from app.services.forecasting.domain_signals import fetch_naphtha_recent_pct_change
+
+    class _FakeQuery:
+        def filter(self, *a, **k): return self
+        def first(self): return None
+
+    class _FakeDb:
+        def query(self, model): return _FakeQuery()
+
+    assert fetch_naphtha_recent_pct_change(_FakeDb()) is None

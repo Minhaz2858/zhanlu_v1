@@ -24,13 +24,30 @@ from app.models.forecasting import (
     ForecastTarget,
 )
 from app.services.db.query_service import QueryService
+from app.services.forecasting.accuracy_tracker import (
+    adaptive_weights,
+    detect_drift,
+)
 from app.services.forecasting.backtest import BacktestResult, evaluate
 from app.services.forecasting.edia_source import EdiaMysqlDataSource
 from app.services.forecasting.discovery import discover
 from app.services.forecasting.ensemble import EnsembleResult, blend, run_models
+from app.services.forecasting.explain import explain_forecast
+from app.services.forecasting.features.feature_registry import (
+    FeatureSpec,
+    derive_feature_spec,
+    topological_order,
+)
+from app.services.forecasting.features.feature_builder import build_features
 from app.services.forecasting.guard import GuardResult, evaluate_guard
 from app.services.forecasting.models import build_model_pool
+from app.services.forecasting.preprocess import preprocess_series
 from app.services.forecasting.quality import QualityResult, score_series
+from app.services.forecasting.reconcile import (
+    CoherenceReport,
+    apply_coherence,
+    check_coherence,
+)
 from app.services.forecasting.scenarios import ScenarioResult, generate
 
 logger = logging.getLogger(__name__)
@@ -162,12 +179,16 @@ class ForecastEngine:
 
         1. Load target + pull time series from datasource
         2. Score quality → update target
-        3. Backtest all models → per-model error
-        4. Fit all models + ensemble blend
-        5. Honesty gate check
-        6. Generate scenarios
-        7. Write ForecastRun + ForecastAccuracyLog
-        8. Apply business rules (if any active)
+        3. Preprocessing (spike detection, stale-data guard, winsorization)
+        4. Backtest all models → per-model error
+        5. Exogenous feature building (KG-driven)
+        6. Fit all models + ensemble blend (+ exog-aware models)
+        7. Honesty gate check
+        8. Value-chain coherence (spread guardrails)
+        9. Driver attribution + drift detection
+        10. Generate scenarios
+        11. Write ForecastRun + ForecastAccuracyLog
+        12. Apply business rules (if any active)
         """
         if horizons is None:
             horizons = [3, 7, 30]
@@ -198,27 +219,91 @@ class ForecastEngine:
         sp = _seasonal_period_for_granularity(granularity, seasonal_period)
         models = build_model_pool(seasonal_period=sp)
 
+        # --- Step 3: Preprocessing (Phase 1) ---
+        preprocess_enabled = _get_config_bool("FORECAST_PREPROCESS_ENABLED", True)
+        preprocess_cleaned = y
+        cleaning_report = None
+        if preprocess_enabled:
+            try:
+                pp = preprocess_series(preprocess_cleaned, target.product_key, seasonal_period=sp)
+                preprocess_cleaned = pp.y_clean
+                cleaning_report = pp.report
+            except Exception as exc:
+                logger.warning("Preprocess failed for %s: %s", target.product_key, exc)
+
+        # Use cleaned series for backtest + models
+        y_model = preprocess_cleaned
+
         # --- Backtest ---
-        bt = evaluate(y, models, seasonal_period=sp)
+        bt = evaluate(y_model, models, seasonal_period=sp)
         per_model_mape = bt.per_model_mape
 
         # --- Fit + forecast ---
         h_max = max(horizons)
         forecasts, models_run, models_failed = run_models(
-            models, y, h=h_max, seasonal_period=sp
+            models, y_model, h=h_max, seasonal_period=sp
         )
 
-        # --- Ensemble ---
+        # --- Step 5: Exogenous features (Phase 1) ---
+        exog_enabled = _get_config_bool("FORECAST_EXOG_ENABLED", True)
+        feature_names: list[str] = []
+        exog_spec: FeatureSpec | None = None
+        exog_degraded = False
+        features_used: list[str] = []
+        coherence_report: CoherenceReport | None = None
+
+        if exog_enabled:
+            try:
+                from app.config import settings
+                from app.services.knowledge_graph.graph import build_c5_c9_graph
+                from app.services.forecasting.features.exogenous_loaders import (
+                    FeedstockLoader, FxLoader, EventFlagLoader,
+                )
+
+                kg = build_c5_c9_graph()
+                exog_spec = derive_feature_spec(target.product_key, kg)
+                feature_names = exog_spec.feedstock_keys
+
+                # Build feature matrix for exog models (no cascade in single-target mode)
+                feed_loader = FeedstockLoader()
+                fx_loader = FxLoader()
+                event_loader = EventFlagLoader(self._db)
+                fm = build_features(
+                    target.product_key, y_model, exog_spec,
+                    feed_loader, fx_loader, event_loader, h_max, cascade_forecasts=None,
+                )
+
+                # Fit exog-aware models if feature matrix is available
+                if fm.X_train is not None and len(fm.X_train) > 0:
+                    features_used = list(fm.X_train.columns)
+                    xgb_exog = models.get("xgboost_exog")
+                    if xgb_exog is not None and hasattr(xgb_exog, "fit"):
+                        try:
+                            xgb_exog.fit(y_model, seasonal_period=sp, exog=fm.X_train)
+                            exog_fc = xgb_exog.forecast(
+                                h_max,
+                                exog_future=fm.X_future if fm.X_future is not None and len(fm.X_future) > 0 else None,
+                            )
+                            forecasts["xgboost_exog"] = exog_fc
+                            models_run.append("xgboost_exog")
+                        except Exception as exc:
+                            logger.warning("xgboost_exog fit failed for %s: %s", target.product_key, exc)
+                            models_failed.append("xgboost_exog")
+                            exog_degraded = True
+            except Exception as exc:
+                logger.warning("Exog pipeline failed for %s: %s", target.product_key, exc)
+                exog_degraded = True
+
+        # --- Ensemble (re-blend after exog models added) ---
         ensemble_result = blend(forecasts, per_model_mape)
 
         # --- Guard ---
         naive_fc = forecasts.get("seasonal_naive")
         if naive_fc is None:
-            # Fallback: run SeasonalNaive manually
             from app.services.forecasting.models.naive import SeasonalNaive
             sn = SeasonalNaive(seasonal_period=sp)
             try:
-                sn.fit(y, seasonal_period=sp)
+                sn.fit(y_model, seasonal_period=sp)
                 naive_fc = sn.forecast(h_max)
             except Exception:
                 naive_fc = ensemble_result.point_forecast
@@ -229,6 +314,194 @@ class ForecastEngine:
             bt.ensemble_mape,
             bt.naive_mape,
         )
+
+        # --- Step 8: Coherence check (Phase 1) ---
+        if exog_spec and exog_spec.feedstock_keys:
+            for fk in exog_spec.feedstock_keys:
+                if fk in forecasts:
+                    fc_vals = ensemble_result.point_forecast.tolist()[:h_max]
+                    coherence_report = check_coherence(
+                        target.product_key, fc_vals,
+                        forecasts[fk].tolist()[:h_max], fk,
+                    )
+                    if coherence_report.spread_inverted:
+                        clamped, coherence_report = apply_coherence(
+                            fc_vals, coherence_report,
+                            forecasts[fk].tolist()[:h_max],
+                        )
+                        ensemble_result.point_forecast = pd.Series(
+                            clamped, name=ensemble_result.point_forecast.name,
+                        )
+                    break   # check first feedstock only
+
+        # --- Step 8.5: Intelligence overlay (Phase 3) ---
+        intelligence_overlay_enabled = _get_config_bool(
+            "FORECAST_INTELLIGENCE_OVERLAY_ENABLED", True
+        )
+        intelligence_report: dict | None = None
+        if intelligence_overlay_enabled:
+            try:
+                from app.services.forecasting.intelligence_overlay import (
+                    fetch_product_intelligence_sync,
+                )
+                intel = fetch_product_intelligence_sync(
+                    self._db, target.product_key, target.org_id or "default-org"
+                )
+                intelligence_report = {
+                    "net_price_pct": intel["net_price_pct"],
+                    "confidence": intel["confidence"],
+                    "event_count": intel["event_count"],
+                    "bias": intel["bias"],
+                    "horizon_adjustments": intel["horizon_adjustments"],
+                }
+                # Apply adjustment to the published forecast (7d = full reflection)
+                if intel.get("active") and abs(intel["net_price_pct"]) > 0.01:
+                    adj_pct = intel["horizon_adjustments"].get(7, 0.0)
+                    factor = 1.0 + adj_pct / 100.0
+                    gc = guard_result
+                    gc.published_forecast = gc.published_forecast * factor
+                    # Log top event
+                    top = intel["detail"][0] if intel["detail"] else None
+                    logger.info(
+                        "[intel-overlay] %s: %.2f%% (×%.4f, %d events, bias=%s)%s",
+                        target.product_key,
+                        adj_pct,
+                        factor,
+                        intel["event_count"],
+                        intel["bias"],
+                        f" — {top['headline'][:80]}" if top else "",
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "[intel-overlay] failed for %s: %s", target.product_key, exc
+                )
+                intelligence_report = None
+
+        # --- Step 8.55: Domain signals overlay (Phase B) ---
+        domain_signals_enabled = _get_config_bool(
+            "FORECAST_DOMAIN_SIGNALS_ENABLED", False
+        )
+        domain_signals_report: dict | None = None
+        if domain_signals_enabled:
+            try:
+                from app.services.forecasting.domain_signals import (
+                    compute_domain_signal_adjustment,
+                    fetch_naphtha_recent_pct_change,
+                )
+                # Extract product_id from target.product_key.
+                # For family targets: "ecisco.c5_resin" → "c5_resin"
+                # For SKU targets:   "ecisco.c5_resin.201000018" → "c5_resin"
+                parts = (target.product_key or "").split(".")
+                product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
+
+                naphtha_pct = fetch_naphtha_recent_pct_change(
+                    self._db, org_id=target.org_id or "default-org"
+                )
+
+                domain_signals_report = compute_domain_signal_adjustment(
+                    product_id=product_id,
+                    as_of_date=datetime.now(),
+                    naphtha_pct_change=naphtha_pct,
+                )
+
+                # Apply the combined % adjustment to the published forecast
+                # (same pattern as the intelligence overlay in Step 8.5).
+                total_pct = domain_signals_report.get("total_pct", 0.0)
+                if total_pct != 0.0:
+                    guard_result.published_forecast = (
+                        guard_result.published_forecast * (1.0 + total_pct / 100.0)
+                    )
+
+                logger.info(
+                    "[domain-signals] %s: applied %+.4f%% (seasonal=%+.4f, causal=%+.4f, rules=%s)",
+                    target.product_key, total_pct,
+                    domain_signals_report.get("seasonal_pct", 0.0),
+                    domain_signals_report.get("causal_pct", 0.0),
+                    domain_signals_report.get("applied_rules", []),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[domain-signals] failed for %s: %s", target.product_key, exc
+                )
+                domain_signals_report = None
+
+        # --- Step 8.6: Policy service — bias correction + volatility adjustment (Phase 4) ---
+        policy_enabled = _get_config_bool("FORECAST_POLICY_ENABLED", True)
+        policy_report: dict | None = None
+        if policy_enabled:
+            try:
+                from app.services.forecasting.forecast_policy_service import (
+                    ForecastPolicyService,
+                )
+                import numpy as np
+                daily_returns = (
+                    np.log(y / y.shift(1)).dropna().tolist()
+                    if len(y) > 1 else []
+                )
+                policy_metrics = ForecastPolicyService.compute_from_accuracy_log(
+                    db=self._db,
+                    product_key=target.product_key,
+                    org_id=target.org_id or "default-org",
+                    daily_returns=daily_returns,
+                )
+                total_adj = policy_metrics.bias_pct + policy_metrics.diagnosis_bias
+                factor = (1.0 + total_adj / 100.0) * policy_metrics.vol_multiplier
+                guard_result.published_forecast = (
+                    guard_result.published_forecast * factor
+                )
+                policy_report = {
+                    "bias_pct": policy_metrics.bias_pct,
+                    "diagnosis_bias": policy_metrics.diagnosis_bias,
+                    "volatility_regime": policy_metrics.volatility_regime.value,
+                    "vol_multiplier": policy_metrics.vol_multiplier,
+                    "sample_count": policy_metrics.sample_count,
+                    "mean_signed_error": policy_metrics.mean_signed_error,
+                    "daily_vol_std": policy_metrics.daily_vol_std,
+                    "applied_factor": round(factor, 4),
+                }
+                logger.info(
+                    "[policy] %s: bias=%.3f%%, vol=%s(mult=%.2f), factor=×%.4f, n=%d",
+                    target.product_key,
+                    policy_metrics.bias_pct,
+                    policy_metrics.volatility_regime.value,
+                    policy_metrics.vol_multiplier,
+                    factor,
+                    policy_metrics.sample_count,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[policy] failed for %s: %s", target.product_key, exc
+                )
+                policy_report = None
+
+        # --- Step 9: Explanation + drift detection (Phase 1) ---
+        drift_status = detect_drift(self._db, target.product_key)
+        explanation_dict: dict | None = None
+        xgb_exog = forecasts.get("xgboost_exog")
+        try:
+            explanation = explain_forecast(
+                product_key=target.product_key,
+                forecast_values=ensemble_result.point_forecast.tolist()[:h_max],
+                previous_forecast=None,  # No previous comparison in single mode
+                xgboost_model=xgb_exog,
+                feature_names=features_used,
+                cleaning_report=cleaning_report if cleaning_report else None,
+                coherence_report=coherence_report if coherence_report else None,
+                drift_status=drift_status,
+                honesty_gate_triggered=guard_result.below_naive_baseline,
+            )
+            explanation_dict = {
+                "summary": explanation.summary,
+                "confidence": explanation.confidence,
+                "drivers": [{"feature": d.feature, "weight": d.weight} for d in explanation.drivers],
+                "coherence_flags": explanation.coherence_flags,
+                "drift_warning": explanation.drift_warning,
+                "intelligence": intelligence_report,
+                "policy": policy_report,
+                "domain_signals": domain_signals_report,
+            }
+        except Exception as exc:
+            logger.warning("Explanation failed for %s: %s", target.product_key, exc)
 
         # --- Scenarios ---
         scenarios_result = generate(
@@ -267,6 +540,28 @@ class ForecastEngine:
             confidence=scenarios_result.confidence,
             as_of_date=datetime.now(timezone.utc),
             model_detail=model_detail,
+            exog_features_used=features_used if features_used else None,
+            cleaning_notes=cleaning_report.notes if cleaning_report else None,
+            explanation=explanation_dict,
+            cleaning_report=(
+                {
+                    "n_spikes": cleaning_report.n_spikes_detected,
+                    "spike_dates": cleaning_report.spike_dates,
+                    "n_shifts": cleaning_report.n_level_shifts,
+                    "is_stale": cleaning_report.is_stale,
+                    "winsorized": cleaning_report.winsorization_applied,
+                }
+                if cleaning_report else None
+            ),
+            coherence_report=(
+                {
+                    "violations": coherence_report.violations,
+                    "spread_inverted": coherence_report.spread_inverted,
+                    "clamped": coherence_report.clamped,
+                }
+                if coherence_report else None
+            ),
+            exog_degraded=exog_degraded,
         )
         self._db.add(run)
 
@@ -316,7 +611,13 @@ class ForecastEngine:
         horizons: list[int] | None = None,
         seasonal_period: int = _DEFAULT_SEASONAL_PERIOD,
     ) -> list[ForecastRun]:
-        """Compute forecasts for all active targets in an org."""
+        """Compute forecasts for all active targets in an org.
+
+        When FORECAST_CASCADE_ENABLED=True, orders targets topologically
+        (feedstock → derivative) and populates cascade_forecasts dict
+        so downstream products can use upstream forecasts as exogenous
+        features.
+        """
         targets = (
             self._db.query(ForecastTarget)
             .filter(
@@ -326,6 +627,24 @@ class ForecastEngine:
             )
             .all()
         )
+
+        cascade_enabled = _get_config_bool("FORECAST_CASCADE_ENABLED", True)
+        cascade_forecasts: dict[str, list[float]] = {}
+
+        if cascade_enabled and len(targets) > 0:
+            try:
+                from app.services.knowledge_graph.graph import build_c5_c9_graph
+                kg = build_c5_c9_graph()
+                product_keys = [t.product_key for t in targets]
+                ordered_keys = topological_order(product_keys, kg)
+                # Sort targets by topological order
+                key_index = {k: i for i, k in enumerate(ordered_keys)}
+                targets = sorted(
+                    targets,
+                    key=lambda t: key_index.get(t.product_key, 999),
+                )
+            except Exception as exc:
+                logger.warning("Topological ordering failed: %s — using original order", exc)
 
         runs: list[ForecastRun] = []
         for target in targets:
@@ -337,6 +656,12 @@ class ForecastEngine:
                 )
                 if run:
                     runs.append(run)
+                    # Populate cascade_forecasts for downstream products
+                    if cascade_enabled and run.results:
+                        max_h = max(int(k) for k in run.results.keys()) if run.results else 7
+                        base_fc = run.results.get(str(max_h), {}).get("base", [])
+                        if base_fc:
+                            cascade_forecasts[target.product_key] = list(base_fc)
             except Exception as exc:
                 logger.error(
                     "Failed to compute target %s: %s", target.id, exc
@@ -550,6 +875,15 @@ class ForecastEngine:
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+def _get_config_bool(key: str, default: bool = True) -> bool:
+    """Safely read a boolean config flag, falling back to *default*."""
+    try:
+        from app.config import settings
+        return bool(getattr(settings, key, default))
+    except Exception:
+        return default
+
 
 def _seasonal_period_for_granularity(
     granularity: str, default: int = 7

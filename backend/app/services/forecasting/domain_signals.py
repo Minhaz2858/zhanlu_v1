@@ -193,3 +193,69 @@ def compute_domain_signal_adjustment(
         "total_pct": total_pct,
         "applied_rules": applied_rules,
     }
+
+
+# ---------------------------------------------------------------------------
+# Naphtha signal fetcher
+# ---------------------------------------------------------------------------
+
+_NAPHTHA_LOOKBACK_DAYS = 14
+_NAPHTHA_RECENT_WINDOW = 3  # last 3 days vs preceding 11
+
+
+def fetch_naphtha_recent_pct_change(
+    db: Any,
+    org_id: str = "default-org",
+    lookback_days: int = _NAPHTHA_LOOKBACK_DAYS,
+) -> float | None:
+    """Compute the recent % change in naphtha price.
+
+    Reads the naphtha forecast target's source history (last 14 days) and
+    compares the mean of the last 3 days against the mean of the preceding
+    11 days. This is robust to single-day spikes.
+
+    Args:
+        db: SQLAlchemy session (sync).
+        org_id: Org ID for the naphtha target.
+        lookback_days: Total lookback window (default 14).
+
+    Returns:
+        The % change (e.g. 10.0 means naphtha rose 10%), or None if the
+        naphtha target or its history is unavailable.
+    """
+    try:
+        from app.models.forecasting import ForecastTarget
+        from app.services.forecasting.edia_source import EdiaMysqlDataSource
+
+        target = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key == "ecisco.naphtha",
+            ForecastTarget.org_id == org_id,
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).first()
+        if target is None or not target.datasource:
+            return None
+
+        src = EdiaMysqlDataSource()
+        df = src.read_history(target.datasource)
+        if df is None or len(df) < lookback_days:
+            return None
+
+        # Take the last `lookback_days` rows
+        recent = df.tail(lookback_days).reset_index(drop=True)
+        if len(recent) <= _NAPHTHA_RECENT_WINDOW:
+            return None
+        recent_mean = recent.tail(_NAPHTHA_RECENT_WINDOW)["y"].mean()
+        preceding_mean = recent.head(len(recent) - _NAPHTHA_RECENT_WINDOW)["y"].mean()
+
+        if preceding_mean == 0 or preceding_mean is None or recent_mean is None:
+            return None
+
+        pct = round((recent_mean - preceding_mean) / preceding_mean * 100.0, 2)
+        logger.info(
+            "[domain-signals] naphtha %s: recent_mean=%.2f, preceding_mean=%.2f → %+.2f%%",
+            org_id, recent_mean, preceding_mean, pct,
+        )
+        return pct
+    except Exception as exc:
+        logger.warning("[domain-signals] naphtha pct change fetch failed: %s", exc)
+        return None
