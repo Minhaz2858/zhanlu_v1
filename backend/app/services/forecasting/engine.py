@@ -490,6 +490,25 @@ class ForecastEngine:
                 drift_status=drift_status,
                 honesty_gate_triggered=guard_result.below_naive_baseline,
             )
+            # --- Trust tier (Phase B) ---
+            trust_tier_report: dict | None = None
+            try:
+                from app.services.forecasting.forecast_trust_tier import (
+                    classify_cadence,
+                    compute_forecast_trust_tier,
+                )
+                _parts = (target.product_key or "").split(".")
+                _product_id = _parts[1] if len(_parts) >= 2 else (target.product_key or "")
+                _cadence = classify_cadence(_product_id, row_count=None)
+                trust_tier_report = compute_forecast_trust_tier(
+                    product_id=_product_id,
+                    below_naive=guard_result.below_naive_baseline,
+                    cadence_class=_cadence,
+                    mape=None,
+                )
+            except Exception as exc:
+                logger.warning("[trust-tier] failed for %s: %s", target.product_key, exc)
+
             explanation_dict = {
                 "summary": explanation.summary,
                 "confidence": explanation.confidence,
@@ -499,6 +518,7 @@ class ForecastEngine:
                 "intelligence": intelligence_report,
                 "policy": policy_report,
                 "domain_signals": domain_signals_report,
+                "trust_tier": trust_tier_report,
             }
         except Exception as exc:
             logger.warning("Explanation failed for %s: %s", target.product_key, exc)
