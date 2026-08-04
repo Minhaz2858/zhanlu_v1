@@ -19,9 +19,10 @@ from app.schemas.market_dashboard import (
     RegionalBatchResponse, ForecastBaseBatchResponse,
     EventsResponse, FxRateResponse, OverviewBundle,
     ForecastChartResponse, PriceChainResponse,
-    SkuForecastMeta,
+    SkuForecastMeta, DecisionBoardResponse,
 )
 from app.services import market_dashboard_service as svc
+from app.services import decision_board_service as dbs
 
 router = APIRouter(prefix="/market-dashboard", tags=["market-dashboard"])
 
@@ -100,6 +101,16 @@ def get_forecast_base_batch(
     """Return 7-day-ahead forecast base prices for the requested products."""
     ids = [p.strip() for p in product_ids.split(",") if p.strip()]
     return svc.get_forecast_base_batch_v2(ids, day=day)
+
+
+@router.get("/decision-board", response_model=DecisionBoardResponse)
+def get_decision_board(
+    group: str = Query(..., pattern="^(upstream|midstream|downstream)$"),
+    day: int = Query(7, ge=1, le=30),
+    user=Depends(get_current_user_required),
+) -> DecisionBoardResponse:
+    """Plain-language weekly decision board for all products in a group."""
+    return dbs.build_decision_board(group=group, day=day)
 
 
 @router.get("/events/latest", response_model=EventsResponse)
