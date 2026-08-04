@@ -901,7 +901,8 @@ def get_forecast_base_batch_v2(
     out: dict = {pid: None for pid in product_ids}
     overlay: dict = {pid: None for pid in product_ids}
     sku_forecasts: dict = {pid: [] for pid in product_ids if pid in _ERP_PRODUCT_KEYS}
-    horizon_key = f"{day}d"  # results JSON uses "3d"/"7d"/"30d" keys
+    horizon_key = str(day)  # results JSON uses "3"/"7"/"30" string keys
+    horizon_key_alt = f"{day}d"  # legacy: some old runs used "7d" suffix
 
     owns_session = db is None
     if owns_session:
@@ -939,7 +940,7 @@ def get_forecast_base_batch_v2(
                 ).order_by(ForecastRun.created_date.desc()).first()
                 if not run or not run.results:
                     continue
-                horizon_payload = run.results.get(horizon_key) or {}
+                horizon_payload = run.results.get(horizon_key) or run.results.get(horizon_key_alt) or {}
                 base = horizon_payload.get("base")
                 if base is None:
                     continue
@@ -1088,7 +1089,7 @@ def get_forecast_base_batch_v2(
                 sku_base = None
                 sku_confidence = None
                 if run and run.results:
-                    horizon_payload = run.results.get(horizon_key) or {}
+                    horizon_payload = run.results.get(horizon_key) or run.results.get(horizon_key_alt) or {}
                     base = horizon_payload.get("base")
                     if isinstance(base, list) and len(base) > 0:
                         sku_base = float(base[0])
@@ -1299,6 +1300,7 @@ def _build_overlay_meta(
     from app.schemas.market_dashboard import (
         DecisionMeta, DirectionalEdgeMeta, ForecastOverlayMeta,
         IntelligenceOverlayMeta, PolicyOverlayMeta, ProbabilityOverlayMeta,
+        TrustTierMeta,
     )
     if explanation is None:
         explanation = horizon_payload.get("explanation") or {}
