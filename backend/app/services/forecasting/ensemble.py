@@ -21,8 +21,12 @@ logger = logging.getLogger(__name__)
 
 # Temperature for softmax: lower = more weight on best model
 _DEFAULT_TAU = 1.0
-# Floor weight — every model gets at least this share
-_FLOOR_WEIGHT = 0.05
+# Floor weight — every model gets at least this share (0.0 = no floor;
+# bad models are gated out by _MAX_ERROR_RATIO instead).
+_FLOOR_WEIGHT = 0.0
+# Models with error > _MAX_ERROR_RATIO * best_error get zero weight
+# (prevents bad models from polluting the blend).
+_MAX_ERROR_RATIO = 2.0
 
 
 @dataclass
@@ -30,7 +34,9 @@ class EnsembleResult:
     """Result of per-series ensemble blending."""
 
     point_forecast: pd.Series  # blended forecast (h steps)
-    weights: dict[str, float]  # model_name → weight (sum to 1)
+    # model_name -> weight.  float (flat) when no per-horizon errors are
+    # provided; list[float] (per-step) when per_model_error_by_horizon is used.
+    weights: dict[str, float | list[float]]
     models_run: list[str]  # names of models that succeeded
     models_failed: list[str]  # names of models that crashed
     individual_forecasts: dict[str, pd.Series] = field(default_factory=dict)
@@ -41,6 +47,7 @@ def blend(
     per_model_error: dict[str, float],
     tau: float = _DEFAULT_TAU,
     floor: float = _FLOOR_WEIGHT,
+    per_model_error_by_horizon: dict[int, dict[str, float]] | None = None,
 ) -> EnsembleResult:
     """Blend individual model forecasts using softmax-weighted average.
 
@@ -55,8 +62,14 @@ def blend(
         Softmax temperature.  Lower values concentrate weight on the
         best model.
     floor : float
-        Minimum weight allocated to each model.  Weights are
-        renormalized after applying the floor.
+        Minimum weight allocated to each model (default 0.0 — ratio
+        gating handles bad-model exclusion instead).
+    per_model_error_by_horizon : dict[int, dict[str, float]] or None
+        When provided, computes **per-step** weights: for forecast step
+        ``t`` (0-indexed), the nearest horizon ``h* >= t+1`` is selected
+        and its per-model errors drive the softmax for that step.
+        ``weights`` becomes ``dict[str, list[float]]``.  When None,
+        flat weights (``dict[str, float]``) are produced.
 
     Returns
     -------
@@ -69,7 +82,7 @@ def blend(
     first = next(iter(forecasts.values()))
     h = len(first)
 
-    # Filter: only models present in both dicts with finite error
+    # Filter: only models present in both dicts with finite error + correct length
     valid_names: list[str] = []
     valid_errors: list[float] = []
     for name, fc in forecasts.items():
@@ -80,15 +93,15 @@ def blend(
 
     if not valid_names:
         # All models failed or had inf error — fall back to equal weight
-        # on whatever forecasts we have
         sorted_names = sorted(forecasts.keys())
         n = len(sorted_names)
         w = 1.0 / n if n > 0 else 0.0
-        weights = {name: w for name in sorted_names}
-        blend_vals = _weighted_sum(forecasts, weights, h)
-        individual = {
-            name: fc for name, fc in forecasts.items() if len(fc) == h
-        }
+        if per_model_error_by_horizon:
+            weights = {name: [w] * h for name in sorted_names}
+        else:
+            weights = {name: w for name in sorted_names}
+        blend_vals = _weighted_sum(forecasts, {name: w for name in sorted_names}, h)
+        individual = {name: fc for name, fc in forecasts.items() if len(fc) == h}
         return EnsembleResult(
             point_forecast=pd.Series(blend_vals, name="ensemble"),
             weights=weights,
@@ -97,35 +110,68 @@ def blend(
             individual_forecasts=individual,
         )
 
-    # Softmax of negative errors
-    errors_arr = np.array(valid_errors, dtype=float)
-    neg_scaled = -errors_arr / (tau * max(np.mean(errors_arr), 1e-10))
-    # Numerical stability: subtract max before exp
-    neg_scaled -= neg_scaled.max()
-    raw_weights = np.exp(neg_scaled)
-    raw_weights /= raw_weights.sum()
+    # All valid names (finite flat error + correct length) — kept for the
+    # weights dict so gated-out models appear with 0 weight.
+    all_valid_names = list(valid_names)
 
-    # Apply floor
-    n_valid = len(valid_names)
-    raw_weights = _apply_floor(raw_weights, floor, n_valid)
-    weights = dict(zip(valid_names, raw_weights))
+    # Ratio gating: models whose error > _MAX_ERROR_RATIO * best get 0 weight.
+    best_err = min(valid_errors)
+    gated_names = [n for n, e in zip(valid_names, valid_errors) if e <= best_err * _MAX_ERROR_RATIO]
+    if not gated_names:
+        gated_names = [valid_names[valid_errors.index(best_err)]]
+    gated_errors = [per_model_error[n] for n in gated_names]
 
-    # Blend
-    blend_vals = _weighted_sum(forecasts, weights, h)
+    # ── Per-horizon path: per-step weights ─────────────────────────────
+    if per_model_error_by_horizon:
+        sorted_horizons = sorted(per_model_error_by_horizon.keys())
+        per_step_weights: dict[str, list[float]] = {name: [0.0] * h for name in all_valid_names}
+        blend_vals = np.zeros(h, dtype=float)
 
-    # Identify crashed models
-    all_model_names = set(forecasts.keys())
-    models_failed = sorted(all_model_names - set(valid_names))
+        for t in range(h):
+            # Nearest horizon >= t+1 (step t is the (t+1)-step-ahead forecast)
+            h_star = next((hh for hh in sorted_horizons if hh >= t + 1), sorted_horizons[-1])
+            herr_map = per_model_error_by_horizon.get(h_star, {})
+            # Use gated names; per-horizon error falls back to flat error.
+            step_errs = [herr_map.get(n, per_model_error.get(n, float("inf"))) for n in gated_names]
+            finite = [(n, e) for n, e in zip(gated_names, step_errs) if np.isfinite(e)]
+            if finite:
+                step_names = [n for n, _ in finite]
+                step_errs = [e for _, e in finite]
+            else:
+                step_names = gated_names
+                step_errs = gated_errors
+            step_w = _softmax(step_errs, tau)
+            for n, wv in zip(step_names, step_w):
+                per_step_weights[n][t] = float(wv)
+                arr = np.asarray(forecasts[n].values, dtype=float)
+                blend_vals[t] += wv * (arr[t] if t < len(arr) else arr[-1])
 
-    individual = {
-        name: fc for name, fc in forecasts.items()
-        if name in valid_names and len(fc) == h
-    }
+        models_failed = sorted(set(forecasts.keys()) - set(all_valid_names))
+        individual = {name: fc for name, fc in forecasts.items() if name in all_valid_names and len(fc) == h}
+
+        return EnsembleResult(
+            point_forecast=pd.Series(blend_vals, name="ensemble"),
+            weights=per_step_weights,
+            models_run=sorted(all_valid_names),
+            models_failed=models_failed,
+            individual_forecasts=individual,
+        )
+
+    # ── Flat path (backward compat) ────────────────────────────────────
+    raw_weights = _softmax(gated_errors, tau)
+    raw_weights = _apply_floor(raw_weights, floor, len(gated_names))
+    weights: dict[str, float | list[float]] = {name: 0.0 for name in all_valid_names}
+    for n, wv in zip(gated_names, raw_weights):
+        weights[n] = float(wv)
+    blend_vals = _weighted_sum(forecasts, {n: weights[n] for n in gated_names}, h)
+
+    models_failed = sorted(set(forecasts.keys()) - set(all_valid_names))
+    individual = {name: fc for name, fc in forecasts.items() if name in all_valid_names and len(fc) == h}
 
     return EnsembleResult(
         point_forecast=pd.Series(blend_vals, name="ensemble"),
         weights=weights,
-        models_run=sorted(valid_names),
+        models_run=sorted(all_valid_names),
         models_failed=models_failed,
         individual_forecasts=individual,
     )
@@ -156,6 +202,16 @@ def run_models(
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+def _softmax(errors: list[float], tau: float) -> np.ndarray:
+    """Softmax of negative errors.  Lower error -> higher weight."""
+    errors_arr = np.array(errors, dtype=float)
+    neg_scaled = -errors_arr / (tau * max(np.mean(errors_arr), 1e-10))
+    neg_scaled -= neg_scaled.max()  # numerical stability
+    raw = np.exp(neg_scaled)
+    raw /= raw.sum()
+    return raw
+
 
 def _apply_floor(
     weights: np.ndarray,
