@@ -24,6 +24,9 @@ import MobileLayout from '@/components/mobile/MobileLayout';
 import MobileDetailShell from '@/components/mobile/MobileDetailShell';
 import MobileChatPage from '@/pages/mobile/MobileChatPage';
 import MobileMySpacePage from '@/pages/mobile/MobileMySpacePage';
+import MobileFromPersonalPage from '@/pages/mobile/MobileFromPersonalPage';
+import MobileFromCompanyPage from '@/pages/mobile/MobileFromCompanyPage';
+import MobileMyFilesPage from '@/pages/mobile/MobileMyFilesPage';
 
 // Secondary routes are code-split so they don't bloat the initial bundle.
 // Each becomes its own lazy chunk, downloaded on first navigation. Chat.jsx
@@ -32,6 +35,9 @@ import MobileMySpacePage from '@/pages/mobile/MobileMySpacePage';
 const AutomationTasks = lazy(() => import('@/pages/AutomationTasks'));
 const AutomationTaskDetail = lazy(() => import('@/pages/AutomationTaskDetail'));
 const MySpace = lazy(() => import('@/pages/MySpace'));
+const FromPersonalPage = lazy(() => import('@/pages/FromPersonalPage'));
+const FromCompanyPage = lazy(() => import('@/pages/FromCompanyPage'));
+const MyFilesPage = lazy(() => import('@/pages/MyFilesPage'));
 const ProjectDetail = lazy(() => import('@/pages/ProjectDetail'));
 const Market = lazy(() => import('@/pages/Market'));
 const MarketAgentDetail = lazy(() => import('@/pages/MarketAgentDetail'));
@@ -41,6 +47,7 @@ const SkillAgent = lazy(() => import('@/pages/SkillAgent'));
 const SkillExecutions = lazy(() => import('@/pages/SkillExecutions'));
 const AgentBuilder = lazy(() => import('@/pages/AgentBuilder'));
 const Settings = lazy(() => import('@/pages/Settings'));
+const AdminUsers = lazy(() => import('@/pages/AdminUsers'));
 const ResourceDetail = lazy(() => import('@/pages/ResourceDetail'));
 const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
 const UITest = lazy(() => import('@/pages/UITest'));
@@ -101,6 +108,9 @@ const AuthenticatedApp = () => {
           <Route path="/" element={<MobileChatPage />} />
           <Route path="/chat" element={<MobileChatPage />} />
           <Route path="/my-space" element={<MobileMySpacePage />} />
+          <Route path="/from-personal" element={<MobileFromPersonalPage />} />
+          <Route path="/from-company" element={<MobileFromCompanyPage />} />
+          <Route path="/my-files" element={<MobileMyFilesPage />} />
           {/* Deep-linked detail routes — reuse the desktop pages inside a
               mobile shell (back bar + scroll region) so phones don't fall
               through to the 404 page. Kept inside MobileLayout so they
@@ -142,6 +152,9 @@ const AuthenticatedApp = () => {
         <Route path="/automation" element={<AutomationTasks />} />
         <Route path="/automation/:id" element={<AutomationTaskDetail />} />
         <Route path="/my-space" element={<MySpace />} />
+        <Route path="/from-personal" element={<FromPersonalPage />} />
+        <Route path="/from-company" element={<FromCompanyPage />} />
+        <Route path="/my-files" element={<MyFilesPage />} />
         <Route path="/my-space/project/:id" element={<ProjectDetail />} />
         <Route path="/my-space/agent/:id" element={<AgentConfig />} />
         <Route path="/my-space/:type/:id" element={<ResourceDetail />} />
@@ -153,6 +166,7 @@ const AuthenticatedApp = () => {
         <Route path="/skills/executions" element={<SkillExecutions />} />
         <Route path="/agent-builder" element={<AgentBuilder />} />
         <Route path="/settings" element={<Settings />} />
+        <Route path="/admin/users" element={<AdminUsers />} />
         <Route path="/dashboard/:id" element={<DashboardView />} />
         <Route path="/market-dashboard/:section" element={<MarketDashboardPage />} />
       </Route>

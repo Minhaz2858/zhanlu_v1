@@ -8,7 +8,8 @@ export const translations = {
     },
     sidebar: {
       brand: '战颅系统', cognitiveHub: '认知中枢', automation: '自动化任务', automationAgent: '自动化助手',
-      mySpace: '我的空间', market: '市场', toolkit: '工具包',
+      mySpace: '我的空间', fromPersonal: '来自个人', fromCompany: '来自公司', myFiles: '我的文件',
+      market: '市场', toolkit: '工具包',
       collapse: '收起侧栏', expand: '展开侧栏',
     },
     chat: {
@@ -605,7 +606,8 @@ export const translations = {
     },
     sidebar: {
       brand: 'Zhanlu System', cognitiveHub: 'Cognitive Hub', automation: 'Automation', automationAgent: 'Automation Agent',
-      mySpace: 'My Space', market: 'Market', toolkit: 'Toolkit',
+      mySpace: 'My Space', fromPersonal: 'From Personal', fromCompany: 'From Company', myFiles: 'My Files',
+      market: 'Market', toolkit: 'Toolkit',
       collapse: 'Collapse sidebar', expand: 'Expand sidebar',
     },
     chat: {

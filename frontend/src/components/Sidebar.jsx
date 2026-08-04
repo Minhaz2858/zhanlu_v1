@@ -3,7 +3,7 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useChatSession } from '@/lib/ChatSessionContext';
-import { Plus, Workflow, Boxes, Store, Wrench, PanelLeftClose, PanelLeftOpen, LayoutDashboard, ChevronDown } from 'lucide-react';
+import { Plus, Workflow, Store, Wrench, PanelLeftClose, PanelLeftOpen, LayoutDashboard, ChevronDown, ShieldCheck, User, Building2, Folder } from 'lucide-react';
 import UserMenu from '@/components/UserMenu';
 import ThemeToggle from '@/components/ThemeToggle';
 import SessionList from '@/components/chat/SessionList';
@@ -66,9 +66,12 @@ export default function Sidebar() {
   // distinct sections.
   const navItems = [
     { to: '/automation', label: t.sidebar.automation, icon: Workflow },
-    { to: '/my-space', label: t.sidebar.mySpace, icon: Boxes },
+    { to: '/from-personal', label: t.sidebar.fromPersonal, icon: User },
+    { to: '/from-company', label: t.sidebar.fromCompany, icon: Building2 },
+    { to: '/my-files', label: t.sidebar.myFiles, icon: Folder },
     { to: '/market', label: t.sidebar.market, icon: Store },
     { to: '/toolkit', label: t.sidebar.toolkit, icon: Wrench },
+    ...(user?.role === 'admin' ? [{ to: '/admin/users', label: 'Admin', icon: ShieldCheck }] : []),
   ];
 
   function linkClass({ isActive }) {
