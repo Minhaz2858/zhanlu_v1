@@ -144,12 +144,16 @@ function DecisionRow({ p, day, isSelected, isExpanded, onSelect, onToggle }) {
           {p.action_label_zh}
         </span>
       </td>
-      <td className="px-2 py-2.5">
-        <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-          <span className={`h-2 w-2 rounded-full ${TRUST_DOTS[p.trust_color] || 'bg-slate-300'}`} />
-          {p.trust_label_zh || '—'}
-        </span>
-      </td>
+        <td className="px-2 py-2.5">
+          {p.trust_label_zh ? (
+            <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
+              <span className={`h-2 w-2 rounded-full ${TRUST_DOTS[p.trust_color] || 'bg-slate-300'}`} />
+              {p.trust_label_zh}
+            </span>
+          ) : (
+            <span className="text-xs text-slate-400">—</span>
+          )}
+        </td>
       <td className="max-w-[220px] truncate px-2 py-2.5 text-xs text-slate-500 dark:text-slate-400">
         {p.one_liner_zh}
       </td>
@@ -188,7 +192,7 @@ function ExpandedCard({ p, day }) {
 
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-      <div className="h-40 rounded border border-slate-100 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
+      <div className="h-40 w-full min-w-0 rounded border border-slate-100 bg-white p-2 dark:border-slate-700 dark:bg-slate-900">
         {points.length ? (
           <ResponsiveContainer width="100%" height="100%">
             <ComposedChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
@@ -206,7 +210,7 @@ function ExpandedCard({ p, day }) {
         )}
       </div>
 
-      <div>
+      <div className="min-w-0">
         <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200">
           {p.narrative_zh}
         </p>

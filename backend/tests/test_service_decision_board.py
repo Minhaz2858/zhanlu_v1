@@ -59,6 +59,31 @@ def test_narrative_missing_forecast():
     assert "观望" in s
 
 
+def test_narrative_direction_from_prices_when_pct_missing():
+    """expected_change_pct=None must not default to 'rise'; use forecast vs current."""
+    s = build_narrative(
+        name_zh="发泡剂", day=7, current_price=6800.0, forecast_base=6000.0,
+        expected_change_pct=None, p_rise=None, action="watch", confidence="low",
+        directional_accuracy=None, intel_event_count=0, intel_bias="neutral",
+        volatility_regime=None,
+    )
+    assert "跌至" in s          # 6,000 < 6,800 → fall, not rise
+    assert "涨至" not in s
+    assert "(—)" not in s       # no empty parenthetical
+    assert "6,000" in s
+
+
+def test_narrative_direction_up_from_prices_when_pct_missing():
+    s = build_narrative(
+        name_zh="发泡剂", day=7, current_price=6800.0, forecast_base=7000.0,
+        expected_change_pct=None, p_rise=None, action="watch", confidence="low",
+        directional_accuracy=None, intel_event_count=0, intel_bias="neutral",
+        volatility_regime=None,
+    )
+    assert "涨至" in s
+    assert "(—)" not in s
+
+
 def test_briefing_with_strong_signal():
     products = [
         DecisionBoardProduct(

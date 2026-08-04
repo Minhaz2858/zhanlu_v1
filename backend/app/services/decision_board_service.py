@@ -99,11 +99,16 @@ def build_narrative(
 ) -> str:
     if forecast_base is None or current_price is None:
         return f"{name_zh}当前预测数据不足,{_ACTION_ADVICE_ZH['watch']}。"
-    move = "涨至" if (expected_change_pct or 0) >= 0 else "跌至"
+    # Direction: prefer expected_change_pct; fall back to forecast vs current.
+    if expected_change_pct is not None:
+        move = "涨至" if expected_change_pct >= 0 else "跌至"
+        pct_txt = f"({_fmt_pct(expected_change_pct)})"
+    else:
+        move = "涨至" if forecast_base >= current_price else "跌至"
+        pct_txt = ""
     s1 = (
         f"{name_zh}现价 {_fmt_price(current_price)} 元/吨,"
-        f"预计未来 {day} 天{move} {_fmt_price(forecast_base)} 元/吨"
-        f"({_fmt_pct(expected_change_pct)})"
+        f"预计未来 {day} 天{move} {_fmt_price(forecast_base)} 元/吨{pct_txt}"
     )
     if p_rise is not None:
         s1 += f",上涨概率 {_fmt_prob(p_rise)}"
