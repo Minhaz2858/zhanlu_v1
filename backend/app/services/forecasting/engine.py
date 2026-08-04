@@ -217,7 +217,7 @@ class ForecastEngine:
         # --- Build model pool ---
         granularity = (target.datasource or {}).get("granularity", "daily")
         sp = _seasonal_period_for_granularity(granularity, seasonal_period)
-        models = build_model_pool(seasonal_period=sp)
+        models = build_model_pool(seasonal_period=sp, y=y)
 
         # --- Step 3: Preprocessing (Phase 1) ---
         preprocess_enabled = _get_config_bool("FORECAST_PREPROCESS_ENABLED", True)
@@ -235,7 +235,7 @@ class ForecastEngine:
         y_model = preprocess_cleaned
 
         # --- Backtest ---
-        bt = evaluate(y_model, models, seasonal_period=sp)
+        bt = evaluate(y_model, models, seasonal_period=sp, horizons=horizons)
         per_model_mape = bt.per_model_mape
 
         # --- Fit + forecast ---
@@ -295,7 +295,11 @@ class ForecastEngine:
                 exog_degraded = True
 
         # --- Ensemble (re-blend after exog models added) ---
-        ensemble_result = blend(forecasts, per_model_mape)
+        # Per-horizon weights: ARIMA may dominate at 7d while ETS/STL win at 30d.
+        per_h = bt.per_horizon_mape if bt.per_horizon_mape else None
+        ensemble_result = blend(
+            forecasts, per_model_mape, per_model_error_by_horizon=per_h,
+        )
 
         # --- Guard ---
         naive_fc = forecasts.get("seasonal_naive")
