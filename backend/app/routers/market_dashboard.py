@@ -10,7 +10,7 @@ the accordion.
 """
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.deps import get_current_user_required
 from app.schemas.market_dashboard import (
@@ -18,6 +18,8 @@ from app.schemas.market_dashboard import (
     RegionalPriceData, NewsListResponse,
     RegionalBatchResponse, ForecastBaseBatchResponse,
     EventsResponse, FxRateResponse, OverviewBundle,
+    ForecastChartResponse, PriceChainResponse,
+    SkuForecastMeta,
 )
 from app.services import market_dashboard_service as svc
 
@@ -147,3 +149,95 @@ def post_overview_refresh(
     the frontend to invalidate caches globally)."""
     dropped = svc.invalidate_overview_cache()
     return {"invalidated": dropped, "key_prefix": "overview:bundle:"}
+
+
+# ── Upstream page: forecast chart + price chain ──────────────────────
+
+
+@router.get("/forecast-chart/{product_id}", response_model=ForecastChartResponse)
+def get_forecast_chart(
+    product_id: str,
+    days: int = Query(30, ge=1, le=365),
+    user=Depends(get_current_user_required),
+) -> ForecastChartResponse:
+    """Return merged past+forecast timeline for a single product.
+
+    - Past zone (left): actual price + previous AI rec for accuracy review
+    - Forecast zone (right): base / bull / bear curves from latest ForecastRun
+    """
+    return svc.get_forecast_chart(product_id, days=days)
+
+
+@router.get("/forecast-skus")
+def list_forecast_skus(
+    product_id: str,
+    user=Depends(get_current_user_required),
+):
+    """List all SKU-level forecast targets for an ERP product family.
+
+    Returns material_code, target_id, report_order, and forecast data
+    for each SKU (material_code) in the family.
+    """
+    from app.models.forecasting import ForecastTarget, ForecastRun
+    from app.database import SessionLocal
+
+    if product_id not in ("c5_resin", "raffinate_c5"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"product_id must be an ERP product ('c5_resin' or 'raffinate_c5'), got '{product_id}'"
+        )
+
+    db = SessionLocal()
+    try:
+        prefix = f"ecisco.{product_id}."
+        targets = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key.like(f"{prefix}%"),
+            ForecastTarget.org_id == "default-org",
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).order_by(ForecastTarget.report_order.asc()).all()
+
+        skus = []
+        for tgt in targets:
+            material_code = tgt.product_key[len(prefix):]
+            # Get latest forecast run for this SKU
+            run = db.query(ForecastRun).filter(
+                ForecastRun.target_id == tgt.id,
+                ForecastRun.is_deleted == False,  # noqa: E712
+            ).order_by(ForecastRun.created_date.desc()).first()
+
+            sku_base = None
+            sku_confidence = None
+            if run and run.results:
+                horizon_payload = run.results.get("7d") or {}
+                base = horizon_payload.get("base")
+                if isinstance(base, list) and len(base) > 0:
+                    sku_base = float(base[0])
+                elif isinstance(base, (int, float)):
+                    sku_base = float(base)
+                sku_confidence = run.confidence
+
+            skus.append(SkuForecastMeta(
+                material_code=material_code,
+                target_id=str(tgt.id),
+                name=tgt.name,
+                report_order=tgt.report_order or 99,
+                is_primary=(tgt.report_order is not None and tgt.report_order <= 12),
+                forecast_base=sku_base,
+                forecast_confidence=sku_confidence,
+            ))
+
+        return {"skus": [s.model_dump() for s in skus], "count": len(skus)}
+    finally:
+        db.close()
+
+
+@router.get("/price-chain", response_model=PriceChainResponse)
+def get_price_chain(
+    user=Depends(get_current_user_required),
+) -> PriceChainResponse:
+    """Return 3-tier upstream price transmission chain.
+
+    Each node: current price, 30d change, sparkline (30-day), percentile.
+    Tiers: crude → naphtha → cracked C5/C9 → isoprene/piperylene/DCPD.
+    """
+    return svc.get_price_chain()
