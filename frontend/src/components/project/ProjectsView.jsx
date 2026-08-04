@@ -13,7 +13,7 @@ import ProjectCreateDialog from '@/components/project/ProjectCreateDialog';
 import {
   Folder, Plus, Loader2, Pencil, FolderKanban, Archive,
   ArchiveRestore, AlertTriangle, Bot, Database, FileText, Search, ArrowUpDown,
-  Sparkles, LayoutGrid, Clock, ArrowDownAZ,
+  Sparkles, LayoutGrid, Clock, ArrowDownAZ, Building2,
 } from 'lucide-react';
 
 /**
@@ -77,7 +77,7 @@ function formatRelativeTime(iso, lang) {
   return isEn ? `${y}y ago` : `${y} 年前`;
 }
 
-export default function ProjectsView() {
+export default function ProjectsView({ scope = null }) {
   const { t, lang } = useLanguage();
   const navigate = useNavigate();
   const isEn = lang === 'en';
@@ -106,10 +106,12 @@ export default function ProjectsView() {
   async function load() {
     setLoading(true);
     try {
-      // Load ALL projects (active + archived). The visibility filter
-      // is applied client-side in `visible` based on `showArchived`,
-      // so flipping the toggle does NOT trigger a network round-trip.
-      const list = await base44.entities.Project.list('-updated_date', 200);
+      // Load ALL projects (active + archived).
+      // resource_type + is_shared_with_me annotations power the COMPANY
+      // vs MY split below. Use the base44 SDK so appId + JWT are
+      // injected automatically (same path as SessionList.jsx:93).
+      let list = await base44.entities.Project.list('-updated_date', 200);
+      if (!Array.isArray(list)) list = list.data || list.items || [];
       setProjects(list || []);
       loadCounts(list || []);
     } finally {
@@ -246,6 +248,18 @@ export default function ProjectsView() {
     return out;
   }, [projects, counts, query, sort, showArchived]);
 
+  // ── COMPANY vs MY split ──
+  const companyProjects = useMemo(
+    () => visible.filter((p) => p.resource_type === 'company' || p.is_shared_with_me),
+    [visible]
+  );
+  const myProjects = useMemo(
+    () => visible.filter((p) => !(p.resource_type === 'company' || p.is_shared_with_me)),
+    [visible]
+  );
+  const showCompany = scope !== 'personal';
+  const showPersonal = scope !== 'company';
+
   // True when there is at least one archived row in the loaded set —
   // the toolbar toggle only renders when it's actionable.
   const hasArchived = (projects || []).some((p) => p.status === 'archived');
@@ -294,16 +308,6 @@ export default function ProjectsView() {
               ? 'Group every agent, data source, file and conversation around a single goal. Anything you put in a project is automatically shared with the agents that live there.'
               : '将 Agent、数据源、文件与对话归类到同一目标下。项目内的资源会自动对项目里的所有 Agent 生效。'}
           </p>
-        </div>
-        <div className="flex items-center gap-2">
-          <Button
-            onClick={() => setCreateOpen(true)}
-            size="sm"
-            className="gap-1.5 shadow-sm"
-          >
-            <Plus className="h-4 w-4" />
-            {isEn ? 'New Project' : '新建项目'}
-          </Button>
         </div>
       </header>
 
@@ -360,29 +364,77 @@ export default function ProjectsView() {
       ) : visible.length === 0 ? (
         <NoResults query={query} isEn={isEn} onClear={() => setQuery('')} />
       ) : (
-        <ul
-          role="list"
-          aria-label={isEn ? 'Project list' : '项目列表'}
-          className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
-        >
-          {visible.map((p) => {
-            const c = counts[p.id] || { agents: 0, kb: 0, files: 0 };
-            const isArchived = p.status === 'archived';
-            return (
-              <ProjectCard
-                key={p.id}
-                project={p}
-                counts={c}
-                isArchived={isArchived}
-                isEn={isEn}
-                relativeTime={formatRelativeTime(p.updated_date, lang)}
-                onOpen={() => navigate(`/my-space/project/${p.id}`)}
-                onRename={isArchived ? undefined : (e) => { e.stopPropagation(); rename(p); }}
-                onArchive={isArchived ? (e) => { e.stopPropagation(); unarchive(p); } : (e) => { e.stopPropagation(); openArchive(p); }}
-              />
-            );
-          })}
-        </ul>
+        <div className="space-y-8">
+          {/* ── COMPANY PROJECTS ── */}
+          {showCompany && (<>
+          <SectionHeader
+            icon={Building2}
+            title={isEn ? 'Company Projects' : '公司项目'}
+            badge={isEn ? 'Admin configured' : '管理员配置'}
+          />
+          {companyProjects.length === 0 ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-10 text-center">
+              <FolderKanban className="mb-3 h-8 w-8 text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground">
+                {isEn ? 'No company projects assigned yet.' : '暂无公司分配的项目。'}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {isEn ? 'Your admin can assign shared projects for you to use.' : '管理员可以为您分配共享项目。'}
+              </p>
+            </div>
+          ) : (
+            <ProjectGrid
+              projects={companyProjects}
+              counts={counts}
+              lang={lang}
+              isEn={isEn}
+              formatRelativeTime={formatRelativeTime}
+              navigate={navigate}
+              rename={rename}
+              unarchive={unarchive}
+              openArchive={openArchive}
+            />
+          )}
+          </>)}
+
+          {/* ── MY PROJECTS ── */}
+          {showPersonal && (<>
+          <div className="flex items-center justify-between">
+            <SectionHeader
+              icon={FolderKanban}
+              title={isEn ? 'My Projects' : '我的项目'}
+              badge={isEn ? 'Created by me' : '个人创建'}
+            />
+            <Button size="sm" onClick={() => setCreateOpen(true)} className="gap-1.5">
+              <Plus className="h-3.5 w-3.5" />
+              {isEn ? 'New Project' : '新建项目'}
+            </Button>
+          </div>
+          {myProjects.length === 0 ? (
+            <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-10 text-center">
+              <FolderKanban className="mb-3 h-8 w-8 text-muted-foreground/40" />
+              <p className="text-sm text-muted-foreground">
+                {isEn ? 'No personal projects yet.' : '暂无个人项目。'}
+              </p>
+              <p className="mt-1 text-xs text-muted-foreground">
+                {isEn ? 'Create your first project to get started.' : '创建您的第一个项目开始使用。'}
+              </p>
+            </div>
+          ) : (
+            <ProjectGrid
+              projects={myProjects}
+              counts={counts}
+              lang={lang}
+              isEn={isEn}
+              formatRelativeTime={formatRelativeTime}
+              navigate={navigate}
+              rename={rename}
+              unarchive={unarchive}
+              openArchive={openArchive}
+            />
+          )}
+          </>)}
+        </div>
       )}
 
       <ProjectCreateDialog
@@ -702,5 +754,56 @@ function NoResults({ query, isEn, onClear }) {
         {isEn ? 'Clear search' : '清除搜索条件'}
       </Button>
     </div>
+  );
+}
+
+
+/**
+ * Section header for COMPANY and MY project/agent sections.
+ */
+function SectionHeader({ icon: Icon, title, badge }) {
+  return (
+    <div className="flex items-center gap-2 border-b border-border pb-2">
+      <Icon className="h-4 w-4 text-muted-foreground" />
+      <h3 className="text-sm font-medium text-foreground">{title}</h3>
+      <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+        {badge}
+      </span>
+    </div>
+  );
+}
+
+
+/**
+ * Project card grid shared by COMPANY and MY sections.
+ */
+function ProjectGrid({
+  projects, counts, lang, isEn, formatRelativeTime,
+  navigate, rename, unarchive, openArchive,
+}) {
+  return (
+    <ul
+      role="list"
+      aria-label={isEn ? 'Project list' : '项目列表'}
+      className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3"
+    >
+      {projects.map((p) => {
+        const c = counts[p.id] || { agents: 0, kb: 0, files: 0 };
+        const isArchived = p.status === 'archived';
+        return (
+          <ProjectCard
+            key={p.id}
+            project={p}
+            counts={c}
+            isArchived={isArchived}
+            isEn={isEn}
+            relativeTime={formatRelativeTime(p.updated_date, lang)}
+            onOpen={() => navigate(`/my-space/project/${p.id}`)}
+            onRename={isArchived ? undefined : (e) => { e.stopPropagation(); rename(p); }}
+            onArchive={isArchived ? (e) => { e.stopPropagation(); unarchive(p); } : (e) => { e.stopPropagation(); openArchive(p); }}
+          />
+        );
+      })}
+    </ul>
   );
 }
