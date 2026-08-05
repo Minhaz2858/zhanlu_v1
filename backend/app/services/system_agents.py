@@ -472,12 +472,17 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "allowed_domains": [],
                 "retention_days": 30,
             },
-            # ecisco_bi_assistant is user-facing — do NOT hide behind
-            # is_system=True.  The frontend's filterUserAgents() uses
-            # is_system to decide what to show in "My Space" and the agent
-            # picker, and this agent is designed to be selected by end users
-            # (and auto-selected in the Ecisco BI project).
-            "is_system": False,
+            # ecisco_bi_assistant is a silent platform system agent.
+            # Frontend/src/pages/Chat.jsx auto-selects it when the user
+            # opens a chat in the "Ecisco BI" project, so users never need
+            # to see it. Hiding it via is_system=True means
+            # filterUserAgents() drops it from My Space, the agent picker,
+            # the active-agent chip, and the Company Agents section. The
+            # flag is also enforced at the API layer (see
+            # entity_service.soft_delete_record) so it cannot be removed
+            # through any HTTP path. ensure_system_agents() back-fills
+            # this flag on every backend startup.
+            "is_system": True,
         },
     ]
 

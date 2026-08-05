@@ -353,11 +353,22 @@ def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None 
 
     ``owner_id`` (optional) scopes the delete to the identity's own rows —
     a non-owner gets False (record hidden → router returns 404).
+
+    If the record has ``is_system=True`` on a model that carries the
+    column, the delete is refused and ``False`` is returned. System
+    agents (e.g. ``ecisco_bi_assistant``) are platform-critical
+    orchestrators that the chat auto-select path depends on; deleting
+    them would break silent auto-selection for the Ecisco BI project
+    and every other place the runtime auto-injects them. The router
+    treats False as 404, so callers cannot distinguish a hidden
+    system agent from a missing one — which is the intended behavior.
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == False
     )), owner_id).first()
     if not record:
+        return False
+    if getattr(record, "is_system", False) is True:
         return False
     record.is_deleted = True
     record.updated_date = datetime.utcnow()
@@ -371,6 +382,10 @@ def delete_many_records(model, query_data: dict, db: Session, owner_id: str | No
     ``owner_id`` (optional) scopes the delete to the identity's own rows —
     a non-owner's matching rows are invisible (never deleted). This closes
     the mass-IDOR gap on user-scoped entities.
+
+    Records with ``is_system=True`` are silently excluded from the bulk
+    delete — they are platform-managed and the count returned does not
+    include them. (See soft_delete_record for the full rationale.)
     """
     query = db.query(model).filter(model.is_deleted == False)
     query = _apply_tenant(model, query)
@@ -386,6 +401,8 @@ def delete_many_records(model, query_data: dict, db: Session, owner_id: str | No
     records = query.all()
     count = 0
     for record in records:
+        if getattr(record, "is_system", False) is True:
+            continue
         record.is_deleted = True
         record.updated_date = datetime.utcnow()
         count += 1
