@@ -46,6 +46,11 @@ class BacktestResult:
     per_horizon_mape: dict[int, dict[str, float]] = field(default_factory=dict)
     residuals_by_horizon: dict[int, list[float]] = field(default_factory=dict)
     directional_accuracy: dict[str, float] = field(default_factory=dict)
+    # Phase A foundation-model metrics:
+    per_model_mase: dict[str, float] = field(default_factory=dict)
+    per_model_crps: dict[str, float | None] = field(default_factory=dict)
+    interval_coverage: dict[str, float | None] = field(default_factory=dict)
+    interval_width: dict[str, float | None] = field(default_factory=dict)
 
 
 def evaluate(
@@ -108,6 +113,10 @@ def evaluate(
             per_horizon_mape={},
             residuals_by_horizon={},
             directional_accuracy={},
+            per_model_mase={},
+            per_model_crps={},
+            interval_coverage={},
+            interval_width={},
         )
 
     # Build the list of origins (sliding window).
@@ -220,6 +229,69 @@ def evaluate(
 
     naive_mape = per_model_mape.get("seasonal_naive", float("inf"))
 
+    # ── MASE (Mean Absolute Scaled Error) ──────────────────────────────
+    # MASE = MAE_model / MAE_seasonal_naive. Scale-free; standard TS metric.
+    sn_mae_denom = float("inf")
+    if "seasonal_naive" in residuals_by_model_horizon:
+        all_sn_resids = [
+            r for h in horizons
+            for r in residuals_by_model_horizon["seasonal_naive"][h]
+        ]
+        if all_sn_resids:
+            sn_mae_denom = float(np.mean(np.abs(all_sn_resids)))
+
+    per_model_mase: dict[str, float] = {}
+    for name in all_model_names:
+        resids = [
+            r for h in horizons
+            for r in residuals_by_model_horizon.get(name, {}).get(h, [])
+        ]
+        if not resids or sn_mae_denom == 0:
+            per_model_mase[name] = float("inf")
+        else:
+            per_model_mase[name] = float(np.mean(np.abs(resids))) / sn_mae_denom
+
+    # ── CRPS + interval coverage (probabilistic models only) ──────────
+    per_model_crps: dict[str, float | None] = {}
+    interval_coverage: dict[str, float | None] = {}
+    interval_width: dict[str, float | None] = {}
+    for name in all_model_names:
+        if name not in models:
+            per_model_crps[name] = None
+            interval_coverage[name] = None
+            interval_width[name] = None
+            continue
+        model = models[name]
+        try:
+            qfc = model.forecast_quantiles(h_max, quantiles=[0.1, 0.5, 0.9])
+        except Exception:
+            qfc = None
+        if qfc is None:
+            per_model_crps[name] = None
+            interval_coverage[name] = None
+            interval_width[name] = None
+        else:
+            # Compute CRPS + coverage on the last fold (full refit is expensive)
+            try:
+                last_T = origins[-1]
+                model.fit(y.iloc[:last_T], seasonal_period=seasonal_period)
+                q = model.forecast_quantiles(h_max, quantiles=[0.1, 0.5, 0.9])
+                y_actual = y.iloc[last_T:last_T + h_max].values.astype(float)
+                q10 = np.asarray(q[0.1][:len(y_actual)], dtype=float)
+                q50 = np.asarray(q[0.5][:len(y_actual)], dtype=float)
+                q90 = np.asarray(q[0.9][:len(y_actual)], dtype=float)
+                per_model_crps[name] = float(
+                    np.mean(np.abs(q50 - y_actual) + 0.5 * (q90 - q10))
+                )
+                interval_coverage[name] = float(
+                    np.mean((y_actual >= q10) & (y_actual <= q90))
+                )
+                interval_width[name] = float(np.mean(q90 - q10))
+            except Exception:
+                per_model_crps[name] = None
+                interval_coverage[name] = None
+                interval_width[name] = None
+
     # Resolve residuals_by_horizon to the BEST model (lowest mean per_model_mape,
     # excluding baselines) — conformal calibration calibrates against the model
     # whose forecast is actually published (the ensemble is dominated by it).
@@ -254,6 +326,10 @@ def evaluate(
         per_horizon_mape=per_horizon_mape,
         residuals_by_horizon=residuals_by_horizon,
         directional_accuracy=directional_accuracy,
+        per_model_mase=per_model_mase,
+        per_model_crps=per_model_crps,
+        interval_coverage=interval_coverage,
+        interval_width=interval_width,
     )
 
 

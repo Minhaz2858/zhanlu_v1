@@ -59,5 +59,32 @@ class ForecastModel(ABC):
         """
         ...
 
+    def forecast_quantiles(
+        self,
+        h: int,
+        quantiles: list[float] | None = None,
+        exog_future: pd.DataFrame | None = None,
+    ) -> dict[float, pd.Series] | None:
+        """Return quantile forecasts, or None if the model is not probabilistic.
+
+        Default implementation returns None (non-probabilistic).
+        Foundation model wrappers override this to return native quantile forecasts.
+
+        Parameters
+        ----------
+        h : int
+            Forecast horizon.
+        quantiles : list[float] | None
+            Quantile levels (e.g. [0.1, 0.5, 0.9]). If None, uses [0.1, 0.5, 0.9].
+        exog_future : pd.DataFrame | None
+            Future exogenous features (for Moirai).
+
+        Returns
+        -------
+        dict[float, pd.Series] | None
+            Mapping quantile -> forecast series. None for non-probabilistic models.
+        """
+        return None
+
     def __repr__(self) -> str:
         return f"<{self.name}>"
