@@ -51,6 +51,7 @@ from app.routers.knowledge_bases import router as knowledge_bases_router
 from app.routers.dashboards import router as dashboards_router
 from app.routers.hooks import router as hooks_router
 from app.routers.market_dashboard import router as market_dashboard_router
+from app.routers.forecast_ops import router as forecast_ops_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.resource_shares import router as resource_shares_router
 from app.routers.reports import router as reports_router
@@ -658,6 +659,7 @@ def create_app() -> FastAPI:
     app.include_router(dashboards_router, prefix="/api")
     app.include_router(hooks_router, prefix="/api")
     app.include_router(market_dashboard_router, prefix="/api")
+    app.include_router(forecast_ops_router, prefix="/api")
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(resource_shares_router, prefix="/api")
     app.include_router(reports_router, prefix="/api")
