@@ -77,3 +77,24 @@ describe('filterUserAgents', () => {
     expect(filterUserAgents([])).toEqual([]);
   });
 });
+
+describe('ecisco_bi_assistant silent-agent coverage', () => {
+  it('treats ecisco_bi_assistant as a system agent via the name fallback', () => {
+    // Even if the row hasn't been migrated to is_system=TRUE yet,
+    // the name-match in SYSTEM_AGENT_NAMES must hide it.
+    expect(isSystemAgent({ id: '1', name: 'ecisco_bi_assistant' })).toBe(true);
+  });
+
+  it('filters ecisco_bi_assistant out of a user-facing list', () => {
+    const list = [
+      { id: '1', name: 'ecisco_bi_assistant' },  // system (name fallback)
+      { id: '2', name: 'My Custom Agent' },      // user
+      { id: '3', name: 'ecisco_bi_assistant', is_system: true }, // system (flag)
+    ];
+    expect(filterUserAgents(list).map((a) => a.id)).toEqual(['2']);
+  });
+
+  it('includes ecisco_bi_assistant in SYSTEM_AGENT_NAMES (regression guard)', () => {
+    expect(SYSTEM_AGENT_NAMES).toContain('ecisco_bi_assistant');
+  });
+});

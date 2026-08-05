@@ -27,6 +27,15 @@ export const SYSTEM_AGENT_NAMES = Object.freeze([
   // include it for defense in depth in case a future change
   // surfaces it.
   'data_agent',
+  // ecisco_bi_assistant is the silent platform orchestrator that
+  // Chat.jsx auto-selects when the user opens a chat in the
+  // "Ecisco BI" project. The backend also stamps is_system=TRUE on
+  // the row (seeder + alembic 042), but the name-match is the
+  // fallback that hides the agent on legacy rows that pre-date the
+  // migration, and on any code path that constructs an AgentApp
+  // dict locally without round-tripping the database. Keeping both
+  // checks makes the UI robust to stale data.
+  'ecisco_bi_assistant',
 ]);
 
 const _systemNameSet = new Set(SYSTEM_AGENT_NAMES);
