@@ -6,15 +6,17 @@ from app.services.forecasting.analyst import service as analyst_service
 
 
 def test_forecast_brief_success(monkeypatch):
-    brief = {"summary_zh": "双环戊二烯现价 6,940 元/吨。",
-             "why_price_zh": "上游下跌。", "why_action_zh": "观望。",
+    brief = {"market_update_zh": "双环戊二烯市场情报中性。",
+             "price_data_zh": "现价 6,940 元/吨。",
+             "upstream_logic_zh": "上游下跌。", "supply_demand_zh": "供需平稳。",
+             "forecast_zh": "预计走弱。",
              "watch_triggers_zh": ["t1"], "risk_zh": "", "source": "template", "day": 7}
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: brief)
     out = asyncio.run(forecast_tool._forecast_brief(
         {"product_id": "dcpd", "day": 7}, db=None, user_id=None, context=None))
     assert out["success"] is True
-    assert out["brief"]["summary_zh"].startswith("双环戊二烯")
+    assert out["brief"]["market_update_zh"].startswith("双环戊二烯")
     assert out["brief"]["source"] == "template"
 
 

@@ -11,21 +11,24 @@ def test_prompt_contains_evidence_and_contract():
     assert "6660" in prompt or "6,660" in prompt   # forecast base in evidence
     assert "双环戊二烯" in prompt
     assert "JSON" in prompt
+    assert "forecast_zh" in prompt                  # 7-section contract
 
 
 def test_writer_success_marks_llm_source():
     pack = _dcpd_pack()
     good = {
-        "summary_zh": "现价 6,940 元/吨,预计 7 日跌至 6,660 元/吨(-4.0%),建议观望。",
-        "why_price_zh": "上游裂解碳五近30日下跌,按 0.66 弹性传导约 -1.9%。",
-        "why_action_zh": "历史数据不足,方向准确率 51% 未达 55% 门槛,观望。",
+        "market_update_zh": "市场动态:市场情报中性。",
+        "price_data_zh": "价格数据:现价 6,940 元/吨。",
+        "upstream_logic_zh": "上游裂解碳五近30日下跌,按 0.66 弹性传导。",
+        "supply_demand_zh": "供需研判:8模型分歧偏大。",
+        "forecast_zh": "价格预测:预计 7 日 6,350–6,950 元/吨,↘ 偏弱,上涨概率 42%。",
         "watch_triggers_zh": ["准确率回升至 55% 以上再评估"],
-        "risk_zh": "近期无重大市场事件,价格由供需基本面驱动。",
+        "risk_zh": "近期无重大市场事件。",
     }
     out = write_brief_llm(pack, llm_caller=lambda prompt, schema: dict(good))
     assert out is not None
     assert out["source"] == "llm"
-    assert out["summary_zh"] == good["summary_zh"]
+    assert out["forecast_zh"] == good["forecast_zh"]
 
 
 def test_writer_returns_none_on_empty_llm():
@@ -34,6 +37,7 @@ def test_writer_returns_none_on_empty_llm():
 
 def test_writer_returns_none_on_hallucination():
     pack = _dcpd_pack()
-    bad = {"summary_zh": "现价 9,999 元/吨,暴涨 50%。", "why_price_zh": "x",
-           "why_action_zh": "y", "watch_triggers_zh": [], "risk_zh": "z"}
+    bad = {"market_update_zh": "现价 9,999 元/吨,暴涨 50%。", "price_data_zh": "x",
+           "upstream_logic_zh": "y", "supply_demand_zh": "z", "forecast_zh": "w",
+           "watch_triggers_zh": [], "risk_zh": "v"}
     assert write_brief_llm(pack, llm_caller=lambda p, s: dict(bad)) is None

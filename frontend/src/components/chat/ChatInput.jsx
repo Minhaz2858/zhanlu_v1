@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { Send, Square, X, Wrench, Bot, Folder, FileText, FileSpreadsheet, Image as ImageIcon, File } from 'lucide-react';
+import { Send, Square, X, Wrench, Bot, Folder, FileText, FileSpreadsheet, Image as ImageIcon, File, Database } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { isSystemAgent } from '@/lib/systemAgents';
 import { isUngroupedProjectName } from '@/lib/projectGrouping';
@@ -57,6 +57,7 @@ export default function ChatInput({
   disabled, centered, inputRef, onUploadFile,
   attachments = [], onRemoveAttachment,
   isStreaming, onStop, pendingProject, onClearProject,
+  inheritedKbCount = 0,
 }) {
   const { t, lang } = useLanguage();
   const [dragCounter, setDragCounter] = useState(0);
@@ -198,6 +199,29 @@ export default function ChatInput({
                 >
                   <Folder className="h-3 w-3 shrink-0" />
                   <span className="truncate">{pendingProject}</span>
+                  {/* Phase 4: visible "inheriting N data sources" badge
+                      — surfaces the project-context binding that
+                      data_source_runtime._extend_with_project_kbs applies
+                      to *every* agent in the project, not just the
+                      project-specific one. Without this, users only
+                      learn about the inheritance by asking the agent
+                      "what can you do?" and getting an answer that
+                      mentions resources they thought belonged only to
+                      the project agent. */}
+                  {inheritedKbCount > 0 && (
+                    <span
+                      title={
+                        lang === 'en'
+                          ? `Inheriting ${inheritedKbCount} data source${inheritedKbCount === 1 ? '' : 's'} from "${pendingProject}"`
+                          : `正在从"${pendingProject}"继承 ${inheritedKbCount} 个数据源`
+                      }
+                      data-testid="inherited-kb-badge"
+                      className="inline-flex items-center gap-1 rounded-full border border-amber-700/40 bg-amber-700/10 px-1.5 py-0.5 text-[10px] font-semibold tabular-nums"
+                    >
+                      <Database className="h-2.5 w-2.5" />
+                      {inheritedKbCount}
+                    </span>
+                  )}
                   {onClearProject && (
                     <button
                       type="button"

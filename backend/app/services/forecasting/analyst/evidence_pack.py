@@ -68,7 +68,9 @@ def _horizon_stats(run_results: dict, day: int) -> dict:
 
 
 def build_pack(*, product_id, name_zh, day, history_rows, upstream_histories,
-               run_results, model_detail, explanation, as_of_month) -> dict:
+               run_results, model_detail, explanation, as_of_month,
+               demand_signal: dict | None = None,
+               supplier_ladder: dict | None = None) -> dict:
     """Assemble the full evidence pack (pure — all data passed in)."""
     exp = explanation or {}
     hs = _horizon_stats(run_results, day)
@@ -154,4 +156,7 @@ def build_pack(*, product_id, name_zh, day, history_rows, upstream_histories,
         # (mirrors decision_engine.py / narrative.py thresholds).
         "thresholds": {"buy_p": 0.70, "sell_p": 0.30, "min_change": 0.03,
                        "edge_accuracy": 0.55, "trend_window_days": 30},
+        # Phase F1: demand signal + supplier ladder (optional, zero regression risk)
+        "demand": demand_signal or {},
+        "supplier_ladder": supplier_ladder or {},
     }

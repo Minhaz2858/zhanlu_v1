@@ -8,6 +8,7 @@ import {
 import { reportsApi } from '@/api/reports';
 import { TYPO } from '../lib/typography';
 import { getChartTheme, rechartsTooltipStyle } from '../lib/chartTheme';
+import { useLanguage } from '@/lib/LanguageProvider';
 
 const DONUT_COLORS = ['#3B82F6', '#6366F1', '#8B5CF6', '#A855F7', '#D946EF', '#E2E8F0'];
 const LINE_COLORS = ['#3B82F6', '#6366F1', '#8B5CF6', '#A855F7', '#D946EF', '#F59E0B', '#10B981'];
@@ -28,6 +29,44 @@ function YoYBadge({ yoy }) {
 }
 
 export default function CustomerSalesReport({ org }) {
+  const { lang } = useLanguage();
+  const t = lang === 'zh'
+    ? {
+        allMaterials: '所有物料',
+        dataAsOf: '数据截止',
+        salesAmount: '销售额',
+        unitWan: '万元',
+        salesQty: '销量',
+        unitTon: '吨',
+        customerShare: '客户销量占比',
+        weeklyPrice: '周度价格走势',
+        weeklySales: '周度销量分布',
+        productYoY: '产品同比增长',
+        salesDetail: '销售明细',
+        colProduct: '产品',
+        colCustomer: '客户',
+        debugPriceSource: 'Debug: 价格来源诊断',
+        loading: 'Loading customer sales data…',
+        loadError: 'Failed to load customer sales',
+      }
+    : {
+        allMaterials: 'All materials',
+        dataAsOf: 'Data as of',
+        salesAmount: 'Sales Amount',
+        unitWan: '10k CNY',
+        salesQty: 'Sales Volume',
+        unitTon: 'ton',
+        customerShare: 'Customer Sales Share',
+        weeklyPrice: 'Weekly Price Trend',
+        weeklySales: 'Weekly Sales Distribution',
+        productYoY: 'Product YoY Growth',
+        salesDetail: 'Sales Detail',
+        colProduct: 'Product',
+        colCustomer: 'Customer',
+        debugPriceSource: 'Debug: price source diagnosis',
+        loading: 'Loading customer sales data…',
+        loadError: 'Failed to load customer sales',
+      };
   const [month, setMonth] = useState('');
   const [material, setMaterial] = useState('');
 
@@ -64,13 +103,13 @@ export default function CustomerSalesReport({ org }) {
   );
 
   if (isLoading) {
-    return <div className="py-8 text-center text-sm text-slate-500">Loading customer sales data…</div>;
+    return <div className="py-8 text-center text-sm text-slate-500">{t.loading}</div>;
   }
 
   if (isError) {
     return (
       <div className="rounded border border-red-200 bg-red-50 p-4 text-sm text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-400">
-        Failed to load customer sales: {error?.message || 'unknown'}
+        {t.loadError}: {error?.message || 'unknown'}
       </div>
     );
   }
@@ -98,13 +137,13 @@ export default function CustomerSalesReport({ org }) {
         onChange={(e) => setMaterial(e.target.value)}
         className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 focus:border-slate-400 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
       >
-        <option value="">所有物料</option>
+        <option value="">{t.allMaterials}</option>
         {availableMaterials.map((m) => (
           <option key={m} value={m}>{m}</option>
         ))}
       </select>
       <span className={TYPO.secondaryData}>
-        数据截止: {effectiveMonth || '--'}
+        {t.dataAsOf}: {effectiveMonth || '--'}
       </span>
     </div>
   );
@@ -112,15 +151,15 @@ export default function CustomerSalesReport({ org }) {
   // ── KPI Cards ──
   const kpiCards = (
     <div className="grid grid-cols-2 gap-4 mb-6">
-      <KpiCard title="销售额" value={s.total_sales_amount_wan} unit="万元" yoy={s.sales_amount_yoy} />
-      <KpiCard title="销量" value={s.total_sales_qty} unit="吨" yoy={s.sales_qty_yoy} />
+      <KpiCard title={t.salesAmount} value={s.total_sales_amount_wan} unit={t.unitWan} yoy={s.sales_amount_yoy} />
+      <KpiCard title={t.salesQty} value={s.total_sales_qty} unit={t.unitTon} yoy={s.sales_qty_yoy} />
     </div>
   );
 
   // ── Customer Share Donut ──
   const donut = data.customer_share && data.customer_share.length > 0 ? (
     <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
-      <div className={TYPO.cardTitle}>客户销量占比</div>
+      <div className={TYPO.cardTitle}>{t.customerShare}</div>
       <div className="mt-2" style={{ width: '100%', height: 240 }}>
         <ResponsiveContainer>
           <PieChart>
@@ -152,7 +191,7 @@ export default function CustomerSalesReport({ org }) {
   // ── Weekly Price Chart ──
   const priceChart = data.price_chart && data.price_chart.length > 0 ? (
     <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
-      <div className={TYPO.cardTitle}>周度价格走势</div>
+      <div className={TYPO.cardTitle}>{t.weeklyPrice}</div>
       <div className="mt-2" style={{ width: '100%', height: 260 }}>
         <ResponsiveContainer>
           <LineChart data={data.price_chart}>
@@ -181,7 +220,7 @@ export default function CustomerSalesReport({ org }) {
   // ── Weekly Sales Chart ──
   const salesChart = data.sales_chart && data.sales_chart.length > 0 ? (
     <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
-      <div className={TYPO.cardTitle}>周度销量分布</div>
+      <div className={TYPO.cardTitle}>{t.weeklySales}</div>
       <div className="mt-2" style={{ width: '100%', height: 260 }}>
         <ResponsiveContainer>
           <LineChart data={data.sales_chart}>
@@ -210,7 +249,7 @@ export default function CustomerSalesReport({ org }) {
   // ── Product Growth List ──
   const growthList = data.product_growth && data.product_growth.length > 0 ? (
     <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
-      <div className={TYPO.cardTitle}>产品同比增长</div>
+      <div className={TYPO.cardTitle}>{t.productYoY}</div>
       <div className="mt-2 space-y-1.5">
         {data.product_growth.map((item) => (
           <div key={item.product} className="flex items-center justify-between rounded px-2 py-1 hover:bg-slate-50 dark:hover:bg-slate-750">
@@ -231,15 +270,15 @@ export default function CustomerSalesReport({ org }) {
   const detailTable = data.sales_detail && data.sales_detail.length > 0 ? (
     <div className="rounded-lg border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-800 overflow-hidden">
       <div className="border-b border-slate-200 p-4 dark:border-slate-700">
-        <span className={TYPO.cardTitle}>销售明细</span>
+        <span className={TYPO.cardTitle}>{t.salesDetail}</span>
         <span className={`ml-2 ${TYPO.secondaryData}`}>Top 50</span>
       </div>
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="border-b border-slate-200 bg-slate-50 dark:border-slate-700 dark:bg-slate-800">
-              <th className="px-4 py-2 text-left text-xs font-semibold text-slate-600 dark:text-slate-400">产品</th>
-              <th className="px-4 py-2 text-left text-xs font-semibold text-slate-600 dark:text-slate-400">客户</th>
+              <th className="px-4 py-2 text-left text-xs font-semibold text-slate-600 dark:text-slate-400">{t.colProduct}</th>
+              <th className="px-4 py-2 text-left text-xs font-semibold text-slate-600 dark:text-slate-400">{t.colCustomer}</th>
               {(data.weeks || []).slice(0, 6).map((w) => (
                 <th key={w} className="px-2 py-2 text-right text-xs font-semibold text-slate-600 dark:text-slate-400">{w}</th>
               ))}
@@ -287,7 +326,7 @@ export default function CustomerSalesReport({ org }) {
       {data.debug && (
         <details className="rounded border border-amber-200 bg-amber-50 p-3 dark:border-amber-800 dark:bg-amber-950">
           <summary className="cursor-pointer text-xs font-semibold text-amber-800 dark:text-amber-400">
-            Debug: 价格来源诊断
+            {t.debugPriceSource}
           </summary>
           <pre className="mt-2 max-h-60 overflow-auto text-[10px] text-amber-700 dark:text-amber-300">
             {JSON.stringify(data.debug, null, 2)}

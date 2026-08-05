@@ -1,4 +1,4 @@
-"""Tests for seed_ecisco_forecast_targets — idempotent seeder for the 10
+"""Tests for seed_ecisco_forecast_targets — idempotent seeder for the 11
 Ecisco BI dashboard md_t_lz_price products (ERP products discovered dynamically)."""
 from __future__ import annotations
 
@@ -27,10 +27,10 @@ def db_session():
     session.close()
 
 
-def test_ecisco_forecast_targets_has_10_md_lz_entries():
-    """Static list now has 10 md_t_lz_price products. ERP products are
+def test_ecisco_forecast_targets_has_11_md_lz_entries():
+    """Static list now has 11 md_t_lz_price products. ERP products are
     discovered dynamically by discover_and_seed_sku_targets()."""
-    assert len(ECISCO_FORECAST_TARGETS) == 10
+    assert len(ECISCO_FORECAST_TARGETS) == 11
 
 
 def test_each_target_has_required_fields():
@@ -49,13 +49,13 @@ def test_each_target_has_required_fields():
         assert "report_order" in t
 
 
-def test_seeder_inserts_10_rows_on_first_call(db_session):
+def test_seeder_inserts_11_rows_on_first_call(db_session):
     count = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
-    assert count == 10
+    assert count == 11
     rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org"
     ).all()
-    assert len(rows) == 10
+    assert len(rows) == 11
     # Spot-check one
     crude = db_session.query(ForecastTarget).filter(
         ForecastTarget.product_key == "ecisco.crude_oil"
@@ -68,13 +68,13 @@ def test_seeder_inserts_10_rows_on_first_call(db_session):
 
 def test_seeder_is_idempotent_second_call_inserts_zero(db_session):
     first = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
-    assert first == 10
+    assert first == 11
     second = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert second == 0
     rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org"
     ).all()
-    assert len(rows) == 10  # still 10, not 20
+    assert len(rows) == 11  # still 11, not 22
 
 
 def test_seeder_scoped_to_org_id(db_session):
@@ -87,8 +87,8 @@ def test_seeder_scoped_to_org_id(db_session):
     b_rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "org-b"
     ).all()
-    assert len(a_rows) == 10
-    assert len(b_rows) == 10
+    assert len(a_rows) == 11
+    assert len(b_rows) == 11
 
 
 def test_product_keys_are_unique():

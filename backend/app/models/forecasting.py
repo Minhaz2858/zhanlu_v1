@@ -259,3 +259,200 @@ class ForecastWeightAdjustment(TimestampedBase):
     delta_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ForecastDecisionLog(TimestampedBase):
+    """Logs every forecast decision with inputs + realized outcome for ROI measurement.
+
+    Created once per (forecast_run, product, horizon_day) when a decision is made.
+    Realized outcomes are filled later by the accuracy_tracker when actual prices
+    become available (horizon_day days after as_of_date).
+
+    Enables Wave 1 threshold calibration (T1.4 grid-search over decision thresholds)
+    by replaying decisions under different threshold values.
+    """
+    __tablename__ = "forecast_decision_logs"
+
+    # ------------------------------------------------------------------ #
+    # Identity
+    # ------------------------------------------------------------------ #
+    # NOTE (2026-08-05): was incorrectly declared ``Integer`` here, which
+    # broke ``Base.metadata.create_all()`` on every backend startup with
+    # ``foreign key constraint "forecast_decision_logs_forecast_run_id_fkey"
+    # cannot be implemented / Key columns "forecast_run_id" and "id" are
+    # of incompatible types: integer and character varying``. The
+    # referenced ``forecast_runs.id`` is a UUID String(36) from
+    # ``TimestampedBase``, so the FK must be a String(36) too. The column
+    # is still optional (``nullable=True``) because some decision logs
+    # originate from rules / domain signals without a backing run.
+    forecast_run_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("forecast_runs.id"), nullable=True, index=True,
+    )
+    product_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    # ------------------------------------------------------------------ #
+    # Snapshot: when and for what horizon
+    # ------------------------------------------------------------------ #
+    horizon_day: Mapped[int] = mapped_column(
+        Integer, nullable=False,
+        comment="Days ahead this decision was made for (e.g. 30)",
+    )
+    as_of_date: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, index=True,
+        comment="The date the decision was computed",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Inputs that produced the decision (for threshold calibration replay)
+    # ------------------------------------------------------------------ #
+    predicted_p_rise: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    predicted_change_pct: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    decision_thresholds: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True,
+        comment="Snapshot of thresholds: {buy_p, sell_p, min_change, edge_accuracy}",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Decision output
+    # ------------------------------------------------------------------ #
+    action: Mapped[str] = mapped_column(
+        String(20), nullable=False,
+        comment="buy / sell / hold / watch",
+    )
+    confidence: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True,
+        comment="high / medium / low",
+    )
+    rationale: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # ------------------------------------------------------------------ #
+    # Realized outcomes (filled later)
+    # ------------------------------------------------------------------ #
+    actual_price_t: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="Price at decision time (as_of_date)",
+    )
+    actual_price_th: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="Price at as_of_date + horizon_day",
+    )
+    roi_pct: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="(actual_price_th/actual_price_t - 1)*100, signed for buy/sell",
+    )
+    realized_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True,
+        comment="When the realized outcome was filled",
+    )
+
+
+class ForecastEventImpact(TimestampedBase):
+    """Quantified impact of exogenous events on forecast accuracy (Wave 2 T2.2).
+
+    Stores per-event calibration data: how much did a specific event type
+    shift the forecast error? Feeds the evidence-pack demand signal and
+    the brief-writer's event-weighting logic in Wave 1-2.
+    """
+    __tablename__ = "forecast_event_impacts"
+
+    # ------------------------------------------------------------------ #
+    # Identity
+    # ------------------------------------------------------------------ #
+    product_id: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    # ------------------------------------------------------------------ #
+    # Event descriptor
+    # ------------------------------------------------------------------ #
+    event_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, index=True,
+        comment="market / maintenance / regulatory / logistics / demand_spike / supplier_outage",
+    )
+    event_date: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False,
+        comment="Date the event occurred (or started)",
+    )
+    event_label: Mapped[Optional[str]] = mapped_column(
+        String(200), nullable=True,
+        comment="Human-readable description",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Impact quantification
+    # ------------------------------------------------------------------ #
+    price_impact_pct: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="Observed price % change attributable to this event",
+    )
+    volume_impact_pct: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="Observed volume % change attributable to this event",
+    )
+    forecast_error_shift: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="Change in MAPE during the event window vs baseline",
+    )
+    duration_days: Mapped[Optional[int]] = mapped_column(
+        Integer, nullable=True,
+        comment="How many days the impact persisted",
+    )
+
+    # ------------------------------------------------------------------ #
+    # Source and confidence
+    # ------------------------------------------------------------------ #
+    source: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True,
+        comment="Data source: erp_volume / supplier_ladder / intel_agent / manual",
+    )
+    confidence_score: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="0.0-1.0 calibration confidence",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wave 2 T2.4: DB-backed per-product decision threshold config
+# ---------------------------------------------------------------------------
+
+class ForecastThresholdConfig(TimestampedBase):
+    """Per-product (or global) decision threshold configuration.
+
+    Resolved at runtime by ``decision_engine.get_thresholds(product_key)``:
+    active product-specific → active global → env → hardcoded default.
+
+    Thresholds are staged by the auto-tuner (source="autotune", status="staged")
+    and promoted to active by an admin via POST /forecast-ops/apply-thresholds.
+    """
+
+    __tablename__ = "forecast_threshold_config"
+
+    product_key: Mapped[Optional[str]] = mapped_column(
+        String(50), nullable=True, index=True,
+        comment="NULL = global default override",
+    )
+    buy_threshold: Mapped[float] = mapped_column(Float, nullable=False,
+                                                  default=0.70)
+    sell_threshold: Mapped[float] = mapped_column(Float, nullable=False,
+                                                   default=0.30)
+    buy_min_change: Mapped[float] = mapped_column(Float, nullable=False,
+                                                   default=0.03)
+    sell_min_change: Mapped[float] = mapped_column(Float, nullable=False,
+                                                    default=-0.03)
+    edge_threshold: Mapped[float] = mapped_column(Float, nullable=False,
+                                                   default=0.55)
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="manual",
+        comment="manual | autotune | autotune (applied)",
+    )
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="staged",
+        comment="staged | active",
+    )
+    applied_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True,
+        comment="When the config was promoted to active",
+    )
+    created_by: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True,
+        comment="Who created this config",
+    )
+

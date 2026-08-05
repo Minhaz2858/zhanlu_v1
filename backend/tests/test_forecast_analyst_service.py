@@ -42,7 +42,7 @@ def _patch_reads(monkeypatch):
 
 def test_cache_hit_returns_without_llm(monkeypatch):
     _patch_reads(monkeypatch)
-    cached = {"summary_zh": "cached", "source": "llm", "day": 7}
+    cached = {"market_update_zh": "cached", "source": "llm", "day": 7}
     run = _run({**_explanation(), "analyst_brief": {"7": cached}})
     db = _FakeDB(SimpleNamespace(id="t1"), run)
 
@@ -69,9 +69,11 @@ def test_llm_upgrade_when_enabled(monkeypatch):
     run = _run(_explanation())
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: True)
-    good = {"summary_zh": "现价 6,940 元/吨,预计跌至 6,660 元/吨。",
-            "why_price_zh": "上游裂解碳五下跌,弹性 0.66 传导。",
-            "why_action_zh": "方向准确率 51% 未达 55% 门槛,观望。",
+    good = {"market_update_zh": "市场情报中性。",
+            "price_data_zh": "现价 6,940 元/吨。",
+            "upstream_logic_zh": "上游裂解碳五下跌,弹性 0.66 传导。",
+            "supply_demand_zh": "8模型分歧偏大。",
+            "forecast_zh": "预计跌至 6,660 元/吨,↘ 偏弱。",
             "watch_triggers_zh": ["准确率 55% 以上再评估"], "risk_zh": "近期无重大市场事件。"}
     monkeypatch.setattr(analyst_service, "chat_completion_json_sync",
                         lambda prompt, schema: dict(good))

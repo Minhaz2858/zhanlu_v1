@@ -12,28 +12,36 @@ logger = logging.getLogger(__name__)
 BRIEF_JSON_SCHEMA = {
     "type": "object",
     "properties": {
-        "summary_zh": {"type": "string"},
-        "why_price_zh": {"type": "string"},
-        "why_action_zh": {"type": "string"},
+        "market_update_zh": {"type": "string"},
+        "price_data_zh": {"type": "string"},
+        "upstream_logic_zh": {"type": "string"},
+        "supply_demand_zh": {"type": "string"},
+        "forecast_zh": {"type": "string"},
         "watch_triggers_zh": {"type": "array", "items": {"type": "string"}},
         "risk_zh": {"type": "string"},
     },
-    "required": ["summary_zh", "why_price_zh", "why_action_zh",
-                 "watch_triggers_zh", "risk_zh"],
+    "required": ["market_update_zh", "price_data_zh", "upstream_logic_zh",
+                 "supply_demand_zh", "forecast_zh", "watch_triggers_zh", "risk_zh"],
 }
 
 
 def build_analyst_prompt(pack: dict) -> str:
     return (
-        "你是石化市场分析师。根据下方 EVIDENCE_JSON 撰写该产品的 AI 简评。\n"
+        "你是石化市场分析师。根据下方 EVIDENCE_JSON 撰写该产品的 AI 简评,按周报格式分7个板块。\n"
         "严格规则:\n"
         "1. 只能使用 EVIDENCE_JSON 中已提供的数字和事实,禁止自行添加任何数字。\n"
         "2. 不要改变决策:decision.action 已由确定性引擎给出,你只能解释它。\n"
-        "3. 输出简体中文 JSON,字段:summary_zh(一句话总览), why_price_zh(价格逻辑:"
-        "上游传导/趋势/季节/模型驱动), why_action_zh(建议逻辑:为什么是这个操作建议,"
-        "信任等级原因), watch_triggers_zh(2-4 条重新评估触发条件,字符串数组), "
-        "risk_zh(风险提示)。\n"
-        "4. 即使置信度低、建议观望,也必须解释清楚为什么以及应该关注什么。\n\n"
+        "3. 输出简体中文 JSON,7个字段对应7个板块:\n"
+        "   - market_update_zh(市场动态:市场情报方向、在册事件数、波动状态)\n"
+        "   - price_data_zh(价格数据:现价、近三年分位、近7日/30日涨跌、均线位置)\n"
+        "   - upstream_logic_zh(上游传导:上游原料变化、弹性传导、与模型方向是否一致)\n"
+        "   - supply_demand_zh(供需研判:季节性、模型驱动因子、模型间分歧)\n"
+        "   - forecast_zh(价格预测:必须给出区间[bear–bull]和方向箭头,如 ↘偏弱/↗偏强/→稳定/↔震荡,"
+        "可加定性词如易跌难涨;附上涨概率和置信度)\n"
+        "   - watch_triggers_zh(2-4 条重新评估触发条件,字符串数组)\n"
+        "   - risk_zh(风险提示)\n"
+        "4. 即使置信度低、建议观望,也必须解释清楚为什么以及应该关注什么。\n"
+        "5. 方向箭头规则:预期变化≥+2%用↗偏强,≤-2%用↘偏弱,|变化|<1.5%且模型分歧大用↔震荡,否则→稳定。\n\n"
         f"EVIDENCE_JSON:\n{json.dumps(pack, ensure_ascii=False, default=str)}"
     )
 

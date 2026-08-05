@@ -194,21 +194,25 @@ export default function PriceTransmissionChain({ language = 'en' }) {
       <div className="flex items-end justify-between gap-4">
         <div>
           <h3 className={TYPO.cardTitle + ' text-slate-800 dark:text-slate-100'}>
-            Price Transmission Chain
+            {language === 'zh' ? '价格传导链' : 'Price Transmission Chain'}
           </h3>
           <p className={TYPO.micro + ' mt-1 text-slate-500 dark:text-slate-400'}>
-            Crude oil → Naphtha → C5/C9 → Downstream products (30-day change)
+            {language === 'zh'
+              ? '原油 → 石脑油 → C5/C9 → 下游产品（30日变化）'
+              : 'Crude oil → Naphtha → C5/C9 → Downstream products (30-day change)'}
           </p>
         </div>
         <span className={TYPO.micro + ' italic text-slate-400 dark:text-slate-500'}>
-          Computed from MySQL data
+          {language === 'zh' ? '基于 MySQL 数据计算' : 'Computed from MySQL data'}
         </span>
       </div>
 
       {/* Tier flow */}
       {!tiers.length ? (
         <div className="py-10 text-center">
-          <p className={TYPO.listText + ' text-slate-500'}>Loading price chain…</p>
+          <p className={TYPO.listText + ' text-slate-500'}>
+            {language === 'zh' ? '正在加载价格链…' : 'Loading price chain…'}
+          </p>
         </div>
       ) : (
         <div className="mt-5 overflow-x-auto">

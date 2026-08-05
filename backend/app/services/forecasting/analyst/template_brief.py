@@ -1,4 +1,8 @@
-"""Deterministic brief renderer — enriched fallback for the LLM writer."""
+"""Deterministic brief renderer — 7-section structure mirroring human weekly reports.
+
+Sections (matching human report layout):
+  市场动态 / 价格数据 / 上游传导 / 供需研判 / 价格预测 / 触发条件 / 风险提示
+"""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -18,6 +22,16 @@ _REASON_CODE_ZH = {
 }
 _BUY_P, _SELL_P, _MIN_CHG, _EDGE = 0.70, 0.30, 0.03, 0.55
 
+# Directional-signal thresholds sit BELOW the decision engine's _MIN_CHG so
+# the qualitative arrow is more sensitive than the buy/sell action gate.
+_DIR_STRONG = 0.02      # |chg| >= 2% → 偏强/偏弱
+_DIR_RANGE = 0.015      # |chg| < 1.5% with high spread → 震荡
+_DIR_SPREAD = 0.04      # spread_pct threshold for 震荡
+
+_INTEL_BIAS_ZH = {"up": "偏多", "down": "偏空", "neutral": "中性"}
+_VOL_ZH = {"NORMAL": "正常", "MODERATE": "偏高", "HIGH": "剧烈"}
+_CONF_ZH = {"high": "高", "medium": "中", "low": "低"}
+
 
 def _fmt_price(v):
     return "—" if v is None else f"{v:,.0f}"
@@ -31,45 +45,67 @@ def _fmt_pct_plain(v, digits=0):
     return "—" if v is None else f"{v * 100:.{digits}f}%"
 
 
-def _summary(p: dict) -> str:
-    if p.get("current_price") is None or p.get("forecast_base") is None:
-        return f"{p['name_zh']}当前预测数据不足,建议观望。"
-    # Direction: prefer the point forecast vs current price; fall back to the
-    # probability model's expected change.
-    if p.get("implied_change_pct") is not None:
-        move = "涨至" if p["implied_change_pct"] >= 0 else "跌至"
-    else:
-        move = "涨至" if (p.get("expected_change_pct") or 0) >= 0 else "跌至"
-    change = p.get("expected_change_pct")
-    if change is None:
-        change = p.get("implied_change_pct")
-    s = f"{p['name_zh']}现价 {_fmt_price(p['current_price'])} 元/吨"
-    if p.get("price_percentile") is not None:
-        s += f",处于近三年约 {p['price_percentile']:.0f}% 分位"
-    s += f"。预计未来 {p['day']} 天{move} {_fmt_price(p['forecast_base'])} 元/吨"
-    if change is not None:
-        s += f"({_fmt_pct_signed(change)})"
-    if p.get("p_rise") is not None:
-        s += f",上涨概率 {_fmt_pct_plain(p['p_rise'])}"
-    return s + "。"
+def _directional_signal(p: dict) -> tuple[str, str]:
+    """Returns (arrow, label_zh) from expected_change_pct + spread_pct."""
+    chg = p.get("expected_change_pct")
+    if chg is None:
+        chg = p.get("implied_change_pct")
+    spread = p.get("spread_pct") or 0
+    if chg is None:
+        return ("?", "方向不明")
+    abs_chg = abs(chg)
+    if abs_chg < _DIR_RANGE and spread > _DIR_SPREAD:
+        return ("↔", "震荡")
+    if chg >= _DIR_STRONG:
+        return ("↗", "偏强")
+    if chg <= -_DIR_STRONG:
+        return ("↘", "偏弱")
+    return ("→", "稳定")
 
 
-def _why_price(p: dict) -> str:
-    if p.get("current_price") is None:
-        return ""
-    bits: list[str] = []
-    up = (p.get("upstream") or [{}])[0]
-    causal = p.get("causal") or {}
-    if up.get("chg_30d_pct") is not None:
-        seg = f"上游{up['name_zh']}近30日{up['chg_30d_pct']:+.1f}%"
-        if causal.get("elasticity") is not None and causal.get("implied_pct") is not None:
-            seg += (f",按 {causal['elasticity']:.2f} 弹性传导约 "
-                    f"{causal['implied_pct']:+.1f}%")
-            if p.get("expected_change_pct") is not None:
-                model_pct = p["expected_change_pct"] * 100
-                seg += (",与模型预测方向一致" if not causal.get("divergent")
-                        else f",而模型预测 {model_pct:+.1f}%,方向背离,需警惕")
-        bits.append(seg)
+def _qualitative_tail(p: dict) -> str:
+    """Qualitative phrase the human reports use (易跌难涨 / 易涨难跌)."""
+    chg = p.get("expected_change_pct")
+    p_rise = p.get("p_rise")
+    if chg is not None and p_rise is not None:
+        if chg < 0 and p_rise < 0.45:
+            return "易跌难涨"
+        if chg > 0 and p_rise > 0.55:
+            return "易涨难跌"
+    return ""
+
+
+# ── Section renderers (pure functions) ──────────────────────────────
+
+def _market_update(p: dict) -> str:
+    """市场动态 — intel events + volatility regime."""
+    intel = p.get("intelligence") or {}
+    count = intel.get("event_count", 0)
+    bias = intel.get("bias", "neutral")
+    bias_zh = _INTEL_BIAS_ZH.get(bias, "中性")
+    vol = (p.get("policy") or {}).get("volatility_regime")
+    vol_zh = _VOL_ZH.get(vol, "") if vol else ""
+    bits = []
+    summary = intel.get("summary")
+    if summary:
+        bits.append(summary)
+    bits.append(f"市场情报{bias_zh}")
+    if count:
+        bits.append(f"在册事件 {count} 条")
+    if vol_zh:
+        bits.append(f"当前波动{vol_zh}")
+    return "市场动态:" + ",".join(bits) + "。"
+
+
+def _price_data(p: dict) -> str:
+    """价格数据 — current + percentile + 7d/30d trend."""
+    cur = p.get("current_price")
+    if cur is None:
+        return "价格数据:暂无现价数据。"
+    bits = [f"现价 {_fmt_price(cur)} 元/吨"]
+    pctile = p.get("price_percentile")
+    if pctile is not None:
+        bits.append(f"处于近三年约 {pctile:.0f}% 分位")
     t = p.get("trend") or {}
     tb = []
     if t.get("chg_7d_pct") is not None:
@@ -77,12 +113,40 @@ def _why_price(p: dict) -> str:
     if t.get("chg_30d_pct") is not None:
         tb.append(f"近30日{_fmt_pct_signed(t['chg_30d_pct'])}")
     if t.get("above_ma30") is not None:
-        tb.append("现价位于30日均线上方" if t["above_ma30"] else "现价位于30日均线下方")
+        tb.append("位于30日均线上方" if t["above_ma30"] else "位于30日均线下方")
     if tb:
-        bits.append("趋势:" + ",".join(tb))
-    if (p.get("seasonal") or {}).get("label_zh"):
-        bits.append(f"当前为{p['seasonal']['month']}月{p['seasonal']['label_zh']}"
-                    f"(季节调整 {p['seasonal']['adj_pct']:+.1f}%)")
+        bits.append(",".join(tb))
+    return "价格数据:" + ";".join(bits) + "。"
+
+
+def _upstream_logic(p: dict) -> str:
+    """上游传导 — causal chain (upstream Δ% × elasticity → implied)."""
+    up = (p.get("upstream") or [{}])[0]
+    causal = p.get("causal") or {}
+    if up.get("chg_30d_pct") is None and causal.get("elasticity") is None:
+        return ""
+    bits = []
+    if up.get("chg_30d_pct") is not None and up.get("name_zh"):
+        seg = f"上游{up['name_zh']}近30日{up['chg_30d_pct']:+.1f}%"
+        if causal.get("elasticity") is not None and causal.get("implied_pct") is not None:
+            seg += f",按 {causal['elasticity']:.2f} 弹性传导约 {causal['implied_pct']:+.1f}%"
+            if p.get("expected_change_pct") is not None:
+                model_pct = p["expected_change_pct"] * 100
+                seg += (",与模型预测方向一致" if not causal.get("divergent")
+                        else f",而模型预测 {model_pct:+.1f}%,方向背离")
+        bits.append(seg)
+    if not bits:
+        return ""
+    return "上游传导:" + ";".join(bits) + "。"
+
+
+def _supply_demand(p: dict) -> str:
+    """供需研判 — seasonal + model drivers + model agreement + demand/supplier signals (Wave 1)."""
+    bits = []
+    seas = p.get("seasonal") or {}
+    if seas.get("label_zh"):
+        bits.append(f"当前为{seas['month']}月{seas['label_zh']}"
+                    f"(季节调整 {seas['adj_pct']:+.1f}%)")
     drivers = p.get("drivers") or []
     if drivers:
         bits.append(f"模型首要驱动因子:{drivers[0]['feature']}"
@@ -91,12 +155,57 @@ def _why_price(p: dict) -> str:
     if ag and ag.get("spread_pct") is not None and ag["spread_pct"] > 0.02:
         bits.append(f"{ag['n_models']} 模型间分歧偏大(区间 "
                     f"{_fmt_price(ag['min'])}–{_fmt_price(ag['max'])})")
+
+    # Wave 1: demand signal (ERP volume)
+    demand = p.get("demand") or {}
+    if demand.get("has_sufficient_data"):
+        trend_map = {"up": "需求上行", "down": "需求收缩", "flat": "需求平稳"}
+        trend_text = trend_map.get(demand.get("demand_trend", ""), "")
+        if demand.get("rolling_4wk_vol") is not None:
+            bits.append(f"近4周销量均值{int(demand['rolling_4wk_vol'])}吨，{trend_text}")
+        yoy = demand.get("yoy_change_pct")
+        if yoy is not None and abs(yoy) > 0.01:
+            yoy_pct = abs(yoy) * 100
+            direction = f"同比+{yoy_pct:.0f}%" if yoy >= 0 else f"同比-{yoy_pct:.0f}%"
+            bits.append(direction)
+        div = demand.get("vol_price_divergence")
+        if div is not None and abs(div) > 0.1:
+            bits.append("量价背离" if div > 0 else "量价收敛")
+
+    # Wave 1: supplier ladder signal
+    supplier = p.get("supplier_ladder") or {}
+    if supplier.get("has_data") and supplier.get("avg_spread") is not None:
+        bits.append(f"供应商价差均值{int(supplier['avg_spread'])}，"
+                    f"趋势{supplier.get('spread_trend', '平稳')}"
+                    f"（近{supplier.get('recent_days', 30)}天）")
+
     if not bits:
-        return "" if p.get("current_price") is None else "暂无可归因的价格驱动因素。"
-    return "价格逻辑:" + ";".join(bits) + "。"
+        return ""
+    return "供需研判:" + ";".join(bits) + "。"
 
 
-def _why_action(p: dict) -> str:
+def _forecast(p: dict) -> str:
+    """价格预测 — range [bear,bull] + directional signal + confidence + action advice."""
+    if p.get("forecast_base") is None or p.get("current_price") is None:
+        return f"价格预测:{p.get('name_zh', '')}当前预测数据不足,建议观望。"
+    arrow, label = _directional_signal(p)
+    bear = p.get("bear")
+    bull = p.get("bull")
+    parts = [f"预计未来 {p.get('day', 7)} 天主流价格"]
+    if bear is not None and bull is not None:
+        parts.append(f" {_fmt_price(bear)}–{_fmt_price(bull)} 元/吨")
+    else:
+        parts.append(f"约 {_fmt_price(p['forecast_base'])} 元/吨")
+    parts.append(f",{arrow} {label}")
+    qual = _qualitative_tail(p)
+    if qual:
+        parts.append(f"({qual})")
+    if p.get("p_rise") is not None:
+        parts.append(f",上涨概率 {_fmt_pct_plain(p['p_rise'])}")
+    conf = (p.get("decision") or {}).get("confidence", "low")
+    parts.append(f"(置信度:{_CONF_ZH.get(conf, '低')})")
+
+    # Action advice + reasoning — embedded like human reports' closing recommendation
     action = (p.get("decision") or {}).get("action", "watch")
     advice = _ACTION_ADVICE_ZH.get(action, _ACTION_ADVICE_ZH["watch"])
     reasons = [_REASON_CODE_ZH[c] for c in (p.get("trust") or {}).get("reason_codes", [])
@@ -107,16 +216,20 @@ def _why_action(p: dict) -> str:
             reasons.append(f"方向准确率 {_fmt_pct_plain(dire['accuracy'])} 未达 "
                            f"{_fmt_pct_plain(_EDGE)} 显著门槛")
         why = "、".join(reasons) if reasons else "信号不明确"
-        return (f"{advice} —— {why},不构成可操作信号。"
-                f"(置信度:{(p.get('decision') or {}).get('confidence', 'low')})")
-    if action == "buy":
-        cond = f"上涨概率≥{_fmt_pct_plain(_BUY_P)} 且预期涨幅≥{_fmt_pct_plain(_MIN_CHG)} 且方向准确率达标"
-    elif action == "sell":
-        cond = f"上涨概率≤{_fmt_pct_plain(_SELL_P)} 且预期跌幅≥{_fmt_pct_plain(_MIN_CHG)} 且方向准确率达标"
+        parts.append(f"。{advice} —— {why},不构成可操作信号")
+    elif action in ("buy", "sell"):
+        if action == "buy":
+            cond = (f"上涨概率≥{_fmt_pct_plain(_BUY_P)} 且预期涨幅≥"
+                    f"{_fmt_pct_plain(_MIN_CHG)} 且方向准确率达标")
+        else:
+            cond = (f"上涨概率≤{_fmt_pct_plain(_SELL_P)} 且预期跌幅≥"
+                    f"{_fmt_pct_plain(_MIN_CHG)} 且方向准确率达标")
+        tail = f"({';'.join(reasons)})" if reasons else ""
+        parts.append(f"。{advice} —— 满足条件:{cond}{tail}")
     else:
-        cond = "有方向优势但预期波动未达买卖阈值"
-    tail = f"({';'.join(reasons)})" if reasons else ""
-    return f"{advice} —— 满足条件:{cond}{tail}。"
+        parts.append(f"。{advice}")
+
+    return "价格预测:" + "".join(parts) + "。"
 
 
 def _triggers(p: dict) -> list[str]:
@@ -149,11 +262,24 @@ def _risk(p: dict) -> str:
     return "风险提示:" + ";".join(risks) + "。" if risks else ""
 
 
+# ── Field order for narrative concatenation ─────────────────────────
+# (used by decision_board_service + weekly_report generator)
+SECTION_TITLES = [
+    ("market_update_zh", "【市场动态】"),
+    ("price_data_zh", "【价格数据】"),
+    ("upstream_logic_zh", "【上游传导】"),
+    ("supply_demand_zh", "【供需研判】"),
+    ("forecast_zh", "【价格预测】"),
+]
+
+
 def render_template_brief(pack: dict) -> dict:
     return {
-        "summary_zh": _summary(pack),
-        "why_price_zh": _why_price(pack),
-        "why_action_zh": _why_action(pack),
+        "market_update_zh": _market_update(pack),
+        "price_data_zh": _price_data(pack),
+        "upstream_logic_zh": _upstream_logic(pack),
+        "supply_demand_zh": _supply_demand(pack),
+        "forecast_zh": _forecast(pack),
         "watch_triggers_zh": _triggers(pack),
         "risk_zh": _risk(pack),
         "source": "template",

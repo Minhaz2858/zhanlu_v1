@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import re
 
-REQUIRED_KEYS = ("summary_zh", "why_price_zh", "why_action_zh",
-                 "watch_triggers_zh", "risk_zh")
+REQUIRED_KEYS = ("market_update_zh", "price_data_zh", "upstream_logic_zh",
+                 "supply_demand_zh", "forecast_zh", "watch_triggers_zh", "risk_zh")
 _NUM_RE = re.compile(r"[-+]?\d[\d,]*\.?\d*")
 _SMALL_NUM_EXEMPT = 12.0
 
@@ -51,7 +51,8 @@ def verify_brief(brief: dict, pack: dict) -> list[str]:
 
     known = _pack_numbers(pack)
     texts = [str(brief.get(k) or "") for k in
-             ("summary_zh", "why_price_zh", "why_action_zh", "risk_zh")]
+             ("market_update_zh", "price_data_zh", "upstream_logic_zh",
+              "supply_demand_zh", "forecast_zh", "risk_zh")]
     texts += [str(t) for t in brief.get("watch_triggers_zh") or []]
     for m in _NUM_RE.finditer(" ".join(texts)):
         raw = m.group(0).replace(",", "").lstrip("+")

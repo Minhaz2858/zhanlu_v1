@@ -171,11 +171,19 @@ class WeeklyReportService:
             from app.services.forecasting.analyst import service as analyst_service
             brief = analyst_service.get_analyst_brief(pid, day=7, db=self.db)
             if brief:
-                narrative = (
-                    brief.get("summary_zh", "")
-                    + brief.get("why_price_zh", "")
-                    + brief.get("why_action_zh", "")
-                ) or None
+                from app.services.forecasting.analyst.template_brief import SECTION_TITLES
+                parts = []
+                for key, title in SECTION_TITLES:
+                    val = brief.get(key, "")
+                    if val:
+                        parts.append(f"{title}{val}")
+                triggers = brief.get("watch_triggers_zh") or []
+                if triggers:
+                    parts.append("【触发条件】" + ";".join(triggers))
+                risk_val = brief.get("risk_zh", "")
+                if risk_val:
+                    parts.append(f"【风险提示】{risk_val}")
+                narrative = "".join(parts) or None
         except Exception as exc:
             logger.warning("[weekly-report] analyst brief failed for %s: %s", pid, exc)
         if not narrative:

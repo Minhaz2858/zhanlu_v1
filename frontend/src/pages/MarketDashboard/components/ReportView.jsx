@@ -1,19 +1,33 @@
 import { useState } from 'react';
 import { BarChart3, Users } from 'lucide-react';
+import { useLanguage } from '@/lib/LanguageProvider';
 import CustomerSalesReport from './CustomerSalesReport';
 import ContractPerformanceReport from './ContractPerformanceReport';
 
-const REPORT_ORGS = [
-  { value: 'huizhou', label: '惠州伊斯科' },
-  { value: 'guangdong', label: '广东伊斯科' },
-];
+const REPORT_ORGS = (lang) => lang === 'zh'
+  ? [
+      { value: 'huizhou', label: '惠州伊斯科' },
+      { value: 'guangdong', label: '广东伊斯科' },
+    ]
+  : [
+      { value: 'huizhou', label: 'Huizhou Yisike' },
+      { value: 'guangdong', label: 'Guangdong Yisike' },
+    ];
 
-const TABS = [
-  { key: 'customer_sales', label: '客户销售情况', icon: Users },
-  { key: 'contract_performance', label: '销售合同执行情况', icon: BarChart3 },
-];
+const TABS = (lang) => lang === 'zh'
+  ? [
+      { key: 'customer_sales', label: '客户销售情况', icon: Users },
+      { key: 'contract_performance', label: '销售合同执行情况', icon: BarChart3 },
+    ]
+  : [
+      { key: 'customer_sales', label: 'Customer Sales', icon: Users },
+      { key: 'contract_performance', label: 'Contract Performance', icon: BarChart3 },
+    ];
 
 export default function ReportView() {
+  const { lang } = useLanguage();
+  const tabs = TABS(lang);
+  const orgs = REPORT_ORGS(lang);
   const [activeTab, setActiveTab] = useState('customer_sales');
   const [org, setOrg] = useState('huizhou');
 
@@ -23,7 +37,7 @@ export default function ReportView() {
       <div className="sticky top-0 z-10 border-b border-slate-200 bg-white dark:bg-slate-900">
         <div className="flex items-center justify-between px-6 py-2">
           <div className="flex items-center gap-1">
-            {TABS.map(({ key, label, icon: Icon }) => {
+            {tabs.map(({ key, label, icon: Icon }) => {
               const active = activeTab === key;
               return (
                 <button
@@ -47,7 +61,7 @@ export default function ReportView() {
             onChange={(e) => setOrg(e.target.value)}
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 focus:border-slate-400 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
           >
-            {REPORT_ORGS.map(({ value, label }) => (
+            {orgs.map(({ value, label }) => (
               <option key={value} value={value}>
                 {label}
               </option>
@@ -59,10 +73,10 @@ export default function ReportView() {
       {/* Content */}
       <div className="flex-1 px-6 py-4">
         {activeTab === 'customer_sales' && (
-          <CustomerSalesReport org={org} />
+          <CustomerSalesReport org={org} lang={lang} />
         )}
         {activeTab === 'contract_performance' && (
-          <ContractPerformanceReport org={org} />
+          <ContractPerformanceReport org={org} lang={lang} />
         )}
       </div>
     </div>

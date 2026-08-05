@@ -29,6 +29,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.config import settings
 from app.deps import get_db, get_current_user_required
@@ -4974,6 +4975,58 @@ async def add_message_stream(
     try:
         from app.database import SessionLocal as _DsrSessionLocal
         from app.services.data_source_runtime import prepare_data_source_runtime
+        # Resolve the project's data-source context per-message so the
+        # data-source runtime can extend the agent's bound KBs with
+        # the project's KBs even when ``conv.project_id`` is None
+        # (e.g. legacy convs from before project-scoping landed, or
+        # convs first opened outside a project-scoped entry point).
+        # Source-of-truth order: body.project_id (per-message
+        # override from the live URL) → conv.project_id (the conv
+        # row's stored FK). Validate the body project_id against the
+        # live projects table so a stale UUID (admin-deleted project,
+        # phantom migration row) doesn't 500 — same defensive
+        # treatment as create_conversation above. When the body has
+        # project_name but no project_id (or vice versa), resolve
+        # the missing side from the projects table so the runtime
+        # sees a complete picture.
+        from app.models.project import Project as _Project
+        _v3_body_pid = body.get("project_id")
+        _v3_body_pname = body.get("project_name")
+        if _v3_body_pid or _v3_body_pname:
+            _v3_validated_row = None
+            if _v3_body_pid:
+                _v3_validated_row = (
+                    _dsr_db.query(_Project)
+                    .filter(_Project.id == _v3_body_pid, _Project.is_deleted == False)  # noqa: E712
+                    .first()
+                )
+                if _v3_validated_row is None:
+                    logger.debug(
+                        "v3 stream: dropping stale body project_id %s "
+                        "(project not found or soft-deleted)",
+                        _v3_body_pid,
+                    )
+                    _v3_body_pid = None
+            if _v3_validated_row is None and _v3_body_pname:
+                _v3_validated_row = (
+                    _dsr_db.query(_Project)
+                    .filter(
+                        func.lower(_Project.name) == _v3_body_pname.lower(),
+                        _Project.is_deleted == False,  # noqa: E712
+                    )
+                    .first()
+                )
+            if _v3_validated_row is not None:
+                _v3_body_pid = _v3_validated_row.id
+                _v3_body_pname = _v3_validated_row.name
+        # Body project context takes precedence over conv.project_id
+        # so a chat opened from a project page can scope to the
+        # project even when the conv row was created without one.
+        _v3_effective_pid = _v3_body_pid or getattr(conv, "project_id", None)
+        _v3_effective_pname = _v3_body_pname
+        if not _v3_effective_pname and _v3_effective_pid:
+            _v3_proj_lookup = _dsr_db.get(_Project, _v3_effective_pid)
+            _v3_effective_pname = _v3_proj_lookup.name if _v3_proj_lookup else None
         _dsr_db = _DsrSessionLocal()
         try:
             if conv.agent_name:
@@ -4982,18 +5035,13 @@ async def add_message_stream(
                     AgentApp.is_deleted == False,
                 ).first()
                 if _v3_agent_for_dsr is not None:
-                    from app.models.project import Project as _Project
-                    _v3_sel_proj_name = None
-                    if getattr(conv, "project_id", None):
-                        _v3_proj_row = _dsr_db.get(_Project, conv.project_id)
-                        _v3_sel_proj_name = _v3_proj_row.name if _v3_proj_row else None
                     _, _, _v3_data_ctx_extras = prepare_data_source_runtime(
                         _dsr_db,
                         _v3_agent_for_dsr,
                         [],
                         "",
-                        selected_project_id=getattr(conv, "project_id", None),
-                        selected_project_name=_v3_sel_proj_name,
+                        selected_project_id=_v3_effective_pid,
+                        selected_project_name=_v3_effective_pname,
                     )
         finally:
             _dsr_db.close()
@@ -5448,17 +5496,16 @@ async def add_message_stream(
     # duplicate DB query). `prepare_data_source_runtime` is purely a
     # function of the agent + the selected project, so the
     # `bound_kb_ids` set is identical to the one the FSM path got.
+    # The `_v3_effective_pid` / `_v3_effective_pname` variables were
+    # resolved up-front (body project context takes precedence over
+    # conv.project_id) — use them here so the tools list gets the
+    # same project-scope the FSM already used.
     try:
         from app.services.data_source_runtime import prepare_data_source_runtime
-        from app.models.project import Project as _Project
-        _v3r_sel_proj_name = None
-        if getattr(conv, "project_id", None):
-            _v3r_proj_row = db.get(_Project, conv.project_id)
-            _v3r_sel_proj_name = _v3r_proj_row.name if _v3r_proj_row else None
         tools, system_prompt, _ = prepare_data_source_runtime(
             db, agent_app, tools, system_prompt,
-            selected_project_id=getattr(conv, "project_id", None),
-            selected_project_name=_v3r_sel_proj_name,
+            selected_project_id=_v3_effective_pid,
+            selected_project_name=_v3_effective_pname,
         )
     except Exception as e:
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
@@ -6499,7 +6546,16 @@ async def add_message_stream(
                 base = list(messages)
                 # Drop a trailing empty assistant placeholder (if any) so we
                 # don't accumulate one assistant message per iteration.
-                if base and base[-1].get("role") == "assistant" and not base[-1].get("content") and not base[-1].get("tool_calls"):
+                # The cleanup drops the placeholder whenever the trailing
+                # assistant message has empty content — regardless of whether
+                # it carries tool_calls. The previous version also required
+                # "no tool_calls", which never fired because partials always
+                # carry ``tool_calls_for_frontend`` (report cards, artifact
+                # ids). Result: each checkpoint appended a new partial
+                # without dropping the old, and ``conv.messages`` grew with
+                # duplicate assistant messages. (Bug: user asked one question,
+                # refresh showed multiple identical answers.)
+                if base and base[-1].get("role") == "assistant" and not base[-1].get("content"):
                     base = base[:-1]
                 base.append({
                     "id": str(uuid.uuid4()), "role": "assistant", "content": "",
@@ -6808,6 +6864,24 @@ async def add_message_stream(
         # so context compaction does not feed it back to the model.
         if reasoning_acc:
             assistant_msg["reasoning"] = "".join(reasoning_acc)
+
+        # ── Final-write dedupe ─────────────────────────────────────────
+        # The stream checkpoints above mutate ``messages[:] = base`` on
+        # every partial commit, so by the time we reach here ``messages``
+        # contains one trailing empty assistant placeholder per checkpoint.
+        # Each has empty content + the same accumulated ``tool_calls``.
+        # Before appending the authoritative final, drop those trailing
+        # placeholders so the user sees exactly ONE assistant bubble for
+        # this turn (not one per iteration). Only touches the trailing
+        # run — earlier user/system messages and assistant messages with
+        # real content are preserved.
+        while (
+            messages
+            and messages[-1].get("role") == "assistant"
+            and not messages[-1].get("content")
+        ):
+            messages.pop()
+
         messages.append(assistant_msg)
 
         # CRITICAL: rebind conv.messages to a NEW list object so SQLAlchemy

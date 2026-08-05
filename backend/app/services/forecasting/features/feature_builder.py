@@ -34,9 +34,29 @@ def build_features(
     event_loader,
     horizon: int,
     cascade_forecasts: dict[str, list[float]] | None = None,
+    volume_df: pd.DataFrame | None = None,
 ) -> FeatureMatrix:
     if not spec.feedstock_keys:
         return FeatureMatrix(X_train=None, X_future=None, feature_names=[])
+
+    # ---- preprocess volume_df (Wave 1: ERP volume exogenous) ----
+    _volume_enabled = False
+    if volume_df is not None and not volume_df.empty:
+        if not isinstance(volume_df.index, pd.DatetimeIndex):
+            if "date" in volume_df.columns:
+                volume_df = volume_df.set_index("date")
+            else:
+                logger.warning("volume_df has no DatetimeIndex and no 'date' col; skipping ERP volume features.")
+                volume_df = None
+        if volume_df is not None:
+            volume_df = volume_df.sort_index()
+            if len(volume_df) < 8:
+                logger.warning(
+                    "volume_df has only %d rows (< 8); skipping ERP volume features.", len(volume_df)
+                )
+                volume_df = None
+            else:
+                _volume_enabled = True
 
     y_dates = y.index
     start_date = y_dates.min()
@@ -106,6 +126,17 @@ def build_features(
             dow = date.weekday()
             row["dow_sin"] = float(np.sin(2 * np.pi * dow / 7))
             row["dow_cos"] = float(np.cos(2 * np.pi * dow / 7))
+        # ERP volume lags (Wave 1)
+        if _volume_enabled:
+            vol_series = volume_df["volume"]
+            for lag in range(1, 8):
+                lag_date = date - timedelta(days=lag)
+                col = f"erp_volume_lag{lag}"
+                if lag_date in volume_df.index:
+                    row[col] = float(vol_series.loc[lag_date])
+                else:
+                    prior = vol_series[vol_series.index <= lag_date]
+                    row[col] = float(prior.iloc[-1]) if len(prior) > 0 else 0.0
         train_rows.append(row)
         train_dates.append(date)
 
@@ -149,6 +180,21 @@ def build_features(
                 dow = date.weekday()
                 row["dow_sin"] = float(np.sin(2 * np.pi * dow / 7))
                 row["dow_cos"] = float(np.cos(2 * np.pi * dow / 7))
+            # ERP volume lags for future (Wave 1)
+            if _volume_enabled:
+                vol_series = volume_df["volume"]
+                last_vol_date = volume_df.index.max()
+                for lag in range(1, 8):
+                    lag_date = date - timedelta(days=lag)
+                    col = f"erp_volume_lag{lag}"
+                    if lag_date <= last_vol_date:
+                        if lag_date in volume_df.index:
+                            row[col] = float(vol_series.loc[lag_date])
+                        else:
+                            prior = vol_series[vol_series.index <= lag_date]
+                            row[col] = float(prior.iloc[-1]) if len(prior) > 0 else float(vol_series.iloc[0])
+                    else:
+                        row[col] = float(vol_series.iloc[-1])
             future_rows.append(row)
         X_future = pd.DataFrame(future_rows, index=future_dates)
 

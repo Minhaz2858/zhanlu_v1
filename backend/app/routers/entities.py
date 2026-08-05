@@ -6,7 +6,7 @@ register_entity_router() creates all 10 endpoints that the Base44 SDK expects.
 
 from typing import Type
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.database import Base
 from app.deps import get_db, get_current_user_required
@@ -30,6 +30,13 @@ from app.services import entity_service
 # include rows that were explicitly shared with the current user via
 # ResourceShare — but only on the READ path.  Writes (update/delete)
 # remain strictly owner-only.
+#
+# KnowledgeBase (2026-08-05): was previously a global catalog, leaking
+# admin-created databases to every user's MySpace Connectors tab. Now
+# user-scoped — each user only sees their own KBs. Project-scoped KB
+# visibility (for shared projects) is handled separately by
+# data_source_runtime._extend_with_project_kbs which queries the
+# KnowledgeBase table directly, NOT through the generic entity API.
 USER_SCOPED_ENTITIES = {
     "ChatSession",
     "ChatMessage",
@@ -39,6 +46,7 @@ USER_SCOPED_ENTITIES = {
     "AutomationFile",
     "AgentApp",
     "Project",
+    "KnowledgeBase",
     # User is self-scoped: the generic entity API may only read/update the
     # authenticated user's OWN record (filtered by id == caller id). This
     # closes the CRITICAL IDOR where any user could read/edit any account.
@@ -277,5 +285,99 @@ def register_entity_router(
         if not success:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
         return {"deleted": True, "id": record_id}
+
+    return router
+
+
+def register_project_kb_router() -> APIRouter:
+    """Register endpoint for listing KnowledgeBases bound to a project.
+
+    Unlike the generic entity API (which is user-scoped and only returns
+    the caller's own KBs), this endpoint lists ALL non-deleted KBs attached
+    to a project — including admin-created KBs on a project shared with
+    a non-admin user (project-bundle sharing).
+
+    Access gate: the caller must be the project owner OR have an active
+    ResourceShare granting them access to the project.
+    """
+    from app.models.project import Project
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.resource_share import ResourceShare
+
+    router = APIRouter(
+        prefix="/api/apps/{app_id}",
+        tags=["knowledge-bases"],
+    )
+
+    @router.get("/projects/{project_id}/knowledge-bases")
+    def list_project_kbs(
+        app_id: str,
+        project_id: str,
+        sort: str | None = Query(None, description="Sort field, - prefix for desc"),
+        limit: int | None = Query(None, description="Max records to return"),
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user_required),
+    ):
+        # 1. Verify project exists
+        project = db.query(Project).filter(
+            Project.id == project_id,
+            Project.is_deleted == False,
+        ).first()
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+        # 2. Access gate: owner OR shared via ResourceShare
+        has_access = project.created_by_id == user.id
+        if not has_access:
+            share = db.query(ResourceShare).filter(
+                ResourceShare.resource_id == project_id,
+                ResourceShare.resource_type == "Project",
+                ResourceShare.user_id == user.id,
+            ).first()
+            has_access = share is not None
+
+        if not has_access:
+            raise HTTPException(
+                status_code=403,
+                detail="You do not have access to this project",
+            )
+
+        # 3. Query non-deleted KBs bound to this project.
+        #    Match by exact FK (project_id) OR by legacy project name.
+        from sqlalchemy import or_
+        q = db.query(KnowledgeBase).filter(
+            or_(
+                KnowledgeBase.project_id == project_id,
+                KnowledgeBase.project == project.name,
+            ),
+            KnowledgeBase.is_deleted == False,
+        )
+
+        # 4. Apply tenant filter
+        org_filter = entity_service._tenant_filters(KnowledgeBase)
+        for cond in org_filter:
+            q = q.filter(cond)
+
+        # 5. Sort (default: newest first)
+        from app.utils.sort_parser import parse_sort
+        order_clauses = parse_sort(KnowledgeBase, sort)
+        q = q.order_by(*order_clauses)
+
+        # 6. Limit
+        effective_limit = limit if limit is not None else 200
+        effective_limit = max(1, min(effective_limit, 500))
+        q = q.limit(effective_limit)
+
+        kbs = q.all()
+
+        # 7. Annotate with can_edit for frontend permissions
+        return [
+            {
+                **kb.to_dict(),
+                "can_edit": kb.created_by_id == user.id,
+                "is_shared_with_me": kb.created_by_id != user.id,
+            }
+            for kb in kbs
+        ]
 
     return router

@@ -12,6 +12,7 @@ from __future__ import annotations
 import dataclasses
 import logging
 import math
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -283,12 +284,33 @@ class ForecastEngine:
                 from app.config import settings
                 from app.services.knowledge_graph.graph import build_c5_c9_graph
                 from app.services.forecasting.features.exogenous_loaders import (
-                    FeedstockLoader, FxLoader, EventFlagLoader,
+                    FeedstockLoader, FxLoader, EventFlagLoader, ErpVolumeLoader,
                 )
 
                 kg = build_c5_c9_graph()
                 exog_spec = derive_feature_spec(target.product_key, kg)
                 feature_names = exog_spec.feedstock_keys
+
+                # ERP volume exogenous feature (Wave 1, flag-gated)
+                volume_df = None
+                if os.environ.get("FORECAST_ERP_VOLUME_EXOG_ENABLED", "false").lower() == "true":
+                    try:
+                        parts = (target.product_key or "").split(".")
+                        product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
+                        vol_loader = ErpVolumeLoader(
+                            product_id=product_id, lookback_days=365, org_id=target.org_id
+                        )
+                        volume_df = vol_loader.load()
+                        if not volume_df.empty:
+                            volume_df = volume_df.set_index("date")
+                            logger.info(
+                                "ERP volume loaded for %s: %d days", target.product_key, len(volume_df)
+                            )
+                        else:
+                            volume_df = None
+                    except Exception as exc:
+                        logger.warning("ERP volume load failed for %s: %s", target.product_key, exc)
+                        volume_df = None
 
                 # Build feature matrix for exog models (no cascade in single-target mode)
                 feed_loader = FeedstockLoader()
@@ -297,6 +319,7 @@ class ForecastEngine:
                 fm = build_features(
                     target.product_key, y_model, exog_spec,
                     feed_loader, fx_loader, event_loader, h_max, cascade_forecasts=None,
+                    volume_df=volume_df,
                 )
 
                 # Fit exog-aware models if feature matrix is available
@@ -767,6 +790,62 @@ class ForecastEngine:
             exog_degraded=exog_degraded,
         )
         self._db.add(run)
+
+        # ------------------------------------------------------------------
+        # T2.1: Flag-gated decision logging (FORECAST_DECISION_LOGGING_ENABLED)
+        # Log each horizon's decision with actual_price_t so the decision→ROI
+        # loop can close during the nightly scoring cron.
+        # ------------------------------------------------------------------
+        if _get_config_bool("FORECAST_DECISION_LOGGING_ENABLED", False):
+            try:
+                from app.services.forecasting.features.decision_logger import (
+                    log_decision,
+                )
+                # Last known price at decision time — the critical field
+                # that makes get_pending_unrealized() return this log.
+                if y_model is not None and len(y_model) > 0:
+                    actual_price_t = float(y_model.iloc[-1])
+                else:
+                    actual_price_t = None
+
+                # Per-horizon thresholds (the values used for THIS run)
+                from app.services.forecasting import decision_engine as _de
+                decision_thresholds = {
+                    "buy": _de._BUY_THRESHOLD,
+                    "sell": _de._SELL_THRESHOLD,
+                    "buy_min_change": _de._BUY_MIN_CHANGE,
+                    "edge": _de._EDGE_THRESHOLD,
+                }
+
+                for h in horizons:
+                    key = str(int(h))
+                    decision_entry = decision_report.get(key)
+                    probability_entry = probability_report.get(key)
+                    if decision_entry is None:
+                        continue
+
+                    p_rise = probability_entry.get("p_rise") if probability_entry else None
+                    exp_chg = probability_entry.get("expected_change_pct") if probability_entry else None
+
+                    log_decision(
+                        session=self._db,
+                        product_id=target.product_key,
+                        horizon_day=int(h),
+                        as_of_date=as_of,
+                        action=str(decision_entry.action),
+                        confidence=(decision_entry.confidence or "low"),
+                        rationale=(decision_entry.rationale or ""),
+                        forecast_run_id=run.id,
+                        predicted_p_rise=float(p_rise) if p_rise is not None else None,
+                        predicted_change_pct=float(exp_chg) if exp_chg is not None else None,
+                        decision_thresholds=decision_thresholds,
+                        actual_price_t=actual_price_t,
+                    )
+            except Exception:
+                logger.exception(
+                    "[forecast-engine] decision logging failed for %s",
+                    target.product_key,
+                )
 
         # --- Write ForecastAccuracyLog ---
         # Sanitize per_model_mape: replace non-finite values (Infinity, NaN)

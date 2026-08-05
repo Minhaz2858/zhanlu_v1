@@ -70,8 +70,15 @@ export default function Sidebar() {
     { to: '/my-files', label: t.sidebar.myFiles, icon: Folder },
     { to: '/market', label: t.sidebar.market, icon: Store },
     { to: '/toolkit', label: t.sidebar.toolkit, icon: Wrench },
-    ...(user?.role === 'admin' ? [{ to: '/admin/users', label: 'Admin', icon: ShieldCheck }] : []),
   ];
+
+  // Admin entry is intentionally NOT part of the main nav — it belongs to
+  // the "role & permission config" category, so it's sunk to the bottom of
+  // the sidebar (just above the user avatar) and only rendered for admins.
+  // Label uses `t.sidebar.admin` but keeps `adminZh` so the Chinese UI shows
+  // 「管理」while the English UI keeps "Admin".
+  const isAdmin = user?.role === 'admin';
+  const adminLabel = lang === 'en' ? t.sidebar.admin : t.sidebar.adminZh;
 
   function linkClass({ isActive }) {
     return `flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors ${
@@ -144,11 +151,11 @@ export default function Sidebar() {
   }, [isDashboardRoute]);
 
   const dashboardItems = [
-    { to: '/market-dashboard/overview', label: 'Overview' },
-    { to: '/market-dashboard/upstream', label: 'Upstream' },
-    { to: '/market-dashboard/midstream', label: 'Midstream' },
-    { to: '/market-dashboard/downstream', label: 'Downstream' },
-    { to: '/market-dashboard/report', label: 'Report' },
+    { to: '/market-dashboard/overview', label: t.sidebar.dashboardOverview },
+    { to: '/market-dashboard/upstream', label: t.sidebar.dashboardUpstream },
+    { to: '/market-dashboard/midstream', label: t.sidebar.dashboardMidstream },
+    { to: '/market-dashboard/downstream', label: t.sidebar.dashboardDownstream },
+    { to: '/market-dashboard/report', label: t.sidebar.dashboardReport },
   ];
   // enabledQuery is still fetched so the query is warm when the user
   // navigates to the dashboard page, but the accordion is no longer
@@ -275,7 +282,7 @@ export default function Sidebar() {
               aria-expanded={dashboardOpen}
             >
               <LayoutDashboard className="h-4 w-4 shrink-0" />
-              <span className="flex-1 text-left">Dashboard</span>
+              <span className="flex-1 text-left">{t.sidebar.dashboard}</span>
               <ChevronDown
                 className={`h-3.5 w-3.5 transition-transform ${dashboardOpen ? 'rotate-180' : ''}`}
               />
@@ -316,6 +323,42 @@ export default function Sidebar() {
           <div className="mb-2 flex justify-center">
             <ThemeToggle collapsed />
           </div>
+        )}
+        {/* Admin entry — role/perm config, sunk below the theme toggle and
+            just above the user avatar. Only rendered for admins; collapses
+            to a bare icon button when the sidebar is collapsed. */}
+        {isAdmin && (
+          !collapsed ? (
+            <NavLink
+              to="/admin/users"
+              className={({ isActive }) =>
+                `mb-2 flex items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors ${
+                  isActive
+                    ? 'bg-sidebar-accent text-accent-foreground font-medium'
+                    : 'text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground'
+                }`
+              }
+            >
+              <ShieldCheck className="h-4 w-4 shrink-0" />
+              {adminLabel}
+            </NavLink>
+          ) : (
+            <div className="mb-2 flex justify-center">
+              <NavLink
+                to="/admin/users"
+                title={adminLabel}
+                className={({ isActive }) =>
+                  `flex h-8 w-8 items-center justify-center rounded-md transition-colors ${
+                    isActive
+                      ? 'bg-sidebar-accent text-accent-foreground'
+                      : 'text-muted-foreground hover:bg-sidebar-accent hover:text-foreground'
+                  }`
+                }
+              >
+                <ShieldCheck className="h-4 w-4" />
+              </NavLink>
+            </div>
+          )
         )}
         <UserMenu user={user} collapsed={collapsed} />
       </div>

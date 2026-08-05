@@ -11,6 +11,7 @@ import {
 } from 'recharts';
 import { RefreshCw, Activity, Zap, Layers, ChevronDown, ChevronUp, BrainCircuit } from 'lucide-react';
 import { marketDashboardApi } from '@/api/marketDashboard';
+import { useLanguage } from '@/lib/LanguageProvider';
 import { TYPO } from '../lib/typography';
 import { getChartTheme } from '../lib/chartTheme';
 import { computeYAxis, normalizeForecastPoints } from '../lib/forecastChartMath';
@@ -79,6 +80,7 @@ function fmtDateShort(iso) {
 }
 
 export default function ForecastTrendChart({ productId, productName }) {
+  const { lang } = useLanguage();
   const [days, setDays] = useState(30);
   const isDark = useDarkMode();
   const chartTheme = getChartTheme(isDark);
@@ -696,55 +698,59 @@ export default function ForecastTrendChart({ productId, productName }) {
                   text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
               >
                 <BrainCircuit size={14} className="text-indigo-500" />
-                AI 分析依据
+                {lang === 'zh' ? 'AI 分析依据' : 'AI Analysis Basis'}
                 {showAnalysis ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
               </button>
               {showAnalysis && (
                 <div className="mt-1 space-y-2 pb-2 text-[12px] leading-relaxed text-slate-600 dark:text-slate-300">
                   {data.analysis.basis_zh && (
                     <p>
-                      <span className="font-semibold text-slate-700 dark:text-slate-200">【预测依据】</span>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">
+                        {lang === 'zh' ? '【预测依据】' : '【Forecast Basis】'}
+                      </span>
                       {data.analysis.basis_zh}
                     </p>
                   )}
                   {data.analysis.action_logic_zh && (
                     <p>
-                      <span className="font-semibold text-slate-700 dark:text-slate-200">【建议逻辑】</span>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">
+                        {lang === 'zh' ? '【建议逻辑】' : '【Suggestion Logic】'}
+                      </span>
                       {data.analysis.action_logic_zh}
                     </p>
                   )}
                   <div className="grid grid-cols-2 gap-x-6 gap-y-1 pt-1 text-[11px] text-slate-500 dark:text-slate-400 sm:grid-cols-4">
                     {data.analysis.chg_7d_pct != null && (
-                      <span>近7日 <b className="tabular-nums">{fmtPct(data.analysis.chg_7d_pct)}</b></span>
+                      <span>{lang === 'zh' ? '近7日' : '7d change'} <b className="tabular-nums">{fmtPct(data.analysis.chg_7d_pct)}</b></span>
                     )}
                     {data.analysis.chg_30d_pct != null && (
-                      <span>近30日 <b className="tabular-nums">{fmtPct(data.analysis.chg_30d_pct)}</b></span>
+                      <span>{lang === 'zh' ? '近30日' : '30d change'} <b className="tabular-nums">{fmtPct(data.analysis.chg_30d_pct)}</b></span>
                     )}
                     {data.analysis.model_count > 0 && (
-                      <span>模型集成 <b>{data.analysis.model_count} 个</b></span>
+                      <span>{lang === 'zh' ? '模型集成' : 'Ensemble of'} <b>{data.analysis.model_count}</b>{lang === 'zh' ? ' 个' : ' models'}</span>
                     )}
                     {data.analysis.ensemble_mape != null && (
                       <span>
-                        回测误差 <b className="tabular-nums">{fmtPct(data.analysis.ensemble_mape, 1, false)}</b>
-                        {data.analysis.beats_naive === true && <span className="text-emerald-600"> 优于基线</span>}
-                        {data.analysis.beats_naive === false && <span className="text-red-500"> 弱于基线</span>}
+                        {lang === 'zh' ? '回测误差' : 'Backtest MAPE'} <b className="tabular-nums">{fmtPct(data.analysis.ensemble_mape, 1, false)}</b>
+                        {data.analysis.beats_naive === true && <span className="text-emerald-600">{lang === 'zh' ? ' 优于基线' : ' beats naive'}</span>}
+                        {data.analysis.beats_naive === false && <span className="text-red-500">{lang === 'zh' ? ' 弱于基线' : ' below naive'}</span>}
                       </span>
                     )}
                     {data.analysis.bull_price != null && data.analysis.bear_price != null && (
                       <span>
-                        区间 <b className="tabular-nums">{fmtPrice(data.analysis.bear_price)}–{fmtPrice(data.analysis.bull_price)}</b>
+                        {lang === 'zh' ? '区间' : 'Range'} <b className="tabular-nums">{fmtPrice(data.analysis.bear_price)}–{fmtPrice(data.analysis.bull_price)}</b>
                       </span>
                     )}
                     {data.analysis.directional_accuracy != null && (
                       <span>
-                        方向准确率 <b className="tabular-nums">{fmtPct(data.analysis.directional_accuracy, 0, false)}</b>
+                        {lang === 'zh' ? '方向准确率' : 'Direction accuracy'} <b className="tabular-nums">{fmtPct(data.analysis.directional_accuracy, 0, false)}</b>
                         {data.analysis.directional_status === 'edge'
-                          ? <span className="text-emerald-600"> 显著</span>
-                          : <span className="text-slate-400"> 不显著</span>}
+                          ? <span className="text-emerald-600">{lang === 'zh' ? ' 显著' : ' significant'}</span>
+                          : <span className="text-slate-400">{lang === 'zh' ? ' 不显著' : ' not significant'}</span>}
                       </span>
                     )}
                     {data.analysis.below_naive_baseline === true && (
-                      <span className="text-amber-600">诚实门控:已降级为保守预测</span>
+                      <span className="text-amber-600">{lang === 'zh' ? '诚实门控:已降级为保守预测' : 'Honesty gate: downgraded to conservative forecast'}</span>
                     )}
                   </div>
                 </div>

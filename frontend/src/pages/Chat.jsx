@@ -72,6 +72,7 @@ export default function Chat() {
     refreshSessions,
     deleteSession,
     renameSession,
+    selectSession,
     chatGeneration,
   } = useChatSession();
 
@@ -212,6 +213,12 @@ export default function Chat() {
   // Scheduled automation panel (Manus-style). Only shown when the current
   // session has an AutomationTask linked to it (session_id == task.session_id).
   const [scheduledOpen, setScheduledOpen] = useState(false);
+  // Number of KnowledgeBases the project's data_source_runtime will
+  // inject into whichever agent is selected (see
+  // _extend_with_project_kbs in data_source_runtime.py). Surfaced as
+  // a small badge on the project chip so users see *why* the agent
+  // can talk to a DB they didn't explicitly bind to the agent.
+  const [inheritedKbCount, setInheritedKbCount] = useState(0);
   // Deep-link target: when a "📅 Scheduled update" chat message's "Open run"
   // button is clicked, we open the Scheduled panel and focus this run.
   const [focusExecutionId, setFocusExecutionId] = useState(null);
@@ -350,24 +357,6 @@ export default function Chat() {
         // Kbs here to keep this code path minimal.
       }).catch(() => {});
     }
-    // Auto-select ecisco_bi_assistant when entering the Ecisco BI
-    // project without an explicit agent param. The ecisco_bi_assistant
-    // replaces the legacy orchestrator_agent and covers the complete
-    // EDIA 6-stage pipeline (perception→diagnosis→forecast→pricing→
-    // decision→weekly report) plus knowledge graph and ERP writeback.
-    // Users who manually pick a different agent are not overridden.
-    if (!agentId && projectName) {
-      (async () => {
-        try {
-          const decodedName = decodeURIComponent(projectName);
-          if (decodedName === 'Ecisco BI') {
-            const _agents = await base44.entities.AgentApp.list();
-            const eciscoAgent = _agents.find((a) => a.name === 'ecisco_bi_assistant');
-            if (eciscoAgent) setActiveAgent(eciscoAgent);
-          }
-        } catch { /* silent — project-scoped fallback handled in handleSend */ }
-      })();
-    }
     // Open an existing agent conversation: the user clicked a row
     // in the Project Detail "Recent Chats" list. We rehydrate the
     // chat pane with the conversation's stored messages and set
@@ -382,6 +371,37 @@ export default function Chat() {
     //      the conv record's agent_name is then stale, but the
     //      caller can still pass the current name.
     const convId = params.get('conv');
+    // Auto-select ecisco_bi_assistant when entering the Ecisco BI
+    // project WITHOUT an explicit agent param AND for a brand-new
+    // chat (no ?conv=). The ecisco_bi_assistant replaces the legacy
+    // orchestrator_agent and covers the complete EDIA 6-stage
+    // pipeline (perception→diagnosis→forecast→pricing→decision→
+    // weekly report) plus knowledge graph and ERP writeback.
+    //
+    // CRITICAL: the ``!convId`` gate prevents this auto-select from
+    // racing against the conv rehydration block below. For an
+    // existing conv, the stored ``agent_name`` (general_assistant,
+    // ecisco_bi_assistant, or anything else) is the source of truth
+    // — rehydrating it via ``setActiveAgent`` and then having this
+    // IIFE overwrite it to ecisco_bi_assistant was the bug: an
+    // existing general_assistant conv opened in the Ecisco+BI
+    // project context would silently flip agents on render. Only
+    // auto-select for NEW chats where the user hasn't picked an
+    // agent yet.
+    // Users who manually pick a different agent are not overridden
+    // (handlePickAgent runs after mount and setActiveAgent wins).
+    if (!agentId && projectName && !convId) {
+      (async () => {
+        try {
+          const decodedName = decodeURIComponent(projectName);
+          if (decodedName === 'Ecisco BI') {
+            const _agents = await base44.entities.AgentApp.list();
+            const eciscoAgent = _agents.find((a) => a.name === 'ecisco_bi_assistant');
+            if (eciscoAgent) setActiveAgent(eciscoAgent);
+          }
+        } catch { /* silent — project-scoped fallback handled in handleSend */ }
+      })();
+    }
     const convAgentName = params.get('agentName') || null;
     if (convId) {
       base44.entities.AgentConversation.get(convId).then(async (conv) => {
@@ -537,6 +557,31 @@ export default function Chat() {
     } catch { /* SSR / test env */ }
   }, [activeId]);
 
+  // Deep-link restore: when the URL has ``?conv=<conversation_id>``
+  // (typical after a page refresh on a chat deep link, or a shared
+  // link from the sidebar's "Recent Chats"), link the conv back to
+  // its owning ChatSession so the chat is fully functional (activeId
+  // set, input enabled, project chip adopted). The rehydration
+  // useEffect at the top of the file loads the conv's messages and
+  // agent, but the conv doesn't carry the session id — only the
+  // ChatSession does, and ``sessions`` is loaded asynchronously. So
+  // we watch ``sessions`` and re-evaluate as soon as the list
+  // arrives. Without this, ``activeId`` stays null after a refresh,
+  // and the cleanup useEffect above wipes ``?conv=`` from the URL
+  // (and the user can no longer type into the chat input because
+  // there is no active session).
+  useEffect(() => {
+    if (!sessions || sessions.length === 0) return;
+    try {
+      const convId = new URLSearchParams(window.location.search).get('conv');
+      if (!convId) return;
+      const s = sessions.find((x) => x.conversation_id === convId);
+      if (!s) return;
+      if (activeId === s.id) return;
+      if (selectSession) selectSession(s.id);
+    } catch { /* SSR / test env */ }
+  }, [sessions, activeId, selectSession]);
+
   // Auto-restore the active agent when opening a session that has a
   // linked AgentConversation (conversation_id set on the ChatSession
   // record). This is the missing piece that makes the sidebar reopen
@@ -572,6 +617,32 @@ export default function Chat() {
   // Auto-scroll and the floating "Jump to latest" button were removed
   // (2026-07-29, user request): the viewport now stays wherever the
   // user put it; new messages simply append without moving the view.
+
+  // Resolve the project's bound KnowledgeBases and surface the count
+  // to the chat input as an "inheriting N data sources" badge. Mirrors
+  // the server-side ``_extend_with_project_kbs`` in
+  // ``data_source_runtime.py`` so the UI shows the same scope the
+  // runtime will apply on the next send. Best-effort: a network failure
+  // just leaves the badge hidden (count = 0), it does not block the
+  // chat.
+  useEffect(() => {
+    if (!pendingProjectId) {
+      setInheritedKbCount(0);
+      return undefined;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const kbs = await base44.entities.KnowledgeBase.list();
+        if (cancelled) return;
+        const count = kbs.filter((kb) => kb.project_id === pendingProjectId).length;
+        if (!cancelled) setInheritedKbCount(count);
+      } catch {
+        if (!cancelled) setInheritedKbCount(0);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [pendingProjectId]);
 
   // Debounced persistence to localStorage so the chat survives refreshes
   useEffect(() => {
@@ -1513,15 +1584,37 @@ export default function Chat() {
     // runtime against the matching AgentApp.
     let convId = sessionId;
     if (!convId) {
-      // Read the project context that was stashed by the project-scoped
-      // entry point (``?project=&projectName=``). Falls back gracefully
-      // to an empty object so existing chat flows (no project) keep
-      // working unchanged.
+      // Read the project context from the CURRENT URL params (the
+      // source of truth for the current navigation). Previously this
+      // read ``sessionStorage['zhanlu:lastProjectContext']``, which
+      // leaked: a user who had earlier visited
+      // ``/chat?projectName=Ecisco+BI`` would later open a fresh
+      // ``/chat`` (no project param) and find their new conversation
+      // auto-tagged with the Ecisco+BI project — and consequently
+      // auto-routed to ``ecisco_bi_assistant`` instead of the default
+      // ``general_assistant``. Using the URL directly ensures the
+      // project context matches the current navigation: only chats
+      // opened from a project-scoped URL get tagged with that
+      // project; everything else lands in "default / general" with
+      // no project_id.
       let projectCtx = {};
       try {
-        const raw = sessionStorage.getItem('zhanlu:lastProjectContext');
-        if (raw) projectCtx = JSON.parse(raw) || {};
-      } catch { /* noop */ }
+        const url = new URL(window.location.href);
+        const urlProjectId = url.searchParams.get('project');
+        const urlProjectName = url.searchParams.get('projectName');
+        if (urlProjectName) {
+          try { projectCtx.projectName = decodeURIComponent(urlProjectName); } catch { projectCtx.projectName = urlProjectName; }
+          if (urlProjectId) projectCtx.projectId = urlProjectId;
+        } else if (urlProjectId) {
+          // URL has project FK but no name — keep the projectId so
+          // the backend can still tag the conv. projectName will be
+          // resolved server-side from the FK.
+          projectCtx.projectId = urlProjectId;
+        }
+        // If URL has neither, projectCtx stays {} → conv is created
+        // with no project_id (the "default / general" path). This is
+        // the intended behavior for chats opened outside a project.
+      } catch { /* SSR / non-browser env — best-effort */ }
       const conv = await createAgentConversation(activeAgent.name, {
         description: activeAgent.description || '',
         agent_app_id: activeAgent.id,
@@ -1615,6 +1708,33 @@ export default function Chat() {
           content: text,
           ...(fileUrls && fileUrls.length ? { file_urls: fileUrls } : {}),
           ...(lang ? { lang } : {}),
+          // Forward the current project context in the stream body
+          // so the backend's prepare_data_source_runtime can extend
+          // the agent's bound KBs with the project's KBs — even when
+          // the AgentConversation row was created without a project_id
+          // (e.g. legacy convs from before project-scoping landed,
+          // or convs first opened outside a project-scoped entry
+          // point). Source from the LIVE URL (not pendingProject
+          // state, which can lag behind a recent navigation and is
+          // cleared by ``newChat(null)`` from "+ New Task"). The
+          // backend treats the body project context as a per-message
+          // override of ``conv.project_id`` — when the URL has no
+          // projectName (a "default / general" chat), no project
+          // context is sent, so the agent correctly falls back to
+          // its own bound data sources only.
+          ...(() => {
+            try {
+              const url = new URL(window.location.href);
+              const urlProjectId = url.searchParams.get('project');
+              const urlProjectName = url.searchParams.get('projectName');
+              const out = {};
+              if (urlProjectId) out.project_id = urlProjectId;
+              if (urlProjectName) {
+                try { out.project_name = decodeURIComponent(urlProjectName); } catch { out.project_name = urlProjectName; }
+              }
+              return out;
+            } catch { return {}; }
+          })(),
         },
         streamState.abortRef.current?.signal,
       );
@@ -2130,7 +2250,7 @@ export default function Chat() {
                       }}
                     />
                   )}
-                  {messages.filter((m) => !m.hidden).map((m) => {
+                  {messages.filter((m) => !m.hidden && (m.id === streamingId || !(m.role === 'assistant' && !m.content))).map((m) => {
                     const isStreaming = m.id === streamingId;
                     const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
                     return (
@@ -2179,7 +2299,7 @@ export default function Chat() {
                 )}
               </div>
             </div>
-            <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} />
+            <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} />
           </>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
@@ -2188,7 +2308,7 @@ export default function Chat() {
             </div>
             <h1 className="font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
             <div className="mt-8 w-full max-w-4xl">
-              <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name) => setPendingProject(name, null)} centered />
+              <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name) => setPendingProject(name, null)} centered inheritedKbCount={inheritedKbCount} />
               {chips.length > 0 && (
                 <RelatedContent
                   chips={chips}

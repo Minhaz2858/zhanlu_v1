@@ -166,13 +166,19 @@ class SkuBrief(BaseModel):
 
 
 class AnalystBriefMeta(BaseModel):
-    """Structured AI 简评 — evidence-grounded analyst brief."""
-    summary_zh: str = ""
-    why_price_zh: str = ""
-    why_action_zh: str = ""
-    watch_triggers_zh: list[str] = []
-    risk_zh: str = ""
-    source: str = "template"           # "llm" | "template"
+    """Structured AI 简评 — 7-section evidence-grounded analyst brief.
+
+    Mirrors the human weekly report's per-product structure:
+    市场动态 / 价格数据 / 上游传导 / 供需研判 / 价格预测 / 触发条件 / 风险提示.
+    """
+    market_update_zh: str = ""           # 市场动态 — intel events + volatility
+    price_data_zh: str = ""             # 价格数据 — current + percentile + trend
+    upstream_logic_zh: str = ""         # 上游传导 — causal chain
+    supply_demand_zh: str = ""          # 供需研判 — seasonal + model drivers
+    forecast_zh: str = ""               # 价格预测 — range + direction + confidence
+    watch_triggers_zh: list[str] = []   # 触发条件 — re-eval triggers
+    risk_zh: str = ""                   # 风险提示 — divergence/spread/vol
+    source: str = "template"            # "llm" | "template"
     day: Optional[int] = None
     generated_at: Optional[str] = None
 

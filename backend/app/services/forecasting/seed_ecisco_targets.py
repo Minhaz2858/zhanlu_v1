@@ -63,6 +63,14 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
             "granularity": "day",
+            "extra_sources": [
+                {
+                    "table": "lz_v_裂解c5_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '裂解C5'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 3,
@@ -77,6 +85,14 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C9-裂解C9均价'",
             "granularity": "day",
+            "extra_sources": [
+                {
+                    "table": "lz_v_裂解c9_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '裂解C9'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 4,
@@ -132,6 +148,14 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '间戊二烯-华东市场价'",
             "granularity": "day",
+            "extra_sources": [
+                {
+                    "table": "lz_v_间戊二烯_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '间戊二烯'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 6,
@@ -146,6 +170,14 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '双环戊二烯-华东市场价'",
             "granularity": "day",
+            "extra_sources": [
+                {
+                    "table": "lz_v_双环戊二烯_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '双环戊二烯'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 7,
@@ -160,6 +192,14 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = 'SIS-巴陵1105'",
             "granularity": "day",
+            "extra_sources": [
+                {
+                    "table": "lz_v_sis_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = 'SIS'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 9,
@@ -197,6 +237,14 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '戊烷发泡剂-华东市场价'",
             "granularity": "day",
+            "extra_sources": [
+                {
+                    "table": "lz_v_戊烷泡发剂_data",
+                    "time_col": "biz_date(业务日期)",
+                    "measure": "tax_price(含税单价)",
+                    "where": "`material_name(产品名称)` = '戊烷发泡剂'",
+                },
+            ],
         },
         "include_in_weekly_report": True,
         "report_order": 11,

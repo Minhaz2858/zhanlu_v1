@@ -4,24 +4,24 @@
 
 @layer base {
   :root {
-    --background: 40 33% 97%;
-    --foreground: 17 12% 10%;
-    --card: 0 0% 99%;
-    --card-foreground: 17 12% 10%;
-    --popover: 40 33% 98%;
-    --popover-foreground: 17 12% 10%;
+    --background: 0 0% 100%;
+    --foreground: 220 14% 10%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 14% 10%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 14% 10%;
     --primary: 25 65% 46%;
     --primary-foreground: 40 33% 97%;
-    --secondary: 40 20% 94%;
-    --secondary-foreground: 17 12% 10%;
-    --muted: 40 20% 94%;
-    --muted-foreground: 20 5% 45%;
-    --accent: 40 30% 92%;
+    --secondary: 220 14% 96%;
+    --secondary-foreground: 220 14% 10%;
+    --muted: 220 14% 96%;
+    --muted-foreground: 220 9% 44%;
+    --accent: 220 14% 94%;
     --accent-foreground: 25 65% 40%;
     --destructive: 0 70% 50%;
     --destructive-foreground: 40 33% 97%;
-    --border: 34 22% 87%;
-    --input: 34 22% 87%;
+    --border: 220 13% 91%;
+    --input: 220 13% 91%;
     --ring: 25 65% 46%;
     --chart-1: 25 65% 46%;
     --chart-2: 160 35% 40%;
@@ -33,13 +33,13 @@
     --font-body: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     --font-display: Georgia, Cambria, 'Times New Roman', Times, serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-    --sidebar-background: 40 28% 95%;
-    --sidebar-foreground: 17 12% 14%;
+    --sidebar-background: 0 0% 100%;
+    --sidebar-foreground: 220 14% 14%;
     --sidebar-primary: 25 65% 46%;
     --sidebar-primary-foreground: 40 33% 97%;
-    --sidebar-accent: 40 28% 91%;
+    --sidebar-accent: 220 14% 96%;
     --sidebar-accent-foreground: 25 65% 40%;
-    --sidebar-border: 34 22% 88%;
+    --sidebar-border: 220 13% 91%;
     --sidebar-ring: 25 65% 46%;
   }
 
@@ -116,11 +116,11 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: hsl(34 22% 82%);
+  background: hsl(220 13% 84%);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: hsl(34 22% 72%);
+  background: hsl(220 13% 74%);
 }
 .dark ::-webkit-scrollbar-thumb {
   background: hsl(0 0% 22%);

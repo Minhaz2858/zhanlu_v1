@@ -9,6 +9,8 @@ export const translations = {
     sidebar: {
       brand: '战颅系统', cognitiveHub: '认知中枢', automation: '自动化任务', automationAgent: '自动化助手',
       mySpace: '我的空间', myFiles: '我的文件', fromPersonal: '来自个人', fromCompany: '来自公司', market: '市场', toolkit: '工具包',
+      admin: '管理', adminZh: '管理',
+      dashboard: '行情看板', dashboardOverview: '总览', dashboardUpstream: '上游', dashboardMidstream: '中游', dashboardDownstream: '下游', dashboardReport: '报表',
       collapse: '收起侧栏', expand: '展开侧栏',
     },
     chat: {
@@ -94,7 +96,7 @@ export const translations = {
       automationBadge: '已创建自动化任务',
     },
     userMenu: {
-      language: '语言', zh: '中文', en: 'English',
+      zh: '中文', en: 'English',
       theme: '主题', light: '浅色模式', dark: '深色模式', system: '跟随系统',
       help: '获取帮助', plans: '查看所有计划', apps: '获取应用和扩展',
       learnMore: '了解更多', logout: '退出登录',
@@ -172,15 +174,8 @@ export const translations = {
       testMissingFields: '请先填写主机和用户名',
     },
     strategic: {
-      decisions: '战略决策', pending: '待处理', activeAgents: '活跃Agent',
-      successRate: '执行成功率', pendingTasks: '待处理任务',
-      allNormal: '暂无待处理任务，全部运行正常。',
-      automation: '自动化', report: '报表', failed: '执行失败', paused: '已暂停',
-      stale: '数据过期', generating: '生成中',
-    },
-    notifications: {
-      title: '通知', pending: '待处理任务', empty: '暂无待处理，全部运行正常。',
-      view: '查看',
+      decisions: '战略决策', activeAgents: '活跃Agent',
+      successRate: '执行成功率',
     },
     automation: {
       title: '自动化任务', subtitle: '查看与管理在对话中创建的全部自动执行流程。启停、查看日志与运行状态。',
@@ -202,9 +197,9 @@ export const translations = {
     mySpace: {
       title: '我的空间', subtitle: '个人私有资产仓库。查看、运行与删除你创建的全部资产。',
       hint: '新建或编辑资产，请在 Chat 对话框中完成。',
-      tabs: { agent: '我的Agent', kb: 'Connectors', file: '我的文件', flow: '决策流程', report: '我的报表', project: '项目', dashboard: '仪表盘' },
+      tabs: { agent: '智能体', kb: '连接器', file: '我的文件', flow: '决策流程', report: '我的报表', project: '项目', dashboard: '仪表盘' },
       empty: '暂无', emptyHint: '在 Chat 对话框中创建后将自动出现在此处。',
-      backToAgents: '返回我的Agent',
+      backToAgents: '返回智能体',
     },
     projectDetail: {
       title: '项目', backTo: '返回项目列表',
@@ -609,6 +604,8 @@ export const translations = {
     sidebar: {
       brand: 'Zhanlu System', cognitiveHub: 'Cognitive Hub', automation: 'Automation', automationAgent: 'Automation Agent',
       mySpace: 'My Space', myFiles: 'My Files', fromPersonal: 'From Personal', fromCompany: 'From Company', market: 'Market', toolkit: 'Toolkit',
+      admin: 'Admin', adminZh: 'Admin',
+      dashboard: 'Dashboard', dashboardOverview: 'Overview', dashboardUpstream: 'Upstream', dashboardMidstream: 'Midstream', dashboardDownstream: 'Downstream', dashboardReport: 'Report',
       collapse: 'Collapse sidebar', expand: 'Expand sidebar',
     },
     chat: {
@@ -771,15 +768,8 @@ export const translations = {
       testMissingFields: 'Please fill in host and username first',
     },
     strategic: {
-      decisions: 'Decisions', pending: 'Pending', activeAgents: 'Active Agents',
-      successRate: 'Success Rate', pendingTasks: 'Pending Tasks',
-      allNormal: 'No pending tasks — all running normally.',
-      automation: 'Automation', report: 'Report', failed: 'Failed', paused: 'Paused',
-      stale: 'Stale', generating: 'Generating',
-    },
-    notifications: {
-      title: 'Notifications', pending: 'Pending Tasks', empty: 'No pending tasks — all running normally.',
-      view: 'View',
+      decisions: 'Decisions', activeAgents: 'Active Agents',
+      successRate: 'Success Rate',
     },
     automation: {
       title: 'Automation Tasks', subtitle: 'View and manage all automated flows created via chat. Start, stop, view logs and status.',

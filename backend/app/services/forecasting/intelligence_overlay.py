@@ -10,10 +10,30 @@ Used by ForecastEngine.compute_target() after the ML ensemble step.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+
+def _get_config_bool(key: str, default: bool = False) -> bool:
+    """Safely read a boolean config flag, falling back to *default*."""
+    try:
+        from app.config import settings
+        val = getattr(settings, key, None)
+        if val is not None:
+            if isinstance(val, bool):
+                return val
+            if isinstance(val, str):
+                return val.lower() in ("1", "true", "yes")
+            return bool(val)
+    except Exception:
+        pass
+    env = os.environ.get(key, "")
+    if env:
+        return env.lower() in ("1", "true", "yes")
+    return default
 
 # Horizon scaling: closer horizons get a larger share of the event impact.
 # 3-day horizon: 80% of net impact (rapid repricing)
@@ -70,13 +90,24 @@ def fetch_product_intelligence_sync(
     total_conf = 0.0
     details = []
 
+    # Wave 2 T2.2: data-backed overlay when flag is ON and calibration exists
+    _use_calibrated = _get_config_bool("FORECAST_EVENT_CALIBRATION_ENABLED", False)
+
     for m in matched:
         direction = m.get("direction", "neutral")
         magnitude = m.get("magnitude_estimate", "minor")
         certainty = m.get("certainty", "medium")
+        event_type = m.get("event_type", "unknown")
 
-        # Convert qualitative to numeric
-        impact_pct = _direction_magnitude_to_pct(direction, magnitude)
+        # Convert qualitative to numeric — prefer calibrated data
+        if _use_calibrated:
+            calibrated = _calibrated_impact_pct(db, event_type, product_key)
+            if calibrated is not None:
+                impact_pct = calibrated
+            else:
+                impact_pct = _direction_magnitude_to_pct(direction, magnitude)
+        else:
+            impact_pct = _direction_magnitude_to_pct(direction, magnitude)
         conf = _certainty_to_confidence(certainty)
 
         weighted_pct += impact_pct * conf
@@ -203,6 +234,36 @@ def _match_events_to_product(
         })
 
     return matched
+
+
+def _calibrated_impact_pct(
+    db: Any,
+    event_type: str,
+    product_key: str,
+) -> float | None:
+    """Look up the mean price_impact_pct from calibrated ForecastEventImpact rows.
+
+    Returns None when no calibration data exists — callers should fall back
+    to the heuristic _direction_magnitude_to_pct().
+    """
+    try:
+        from sqlalchemy import func
+        from app.models.forecasting import ForecastEventImpact
+
+        row = (
+            db.query(func.avg(ForecastEventImpact.price_impact_pct))
+            .filter(
+                ForecastEventImpact.event_type == event_type,
+                ForecastEventImpact.product_id == product_key,
+                ForecastEventImpact.price_impact_pct.isnot(None),
+            )
+            .first()
+        )
+        if row and row[0] is not None:
+            return float(row[0])
+    except Exception:
+        pass
+    return None
 
 
 def _direction_magnitude_to_pct(direction: str, magnitude: str) -> float:

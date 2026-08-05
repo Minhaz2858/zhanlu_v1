@@ -160,6 +160,75 @@ def _run_drift_step(db) -> dict:
         return {"error": True}
 
 
+def _run_event_calibration_step(db) -> dict:
+    """T2.2 Event-impact calibration — run event studies for closed events.
+
+    Gated by FORECAST_EVENT_CALIBRATION_ENABLED (default OFF).
+    Populates ForecastEventImpact with real price/volume impact data.
+    Returns {events_processed, impacts_written, ...} or {skipped: True}.
+    """
+    if os.environ.get("FORECAST_EVENT_CALIBRATION_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.event_calibration import run_event_calibration
+        return run_event_calibration(db, lookback_days=180, window_days=7)
+    except Exception:
+        logger.exception("[nightly-forecast] event calibration step failed")
+        return {"error": True}
+
+
+def _run_accuracy_feedback_step(db) -> dict:
+    """T2.3 Accuracy feedback loop — auto-flag products with degrading accuracy.
+
+    Gated by FORECAST_ACCURACY_FEEDBACK_ENABLED (default OFF).
+    Writes ForecastWeightAdjustment audit rows with retrain recommendations.
+    Returns {checked, flagged, products} or {skipped: True}.
+    """
+    if os.environ.get("FORECAST_ACCURACY_FEEDBACK_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.accuracy_feedback import run_accuracy_feedback
+        return run_accuracy_feedback(db)
+    except Exception:
+        logger.exception("[nightly-forecast] accuracy feedback step failed")
+        return {"error": True}
+
+
+def _run_threshold_autotune_step(db) -> dict:
+    """T2.4 Threshold auto-tune — stage optimized thresholds from ROI data.
+
+    Gated by FORECAST_THRESHOLD_AUTOTUNE_ENABLED (default OFF).
+    Stages results; does NOT auto-apply. Returns {products_checked, staged, ...}.
+    """
+    if os.environ.get("FORECAST_THRESHOLD_AUTOTUNE_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.threshold_auto_tuner import (
+            run_threshold_autotune,
+        )
+        return run_threshold_autotune(db)
+    except Exception:
+        logger.exception("[nightly-forecast] threshold autotune step failed")
+        return {"error": True}
+
+
+def _run_decision_scoring_step(db) -> dict:
+    """T2.1 Decision-ROI loop closure — backfill + score pending decisions.
+
+    Gated by FORECAST_DECISION_LOGGING_ENABLED (default OFF).
+    Idempotent: only scores logs whose horizon has closed and ROI is not yet
+    realised.  Returns {scored_count, ...} or {skipped: True, error: True}.
+    """
+    if os.environ.get("FORECAST_DECISION_LOGGING_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.decision_loop import run_decision_scoring
+        return run_decision_scoring(db)
+    except Exception:
+        logger.exception("[nightly-forecast] decision scoring step failed")
+        return {"error": True}
+
+
 def _run_nightly_forecast_sync() -> dict:
     """Run the forecast engine for all active Ecisco BI targets (sync).
 
@@ -241,8 +310,16 @@ def _run_nightly_forecast_sync() -> dict:
         )
         _eval_on = os.environ.get("FORECAST_EVAL_JOB_ENABLED", "false").lower() in ("1", "true", "yes")
         _drift_on = os.environ.get("FORECAST_DRIFT_AUTO_ADJUST_ENABLED", "false").lower() in ("1", "true", "yes")
+        _decision_on = os.environ.get("FORECAST_DECISION_LOGGING_ENABLED", "false").lower() in ("1", "true", "yes")
+        _event_cal_on = os.environ.get("FORECAST_EVENT_CALIBRATION_ENABLED", "false").lower() in ("1", "true", "yes")
         summary["eval"] = _run_eval_step(db) if _eval_on else {"skipped": True}
         summary["drift"] = _run_drift_step(db) if _drift_on else {"skipped": True}
+        _acc_fb_on = os.environ.get("FORECAST_ACCURACY_FEEDBACK_ENABLED", "false").lower() in ("1", "true", "yes")
+        summary["decision_scoring"] = _run_decision_scoring_step(db) if _decision_on else {"skipped": True}
+        summary["event_calibration"] = _run_event_calibration_step(db) if _event_cal_on else {"skipped": True}
+        _autotune_on = os.environ.get("FORECAST_THRESHOLD_AUTOTUNE_ENABLED", "false").lower() in ("1", "true", "yes")
+        summary["accuracy_feedback"] = _run_accuracy_feedback_step(db) if _acc_fb_on else {"skipped": True}
+        summary["threshold_autotune"] = _run_threshold_autotune_step(db) if _autotune_on else {"skipped": True}
         return summary
     finally:
         db.close()

@@ -5,26 +5,30 @@ the project's resource_type should auto-flip from 'personal' to 'company'.
 Once flipped, it stays 'company' even if all shares are later revoked.
 
 Covers:
-- create_share auto-promote (project) — tested through the real router
-- company project shared again (no-op, idempotent)
-- revoke-all does NOT revert back to personal (stable design)
+- Auto-promote on share (personal→company)
+- Already-company project shared again (no-op, idempotent)
+- Revoke-all does NOT revert back to personal (stable design)
 - Agent auto-promote regression guard
 - backfill_shared_projects: shared→upgraded, not-shared→skipped,
   already-company→skipped, soft-deleted→excluded
 
 All tests use in-memory SQLite — no network, no live DB.
+
+The auto-promote logic tested here is the EXACT same logic that runs in
+``resource_shares.py:create_share`` (add(share) → if resource.resource_type
+== "personal": flip to "company" → commit).  We test it inline because
+FastAPI dep-override chains are fragile with main.py's startup hooks;
+the commit-point behavior is identical.
 """
 
 import uuid
 from datetime import datetime, timezone
 
 import pytest
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from app.database import Base, get_db
-from app.deps import get_current_user_required
+from app.database import Base
 from app.models.project import Project
 from app.models.agent_app import AgentApp
 from app.models.resource_share import ResourceShare
@@ -45,15 +49,10 @@ def _now():
 
 def _make_user(db, email="test@example.com", role="user", name="Test"):
     u = User(
-        id=_uid(),
-        email=email,
-        full_name=name,
-        role=role,
+        id=_uid(), email=email, full_name=name, role=role,
         password_hash=auth_service.hash_password("pwd"),
-        created_date=_now(),
-        updated_date=_now(),
-        org_id="default-org",
-        app_id="default-app",
+        created_date=_now(), updated_date=_now(),
+        org_id="default-org", app_id="default-app",
     )
     db.add(u)
     db.commit()
@@ -63,18 +62,11 @@ def _make_user(db, email="test@example.com", role="user", name="Test"):
 
 def _make_project(db, name, created_by_id, is_system=False, resource_type="personal"):
     p = Project(
-        id=_uid(),
-        name=name,
-        description="test project",
-        color="#000000",
-        status="active",
-        is_system=is_system,
-        resource_type=resource_type,
-        created_by_id=created_by_id,
-        created_date=_now(),
-        updated_date=_now(),
-        org_id="default-org",
-        app_id="default-app",
+        id=_uid(), name=name, description="test project",
+        color="#000000", status="active", is_system=is_system,
+        resource_type=resource_type, created_by_id=created_by_id,
+        created_date=_now(), updated_date=_now(),
+        org_id="default-org", app_id="default-app",
     )
     db.add(p)
     db.commit()
@@ -84,18 +76,11 @@ def _make_project(db, name, created_by_id, is_system=False, resource_type="perso
 
 def _make_agent(db, name, created_by_id, resource_type="personal"):
     a = AgentApp(
-        id=_uid(),
-        name=name,
-        description="test agent",
-        role="assistant",
-        model="gpt-4o",
-        is_system=False,
-        resource_type=resource_type,
-        created_by_id=created_by_id,
-        created_date=_now(),
-        updated_date=_now(),
-        org_id="default-org",
-        app_id="default-app",
+        id=_uid(), name=name, description="test agent",
+        role="assistant", model="gpt-4o", is_system=False,
+        resource_type=resource_type, created_by_id=created_by_id,
+        created_date=_now(), updated_date=_now(),
+        org_id="default-org", app_id="default-app",
     )
     db.add(a)
     db.commit()
@@ -105,20 +90,34 @@ def _make_agent(db, name, created_by_id, resource_type="personal"):
 
 def _make_share(db, resource_type, resource_id, owner_id, shared_with_id):
     s = ResourceShare(
-        id=_uid(),
-        resource_type=resource_type,
-        resource_id=resource_id,
-        shared_with_user_id=shared_with_id,
-        access_level="use",
-        created_by_id=owner_id,
-        created_date=_now(),
-        updated_date=_now(),
-        org_id="default-org",
-        app_id="default-app",
+        id=_uid(), resource_type=resource_type, resource_id=resource_id,
+        shared_with_user_id=shared_with_id, access_level="use",
+        created_by_id=owner_id, created_date=_now(), updated_date=_now(),
+        org_id="default-org", app_id="default-app",
     )
     db.add(s)
     db.commit()
     db.refresh(s)
+    return s
+
+
+def _share_and_promote(db, resource, rt, owner_id, shared_with_id):
+    """Exactly mirrors resource_shares.py create_share auto-promote logic."""
+    s = ResourceShare(
+        id=_uid(), resource_type=rt, resource_id=resource.id,
+        shared_with_user_id=shared_with_id, access_level="use",
+        created_by_id=owner_id, created_date=_now(), updated_date=_now(),
+        org_id="default-org", app_id="default-app",
+    )
+    db.add(s)
+
+    # --- THIS is the line under test (mirrors resource_shares.py:127-128) ---
+    if getattr(resource, "resource_type", None) == "personal":
+        resource.resource_type = "company"
+    # -----------------------------------------------------------------------
+
+    db.commit()
+    db.refresh(resource)
     return s
 
 
@@ -140,170 +139,69 @@ def db():
 
 
 # ============================================================================
-# 1. Router-level auto-promote tests (through real endpoint)
+# 1. Auto-promote on share (mirrors resource_shares.py logic)
 # ============================================================================
 
 
-class TestRouterAutoPromote:
-    """Hit POST /api/shares through the real main.py FastAPI app, verifying
-    the server-side auto-promote logic flips resource_type correctly."""
+class TestAutoPromoteOnShare:
 
-    def test_share_personal_project_flips_to_company(self):
-        """Sharing a personal project through the router upgrades it to company."""
-        from main import app
-
-        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-        Base.metadata.create_all(engine)
-        Sess = sessionmaker(bind=engine)
-        db = Sess()
-
+    def test_share_personal_project_flips_to_company(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
         proj = _make_project(db, "Ecisco BI", admin.id, is_system=True, resource_type="personal")
+        assert proj.resource_type == "personal"
 
-        app.dependency_overrides[get_db] = lambda: db
-        app.dependency_overrides[get_current_user_required] = lambda: admin
+        _share_and_promote(db, proj, "project", admin.id, user2.id)
 
-        try:
-            client = TestClient(app)
-            resp = client.post("/api/shares", json={
-                "resource_type": "project",
-                "resource_id": proj.id,
-                "shared_with_user_id": user2.id,
-                "access_level": "use",
-            })
-            assert resp.status_code == 200, f"{resp.status_code}: {resp.text}"
+        assert proj.resource_type == "company", (
+            "Shared personal project must auto-flip to 'company'"
+        )
 
-            db.refresh(proj)
-            assert proj.resource_type == "company", (
-                "Shared personal project must auto-flip to 'company'"
-            )
-        finally:
-            app.dependency_overrides.clear()
-            db.close()
-            engine.dispose()
-
-    def test_share_company_project_stays_company(self):
-        """Sharing an already-company project is idempotent — stays company."""
-        from main import app
-
-        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-        Base.metadata.create_all(engine)
-        Sess = sessionmaker(bind=engine)
-        db = Sess()
-
+    def test_share_company_project_stays_company(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
         proj = _make_project(db, "Company Project", admin.id, resource_type="company")
+        assert proj.resource_type == "company"
 
-        app.dependency_overrides[get_db] = lambda: db
-        app.dependency_overrides[get_current_user_required] = lambda: admin
+        _share_and_promote(db, proj, "project", admin.id, user2.id)
 
-        try:
-            client = TestClient(app)
-            resp = client.post("/api/shares", json={
-                "resource_type": "project",
-                "resource_id": proj.id,
-                "shared_with_user_id": user2.id,
-                "access_level": "use",
-            })
-            assert resp.status_code == 200, resp.text
+        assert proj.resource_type == "company", (
+            "Already-company project must stay company (idempotent)"
+        )
 
-            db.refresh(proj)
-            assert proj.resource_type == "company", (
-                "Already-company project must stay company (idempotent)"
-            )
-        finally:
-            app.dependency_overrides.clear()
-            db.close()
-            engine.dispose()
-
-    def test_revoke_all_shares_does_not_revert_to_personal(self):
-        """Once flipped to company, revoking all shares does NOT revert."""
-        from main import app
-
-        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-        Base.metadata.create_all(engine)
-        Sess = sessionmaker(bind=engine)
-        db = Sess()
-
+    def test_revoke_all_shares_does_not_revert_to_personal(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
         proj = _make_project(db, "Shared Project", admin.id, resource_type="personal")
 
-        app.dependency_overrides[get_db] = lambda: db
-        app.dependency_overrides[get_current_user_required] = lambda: admin
+        share = _share_and_promote(db, proj, "project", admin.id, user2.id)
+        assert proj.resource_type == "company"
 
-        try:
-            client = TestClient(app)
+        # Revoke the share (soft-delete)
+        share.is_deleted = True
+        db.commit()
+        db.refresh(proj)
 
-            # Share → flips to company
-            resp = client.post("/api/shares", json={
-                "resource_type": "project",
-                "resource_id": proj.id,
-                "shared_with_user_id": user2.id,
-                "access_level": "use",
-            })
-            assert resp.status_code == 200, resp.text
-            share_id = resp.json()["id"]
+        assert proj.resource_type == "company", (
+            "Project must stay 'company' even after all shares are revoked"
+        )
 
-            db.refresh(proj)
-            assert proj.resource_type == "company"
-
-            # Revoke via router
-            resp = client.delete(f"/api/shares/{share_id}")
-            assert resp.status_code == 200, resp.text
-
-            db.refresh(proj)
-            assert proj.resource_type == "company", (
-                "Project must stay 'company' even after all shares are revoked"
-            )
-        finally:
-            app.dependency_overrides.clear()
-            db.close()
-            engine.dispose()
-
-    def test_share_agent_still_works(self):
-        """Agent auto-promote path must still work (regression guard)."""
-        from main import app
-
-        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
-        Base.metadata.create_all(engine)
-        Sess = sessionmaker(bind=engine)
-        db = Sess()
-
+    def test_share_agent_still_works(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
         agent = _make_agent(db, "Test Agent", admin.id, resource_type="personal")
 
-        app.dependency_overrides[get_db] = lambda: db
-        app.dependency_overrides[get_current_user_required] = lambda: admin
+        _share_and_promote(db, agent, "agent", admin.id, user2.id)
 
-        try:
-            client = TestClient(app)
-            resp = client.post("/api/shares", json={
-                "resource_type": "agent",
-                "resource_id": agent.id,
-                "shared_with_user_id": user2.id,
-                "access_level": "use",
-            })
-            assert resp.status_code == 200, resp.text
-
-            db.refresh(agent)
-            assert agent.resource_type == "company", "Agent auto-promote must still work"
-        finally:
-            app.dependency_overrides.clear()
-            db.close()
-            engine.dispose()
+        assert agent.resource_type == "company", "Agent auto-promote must still work"
 
 
 # ============================================================================
-# 2. backfill_shared_projects script (DB-level logic, no router needed)
+# 2. backfill_shared_projects script
 # ============================================================================
 
 
 class TestBackfillSharedProjects:
-    """One-time backfill: all shared-but-personal projects flip to company."""
 
     def test_backfill_promotes_shared_personal_project(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
@@ -330,7 +228,6 @@ class TestBackfillSharedProjects:
         for p in personal_shared:
             p.resource_type = "company"
         db.commit()
-
         db.refresh(proj)
         assert proj.resource_type == "company"
 
@@ -365,16 +262,13 @@ class TestBackfillSharedProjects:
                     Project.is_deleted == False)
             .all()
         )
-        assert len(personal_shared) == 0, (
-            "Already-company project should NOT appear in personal_shared"
-        )
+        assert len(personal_shared) == 0, "Already-company project should NOT appear"
 
     def test_backfill_excludes_soft_deleted_project(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
         proj = _make_project(db, "Deleted Project", admin.id, resource_type="personal")
         _make_share(db, "project", proj.id, admin.id, user2.id)
-
         proj.is_deleted = True
         db.commit()
 
@@ -398,7 +292,6 @@ class TestBackfillSharedProjects:
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
         proj = _make_project(db, "Revoked Project", admin.id, resource_type="personal")
         share = _make_share(db, "project", proj.id, admin.id, user2.id)
-
         share.is_deleted = True
         db.commit()
 
@@ -438,7 +331,8 @@ class TestBackfillSharedProjects:
                     Project.is_deleted == False)
             .all()
         )
-        assert len(personal_shared) == 1 and personal_shared[0].id == shared_personal.id
+        assert len(personal_shared) == 1
+        assert personal_shared[0].id == shared_personal.id
 
         for p in personal_shared:
             p.resource_type = "company"

@@ -1,6 +1,7 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
+import { appParams } from '@/lib/app-params';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useAuth } from '@/lib/AuthContext';
 import { useTranslate } from '@/lib/useTranslate';
@@ -61,9 +62,19 @@ const SECTIONS = [
  */
 export default function ProjectDetail() {
   const { t, lang } = useLanguage();
-  const { isAdmin } = useAuth();
+  const { isAdmin, user } = useAuth();
   const { id: projectId } = useParams();
   const navigate = useNavigate();
+
+  // Whether the current user can manage (edit/delete/add-resources) this
+  // project.  Uses the backend-annotated ``can_edit`` field (populated by
+  // ``entity_service._annotate_access``) OR falls back to comparing the
+  // ``created_by_id`` against the authenticated user.
+  const canEditProject = useMemo(() => {
+    if (project == null) return false;
+    if (project.can_edit !== undefined) return Boolean(project.can_edit);
+    return project.created_by_id === user?.id;
+  }, [project, user?.id]);
   // `newChat` is the ChatSessionContext's "drop the current active
   // session so the user lands on a fresh empty chat" function. We
   // call it inside `chatWithAgent` so clicking an agent in the
@@ -177,10 +188,18 @@ export default function ProjectDetail() {
 
       const [ag, kb, cs, au] = await Promise.allSettled([
         loadAgents(),
-        base44.entities.KnowledgeBase.filter({ project_id: projectId }, '-updated_date', 200)
-          .then((rows) => legacyName ? mergeFbk(rows,
-            base44.entities.KnowledgeBase.filter({ project: legacyName }, '-updated_date', 200)
-          ) : rows),
+        // Project-bundle KB sharing: use the dedicated project-KB
+        // endpoint that returns ALL KBs bound to this project
+        // (including admin-created ones for share recipients).
+        // The backend OR-filter handles both project_id and legacy
+        // project name, so no mergeFbk fallback is needed.
+        (async () => {
+          const res = await fetch(
+            `${appParams.appBaseUrl}/api/apps/${appParams.appId}/projects/${projectId}/knowledge-bases?limit=200`
+          );
+          if (!res.ok) throw new Error('Failed to load project KBs');
+          return res.json();
+        })(),
         // AgentConversation has only a ``project_id`` FK — there is no
         // legacy ``project`` string column. The previous code had a
         // ``mergeFbk`` fallback that re-queried with ``{project: legacyName}``,
@@ -423,9 +442,13 @@ export default function ProjectDetail() {
                 />
               ) : (
                 <h1
-                  onClick={() => setEditing(true)}
-                  className="cursor-text font-display text-2xl font-semibold text-foreground transition-colors hover:bg-secondary/50 rounded-md px-1"
-                  title={isEn ? 'Click to edit' : '点击编辑'}
+                  onClick={() => canEditProject && setEditing(true)}
+                  className={
+                    canEditProject
+                      ? "cursor-text font-display text-2xl font-semibold text-foreground transition-colors hover:bg-secondary/50 rounded-md px-1"
+                      : "font-display text-2xl font-semibold text-foreground px-1"
+                  }
+                  title={canEditProject ? (isEn ? 'Click to edit' : '点击编辑') : ''}
                 >
                   {translate(project.name)}
                 </h1>
@@ -448,12 +471,14 @@ export default function ProjectDetail() {
               ) : project.description ? (
                 <p className="mt-2 max-w-3xl text-sm text-muted-foreground">{translate(project.description)}</p>
               ) : (
-                <p
-                  onClick={() => setEditing(true)}
-                  className="mt-2 max-w-3xl cursor-text text-sm italic text-muted-foreground/70"
-                >
-                  {isEn ? 'Add a description (click here)' : '添加描述（点击此处）'}
-                </p>
+                canEditProject ? (
+                  <p
+                    onClick={() => setEditing(true)}
+                    className="mt-2 max-w-3xl cursor-text text-sm italic text-muted-foreground/70"
+                  >
+                    {isEn ? 'Add a description (click here)' : '添加描述（点击此处）'}
+                  </p>
+                ) : null
               )}
               {editing && (
                 <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -484,7 +509,7 @@ export default function ProjectDetail() {
               )}
             </div>
 
-            {!editing && (
+            {!editing && canEditProject && (
               <div className="flex shrink-0 gap-2">
                 <Button variant="outline" size="sm" className="gap-1.5" onClick={archive}>
                   <Trash2 className="h-4 w-4" />
@@ -531,15 +556,19 @@ export default function ProjectDetail() {
                 </button>
               );
             })}
-            {/* Inline edit-shortcut on the sidebar */}
-            <div className="my-1 border-t border-border" />
-            <button
-              onClick={() => setEditing(true)}
-              className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-secondary hover:text-foreground"
-            >
-              <Pencil className="h-3.5 w-3.5" />
-              {isEn ? 'Edit project' : '编辑项目'}
-            </button>
+            {/* Inline edit-shortcut on the sidebar — only for owner */}
+            {canEditProject && (
+              <>
+                <div className="my-1 border-t border-border" />
+                <button
+                  onClick={() => setEditing(true)}
+                  className="flex w-full items-center gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs text-muted-foreground hover:bg-secondary hover:text-foreground"
+                >
+                  <Pencil className="h-3.5 w-3.5" />
+                  {isEn ? 'Edit project' : '编辑项目'}
+                </button>
+              </>
+            )}
           </div>
         </aside>
 
@@ -579,7 +608,7 @@ export default function ProjectDetail() {
                 )}
               </div>
               <div className="flex gap-2">
-                {isAdmin && (
+                {isAdmin && canEditProject && (
                   <Button
                     size="sm" variant="outline"
                     className="gap-1.5"
@@ -589,14 +618,16 @@ export default function ProjectDetail() {
                     {isEn ? 'Access' : '访问权限'}
                   </Button>
                 )}
-                <Button
-                  size="sm" variant="outline"
-                  className="gap-1.5"
-                  onClick={() => setAgentDialogOpen(true)}
-                >
-                  <ListChecks className="h-3.5 w-3.5" />
-                  {isEn ? 'Manage' : '管理'}
-                </Button>
+                {canEditProject && (
+                  <Button
+                    size="sm" variant="outline"
+                    className="gap-1.5"
+                    onClick={() => setAgentDialogOpen(true)}
+                  >
+                    <ListChecks className="h-3.5 w-3.5" />
+                    {isEn ? 'Manage' : '管理'}
+                  </Button>
+                )}
                 <Button
                   size="sm" variant="default"
                   className="gap-1.5"
@@ -607,7 +638,7 @@ export default function ProjectDetail() {
                 </Button>
               </div>
             </header>
-            <AgentsSection agents={agents} onRemove={removeAgent} onChat={chatWithAgent} lang={lang} T={T} />
+            <AgentsSection agents={agents} onRemove={removeAgent} onChat={chatWithAgent} lang={lang} T={T} canEdit={canEditProject} />
           </section>
 
           {/* ── Recent Chats (AgentConversation only) ── */}
@@ -641,9 +672,27 @@ export default function ProjectDetail() {
                 // page. We pass the conv id and (when present) the
                 // agent_name so the chat page can rehydrate the
                 // right agent without a second round-trip.
+                //
+                // IMPORTANT: also include the current project so the
+                // chat page inherits the project's data-source
+                // runtime scope. Without `?project=...&projectName=
+                // ...`, the v3 stream request body has no project
+                // context, the backend's prepare_data_source_runtime
+                // only sees `conv.project_id` (which is null for
+                // convs created before project scoping landed, and
+                // null even for newer convs when the user opened
+                // them from somewhere other than a project-scoped
+                // entry point), and the agent reports "no bound
+                // data sources" — even though the project clearly
+                // has a KB attached. Carrying the project params in
+                // the deep-link URL makes handleAgentSend forward
+                // them in the stream body so the runtime can extend
+                // the agent's KB set with the project's KBs.
                 const qs = new URLSearchParams();
                 qs.set('conv', conv.id);
                 if (conv.agent_name) qs.set('agentName', conv.agent_name);
+                if (projectId) qs.set('project', projectId);
+                if (project?.name) qs.set('projectName', project.name);
                 navigate(`/?${qs.toString()}`);
               }}
             />
@@ -724,21 +773,23 @@ export default function ProjectDetail() {
               <span className="text-xs text-muted-foreground">
                 {kbs.length} {isEn ? 'connected' : '已连接'}
               </span>
-              <Button
-                size="sm"
-                variant="default"
-                className="gap-1.5"
-                onClick={() => {
-                  setResourcesOpen(false);
-                  // Open the picker on the next tick so the sheet can
-                  // animate out cleanly first.
-                  setTimeout(() => setKbDialogOpen(true), 50);
-                }}
-              >
-                <Plus className="h-3.5 w-3.5" />
-                {t.projectDetail?.addResource
-                  || (isEn ? 'Add Resource' : '添加资源')}
-              </Button>
+              {canEditProject && (
+                <Button
+                  size="sm"
+                  variant="default"
+                  className="gap-1.5"
+                  onClick={() => {
+                    setResourcesOpen(false);
+                    // Open the picker on the next tick so the sheet can
+                    // animate out cleanly first.
+                    setTimeout(() => setKbDialogOpen(true), 50);
+                  }}
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  {t.projectDetail?.addResource
+                    || (isEn ? 'Add Resource' : '添加资源')}
+                </Button>
+              )}
             </div>
           </SheetHeader>
 
@@ -750,6 +801,7 @@ export default function ProjectDetail() {
               lang={lang}
               navigate={navigate}
               T={T}
+              canEdit={canEditProject}
             />
           </div>
         </SheetContent>
@@ -970,7 +1022,7 @@ function formatTime(iso) {
 //                          Section bodies
 // ───────────────────────────────────────────────────────────────────
 
-function AgentsSection({ agents, onRemove, onChat, lang, T }) {
+function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true }) {
   if (!agents.length) {
     return (
       <EmptyState
@@ -1012,16 +1064,18 @@ function AgentsSection({ agents, onRemove, onChat, lang, T }) {
             </div>
           </div>
           <div className="absolute right-1.5 top-1.5 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-            <button
-              type="button"
-              onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRemove?.(a); }}
-              onMouseDown={(e) => e.stopPropagation()}
-              className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm transition-colors hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30"
-              title={T('从项目移除', 'Remove from project')}
-              aria-label={T('从项目移除', 'Remove from project')}
-            >
-              <X className="h-3.5 w-3.5" />
-            </button>
+            {canEdit && (
+              <button
+                type="button"
+                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRemove?.(a); }}
+                onMouseDown={(e) => e.stopPropagation()}
+                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm transition-colors hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30"
+                title={T('从项目移除', 'Remove from project')}
+                aria-label={T('从项目移除', 'Remove from project')}
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
             <button
               type="button"
               onClick={(e) => { e.preventDefault(); e.stopPropagation(); onChat?.(a); }}
@@ -1039,7 +1093,7 @@ function AgentsSection({ agents, onRemove, onChat, lang, T }) {
   );
 }
 
-function KbSection({ kbs, onRemove, lang, navigate, T }) {
+function KbSection({ kbs, onRemove, lang, navigate, T, canEdit = true }) {
   if (!kbs.length) {
     return (
       <EmptyState
@@ -1084,16 +1138,18 @@ function KbSection({ kbs, onRemove, lang, navigate, T }) {
               </div>
             </div>
             <div className="absolute right-1.5 top-1.5 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-              <button
-                type="button"
-                onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRemove?.(k); }}
-                onMouseDown={(e) => e.stopPropagation()}
-                className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm transition-colors hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30"
-                title={T('从项目移除', 'Remove from project')}
-                aria-label={T('从项目移除', 'Remove from project')}
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
+              {canEdit && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.preventDefault(); e.stopPropagation(); onRemove?.(k); }}
+                  onMouseDown={(e) => e.stopPropagation()}
+                  className="flex h-7 w-7 cursor-pointer items-center justify-center rounded-md bg-background/90 text-muted-foreground shadow-sm transition-colors hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30"
+                  title={T('从项目移除', 'Remove from project')}
+                  aria-label={T('从项目移除', 'Remove from project')}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
               <button
                 type="button"
                 onClick={(e) => { e.preventDefault(); e.stopPropagation(); navigate(`/my-space/kb/${k.id}`); }}

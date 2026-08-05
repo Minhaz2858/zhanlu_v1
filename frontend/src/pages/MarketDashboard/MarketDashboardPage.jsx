@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
+import { useLanguage } from '@/lib/LanguageProvider';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
 import RegionalTable from './components/RegionalTable';
@@ -30,6 +31,7 @@ const PRODUCT_LABELS = {
 
 export default function MarketDashboardPage() {
   const { section } = useParams();
+  const { lang } = useLanguage();
   const isValidSection = VALID_SECTIONS.includes(section);
   const isProductSection = isValidSection && section !== 'overview';
   const [selectedProductId, setSelectedProductId] = useState('crude_oil');
@@ -129,13 +131,13 @@ export default function MarketDashboardPage() {
   // Report section: dual-tab Customer Sales / Contract Performance.
   // Bypasses the product-section layout (no snapshot / product selector needed).
   if (section === 'report') {
-    return <ReportView />;
+    return <ReportView language={lang} />;
   }
 
   // Overview section: pixel-faithful EDIA layout (sidebar + 3 price cards +
   // 7-day forecast + industry intelligence + footer).
   if (section === 'overview') {
-    return <OverviewDashboard snapshot={snapshotQuery.data || []} />;
+    return <OverviewDashboard snapshot={snapshotQuery.data || []} language={lang} />;
   }
 
   // Unified product-section layout (upstream / midstream / downstream):
@@ -153,11 +155,13 @@ export default function MarketDashboardPage() {
         labels={stripLabels}
         selectedId={selectedProductId}
         onSelect={setSelectedProductId}
+        language={lang}
       />
       <DecisionBoard
         group={section}
         selectedId={selectedProductId}
         onSelectProduct={setSelectedProductId}
+        language={lang}
       />
       {snapshotQuery.isLoading && (
         <div className="px-6 py-4">
@@ -180,9 +184,10 @@ export default function MarketDashboardPage() {
         <ForecastTrendChart
           productId={selectedProductId}
           productName={productName}
+          language={lang}
         />
       )}
-      {section === 'upstream' && <PriceTransmissionChain />}
+      {section === 'upstream' && <PriceTransmissionChain language={lang} />}
       {selectedProductId && productIds.includes(selectedProductId) && (
         <div className="px-6 pt-6 pb-8">
           <RegionalTable productId={selectedProductId} />

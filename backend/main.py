@@ -26,7 +26,7 @@ from app.models import (
 
 # Import tool_handlers to register all 8 new capability tools in the registry
 import app.services.tool_handlers  # noqa: F401
-from app.routers.entities import register_entity_router
+from app.routers.entities import register_entity_router, register_project_kb_router
 from app.routers.auth import router as auth_router
 from app.routers.public import router as public_router
 from app.routers.diagnostics import router as diagnostics_router
@@ -637,6 +637,10 @@ def create_app() -> FastAPI:
     for entity_name, model_class in ENTITY_MODELS.items():
         router = register_entity_router(entity_name, model_class)
         app.include_router(router, prefix="/api")
+
+    # Project-bundle KB sharing: lists all KBs bound to a project
+    # (including admin-created ones for shared project recipients)
+    app.include_router(register_project_kb_router())
 
     app.include_router(functions_router, prefix="/api")
     app.include_router(integrations_router, prefix="/api")

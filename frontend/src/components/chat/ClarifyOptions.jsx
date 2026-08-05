@@ -34,7 +34,7 @@ function getIcon(name) {
 }
 
 export default function ClarifyOptions({ block, onSelectOption, onSelectOther }) {
-  const { t } = useLanguage();
+  const { t, lang } = useLanguage();
   const { prompt, subtext, options = [], step, total } = block;
   const [selected, setSelected] = useState(null);
   const [autoCollecting, setAutoCollecting] = useState(false);
@@ -109,15 +109,15 @@ export default function ClarifyOptions({ block, onSelectOption, onSelectOther })
       <div className="mt-3 flex items-center gap-3 rounded-xl border border-primary/30 bg-primary/5 px-4 py-3 text-sm text-foreground">
         <Loader2 className="h-4 w-4 animate-spin text-primary" />
         <div className="flex-1">
-          <div className="font-medium">正在汇总 {totalNum} 个配置问题…</div>
-          <div className="mt-0.5 text-xs text-muted-foreground">将以批量表单一次性呈现，避免分步来回。</div>
+          <div className="font-medium">{lang === 'zh' ? `正在汇总 ${totalNum} 个配置问题…` : `Collating ${totalNum} config questions…`}</div>
+          <div className="mt-0.5 text-xs text-muted-foreground">{lang === 'zh' ? '将以批量表单一次性呈现，避免分步来回。' : 'Presented all at once as a batch form to avoid back-and-forth.'}</div>
         </div>
         <button
           type="button"
           onClick={handleManualReask}
           className="rounded-md border border-primary/30 bg-background/60 px-2 py-1 text-[11px] font-medium text-primary transition-colors hover:bg-primary/10"
         >
-          切换 → 批量表单
+          {lang === 'zh' ? '切换 → 批量表单' : 'Switch → Batch Form'}
         </button>
       </div>
     );
@@ -133,11 +133,11 @@ export default function ClarifyOptions({ block, onSelectOption, onSelectOther })
         >
           <span className="flex items-center gap-1.5">
             <ListChecks className="h-3.5 w-3.5 text-primary" />
-            <span className="font-medium">检测到分步提问（共 {totalNum} 步）</span>
+            <span className="font-medium">{lang === 'zh' ? `检测到分步提问（共 ${totalNum} 步）` : `Step-by-step questioning detected (${totalNum} steps)`}</span>
             <span className="text-muted-foreground">·</span>
-            <span className="text-muted-foreground">点击改为一次性列出所有问题</span>
+            <span className="text-muted-foreground">{lang === 'zh' ? '点击改为一次性列出所有问题' : 'Click to list all questions at once'}</span>
           </span>
-          <span className="text-[11px] text-primary">切换 →</span>
+          <span className="text-[11px] text-primary">{lang === 'zh' ? '切换 →' : 'Switch →'}</span>
         </button>
       )}
       {hasProgress && (

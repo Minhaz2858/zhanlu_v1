@@ -11,7 +11,6 @@ const MODELS = ['automatic', 'gpt_5_mini', 'gemini_3_flash', 'claude_sonnet_4_6'
 const SECTIONS_CONFIG = [
   { id: 'account', icon: User, type: 'account' },
   { id: 'i18n', icon: Globe, fields: [
-    { type: 'select', key: 'language', options: ['zh', 'en'] },
     { type: 'text', key: 'timezone' },
     { type: 'select', key: 'date_format', options: ['YYYY-MM-DD', 'DD/MM/YYYY', 'MM/DD/YYYY'] },
   ]},

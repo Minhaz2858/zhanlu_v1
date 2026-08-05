@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { PRODUCT_LABELS } from '@/constants/marketDashboard';
-import { NO_DATA_LABEL, getPriceChangeTextClass } from '../lib/priceChange';
+import { getPriceChangeTextClass } from '../lib/priceChange';
 import { TYPO } from '../lib/typography';
 
 /**
@@ -588,10 +588,11 @@ function chunkArray(items, size) {
 
 /* ── Display-name helper ──────────────────────────────────────────── */
 
-function defaultDisplayName(id, fallback) {
+function defaultDisplayName(id, fallback, language = 'en') {
   const labels = PRODUCT_LABELS[id];
-  if (labels?.label_en) return labels.label_en;
-  return labels?.label_zh || fallback || id;
+  if (!labels) return fallback || id;
+  if (language === 'zh') return labels.label_zh || labels.label_en || fallback || id;
+  return labels.label_en || labels.label_zh || fallback || id;
 }
 
 /* ── Component ────────────────────────────────────────────────────── */
@@ -605,7 +606,8 @@ export default function OverviewDashboard({
   displayName,
 }) {
   const resolvedLocale = locale || (typeof navigator !== 'undefined' ? navigator.language : 'en-US') || 'en-US';
-  const resolveName = displayName || ((id, fb) => defaultDisplayName(id, fb));
+  const noData = language === 'zh' ? '暂无数据' : 'No Data Available';
+  const resolveName = displayName || ((id, fb) => defaultDisplayName(id, fb, language));
   const queryClient = useQueryClient();
 
   const text = language === 'en'
@@ -831,7 +833,7 @@ export default function OverviewDashboard({
 
   const formatAbsoluteChange = (latestPrice, pct, explicitGap) => {
     const value = resolveGap(latestPrice, pct, explicitGap);
-    if (value == null || !Number.isFinite(value)) return NO_DATA_LABEL;
+    if (value == null || !Number.isFinite(value)) return noData;
     const abs = Math.abs(value);
     const formatted = abs.toLocaleString(resolvedLocale, {
       minimumFractionDigits: abs < 10 ? 2 : 0,
@@ -847,7 +849,7 @@ export default function OverviewDashboard({
   };
 
   const formatPriceValue = (value) => {
-    if (value == null || !Number.isFinite(value)) return NO_DATA_LABEL;
+    if (value == null || !Number.isFinite(value)) return noData;
     return value.toLocaleString(resolvedLocale, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   };
 
@@ -917,36 +919,36 @@ export default function OverviewDashboard({
             <div className="rounded-md border border-border bg-card px-2.5 py-2">
               <p className="text-[9px] md:text-[10px] text-muted-foreground">{text.brent}</p>
               <p className="font-mono text-[15px] font-semibold text-foreground">
-                {brent ? brent.price.toLocaleString(resolvedLocale) : NO_DATA_LABEL}
+                {brent ? brent.price.toLocaleString(resolvedLocale) : noData}
               </p>
               <p className={`font-mono text-[11px] md:text-[12px] ${changeColor(changeSignal(brent?.price, brent?.change_pct), 'text-muted-foreground')}`}>
                 {brent
                   ? formatAbsoluteChange(brent.price, brent.change_pct, brent.daily_gap_value)
-                  : NO_DATA_LABEL}
+                  : noData}
               </p>
             </div>
 
             <div className="rounded-md border border-border bg-card px-2.5 py-2">
               <p className="text-[9px] md:text-[10px] text-muted-foreground">{text.naphthaLabel}</p>
               <p className="font-mono text-[15px] font-semibold text-foreground">
-                {naphtha ? naphtha.price.toLocaleString(resolvedLocale) : NO_DATA_LABEL}
+                {naphtha ? naphtha.price.toLocaleString(resolvedLocale) : noData}
               </p>
               <p className={`font-mono text-[11px] md:text-[12px] ${changeColor(changeSignal(naphtha?.price, naphtha?.change_pct), 'text-muted-foreground')}`}>
                 {naphtha
                   ? formatAbsoluteChange(naphtha.price, naphtha.change_pct, naphtha.daily_gap_value)
-                  : NO_DATA_LABEL}
+                  : noData}
               </p>
             </div>
 
             <div className="rounded-md border border-border bg-card px-2.5 py-2">
               <p className="text-[9px] md:text-[10px] text-muted-foreground">{text.crackedC5Label}</p>
               <p className="font-mono text-[15px] font-semibold text-foreground">
-                {crackedC5 ? crackedC5.price.toLocaleString(resolvedLocale) : NO_DATA_LABEL}
+                {crackedC5 ? crackedC5.price.toLocaleString(resolvedLocale) : noData}
               </p>
               <p className={`font-mono text-[11px] md:text-[12px] ${changeColor(changeSignal(crackedC5?.price, crackedC5?.change_pct), 'text-muted-foreground')}`}>
                 {crackedC5
                   ? formatAbsoluteChange(crackedC5.price, crackedC5.change_pct, crackedC5.daily_gap_value)
-                  : NO_DATA_LABEL}
+                  : noData}
               </p>
             </div>
           </div>
@@ -1048,7 +1050,7 @@ export default function OverviewDashboard({
                           <div className="overview-regional-panel border-t border-slate-200 dark:border-slate-700">
                             {item.execution_price != null && (
                               <div className={`overview-regional-row ${OVERVIEW_ROW_GRID} border-b border-slate-200 dark:border-slate-700 px-3.5 py-1.5 text-[12px] md:text-[13px] overview-regional-internal`}>
-                                <span className="font-semibold text-foreground truncate" title={language === 'en' ? 'Latest actual transaction price recorded in the system' : '系统中记录的最新实际成交价格'}>
+                                <span className="min-w-0 truncate font-semibold text-foreground" title={language === 'en' ? 'Latest actual transaction price recorded in the system' : '系统中记录的最新实际成交价格'}>
                                   {text.execution}
                                 </span>
                                 <span className={`overview-exec-muted text-right text-[11px] md:text-[12px] ${dateTextClass(item.execution_price_date)}`} title={language === 'en' ? 'Date of this execution price' : '该成交价格的日期'}>
@@ -1072,12 +1074,12 @@ export default function OverviewDashboard({
                             )}
                             {isLoadingThis ? (
                               <div className={`overview-regional-row ${OVERVIEW_ROW_GRID} border-b border-slate-200 dark:border-slate-700 px-3.5 py-2 text-[12px] md:text-[13px] overview-exec-muted last:border-b-0`}>
-                                <span>{text.loading}</span>
+                                <span className="truncate min-w-0">{text.loading}</span>
                                 <span /><span />
                               </div>
                             ) : !regional ? (
                               <div className={`overview-regional-row ${OVERVIEW_ROW_GRID} border-b border-slate-200 dark:border-slate-700 px-3.5 py-2 text-[12px] md:text-[13px] overview-exec-muted last:border-b-0`}>
-                                <span>{text.regionalUnavailable}</span>
+                                <span className="truncate min-w-0">{text.regionalUnavailable}</span>
                                 <span className="text-right">--</span>
                                 <span /><span />
                               </div>
@@ -1089,7 +1091,7 @@ export default function OverviewDashboard({
                                 if (visibleRegions.length === 0) {
                                   return (
                                     <div className={`overview-regional-row ${OVERVIEW_ROW_GRID} border-b border-slate-200 dark:border-slate-700 px-3.5 py-2 text-[12px] md:text-[13px] overview-exec-muted last:border-b-0`}>
-                                      <span>{text.regionalUnavailable}</span>
+                                      <span className="truncate min-w-0">{text.regionalUnavailable}</span>
                                       <span className="text-right">--</span>
                                       <span /><span />
                                     </div>
@@ -1099,7 +1101,7 @@ export default function OverviewDashboard({
                                   const isStale = (r.days_stale ?? 0) > 7;
                                   return (
                                     <div key={r.price_type} className={`overview-regional-row ${OVERVIEW_ROW_GRID} border-b border-slate-200 dark:border-slate-700 px-3.5 py-1.5 text-[12px] md:text-[13px] last:border-b-0 ${r.is_internal ? 'overview-regional-internal' : ''}`}>
-                                      <span className={`${r.is_internal ? 'font-semibold text-foreground' : 'overview-exec-muted'} truncate`} title={
+                                      <span className={`min-w-0 truncate ${r.is_internal ? 'font-semibold text-foreground' : 'overview-exec-muted'}`} title={
                                         language === 'en'
                                           ? r.is_internal ? 'Internal ERP reference price' : 'External market reference price'
                                           : r.is_internal ? '内部ERP参考价' : '外部市场参考价'
@@ -1215,7 +1217,7 @@ export default function OverviewDashboard({
                                 )}
                                 {intelCount > 0 && (
                                   <span className={`inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[9px] font-medium leading-tight ${intelDir === 'up' ? 'bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400' : intelDir === 'down' ? 'bg-red-100 text-red-600 dark:bg-red-900/30 dark:text-red-400' : 'bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-400'}`}>
-                                    {intelDir === 'up' ? '↑' : intelDir === 'down' ? '↓' : '—'} Intel
+                                    {intelDir === 'up' ? '↑' : intelDir === 'down' ? '↓' : '—'} {language === 'zh' ? '情报' : 'Intel'}
                                   </span>
                                 )}
                               </div>

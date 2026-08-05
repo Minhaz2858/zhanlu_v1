@@ -2,8 +2,11 @@
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
 from typing import Optional
+
+import pandas as pd
 
 from app.models.market_dashboard import PRODUCT_LABELS
 from app.services import market_dashboard_service as mds
@@ -47,16 +50,71 @@ def _build_pack_for(product_id: str, day: int, run) -> dict:
         up: mds.read_product_history_rows(up)
         for up in UPSTREAM_MAP.get(product_id, [])
     }
+    history_rows = mds.read_product_history_rows(product_id)
+
+    # Wave 1: demand signal + supplier ladder (flag-gated, default OFF)
+    demand_signal: dict | None = None
+    supplier_ladder: dict | None = None
+    if os.environ.get("FORECAST_DEMAND_SIGNAL_ENABLED", "false").lower() == "true":
+        try:
+            from app.services.forecasting.features.exogenous_loaders import (
+                ErpVolumeLoader, SupplierDispersionLoader,
+            )
+            from app.services.forecasting.features.demand_signal import (
+                compute_demand_signal, compute_supplier_ladder_signal,
+            )
+
+            # Load ERP volume and compute demand signal
+            vol_loader = ErpVolumeLoader(product_id=product_id, lookback_days=365)
+            volume_df = vol_loader.load()
+            if not volume_df.empty and len(volume_df) >= 28:
+                # Build price DataFrame from history_rows [(date_str, price), ...]
+                if history_rows and len(history_rows) >= 28:
+                    price_df = pd.DataFrame(
+                        [{"date": d, "price": float(v)} for d, v in history_rows if v is not None]
+                    )
+                    ds = compute_demand_signal(
+                        volume_df, price_df=price_df,
+                        product_id=product_id, rolling_window=28, yoy_window=364,
+                    )
+                    if ds and ds.has_sufficient_data:
+                        demand_signal = {
+                            "rolling_4wk_vol": ds.rolling_4wk_vol,
+                            "yoy_change_pct": ds.yoy_change_pct,
+                            "vol_price_divergence": ds.vol_price_divergence,
+                            "demand_trend": ds.demand_trend,
+                            "recent_vol": ds.recent_vol,
+                            "vol_momentum_4wk": ds.vol_momentum_4wk,
+                            "has_sufficient_data": True,
+                        }
+
+            # Load supplier dispersion and compute ladder signal
+            disp_loader = SupplierDispersionLoader(
+                product_id=product_id, lookback_days=90,
+            )
+            dispersion_df = disp_loader.load()
+            if not dispersion_df.empty:
+                ladder = compute_supplier_ladder_signal(
+                    dispersion_df, product_id=product_id, recent_days=30,
+                )
+                if ladder and ladder.get("has_data"):
+                    supplier_ladder = ladder
+        except Exception as exc:
+            logger.warning("[analyst] demand-signal load failed for %s: %s",
+                           product_id, exc)
+
     return build_pack(
         product_id=product_id,
         name_zh=labels.get("label_zh", product_id),
         day=day,
-        history_rows=mds.read_product_history_rows(product_id),
+        history_rows=history_rows,
         upstream_histories=upstream_histories,
         run_results=run.results or {},
         model_detail=run.model_detail,
         explanation=run.explanation or {},
         as_of_month=datetime.now().month,
+        demand_signal=demand_signal,
+        supplier_ladder=supplier_ladder,
     )
 
 
@@ -71,7 +129,8 @@ def get_analyst_brief(product_id: str, day: int = 7, db=None,
         if run is None or not run.results:
             return None
         cached = ((run.explanation or {}).get("analyst_brief") or {}).get(str(day))
-        if cached:
+        # Skip stale caches from the old 5-field schema (pre-restructure).
+        if cached and "market_update_zh" in cached:
             return cached
 
         pack = _build_pack_for(product_id, day, run)

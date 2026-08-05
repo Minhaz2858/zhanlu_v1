@@ -207,9 +207,11 @@ def test_build_decision_board_missing_overlay(monkeypatch):
 
 def _analyst_brief_dict():
     return {
-        "summary_zh": "双环戊二烯现价 6,940 元/吨,预计跌至 6,660 元/吨。",
-        "why_price_zh": "上游裂解碳五下跌。",
-        "why_action_zh": "历史数据不足,观望。",
+        "market_update_zh": "市场动态:市场情报中性。",
+        "price_data_zh": "价格数据:现价 6,940 元/吨。",
+        "upstream_logic_zh": "上游裂解碳五下跌。",
+        "supply_demand_zh": "供需研判:8模型分歧偏大。",
+        "forecast_zh": "价格预测:预计跌至 6,660 元/吨,↘ 偏弱。",
         "watch_triggers_zh": ["准确率 55% 以上再评估"],
         "risk_zh": "近期无重大市场事件。",
         "source": "template", "day": 7, "generated_at": "2026-08-04T00:00:00+00:00",
@@ -238,9 +240,9 @@ def test_board_attaches_analyst_brief(monkeypatch):
     resp = dbs.build_decision_board("midstream", day=7)
     p = next(p for p in resp.products if p.id == "dcpd")
     assert p.analyst_brief is not None
-    assert p.analyst_brief.why_price_zh == "上游裂解碳五下跌。"
+    assert p.analyst_brief.upstream_logic_zh == "上游裂解碳五下跌。"
     assert p.analyst_brief.watch_triggers_zh == ["准确率 55% 以上再评估"]
-    assert p.narrative_zh.startswith("双环戊二烯现价 6,940")
+    assert "6,940" in p.narrative_zh
 
 
 def test_board_survives_analyst_failure(monkeypatch):

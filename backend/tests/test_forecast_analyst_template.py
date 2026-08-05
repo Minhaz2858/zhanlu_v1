@@ -1,4 +1,4 @@
-"""Template brief renderer — the deterministic fallback (DCPD case)."""
+"""Template brief renderer — 7-section deterministic fallback (DCPD case)."""
 from app.services.forecasting.analyst.evidence_pack import build_pack
 from app.services.forecasting.analyst.template_brief import render_template_brief
 from tests.test_forecast_analyst_pack import _explanation, _history
@@ -17,25 +17,39 @@ def _dcpd_pack():
 
 def test_brief_schema_and_source():
     b = render_template_brief(_dcpd_pack())
-    for key in ("summary_zh", "why_price_zh", "why_action_zh",
-                "watch_triggers_zh", "risk_zh", "source", "day", "generated_at"):
+    for key in ("market_update_zh", "price_data_zh", "upstream_logic_zh",
+                "supply_demand_zh", "forecast_zh", "watch_triggers_zh",
+                "risk_zh", "source", "day", "generated_at"):
         assert key in b
     assert b["source"] == "template"
     assert isinstance(b["watch_triggers_zh"], list) and len(b["watch_triggers_zh"]) >= 2
 
 
-def test_brief_explains_why_price():
+def test_brief_upstream_names_elasticity():
     b = render_template_brief(_dcpd_pack())
-    assert "裂解碳五" in b["why_price_zh"]        # upstream named
-    assert "弹性" in b["why_price_zh"]            # elasticity mentioned
-    assert "传统需求旺季" in b["why_price_zh"]     # seasonal (dcpd month 8 = +1.5)
+    assert "裂解碳五" in b["upstream_logic_zh"]        # upstream named
+    assert "弹性" in b["upstream_logic_zh"]            # elasticity mentioned
 
 
-def test_brief_explains_why_action_low_trust():
+def test_brief_supply_demand_seasonal():
     b = render_template_brief(_dcpd_pack())
-    assert "观望" in b["why_action_zh"]
-    assert "历史数据不足" in b["why_action_zh"]    # sparse_data reason in words
-    assert "55%" in b["why_action_zh"]            # edge threshold referenced
+    assert "传统需求旺季" in b["supply_demand_zh"]     # seasonal (dcpd month 8 = +1.5)
+
+
+def test_brief_forecast_range_and_direction():
+    b = render_template_brief(_dcpd_pack())
+    # bear–bull range present (the key new feature) — last points: bear=6350, bull=6950
+    assert "6,350" in b["forecast_zh"]
+    assert "6,950" in b["forecast_zh"]
+    # directional arrow present
+    assert any(arrow in b["forecast_zh"] for arrow in ("↘", "↗", "→", "↔"))
+
+
+def test_brief_forecast_explains_watch_action():
+    b = render_template_brief(_dcpd_pack())
+    assert "观望" in b["forecast_zh"]
+    assert "历史数据不足" in b["forecast_zh"]    # sparse_data reason in words
+    assert "55%" in b["forecast_zh"]            # edge threshold referenced
 
 
 def test_brief_watch_triggers_actionable():
@@ -66,8 +80,8 @@ def test_brief_buy_case():
         explanation=exp, as_of_month=8,
     )
     b = render_template_brief(pack)
-    assert "备货" in b["why_action_zh"]
-    assert "70%" in b["why_action_zh"]            # buy probability threshold
+    assert "备货" in b["forecast_zh"]
+    assert "70%" in b["forecast_zh"]            # buy probability threshold
 
 
 def test_brief_missing_data_degrades():
@@ -77,5 +91,5 @@ def test_brief_missing_data_degrades():
         run_results={}, model_detail=None, explanation={}, as_of_month=8,
     )
     b = render_template_brief(pack)
-    assert "数据不足" in b["summary_zh"]
-    assert b["why_price_zh"] == "" or "暂无" in b["why_price_zh"]
+    assert "数据不足" in b["forecast_zh"]
+    assert b["upstream_logic_zh"] == ""

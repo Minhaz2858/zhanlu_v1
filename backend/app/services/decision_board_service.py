@@ -236,15 +236,25 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
             brief = None
 
         if brief:
-            narrative_zh = (
-                brief.get("summary_zh", "")
-                + brief.get("why_price_zh", "")
-                + brief.get("why_action_zh", "")
-            )
+            from app.services.forecasting.analyst.template_brief import SECTION_TITLES
+            narrative_parts = []
+            for key, title in SECTION_TITLES:
+                val = brief.get(key, "")
+                if val:
+                    narrative_parts.append(f"{title}{val}")
+            triggers = brief.get("watch_triggers_zh") or []
+            if triggers:
+                narrative_parts.append("【触发条件】" + ";".join(triggers))
+            risk_val = brief.get("risk_zh", "")
+            if risk_val:
+                narrative_parts.append(f"【风险提示】{risk_val}")
+            narrative_zh = "".join(narrative_parts)
             brief_meta = AnalystBriefMeta(
-                **{k: brief.get(k) for k in (
-                    "summary_zh", "why_price_zh", "why_action_zh",
-                    "watch_triggers_zh", "risk_zh", "source", "day", "generated_at")}
+                **{k: (brief.get(k) or ("" if k != "watch_triggers_zh" else []))
+                   for k in (
+                    "market_update_zh", "price_data_zh", "upstream_logic_zh",
+                    "supply_demand_zh", "forecast_zh", "watch_triggers_zh",
+                    "risk_zh", "source", "day", "generated_at")}
             )
         else:
             narrative_zh = build_narrative(

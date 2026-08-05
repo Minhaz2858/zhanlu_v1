@@ -163,3 +163,105 @@ def adaptive_weights(
     if total > 0:
         blended = {k: v / total for k, v in blended.items()}
     return blended
+
+
+# ---------------------------------------------------------------------------
+# Decision ROI scoring (Phase F2)
+# ---------------------------------------------------------------------------
+
+def score_pending_decisions(db) -> dict:
+    """Fetch pending decision logs whose horizon has closed, compute ROI, and fill.
+
+    Called by the nightly compute pipeline or on-demand from the decision board.
+
+    Returns summary: {scored_count, total_roi_avg, buy_count, sell_count, errors}
+    """
+    from app.services.forecasting.features.decision_logger import (
+        get_pending_unrealized,
+        fill_realized_outcomes,
+    )
+    from app.services.forecasting.features.decision_roi import (
+        score_decision,
+        aggregate_roi,
+    )
+    from app.services.forecasting.edia_source import _resolve_mysql_engine
+
+    pending = get_pending_unrealized(db)
+    if not pending:
+        return {"scored_count": 0, "total_roi_avg": None, "buy_count": 0,
+                "sell_count": 0, "errors": []}
+
+    engine = _resolve_mysql_engine()
+    if engine is None:
+        return {"scored_count": 0, "total_roi_avg": None, "buy_count": 0,
+                "sell_count": 0, "errors": ["No EDIA MySQL engine"]}
+
+    scored = 0
+    errors = []
+
+    for log in pending:
+        try:
+            # Fetch actual price at as_of_date + horizon_day from market data
+            import datetime
+            from sqlalchemy import text
+
+            target_date = log.as_of_date + datetime.timedelta(days=log.horizon_day)
+            table = f"sale_erp_v_{log.product_id}_data"
+
+            with engine.connect() as conn:
+                row = conn.execute(
+                    text(
+                        f"SELECT `date`, `price` FROM `{table}` "
+                        f"WHERE `date` = :target_date LIMIT 1"
+                    ),
+                    {"target_date": target_date.isoformat()},
+                ).fetchone()
+
+            if row is None:
+                continue
+
+            actual_price_th = float(row[1]) if row[1] is not None else None
+            if actual_price_th is None:
+                continue
+
+            # We already have actual_price_t from the log
+            actual_price_t = float(log.actual_price_t)
+            if actual_price_t <= 0:
+                continue
+
+            roi = score_decision(
+                action=log.action,
+                actual_price_t=actual_price_t,
+                actual_price_th=actual_price_th,
+            )
+
+            fill_realized_outcomes(
+                session=db,
+                log_id=log.id,
+                actual_price_t=actual_price_t,
+                actual_price_th=actual_price_th,
+                roi_pct=roi,
+            )
+            scored += 1
+        except Exception as exc:
+            logger.warning("score_pending_decisions failed for log %s: %s", log.id, exc)
+            errors.append(str(exc))
+
+    # Re-fetch for aggregate summary
+    if scored > 0:
+        from app.models.forecasting import ForecastDecisionLog
+        scored_logs = db.query(ForecastDecisionLog).filter(
+            ForecastDecisionLog.roi_pct.isnot(None)
+        ).order_by(ForecastDecisionLog.realized_at.desc()).limit(scored).all()
+        summary = aggregate_roi(scored_logs)
+        return {
+            "scored_count": scored,
+            "total_roi_avg": summary.weighted_roi,
+            "buy_count": summary.buy_count,
+            "sell_count": summary.sell_count,
+            "accuracy_pct": summary.accuracy_pct,
+            "errors": errors,
+        }
+
+    return {"scored_count": scored, "total_roi_avg": None, "buy_count": 0,
+            "sell_count": 0, "errors": errors}

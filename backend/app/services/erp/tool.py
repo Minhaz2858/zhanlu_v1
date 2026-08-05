@@ -46,10 +46,46 @@ async def _handle_ask_erp_kpi(
         return {"success": False, "error": f"Could not resolve product '{product}'."}
 
     days = int(args.get("days", 30))
+    kb = _resolve_mysql_kb(db, context or {})
+    if kb is None:
+        # No MySQL KB bound to the project → tell the LLM clearly so
+        # it can guide the user to the Resources panel.
+        return {
+            "success": False,
+            "error": (
+                "No MySQL data source is bound to this project. "
+                "Add a MySQL KnowledgeBase via the project's Resources "
+                "panel and try again."
+            ),
+        }
     svc = ErpKpiService(db=db, org_id=(context or {}).get("org_id"))
-    kpi = svc.get_product_kpis(product_id, days=days)
-
+    kpi = svc.get_product_kpis(product_id, days=days, kb=kb)
     return {"success": True, "kpi": kpi}
+
+
+def _resolve_mysql_kb(db, context: dict) -> Any | None:
+    """Pick the first MySQL/MariaDB KnowledgeBase bound to the project.
+
+    Falls back to a global default if multiple are bound. Returns ``None``
+    if no MySQL KB is reachable.
+    """
+    bound_ids: list[str] = list(context.get("bound_kb_ids") or [])
+    if not bound_ids or db is None:
+        return None
+    from app.models.knowledge_base import KnowledgeBase  # local import
+
+    rows = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id.in_(bound_ids))
+        .all()
+    )
+    mysql_rows = [
+        r for r in rows
+        if (r.db_type or "").strip().lower() in ("mysql", "mariadb")
+    ]
+    if not mysql_rows:
+        return None
+    return mysql_rows[0]
 
 
 async def _handle_ask_erp_writeback(

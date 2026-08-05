@@ -325,7 +325,7 @@ function Field({ icon: Icon, label, value, editing, onStartEdit, onCancel, onCom
             'group flex w-full items-start gap-1.5 rounded-md px-1.5 py-1 -mx-1.5 text-left transition-colors hover:bg-muted ' +
             (changed ? 'ring-1 ring-primary/40 bg-primary/5' : '')
           }
-          title="点击编辑"
+          title={isEn ? 'Click to edit' : '点击编辑'}
         >
           <span className={'min-w-0 flex-1 truncate ' + (value ? 'text-foreground' : 'text-muted-foreground')}>
             {value || <span className="italic">{placeholder}</span>}

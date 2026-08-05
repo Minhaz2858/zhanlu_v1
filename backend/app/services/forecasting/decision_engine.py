@@ -19,14 +19,98 @@ Confidence:
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 
-_BUY_THRESHOLD = 0.70
-_SELL_THRESHOLD = 0.30
-_BUY_MIN_CHANGE = 0.03   # 3% expected rise
-_SELL_MIN_CHANGE = -0.03 # 3% expected fall
-_EDGE_THRESHOLD = 0.55   # minimum directional accuracy to act on
-_P_HIGH_MARGIN = 0.25    # |p_rise - 0.5| needed for "high" confidence
+# Decision thresholds — env-overridable for calibration (Wave 1).
+# All defaults match the original hardcoded values → zero regression when flags off.
+# Wave 2 T2.4: get_thresholds(product_key) resolves DB → env → default.
+_BUY_THRESHOLD = float(os.environ.get("FORECAST_BUY_THRESHOLD", "0.70"))
+_SELL_THRESHOLD = float(os.environ.get("FORECAST_SELL_THRESHOLD", "0.30"))
+_BUY_MIN_CHANGE = float(os.environ.get("FORECAST_BUY_MIN_CHANGE", "0.03"))
+_SELL_MIN_CHANGE = float(os.environ.get("FORECAST_SELL_MIN_CHANGE", "-0.03"))
+_EDGE_THRESHOLD = float(os.environ.get("FORECAST_EDGE_THRESHOLD", "0.55"))
+_P_HIGH_MARGIN = float(os.environ.get("FORECAST_P_HIGH_MARGIN", "0.25"))
+
+
+def get_thresholds(
+    product_key: str | None = None,
+    db: object | None = None,
+) -> dict[str, float]:
+    """Resolve decision thresholds: DB (active product-specific → active
+    global) → env → hardcoded default.
+
+    Used by recommend() to read per-product config at decision time.
+    No DB call overhead when no config rows exist (quick query).
+
+    Args:
+        product_key: Optional product key for per-product lookup.
+        db: Optional pre-existing DB session (for testing).
+    """
+    _db = db
+    _close = False
+    try:
+        if _db is None:
+            from app.database import SessionLocal
+            _db = SessionLocal()
+            _close = True
+
+        from app.models.forecasting import ForecastThresholdConfig
+
+        try:
+            # Active product-specific config
+            if product_key:
+                row = (
+                    _db.query(ForecastThresholdConfig)
+                    .filter(
+                        ForecastThresholdConfig.product_key == product_key,
+                        ForecastThresholdConfig.status == "active",
+                    )
+                    .order_by(ForecastThresholdConfig.applied_at.desc())
+                    .first()
+                )
+                if row:
+                    return {
+                        "buy": float(row.buy_threshold),
+                        "sell": float(row.sell_threshold),
+                        "buy_min_change": float(row.buy_min_change),
+                        "sell_min_change": float(row.sell_min_change),
+                        "edge": float(row.edge_threshold),
+                    }
+
+            # Active global config (product_key IS NULL)
+            row = (
+                _db.query(ForecastThresholdConfig)
+                .filter(
+                    ForecastThresholdConfig.product_key.is_(None),
+                    ForecastThresholdConfig.status == "active",
+                )
+                .order_by(ForecastThresholdConfig.applied_at.desc())
+                .first()
+            )
+            if row:
+                return {
+                    "buy": float(row.buy_threshold),
+                    "sell": float(row.sell_threshold),
+                    "buy_min_change": float(row.buy_min_change),
+                    "sell_min_change": float(row.sell_min_change),
+                    "edge": float(row.edge_threshold),
+                }
+        finally:
+            if _close and hasattr(_db, 'close'):
+                _db.close()
+    except Exception:
+        pass
+
+    # Fallback: env → hardcoded (Wave 1 behavior, zero regression).
+    # Re-read env at call time, not module-import time.
+    return {
+        "buy": float(os.environ.get("FORECAST_BUY_THRESHOLD", "0.70")),
+        "sell": float(os.environ.get("FORECAST_SELL_THRESHOLD", "0.30")),
+        "buy_min_change": float(os.environ.get("FORECAST_BUY_MIN_CHANGE", "0.03")),
+        "sell_min_change": float(os.environ.get("FORECAST_SELL_MIN_CHANGE", "-0.03")),
+        "edge": float(os.environ.get("FORECAST_EDGE_THRESHOLD", "0.55")),
+    }
 
 
 @dataclass
@@ -42,6 +126,7 @@ def recommend(
     directional_acc: float | None,
     directional_status: str | None,
     trust_tier: str,
+    product_key: str | None = None,
 ) -> Decision:
     """Compute buy/hold/sell recommendation.
 
@@ -57,16 +142,26 @@ def recommend(
         "edge" / "no_edge" from Phase E1 classifier.
     trust_tier : str
         "high" / "medium" / "directional" / "low".
+    product_key : str | None
+        Optional product key for per-product threshold lookup (Wave 2 T2.4).
+        When None, uses env/default.
 
     Returns
     -------
     Decision with action, confidence, rationale.
     """
+    th = get_thresholds(product_key)
+    buy_th = th["buy"]
+    sell_th = th["sell"]
+    buy_min = th["buy_min_change"]
+    sell_min = th["sell_min_change"]
+    edge_th = th["edge"]
+
     tier = (trust_tier or "low").lower()
     has_edge = (
         directional_status == "edge"
         and directional_acc is not None
-        and directional_acc >= _EDGE_THRESHOLD
+        and directional_acc >= edge_th
     )
 
     # Watch zone: no edge, low trust, or any other hedging condition
@@ -91,13 +186,13 @@ def recommend(
         conf = "medium"
 
     # Actionable signals
-    if p_rise >= _BUY_THRESHOLD and expected_change_pct > _BUY_MIN_CHANGE:
+    if p_rise >= buy_th and expected_change_pct > buy_min:
         return Decision(
             "buy", conf,
             f"P(rise)={p_rise:.0%}, expected +{expected_change_pct:.1%}; "
             f"directional accuracy {directional_acc:.0%}.",
         )
-    if p_rise <= _SELL_THRESHOLD and expected_change_pct < _SELL_MIN_CHANGE:
+    if p_rise <= sell_th and expected_change_pct < sell_min:
         return Decision(
             "sell", conf,
             f"P(rise)={p_rise:.0%}, expected {expected_change_pct:.1%}; "

@@ -215,7 +215,7 @@ def main():
                 avatar.click()
                 page.wait_for_timeout(1000)
                 body = page.inner_text("body")
-                menu_items = ["Pending Tasks", "Settings", "Language", "Theme",
+                menu_items = ["Settings", "Language", "Theme",
                               "Get Help", "Log Out", "View All Plans"]
                 found_menu = [m for m in menu_items if m in body]
                 if len(found_menu) >= 3:

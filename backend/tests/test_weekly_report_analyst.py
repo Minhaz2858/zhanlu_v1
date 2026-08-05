@@ -7,9 +7,12 @@ def test_section_uses_analyst_brief(monkeypatch):
     monkeypatch.setattr(wrg, "collect_all_numbers",
                         lambda pid, db: {"current_price": 6940.0, "change_7d_pct": -1.2})
     monkeypatch.setattr(wrg, "render_chart_stub", lambda *a, **k: None)
-    brief = {"summary_zh": "双环戊二烯现价 6,940 元/吨,预计下周走弱。",
-             "why_price_zh": "上游裂解碳五下跌,成本端下移。",
-             "why_action_zh": "建议观望。", "watch_triggers_zh": [], "risk_zh": "",
+    brief = {"market_update_zh": "市场动态:双环戊二烯市场平稳。",
+             "price_data_zh": "价格数据:现价 6,940 元/吨。",
+             "upstream_logic_zh": "上游裂解碳五下跌,成本端下移。",
+             "supply_demand_zh": "供需研判:按需采购。",
+             "forecast_zh": "价格预测:预计下周走弱。",
+             "watch_triggers_zh": [], "risk_zh": "",
              "source": "template", "day": 7}
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: brief)
