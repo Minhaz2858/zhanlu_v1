@@ -98,3 +98,20 @@ def apply_bias_correction(db, target, published_series: pd.Series, author_id: st
     logger.info("[bias-correction] %s applied delta=%.4f (n=%d)",
                 target.product_key, delta["delta_ratio"], delta["n"])
     return adjusted, expl
+
+
+def resolve_trusted_author(db, product_key: str) -> str | None:
+    """Most recent scored author for the product who passes the trust gate."""
+    rows = db.query(ForecastFeedback).filter(
+        ForecastFeedback.product_id == product_key,
+        ForecastFeedback.status == "scored",
+        ForecastFeedback.is_deleted == False,  # noqa: E712
+    ).order_by(ForecastFeedback.scored_at.desc()).limit(50).all()
+    seen: list[str] = []
+    for r in rows:
+        if r.author_id not in seen:
+            seen.append(r.author_id)
+    for aid in seen:
+        if trust_gate_met(db, aid, product_key):
+            return aid
+    return None

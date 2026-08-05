@@ -9,6 +9,7 @@ ForecastAccuracyLog, ForecastBusinessRule).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 import math
 from datetime import datetime, timedelta, timezone
@@ -513,6 +514,54 @@ class ForecastEngine:
         explanation_dict: dict | None = None
         xgb_exog = forecasts.get("xgboost_exog")
 
+        # ── MLOps / HITL publish-step adjustments (Task 7) ──────────────
+        # Both adjust guard_result.published_forecast (the price users see)
+        # but NEVER the decision-engine action call. Disclosed in the brief.
+        # Flags default OFF -> no-op, existing behavior unchanged.
+        drift_report: dict | None = None
+        if _get_config_bool("FORECAST_DRIFT_AUTO_ADJUST_ENABLED", False):
+            try:
+                from app.models.forecasting import ForecastWeightAdjustment
+                from app.services.forecasting.ops import drift_response
+                pending_drift = self._db.query(ForecastWeightAdjustment).filter(
+                    ForecastWeightAdjustment.target_id == target_id,
+                    ForecastWeightAdjustment.triggered_by == "drift",
+                    ForecastWeightAdjustment.applied == False,  # noqa: E712
+                ).order_by(ForecastWeightAdjustment.created_date.desc()).first()
+                if pending_drift is not None and naive_fc is not None:
+                    f = drift_response.get_drift_blend_factor()
+                    blended = guard_result.published_forecast * (1 - f) + naive_fc * f
+                    guard_result = dataclasses.replace(
+                        guard_result, published_forecast=blended,
+                    )
+                    pending_drift.applied = True
+                    pending_drift.applied_at = datetime.utcnow()
+                    self._db.flush()
+                    drift_report = {
+                        "blend_factor": f,
+                        "audit_id": pending_drift.id,
+                        "reason": pending_drift.reason,
+                    }
+                    logger.info("[ops] drift-blend applied to %s (f=%.2f)", target.product_key, f)
+            except Exception:
+                logger.exception("[ops] drift-blend failed for %s", target.product_key)
+
+        bias_report: dict | None = None
+        if _get_config_bool("FORECAST_BIAS_CORRECTION_ENABLED", False):
+            try:
+                from app.services.forecasting.ops import bias_correction
+                _author = bias_correction.resolve_trusted_author(self._db, target.product_key)
+                _adjusted, bias_report = bias_correction.apply_bias_correction(
+                    self._db, target, guard_result.published_forecast,
+                    author_id=_author,
+                )
+                if bias_report is not None:
+                    guard_result = dataclasses.replace(
+                        guard_result, published_forecast=_adjusted,
+                    )
+            except Exception:
+                logger.exception("[ops] bias-correction failed for %s", target.product_key)
+
         # --- Scenarios (with conformal calibrated intervals) ---
         cal = conformal_calibrate(bt.residuals_by_horizon) if bt.residuals_by_horizon else None
         scenarios_result = generate(
@@ -676,6 +725,14 @@ class ForecastEngine:
 
         # --- Write ForecastRun ---
         now_utc = datetime.now(timezone.utc)
+        # merge MLOps/HITL adjustment reports into the run explanation
+        ops_explanation: dict = {}
+        if drift_report is not None:
+            ops_explanation["drift_adjustment"] = drift_report
+        if bias_report is not None:
+            ops_explanation["bias_correction"] = bias_report
+        if ops_explanation:
+            explanation_dict = {**(explanation_dict or {}), **ops_explanation}
         run = ForecastRun(
             target_id=target_id,
             org_id=target.org_id,
