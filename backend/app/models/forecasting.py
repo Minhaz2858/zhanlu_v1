@@ -154,6 +154,11 @@ class ForecastAccuracyLog(TimestampedBase):
     # JSON: {"ets": 0.12, "arima": 0.15, "seasonal_naive": 0.14, "xgboost": 0.11}
     per_model: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
+    # ── Realized-eval linkage (MLOps) ─────────────────────────
+    # Links a realized-eval row (per_model=None marker) back to its ForecastRun,
+    # so drift detection / adaptive weights consume only scored rows.
+    run_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+
 
 class ForecastBusinessRule(TimestampedBase):
     """Business logic layer — seasonal, causal, event, and guardrail rules.
@@ -204,3 +209,53 @@ class DomainPackInstall(TimestampedBase):
     pack_version: Mapped[str] = mapped_column(String(50), nullable=False)
     config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     installed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ForecastFeedback(TimestampedBase):
+    """Human-in-the-Loop correction — a user asserts the AI price is wrong.
+
+    ``status`` flows ``pending`` → ``scored`` once the target date's actual
+    arrives and the evaluation job computes ``ai_error`` / ``user_error`` /
+    ``beat``. A pending override NEVER moves the forecast; only trust-gated,
+    validated corrections influence the published price (bias_correction.py).
+    """
+
+    __tablename__ = "forecast_feedback"
+
+    target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("forecast_targets.id"), nullable=False, index=True
+    )
+    product_id: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    ai_price: Mapped[float] = mapped_column(Float, nullable=False)
+    user_price: Mapped[float] = mapped_column(Float, nullable=False)
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    author_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    author_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    target_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending", index=True)
+    ai_error: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    user_error: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    beat: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True)
+    scored_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+
+class ForecastWeightAdjustment(TimestampedBase):
+    """Audit trail for automated forecast adjustments (drift, bias-correction).
+
+    Every automated change to a published forecast writes a row here so the
+    change is traceable. ``applied=False`` on creation; the engine marks it
+    ``True`` once the adjustment is blended into a run.
+    """
+
+    __tablename__ = "forecast_weight_adjustments"
+
+    target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("forecast_targets.id"), nullable=False, index=True
+    )
+    triggered_by: Mapped[str] = mapped_column(String(20), nullable=False)  # drift | bias_correction
+    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    old_weights: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    new_weights: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    delta_ratio: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    applied_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
