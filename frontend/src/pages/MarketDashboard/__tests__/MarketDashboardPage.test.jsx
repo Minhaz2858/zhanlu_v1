@@ -3,6 +3,10 @@ import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
+vi.mock('../components/ReportView', () => ({
+  default: () => <div data-testid="mock-report-view">Report Section</div>,
+}));
+
 vi.mock('@/api/marketDashboard', () => ({
   marketDashboardApi: {
     enabled: vi.fn().mockResolvedValue({ enabled: true, reachable: true, reason: 'ok' }),
@@ -142,6 +146,11 @@ describe('MarketDashboardPage — other sections', () => {
   it('renders invalid-section fallback', async () => {
     renderAt('/market-dashboard/bogus');
     expect(await screen.findByText(/unknown section/i)).toBeInTheDocument();
+  });
+
+  it('renders Report section via ReportView', async () => {
+    renderAt('/market-dashboard/report');
+    expect(await screen.findByTestId('mock-report-view')).toBeInTheDocument();
   });
 
   it('renders the EDIA overview layout header (not the per-section header)', async () => {

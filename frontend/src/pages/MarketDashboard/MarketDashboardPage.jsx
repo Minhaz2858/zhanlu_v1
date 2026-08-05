@@ -9,8 +9,9 @@ import ObservedDataStrip from './components/ObservedDataStrip';
 import ForecastTrendChart from './components/ForecastTrendChart';
 import PriceTransmissionChain from './components/PriceTransmissionChain';
 import DecisionBoard from './components/DecisionBoard';
+import ReportView from './components/ReportView';
 
-const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream'];
+const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream', 'report'];
 
 // Upstream fallback so the strip paints instantly while the snapshot loads.
 // (Midstream products like Isoprene/Piperylene/DCPD and downstream products
@@ -45,7 +46,7 @@ export default function MarketDashboardPage() {
     queryFn: () => marketDashboardApi.snapshot(
       section === 'overview' ? undefined : section,
     ),
-    enabled: isValidSection && enabledQuery.data?.enabled && enabledQuery.data?.reachable,
+    enabled: isValidSection && section !== 'report' && enabledQuery.data?.enabled && enabledQuery.data?.reachable,
     staleTime: 60_000,
   });
 
@@ -123,6 +124,12 @@ export default function MarketDashboardPage() {
         </div>
       </div>
     );
+  }
+
+  // Report section: dual-tab Customer Sales / Contract Performance.
+  // Bypasses the product-section layout (no snapshot / product selector needed).
+  if (section === 'report') {
+    return <ReportView />;
   }
 
   // Overview section: pixel-faithful EDIA layout (sidebar + 3 price cards +

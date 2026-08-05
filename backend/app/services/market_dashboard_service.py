@@ -172,6 +172,11 @@ def _read_md_lz_history_rows(
     return out
 
 
+def read_product_history_rows(product_id: str) -> list[tuple]:
+    """Public alias of _read_product_history_rows for the analyst pack."""
+    return _read_product_history_rows(product_id)
+
+
 def _read_product_history_rows(product_id: str) -> list[tuple]:
     """Return [(date_str, price_float), ...] from EDIA's table for a product.
 
@@ -861,6 +866,7 @@ PRODUCT_FORECAST_TARGET_KEY: dict[str, str] = {
     "naphtha":        "ecisco.naphtha",
     "cracked_c5":     "ecisco.cracked_c5",
     "cracked_c9":     "ecisco.cracked_c9",
+    "mixed_c5":       "ecisco.mixed_c5",
     "isoprene":       "ecisco.isoprene",
     "piperylene":     "ecisco.piperylene",
     "dcpd":           "ecisco.dcpd",
@@ -1415,6 +1421,147 @@ def _build_overlay_meta(
     return None
 
 
+def _extract_horizon_keyed(explanation: Optional[dict], section: str, day: int) -> dict:
+    """Pull {"7": {...}} style section out of run.explanation for horizon `day`.
+
+    Falls back to the first entry when the exact horizon is absent.
+    """
+    raw = (explanation or {}).get(section) or {}
+    if not isinstance(raw, dict):
+        return {}
+    exact = raw.get(str(day))
+    if isinstance(exact, dict):
+        return exact
+    for v in raw.values():
+        if isinstance(v, dict):
+            return v
+    return {}
+
+
+def _build_analysis_block(
+    *,
+    day: int,
+    history_rows: list,
+    horizon_payload: dict,
+    run=None,
+    explanation: Optional[dict] = None,
+    overlay: Optional["ForecastOverlayMeta"] = None,
+) -> "ForecastAnalysisMeta":
+    """Compose the AI 分析依据 block for the chart page / decision board.
+
+    Combines read-time trend stats (from actual history) with run-level
+    model/uncertainty/directional evidence, then renders the Chinese
+    【预测依据】 + 【建议逻辑】 fragments via forecasting.narrative.
+    """
+    from app.schemas.market_dashboard import ForecastAnalysisMeta
+    from app.services.forecasting import narrative as fn
+
+    trend = fn.compute_trend_stats(history_rows)
+    unc = fn.compute_uncertainty_stats(horizon_payload)
+    models = fn.compute_model_stats(
+        getattr(run, "model_detail", None),
+        getattr(run, "below_naive_baseline", None),
+    )
+
+    dire = _extract_horizon_keyed(explanation, "directional", day)
+    dec = _extract_horizon_keyed(explanation, "decision", day)
+    prob = _extract_horizon_keyed(explanation, "probability", day)
+    trust_raw = (explanation or {}).get("trust_tier") or {}
+
+    # Prefer overlay values (already normalised) when available
+    action = dec.get("action", "watch")
+    confidence = dec.get("confidence", "low")
+    p_rise = prob.get("p_rise")
+    exp_chg = prob.get("expected_change_pct")
+    dir_acc = dire.get("accuracy")
+    dir_status = dire.get("status")
+    trust_tier = trust_raw.get("tier")
+
+    basis_zh = fn.build_basis_zh(trend=trend, uncertainty=unc, models=models)
+    action_logic_zh = fn.build_action_logic_zh(
+        action=action, confidence=confidence,
+        p_rise=p_rise, expected_change_pct=exp_chg,
+        directional_accuracy=dir_acc, directional_status=dir_status,
+        trust_tier=trust_tier,
+    )
+
+    return ForecastAnalysisMeta(
+        chg_7d_pct=trend.get("chg_7d_pct"),
+        chg_30d_pct=trend.get("chg_30d_pct"),
+        ma30=trend.get("ma30"),
+        above_ma30=trend.get("above_ma30"),
+        bull_price=unc.get("bull"),
+        bear_price=unc.get("bear"),
+        spread_pct=unc.get("spread_pct"),
+        model_count=models.get("model_count", 0),
+        model_names=models.get("model_names", []),
+        ensemble_mape=models.get("ensemble_mape"),
+        naive_mape=models.get("naive_mape"),
+        beats_naive=models.get("beats_naive"),
+        below_naive_baseline=models.get("below_naive_baseline"),
+        directional_accuracy=float(dir_acc) if isinstance(dir_acc, (int, float)) else None,
+        directional_status=dir_status,
+        directional_n_test=int(dire.get("n_test", 0) or 0) or None,
+        rationale=dec.get("rationale"),
+        basis_zh=basis_zh,
+        action_logic_zh=action_logic_zh,
+    )
+
+
+def _pick_horizon_payload(results: dict, days: int) -> tuple:
+    """Return (horizon_payload, effective_horizon_days) for the requested days.
+
+    Preference: exact key f"{days}d" → str(days); otherwise the nearest
+    available numeric horizon key (ties → larger key).  Returns ({}, None)
+    if no usable horizon is found.
+    """
+    if not results:
+        return {}, None
+
+    # Exact-key preference
+    for key in (f"{days}d", str(days)):
+        payload = results.get(key)
+        if isinstance(payload, dict) and payload:
+            return payload, days
+
+    # Nearest-horizon fallback: parse numeric horizon keys
+    numeric_keys = []
+    for k in results:
+        try:
+            h = int(k.rstrip("d"))
+            numeric_keys.append(h)
+        except (ValueError, TypeError):
+            continue
+
+    if not numeric_keys:
+        return {}, None
+
+    # Closest absolute distance; ties → larger horizon (more data to slice from)
+    best_h = max(numeric_keys, key=lambda h: (-abs(h - days), h))
+    payload = results.get(f"{best_h}d") or results.get(str(best_h)) or {}
+    if isinstance(payload, dict) and payload:
+        return payload, best_h
+
+    return {}, None
+
+
+def _slice_curve(curve, days: int) -> list[float] | None:
+    """Slice a curve array to at most `days` points.  Returns None if curve
+    is not a list or is empty."""
+    if not isinstance(curve, list) or len(curve) == 0:
+        return None
+    return curve[:days]
+
+
+def _curve_to_float_list(curve) -> list[float] | None:
+    """Normalise a curve value (list / scalar / None) into a list of floats."""
+    if isinstance(curve, list) and len(curve) > 0:
+        return [float(v) for v in curve]
+    elif isinstance(curve, (int, float)):
+        return [float(curve)]
+    return None
+
+
 def get_forecast_chart(
     product_id: str, days: int = 30, db=None,
 ) -> "ForecastChartResponse":
@@ -1458,6 +1605,7 @@ def get_forecast_chart(
     executed_in_count = 0
     executed_out_count = 0
     overlay_meta: Optional[ForecastOverlayMeta] = None  # Phase 6
+    analysis_meta = None  # ForecastAnalysisMeta | None — AI 分析依据
 
     owns_session = db is None
     if owns_session:
@@ -1478,19 +1626,27 @@ def get_forecast_chart(
                 ).order_by(ForecastRun.created_date.desc()).limit(10).all()
 
                 if runs:
-                    # Latest run = forecast curves
-                    latest = runs[0]
-                    horizon_payload = (
-                        (latest.results or {}).get(f"{days}d")
-                        or (latest.results or {}).get(str(days))
-                        or {}
+                    # Horizon-aware latest-run selection: pick the newest run
+                    # whose results actually contain the requested horizon.
+                    latest = None
+                    for r in runs:
+                        rp = (r.results or {})
+                        if f"{days}d" in rp or str(days) in rp:
+                            latest = r
+                            break
+                    if latest is None:
+                        latest = runs[0]  # fallback to newest (nearest-horizon slicing)
+
+                    horizon_payload, effective_horizon = _pick_horizon_payload(
+                        latest.results or {}, days,
                     )
                     for k in ("base", "bull", "bear"):
                         raw = horizon_payload.get(k)
-                        if isinstance(raw, list) and len(raw) > 0:
-                            forecast_curves[k] = [float(v) for v in raw]
-                        elif isinstance(raw, (int, float)):
-                            forecast_curves[k] = [float(raw)]
+                        curve = _curve_to_float_list(raw)
+                        if curve is not None and effective_horizon is not None and effective_horizon > days:
+                            curve = curve[:days]
+                        if curve is not None:
+                            forecast_curves[k] = curve
                     as_of_date = (
                         latest.created_date.strftime("%Y-%m-%d")
                         if latest.created_date else None
@@ -1502,6 +1658,16 @@ def get_forecast_chart(
                     # embedded in horizon_payload (which only has base/bull/bear).
                     overlay_meta = _build_overlay_meta(
                         product_id, horizon_payload, latest.explanation,
+                    )
+
+                    # ---- AI 分析依据 (chart-page reasoning panel) ----
+                    analysis_meta = _build_analysis_block(
+                        day=days,
+                        history_rows=history_rows,
+                        horizon_payload=horizon_payload,
+                        run=latest,
+                        explanation=latest.explanation,
+                        overlay=overlay_meta,
                     )
 
                     # ---- Step-function previous AI across the PAST zone ----
@@ -1539,19 +1705,34 @@ def get_forecast_chart(
                             if offset < 0:
                                 continue
 
-                            bp = (best_run.results or {}).get(f"{days}d") or (best_run.results or {}).get(str(days)) or {}
+                            # Use _pick_horizon_payload for nearest-horizon fallback
+                            bp, bp_horizon = _pick_horizon_payload(
+                                best_run.results or {}, days,
+                            )
                             base_arr = bp.get("base")
                             bull_arr = bp.get("bull")
                             bear_arr = bp.get("bear")
 
-                            if isinstance(base_arr, list) and 0 <= offset < len(base_arr):
-                                previous_ai_series[d_str] = float(base_arr[offset])
-                            elif isinstance(base_arr, (int, float)):
-                                previous_ai_series[d_str] = float(base_arr)
-                            if isinstance(bull_arr, list) and 0 <= offset < len(bull_arr):
-                                prev_ai_high_series[d_str] = float(bull_arr[offset])
-                            if isinstance(bear_arr, list) and 0 <= offset < len(bear_arr):
-                                prev_ai_low_series[d_str] = float(bear_arr[offset])
+                            # Slice if the fallback horizon is larger than requested
+                            if bp_horizon is not None and bp_horizon > days:
+                                if isinstance(base_arr, list) and 0 <= offset < min(bp_horizon, len(base_arr)):
+                                    if offset < days:
+                                        previous_ai_series[d_str] = float(base_arr[offset])
+                                if isinstance(bull_arr, list) and 0 <= offset < min(bp_horizon, len(bull_arr)):
+                                    if offset < days:
+                                        prev_ai_high_series[d_str] = float(bull_arr[offset])
+                                if isinstance(bear_arr, list) and 0 <= offset < min(bp_horizon, len(bear_arr)):
+                                    if offset < days:
+                                        prev_ai_low_series[d_str] = float(bear_arr[offset])
+                            else:
+                                if isinstance(base_arr, list) and 0 <= offset < len(base_arr):
+                                    previous_ai_series[d_str] = float(base_arr[offset])
+                                elif isinstance(base_arr, (int, float)):
+                                    previous_ai_series[d_str] = float(base_arr)
+                                if isinstance(bull_arr, list) and 0 <= offset < len(bull_arr):
+                                    prev_ai_high_series[d_str] = float(bull_arr[offset])
+                                if isinstance(bear_arr, list) and 0 <= offset < len(bear_arr):
+                                    prev_ai_low_series[d_str] = float(bear_arr[offset])
 
                             # Executed-dot classification
                             lo = prev_ai_low_series.get(d_str)
@@ -1682,7 +1863,62 @@ def get_forecast_chart(
         executed_in_range_count=executed_in_count,
         executed_outside_range_count=executed_out_count,
         overlay=overlay_meta,  # Phase 6
+        analysis=analysis_meta,  # AI 分析依据
     )
+
+
+def get_forecast_analysis(
+    product_id: str, day: int = 7, db=None,
+) -> Optional["ForecastAnalysisMeta"]:
+    """Lightweight accessor for the AI 分析依据 block of one product.
+
+    Used by the decision-board service to enrich narratives without
+    paying for the full chart point assembly. Returns None when the
+    product has no forecast target / run / history.
+    """
+    from app.models.forecasting import ForecastTarget, ForecastRun
+    from app.schemas.market_dashboard import ForecastAnalysisMeta  # noqa: F401
+
+    target_key = PRODUCT_FORECAST_TARGET_KEY.get(product_id)
+    if not target_key:
+        return None
+
+    owns_session = db is None
+    if owns_session:
+        from app.database import SessionLocal
+        db = SessionLocal()
+    try:
+        tgt = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key == target_key,
+            ForecastTarget.org_id == "default-org",
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).first()
+        if tgt is None:
+            return None
+
+        run = db.query(ForecastRun).filter(
+            ForecastRun.target_id == tgt.id,
+            ForecastRun.is_deleted == False,  # noqa: E712
+        ).order_by(ForecastRun.created_date.desc()).first()
+        if run is None or not run.results:
+            return None
+
+        horizon_payload, _eh = _pick_horizon_payload(run.results, day)
+        history_rows = _read_product_history_rows(product_id)
+        if not history_rows and not horizon_payload:
+            return None
+
+        return _build_analysis_block(
+            day=day,
+            history_rows=history_rows,
+            horizon_payload=horizon_payload,
+            run=run,
+            explanation=run.explanation,
+            overlay=None,
+        )
+    finally:
+        if owns_session:
+            db.close()
 
 
 def _safe_idx(lst: Optional[list], idx: int) -> Optional[float]:

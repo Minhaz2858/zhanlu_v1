@@ -164,6 +164,18 @@ class SkuBrief(BaseModel):
     forecast_base: Optional[float] = None
 
 
+class AnalystBriefMeta(BaseModel):
+    """Structured AI 简评 — evidence-grounded analyst brief."""
+    summary_zh: str = ""
+    why_price_zh: str = ""
+    why_action_zh: str = ""
+    watch_triggers_zh: list[str] = []
+    risk_zh: str = ""
+    source: str = "template"           # "llm" | "template"
+    day: Optional[int] = None
+    generated_at: Optional[str] = None
+
+
 class DecisionBoardProduct(BaseModel):
     """One product row on the decision board (plain-language bundle)."""
     id: str
@@ -187,6 +199,7 @@ class DecisionBoardProduct(BaseModel):
     volatility_regime: Optional[str] = None      # NORMAL|MODERATE|HIGH
     one_liner_zh: str = ""
     narrative_zh: str = ""
+    analyst_brief: Optional[AnalystBriefMeta] = None
     skus: list[SkuBrief] = []
 
 
@@ -291,6 +304,39 @@ class ForecastChartPoint(BaseModel):
     zone: str = "past"                   # "past" | "today" | "forecast"
 
 
+class ForecastAnalysisMeta(BaseModel):
+    """AI 分析依据 — structured reasoning behind the forecast.
+
+    Powers the chart-page collapsible "AI 分析依据" panel and is reused
+    by the decision-board narrative builder. All fields optional so a
+    product with thin data degrades gracefully.
+    """
+    # Trend (computed from actual price history)
+    chg_7d_pct: Optional[float] = None
+    chg_30d_pct: Optional[float] = None
+    ma30: Optional[float] = None
+    above_ma30: Optional[bool] = None
+    # Uncertainty (from latest run bull/bear)
+    bull_price: Optional[float] = None
+    bear_price: Optional[float] = None
+    spread_pct: Optional[float] = None
+    # Model ensemble (from run.model_detail)
+    model_count: int = 0
+    model_names: list[str] = Field(default_factory=list)
+    ensemble_mape: Optional[float] = None
+    naive_mape: Optional[float] = None
+    beats_naive: Optional[bool] = None
+    below_naive_baseline: Optional[bool] = None
+    # Directional classifier + decision rationale
+    directional_accuracy: Optional[float] = None
+    directional_status: Optional[str] = None     # "edge" | "no_edge"
+    directional_n_test: Optional[int] = None
+    rationale: Optional[str] = None              # decision rationale (en)
+    # Pre-built Chinese narrative fragments
+    basis_zh: str = ""                           # 【预测依据】
+    action_logic_zh: str = ""                    # 【建议逻辑】
+
+
 class ForecastChartResponse(BaseModel):
     """Full forecast chart payload for a product.
 
@@ -305,6 +351,7 @@ class ForecastChartResponse(BaseModel):
     executed_in_range_count: int = 0     # count of past dates inside AI range
     executed_outside_range_count: int = 0  # count of past dates outside AI range
     overlay: Optional[ForecastOverlayMeta] = None  # Phase 6
+    analysis: Optional[ForecastAnalysisMeta] = None  # AI 分析依据
 
 
 # ── Price transmission chain (3-tier upstream flow) ─────────────────

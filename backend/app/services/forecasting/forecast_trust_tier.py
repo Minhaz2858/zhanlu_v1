@@ -85,6 +85,7 @@ def compute_forecast_trust_tier(
         badge_color = "red"
         badge_label_zh = "数据不足"
         badge_label_en = "Insufficient Data"
+        reason_codes = ["sparse_data"]
         reason_zh = "历史数据稀疏或不支持预测，建议查看市场定性分析。"
         reason_en = (
             "Historical data is too sparse or unsupported for forecasting. "
@@ -96,7 +97,9 @@ def compute_forecast_trust_tier(
         badge_color = "orange"
         badge_label_zh = "方向性参考"
         badge_label_en = "Directional Only"
+        reason_codes = ["below_naive_baseline"]
         if product_id in _WEEKLY_CADENCE_PRODUCTS:
+            reason_codes.append("weekly_cadence")
             reason_zh = (
                 "该产品周频交易，日预测精度有限；当前模型弱于简单基准。仅供参考方向。"
             )
@@ -118,6 +121,7 @@ def compute_forecast_trust_tier(
         badge_color = "yellow"
         badge_label_zh = "周参考"
         badge_label_en = "Weekly Reference"
+        reason_codes = ["weekly_cadence"]
         reason_zh = "周频产品，日预测仅供参考；建议以周均价为主要参考。"
         reason_en = (
             "Weekly-trading product; daily forecast is indicative only. "
@@ -129,6 +133,7 @@ def compute_forecast_trust_tier(
         badge_color = "green"
         badge_label_zh = "高置信"
         badge_label_en = "High Confidence"
+        reason_codes = ["model_skill_high"]
         mape_str = f"（MAPE {mape:.1f}%）" if mape is not None else ""
         mape_str_en = f" (MAPE {mape:.1f}%)" if mape is not None else ""
         reason_zh = f"模型在历史回测中持续跑赢简单基准，置信度较高{mape_str}。"
@@ -142,6 +147,7 @@ def compute_forecast_trust_tier(
         badge_color = "yellow"
         badge_label_zh = "中置信"
         badge_label_en = "Medium Confidence"
+        reason_codes = ["model_skill_medium"]
         reason_zh = "模型有一定预测能力，但需结合市场判断使用。"
         reason_en = (
             "Model has some predictive skill; use alongside qualitative market judgment."
@@ -154,6 +160,7 @@ def compute_forecast_trust_tier(
         "mape": mape,
         "reason_zh": reason_zh,
         "reason_en": reason_en,
+        "reason_codes": reason_codes,
         "badge_color": badge_color,
         "badge_label_zh": badge_label_zh,
         "badge_label_en": badge_label_en,

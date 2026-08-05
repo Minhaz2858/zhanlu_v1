@@ -64,6 +64,11 @@ _ELASTICITIES: dict[str, float] = {
 }
 
 
+def get_elasticity(product_id: str) -> float | None:
+    """Public accessor for the effective chain elasticity of a product."""
+    return _ELASTICITIES.get(product_id)
+
+
 # ---------------------------------------------------------------------------
 # Seasonal rules (product_id, month) → pct adjustment (additive)
 # ---------------------------------------------------------------------------

@@ -107,7 +107,7 @@ export default function ChatFilesModal({ sessionId, open, onOpenChange }) {
                       <button onClick={(e) => { e.stopPropagation(); setPreviewFile(f); }} className="text-muted-foreground transition-colors hover:text-primary" title={t.detail.preview}>
                         <Eye className="h-4 w-4" />
                       </button>
-                      <a href={f.file_url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="text-muted-foreground transition-colors hover:text-primary">
+                      <a href={f.download_url || f.file_url} target="_blank" rel="noreferrer" onClick={(e) => e.stopPropagation()} className="text-muted-foreground transition-colors hover:text-primary">
                         <Download className="h-4 w-4" />
                       </a>
                     </div>

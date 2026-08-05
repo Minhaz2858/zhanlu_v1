@@ -388,6 +388,12 @@ class Settings(BaseSettings):
     FORECAST_CASCADE_ENABLED: bool = True
     FORECAST_ADAPTIVE_WEIGHTS_FACTOR: float = 0.3
     FORECAST_DRIFT_THRESHOLD_PCT: float = 20.0
+    # Domain-signal overlay (naphtha→C5 elasticities + seasonal rules).
+    # Enable per A/B validation (tests/test_domain_signals_ab.py).
+    FORECAST_DOMAIN_SIGNALS_ENABLED: bool = False
+    # LLM analyst brief writer. When False, the deterministic template
+    # brief is used everywhere (no LLM calls).
+    FORECAST_ANALYST_LLM_ENABLED: bool = False
 
     # ── Ecisco BI feature flags (EDIA 5.1.2 → zhanlu migration) ─────────
     # Master switch for EDIA-specific delegated tools in the ecisco_bi_assistant

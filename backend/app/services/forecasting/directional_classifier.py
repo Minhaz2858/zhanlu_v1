@@ -102,13 +102,16 @@ def _cv_eval(y: pd.Series, h: int):
     test on samples [k*N/K : (k+1)*N/K].
     """
     n = len(y)
+    # Reset index to default RangeIndex to avoid alignment issues when
+    # filtering feats with a boolean Series from a different index.
+    y = y.reset_index(drop=True)
     feats = build_features(y)
     future_sign = (y.shift(-h) > y).astype(int)
 
     # Drop rows where future_sign is NaN (last h rows have no label)
-    valid_mask = future_sign.notna()
-    feats = feats[valid_mask].reset_index(drop=True)
-    labels = future_sign[valid_mask].astype(int).reset_index(drop=True)
+    valid_mask = future_sign.notna().reset_index(drop=True)
+    feats = feats.loc[valid_mask].reset_index(drop=True)
+    labels = future_sign.loc[valid_mask].astype(int).reset_index(drop=True)
     n_valid = len(labels)
     if n_valid < _MIN_TRAIN + 30:
         return None, 0

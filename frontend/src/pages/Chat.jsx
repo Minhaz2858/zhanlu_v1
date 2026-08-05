@@ -1266,7 +1266,7 @@ export default function Chat() {
             // "Ungrouped" when no chip is set. See lib/createResourceProject.js.
             const projectFallback = pickCreateProject(parsedFields, pendingProject, t.sessionList.ungrouped);
             const payload = cr.type === 'report'
-              ? { title: cr.name, ...parsedFields }
+              ? { title: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback, agent_name: effectiveAgent?.name || null } : {}) }
               : { name: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback } : {}) };
             const created = await base44.entities[entityName].create(payload);
             // Manus-style: when an automation is created from a chat, rename
@@ -1413,7 +1413,8 @@ export default function Chat() {
             try {
               const e2 = ENTITY_MAP[cr2.type];
               if (e2) {
-                const payload2 = cr2.type === 'report' ? { title: cr2.name, ...pf } : { name: cr2.name, ...pf };
+                const projectFallback2 = pickCreateProject(pf, pendingProject, t.sessionList.ungrouped);
+                const payload2 = cr2.type === 'report' ? { title: cr2.name, ...pf, ...(sid ? { session_id: sid, project: projectFallback2, agent_name: effectiveAgent?.name || null } : {}) } : { name: cr2.name, ...pf, ...(sid ? { session_id: sid, project: projectFallback2 } : {}) };
                 const created2 = await base44.entities[e2].create(payload2);
                 // Same bulletproof rename as the main create_resource path
                 // (see comment there). The retry fires when the agent's

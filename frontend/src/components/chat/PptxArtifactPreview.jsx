@@ -1,13 +1,23 @@
 /**
- * PptxArtifactPreview - inline slide-deck viewer for the chat pane.
- *
- * Fetches /api/artifacts/{id}/preview?format=html (positioned 16:9 slides),
- * parses each <section class="zl-slide" data-slide="N"> into a slide, and
- * shows one slide at a time on a dark stage that scales to fit. Prev/next,
- * arrow-key navigation, a thumbnail rail, and an "N / total" counter let the
- * user move through the deck without leaving the chat. Props contract is
- * unchanged from the previous stacked-scroll reader.
- */
+* PptxArtifactPreview - inline slide-deck viewer for the chat pane.
+*
+* Fetches /api/artifacts/{id}/preview?format=html (positioned slides at the
+* deck's real aspect ratio), parses each <section class="zl-slide"
+* data-slide="N"> into a slide, and shows one slide at a time on a dark
+* stage that scales to fit ("contain": scale = min(cw/sw, ch/sh), centered,
+* ~24px margin). The first slide's `width:Npx; height:Mpx` is read from the
+* inline style so 4:3 / 16:10 / portrait decks all fit without clipping or
+* postage-stamp content. The slide wrapper's translate(-50%,-50%)
+* centering and the fit scale live in ONE inline `transform` — under
+* Tailwind v3 the translate utilities are implemented via the `transform`
+* property, so a separate inline `transform: scale(...)` would silently
+* wipe the centering and park the slide's top-left corner at the stage
+* center (the "slide jammed bottom-right, clipped" bug). Hosts that give
+* no definite height (inline chat card) get a width-driven fallback with
+* an explicit aspect-ratio stage height so the stage can't collapse to 0.
+* Prev/next, arrow-key navigation, a thumbnail rail, and an "N / total"
+* counter let the user move through the deck without leaving the chat.
+*/
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader2, Presentation, AlertTriangle, Download, ChevronLeft, ChevronRight } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -16,6 +26,12 @@ const API_BASE = '/api';
 const BASE_SLIDE_W = 960;
 const BASE_SLIDE_H = 540;
 const THUMB_CAP = 50;
+// Uniform breathing room around the fitted slide inside the stage.
+const STAGE_PAD = 24;
+// Below this measured stage height the host clearly gave no definite
+// height (a slide canvas is never legitimately shorter than this) — switch
+// to the width-driven self-sizing fallback.
+const MIN_REAL_STAGE_H = 120;
 
 export default function PptxArtifactPreview({
   artifactId,
@@ -26,10 +42,15 @@ export default function PptxArtifactPreview({
   title,
 }) {
   const [slides, setSlides] = useState([]);
+  const [slideDims, setSlideDims] = useState({ w: BASE_SLIDE_W, h: BASE_SLIDE_H });
   const [status, setStatus] = useState('loading');
   const [error, setError] = useState(null);
   const [current, setCurrent] = useState(0);
   const [scale, setScale] = useState(1);
+  // Width-driven fallback: when the host gives no definite height, the
+  // stage gets this explicit pixel height (derived from width + aspect).
+  const [selfSizeH, setSelfSizeH] = useState(null);
+  const selfSizeRef = useRef(false);
   const stageRef = useRef(null);
 
   useEffect(() => {
@@ -53,6 +74,24 @@ export default function PptxArtifactPreview({
           setError('No slides found');
           return;
         }
+        // Read the deck's actual aspect ratio from the first slide's inline
+        // style (backend always emits `width:Npx; height:Mpx` on the section).
+        // Falling back to 16:9 keeps the legacy test fixtures and any
+        // future hand-written HTML working.
+        let actualW = BASE_SLIDE_W;
+        let actualH = BASE_SLIDE_H;
+        const firstStyle = sections[0].getAttribute('style') || '';
+        const wMatch = firstStyle.match(/width:\s*([\d.]+)px/i);
+        const hMatch = firstStyle.match(/height:\s*([\d.]+)px/i);
+        if (wMatch && hMatch) {
+          const w = parseFloat(wMatch[1]);
+          const h = parseFloat(hMatch[1]);
+          if (Number.isFinite(w) && Number.isFinite(h) && w > 0 && h > 0) {
+            actualW = w;
+            actualH = h;
+          }
+        }
+        setSlideDims({ w: actualW, h: actualH });
         setSlides(sections.map((s) => ({
           id: s.getAttribute('data-slide') || String(s),
           html: s.outerHTML,
@@ -74,15 +113,39 @@ export default function PptxArtifactPreview({
     if (!el || typeof ResizeObserver === 'undefined') return undefined;
     const compute = () => {
       const w = el.clientWidth;
-      const h = el.clientHeight;
-      if (!w || !h) return;
-      setScale(Math.min(w / BASE_SLIDE_W, h / BASE_SLIDE_H));
+      let h = el.clientHeight;
+      if (!w) return;
+      // Host gave no definite height (e.g. the inline chat card, whose
+      // wrapper is only max-h-capped): the absolutely-positioned slide
+      // contributes nothing to layout, so the stage would collapse to ~0px
+      // and the deck would render at scale 1, jammed off-canvas. Fall back
+      // to a width-driven fit and an explicit aspect-ratio stage height.
+      // Sticky via selfSizeRef so the explicit height doesn't flip the
+      // measurement back and oscillate, and so panel resizes keep
+      // re-deriving the height from the (always definite) width.
+      if (h < MIN_REAL_STAGE_H || selfSizeRef.current) {
+        selfSizeRef.current = true;
+        // ceil so the derived height never under-fits the width-driven
+        // scale (a rounded-down height would shave the scale by a hair).
+        h = Math.max(
+          Math.ceil((w - STAGE_PAD * 2) * (slideDims.h / slideDims.w)) + STAGE_PAD * 2,
+          MIN_REAL_STAGE_H,
+        );
+        setSelfSizeH((prev) => (prev === h ? prev : h));
+      }
+      // "Contain" fit: uniform scale, whole slide root, ~24px margin.
+      const availW = Math.max(w - STAGE_PAD * 2, 40);
+      const availH = Math.max(h - STAGE_PAD * 2, 40);
+      // Use the deck's actual aspect ratio (parsed from the backend HTML),
+      // not a hardcoded 16:9, so 4:3 / 16:10 / portrait decks fit correctly.
+      const next = Math.min(availW / slideDims.w, availH / slideDims.h);
+      setScale((prev) => (Math.abs(prev - next) < 0.0005 ? prev : next));
     };
     compute();
     const ro = new ResizeObserver(compute);
     ro.observe(el);
     return () => ro.disconnect();
-  }, [status]);
+  }, [status, slideDims.w, slideDims.h]);
 
   const total = slides.length;
   const go = useCallback((idx) => {
@@ -162,16 +225,30 @@ export default function PptxArtifactPreview({
               role="group"
               aria-label="Presentation stage"
               onKeyDown={onKey}
-              className="relative flex min-h-0 flex-1 items-center justify-center overflow-hidden bg-[#0B1220] outline-none"
+              style={selfSizeH ? { height: selfSizeH } : undefined}
+              className={cn(
+                // overflow-hidden: the 960px slide root must never leak
+                // scrollable overflow into ancestors (no scrollbars in the
+                // canvas) — only the scaled, centered result is visible.
+                'relative flex min-h-0 w-full items-center justify-center overflow-hidden bg-[#0B1220] outline-none',
+                // flex-1 (fill host) only when the host gives a definite
+                // height; in self-size mode flex-basis:0% would override
+                // the explicit pixel height and collapse the stage again.
+                selfSizeH ? 'shrink-0' : 'flex-1'
+              )}
             >
               <div
                 style={{
-                  width: BASE_SLIDE_W,
-                  height: BASE_SLIDE_H,
-                  transform: `scale(${scale})`,
+                  width: slideDims.w,
+                  height: slideDims.h,
+                  // Centering + fit scale in ONE transform: under Tailwind
+                  // v3 the -translate-x/y-1/2 classes use the `transform`
+                  // property, so an inline `transform: scale(...)` without
+                  // the translate would override (erase) the centering.
+                  transform: `translate(-50%, -50%) scale(${scale})`,
                   transformOrigin: 'center center',
                 }}
-                className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 overflow-hidden rounded-md bg-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-150"
+                className="pointer-events-none absolute left-1/2 top-1/2 overflow-hidden rounded-md bg-white shadow-2xl ring-1 ring-white/10 transition-opacity duration-150"
               >
                 <div
                   // eslint-disable-next-line react/no-danger

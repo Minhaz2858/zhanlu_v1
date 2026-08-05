@@ -214,12 +214,40 @@ function ExpandedCard({ p, day }) {
       </div>
 
       <div className="min-w-0">
-        <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200">
-          {p.narrative_zh}
-        </p>
+          {p.analyst_brief ? (
+            <div className="space-y-2 text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+              <p>{p.analyst_brief.summary_zh}</p>
+              {p.analyst_brief.why_price_zh && <p>{p.analyst_brief.why_price_zh}</p>}
+              {p.analyst_brief.why_action_zh && <p>{p.analyst_brief.why_action_zh}</p>}
+              {p.analyst_brief.watch_triggers_zh?.length > 0 && (
+                <div>
+                  <div className="text-xs font-medium text-slate-500 dark:text-slate-400">关注触发</div>
+                  <ul className="mt-0.5 list-disc pl-4 text-xs text-slate-500 dark:text-slate-400">
+                    {p.analyst_brief.watch_triggers_zh.map((t, i) => (
+                      <li key={i}>{t}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {p.analyst_brief.risk_zh && (
+                <p className="text-xs text-amber-600 dark:text-amber-400">{p.analyst_brief.risk_zh}</p>
+              )}
+              {p.analyst_brief.source === 'llm' && (
+                <span className="inline-block rounded bg-violet-50 px-1.5 py-0.5 text-[10px] text-violet-600 dark:bg-violet-900/30 dark:text-violet-300">AI 分析师撰写</span>
+              )}
+            </div>
+          ) : (
+            <p className="text-sm leading-relaxed text-slate-700 dark:text-slate-200">
+              {p.narrative_zh}
+            </p>
+          )}
         <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-4">
           <div>方向准确率<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.directional_accuracy == null ? '—' : `${Math.round(p.directional_accuracy * 100)}%`}</span></div>
-          <div>情报事件<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.intel_event_count} 条</span></div>
+          <div>情报事件<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.intel_event_count} 条</span>
+            {p.intel_event_count === 0 && (
+              <span className="block text-[10px] font-normal text-slate-400 dark:text-slate-500">近期无重大市场事件</span>
+            )}
+          </div>
           <div>波动状态<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{VOL_ZH[p.volatility_regime] || '—'}</span></div>
           <div>置信度<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{CONF_ZH[p.confidence] || '低'}</span></div>
         </div>

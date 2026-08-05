@@ -83,3 +83,29 @@ def test_convert_pptx_to_html_handles_unicode():
     prs.save(buf)
     html, _ = convert_pptx_to_html(buf.getvalue())
     assert "报告" in html
+
+
+def test_convert_pptx_to_html_renders_every_shape_not_just_the_last():
+    """Regression: a previous indentation bug placed the text-box rendering
+    block outside the `for shape in slide.shapes:` loop, so only the LAST
+    shape on each slide was ever emitted. A 3-shape slide (title placeholder
+    + two text boxes) must produce all three positioned divs.
+    """
+    prs = Presentation()
+    slide = prs.slides.add_slide(prs.slide_layouts[5])
+    slide.shapes.title.text = "Title Shape"
+    tb1 = slide.shapes.add_textbox(Inches(0.5), Inches(2), Inches(9), Inches(1))
+    tb1.text_frame.text = "Middle Shape"
+    tb2 = slide.shapes.add_textbox(Inches(0.5), Inches(4), Inches(9), Inches(1))
+    tb2.text_frame.text = "Trailing Shape"
+    buf = io.BytesIO()
+    prs.save(buf)
+    html, _ = convert_pptx_to_html(buf.getvalue())
+    assert "Title Shape" in html, "title placeholder was dropped"
+    assert "Middle Shape" in html, "first text box was dropped (last-only bug)"
+    assert "Trailing Shape" in html, "last text box was dropped"
+    # Each shape should produce its own positioned div
+    assert html.count("position:absolute") >= 3
+    # And each should carry the new nowrap/visible guards
+    assert "white-space:nowrap" in html
+    assert "overflow:visible" in html

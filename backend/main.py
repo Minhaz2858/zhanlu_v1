@@ -53,6 +53,7 @@ from app.routers.hooks import router as hooks_router
 from app.routers.market_dashboard import router as market_dashboard_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.resource_shares import router as resource_shares_router
+from app.routers.reports import router as reports_router
 
 
 ENTITY_MODELS = {
@@ -659,6 +660,7 @@ def create_app() -> FastAPI:
     app.include_router(market_dashboard_router, prefix="/api")
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(resource_shares_router, prefix="/api")
+    app.include_router(reports_router, prefix="/api")
 
     # Serve uploaded files under /api/uploads so the Vite proxy routes them to backend
     app.mount("/api/uploads", StaticFiles(directory=str(settings.upload_path)), name="uploads")

@@ -157,9 +157,14 @@ function formatSize(bytes) {
  *   - other → iframe if a preview_url exists, else a graceful fallback
  */
 export default function ArtifactPreviewPane({ artifact, onClose }) {
-  const [viewMode, setViewMode] = useState('document');
+  // Default to 'html' (mammoth/pptx2html rendered content) so the chat
+  // preview matches the "Files in this task" modal. Previously defaulted
+  // to 'document' (PDF render via LibreOffice) which only showed page 1
+  // of multi-page documents and looked visually different from the modal.
+  // Users can still toggle to 'pdf' for a faithful page-by-page render.
+  const [viewMode, setViewMode] = useState('html');
   const _artifactIdForReset = artifact?.id || artifact?.artifact_id;
-  useEffect(() => { setViewMode('document'); }, [_artifactIdForReset]);
+  useEffect(() => { setViewMode('html'); }, [_artifactIdForReset]);
 
   // Null-safe derivations for the preview-token hook below (hooks must run
   // unconditionally, before the ``if (!artifact) return null`` guard). The
@@ -226,12 +231,12 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
     ? `/api/artifacts/${previewArtifactId}/preview`
     : null;
 
-  // Office-file artifacts (docx/pptx/xlsx) default to a faithful PDF
-  // render of the actual downloaded file.  When a sidecar summary
-  // (rich HTML sibling artifact) exists, the user can toggle between
-  // "Document" (PDF) and "Summary" (sidecar HTML) views.
+  // Office-file artifacts (docx/pptx/xlsx) have three view modes:
+  //   'html'    — mammoth/pptx2html rendition (default; matches Files modal)
+  //   'pdf'     — faithful PDF render via LibreOffice (page-by-page)
+  //   'summary' — sibling rich-HTML artifact (sidecar, when present)
   const isOfficeDoc = artifact.type === 'docx' || artifact.type === 'pptx' || artifact.type === 'xlsx';
-  const showToggle = isOfficeDoc && !!sidecarPreviewUrl;
+  const showToggle = isOfficeDoc; // always show the toggle for office docs
 
   // Automation-file artifacts live in the AutomationFile table (not the
   // Artifact table) and are served by a different endpoint. Routing them
@@ -272,6 +277,16 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
           {showToggle && (
             <div className="flex items-center rounded-md border border-border bg-secondary/40 p-0.5">
               <button
+                onClick={() => setViewMode('html')}
+                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                  viewMode === 'html'
+                    ? 'bg-background text-foreground shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                HTML
+              </button>
+              <button
                 onClick={() => setViewMode('document')}
                 className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
                   viewMode === 'document'
@@ -279,18 +294,20 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                Document
+                PDF
               </button>
-              <button
-                onClick={() => setViewMode('summary')}
-                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-                  viewMode === 'summary'
-                    ? 'bg-background text-foreground shadow-sm'
-                    : 'text-muted-foreground hover:text-foreground'
-                }`}
-              >
-                Summary
-              </button>
+              {sidecarPreviewUrl && (
+                <button
+                  onClick={() => setViewMode('summary')}
+                  className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
+                    viewMode === 'summary'
+                      ? 'bg-background text-foreground shadow-sm'
+                      : 'text-muted-foreground hover:text-foreground'
+                  }`}
+                >
+                  Summary
+                </button>
+              )}
             </div>
           )}
           {artifact.ms_word_open_url && (
@@ -350,16 +367,16 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
             panel is dragged wider, which made the content look frozen
             — see the regression the user filed. */}
         {isOfficeDoc ? (
-          /* Office-file artifacts (docx/pptx/xlsx): default to a
-             faithful PDF render of the actual downloaded file.  If a
-             sidecar summary exists and the user toggled to it, show
-             the rich-HTML summary instead. */
+          /* Office-file artifacts (docx/pptx/xlsx): three view modes.
+             'html' is the default (matches Files in this task modal).
+             'document' is a faithful PDF render via LibreOffice.
+             'summary' is the sibling rich-HTML sidecar artifact. */
           viewMode === 'summary' && sidecarPreviewUrl ? (
             <SidecarHtmlPreview
               key={`sidecar-${artifactId}-${previewArtifactId}`}
               src={sidecarPreviewUrl}
             />
-          ) : (
+          ) : viewMode === 'document' ? (
             <PdfFaithfulPreview
               key={`pdf-${artifactId}`}
               artifactId={artifactId}
@@ -386,6 +403,25 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
                 )
               }
             />
+          ) : (
+            /* 'html' (default) — matches the Files in this task modal. */
+            artifact.type === 'docx' ? (
+              <DocxArtifactPreview
+                key={`docx-${artifactId}`}
+                artifactId={artifactId}
+                outline={artifact.preview_outline || []}
+                title={title}
+                downloadUrl={fileUrl}
+              />
+            ) : (
+              <PptxArtifactPreview
+                key={`pptx-${artifactId}`}
+                artifactId={artifactId}
+                outline={artifact.preview_outline || []}
+                title={title}
+                downloadUrl={fileUrl}
+              />
+            )
           )
         ) : sidecarPreviewUrl ? (
           /* Non-office artifacts: prefer sidecar rich HTML (unchanged). */

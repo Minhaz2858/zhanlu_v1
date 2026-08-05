@@ -82,6 +82,22 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 4,
     },
     {
+        # Dashboard product_id "mixed_c5" = Yangzi Cracked C5
+        # (mirrors PRODUCT_TABLE_MAP["mixed_c5"] in models/market_dashboard.py)
+        "product_key": "ecisco.mixed_c5",
+        "name": "Yangzi Cracked C5",
+        "datasource": {
+            "source": "edia_mysql",
+            "table": "md_t_lz_price",
+            "time_col": "FDATE",
+            "measure": "FTAXPRICE",
+            "where": "FMATERIAL_NAME = '裂解C5-扬子裂解C5'",
+            "granularity": "day",
+        },
+        "include_in_weekly_report": True,
+        "report_order": 5,
+    },
+    {
         "product_key": "ecisco.isoprene",
         "name": "Isoprene (East China)",
         "datasource": {

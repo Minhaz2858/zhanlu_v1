@@ -230,6 +230,30 @@ def get_automation_by_session(
     }
 
 
+def _ext_from_url(file_url: str | None) -> str:
+    """Extract lowercase file extension from a URL, default to 'docx'."""
+    import re
+    if not file_url:
+        return "docx"
+    m = re.search(r"\.([a-z0-9]+)(?:\?|$)", file_url, re.IGNORECASE)
+    return m.group(1).lower() if m else "docx"
+
+
+def _report_resource_kind(report_type: str | None, file_type: str) -> str:
+    """Map Report.type + file extension to a resource_kind value.
+
+    - ``dashboard`` → ``"dashboard"`` (triggers DashboardArtifactPreview)
+    - ``html``/``htm`` extension → ``"html_file"`` (triggers sandbox iframe)
+    - everything else → ``"report"``
+    """
+    rt = (report_type or "").lower()
+    if rt == "dashboard":
+        return "dashboard"
+    if file_type in ("html", "htm"):
+        return "html_file"
+    return "report"
+
+
 @router.get("/by-session/{session_id}/files")
 def list_files_by_session(
     session_id: str,
@@ -278,6 +302,110 @@ def list_files_by_session(
         d = u.to_dict()
         d["_source"] = "uploaded"
         files.append(d)
+
+    # Report rows for this session (agent-generated DOCX reports created in
+    # chat via create_resource type=report). Normalize to same shape as
+    # AutomationFile/UserFile so the frontend ChatFilesModal renders them
+    # without any code change.
+    from app.models.report import Report as ReportModel
+    report_rows = db.query(ReportModel).filter(
+        ReportModel.session_id == session_id,
+        ReportModel.is_deleted == False,  # noqa: E712
+    ).order_by(ReportModel.updated_date.desc()).limit(200).all()
+    for r in report_rows:
+        # Derive file_type from file_url extension; default to docx
+        ft = _ext_from_url(r.file_url)
+        # Derive resource_kind: dashboard/HTML get special treatment;
+        # everything else is "report"
+        kind = _report_resource_kind(r.type, ft)
+        files.append({
+            "id": r.id,
+            "name": r.title,
+            "file_type": ft,
+            "file_url": r.file_url,
+            "source": "ai_generated",
+            "resource_kind": kind,
+            "project": r.project,
+            "project_id": r.project_id,
+            "session_id": r.session_id,
+            "agent_name": r.agent_name,
+            "updated_date": r.updated_date.isoformat() if r.updated_date else None,
+            "created_date": r.created_date.isoformat() if r.created_date else None,
+            "_source": "ai_generated",
+            "_entity_type": "Report",
+        })
+
+    # Artifacts stored in chat_messages.artifacts JSON column for this session.
+    # The agent stores generated files (DOCX, PDF, HTML) as Artifacts in
+    # chat_messages.artifacts (per-message), not always as Report entities.
+    # Include them here so the "Files in this task" modal surfaces everything
+    # the agent produced in this session.
+    from app.models.chat_message import ChatMessage
+    seen_artifact_ids: set[str] = set()
+    msg_rows = db.query(ChatMessage).filter(
+        ChatMessage.session_id == session_id,
+        ChatMessage.is_deleted == False,  # noqa: E712
+        ChatMessage.artifacts.isnot(None),
+    ).all()
+    for m in msg_rows:
+        arts = m.artifacts
+        if not isinstance(arts, list):
+            continue
+        for art in arts:
+            if not isinstance(art, dict):
+                continue
+            aid = str(art.get("artifact_id") or art.get("id") or "")
+            if not aid or aid in seen_artifact_ids:
+                continue
+            seen_artifact_ids.add(aid)
+            raw_file_url = art.get("file_url") or ""
+            raw_preview_url = art.get("preview_url") or ""
+            ft = _ext_from_url(raw_file_url) or (art.get("type") or "").lower() or "docx"
+            kind = _report_resource_kind(art.get("type"), ft)
+            # For Office formats (DOCX/PPTX/XLSX), prefer the HTML preview
+            # variant (mammoth/pptx-renderer) which renders cleanly inline
+            # in a sandboxed iframe. Fall back to PDF preview, then to the
+            # raw file_url (which is the download endpoint and will
+            # trigger a download instead of rendering).
+            OFFICE = {"doc", "docx", "ppt", "pptx", "pps", "ppsx", "xls", "xlsx", "odt", "ods", "odp", "rtf"}
+            is_office = ft in OFFICE
+            primary_url = raw_file_url
+            if is_office and raw_preview_url:
+                # If the preview URL points at the artifact preview endpoint
+                # (ends with /preview), append ?format=html so the user gets
+                # the mammoth/pptx HTML rendition (clean inline render)
+                # instead of a PDF (which would still work but feels heavy
+                # in a small modal).
+                if ft in ("docx", "pptx"):
+                    if "?" in raw_preview_url:
+                        primary_url = raw_preview_url + "&format=html"
+                    else:
+                        primary_url = raw_preview_url + "?format=html"
+                else:
+                    # XLSX: no HTML preview, use cached PDF instead
+                    primary_url = raw_preview_url
+            elif not is_office and raw_preview_url:
+                # PDF/image previews: use the cached preview blob directly
+                primary_url = raw_preview_url
+            files.append({
+                "id": aid,
+                "name": art.get("title") or art.get("file_name") or "Artifact",
+                "file_type": ft,
+                "file_url": primary_url or raw_file_url,
+                "preview_url": raw_preview_url,
+                "download_url": raw_file_url,
+                "file_size": art.get("file_size"),
+                "mime_type": art.get("mime_type"),
+                "source": "ai_generated",
+                "resource_kind": kind,
+                "session_id": session_id,
+                "agent_name": m.role if m.role == "assistant" else None,
+                "message_id": m.id,
+                "updated_date": m.updated_date.isoformat() if m.updated_date else None,
+                "created_date": m.created_date.isoformat() if m.created_date else None,
+                "_source": "ai_generated",
+                "_entity_type": "Artifact",
+            })
 
     return {
         "task_id": task.id if task else None,

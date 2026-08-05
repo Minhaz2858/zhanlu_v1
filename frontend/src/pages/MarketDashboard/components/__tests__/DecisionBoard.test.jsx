@@ -85,4 +85,40 @@ describe('DecisionBoard', () => {
     fireEvent.click(btn);
     expect(screen.queryByText(/异戊二烯现价 12,100 元\/吨/)).not.toBeInTheDocument();
   });
+
+  it('renders structured analyst brief sections when present', async () => {
+    const { marketDashboardApi } = await import('@/api/marketDashboard');
+    const withBrief = {
+      ...FIXTURE,
+      products: [
+        {
+          ...FIXTURE.products[0],
+          analyst_brief: {
+            summary_zh: '异戊二烯现价 12,100 元/吨,预计涨至 12,450 元/吨(+2.9%)。',
+            why_price_zh: '上游裂解碳五近30日+1.8%,按 0.68 弹性传导约 +1.2%。',
+            why_action_zh: '建议提前备货 —— 上涨概率≥70% 且方向准确率达标。',
+            watch_triggers_zh: ['方向准确率回升至 55% 以上时重新评估'],
+            risk_zh: '近期无重大市场事件,价格主要由供需基本面驱动。',
+            source: 'llm', day: 7, generated_at: '2026-08-04T00:00:00+00:00',
+          },
+        },
+        FIXTURE.products[1],
+      ],
+    };
+    marketDashboardApi.decisionBoard.mockResolvedValueOnce(withBrief);
+    renderBoard();
+    const btn = await screen.findByLabelText('展开 异戊二烯');
+    fireEvent.click(btn);
+    expect(await screen.findByText(/上游裂解碳五近30日/)).toBeInTheDocument();
+    expect(screen.getByText('关注触发')).toBeInTheDocument();
+    expect(screen.getByText(/方向准确率回升至 55%/)).toBeInTheDocument();
+    expect(screen.getByText('AI 分析师撰写')).toBeInTheDocument();
+  });
+
+  it('shows no-events note when intel_event_count is 0', async () => {
+    renderBoard();
+    const btn = await screen.findByLabelText('展开 双环戊二烯');
+    fireEvent.click(btn);
+    expect(await screen.findByText('近期无重大市场事件')).toBeInTheDocument();
+  });
 });

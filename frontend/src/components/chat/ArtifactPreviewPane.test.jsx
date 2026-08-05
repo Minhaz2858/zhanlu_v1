@@ -2,6 +2,14 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
 import { render, cleanup } from '@testing-library/react';
 import ArtifactPreviewPane from './ArtifactPreviewPane';
 
+// Mock docx-preview so DocxBrowserRenderer's dynamic import resolves instantly
+vi.mock('docx-preview', () => ({
+  renderAsync: vi.fn(async (_blob, containerEl) => {
+    containerEl.innerHTML = '<div class="docx-wrapper"><p>Mocked render</p></div>';
+  }),
+}));
+vi.mock('@/docx-preview.css', () => ({}));
+
 beforeEach(() => {
   localStorage.setItem('zhanlu_lang', 'en');
   globalThis.fetch = vi.fn();
@@ -25,7 +33,7 @@ function mockFetchPdfOk() {
 }
 
 describe('ArtifactPreviewPane (artifact_source routing)', () => {
-  it('routes an automation_file docx to /api/automations/files/{id}/preview (not the broken /api/artifacts/ endpoint)', async () => {
+  it('routes an automation_file docx to the correct download URL (via file_url)', async () => {
     const artifact = {
       id: 'auto-file-uuid-123',
       type: 'docx',
@@ -40,19 +48,19 @@ describe('ArtifactPreviewPane (artifact_source routing)', () => {
 
     render(<ArtifactPreviewPane artifact={artifact} onClose={() => {}} />);
 
-    // The fix: PdfFaithfulPreview must call the automation-files endpoint,
-    // not /api/artifacts/{id}/preview (which 404s for AutomationFile IDs).
     await vi.waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalled();
     });
     const calledUrls = globalThis.fetch.mock.calls.map((c) => c[0]);
-    expect(calledUrls).toContain('/api/automations/files/auto-file-uuid-123/preview');
-    expect(calledUrls).not.toContain(
-      '/api/artifacts/auto-file-uuid-123/preview?format=pdf',
+
+    // DocxBrowserRenderer fetches the explicit downloadUrl (file_url) as the
+    // docx blob source — not a constructed /api/artifacts/{id}/download URL.
+    expect(calledUrls).toContain(
+      '/api/automations/files/auto-file-uuid-123/download',
     );
   });
 
-  it('routes an Artifact-table docx to /api/artifacts/{id}/preview?format=pdf (backward compat)', async () => {
+  it('routes an Artifact-table docx to /api/artifacts/{id}/download (backward compat)', async () => {
     const artifact = {
       id: 'artifact-uuid-456',
       artifact_id: 'artifact-uuid-456',
@@ -72,8 +80,11 @@ describe('ArtifactPreviewPane (artifact_source routing)', () => {
       expect(globalThis.fetch).toHaveBeenCalled();
     });
     const calledUrls = globalThis.fetch.mock.calls.map((c) => c[0]);
+
+    // With viewMode='html' (default), DocxBrowserRenderer fetches the
+    // downloadUrl (file_url) as the docx blob source.
     expect(calledUrls).toContain(
-      '/api/artifacts/artifact-uuid-456/preview?format=pdf',
+      '/api/artifacts/artifact-uuid-456/download',
     );
   });
 });

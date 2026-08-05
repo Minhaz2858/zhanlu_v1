@@ -1,6 +1,6 @@
 """Report model — generated DOCX reports."""
 
-from sqlalchemy import String, Text
+from sqlalchemy import String, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -14,3 +14,9 @@ class Report(TimestampedBase):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     file_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="generating")
+    session_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    project_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("projects.id"), nullable=True, index=True
+    )
+    project: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    agent_name: Mapped[str | None] = mapped_column(String(255), nullable=True)

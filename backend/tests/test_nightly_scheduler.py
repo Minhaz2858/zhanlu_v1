@@ -97,11 +97,16 @@ class TestSeedEciscoTargets:
         )
         assert callable(seed_ecisco_forecast_targets)
 
-    def test_seed_returns_12_targets(self):
-        """seed_ecisco_forecast_targets should define 12 hardcoded targets."""
+    def test_seed_returns_11_targets(self):
+        """seed_ecisco_forecast_targets should define 11 hardcoded targets.
+
+        10 md_t_lz_price products + ecisco.mixed_c5 (Yangzi Cracked C5).
+        The 2 ERP products (c5_resin, raffinate_c5) are seeded dynamically
+        via discover_and_seed_sku_targets(), not in this static list.
+        """
         from app.services.forecasting.seed_ecisco_targets import (
             ECISCO_FORECAST_TARGETS,
         )
-        assert len(ECISCO_FORECAST_TARGETS) == 12, (
-            f"Expected 12 Ecisco BI targets, got {len(ECISCO_FORECAST_TARGETS)}"
+        assert len(ECISCO_FORECAST_TARGETS) == 11, (
+            f"Expected 11 Ecisco BI targets, got {len(ECISCO_FORECAST_TARGETS)}"
         )

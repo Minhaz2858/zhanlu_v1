@@ -1,0 +1,106 @@
+/* ==========================================================================
+   docx-preview Word-Page Styling
+   --------------------------------------------------------------------------
+   docx-preview emits .docx-wrapper (outer canvas) and .docx-page (each A4
+   sheet).  These rules give the output true Word-like fidelity — white A4
+   pages with soft drop-shadows floating on a neutral gray canvas.
+   ========================================================================== */
+
+/* ---- Canvas (grey deskmat behind the pages) --------------------------- */
+.docx-wrapper {
+  background: #f0f1f3;
+  padding: 16px 0;
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+/* ---- Individual A4 page ------------------------------------------------ */
+.docx-wrapper .docx-page {
+  max-width: 794px;           /* A4 @ 96 dpi */
+  width: 100%;
+  margin: 0 auto;
+  padding: 96px 72px;         /* ~1 inch margins */
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12), 0 4px 12px rgba(0, 0, 0, 0.06);
+  border-radius: 2px;
+  font-family: 'Calibri', 'Segoe UI', system-ui, -apple-system, sans-serif;
+  font-size: 11pt;
+  line-height: 1.15;
+  color: #000000;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+/* ---- Headings ---------------------------------------------------------- */
+.docx-wrapper .docx-page h1,
+.docx-wrapper .docx-page h2,
+.docx-wrapper .docx-page h3,
+.docx-wrapper .docx-page h4,
+.docx-wrapper .docx-page h5,
+.docx-wrapper .docx-page h6 {
+  font-weight: bold;
+  color: inherit;
+  margin: 0.5em 0 0.25em;
+  line-height: 1.2;
+}
+
+/* ---- Tables ------------------------------------------------------------ */
+.docx-wrapper .docx-page table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 0.5em 0;
+  table-layout: auto;
+}
+
+.docx-wrapper .docx-page table td,
+.docx-wrapper .docx-page table th {
+  border: 1px solid #000000;
+  padding: 2px 4px;
+  vertical-align: top;
+  font-size: inherit;
+}
+
+/* ---- Lists ------------------------------------------------------------- */
+.docx-wrapper .docx-page ul,
+.docx-wrapper .docx-page ol {
+  margin: 0.25em 0;
+  padding-left: 2em;
+}
+
+.docx-wrapper .docx-page li {
+  margin: 0.125em 0;
+}
+
+/* ---- Images ------------------------------------------------------------ */
+.docx-wrapper .docx-page img {
+  max-width: 100%;
+  height: auto;
+}
+
+/* ---- Paragraphs -------------------------------------------------------- */
+.docx-wrapper .docx-page p {
+  margin: 0.25em 0;
+}
+
+/* ---- Dark-mode: keep pages white, dim the canvas ----------------------- */
+@media (prefers-color-scheme: dark) {
+  .docx-wrapper {
+    background: #1a1a2e;
+  }
+
+  .docx-wrapper .docx-page {
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.3);
+  }
+}
+
+/* ---- Dark-mode override when a parent explicitly uses .dark class ------ */
+.dark .docx-wrapper {
+  background: #1a1a2e;
+}
+
+.dark .docx-wrapper .docx-page {
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4), 0 4px 16px rgba(0, 0, 0, 0.3);
+}

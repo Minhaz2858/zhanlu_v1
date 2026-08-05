@@ -122,9 +122,11 @@ async def create_share(
     )
     db.add(share)
 
-    # When an agent is shared, auto-promote it to "company" so it appears
-    # under Company Agents for all users (not just the recipient).
-    if rt == "agent" and getattr(resource, "resource_type", None) == "personal":
+    # When a resource is shared, auto-promote it to "company" so it appears
+    # under Company Projects / Company Agents for all users (not just the
+    # recipient).  Once flipped it stays "company" even if all shares are
+    # later revoked (stable design per plan 2026-08-05).
+    if getattr(resource, "resource_type", None) == "personal":
         resource.resource_type = "company"
 
     db.commit()

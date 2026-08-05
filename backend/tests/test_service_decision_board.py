@@ -203,3 +203,65 @@ def test_build_decision_board_missing_overlay(monkeypatch):
     assert p.action_label_zh == "建议观望"
     assert p.one_liner_zh == "数据不足,建议观望"
     assert "数据不足" in p.narrative_zh
+
+
+def _analyst_brief_dict():
+    return {
+        "summary_zh": "双环戊二烯现价 6,940 元/吨,预计跌至 6,660 元/吨。",
+        "why_price_zh": "上游裂解碳五下跌。",
+        "why_action_zh": "历史数据不足,观望。",
+        "watch_triggers_zh": ["准确率 55% 以上再评估"],
+        "risk_zh": "近期无重大市场事件。",
+        "source": "template", "day": 7, "generated_at": "2026-08-04T00:00:00+00:00",
+    }
+
+
+def test_board_attaches_analyst_brief(monkeypatch):
+    brief = _analyst_brief_dict()
+    monkeypatch.setattr(
+        dbs.mds, "get_market_snapshot",
+        lambda group: [_snapshot(pid, 6940.0)
+                       for pid in ("isoprene", "piperylene", "dcpd", "raffinate_c5")],
+    )
+    monkeypatch.setattr(
+        dbs.mds, "get_forecast_base_batch_v2",
+        lambda product_ids, day=7, db=None: ForecastBaseBatchResponse(
+            day=day,
+            base_by_product={pid: 6660.0 for pid in product_ids},
+            overlay_by_product={pid: _overlay(pid, action="watch", conf="low") for pid in product_ids},
+            sku_forecasts_by_product={},
+        ),
+    )
+    from app.services.forecasting.analyst import service as analyst_service
+    monkeypatch.setattr(analyst_service, "get_analyst_brief",
+                        lambda pid, day=7, db=None: brief)
+    resp = dbs.build_decision_board("midstream", day=7)
+    p = next(p for p in resp.products if p.id == "dcpd")
+    assert p.analyst_brief is not None
+    assert p.analyst_brief.why_price_zh == "上游裂解碳五下跌。"
+    assert p.analyst_brief.watch_triggers_zh == ["准确率 55% 以上再评估"]
+    assert p.narrative_zh.startswith("双环戊二烯现价 6,940")
+
+
+def test_board_survives_analyst_failure(monkeypatch):
+    monkeypatch.setattr(
+        dbs.mds, "get_market_snapshot",
+        lambda group: [_snapshot("isoprene", 12100.0)],
+    )
+    monkeypatch.setattr(
+        dbs.mds, "get_forecast_base_batch_v2",
+        lambda product_ids, day=7, db=None: ForecastBaseBatchResponse(
+            day=day, base_by_product={"isoprene": 12450.0},
+            overlay_by_product={"isoprene": _overlay("isoprene")},
+            sku_forecasts_by_product={},
+        ),
+    )
+    monkeypatch.setattr(dbs, "PRODUCT_GROUP_MAP", {"midstream": ["isoprene"]})
+    from app.services.forecasting.analyst import service as analyst_service
+
+    def _boom(pid, day=7, db=None):
+        raise RuntimeError("analyst down")
+    monkeypatch.setattr(analyst_service, "get_analyst_brief", _boom)
+    resp = dbs.build_decision_board("midstream", day=7)
+    assert resp.products[0].analyst_brief is None
+    assert "12,100" in resp.products[0].narrative_zh  # legacy narrative intact

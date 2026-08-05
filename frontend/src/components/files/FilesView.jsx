@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useTranslate } from '@/lib/useTranslate';
@@ -10,10 +10,24 @@ import FileCard from './FileCard';
 import RenameDialog from './RenameDialog';
 import FilePreviewModal from '@/components/chat/FilePreviewModal';
 
-export default function FilesView() {
+/**
+ * FilesView — list of UserFile rows, with optional scope filter.
+ *
+ * `scope`:
+ *   - 'all' (default): no filtering beyond search/sort
+ *   - 'personal': files whose project's `resource_type` is 'personal' OR
+ *                 files with no project (matches the rule chosen for unassigned files)
+ *   - 'company': files whose project's `resource_type` is 'company'
+ *
+ * We do the filter client-side by reading the project's `resource_type`
+ * (set on the Project entity by the RBAC migration). This avoids a DB
+ * migration on UserFile and keeps the rest of the code unchanged.
+ */
+export default function FilesView({ scope = 'all' }) {
   const { t, lang } = useLanguage();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [projectTypes, setProjectTypes] = useState({}); // { project_id: 'personal' | 'company' }
   const [filterProject, setFilterProject] = useState('all');
   const [filterAgent, setFilterAgent] = useState('all');
   const [sortBy, setSortBy] = useState('date');
@@ -34,12 +48,61 @@ export default function FilesView() {
   }
 
   useEffect(() => { moment.locale(lang === 'zh' ? 'zh-cn' : 'en'); }, [lang]);
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [scope]);
 
   async function load() {
     setLoading(true);
     try {
-      setItems(await base44.entities.UserFile.list('-updated_date', 500));
+      const [files, reports, projects] = await Promise.all([
+        base44.entities.UserFile.list('-updated_date', 500),
+        base44.entities.Report.list('-updated_date', 500).catch(() => []),
+        scope === 'all'
+          ? Promise.resolve(null)
+          : base44.entities.Project.list('-updated_date', 500).catch(() => []),
+      ]);
+      // Normalize Report rows to UserFile shape so they merge seamlessly
+      const _extFromUrl = (url) => {
+        if (!url) return 'docx';
+        const m = url.match(/\.([a-z0-9]+)(?:\?|$)/i);
+        return m ? m[1].toLowerCase() : 'docx';
+      };
+      const _reportKind = (reportType, ft) => {
+        const rt = (reportType || '').toLowerCase();
+        if (rt === 'dashboard') return 'dashboard';
+        if (ft === 'html' || ft === 'htm') return 'html_file';
+        return 'report';
+      };
+      const reportItems = (reports || []).map((r) => {
+        const ft = _extFromUrl(r.file_url);
+        const kind = _reportKind(r.type, ft);
+        return {
+          id: r.id,
+          name: r.title,
+          file_type: ft,
+          file_url: r.file_url,
+          source: 'ai_generated',
+          resource_kind: kind,
+          project: r.project,
+          project_id: r.project_id,
+          session_id: r.session_id,
+          agent_name: r.agent_name,
+          read: false,
+          pinned: false,
+          size: null,
+          updated_date: r.updated_date,
+          created_date: r.created_date,
+          _entityType: 'Report',
+        };
+      });
+      // Merge Report rows after UserFile rows (UserFile first = pinned items surface on top)
+      setItems([...files, ...reportItems]);
+      if (projects) {
+        const map = {};
+        for (const p of projects) map[p.id] = p.resource_type || 'personal';
+        setProjectTypes(map);
+      } else {
+        setProjectTypes({});
+      }
     } finally { setLoading(false); }
   }
 
@@ -49,7 +112,24 @@ export default function FilesView() {
   const agents = [...new Set(items.map((i) => i.agent_name).filter(Boolean))];
   const unreadCount = items.filter((i) => i.read === false).length;
 
-  let filtered = items;
+  // Determine which files match the requested scope. Files with no
+  // `project_id` are treated as "personal" — matches the rule chosen
+  // for unassigned files during brainstorming. Files whose `project_id`
+  // resolves to an unknown project also fall back to "personal" so
+  // they don't disappear silently.
+  const scopedItems = useMemo(() => {
+    if (scope === 'all') return items;
+    return items.filter((item) => {
+      if (!item.project_id) return scope === 'personal';
+      const projType = projectTypes[item.project_id];
+      // Unknown / missing project_type → treat as personal (best-effort
+      // fallback so legacy files still appear somewhere).
+      const normalized = projType || 'personal';
+      return normalized === scope;
+    });
+  }, [items, scope, projectTypes]);
+
+  let filtered = scopedItems;
   if (filterProject !== 'all') filtered = filtered.filter((i) => i.project === filterProject);
   if (filterAgent !== 'all') filtered = filtered.filter((i) => i.agent_name === filterAgent);
   if (keywords.length > 0) filtered = filtered.filter((i) => KEYWORDS.some((kw) => keywords.includes(kw.key) && kw.match(i)));
@@ -65,20 +145,29 @@ export default function FilesView() {
   const pinned = filtered.filter((i) => i.pinned === true);
   const others = filtered.filter((i) => i.pinned !== true);
 
+  const isReport = (item) => item._entityType === 'Report';
+  const entityFor = (item) => isReport(item) ? base44.entities.Report : base44.entities.UserFile;
+
   async function togglePin(item) {
+    if (isReport(item)) return; // Report has no pinned field
     await base44.entities.UserFile.update(item.id, { pinned: !item.pinned });
     load();
   }
   async function markRead(item) {
+    if (isReport(item)) return; // Report has no read field
     if (item.read === false) await base44.entities.UserFile.update(item.id, { read: true });
   }
   async function remove(item) {
-    await base44.entities.UserFile.delete(item.id);
+    await entityFor(item).delete(item.id);
     load();
   }
   async function doRename(name) {
     if (!renameItem || !name.trim()) return;
-    await base44.entities.UserFile.update(renameItem.id, { name: name.trim() });
+    if (isReport(renameItem)) {
+      await base44.entities.Report.update(renameItem.id, { title: name.trim() });
+    } else {
+      await base44.entities.UserFile.update(renameItem.id, { name: name.trim() });
+    }
     setRenameItem(null);
     load();
   }
@@ -125,7 +214,7 @@ export default function FilesView() {
           </SelectContent>
         </Select>
         <span className="ml-auto text-xs text-muted-foreground">
-          {items.length} {t.myFiles.files}{unreadCount > 0 && ` · ${unreadCount} ${t.myFiles.unread}`}
+          {scopedItems.length} {t.myFiles.files}{unreadCount > 0 && ` · ${unreadCount} ${t.myFiles.unread}`}
         </span>
       </div>
 
@@ -134,7 +223,7 @@ export default function FilesView() {
       ) : filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-border py-20 text-center">
           <FileText className="mb-3 h-8 w-8 text-muted-foreground/40" />
-          <p className="text-sm text-muted-foreground">{items.length === 0 ? t.myFiles.noFiles : t.myFiles.emptyFiltered}</p>
+          <p className="text-sm text-muted-foreground">{scopedItems.length === 0 ? t.myFiles.noFiles : t.myFiles.emptyFiltered}</p>
           <p className="mt-1 text-xs text-muted-foreground">{t.myFiles.noFilesHint}</p>
         </div>
       ) : (

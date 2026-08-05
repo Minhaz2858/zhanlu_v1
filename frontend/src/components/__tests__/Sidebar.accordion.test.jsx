@@ -82,6 +82,7 @@ describe('Sidebar DashboardAccordion', () => {
     expect(screen.getByText('Upstream')).toBeInTheDocument();
     expect(screen.getByText('Midstream')).toBeInTheDocument();
     expect(screen.getByText('Downstream')).toBeInTheDocument();
+    expect(screen.getByText('Report')).toBeInTheDocument();
   });
 
   // Discoverability is a feature: a user who lands on a server where
@@ -101,10 +102,11 @@ describe('Sidebar DashboardAccordion', () => {
     const header = await screen.findByText(/dashboard/i);
     // The header is a button; click to expand
     fireEvent.click(header);
-    // All four sub-items become reachable
+    // All five sub-items become reachable
     expect(screen.getByText('Overview')).toBeInTheDocument();
     expect(screen.getByText('Upstream')).toBeInTheDocument();
     expect(screen.getByText('Midstream')).toBeInTheDocument();
     expect(screen.getByText('Downstream')).toBeInTheDocument();
+    expect(screen.getByText('Report')).toBeInTheDocument();
   });
 });

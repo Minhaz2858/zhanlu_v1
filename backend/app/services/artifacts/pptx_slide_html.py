@@ -295,10 +295,15 @@ def render_pptx_to_slide_html(pptx_bytes: bytes) -> tuple[str, list[str]]:
 
     for i, slide in enumerate(prs.slides, start=1):
         bg = _slide_bg_hex(slide)
+        # `overflow:visible` (not hidden) so text and shapes that extend
+        # past the slide's right/bottom edge are still shown. Many decks
+        # position title text boxes flush to the slide's right edge with
+        # `Resize shape to fit text` left off — clipping there would hide
+        # the rest of the title ("Q2 2026 Sales Report" → "Q2 2026").
         parts.append(
             f"<section class='zl-slide' data-slide='{i}' "
             f"style='position:relative;box-sizing:border-box;width:{BASE_W}px;"
-            f"height:{BASE_H}px;overflow:hidden;background:{bg}'>"
+            f"height:{BASE_H}px;overflow:visible;background:{bg}'>"
         )
 
         for shape in slide.shapes:
@@ -352,7 +357,7 @@ def render_pptx_to_slide_html(pptx_bytes: bytes) -> tuple[str, list[str]]:
 
             if not shape.has_text_frame:
                 continue
-            style_bits = [_pos(shape)]
+            style_bits = [_pos(shape), "white-space:nowrap", "overflow:visible"]
             fill = _shape_fill_hex(shape)
             if fill:
                 style_bits.append(f"background:{fill}")

@@ -7,9 +7,98 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Wand2, CheckCircle2, XCircle, Play, Loader2 } from 'lucide-react';
 import { authFetch } from '@/api/authFetch';
 
-function parseConnString(raw) {
+/**
+ * Decode a single token extracted from a connection string.
+ *
+ * Connection strings pasted from SQLAlchemy URLs (or any other URL
+ * source) carry URL-encoded values like ``%40`` for ``@`` and ``%2B``
+ * for ``+``. The CLI itself does NOT decode them, but the value we
+ * hand to the wizard (and the backend) needs the real characters —
+ * otherwise we double-encode on the way out (see #kb-password-bug).
+ *
+ * Falls back to the raw token on malformed escape sequences so a
+ * stray ``%ZZ`` doesn't blank the form field.
+ */
+function decodeToken(s) {
+  if (s == null) return s;
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
+}
+
+/**
+ * Parse a SQLAlchemy-style connection URL into the wizard's
+ * database-field shape. Examples that this must handle:
+ *
+ *   mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/aipdp_data_warehouse_prod?charset=utf8mb4
+ *   postgresql+psycopg2://user:pw@host:5432/mydb
+ *   mongodb+srv://user:pw@cluster.example.com/db
+ *   oracle+cx_oracle://user:pw@host:1521/?service_name=orcl
+ *
+ * The dialect prefix (everything before ``+://``) is mapped to the
+ * wizard's ``db_type``. URL-encoded values in userinfo / path are
+ * decoded by the shared ``decodeToken`` helper. Returns ``null`` when
+ * the input is not a SQLAlchemy URL we recognise — the caller then
+ * falls through to the CLI parser.
+ *
+ * Exports for unit testing — see KbDatabaseFields.test.jsx.
+ */
+export function parseSqlalchemyUrl(raw) {
   const str = (raw || '').trim();
   if (!str) return null;
+
+  // Match: scheme://[user[:password]@]host[:port]/path[?query]
+  // scheme = ALPHA *( ALPHA / DIGIT / + / - / . )
+  const m = str.match(
+    /^([a-zA-Z][a-zA-Z0-9+.-]*):\/\/(?:([^:@/?#]+)(?::([^@]*))?@)?([^:/?#]+)(?::(\d+))?\/?([^?#]*)/
+  );
+  if (!m) return null;
+
+  const [, scheme, user, password, host, port, rawPath] = m;
+  const dialect = scheme.toLowerCase().split('+')[0];
+
+  const dialectToDbType = {
+    mysql: 'mysql',
+    postgresql: 'postgresql',
+    postgres: 'postgresql',
+    mongodb: 'mongodb',
+    mongo: 'mongodb',
+    mssql: 'sqlserver',
+    sqlserver: 'sqlserver',
+  };
+  const db_type = dialectToDbType[dialect];
+  if (!db_type) return null;
+
+  const result = { db_type };
+  if (host) result.host = decodeToken(host);
+  if (port) result.port = Number(port);
+  if (user) result.username = decodeToken(user);
+  if (password) result.password = decodeToken(password);
+  const dbName = rawPath.split('?')[0].replace(/^\//, '');
+  if (dbName) result.database_name = decodeToken(dbName);
+
+  return Object.keys(result).length > 1 ? result : null;
+}
+
+/**
+ * Parse a CLI-style connection string (mysql/psql/mongosh/sqlcmd)
+ * OR a SQLAlchemy URL into the wizard's database-field shape.
+ *
+ * Exports for unit testing — see KbDatabaseFields.test.jsx.
+ */
+export function parseConnString(raw) {
+  const str = (raw || '').trim();
+  if (!str) return null;
+
+  // SQLAlchemy URLs always carry a scheme prefix. Try that branch
+  // first so URLs like ``mysql+pymysql://...`` don't fall through
+  // and confuse the CLI flag parser with their ``+pymysql`` digests.
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(str)) {
+    const sa = parseSqlalchemyUrl(str);
+    if (sa) return sa;
+  }
 
   const client = (str.match(/^(\S+)/)?.[1] || '').toLowerCase();
   let db_type = '';
@@ -27,7 +116,7 @@ function parseConnString(raw) {
   let m;
   while ((m = eqRe.exec(str))) {
     const key = m[1].toLowerCase();
-    const val = m[2].replace(/^["']|["']$/g, '');
+    const val = decodeToken(m[2].replace(/^["']|["']$/g, ''));
     if (key === 'host') result.host = val;
     else if (key === 'port') result.port = val;
     else if (key === 'user' || key === 'username') result.username = val;
@@ -35,9 +124,12 @@ function parseConnString(raw) {
     else if (key === 'database' || key === 'dbname' || key === 'db') result.database_name = val;
   }
 
-  // -h VALUE (space-separated)
+  // -h VALUE (space-separated). Strip surrounding quotes if the
+  // user wrapped the value (e.g. ``-h "my host"``).
   const hostM = str.match(/(?:^|\s)-h\s+(\S+)/);
-  if (hostM && !result.host) result.host = hostM[1];
+  if (hostM && !result.host) {
+    result.host = decodeToken(hostM[1].replace(/^["']|["']$/g, ''));
+  }
 
   // -P VALUE (MySQL port, capital) or -p VALUE (PG port, lowercase)
   const portM = isPg
@@ -47,15 +139,15 @@ function parseConnString(raw) {
 
   // -u / -U VALUE
   const userM = str.match(/(?:^|\s)-[uU]\s+(\S+)/);
-  if (userM && !result.username) result.username = userM[1];
+  if (userM && !result.username) result.username = decodeToken(userM[1]);
 
   // -pVALUE (MySQL attached password, e.g. -pSynexia@123)
   const pwM = str.match(/(?:^|\s)-p(?=\S)(\S+)/);
-  if (pwM && !isPg && !result.password) result.password = pwM[1];
+  if (pwM && !isPg && !result.password) result.password = decodeToken(pwM[1]);
 
   // -d VALUE (PG database name)
   const dbM = str.match(/(?:^|\s)-d\s+(\S+)/);
-  if (dbM && !result.database_name) result.database_name = dbM[1];
+  if (dbM && !result.database_name) result.database_name = decodeToken(dbM[1]);
 
   // Positional database name (bare token at the end, e.g. db_zhanlu_no2)
   const cleaned = str
@@ -67,7 +159,7 @@ function parseConnString(raw) {
     .trim();
   const positional = cleaned.match(/(\S+)/);
   if (positional && !result.database_name) {
-    result.database_name = positional[1].replace(/^["']|["']$/g, '');
+    result.database_name = decodeToken(positional[1].replace(/^["']|["']$/g, ''));
   }
 
   if (result.port) result.port = Number(result.port);

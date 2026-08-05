@@ -5,6 +5,7 @@ from TimestampedBase).  Preview and download endpoints never expose raw file
 paths — they stream blob data through the API with proper Content-Type.
 """
 
+import io
 import logging
 import re
 from typing import Optional
@@ -26,6 +27,8 @@ from app.services.artifacts.preview_builder import (
     extract_docx_outline,
     extract_pptx_outline,
     build_ms_word_open_url,
+    convert_docx_to_html,
+    convert_pptx_to_html,
 )
 
 logger = logging.getLogger(__name__)
@@ -1136,3 +1139,183 @@ async def extract_brand_palette(file: UploadFile = File(...)):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     return {"colors": colors}
+
+
+# ── Generic file preview by URL ────────────────────────────────────
+#
+# Used by the frontend FilePreviewer for files that point at our own
+# /api/uploads/ directory.  The endpoint:
+#   • accepts only local /api/uploads/ URLs (no SSRF, no proxying
+#     arbitrary external URLs)
+#   • resolves the URL to settings.upload_path / <safe filename>
+#   • converts DOCX/PPTX/XLSX/MD to a sanitized HTML document that
+#     browsers can render inline
+#   • passes through HTML, PDF, images, audio, video as their original
+#     bytes with the correct Content-Type
+#
+# This is what makes "preview a generated .docx report from
+# /my-files" actually work in the browser — the backend serves an
+# HTML rendition of the Office file.  No LibreOffice required for
+# DOCX/PPTX/XLSX → HTML (mammoth + python-pptx + openpyxl all do it
+# in-process).
+_PREVIEW_PREVIEW_WRAP = """<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<title>{title}</title>
+<style>
+body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 960px; margin: 32px auto; padding: 24px; line-height: 1.6; color: #1a1a1a; background: #fff; }}
+h1, h2, h3, h4 {{ color: #111; margin-top: 1.4em; }}
+h1 {{ border-bottom: 2px solid #e5e5e5; padding-bottom: 6px; }}
+table {{ border-collapse: collapse; width: 100%; margin: 12px 0; }}
+th, td {{ border: 1px solid #d4d4d4; padding: 6px 10px; text-align: left; }}
+th {{ background: #f5f5f5; }}
+pre, code {{ background: #f6f6f6; padding: 2px 4px; border-radius: 3px; }}
+pre {{ padding: 12px; overflow-x: auto; }}
+.slide {{ border: 1px solid #e5e5e5; border-radius: 8px; padding: 24px; margin: 16px 0; min-height: 200px; background: #fafafa; }}
+.sheet {{ margin: 16px 0; }}
+.sheet-title {{ font-weight: 600; margin: 8px 0; }}
+</style></head>
+<body>
+{body}
+</body></html>"""
+
+
+def _wrap_preview(body: str, title: str) -> bytes:
+    return _PREVIEW_PREVIEW_WRAP.format(title=title, body=body).encode("utf-8")
+
+
+def _convert_xlsx_to_html(xlsx_bytes: bytes) -> str:
+    """Render an XLSX as a sequence of HTML tables (one per sheet).
+
+    Uses openpyxl to read each sheet, but no styling — just a faithful
+    row-by-row dump.  Heavy enough for inline preview of typical
+    agent-generated reports (a few hundred rows per sheet).
+    """
+    try:
+        from openpyxl import load_workbook  # lazy
+    except ImportError:
+        return ""
+
+    try:
+        wb = load_workbook(io.BytesIO(xlsx_bytes), read_only=True, data_only=True)
+    except Exception as exc:
+        logger.warning("openpyxl failed to open xlsx: %s", exc)
+        return ""
+
+    parts = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        parts.append(f'<h2 class="sheet-title">{sheet_name}</h2>')
+        parts.append('<table>')
+        for row in ws.iter_rows(values_only=True):
+            cells = "".join(
+                "<td>{}</td>".format(
+                    ("" if v is None else str(v).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+                )
+                for v in row
+            )
+            parts.append(f"<tr>{cells}</tr>")
+        parts.append("</table>")
+    wb.close()
+    return "".join(parts) if parts else ""
+
+
+@router.get("/files/preview")
+def preview_file_by_url(url: str = Query(..., description="Local /api/uploads/ path")):
+    """Convert a file (by /api/uploads/ URL) to a previewable format.
+
+    Returns a sanitized HTML document for Office files (DOCX/PPTX/XLSX)
+    and Markdown, or the original bytes for HTML/PDF/images/audio/video.
+    """
+    from urllib.parse import urlparse
+
+    # ── Security: only accept local /api/uploads/ paths ──
+    raw = url
+    if raw.startswith("http://") or raw.startswith("https://"):
+        parsed = urlparse(raw)
+        raw = parsed.path
+    if not raw.startswith("/api/uploads/"):
+        raise HTTPException(
+            status_code=400,
+            detail="Only local /api/uploads/ URLs are previewable",
+        )
+
+    filename = raw[len("/api/uploads/"):]
+    # Disallow path traversal / nested paths
+    if not filename or "/" in filename or ".." in filename or "\\" in filename:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+
+    file_path = settings.upload_path / filename
+    if not file_path.is_file():
+        raise HTTPException(status_code=404, detail="File not found on disk")
+
+    ext = file_path.suffix.lower().lstrip(".")
+    display_name = filename
+    raw_bytes = file_path.read_bytes()
+
+    if ext == "docx":
+        html, _ = convert_docx_to_html(raw_bytes)
+        if not html:
+            raise HTTPException(status_code=500, detail="DOCX conversion failed")
+        return Response(content=_wrap_preview(html, display_name), media_type="text/html")
+
+    if ext == "pptx":
+        html, _ = convert_pptx_to_html(raw_bytes)
+        if not html:
+            raise HTTPException(status_code=500, detail="PPTX conversion failed")
+        return Response(content=_wrap_preview(html, display_name), media_type="text/html")
+
+    if ext == "xlsx":
+        html = _convert_xlsx_to_html(raw_bytes)
+        if not html:
+            raise HTTPException(status_code=500, detail="XLSX conversion failed")
+        return Response(content=_wrap_preview(html, display_name), media_type="text/html")
+
+    if ext in ("md", "markdown"):
+        try:
+            import markdown
+            body = markdown.markdown(
+                raw_bytes.decode("utf-8", errors="replace"),
+                extensions=["tables", "fenced_code", "codehilite", "toc"],
+            )
+        except ImportError:
+            raise HTTPException(status_code=500, detail="markdown package not installed")
+        return Response(content=_wrap_preview(body, display_name), media_type="text/html")
+
+    if ext in ("html", "htm"):
+        return Response(content=raw_bytes, media_type="text/html")
+
+    if ext == "pdf":
+        return Response(content=raw_bytes, media_type="application/pdf")
+
+    # Pass-through binary types
+    pass_through_mime = {
+        "png": "image/png",
+        "jpg": "image/jpeg",
+        "jpeg": "image/jpeg",
+        "gif": "image/gif",
+        "webp": "image/webp",
+        "svg": "image/svg+xml",
+        "bmp": "image/bmp",
+        "mp3": "audio/mpeg",
+        "m4a": "audio/mp4",
+        "wav": "audio/wav",
+        "ogg": "audio/ogg",
+        "flac": "audio/flac",
+        "aac": "audio/aac",
+        "mp4": "video/mp4",
+        "mov": "video/quicktime",
+        "webm": "video/webm",
+        "ogv": "video/ogg",
+        "mkv": "video/x-matroska",
+        "txt": "text/plain",
+        "csv": "text/csv",
+        "json": "application/json",
+        "xml": "application/xml",
+    }
+    if ext in pass_through_mime:
+        return Response(content=raw_bytes, media_type=pass_through_mime[ext])
+
+    raise HTTPException(
+        status_code=415,
+        detail=f"Preview not supported for .{ext} files",
+    )

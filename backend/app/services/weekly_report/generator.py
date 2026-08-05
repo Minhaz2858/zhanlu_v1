@@ -165,12 +165,25 @@ class WeeklyReportService:
         numbers = collect_all_numbers(pid, self.db)
         chart = render_chart_stub(pid, numbers, week_start, week_end) if include_charts else None
 
-        # Build narrative placeholder (LLM would fill this)
-        narrative = (
-            f"本周{name_cn}市场运行平稳。"
-            f"上游原料端变化幅度有限，需求端按需采购。"
-            f"下周市场预计延续当前态势，需关注宏观面变化。"
-        )
+        # Build narrative: analyst brief (evidence-grounded) → placeholder fallback
+        narrative = None
+        try:
+            from app.services.forecasting.analyst import service as analyst_service
+            brief = analyst_service.get_analyst_brief(pid, day=7, db=self.db)
+            if brief:
+                narrative = (
+                    brief.get("summary_zh", "")
+                    + brief.get("why_price_zh", "")
+                    + brief.get("why_action_zh", "")
+                ) or None
+        except Exception as exc:
+            logger.warning("[weekly-report] analyst brief failed for %s: %s", pid, exc)
+        if not narrative:
+            narrative = (
+                f"本周{name_cn}市场运行平稳。"
+                f"上游原料端变化幅度有限，需求端按需采购。"
+                f"下周市场预计延续当前态势，需关注宏观面变化。"
+            )
 
         return {
             "product_id": pid,

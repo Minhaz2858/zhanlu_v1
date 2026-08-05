@@ -9,7 +9,7 @@ import {
   ResponsiveContainer, ComposedChart, Line, Area, XAxis, YAxis,
   Tooltip, ReferenceLine, ReferenceDot, CartesianGrid,
 } from 'recharts';
-import { RefreshCw, Activity, Zap, Layers } from 'lucide-react';
+import { RefreshCw, Activity, Zap, Layers, ChevronDown, ChevronUp, BrainCircuit } from 'lucide-react';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from '../lib/typography';
 import { getChartTheme } from '../lib/chartTheme';
@@ -50,6 +50,13 @@ function fmtPrice(v) {
   return n.toLocaleString('en-US', { maximumFractionDigits: 2 });
 }
 
+function fmtPct(v, digits = 1, signed = true) {
+  if (v == null) return '—';
+  const n = Number(v);
+  if (Number.isNaN(n)) return '—';
+  return `${signed && n >= 0 ? '+' : ''}${(n * 100).toFixed(digits)}%`;
+}
+
 // MM-DD format: "2026-08-03" → "08-03"
 function fmtDateMMDD(iso) {
   if (!iso) return '';
@@ -84,6 +91,7 @@ export default function ForecastTrendChart({ productId, productName }) {
   });
 
   const [showSkuPopover, setShowSkuPopover] = useState(false);
+  const [showAnalysis, setShowAnalysis] = useState(false);
 
   // Fetch SKU list for ERP products (c5_resin, raffinate_c5)
   const isErpProduct = productId === 'c5_resin' || productId === 'raffinate_c5';
@@ -678,6 +686,71 @@ export default function ForecastTrendChart({ productId, productName }) {
               </>
             )}
           </div>
+
+          {/* ── AI 分析依据 (collapsible reasoning panel) ── */}
+          {data?.analysis && (data.analysis.basis_zh || data.analysis.action_logic_zh) && (
+            <div className="border-t border-slate-100 px-6 py-2 dark:border-slate-800">
+              <button
+                onClick={() => setShowAnalysis((v) => !v)}
+                className="flex w-full items-center gap-1.5 py-1 text-left text-[12px] font-medium
+                  text-slate-600 hover:text-slate-900 dark:text-slate-300 dark:hover:text-slate-100"
+              >
+                <BrainCircuit size={14} className="text-indigo-500" />
+                AI 分析依据
+                {showAnalysis ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
+              </button>
+              {showAnalysis && (
+                <div className="mt-1 space-y-2 pb-2 text-[12px] leading-relaxed text-slate-600 dark:text-slate-300">
+                  {data.analysis.basis_zh && (
+                    <p>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">【预测依据】</span>
+                      {data.analysis.basis_zh}
+                    </p>
+                  )}
+                  {data.analysis.action_logic_zh && (
+                    <p>
+                      <span className="font-semibold text-slate-700 dark:text-slate-200">【建议逻辑】</span>
+                      {data.analysis.action_logic_zh}
+                    </p>
+                  )}
+                  <div className="grid grid-cols-2 gap-x-6 gap-y-1 pt-1 text-[11px] text-slate-500 dark:text-slate-400 sm:grid-cols-4">
+                    {data.analysis.chg_7d_pct != null && (
+                      <span>近7日 <b className="tabular-nums">{fmtPct(data.analysis.chg_7d_pct)}</b></span>
+                    )}
+                    {data.analysis.chg_30d_pct != null && (
+                      <span>近30日 <b className="tabular-nums">{fmtPct(data.analysis.chg_30d_pct)}</b></span>
+                    )}
+                    {data.analysis.model_count > 0 && (
+                      <span>模型集成 <b>{data.analysis.model_count} 个</b></span>
+                    )}
+                    {data.analysis.ensemble_mape != null && (
+                      <span>
+                        回测误差 <b className="tabular-nums">{fmtPct(data.analysis.ensemble_mape, 1, false)}</b>
+                        {data.analysis.beats_naive === true && <span className="text-emerald-600"> 优于基线</span>}
+                        {data.analysis.beats_naive === false && <span className="text-red-500"> 弱于基线</span>}
+                      </span>
+                    )}
+                    {data.analysis.bull_price != null && data.analysis.bear_price != null && (
+                      <span>
+                        区间 <b className="tabular-nums">{fmtPrice(data.analysis.bear_price)}–{fmtPrice(data.analysis.bull_price)}</b>
+                      </span>
+                    )}
+                    {data.analysis.directional_accuracy != null && (
+                      <span>
+                        方向准确率 <b className="tabular-nums">{fmtPct(data.analysis.directional_accuracy, 0, false)}</b>
+                        {data.analysis.directional_status === 'edge'
+                          ? <span className="text-emerald-600"> 显著</span>
+                          : <span className="text-slate-400"> 不显著</span>}
+                      </span>
+                    )}
+                    {data.analysis.below_naive_baseline === true && (
+                      <span className="text-amber-600">诚实门控:已降级为保守预测</span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

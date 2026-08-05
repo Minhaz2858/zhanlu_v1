@@ -1,16 +1,30 @@
 /**
  * DocxArtifactPreview — inline DOCX reader for the chat card and side panel.
  *
- * Fetches `/api/artifacts/{id}/preview?format=html` (sanitized server-side
- * by `mammoth`) and renders it inside a scrollable, sandboxed container.
- * The optional `outline` (extracted server-side) drives the sidebar.
+ * Uses two-tier rendering:
+ *   1. PRIMARY: DocxBrowserRenderer (lazy-loaded `docx-preview` lib) —
+ *      renders the document with true Word-like fidelity (page layout,
+ *      headings, tables, images, etc.).
+ *   2. FALLBACK: mammoth HTML — server-side conversion via
+ *      `/api/artifacts/{id}/preview?format=html`.  Activated automatically
+ *      when docx-preview fails (blob fetch error, OOXML parse error, etc.).
+ *
+ * The optional `outline` (extracted server-side) drives the sidebar,
+ * shared by both render paths.
  */
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader2, FileText, AlertTriangle, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import DocxOutline from './DocxOutline';
+import DocxBrowserRenderer from './DocxBrowserRenderer';
 
 const API_BASE = '/api';
+
+// Render modes
+const MODE = {
+  DOCX_PREVIEW: 'docx-preview',
+  MAMMOTH: 'mammoth',
+};
 
 export default function DocxArtifactPreview({
   artifactId,
@@ -20,25 +34,34 @@ export default function DocxArtifactPreview({
   downloadUrl,
   title,
 }) {
+  const [mode, setMode] = useState(MODE.DOCX_PREVIEW);
   const [html, setHtml] = useState(null);
-  const [error, setError] = useState(null);
+  const [mammothError, setMammothError] = useState(null);
   const bodyRef = useRef(null);
 
+  // ---- Switch to mammoth when docx-preview fails ----------------------
+  const handleDocxError = useCallback(() => {
+    setMode(MODE.MAMMOTH);
+  }, []);
+
+  // ---- Fetch mammoth HTML when in fallback mode -----------------------
   useEffect(() => {
-    if (!artifactId) return;
+    if (mode !== MODE.MAMMOTH || !artifactId) return;
     let active = true;
-    setHtml(null);
-    setError(null);
+    setMammothError(null);
+
     fetch(`${API_BASE}/artifacts/${artifactId}/preview?format=html`)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
       })
       .then((text) => { if (active) setHtml(text); })
-      .catch((e) => { if (active) setError(e.message || 'Failed to load'); });
-    return () => { active = false; };
-  }, [artifactId]);
+      .catch((e) => { if (active) setMammothError(e.message || 'Failed to load'); });
 
+    return () => { active = false; };
+  }, [mode, artifactId]);
+
+  // ---- Anchor-jump handler --------------------------------------------
   const handleJump = useCallback((id) => {
     if (onAnchorJump) return onAnchorJump(id);
     const root = bodyRef.current;
@@ -47,6 +70,40 @@ export default function DocxArtifactPreview({
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [onAnchorJump]);
 
+  // ---- Derive the docx blob download URL ------------------------------
+  // Prefer the explicit downloadUrl prop (e.g. automation_file artifacts
+  // have file_url='/api/automations/files/{id}/download'). Fall back to
+  // constructing from the artifact ID.
+  const docxSrc = downloadUrl
+    || (artifactId ? `${API_BASE}/artifacts/${artifactId}/download` : null);
+
+  // ---- Render ---------------------------------------------------------
+  if (!artifactId) {
+    return (
+      <div className={cn('flex h-full min-h-0 w-full', className)}>
+        <div className="flex flex-1 items-center justify-center py-8 text-xs text-muted-foreground">
+          No artifact ID provided.
+        </div>
+      </div>
+    );
+  }
+
+  // Mode: docx-preview (primary)
+  if (mode === MODE.DOCX_PREVIEW) {
+    return (
+      <DocxBrowserRenderer
+        src={docxSrc}
+        outline={outline}
+        onAnchorJump={onAnchorJump}
+        className={className}
+        title={title}
+        downloadUrl={downloadUrl}
+        onError={handleDocxError}
+      />
+    );
+  }
+
+  // Mode: mammoth (fallback)
   return (
     <div className={cn('flex h-full min-h-0 w-full', className)}>
       {outline.length > 0 && (
@@ -58,8 +115,8 @@ export default function DocxArtifactPreview({
       )}
 
       <div className="flex min-h-0 flex-1 flex-col">
-        {error ? (
-          <ErrorState message={error} downloadUrl={downloadUrl} title={title} />
+        {mammothError ? (
+          <ErrorState message={mammothError} downloadUrl={downloadUrl} title={title} />
         ) : html == null ? (
           <LoadingState />
         ) : (

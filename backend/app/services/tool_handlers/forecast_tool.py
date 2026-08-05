@@ -900,6 +900,70 @@ FORECAST_PPT_SCHEMA = {
 
 
 # ======================================================================
+# forecast_brief  (lightweight read — evidence-grounded analyst brief)
+# ======================================================================
+
+async def _forecast_brief(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Return the cached evidence-grounded analyst brief for a product.
+
+    Required args:
+        product_id  (str): Dashboard product_id (e.g. 'dcpd', 'isoprene').
+    Optional args:
+        day         (int): Forecast horizon in days (default 7).
+    """
+    product_id = args.get("product_id")
+    if not product_id:
+        return {"success": False, "error": "product_id is required."}
+    day = int(args.get("day", 7))
+
+    from app.services.forecasting.analyst import service as analyst_service
+
+    def _do_work():
+        return analyst_service.get_analyst_brief(product_id, day=day, db=db)
+
+    try:
+        brief = await asyncio.to_thread(_do_work)
+    except Exception as exc:
+        logger.warning("forecast_brief failed (%s): %s", product_id, exc)
+        return {"success": False, "error": f"Brief generation failed: {exc}"}
+    if brief is None:
+        return {"success": False,
+                "error": f"No forecast data or brief available for '{product_id}'."}
+    return {"success": True, "product_id": product_id, "day": day, "brief": brief}
+
+
+FORECAST_BRIEF_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "forecast_brief",
+        "description": (
+            "Get the evidence-grounded AI analyst brief for a dashboard product "
+            "(dcpd, isoprene, piperylene, c5_resin, etc.): why the price is "
+            "forecast to move (upstream transmission, trend, seasonality, model "
+            "drivers), why the current buy/hold/sell/watch recommendation, and "
+            "what triggers would change it. Use this to answer 'why' questions "
+            "about the forecast. Safe read-only tool."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {"type": "string",
+                               "description": "Dashboard product_id, e.g. 'dcpd'."},
+                "day": {"type": "integer", "default": 7,
+                        "description": "Forecast horizon in days (default 7)."},
+            },
+            "required": ["product_id"],
+        },
+    },
+}
+
+
+# ======================================================================
 # Registration
 # ======================================================================
 
@@ -959,6 +1023,13 @@ for _name, _schema, _handler, _enabled, _desc in (
         _forecast_list_skus,
         True,
         "List all SKU-level forecast targets for an ERP product family.",
+    ),
+    (
+        "forecast_brief",
+        FORECAST_BRIEF_SCHEMA,
+        _forecast_brief,
+        True,
+        "Get the evidence-grounded AI analyst brief for a product.",
     ),
 ):
     registry.register(

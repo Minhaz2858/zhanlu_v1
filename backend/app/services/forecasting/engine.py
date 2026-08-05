@@ -178,6 +178,7 @@ class ForecastEngine:
         target_id: str,
         horizons: list[int] | None = None,
         seasonal_period: int = _DEFAULT_SEASONAL_PERIOD,
+        as_of: datetime | None = None,
     ) -> ForecastRun | None:
         """Full pipeline for a single ForecastTarget.
 
@@ -193,9 +194,13 @@ class ForecastEngine:
         10. Generate scenarios
         11. Write ForecastRun + ForecastAccuracyLog
         12. Apply business rules (if any active)
+
+        as_of: When set, truncates the fetched time series to dates ≤ as_of
+               and stamps the run with that date (walk-forward hindcast).
+               Default None → live forecast (no truncation, now() stamp).
         """
         if horizons is None:
-            horizons = [3, 7, 30]
+            horizons = [3, 7, 15, 30]
 
         target = self._db.query(ForecastTarget).filter(
             ForecastTarget.id == target_id,
@@ -210,6 +215,22 @@ class ForecastEngine:
         if y is None or len(y.dropna()) < 2:
             logger.warning("Target %s: insufficient data", target_id)
             return None
+
+        # --- as_of: truncate series to the hindcast origin date ---
+        if as_of is not None:
+            as_of_ts = pd.Timestamp(as_of)
+            # Normalise: ensure both sides are tz-naive for safe comparison
+            if as_of_ts.tzinfo is not None:
+                as_of_ts = as_of_ts.tz_convert(None)
+            if y.index.tz is not None:
+                y.index = y.index.tz_convert(None)
+            y = y[y.index <= as_of_ts]
+            if len(y.dropna()) < 2:
+                logger.warning(
+                    "Target %s: insufficient data after as_of truncation (as_of=%s, rows=%d)",
+                    target_id, as_of.date().isoformat(), len(y),
+                )
+                return None
 
         # --- Quality scoring ---
         qr = score_series(y)
@@ -531,7 +552,7 @@ class ForecastEngine:
         for h in horizons:
             h_int = int(h)
             try:
-                dir_result = backtest_directional(data, horizons=(h_int,))
+                dir_result = backtest_directional(y_model, horizons=(h_int,))
             except Exception as exc:
                 logger.warning(
                     "[directional] failed for %s h=%d: %s",
@@ -605,6 +626,17 @@ class ForecastEngine:
                     "rationale": decision.rationale,
                 }
 
+            # --- Model agreement metric (analyst evidence) ---
+            from app.services.forecasting.analyst.evidence_pack import (
+                compute_model_agreement,
+            )
+            model_agreement_report: dict = {}
+            for h in horizons:
+                h_int = int(h)
+                ag = compute_model_agreement(forecasts, h_int)
+                if ag is not None:
+                    model_agreement_report[str(h_int)] = ag
+
             explanation_dict = {
                 "summary": explanation.summary,
                 "confidence": explanation.confidence,
@@ -618,6 +650,7 @@ class ForecastEngine:
                 "probability": probability_report,
                 "directional": directional_report,
                 "decision": decision_report,
+                "model_agreement": model_agreement_report,
             }
         except Exception as exc:
             logger.warning("Explanation failed for %s: %s", target.product_key, exc)
@@ -642,6 +675,7 @@ class ForecastEngine:
         }
 
         # --- Write ForecastRun ---
+        now_utc = datetime.now(timezone.utc)
         run = ForecastRun(
             target_id=target_id,
             org_id=target.org_id,
@@ -649,7 +683,8 @@ class ForecastEngine:
             results=results,
             below_naive_baseline=guard_result.below_naive_baseline,
             confidence=scenarios_result.confidence,
-            as_of_date=datetime.now(timezone.utc),
+            as_of_date=as_of if as_of is not None else now_utc,
+            created_date=as_of if as_of is not None else now_utc,
             model_detail=model_detail,
             exog_features_used=features_used if features_used else None,
             cleaning_notes=cleaning_report.notes if cleaning_report else None,
@@ -711,6 +746,8 @@ class ForecastEngine:
         # --- Apply business rules ---
         # (Future: seasonal adjustments, event overrides, guardrails)
         _apply_rules(self._db, target_id, run)
+
+        _prewarm_analyst_brief(self._db, target.product_key)
 
         return run
 
@@ -920,6 +957,7 @@ class ForecastEngine:
         target_id: str,
         horizons: list[int] | None = None,
         seasonal_period: int = _DEFAULT_SEASONAL_PERIOD,
+        as_of: datetime | None = None,
     ) -> dict | None:
         """Like compute_target(), but also returns the source data for truth-gating.
 
@@ -970,7 +1008,7 @@ class ForecastEngine:
         # we still want to return the truth-anchor data so the LLM can report
         # insufficient_data correctly.
         try:
-            run = self.compute_target(target_id, horizons, seasonal_period)
+            run = self.compute_target(target_id, horizons, seasonal_period, as_of=as_of)
         except Exception as exc:
             logger.warning(
                 "compute_target raised for %s: %s — returning anchor only",
@@ -986,6 +1024,20 @@ class ForecastEngine:
 
 
 # ── helpers ────────────────────────────────────────────────────────────
+
+def _prewarm_analyst_brief(db, product_key) -> None:
+    """Best-effort analyst brief pre-warm after a forecast run. Never raises."""
+    try:
+        if not _get_config_bool("FORECAST_ANALYST_LLM_ENABLED", False):
+            return
+        parts = (product_key or "").split(".")
+        if len(parts) != 2 or parts[0] != "ecisco":
+            return
+        from app.services.forecasting.analyst import service as analyst_service
+        analyst_service.prewarm_brief(parts[1], day=7, db=db)
+    except Exception as exc:
+        logger.warning("[analyst] prewarm failed for %s: %s", product_key, exc)
+
 
 def _get_config_bool(key: str, default: bool = True) -> bool:
     """Safely read a boolean config flag, falling back to *default*."""

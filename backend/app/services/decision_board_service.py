@@ -14,7 +14,7 @@ from typing import Optional
 
 from app.models.market_dashboard import PRODUCT_GROUP_MAP, PRODUCT_LABELS
 from app.schemas.market_dashboard import (
-    DecisionBoardProduct, DecisionBoardResponse, SkuBrief,
+    AnalystBriefMeta, DecisionBoardProduct, DecisionBoardResponse, SkuBrief,
 )
 from app.services import market_dashboard_service as mds
 
@@ -96,7 +96,17 @@ def build_narrative(
     intel_event_count: int,
     intel_bias: str,
     volatility_regime: Optional[str],
+    basis_zh: str = "",
+    action_logic_zh: str = "",
 ) -> str:
+    """Plain-language per-product narrative.
+
+    When *basis_zh* / *action_logic_zh* are provided (from the forecast
+    analysis block), the narrative explains WHY: trend / model-ensemble /
+    uncertainty evidence, plus the threshold logic behind the action and
+    what would change it. Otherwise it degrades to the legacy 3-sentence
+    form.
+    """
     if forecast_base is None or current_price is None:
         return f"{name_zh}当前预测数据不足,{_ACTION_ADVICE_ZH['watch']}。"
     # Direction: prefer expected_change_pct; fall back to forecast vs current.
@@ -113,6 +123,10 @@ def build_narrative(
     if p_rise is not None:
         s1 += f",上涨概率 {_fmt_prob(p_rise)}"
     s1 += "。"
+
+    # 【预测依据】 trend / model / uncertainty (from analysis block)
+    s_basis = f"预测依据:{basis_zh}" if basis_zh else ""
+
     evidence = []
     if directional_accuracy is not None:
         evidence.append(f"方向预测历史准确率 {_fmt_prob(directional_accuracy)}")
@@ -126,11 +140,16 @@ def build_narrative(
             f"波动状态{_VOLATILITY_ZH.get(volatility_regime, volatility_regime)}"
         )
     s2 = "、".join(evidence) + "。" if evidence else ""
-    s3 = (
-        f"{_ACTION_ADVICE_ZH.get(action, _ACTION_ADVICE_ZH['watch'])}"
-        f"(置信度:{_CONFIDENCE_ZH.get(confidence, '低')})。"
-    )
-    return s1 + s2 + s3
+
+    # 【建议逻辑】 threshold reasoning (from analysis block), else legacy advice
+    if action_logic_zh:
+        s3 = f"{_ACTION_ADVICE_ZH.get(action, _ACTION_ADVICE_ZH['watch'])} —— {action_logic_zh}"
+    else:
+        s3 = (
+            f"{_ACTION_ADVICE_ZH.get(action, _ACTION_ADVICE_ZH['watch'])}"
+            f"(置信度:{_CONFIDENCE_ZH.get(confidence, '低')})。"
+        )
+    return s1 + s_basis + s2 + s3
 
 
 def build_briefing(products: list[DecisionBoardProduct], day: int) -> str:
@@ -197,6 +216,48 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
         if trust is not None:
             trust_label = trust.badge_label_zh or TRUST_LABELS_ZH.get(trust.tier)
 
+        # AI 分析依据 (trend / model / uncertainty + action logic)
+        analysis = None
+        try:
+            analysis = mds.get_forecast_analysis(pid, day, db=db)
+        except Exception:  # additive — never break the board on analysis failure
+            analysis = None
+        basis_zh = analysis.basis_zh if analysis else ""
+        action_logic_zh = analysis.action_logic_zh if analysis else ""
+
+        # Analyst brief (evidence-grounded LLM/template) — additive.
+        # When present, its sections become the narrative; otherwise the
+        # legacy template narrative is used.
+        brief = None
+        try:
+            from app.services.forecasting.analyst import service as analyst_service
+            brief = analyst_service.get_analyst_brief(pid, day=day, db=db)
+        except Exception:
+            brief = None
+
+        if brief:
+            narrative_zh = (
+                brief.get("summary_zh", "")
+                + brief.get("why_price_zh", "")
+                + brief.get("why_action_zh", "")
+            )
+            brief_meta = AnalystBriefMeta(
+                **{k: brief.get(k) for k in (
+                    "summary_zh", "why_price_zh", "why_action_zh",
+                    "watch_triggers_zh", "risk_zh", "source", "day", "generated_at")}
+            )
+        else:
+            narrative_zh = build_narrative(
+                name_zh=name_zh, day=day, current_price=current,
+                forecast_base=base, expected_change_pct=exp_chg, p_rise=p_rise,
+                action=action, confidence=confidence,
+                directional_accuracy=dire.accuracy if dire else None,
+                intel_event_count=intel_count, intel_bias=intel_bias,
+                volatility_regime=vol,
+                basis_zh=basis_zh, action_logic_zh=action_logic_zh,
+            )
+            brief_meta = None
+
         skus = [
             SkuBrief(material_code=s.material_code, name=s.name,
                      forecast_base=s.forecast_base)
@@ -227,14 +288,8 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
                 action=action, p_rise=p_rise, expected_change_pct=exp_chg,
                 intel_event_count=intel_count, intel_bias=intel_bias,
             ),
-            narrative_zh=build_narrative(
-                name_zh=name_zh, day=day, current_price=current,
-                forecast_base=base, expected_change_pct=exp_chg, p_rise=p_rise,
-                action=action, confidence=confidence,
-                directional_accuracy=dire.accuracy if dire else None,
-                intel_event_count=intel_count, intel_bias=intel_bias,
-                volatility_regime=vol,
-            ),
+            narrative_zh=narrative_zh,
+            analyst_brief=brief_meta,
             skus=skus,
         ))
 
