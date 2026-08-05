@@ -85,4 +85,22 @@ export const marketDashboardApi = {
     getJson('/api/market-dashboard/forecast-skus', { product_id: productId }),
   /** Upstream page: 3-tier price transmission chain. */
   priceChain: () => getJson('/api/market-dashboard/price-chain'),
+  /** HITL: submit a price correction (pending until scored against actuals). */
+  async submitForecastFeedback({ product_id, ai_price, user_price, reason, target_date }) {
+    const res = await authFetch('/api/market-dashboard/forecast-feedback', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ product_id, ai_price, user_price, reason, target_date }),
+    });
+    if (!res.ok) throw new Error(`feedback submit failed: ${res.status}`);
+    return res.json();
+  },
+  /** HITL: list correction history for a product. */
+  async listForecastFeedback(product_id) {
+    const res = await authFetch(
+      `/api/market-dashboard/forecast-feedback?product_id=${encodeURIComponent(product_id)}`,
+    );
+    if (!res.ok) return [];
+    return res.json();
+  },
 };

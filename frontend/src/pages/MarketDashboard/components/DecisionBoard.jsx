@@ -7,6 +7,7 @@ import {
 } from 'recharts';
 import { Sparkles, ChevronDown } from 'lucide-react';
 import { marketDashboardApi } from '@/api/marketDashboard';
+import ForecastFeedbackModal from './ForecastFeedbackModal';
 import { normalizeForecastPoints } from '../lib/forecastChartMath';
 
 const ACTION_STYLES = {
@@ -42,6 +43,7 @@ function fmtProb(v) {
 
 export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
   const [expandedId, setExpandedId] = useState(null);
+  const [feedbackProduct, setFeedbackProduct] = useState(null);
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ['market-dashboard', 'decision-board', group],
@@ -106,16 +108,24 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
                 isExpanded={isExpanded}
                 onSelect={() => onSelectProduct?.(p.id)}
                 onToggle={() => setExpandedId(isExpanded ? null : p.id)}
+                onFeedback={() => setFeedbackProduct({ id: p.id, aiPrice: p.forecast_base })}
               />
             );
           })}
         </tbody>
       </table>
+      {feedbackProduct && (
+        <ForecastFeedbackModal
+          productId={feedbackProduct.id}
+          aiPrice={feedbackProduct.aiPrice}
+          onClose={() => setFeedbackProduct(null)}
+        />
+      )}
     </div>
   );
 }
 
-function DecisionRow({ p, day, isSelected, isExpanded, onSelect, onToggle }) {
+function DecisionRow({ p, day, isSelected, isExpanded, onSelect, onToggle, onFeedback }) {
   const chgCls =
     p.expected_change_pct == null
       ? 'text-slate-400'
@@ -146,6 +156,13 @@ function DecisionRow({ p, day, isSelected, isExpanded, onSelect, onToggle }) {
         <span className={`inline-block rounded-full border px-2 py-0.5 text-xs font-medium ${ACTION_STYLES[p.action] || ACTION_STYLES.watch}`}>
           {p.action_label_zh}
         </span>
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onFeedback?.(); }}
+          className="ml-1 align-middle text-[10px] text-blue-600 hover:underline dark:text-blue-400"
+        >
+          修正预测
+        </button>
       </td>
         <td className="px-2 py-2.5">
           {p.trust_label_zh ? (
