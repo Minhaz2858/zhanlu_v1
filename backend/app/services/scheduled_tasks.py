@@ -124,6 +124,42 @@ def _calculate_seconds_until_2am() -> float:
     return (target - now).total_seconds()
 
 
+def _run_eval_step(db) -> dict:
+    """Evaluation job step — closes the realized_mape loop. Gated."""
+    if os.environ.get("FORECAST_EVAL_JOB_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.evaluation_job import run_evaluation
+        return run_evaluation(db)
+    except Exception:
+        logger.exception("[nightly-forecast] eval step failed")
+        return {"error": True}
+
+
+def _run_drift_step(db) -> dict:
+    """Drift-response step — detect + audit. Gated (detection needs eval data)."""
+    if os.environ.get("FORECAST_DRIFT_AUTO_ADJUST_ENABLED", "false").lower() not in ("1", "true", "yes"):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.drift_response import check_drift_and_audit
+        from app.models.forecasting import ForecastTarget
+        targets = db.query(ForecastTarget).filter(
+            ForecastTarget.org_id == "default-org",
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).all()
+        drifting = 0
+        for t in targets:
+            try:
+                if check_drift_and_audit(db, t).get("is_drifting"):
+                    drifting += 1
+            except Exception:
+                logger.exception("[nightly-forecast] drift check failed for %s", t.product_key)
+        return {"checked": len(targets), "drifting": drifting}
+    except Exception:
+        logger.exception("[nightly-forecast] drift step failed")
+        return {"error": True}
+
+
 def _run_nightly_forecast_sync() -> dict:
     """Run the forecast engine for all active Ecisco BI targets (sync).
 
@@ -154,7 +190,8 @@ def _run_nightly_forecast_sync() -> dict:
             db.query(ForecastTarget)
             .filter(
                 ForecastTarget.org_id == "default-org",
-                ForecastTarget.is_active == True,  # noqa: E712
+                ForecastTarget.status.in_(["active", "discovered"]),
+                ForecastTarget.is_deleted == False,  # noqa: E712
             )
             .all()
         )
@@ -202,6 +239,10 @@ def _run_nightly_forecast_sync() -> dict:
             total_elapsed,
             f"; failures: {failures}" if failures else "",
         )
+        _eval_on = os.environ.get("FORECAST_EVAL_JOB_ENABLED", "false").lower() in ("1", "true", "yes")
+        _drift_on = os.environ.get("FORECAST_DRIFT_AUTO_ADJUST_ENABLED", "false").lower() in ("1", "true", "yes")
+        summary["eval"] = _run_eval_step(db) if _eval_on else {"skipped": True}
+        summary["drift"] = _run_drift_step(db) if _drift_on else {"skipped": True}
         return summary
     finally:
         db.close()
