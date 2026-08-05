@@ -285,6 +285,7 @@ class ForecastEngine:
                 from app.services.knowledge_graph.graph import build_c5_c9_graph
                 from app.services.forecasting.features.exogenous_loaders import (
                     FeedstockLoader, FxLoader, EventFlagLoader, ErpVolumeLoader,
+                    OperatingRateLoader, InventoryLoader, ImportPriceLoader,
                 )
 
                 kg = build_c5_c9_graph()
@@ -312,6 +313,76 @@ class ForecastEngine:
                         logger.warning("ERP volume load failed for %s: %s", target.product_key, exc)
                         volume_df = None
 
+                # Wave 3 T3.4 external-feed exogenous features (flag-gated)
+                operating_rate_df = None
+                inventory_df = None
+                import_price_df = None
+                if os.environ.get("FORECAST_EXTERNAL_EXOG_ENABLED", "false").lower() == "true":
+                    parts = (target.product_key or "").split(".")
+                    product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
+                    try:
+                        op_loader = OperatingRateLoader(
+                            product_id=product_id, lookback_days=365,
+                            org_id=target.org_id, db_session=self._db,
+                        )
+                        operating_rate_df = op_loader.load()
+                        if not operating_rate_df.empty:
+                            operating_rate_df = operating_rate_df.set_index("date")
+                            logger.info(
+                                "External op-rate loaded for %s: %d days",
+                                target.product_key, len(operating_rate_df),
+                            )
+                        else:
+                            operating_rate_df = None
+                    except Exception as exc:
+                        logger.warning(
+                            "External op-rate load failed for %s: %s",
+                            target.product_key, exc,
+                        )
+                        operating_rate_df = None
+
+                    try:
+                        inv_loader = InventoryLoader(
+                            product_id=product_id, lookback_days=365,
+                            org_id=target.org_id, db_session=self._db,
+                        )
+                        inventory_df = inv_loader.load()
+                        if not inventory_df.empty:
+                            inventory_df = inventory_df.set_index("date")
+                            logger.info(
+                                "External inventory loaded for %s: %d days",
+                                target.product_key, len(inventory_df),
+                            )
+                        else:
+                            inventory_df = None
+                    except Exception as exc:
+                        logger.warning(
+                            "External inventory load failed for %s: %s",
+                            target.product_key, exc,
+                        )
+                        inventory_df = None
+
+                    try:
+                        ip_loader = ImportPriceLoader(
+                            product_id=product_id, lookback_days=365,
+                            org_id=target.org_id, db_session=self._db,
+                        )
+                        import_price_df = ip_loader.load()
+                        if not import_price_df.empty:
+                            import_price_df = import_price_df.set_index("date")
+                            logger.info(
+                                "External import-price loaded for %s: %d days",
+                                target.product_key, len(import_price_df),
+                            )
+                        else:
+                            import_price_df = None
+                    except Exception as exc:
+                        logger.warning(
+                            "External import-price load failed for %s: %s",
+                            target.product_key, exc,
+                        )
+                        import_price_df = None
+
                 # Build feature matrix for exog models (no cascade in single-target mode)
                 feed_loader = FeedstockLoader()
                 fx_loader = FxLoader()
@@ -320,6 +391,9 @@ class ForecastEngine:
                     target.product_key, y_model, exog_spec,
                     feed_loader, fx_loader, event_loader, h_max, cascade_forecasts=None,
                     volume_df=volume_df,
+                    operating_rate_df=operating_rate_df,
+                    inventory_df=inventory_df,
+                    import_price_df=import_price_df,
                 )
 
                 # Fit exog-aware models if feature matrix is available
@@ -339,6 +413,22 @@ class ForecastEngine:
                             logger.warning("xgboost_exog fit failed for %s: %s", target.product_key, exc)
                             models_failed.append("xgboost_exog")
                             exog_degraded = True
+
+                    # Foundation model: Moirai (exog-aware) — same exog as xgboost_exog
+                    moirai_model = models.get("moirai")
+                    if (moirai_model is not None and hasattr(moirai_model, "fit")
+                            and getattr(moirai_model, "uses_exog", False)):
+                        try:
+                            moirai_model.fit(y_model, seasonal_period=sp, exog=fm.X_train)
+                            moirai_fc = moirai_model.forecast(
+                                h_max,
+                                exog_future=fm.X_future if fm.X_future is not None and len(fm.X_future) > 0 else None,
+                            )
+                            forecasts["moirai"] = moirai_fc
+                            models_run.append("moirai")
+                        except Exception as exc:
+                            logger.warning("moirai fit failed for %s: %s", target.product_key, exc)
+                            models_failed.append("moirai")
             except Exception as exc:
                 logger.warning("Exog pipeline failed for %s: %s", target.product_key, exc)
                 exog_degraded = True
