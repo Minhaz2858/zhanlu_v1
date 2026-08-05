@@ -605,11 +605,23 @@ class TestSystemAgent:
         names = [c["name"] for c in configs]
         assert "ecisco_bi_assistant" in names
 
-    def test_ecisco_bi_assistant_not_is_system(self):
-        """ecisco_bi_assistant is user-facing (is_system=False)."""
+    def test_ecisco_bi_assistant_is_silent_system(self):
+        """ecisco_bi_assistant is a silent platform system agent (is_system=True).
+
+        The agent is auto-selected by Chat.jsx when the user opens a chat
+        in the Ecisco BI project, so end users must never see it in any
+        UI surface. Hiding is done at the frontend via filterUserAgents()
+        matching on the is_system flag, and at the API layer via
+        entity_service.soft_delete_record refusing to delete system
+        agents. This test guards the seeder contract; the
+        entity-service guard is tested in test_ecisco_bi_silent_agent.py.
+        """
         configs = _build_system_agent_configs()
         orch = next(c for c in configs if c["name"] == "ecisco_bi_assistant")
-        assert orch.get("is_system") is False
+        assert orch.get("is_system") is True, (
+            f"ecisco_bi_assistant should be is_system=True so the frontend "
+            f"hides it, got is_system={orch.get('is_system')}"
+        )
 
     def test_ecisco_bi_assistant_project_is_ecisco_bi(self):
         """ecisco_bi_assistant project is 'Ecisco BI'."""
