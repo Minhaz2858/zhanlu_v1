@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -54,7 +54,7 @@ def rolling_accuracy(
     if not target:
         return {"mean_mape": None, "n_evaluations": 0, "trend": "unknown"}
 
-    cutoff = datetime.now(timezone.utc) - pd.Timedelta(days=window_days)
+    cutoff = datetime.utcnow() - timedelta(days=window_days)
     logs = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.target_id == target.id,
         ForecastAccuracyLog.evaluated_at >= cutoff,
@@ -108,15 +108,19 @@ def detect_drift(
 
     baseline_mapes = []
     recent_mapes = []
-    baseline_cutoff = datetime.now(timezone.utc) - pd.Timedelta(days=baseline_window_days)
-    recent_cutoff = datetime.now(timezone.utc) - pd.Timedelta(days=recent_window_days)
+    now = datetime.utcnow()
+    baseline_cutoff = now - timedelta(days=baseline_window_days)
+    recent_cutoff = now - timedelta(days=recent_window_days)
     for log in all_logs:
         if log.evaluated_at is None:
             continue
+        ev = log.evaluated_at
+        if ev.tzinfo is not None:
+            ev = ev.astimezone(timezone.utc).replace(tzinfo=None)
         mape = float(log.realized_mape)
-        if log.evaluated_at >= recent_cutoff:
+        if ev >= recent_cutoff:
             recent_mapes.append(mape)
-        elif log.evaluated_at >= baseline_cutoff:
+        elif ev >= baseline_cutoff:
             baseline_mapes.append(mape)
 
     if len(baseline_mapes) < 3 or len(recent_mapes) < 3:
