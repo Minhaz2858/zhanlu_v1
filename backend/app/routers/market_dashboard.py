@@ -8,11 +8,13 @@ Exception: GET /enabled is informational (returns 200 with {enabled: false}
 when EDIA is not configured) so the sidebar can decide whether to render
 the accordion.
 """
+import os
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.deps import get_current_user_required
+from app.database import get_db
 from app.schemas.market_dashboard import (
     EnabledResponse, MarketSnapshot, PriceHistoryPoint,
     RegionalPriceData, NewsListResponse,
@@ -20,9 +22,13 @@ from app.schemas.market_dashboard import (
     EventsResponse, FxRateResponse, OverviewBundle,
     ForecastChartResponse, PriceChainResponse,
     SkuForecastMeta, DecisionBoardResponse,
+    ForecastFeedbackRequest, ForecastFeedbackItem,
 )
 from app.services import market_dashboard_service as svc
 from app.services import decision_board_service as dbs
+from app.services.forecasting.ops.feedback_service import (
+    record_feedback, list_feedback,
+)
 
 router = APIRouter(prefix="/market-dashboard", tags=["market-dashboard"])
 
@@ -252,3 +258,55 @@ def get_price_chain(
     Tiers: crude → naphtha → cracked C5/C9 → isoprene/piperylene/DCPD.
     """
     return svc.get_price_chain()
+
+
+# ── HITL forecast feedback (Task 5) ──────────────────────────────────
+
+
+def _hitl_enabled() -> bool:
+    return os.environ.get("FORECAST_HITL_ENABLED", "false").lower() in ("1", "true", "yes")
+
+
+def _feedback_to_item(fb) -> dict:
+    return {
+        "id": fb.id, "ai_price": fb.ai_price, "user_price": fb.user_price,
+        "reason": fb.reason, "author_name": fb.author_name,
+        "target_date": fb.target_date.isoformat() if fb.target_date else None,
+        "status": fb.status, "beat": fb.beat,
+        "ai_error": fb.ai_error, "user_error": fb.user_error,
+        "created_date": fb.created_date.isoformat() if fb.created_date else None,
+    }
+
+
+@router.post("/forecast-feedback", response_model=ForecastFeedbackItem)
+def post_forecast_feedback(
+    body: ForecastFeedbackRequest,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Record a Human-in-the-Loop price correction (pending until scored)."""
+    if not _hitl_enabled():
+        raise HTTPException(status_code=503, detail="forecast_hitl_disabled")
+    try:
+        fb = record_feedback(
+            db=db, product_id=body.product_id, ai_price=body.ai_price,
+            user_price=body.user_price, reason=body.reason,
+            author_id=str(getattr(user, "id", "anonymous")),
+            author_name=getattr(user, "name", None) or getattr(user, "email", None),
+            target_date=body.target_date,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return ForecastFeedbackItem(**_feedback_to_item(fb))
+
+
+@router.get("/forecast-feedback", response_model=list[ForecastFeedbackItem])
+def get_forecast_feedback(
+    product_id: str = Query(...),
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """List HITL correction history for a product."""
+    if not _hitl_enabled():
+        raise HTTPException(status_code=503, detail="forecast_hitl_disabled")
+    return [ForecastFeedbackItem(**row) for row in list_feedback(db, product_id)]

@@ -4,6 +4,7 @@ Field names mirror EDIA's frontend interfaces
 (MarketSnapshotItem, RegionalPriceData, etc.) so the ported EDIA React
 components can consume the payload without remapping.
 """
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
 
@@ -376,4 +377,31 @@ class PriceChainResponse(BaseModel):
     """3-tier price transmission chain."""
     tiers: list[list[PriceChainNode]] = Field(default_factory=list)
     as_of_date: Optional[str] = None
+
+
+# ── HITL forecast feedback (Task 5) ──────────────────────────────────
+
+
+class ForecastFeedbackRequest(BaseModel):
+    """POST /market-dashboard/forecast-feedback body."""
+    product_id: str
+    ai_price: float = Field(gt=0)
+    user_price: float = Field(gt=0)
+    reason: str | None = None
+    target_date: datetime | None = None
+
+
+class ForecastFeedbackItem(BaseModel):
+    """One HITL correction row (response shape for POST + GET)."""
+    id: str
+    ai_price: float
+    user_price: float
+    reason: str | None = None
+    author_name: str | None = None
+    target_date: str | None = None
+    status: str
+    beat: bool | None = None
+    ai_error: float | None = None
+    user_error: float | None = None
+    created_date: str | None = None
 
