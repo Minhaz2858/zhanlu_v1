@@ -41,6 +41,7 @@ def build_model_pool(
     but fit-time failures (convergence) must be caught by the ensemble.
     """
     import logging
+    import os
 
     from app.services.forecasting.models.naive import NaiveLast, SeasonalNaive
     from app.services.forecasting.models.ets import ETSModel
@@ -77,5 +78,48 @@ def build_model_pool(
             pool["xgboost_exog"] = xgb_exog
         except ImportError:
             logger.warning("xgboost not installed — skipping xgboost_reg model")
+
+    # Optional: foundation models (flag-gated, lazy import)
+    foundation_enabled = os.environ.get(
+        "FORECAST_FOUNDATION_MODELS_ENABLED", "false"
+    ).lower() == "true"
+    if foundation_enabled and y is not None and len(y) >= 60:
+        # Chronos-Bolt (univariate zero-shot)
+        chronos_on = os.environ.get(
+            "FORECAST_FOUNDATION_MODEL_CHRONOS_ENABLED", "true"
+        ).lower() == "true"
+        if chronos_on:
+            try:
+                from app.services.forecasting.models.chronos_bolt import (
+                    ChronosBoltModel,
+                )
+
+                pool["chronos_bolt"] = ChronosBoltModel()
+                logger.info("build_model_pool: added chronos_bolt")
+            except ImportError:
+                logger.warning(
+                    "build_model_pool: torch/chronos not installed "
+                    "— skipping chronos_bolt"
+                )
+
+        # Moirai (exog-aware zero-shot)
+        moirai_on = os.environ.get(
+            "FORECAST_FOUNDATION_MODEL_MOIRAI_ENABLED", "true"
+        ).lower() == "true"
+        if moirai_on:
+            try:
+                from app.services.forecasting.models.moirai import MoiraiModel
+
+                pool["moirai"] = MoiraiModel()
+                logger.info("build_model_pool: added moirai")
+            except ImportError:
+                logger.warning(
+                    "build_model_pool: torch/uni2ts not installed "
+                    "— skipping moirai"
+                )
+    elif foundation_enabled and (y is None or len(y) < 60):
+        logger.info(
+            "build_model_pool: skipping foundation models (series too short)"
+        )
 
     return pool
