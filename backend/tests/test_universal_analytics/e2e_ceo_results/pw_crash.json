@@ -1,0 +1,32 @@
+[
+  {
+    "question_id": "A1",
+    "category": "business",
+    "question": "What is the current market trend for semiconductor pricing in Q3 2025? Provide detailed analysis.",
+    "response": "S\nEcisco AI\nECISCO\nNew Task\nBusiness\nAdmin\nAutomation\nMy Space\nMy Files\nDashboard\nUngrouped\nUNGROUPED\nCUSTOMER SUPPORT\nDATA ANALYSIS\nECISCO BI\nEEE\nGLOBAL\nMARKETING TEAM\nSystem\nA\nAdmin User\nAdmin\nFiles in this task\nWhat is the current market trend for semiconductor pricing in Q3 2025? Provide detailed analysis.\nCrystallizing\nWrapping everything up\n17\n17 steps · 17 done · 0 failed\n\nI've completed the requested changes. Please review the agent configuration above.\n\nSend",
+    "response_length": 0,
+    "duration_seconds": 181.5,
+    "error": "response.substring is not a function",
+    "timestamp": "2026-08-06T10:16:05.665Z"
+  },
+  {
+    "question_id": "A2",
+    "category": "business",
+    "question": "Analyze the competitive landscape for our main product line. Who are our top 3 competitors?",
+    "response": "S\nEcisco AI\nECISCO\nNew Task\nBusiness\nAdmin\nAutomation\nMy Space\nMy Files\nDashboard\nUngrouped\nUNGROUPED\nCUSTOMER SUPPORT\nDATA ANALYSIS\nECISCO BI\nEEE\nGLOBAL\nMARKETING TEAM\nSystem\nA\nAdmin User\nAdmin\nFiles in this task\nWhat is the current market trend for semiconductor pricing in Q3 2025? Provide detailed analysis.\nCrystallizing\nWrapping everything up\n17\n17 steps · 17 done · 0 failed\n\nI've completed the requested changes. Please review the agent configuration above.\n\nAnalyze the competitive landscape for our main product line. Who are our top 3 competitors?\nCrystallizing\nWrapping everything up\n16\n16 steps · 12 done · 4 failed\n\nThe memory lookups are unavailable in this environment (schema issue on the backend), so I'll proceed with the context from our prior discussion — your focus has been semiconductor pricing, so I'll assume your main product line is memory/storage semiconductors (DRAM/NAND) and analyze that competitive landscape. Let me pull the latest market-share data first.\n\nSend",
+    "response_length": 0,
+    "duration_seconds": 181.5,
+    "error": "response.substring is not a function",
+    "timestamp": "2026-08-06T10:19:07.388Z"
+  },
+  {
+    "question_id": "A3",
+    "category": "business",
+    "question": "What macroeconomic factors are most impacting our supply chain costs right now?",
+    "response": "",
+    "response_length": 0,
+    "duration_seconds": 121.5,
+    "error": "page.waitForTimeout: Target page, context or browser has been closed",
+    "timestamp": "2026-08-06T10:21:08.935Z"
+  }
+]
