@@ -25,9 +25,9 @@ import unicodedata
 import uuid
 import httpx
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
@@ -38,6 +38,7 @@ from app.models.agent_conversation import AgentConversation
 from app.models.user import User
 from app.services.tracing import TraceContext
 from app.services.llm_service import llm_headers, llm_url, get_model
+from app.services.llm_router import resolve_effective_llm, EffectiveLLM
 from app.services.agent_prompts import (
     get_system_prompt,
     get_tools,
@@ -87,6 +88,9 @@ from app.services.prompt_caching import apply_cache_control
 from app.services.agent_metrics import metrics
 from app.services.provider_fallback import with_fallback
 
+# P4: user-level LLM overrides (temperature, max_tokens, fallback model)
+from app.services.user_settings_runtime import get_user_llm_overrides
+
 # Import tool_handlers to trigger registration of all new tools in the registry
 import app.services.tool_handlers  # noqa: F401
 
@@ -117,6 +121,28 @@ logger = logging.getLogger(__name__)
 _compaction_states: dict[str, "AutoCompactState"] = {}
 
 router = APIRouter(tags=["agents"])
+
+# ── Scalability (Part 2 Gap Analysis): Sync DB → async bridge ──────
+# Wraps sync SQLAlchemy operations in asyncio.to_thread so they don't
+# block the event loop. Used for message persistence, history loading,
+# and conversation state updates — the three hot paths in async handlers.
+import functools
+import contextvars
+def _run_db_sync(func, *args, **kwargs):
+    """Run a sync DB function in a thread pool via asyncio.to_thread.
+
+    Preserves the current task's context so that tracing identifiers
+    (trace_id, user_id, etc.) survive the thread boundary.
+
+    Usage::
+        conv = await _run_db_sync(db.query, Conversation).filter(...)
+        await _run_db_sync(db.commit)
+    """
+    # Snapshot current context
+    ctx = contextvars.copy_context()
+    def _wrapped():
+        return func(*args, **kwargs)
+    return asyncio.to_thread(_wrapped, context=ctx)
 
 MAX_TOOL_ITERATIONS = 10
 
@@ -960,7 +986,7 @@ def _persist_decision_summary_pause(
         "id": assistant_msg_id,
         "role": "assistant",
         "content": raw_for_persistence,
-        "created_date": datetime.utcnow().isoformat(),
+        "created_date": datetime.now(timezone.utc).isoformat(),
     }
     if tool_calls_for_frontend:
         assistant_msg["tool_calls"] = tool_calls_for_frontend
@@ -989,7 +1015,7 @@ def _persist_decision_summary_pause(
     # conv.messages to a different list object, so mutating the closure
     # variable alone is not enough.
     conv.messages = list(messages)
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     try:
         db.commit()
     except Exception as e:
@@ -1356,7 +1382,7 @@ def _derive_trace_from_response(
     # 2. Fall back: derive one trace step per executed tool call.
     tc_list = tool_calls_for_frontend or []
     if tc_list:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         started = started_at or now
         elapsed = max(0, int((now - started).total_seconds() * 1000)) if started else 0
         # Distribute elapsed across steps evenly (rough approximation)
@@ -1626,6 +1652,58 @@ def _collect_artifact_results(
                 ),
             )
 
+    # ── Layer 2 dedup — collapse file-format sibling duplicates ──
+    # When finalize.py creates two file-format artifacts for the same
+    # document (e.g. eager_render_default + run_sandbox_skill both
+    # produce a docx), keep only one.  Group by normalized title (or
+    # type + file_name as fallback) and keep the highest version_number.
+    file_artifacts = [
+        a for a in artifacts
+        if (a.get("type") or "").lower() in _FILE_FORMATS
+    ]
+    if len(file_artifacts) > 1:
+        # Group by (normalized_title, type) or (file_name, type) as fallback
+        from collections import defaultdict
+        groups: dict[tuple, list[dict]] = defaultdict(list)
+        for a in file_artifacts:
+            key = (
+                (a.get("title") or "").strip().lower(),
+                a.get("type") or "",
+            )
+            if not key[0]:  # fallback to file_name
+                key = (
+                    (a.get("file_name") or "").strip().lower(),
+                    a.get("type") or "",
+                )
+            groups[key].append(a)
+
+        consumed2: set[str] = set()
+        for key, group in groups.items():
+            if len(group) < 2:
+                continue
+            # Keep the one with the highest version_number; if tied,
+            # keep the one with preview_url (sandbox) over the one without
+            sorted_group = sorted(
+                group,
+                key=lambda a: (
+                    a.get("version_number") or 0,
+                    1 if a.get("preview_url") else 0,
+                ),
+                reverse=True,
+            )
+            for dup in sorted_group[1:]:
+                consumed2.add(dup["artifact_id"])
+                logger.info(
+                    "Layer 2 dedup: dropping file-format sibling %s (type=%s, v=%s) "
+                    "in favor of %s (type=%s, v=%s)",
+                    dup.get("artifact_id"), dup.get("type"), dup.get("version_number"),
+                    sorted_group[0].get("artifact_id"), sorted_group[0].get("type"),
+                    sorted_group[0].get("version_number"),
+                )
+
+        if consumed2:
+            artifacts = [a for a in artifacts if a["artifact_id"] not in consumed2]
+
     return artifacts
 
 
@@ -1674,14 +1752,14 @@ def _checkpoint_partial_assistant_msg(
             "id": assistant_msg_id,
             "role": "assistant",
             "content": "",
-            "created_date": datetime.utcnow().isoformat(),
+            "created_date": datetime.now(timezone.utc).isoformat(),
         }
         if tool_calls_for_frontend:
             partial["tool_calls"] = tool_calls_for_frontend
         if artifact_ids:
             partial["artifact_ids"] = list(artifact_ids)
         conv.messages = list(messages) + [partial]
-        conv.updated_date = datetime.utcnow()
+        conv.updated_date = datetime.now(timezone.utc)
         db.commit()
     except Exception as ckpt_err:
         logger.warning("mid-turn checkpoint failed (non-fatal): %s", ckpt_err)
@@ -2057,7 +2135,7 @@ async def update_conversation(
         conv.title = body["title"]
     if "status" in body:
         conv.status = body["status"]
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(conv)
     return conv.to_dict()
@@ -2097,7 +2175,7 @@ async def set_permission_mode(
 
     conv.metadata_ = conv.metadata_ or {}
     conv.metadata_["permission_mode"] = mode
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(conv)
 
@@ -2148,13 +2226,37 @@ async def add_message(
     messages = conv.messages or []
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
+    user_model_v2: str | None = body.get("model")
+
+    # ── Hierarchical LLM resolution ─────────────────────────────────
+    _eff_llm_v2 = resolve_effective_llm(
+        db,
+        project_id=conv.project_id,
+        agent_name=conv.agent_name,
+        user_model=user_model_v2,
+        user_is_admin=(user.role == "admin"),
+        org_id=conv.org_id,
+        app_id=conv.app_id,
+    )
+    if _eff_llm_v2.locked and user_model_v2:
+        logger.info(
+            "LLM locked by admin config (reason=%s) — ignoring user model %s",
+            _eff_llm_v2.locked_reason, user_model_v2,
+        )
+
+    # ── User-level LLM overrides (Settings page) ──────────────────────
+    # Computed once per-request so all LLM calls in this handler (primary,
+    # retry, compaction retry, fallback) use the same user preferences.
+    # Per-request explicit values in ``body`` always win; these are only
+    # defaults read from ``user_settings``.
+    llm_overrides = get_user_llm_overrides(db, user.id)
 
     # Add the user message
     user_msg = {
         "id": str(uuid.uuid4()),
         "role": user_role,
         "content": user_content,
-        "created_date": datetime.utcnow().isoformat(),
+        "created_date": datetime.now(timezone.utc).isoformat(),
     }
     messages.append(user_msg)
 
@@ -2167,7 +2269,7 @@ async def add_message(
     # appear in the conversation history on reload, even if the rest
     # of the agent run never completes.
     conv.messages = list(messages)
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     try:
         db.commit()
     except Exception as _early_commit_err:
@@ -2281,12 +2383,12 @@ async def add_message(
                     "id": str(uuid.uuid4()),
                     "role": "assistant",
                     "content": _fsm_result.assistant_content or "",
-                    "created_date": datetime.utcnow().isoformat(),
+                    "created_date": datetime.now(timezone.utc).isoformat(),
                     "tool_calls": _fsm_result.tool_calls,
                 }
                 messages.append(_assistant_msg)
                 conv.messages = list(messages)
-                conv.updated_date = datetime.utcnow()
+                conv.updated_date = datetime.now(timezone.utc)
                 try:
                     db.commit()
                 except Exception as _fsm_commit_err:
@@ -2328,6 +2430,17 @@ async def add_message(
                 conversation_id=conversation_id,
                 user_id=user.id if user else None,
                 agent_app=agent_app,
+                # Project scope (2026-08-05): the same `sel_proj_name`
+                # resolved above for the data-source runtime is the
+                # right project_id to forward to the memory snapshot.
+                # Without this, the agent recalls agent notes (e.g.
+                # the "Q2 2026 sales report" entry) from every
+                # project the user has ever visited — the user sees
+                # the same report-recollection greeting in convs
+                # across all projects. Memory writes are stamped
+                # with the same project_id at extraction time so the
+                # notes stay inside the project they were taken in.
+                project_id=getattr(conv, "project_id", None),
             )
         except Exception:
             pass  # Prompt building is best-effort
@@ -2593,7 +2706,10 @@ async def add_message(
                 prune_tool_results_only(llm_messages)
                 sanitize_messages(llm_messages)
                 llm_response = await _call_llm_with_tools(
-                    llm_messages, tools, tool_choice=tool_choice
+                    llm_messages, tools, tool_choice=tool_choice,
+                    endpoint=_eff_llm_v2.endpoint,
+                    temperature=llm_overrides.get("temperature"),
+                    max_tokens=llm_overrides.get("max_tokens"),
                 )
             except Exception as e:
                 # P1.1: Structured API error classification
@@ -2624,7 +2740,10 @@ async def add_message(
                             prune_tool_results_only(llm_messages)
                             sanitize_messages(llm_messages)
                             llm_response = await _call_llm_with_tools(
-                                llm_messages, tools, tool_choice=tool_choice
+                                llm_messages, tools, tool_choice=tool_choice,
+                                endpoint=_eff_llm_v2.endpoint,
+                                temperature=llm_overrides.get("temperature"),
+                                max_tokens=llm_overrides.get("max_tokens"),
                             )
                         else:
                             assistant_content = f"Sorry, the conversation is too long and compaction failed: {str(e)}"
@@ -2639,9 +2758,13 @@ async def add_message(
                         return await _call_llm_with_tools(
                             llm_messages, tools, tool_choice=tool_choice,
                             model_override=_model_name,
+                            endpoint=_eff_llm_v2.endpoint,
+                            temperature=llm_overrides.get("temperature"),
+                            max_tokens=llm_overrides.get("max_tokens"),
                         )
                     _fb_response, _fb_model = await with_fallback(
-                        get_model(), _call_with_fallback_model, ce
+                        get_model(), _call_with_fallback_model, ce,
+                        user_fallback=llm_overrides.get("fallback_model"),
                     )
                     if _fb_response:
                         llm_response = _fb_response
@@ -2657,7 +2780,10 @@ async def add_message(
                         prune_tool_results_only(llm_messages)
                         sanitize_messages(llm_messages)
                         return await _call_llm_with_tools(
-                            llm_messages, tools, tool_choice=tool_choice
+                            llm_messages, tools, tool_choice=tool_choice,
+                            endpoint=_eff_llm_v2.endpoint,
+                            temperature=llm_overrides.get("temperature"),
+                            max_tokens=llm_overrides.get("max_tokens"),
                         )
                     try:
                         llm_response = await call_with_transient_retry(_retry_llm_call)
@@ -3159,12 +3285,12 @@ async def add_message(
                     "id": str(uuid.uuid4()),
                     "role": "assistant",
                     "content": "",
-                    "created_date": datetime.utcnow().isoformat(),
+                    "created_date": datetime.now(timezone.utc).isoformat(),
                     "tool_calls": tool_calls_for_frontend,
                 }
                 messages.append(assistant_msg)
                 conv.messages = messages
-                conv.updated_date = datetime.utcnow()
+                conv.updated_date = datetime.now(timezone.utc)
                 db.commit()
                 db.refresh(conv)
                 logger.info(
@@ -3249,7 +3375,7 @@ async def add_message(
             "id": assistant_msg_id,
             "role": "assistant",
             "content": assistant_content,
-            "created_date": datetime.utcnow().isoformat(),
+            "created_date": datetime.now(timezone.utc).isoformat(),
         }
         if tool_calls_for_frontend:
             assistant_msg["tool_calls"] = tool_calls_for_frontend
@@ -3457,9 +3583,32 @@ async def add_message(
         messages.append(assistant_msg)
 
     conv.messages = messages
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(conv)
+
+    # QUALITY_EVAL (Part 2 — Gap Analysis): run standalone quality
+    # evaluation in the ReAct (v2) path.  Only fires when
+    # QUALITY_EVAL_ALL_PATHS is True.  Non-fatal: any failure or
+    # heuristic-only result leaves assistant_content unchanged.
+    try:
+        if getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
+            from app.services.synexia.quality_eval import evaluate_response_quality
+            _qe = evaluate_response_quality(
+                user_message=user_content or prompt,
+                assistant_text=assistant_content,
+                response_prompt=system_prompt or "",
+            )
+            if _qe.final_text and _qe.final_text != assistant_content:
+                assistant_content = _qe.final_text
+                # Update the persisted message content
+                assistant_msg["content"] = assistant_content
+                conv.messages = messages  # messages already has assistant_msg appended
+                conv.updated_date = datetime.now(timezone.utc)
+                db.commit()
+                db.refresh(conv)
+    except Exception as _qe_err:
+        logger.warning("ReAct quality eval failed (non-fatal): %s", _qe_err)
 
     # Fire-and-forget: extract memories from this conversation.
     # Only triggers when there are enough messages (≥4, checked internally).
@@ -3520,6 +3669,9 @@ async def resume_conversation(
         agent_name=conv.agent_name,
         role=user.role,
     )
+
+    # ── User-level LLM overrides ─────────────────────────────────────
+    llm_overrides = get_user_llm_overrides(db, user.id)
 
     resume_state = (conv.metadata_ or {}).get("_resume_state")
     if not resume_state:
@@ -3752,7 +3904,11 @@ async def resume_conversation(
             # P1.3: Pre-API deterministic tool result pruning
             prune_tool_results_only(llm_messages)
             sanitize_messages(llm_messages)
-            llm_response = await _call_llm_with_tools(llm_messages, tools, tool_choice=tool_choice)
+            llm_response = await _call_llm_with_tools(
+                llm_messages, tools, tool_choice=tool_choice,
+                temperature=llm_overrides.get("temperature"),
+                max_tokens=llm_overrides.get("max_tokens"),
+            )
         except Exception as e:
             # P1.1: Structured error classification
             ce = classify_api_error(e)
@@ -3934,10 +4090,10 @@ async def resume_conversation(
                 }
                 conv.status = "awaiting_approval"
                 assistant_msg = {"id": str(uuid.uuid4()), "role": "assistant", "content": "",
-                                 "created_date": datetime.utcnow().isoformat(), "tool_calls": tool_calls_for_frontend}
+                                 "created_date": datetime.now(timezone.utc).isoformat(), "tool_calls": tool_calls_for_frontend}
                 messages.append(assistant_msg)
                 conv.messages = messages
-                conv.updated_date = datetime.utcnow()
+                conv.updated_date = datetime.now(timezone.utc)
                 db.commit()
                 db.refresh(conv)
                 return conv.to_dict()
@@ -4021,7 +4177,7 @@ async def resume_conversation(
     _msg_id = str(uuid.uuid4())
     assistant_msg = {
         "id": _msg_id, "role": "assistant",
-        "content": assistant_content, "created_date": datetime.utcnow().isoformat(),
+        "content": assistant_content, "created_date": datetime.now(timezone.utc).isoformat(),
     }
     if tool_calls_for_frontend:
         assistant_msg["tool_calls"] = tool_calls_for_frontend
@@ -4038,7 +4194,7 @@ async def resume_conversation(
     messages.append(assistant_msg)
 
     conv.messages = messages
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(conv)
 
@@ -4161,7 +4317,7 @@ async def confirm_decision(
         new_md.pop("pending_agent_payload", None)
         new_md.pop("awaiting_decision_summary", None)
         conv.metadata_ = new_md
-        conv.updated_date = datetime.utcnow()
+        conv.updated_date = datetime.now(timezone.utc)
         db.commit()
         db.refresh(conv)
         return {
@@ -4176,7 +4332,7 @@ async def confirm_decision(
         new_md["pending_agent_payload"] = clean
         new_md["awaiting_decision_summary"] = True
         conv.metadata_ = new_md
-        conv.updated_date = datetime.utcnow()
+        conv.updated_date = datetime.now(timezone.utc)
         db.commit()
         db.refresh(conv)
         return {
@@ -4212,7 +4368,7 @@ async def confirm_decision(
             f"You can now open the agent's config page to review and refine "
             f"the five-layer constitutional prompt and bound skills."
         ),
-        "created_date": datetime.utcnow().isoformat(),
+        "created_date": datetime.now(timezone.utc).isoformat(),
         "tool_calls": [
             {
                 "id": str(uuid.uuid4()),
@@ -4230,7 +4386,7 @@ async def confirm_decision(
     new_md.pop("pending_agent_payload", None)
     new_md.pop("awaiting_decision_summary", None)
     conv.metadata_ = new_md
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     try:
         db.commit()
     except Exception as e:
@@ -4337,6 +4493,9 @@ async def _call_llm_with_tools(
     tool_choice: dict | None = None,
     *,
     model_override: str | None = None,
+    endpoint: "LLMEndpoint | None" = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> dict:
     """Call the LLM with optional function calling (tools).
 
@@ -4348,13 +4507,28 @@ async def _call_llm_with_tools(
             specific tool. Set to None for "auto" (default).
         model_override: Optional model name to override the default (for
             provider fallback).
+        endpoint: Optional concrete LLMEndpoint from hierarchical config.
+            When set, uses endpoint.base_url / endpoint.api_key /
+            endpoint.model_id instead of global settings.
+        temperature: Optional temperature override. Defaults to 0.7 when
+            not provided. Read from ``UserSetting`` at runtime.
+        max_tokens: Optional max_tokens override. Omitted from the payload
+            when None to preserve provider defaults.
 
     Returns:
         dict with:
             - content (str): the text response (may be empty if tool_calls present)
             - tool_calls (list): list of tool call dicts from the LLM
     """
-    _model = model_override or get_model()
+    if endpoint is not None:
+        _model = endpoint.model_id
+        _url = endpoint.base_url.rstrip("/") + "/chat/completions"
+        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+    else:
+        _model = model_override or get_model()
+        _url = llm_url()
+        _headers = llm_headers()
+
     payload = {
         "model": _model,
         "messages": apply_cache_control(
@@ -4362,8 +4536,10 @@ async def _call_llm_with_tools(
             enabled=getattr(settings, "PROMPT_CACHE_ENABLED", False),
             cache_ttl=getattr(settings, "PROMPT_CACHE_TTL", "5m"),
         ),
-        "temperature": 0.7,
+        "temperature": temperature if temperature is not None else 0.7,
     }
+    if max_tokens is not None:
+        payload["max_tokens"] = max_tokens
     if tools:
         payload["tools"] = tools
     if tool_choice:
@@ -4371,7 +4547,7 @@ async def _call_llm_with_tools(
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(llm_url(), headers=llm_headers(), json=payload)
+            resp = await client.post(_url, headers=_headers, json=payload)
             resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         # If tool_choice forcing caused an error (some providers don't
@@ -4385,7 +4561,7 @@ async def _call_llm_with_tools(
             try:
                 async with httpx.AsyncClient(timeout=120.0) as client:
                     resp = await client.post(
-                        llm_url(), headers=llm_headers(), json=payload
+                        _url, headers=_headers, json=payload
                     )
                     resp.raise_for_status()
             except httpx.HTTPStatusError as e2:
@@ -4504,7 +4680,7 @@ def _persist_stream_error(db, conv, conversation_id, messages, e, ce,
         err_msg = {
             "id": str(uuid.uuid4()), "role": "assistant",
             "content": f"**[Error]** {assistant_content}",
-            "created_date": datetime.utcnow().isoformat(),
+            "created_date": datetime.now(timezone.utc).isoformat(),
         }
         if tool_calls_for_frontend:
             err_msg["tool_calls"] = tool_calls_for_frontend
@@ -4518,7 +4694,7 @@ def _persist_stream_error(db, conv, conversation_id, messages, e, ce,
         # the new JSON value (the checkpoint block above may have rebound
         # conv.messages to a different list object).
         conv.messages = list(messages)
-        conv.updated_date = datetime.utcnow()
+        conv.updated_date = datetime.now(timezone.utc)
         db.commit()
         # Re-query a fresh instance so the `done` event's conversation
         # payload reflects the freshly committed row, not a possibly-
@@ -4544,6 +4720,10 @@ async def _stream_llm_with_tools(
     tool_choice: dict | None = None,
     *,
     client: "httpx.AsyncClient | None" = None,
+    model_override: str | None = None,
+    endpoint: "LLMEndpoint | None" = None,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ):
     """Stream the LLM response, yielding incremental events.
 
@@ -4570,16 +4750,28 @@ async def _stream_llm_with_tools(
                 None, a fresh client is created with the production
                 timeout. The client must expose ``__aenter__/__aexit__``
                 and ``stream(method, url, **kwargs)`` (standard httpx shape).
+        endpoint: Optional concrete LLMEndpoint from hierarchical config.
 
     The caller is responsible for formatting the yielded events as SSE
     ``data:`` lines.
     """
-    base_payload = {
-        "model": get_model(),
+    if endpoint is not None:
+        _model = endpoint.model_id
+        _stream_url = endpoint.base_url.rstrip("/") + "/chat/completions"
+        _stream_headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+    else:
+        _model = model_override or get_model()
+        _stream_url = llm_url()
+        _stream_headers = llm_headers()
+
+    base_payload: dict = {
+        "model": _model,
         "messages": messages,
-        "temperature": 0.7,
+        "temperature": temperature if temperature is not None else 0.7,
         "stream": True,
     }
+    if max_tokens is not None:
+        base_payload["max_tokens"] = max_tokens
     if tools:
         base_payload["tools"] = tools
     if tool_choice:
@@ -4647,7 +4839,7 @@ async def _stream_llm_with_tools(
         nonlocal full_content, reasoning_acc
         try:
             async with stream_client.stream(
-                "POST", llm_url(), headers=llm_headers(), json=payload,
+                "POST", _stream_url, headers=_stream_headers, json=payload,
             ) as resp:
                 if resp.status_code >= 400:
                     # Read the body INSIDE the context (response still
@@ -4842,6 +5034,300 @@ async def steer_conversation(
     return {"ok": True, "queued": True}
 
 
+def _chunk_stream_text(text: str, size: int = 180) -> list:
+    """Split text into ~``size``-char SSE chunks, preferring newline breaks."""
+    if not text:
+        return []
+    chunks: list = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if i + size >= n:
+            chunks.append(text[i:])
+            break
+        j = text.rfind("\n", i, i + size)
+        if j > i:
+            chunks.append(text[i : j + 1])
+            i = j + 1
+        else:
+            chunks.append(text[i : i + size])
+            i += size
+    return chunks
+
+
+# --------------------------------------------------------------------------- #
+# Experience layer (Phase A): turn-end recipe learning + user profile updates.
+# Best-effort: any failure is logged (never user content or embeddings) and
+# skipped, so the chat loop is never affected. Gated by
+# ECISCO_BI_RECIPE_LEARNING_ENABLED / ECISCO_BI_USER_PROFILE_ENABLED.
+# --------------------------------------------------------------------------- #
+def _record_turn_experience(
+    *,
+    agent_app_id: str,
+    user_id,
+    user_content: str,
+    assistant_content: str,
+    tool_sequence=None,
+    iterations: int = 0,
+) -> None:
+    """Turn-end hook: record the tool-sequence recipe + update user profile.
+
+    ``tool_sequence`` is the ordered list of tool call records from this turn
+    (each with a ``name``); a non-empty final ``assistant_content`` is the
+    success signal for recipe recording. Synchronous + fire-and-forget —
+    callers wrap it in try/except for full isolation.
+    """
+    success = bool(assistant_content and assistant_content.strip())
+
+    if getattr(settings, "ECISCO_BI_RECIPE_LEARNING_ENABLED", False):
+        try:
+            from app.services.experience_intent import classify_question, INTENT_CONVERSATIONAL
+            from app.services.learning_graph import record_recipe
+
+            intent = classify_question(user_content)
+            seq = [t.get("name") for t in (tool_sequence or []) if t and t.get("name")]
+            if seq and intent != INTENT_CONVERSATIONAL:
+                record_recipe(agent_app_id, intent, seq, success, iterations=iterations)
+                logger.debug(
+                    "experience: recipe recorded agent=%s intent=%s tools=%d success=%s",
+                    agent_app_id, intent, len(seq), success,
+                )
+        except Exception as _rec_err:  # noqa: BLE001 — best-effort
+            logger.warning("experience: recipe recording failed (non-fatal): %s", _rec_err)
+
+    if getattr(settings, "ECISCO_BI_USER_PROFILE_ENABLED", False) and user_id:
+        try:
+            from app.services.user_profile import update_user_profile
+
+            update_user_profile(agent_app_id, user_id, user_content or "")
+            logger.debug(
+                "experience: user profile updated agent=%s user=%s",
+                agent_app_id, user_id,
+            )
+        except Exception as _prof_err:  # noqa: BLE001 — best-effort
+            logger.warning("experience: user profile update failed (non-fatal): %s", _prof_err)
+
+
+def _store_turn_cache(
+    *,
+    db,
+    agent_app_id: str,
+    user_id,
+    user_content: str,
+    assistant_content: str,
+    artifact_ids=None,
+) -> None:
+    """Turn-end hook: persist a successful answer into the semantic cache.
+
+    Gated by ECISCO_BI_RESPONSE_CACHE_ENABLED. Only substantive answers
+    are stored; the cache service itself enforces scope (shared for
+    data-driven intents, per-user for conversational) and freshness
+    guards. Best-effort: any failure is logged and skipped.
+    """
+    if not getattr(settings, "ECISCO_BI_RESPONSE_CACHE_ENABLED", False):
+        return
+    if not assistant_content or not assistant_content.strip():
+        return
+    try:
+        from app.services.experience_intent import classify_question
+        from app.services.llm_service import get_embedding
+        from app.services.response_cache import store_cached_response
+
+        embedding = get_embedding(user_content)
+        if not embedding:
+            return  # embedding service unavailable -> cache disabled
+        store_cached_response(
+            db,
+            agent_app_id=agent_app_id,
+            user_id=user_id,
+            question_text=user_content,
+            intent_class=classify_question(user_content),
+            embedding=embedding,
+            response_content=assistant_content,
+            artifact_ids=artifact_ids,
+        )
+        logger.debug(
+            "experience: response cache store attempted agent=%s len=%d",
+            agent_app_id, len(assistant_content),
+        )
+    except Exception as _cache_store_err:  # noqa: BLE001 — best-effort
+        logger.warning("experience: response cache store failed (non-fatal): %s", _cache_store_err)
+
+
+def _resolve_agent_app_key(db: Session, agent_name, app_id: str) -> str:
+    """Resolve the agent store key consistent with the chat routes.
+
+    The chat routes key recipes/profiles/cache on ``agent_app.id`` when an
+    AgentApp exists, else on ``agent_name``. Keep this identical so the
+    feedback endpoint touches the same stores.
+    """
+    try:
+        agent_app = (
+            db.query(AgentApp)
+            .filter(AgentApp.name == agent_name, AgentApp.is_deleted == False)  # noqa: E712
+            .first()
+        )
+        return agent_app.id if agent_app else (agent_name or app_id or "general_assistant")
+    except Exception as _key_err:  # noqa: BLE001 — best-effort
+        logger.debug("experience: agent key resolve failed: %s", _key_err)
+        return agent_name or app_id or "general_assistant"
+
+
+@router.post("/apps/{app_id}/agents/conversations/{conversation_id}/messages/{message_id}/feedback")
+def add_message_feedback(
+    app_id: str,
+    conversation_id: str,
+    message_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Record explicit thumbs up/down feedback on an assistant message.
+
+    Writes an ``ExperienceEntry`` (entry_type="user_feedback"), then:
+      - reinforces/penalizes the matching recipe (Layer 1)
+      - reinforces or evicts the matching semantic cache entry (Layer 2)
+      - updates the user's explicit profile preferences (Layer 3)
+
+    All adjustments are best-effort and flag-gated (ECISCO_BI_*_ENABLED).
+    """
+    try:
+        rating = int(body.get("rating", 0))
+        if rating not in (1, -1):
+            raise ValueError("rating must be +1 or -1")
+        comment = str(body.get("comment") or "")[:500]
+    except (TypeError, ValueError) as _fb_payload_err:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": f"invalid feedback payload: {_fb_payload_err}"},
+        )
+
+    conv = (
+        db.query(AgentConversation)
+        .filter(
+            AgentConversation.id == conversation_id,
+            AgentConversation.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if conv is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "conversation not found"})
+
+    messages = list(conv.messages or [])
+    target_msg = next(
+        (
+            m for m in messages
+            if str(m.get("id")) == message_id and m.get("role") == "assistant"
+        ),
+        None,
+    )
+    if target_msg is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "message not found"})
+
+    # Find the preceding user message (the question this answer belongs to).
+    user_content = ""
+    for m in reversed(messages):
+        if str(m.get("id")) == message_id:
+            continue
+        if m.get("role") == "user":
+            user_content = m.get("content") or ""
+            break
+        if m.get("role") == "assistant":
+            break  # hit an earlier assistant message — stop searching
+
+    intent_class = "general"
+    try:
+        from app.services.experience_intent import classify_question
+
+        intent_class = classify_question(user_content)
+    except Exception as _intent_err:  # noqa: BLE001 — best-effort
+        logger.debug("feedback: intent classify failed: %s", _intent_err)
+
+    agent_key = _resolve_agent_app_key(db, conv.agent_name, app_id)
+
+    # 1) ExperienceEntry — the durable feedback record.
+    try:
+        from app.models.experience_entry import ExperienceEntry
+
+        db.add(
+            ExperienceEntry(
+                agent_app_id=agent_key,
+                entry_type="user_feedback",
+                summary="user {} assistant message".format("upvoted" if rating > 0 else "downvoted"),
+                detail_json=json.dumps(
+                    {
+                        "message_id": message_id,
+                        "comment": comment,
+                        "intent_class": intent_class,
+                        "question": (user_content or "")[:500],
+                    },
+                    ensure_ascii=False,
+                ),
+                outcome="positive" if rating > 0 else "negative",
+                confidence=None,
+                user_rating=rating,
+                user_feedback=comment,
+                tags=[intent_class],
+            )
+        )
+        db.commit()
+    except Exception as _ee_err:  # noqa: BLE001 — best-effort
+        logger.warning("feedback: ExperienceEntry write failed (non-fatal): %s", _ee_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    # 2) Recipe adjustment (Layer 1).
+    if getattr(settings, "ECISCO_BI_RECIPE_LEARNING_ENABLED", False):
+        try:
+            from app.services.learning_graph import adjust_recipe_feedback
+
+            adjust_recipe_feedback(agent_key, intent_class, rating)
+        except Exception as _recipe_fb_err:  # noqa: BLE001 — best-effort
+            logger.warning("feedback: recipe adjust failed (non-fatal): %s", _recipe_fb_err)
+
+    # 3) Cache entry adjustment (Layer 2) — thumbs down evicts it.
+    if getattr(settings, "ECISCO_BI_RESPONSE_CACHE_ENABLED", False):
+        try:
+            from app.models.response_cache_entry import ResponseCacheEntry
+            from app.services.response_cache import apply_feedback_score, evict_cache_entry
+
+            target_content = target_msg.get("content") or ""
+            cache_entry = (
+                db.query(ResponseCacheEntry)
+                .filter(
+                    ResponseCacheEntry.agent_app_id == agent_key,
+                    ResponseCacheEntry.response_content == target_content,
+                    ResponseCacheEntry.is_deleted == False,  # noqa: E712
+                )
+                .first()
+            )
+            if cache_entry is not None:
+                if rating < 0:
+                    evict_cache_entry(db, cache_entry.id)
+                else:
+                    apply_feedback_score(db, cache_entry.id, 1)
+        except Exception as _cache_fb_err:  # noqa: BLE001 — best-effort
+            logger.warning("feedback: cache adjust failed (non-fatal): %s", _cache_fb_err)
+
+    # 4) User profile explicit preferences (Layer 3).
+    if getattr(settings, "ECISCO_BI_USER_PROFILE_ENABLED", False):
+        try:
+            from app.services.user_profile import add_feedback
+
+            add_feedback(agent_key, str(user.id), rating)
+        except Exception as _profile_fb_err:  # noqa: BLE001 — best-effort
+            logger.warning("feedback: profile adjust failed (non-fatal): %s", _profile_fb_err)
+
+    return {
+        "ok": True,
+        "rating": rating,
+        "intent_class": intent_class,
+        "message_id": message_id,
+    }
+
+
 @router.post("/apps/{app_id}/agents/conversations/v3/{conversation_id}/messages/stream")
 async def add_message_stream(
     app_id: str,
@@ -4887,6 +5373,30 @@ async def add_message_stream(
     messages = conv.messages or []
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
+    # Per-message model override from the ModelSwitcher (P4 UI).
+    # Falls back to settings.LLM_MODEL when absent.
+    user_model: str | None = body.get("model")
+
+    # ── Hierarchical LLM resolution ─────────────────────────────────
+    effective_llm = resolve_effective_llm(
+        db,
+        project_id=conv.project_id,
+        agent_name=conv.agent_name,
+        user_model=user_model,
+        user_is_admin=(user.role == "admin"),
+        org_id=conv.org_id,
+        app_id=conv.app_id,
+    )
+    _lock_llm = effective_llm.locked  # used for chat header SSE event
+    if effective_llm.locked and user_model:
+        logger.info(
+            "LLM locked by admin config (reason=%s) — ignoring user model %s",
+            effective_llm.locked_reason, user_model,
+        )
+
+    # ── User-level LLM overrides (Settings page) ──────────────────────
+    llm_overrides = get_user_llm_overrides(db, user.id)
+
     # Phase 1: file_urls are sent by the frontend's handleAgentSend /
     # handleSend when the user queued attachments. Parse them here so the
     # agent can read what was uploaded. Persisted on the user message so
@@ -4909,7 +5419,7 @@ async def add_message_stream(
         "id": str(uuid.uuid4()),
         "role": user_role,
         "content": user_content,
-        "created_date": datetime.utcnow().isoformat(),
+        "created_date": datetime.now(timezone.utc).isoformat(),
     }
     if file_urls:
         user_msg["file_urls"] = file_urls
@@ -4924,7 +5434,7 @@ async def add_message_stream(
     # appear in the conversation history on reload, even if the rest
     # of the agent run never completes.
     conv.messages = list(messages)
-    conv.updated_date = datetime.utcnow()
+    conv.updated_date = datetime.now(timezone.utc)
     try:
         db.commit()
     except Exception as _early_commit_err:
@@ -4935,6 +5445,111 @@ async def add_message_stream(
         db.rollback()
         # Don't fail the request — the loop's own error handler can
         # still attempt a persist. But log loudly so we notice.
+
+    # ── Experience layer (Phase B): semantic response cache ──────────────
+    # When ECISCO_BI_RESPONSE_CACHE_ENABLED is on, attempt an early cache
+    # lookup BEFORE the FSM/tool loop runs. On hit, stream the cached
+    # answer through the same SSE delta/done format and skip the LLM run
+    # entirely — the "faster on repeat questions" payoff. Strict freshness
+    # guards (same data_version + similarity + TTL) live in the cache
+    # service; any failure falls back to the normal run. Cached answers
+    # are skipped when the turn carries file attachments (the answer
+    # would depend on the file contents).
+    _cache_hit_entry = None
+    if (
+        getattr(settings, "ECISCO_BI_RESPONSE_CACHE_ENABLED", False)
+        and user_content
+        and not file_urls
+    ):
+        try:
+            _cache_agent_app = (
+                db.query(AgentApp)
+                .filter(AgentApp.name == conv.agent_name, AgentApp.is_deleted == False)  # noqa: E712
+                .first()
+            )
+            if _cache_agent_app is not None:
+                from app.services.experience_intent import classify_question
+                from app.services.llm_service import get_embedding
+                from app.services.response_cache import lookup_cached_response
+
+                _cache_intent = classify_question(user_content)
+                _cache_embedding = get_embedding(user_content)
+                _cache_hit_entry = lookup_cached_response(
+                    db,
+                    agent_app_id=_cache_agent_app.id,
+                    user_id=str(user.id),
+                    question_text=user_content,
+                    intent_class=_cache_intent,
+                    embedding=_cache_embedding,
+                )
+        except Exception as _cache_lookup_err:  # noqa: BLE001 — safe fallback
+            logger.warning(
+                "experience: response cache lookup failed (non-fatal): %s",
+                _cache_lookup_err,
+            )
+            _cache_hit_entry = None
+
+    if _cache_hit_entry is not None:
+        # Cache hit — replay the stored answer via SSE and skip the run.
+        async def _cache_hit_stream():
+            _cached_text = _cache_hit_entry.response_content or ""
+            try:
+                _cached_msg = {
+                    "id": str(uuid.uuid4()),
+                    "role": "assistant",
+                    "content": _cached_text,
+                    "created_date": datetime.now(timezone.utc).isoformat(),
+                }
+                if _cache_hit_entry.artifact_ids:
+                    _cached_msg["artifact_ids"] = _cache_hit_entry.artifact_ids
+                conv.messages = list((conv.messages or []) + [_cached_msg])
+                conv.updated_date = datetime.now(timezone.utc)
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                logger.info(
+                    "experience: response cache HIT agent=%s intent=%s chars=%d",
+                    getattr(_cache_hit_entry, "agent_app_id", "?"),
+                    getattr(_cache_hit_entry, "intent_class", "?"),
+                    len(_cached_text),
+                )
+                for _chunk in _chunk_stream_text(_cached_text, 180):
+                    yield f'data: {json.dumps({"type": "delta", "content": _chunk})}\n\n'
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "type": "done",
+                        "content": _cached_text,
+                        "trace": [],
+                        "conversation": conv.to_dict(),
+                    })
+                    + "\n\n"
+                )
+            except Exception as _cache_stream_err:  # noqa: BLE001
+                logger.warning(
+                    "experience: cache hit stream failed (non-fatal): %s",
+                    _cache_stream_err,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "type": "error",
+                        "message": "缓存答案回放失败",
+                        "conversation": conv.to_dict(),
+                    })
+                    + "\n\n"
+                )
+
+        return StreamingResponse(
+            _sse_with_heartbeat(_cache_hit_stream()),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     # --- Planning-layer classification (v3 stream) ---
     # When SYNEXIA_FSM_ENABLED is on AND the trigger fires, route the
@@ -4975,60 +5590,67 @@ async def add_message_stream(
     try:
         from app.database import SessionLocal as _DsrSessionLocal
         from app.services.data_source_runtime import prepare_data_source_runtime
-        # Resolve the project's data-source context per-message so the
-        # data-source runtime can extend the agent's bound KBs with
-        # the project's KBs even when ``conv.project_id`` is None
-        # (e.g. legacy convs from before project-scoping landed, or
-        # convs first opened outside a project-scoped entry point).
-        # Source-of-truth order: body.project_id (per-message
-        # override from the live URL) → conv.project_id (the conv
-        # row's stored FK). Validate the body project_id against the
-        # live projects table so a stale UUID (admin-deleted project,
-        # phantom migration row) doesn't 500 — same defensive
-        # treatment as create_conversation above. When the body has
-        # project_name but no project_id (or vice versa), resolve
-        # the missing side from the projects table so the runtime
-        # sees a complete picture.
-        from app.models.project import Project as _Project
-        _v3_body_pid = body.get("project_id")
-        _v3_body_pname = body.get("project_name")
-        if _v3_body_pid or _v3_body_pname:
-            _v3_validated_row = None
-            if _v3_body_pid:
-                _v3_validated_row = (
-                    _dsr_db.query(_Project)
-                    .filter(_Project.id == _v3_body_pid, _Project.is_deleted == False)  # noqa: E712
-                    .first()
-                )
-                if _v3_validated_row is None:
-                    logger.debug(
-                        "v3 stream: dropping stale body project_id %s "
-                        "(project not found or soft-deleted)",
-                        _v3_body_pid,
-                    )
-                    _v3_body_pid = None
-            if _v3_validated_row is None and _v3_body_pname:
-                _v3_validated_row = (
-                    _dsr_db.query(_Project)
-                    .filter(
-                        func.lower(_Project.name) == _v3_body_pname.lower(),
-                        _Project.is_deleted == False,  # noqa: E712
-                    )
-                    .first()
-                )
-            if _v3_validated_row is not None:
-                _v3_body_pid = _v3_validated_row.id
-                _v3_body_pname = _v3_validated_row.name
-        # Body project context takes precedence over conv.project_id
-        # so a chat opened from a project page can scope to the
-        # project even when the conv row was created without one.
-        _v3_effective_pid = _v3_body_pid or getattr(conv, "project_id", None)
-        _v3_effective_pname = _v3_body_pname
-        if not _v3_effective_pname and _v3_effective_pid:
-            _v3_proj_lookup = _dsr_db.get(_Project, _v3_effective_pid)
-            _v3_effective_pname = _v3_proj_lookup.name if _v3_proj_lookup else None
+        # Open the dedicated session FIRST — the project-validation
+        # queries below need it. Previously we opened it ~60 lines
+        # later, after the validation block, which caused a NameError
+        # the moment a body with project_id/project_name arrived in
+        # production. The silent except path below then set
+        # ``_v3_data_ctx_extras = {}`` and the agent saw zero bound
+        # KBs even when the project had a connected database.
         _dsr_db = _DsrSessionLocal()
         try:
+            from app.models.project import Project as _Project
+            # Resolve the project's data-source context per-message so the
+            # data-source runtime can extend the agent's bound KBs with
+            # the project's KBs even when ``conv.project_id`` is None
+            # (e.g. legacy convs from before project-scoping landed, or
+            # convs first opened outside a project-scoped entry point).
+            # Source-of-truth order: body.project_id (per-message
+            # override from the live URL) → conv.project_id (the conv
+            # row's stored FK). Validate the body project_id against the
+            # live projects table so a stale UUID (admin-deleted project,
+            # phantom migration row) doesn't 500 — same defensive
+            # treatment as create_conversation above. When the body has
+            # project_name but no project_id (or vice versa), resolve
+            # the missing side from the projects table so the runtime
+            # sees a complete picture.
+            _v3_body_pid = body.get("project_id")
+            _v3_body_pname = body.get("project_name")
+            if _v3_body_pid or _v3_body_pname:
+                _v3_validated_row = None
+                if _v3_body_pid:
+                    _v3_validated_row = (
+                        _dsr_db.query(_Project)
+                        .filter(_Project.id == _v3_body_pid, _Project.is_deleted == False)  # noqa: E712
+                        .first()
+                    )
+                    if _v3_validated_row is None:
+                        logger.debug(
+                            "v3 stream: dropping stale body project_id %s "
+                            "(project not found or soft-deleted)",
+                            _v3_body_pid,
+                        )
+                        _v3_body_pid = None
+                if _v3_validated_row is None and _v3_body_pname:
+                    _v3_validated_row = (
+                        _dsr_db.query(_Project)
+                        .filter(
+                            func.lower(_Project.name) == _v3_body_pname.lower(),
+                            _Project.is_deleted == False,  # noqa: E712
+                        )
+                        .first()
+                    )
+                if _v3_validated_row is not None:
+                    _v3_body_pid = _v3_validated_row.id
+                    _v3_body_pname = _v3_validated_row.name
+            # Body project context takes precedence over conv.project_id
+            # so a chat opened from a project page can scope to the
+            # project even when the conv row was created without one.
+            _v3_effective_pid = _v3_body_pid or getattr(conv, "project_id", None)
+            _v3_effective_pname = _v3_body_pname
+            if not _v3_effective_pname and _v3_effective_pid:
+                _v3_proj_lookup = _dsr_db.get(_Project, _v3_effective_pid)
+                _v3_effective_pname = _v3_proj_lookup.name if _v3_proj_lookup else None
             if conv.agent_name:
                 _v3_agent_for_dsr = _dsr_db.query(AgentApp).filter(
                     AgentApp.name == conv.agent_name,
@@ -5046,8 +5668,13 @@ async def add_message_stream(
         finally:
             _dsr_db.close()
     except Exception as _v3_dsr_err:
-        logger.debug(
-            "v3 pre-FSM prepare_data_source_runtime failed (non-fatal): %s",
+        # Promote to WARNING so a future regression of the kind above
+        # is visible in production logs (the previous ``logger.debug``
+        # call was suppressed when LOG_LEVEL=INFO and the failure was
+        # invisible — every chat silently dropped the bound KBs).
+        logger.warning(
+            "v3 pre-FSM prepare_data_source_runtime failed (non-fatal, "
+            "agent will run with bound_kb_ids=[]): %s",
             _v3_dsr_err,
         )
         _v3_data_ctx_extras = {}
@@ -5220,7 +5847,7 @@ async def add_message_stream(
 
                 # Persist the assistant message and emit done.
                 try:
-                    from app.models.message import Message
+                    from app.models.chat_message import ChatMessage as Message
                     msg = Message(
                         id=str(uuid4()),
                         conversation_id=conversation_id,
@@ -5253,7 +5880,7 @@ async def add_message_stream(
                         "id": str(uuid4()),
                         "role": "assistant",
                         "content": (assistant_content or "")[:4000],
-                        "created_date": datetime.utcnow().isoformat(),
+                        "created_date": datetime.now(timezone.utc).isoformat(),
                         "tool_calls": _compact_tool_calls,
                         "artifact_ids": fsm_result.artifact_ids or [],
                         "file_exports": (
@@ -5265,7 +5892,7 @@ async def add_message_stream(
                     }
                     messages.append(_assistant_msg)
                     conv.messages = list(messages)
-                    conv.updated_date = datetime.utcnow()
+                    conv.updated_date = datetime.now(timezone.utc)
                     db.commit()
                     db.refresh(conv)
                 except Exception as _conv_msg_err:
@@ -5274,6 +5901,38 @@ async def add_message_stream(
                         _conv_msg_err,
                     )
                     db.rollback()
+
+                # --- Experience layer (Phase A): turn-end recipe + user profile ---
+                try:
+                    _fsm_agent_app = (
+                        db.query(AgentApp)
+                        .filter(AgentApp.name == _v3_agent_name, AgentApp.is_deleted == False)  # noqa: E712
+                        .first()
+                    )
+                    _fsm_agent_app_id = _fsm_agent_app.id if _fsm_agent_app else _v3_agent_name
+                    _fsm_tool_seq = []
+                    for _tc in (fsm_result.tool_calls or []):
+                        _nm = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
+                        if _nm:
+                            _fsm_tool_seq.append({"name": _nm})
+                    _record_turn_experience(
+                        agent_app_id=_fsm_agent_app_id,
+                        user_id=getattr(user, "id", None),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        tool_sequence=_fsm_tool_seq,
+                        iterations=len(_fsm_tool_seq),
+                    )
+                    _store_turn_cache(
+                        db,
+                        agent_app_id=_fsm_agent_app_id,
+                        user_id=getattr(user, "id", None),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        artifact_ids=getattr(fsm_result, "artifact_ids", None),
+                    )
+                except Exception as _fsm_xp_err:  # noqa: BLE001 — best-effort
+                    logger.warning("experience: FSM turn-end hook failed (non-fatal): %s", _fsm_xp_err)
 
                 done_payload = {
                     "type": "done",
@@ -5366,6 +6025,18 @@ async def add_message_stream(
             conversation_id=conversation_id,
             user_id=user.id if user else None,
             agent_app=agent_app,
+            # Project scope (2026-08-05): forward the effective
+            # project_id (body override > conv.project_id, resolved
+            # up-front in the data-source-runtime prep block) so the
+            # memory snapshot is recalled only from the active
+            # project. Without this, a note like "Q2 2026 sales
+            # report" taken in one project leaked into every other
+            # project's system prompt — the user saw the same
+            # report-recollection greeting in convs across all
+            # projects. The same ``_v3_effective_pid`` / fallback
+            # name resolution is used for the data-source runtime
+            # above, so both pieces see the same project scope.
+            project_id=_v3_effective_pid,
         )
     except Exception:
         pass
@@ -5778,6 +6449,10 @@ async def add_message_stream(
                         try:
                             async for ev_type, ev_data in _stream_llm_with_tools(
                                 llm_messages, tools, tool_choice=tool_choice,
+                                model_override=user_model,
+                                endpoint=effective_llm.endpoint,
+                                temperature=llm_overrides.get("temperature"),
+                                max_tokens=llm_overrides.get("max_tokens"),
                             ):
                                 if ev_type == "delta":
                                     assistant_content += ev_data
@@ -5820,6 +6495,10 @@ async def add_message_stream(
                     # ── Legacy buffered path ──────────────────────────
                     llm_response = await _call_llm_with_tools(
                         llm_messages, tools, tool_choice=tool_choice,
+                        model_override=user_model,
+                        endpoint=effective_llm.endpoint,
+                        temperature=llm_overrides.get("temperature"),
+                        max_tokens=llm_overrides.get("max_tokens"),
                     )
                     assistant_content = llm_response.get("content", "")
                     raw_tool_calls = llm_response.get("tool_calls", [])
@@ -5844,9 +6523,13 @@ async def add_message_stream(
                             return await _call_llm_with_tools(
                                 llm_messages, tools, tool_choice=tool_choice,
                                 model_override=_model_name,
+                                endpoint=effective_llm.endpoint,
+                                temperature=llm_overrides.get("temperature"),
+                                max_tokens=llm_overrides.get("max_tokens"),
                             )
                         _fb_response, _fb_model = await with_fallback(
-                            get_model(), _call_with_fallback_model, ce
+                            get_model(), _call_with_fallback_model, ce,
+                            user_fallback=llm_overrides.get("fallback_model"),
                         )
                     except Exception as _fb_err:
                         _fb_response, _fb_model = None, None
@@ -6559,7 +7242,7 @@ async def add_message_stream(
                     base = base[:-1]
                 base.append({
                     "id": str(uuid.uuid4()), "role": "assistant", "content": "",
-                    "created_date": datetime.utcnow().isoformat(),
+                    "created_date": datetime.now(timezone.utc).isoformat(),
                     "tool_calls": tool_calls_for_frontend,
                 })
                 conv.messages = base
@@ -6567,9 +7250,9 @@ async def add_message_stream(
                 # detects the change. Mutating in place (e.g. `md["k"]=v`)
                 # does NOT trigger change detection for JSON columns.
                 new_meta = dict(conv.metadata_ or {})
-                new_meta["_last_checkpoint_at"] = datetime.utcnow().isoformat()
+                new_meta["_last_checkpoint_at"] = datetime.now(timezone.utc).isoformat()
                 conv.metadata_ = new_meta
-                conv.updated_date = datetime.utcnow()
+                conv.updated_date = datetime.now(timezone.utc)
                 db.commit()
                 # Replace the closure variable's contents in place.
                 messages[:] = base
@@ -6608,7 +7291,7 @@ async def add_message_stream(
                 conv.metadata_ = new_meta
                 conv.status = "awaiting_approval"
                 conv.messages = messages
-                conv.updated_date = datetime.utcnow()
+                conv.updated_date = datetime.now(timezone.utc)
                 db.commit()
                 yield f'data: {json.dumps({"type": "paused", "conversation": conv.to_dict()})}\n\n'
                 _discard_steer(conversation_id)
@@ -6840,7 +7523,7 @@ async def add_message_stream(
         assistant_msg = {
             "id": assistant_msg_id, "role": "assistant",
             "content": assistant_content,
-            "created_date": datetime.utcnow().isoformat(),
+            "created_date": datetime.now(timezone.utc).isoformat(),
         }
         if tool_calls_for_frontend:
             assistant_msg["tool_calls"] = tool_calls_for_frontend
@@ -6895,7 +7578,7 @@ async def add_message_stream(
         # `done` event's conversation payload reflects the actual
         # stored state.
         conv.messages = list(messages)
-        conv.updated_date = datetime.utcnow()
+        conv.updated_date = datetime.now(timezone.utc)
         try:
             db.commit()
         except Exception as _commit_err:
@@ -6941,6 +7624,45 @@ async def add_message_stream(
                 "v3 stream: memory consolidation hook failed (non-fatal): %s",
                 _mc_hook_err,
             )
+
+        # QUALITY_EVAL (Part 2 — Gap Analysis): run standalone quality
+        # eval on the non-FSM v3 streaming path. Gated by
+        # QUALITY_EVAL_ALL_PATHS.  When the text is revised, the done
+        # event carries the updated assistant_content.
+        try:
+            if getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
+                from app.services.synexia.quality_eval import evaluate_response_quality
+                _qe_result = evaluate_response_quality(
+                    user_message=user_content or "",
+                    assistant_text=assistant_content,
+                )
+                if _qe_result.final_text and _qe_result.final_text != assistant_content:
+                    assistant_content = _qe_result.final_text
+                # Emit quality eval verdict as SSE event
+                yield f'data: {json.dumps({"type": "quality_eval", "quality_eval": _qe_result.to_dict()})}\n\n'
+        except Exception as _qe_err:
+            logger.warning("v3 stream quality eval failed (non-fatal): %s", _qe_err)
+
+        # --- Experience layer (Phase A/B): recipe + profile + cache store ---
+        try:
+            _record_turn_experience(
+                agent_app_id=agent_app_id,
+                user_id=getattr(user, "id", None),
+                user_content=user_content,
+                assistant_content=assistant_content,
+                tool_sequence=tool_calls_for_frontend,
+                iterations=len(tool_calls_for_frontend or []),
+            )
+            _store_turn_cache(
+                db,
+                agent_app_id=agent_app_id,
+                user_id=getattr(user, "id", None),
+                user_content=user_content,
+                assistant_content=assistant_content,
+                artifact_ids=assistant_msg.get("artifact_ids") if isinstance(assistant_msg, dict) else None,
+            )
+        except Exception as _xp_err:  # noqa: BLE001 — best-effort
+            logger.warning("experience: turn-end hook failed (non-fatal): %s", _xp_err)
 
         yield f'data: {json.dumps({"type": "done", "content": assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
         _discard_steer(conversation_id)

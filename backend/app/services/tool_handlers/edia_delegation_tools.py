@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from typing import Any
+from typing import Any, Callable
 
 from sqlalchemy.orm import Session
 
@@ -56,7 +56,7 @@ _DENIED_RECURSIVE = {
     "ask_diagnosis", "ask_pricing", "ask_forecast_agent",
     "ask_report_agent", "ask_data_agent", "ask_intelligence",
     "ask_knowledge_graph", "ask_decision", "ask_macro_override",
-    "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback",
+    "ask_erp_kpi", "ask_erp_writeback",
     "delegate_task",
     "create_agent", "update_agent", "create_skill", "update_skill",
     "create_automation", "update_automation", "send_message",
@@ -73,7 +73,7 @@ async def _run_sub_agent(
     db: Session,
     user_id: str | None,
     context: dict | None = None,
-    max_iterations: int = 8,
+    max_iterations: int = 5,
 ) -> dict:
     """Run a named BUILTIN_AGENT in a sub-conversation loop.
 
@@ -121,6 +121,27 @@ async def _run_sub_agent(
         entry = registry.get_entry(tname)
         if entry and entry.schema:
             tool_schemas.append(entry.schema)
+
+    # --- P1 Harness path ---
+    try:
+        from app.config import settings
+        use_harness = settings.AGENT_HARNESS_ENABLED
+    except Exception:
+        use_harness = False
+
+    if use_harness:
+        return await _run_sub_agent_via_harness(
+            agent_name=agent_name,
+            question=question,
+            system_prompt=system_prompt,
+            allowed_tools=allowed_tools,
+            tool_schemas=tool_schemas,
+            denied_tools=_DENIED_RECURSIVE,
+            db=db,
+            user_id=user_id,
+            context=ctx,
+            max_iterations=max_iterations,
+        )
 
     messages: list[dict] = [
         {"role": "system", "content": system_prompt},
@@ -285,6 +306,80 @@ async def _run_sub_agent(
     }
 
 
+async def _run_sub_agent_via_harness(
+    *,
+    agent_name: str,
+    question: str,
+    system_prompt: str,
+    allowed_tools: list[str],
+    tool_schemas: list[dict],
+    denied_tools: set[str],
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+    max_iterations: int = 8,
+) -> dict:
+    """Run a sub-agent through the P1 unified harness.
+
+    Bridges EDIA's ``call_llm_with_reliability`` and guardrail hooks
+    into the ``AgentRunOrchestrator`` so the loop is standardised while
+    preserving EDIA guard behaviour.
+    """
+    ctx = context or {}
+
+    # Bridge llm_fn: EDIA signature → orchestrator signature
+    async def _harness_llm(
+        messages: list[dict],
+        tools: list[dict] | None,
+        temperature: float,
+    ) -> dict:
+        return await call_llm_with_reliability(
+            messages, tools or [], temperature=temperature,
+        )
+
+    # Bridge tool dispatcher: orchestrator signature → execute_tool
+    async def _harness_dispatcher(
+        tool_name: str,
+        tool_args: dict,
+        _db: Any,
+        _user_id: str | None,
+        _context: dict | None,
+    ) -> dict:
+        from app.services.agent_tools import execute_tool
+        return await execute_tool(
+            tool_name, tool_args, db, user_id, context=ctx,
+        )
+
+    from app.services.harness.orchestrator import AgentRunOrchestrator
+
+    orch = AgentRunOrchestrator(
+        agent_name=agent_name,
+        task=question,
+        system_prompt=system_prompt,
+        tool_schemas=tool_schemas,
+        allowed_tools=set(allowed_tools),
+        llm_fn=_harness_llm,
+        tool_dispatcher=_harness_dispatcher,
+        db=db,
+        user_id=user_id,
+        context=ctx,
+        denied_tools=denied_tools,
+        max_iterations=max_iterations,
+        pre_call_prep=pre_call_prep,
+        persist_result_str=lambda tn, r: persist_result_str(tn, r, None),
+        apply_turn_budget=lambda msgs, ids, names: apply_turn_budget_to_batch(
+            msgs, ids, names, None
+        ),
+    )
+    result = await orch.run()
+    return {
+        "success": result.success,
+        "answer": result.answer,
+        "agent": agent_name,
+        "iterations": result.iterations,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Individual tool handlers
 # ---------------------------------------------------------------------------
@@ -371,12 +466,6 @@ async def _ask_macro_override(args: dict, db: Session, user_id: str | None, cont
     return await _handle_ask_macro_override(args, db, user_id, context)
 
 
-async def _ask_weekly_report(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
-    """Weekly report generation via direct Python service (no sub-agent delegation)."""
-    from app.services.weekly_report.tool import _handle_ask_weekly_report
-    return await _handle_ask_weekly_report(args, db, user_id, context)
-
-
 async def _ask_erp_kpi(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
     """ERP KPI query via direct Python service (no sub-agent delegation)."""
     from app.services.erp.tool import _handle_ask_erp_kpi
@@ -407,11 +496,90 @@ def _make_schema(name: str, description: str, agent_label: str) -> dict:
                         "type": "string",
                         "description": f"The natural-language question to ask the {agent_label}.",
                     },
+                    "async": {
+                        "type": "boolean",
+                        "description": (
+                            "If true, the task is enqueued for background "
+                            "execution and a run_id is returned immediately. "
+                            "Collect the result later with collect_run(). "
+                            "Default: false (blocking synchronous call)."
+                        ),
+                    },
                 },
                 "required": ["question"],
             },
         },
     }
+
+
+def _maybe_async(
+    handler: Callable,
+) -> Callable:
+    """Wrap a handler so it respects ``async: true`` when the
+    ``EDIA_DELEGATION_ASYNC_ENABLED`` config flag is set.
+
+    Returns the normal sync result when async is false / flag off.
+    When both conditions are true, enqueues a background run and
+    returns ``{success: True, run_id: "...", status: "queued"}``.
+    """
+    async def _wrapped(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
+        want_async = bool(args.get("async", False))
+        try:
+            from app.config import settings
+            async_enabled = settings.EDIA_DELEGATION_ASYNC_ENABLED
+        except Exception:
+            async_enabled = False
+
+        if want_async and async_enabled:
+            # Build a unique run_id and enqueue for background execution
+            import uuid as _uuid
+            run_id = _uuid.uuid4().hex[:32]
+            ctx = context or {}
+            agent_name = handler.__name__.replace("_ask_", "").replace("_", " ")
+            question = (args.get("question") or "").strip()
+
+            # Enqueue the original handler call for background execution
+            from app.services.harness.run_service import (
+                get_run_service,
+                AGENT_RUN_TASK_TYPE,
+            )
+            from app.services import task_queue as _tq
+
+            # Create a record for observability
+            _svc = get_run_service()
+            _svc.create_run_record(
+                agent_name=agent_name,
+                task=question,
+                mode="queued",
+                run_id=run_id,
+                caller_context={
+                    "org_id": ctx.get("org_id", "default-org"),
+                    "app_id": ctx.get("app_id", "default-app"),
+                    "user_id": user_id,
+                },
+            )
+            _tq.enqueue(
+                AGENT_RUN_TASK_TYPE,
+                {
+                    "run_id": run_id,
+                    "agent_name": agent_name,
+                    "task": question,
+                    "handler": handler.__name__,
+                },
+            )
+            return {
+                "success": True,
+                "run_id": run_id,
+                "status": "queued",
+                "agent": agent_name,
+                "message": f"Task queued. Collect result with run_id={run_id}.",
+            }
+
+        return await handler(args, db, user_id, context)
+
+    # Preserve the original name for introspection
+    _wrapped.__name__ = handler.__name__
+    return _wrapped
 
 
 for _name, _schema, _handler, _desc in (
@@ -526,16 +694,6 @@ for _name, _schema, _handler, _desc in (
         "Apply a macro-level pricing override.",
     ),
     (
-        "ask_weekly_report",
-        _make_schema(
-            "ask_weekly_report",
-            "Ask the EDIA Weekly Report Agent to generate a complete weekly report for a product or portfolio: pull data, compute charts, generate narrative, and produce a formatted report (JSON/PDF/Word/PPT).",
-            "Weekly Report Agent",
-        ),
-        _ask_weekly_report,
-        "Ask the EDIA Weekly Report Agent to generate a report.",
-    ),
-    (
         "ask_erp_kpi",
         _make_schema(
             "ask_erp_kpi",
@@ -559,7 +717,7 @@ for _name, _schema, _handler, _desc in (
     registry.register(
         name=_name,
         schema=_schema,
-        handler=_handler,
+        handler=_maybe_async(_handler),
         category="delegation",
         enabled_by_default=False,
         description=_desc,

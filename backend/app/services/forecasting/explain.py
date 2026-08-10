@@ -26,11 +26,13 @@ class Explanation:
     cleaning_note: str
     coherence_flags: list[str]
     drift_warning: bool
+    regime: str = ""
+    directional_signal: str = ""
 
 
 def _extract_drivers(xgboost_model, feature_names: list[str]) -> list[DriverAttribution]:
     """Extract top-5 feature importances from a fitted XGBoost model."""
-    if xgboost_model is None or xgboost_model._model is None or not feature_names:
+    if xgboost_model is None or not hasattr(xgboost_model, '_model') or xgboost_model._model is None or not feature_names:
         return []
     try:
         importances = xgboost_model._model.feature_importances_
@@ -132,6 +134,8 @@ def explain_forecast(
     coherence_report,
     drift_status: dict,
     honesty_gate_triggered: bool,
+    regime: str = "",
+    directional_signal: str = "",
 ) -> Explanation:
     """Produce a human-readable Explanation with driver attribution.
 
@@ -156,4 +160,6 @@ def explain_forecast(
         cleaning_note=cleaning_note,
         coherence_flags=coherence_flags,
         drift_warning=drift_warning,
+        regime=regime,
+        directional_signal=directional_signal,
     )

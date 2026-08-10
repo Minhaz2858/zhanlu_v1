@@ -417,7 +417,7 @@ def next_run_at(cron: str, after: Optional[datetime] = None, tz_name: Optional[s
     storage. This fixes the P0-6 bug where every schedule fired at the
     wall-clock time in UTC regardless of the user's location.
 
-    ``after`` is UTC-naive (the dispatcher passes ``datetime.utcnow()``).
+    ``after`` is UTC-naive (the dispatcher passes ``datetime.now(timezone.utc)``).
     The returned value is always UTC-naive so the existing UTC comparison
     (``next_run_at <= now``) is unchanged.
 

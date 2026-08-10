@@ -14,6 +14,7 @@ pick whichever fits.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -56,20 +57,53 @@ class NLAnswerService:
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
 
-        # 1. Pull schema
-        try:
-            schema_info = schema_svc.describe_all(kb_id, max_tables=30)
-        except Exception as e:
-            logger.warning("NLAnswer: schema introspection failed: %s", e)
-            return {
-                "success": False,
-                "error": f"Failed to read schema: {e}",
-                "source_id": kb_id,
-            }
+        # 1. Pull schema — try semantic catalog first, fall back to raw DDL.
+        # `schema_info` keeps the describe_all-shaped dict (used for db_type
+        # and citations); `schema_text` is the pre-rendered prompt context
+        # (the linker slice when available, else rendered from schema_info).
+        schema_info: dict | None = None
+        schema_text: str | None = None
+        if settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+            try:
+                from app.services.knowledge_graph.schema_linker import link_schema
+                linker_result = await link_schema(
+                    question=question,
+                    kb_ids=[kb_id],
+                    db=self._db,
+                    top_k=8,
+                )
+                if linker_result and linker_result.get("slice_text"):
+                    schema_text = linker_result["slice_text"]
+                    schema_info = _schema_info_from_linker(
+                        linker_result, schema_svc, kb_id
+                    )
+                    logger.debug(
+                        "NLAnswer: using catalog slice (%d tables in context)",
+                        len(linker_result.get("tables", [])),
+                    )
+            except Exception as e:
+                logger.warning(
+                    "NLAnswer: schema linker failed (falling back to describe_all): %s", e,
+                )
+                schema_info = None
+                schema_text = None
+
+        if schema_info is None:
+            try:
+                schema_info = await asyncio.to_thread(
+                    schema_svc.describe_all, kb_id, 30
+                )
+            except Exception as e:
+                logger.warning("NLAnswer: schema introspection failed: %s", e)
+                return {
+                    "success": False,
+                    "error": f"Failed to read schema: {e}",
+                    "source_id": kb_id,
+                }
 
         # 2. Text → SQL
         try:
-            sql = await self._text_to_sql(question, schema_info)
+            sql = await self._text_to_sql(question, schema_info, schema_text=schema_text)
         except Exception as e:
             logger.warning("NLAnswer: text→SQL failed: %s", e)
             return {
@@ -87,7 +121,7 @@ class NLAnswerService:
 
         # 3. Execute
         try:
-            exec_result = query_svc.execute(kb_id, sql)
+            exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
         except Exception as e:
             logger.warning("NLAnswer: execute failed: %s", e)
             return {
@@ -121,9 +155,19 @@ class NLAnswerService:
     # LLM steps
     # ------------------------------------------------------------------
 
-    async def _text_to_sql(self, question: str, schema_info: dict) -> str:
-        """Ask the LLM to produce a single SQL statement."""
-        schema_text = _format_schema_for_prompt(schema_info)
+    async def _text_to_sql(
+        self,
+        question: str,
+        schema_info: dict,
+        schema_text: str | None = None,
+    ) -> str:
+        """Ask the LLM to produce a single SQL statement.
+
+        ``schema_text`` is the pre-rendered prompt context (e.g. the schema
+        linker's curated slice); when None it is rendered from schema_info.
+        """
+        if schema_text is None:
+            schema_text = _format_schema_for_prompt(schema_info)
         messages = [
             {"role": "system", "content": _SQL_GEN_SYSTEM_PROMPT},
             {
@@ -164,6 +208,37 @@ class NLAnswerService:
 # ---------------------------------------------------------------------------
 # Prompt helpers
 # ---------------------------------------------------------------------------
+
+def _schema_info_from_linker(
+    linker_result: dict, schema_svc: SchemaService, kb_id: str
+) -> dict:
+    """Adapt a schema-linker result to the describe_all-shaped dict.
+
+    Downstream helpers (db_type lookup in _text_to_sql, _extract_citations)
+    expect the describe_all shape, while the linker returns enriched table
+    dicts. The pre-rendered DDL slice is passed separately as schema_text.
+    """
+    kb = schema_svc._load_kb(kb_id)
+    tables = []
+    for t in linker_result.get("tables", []):
+        tables.append({
+            "table": t.get("table_name"),
+            "columns": [
+                {
+                    "name": c.get("name"),
+                    "type": c.get("data_type") or "",
+                    "nullable": c.get("is_nullable"),
+                    "pk": bool(c.get("is_primary_key")),
+                    "default": None,
+                }
+                for c in t.get("columns", [])
+            ],
+        })
+    return {
+        "source": {"id": kb.id, "name": kb.name, "db_type": kb.db_type},
+        "tables": tables,
+    }
+
 
 _SQL_GEN_SYSTEM_PROMPT = (
     "You are a SQL generator. Given a database schema and a natural-language "

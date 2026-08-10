@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ class TokenTracker:
             completion_tokens=completion_tokens,
             total_tokens=total_tokens,
             cost_usd=cost,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
             agent_name=agent_name,
             metadata=metadata or {},
         )

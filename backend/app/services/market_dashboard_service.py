@@ -1438,6 +1438,32 @@ def _extract_horizon_keyed(explanation: Optional[dict], section: str, day: int) 
     return {}
 
 
+def _extract_drivers(explanation: Optional[dict]) -> list:
+    """Extract top-N feature drivers from run.explanation (Stream B2).
+
+    The engine stores drivers as [{"feature": str, "weight": float}, ...]
+    in run.explanation["drivers"]. Returns DriverAttributionMeta list.
+    """
+    from app.schemas.market_dashboard import DriverAttributionMeta
+
+    if not explanation or not isinstance(explanation, dict):
+        return []
+    raw_drivers = explanation.get("drivers")
+    if not raw_drivers or not isinstance(raw_drivers, list):
+        return []
+    out = []
+    for d in raw_drivers[:5]:  # top-5 only
+        if isinstance(d, dict) and "feature" in d and "weight" in d:
+            try:
+                out.append(DriverAttributionMeta(
+                    feature=str(d["feature"]),
+                    weight=float(d["weight"]),
+                ))
+            except (TypeError, ValueError):
+                continue
+    return out
+
+
 def _build_analysis_block(
     *,
     day: int,
@@ -1503,6 +1529,7 @@ def _build_analysis_block(
         directional_status=dir_status,
         directional_n_test=int(dire.get("n_test", 0) or 0) or None,
         rationale=dec.get("rationale"),
+        drivers=_extract_drivers(explanation),
         basis_zh=basis_zh,
         action_logic_zh=action_logic_zh,
     )

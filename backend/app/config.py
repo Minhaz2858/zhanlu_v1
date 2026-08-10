@@ -246,6 +246,50 @@ class Settings(BaseSettings):
     # Provider Profile (P3)
     ACTIVE_PROVIDER: str = ""  # empty = use OPENAI_* env vars
 
+    # ── Model Layer (Part 2 Gap Analysis) ────────────────────────────────
+    # Task-based model routing — JSON mapping of task_type → model_name.
+    # Example: '{"simple_chat":"deepseek-chat","reasoning":"deepseek-reasoner"}'
+    # When empty or unset, all tasks use settings.LLM_MODEL.
+    MODEL_TASK_ROUTING: str = ""
+
+    # LLM response cache (Redis). Only caches temperature=0 calls.
+    LLM_RESPONSE_CACHE_ENABLED: bool = False
+    LLM_RESPONSE_CACHE_TTL_S: int = 3600  # 1 hour
+
+    # Per-model context window sizes (tokens). Used by compaction logic.
+    # Example: '{"deepseek-chat":64000,"gpt-4o":128000,"deepseek-reasoner":64000}'
+    MODEL_CONTEXT_WINDOWS: str = ""
+
+    # Provider health-based routing (circuit breaker).
+    # When True, call_llm() uses select_provider() to pick the healthiest
+    # provider instead of the fixed order from LLM_FALLBACK_PROVIDERS.
+    LLM_HEALTH_ROUTING_ENABLED: bool = False
+
+    # ── Rate Limiting ───────────────────────────────────────────────────
+    RATE_LIMIT_ENABLED: bool = False
+    RATE_LIMIT_RPM: int = 60  # max requests per minute per user+app
+    RATE_LIMIT_WINDOW_S: int = 60  # sliding window duration
+    RATE_LIMIT_WHITELIST: str = "[]"  # JSON array of exempt user IDs
+
+    # ── Task Queue ──────────────────────────────────────────────────────
+    TASK_QUEUE_ENABLED: bool = False
+    TASK_QUEUE_MAX_RETRIES: int = 3
+
+    # ── Retrieval Hybrid (Context Handling) ────────────────────────────
+    RETRIEVAL_HYBRID_ENABLED: bool = False
+    RETRIEVAL_HYBRID_TOP_K: int = 10
+    RETRIEVAL_HYBRID_MIN_SCORE: float = 0.5
+
+    # ── NLU / Intent (Part 2 Gap Analysis) ────────────────────────────
+    EDIA_INTENT_PLANNER_ENABLED: bool = False
+    QUERY_REWRITE_ENABLED: bool = False
+
+    # ── Eval Pipeline (Part 2 Gap Analysis) ───────────────────────────
+    EVAL_PIPELINE_ENABLED: bool = False
+    EVAL_SAMPLE_RATE: float = 0.1
+    EVAL_MAX_SAMPLES_PER_RUN: int = 50
+    PROMPT_AB_TEST_ENABLED: bool = False
+
     # Sandbox (P3)
     SANDBOX_BACKEND: str = ""  # auto-detect if empty
     SANDBOX_WORKSPACE: str = "agent_workspace"
@@ -335,6 +379,11 @@ class Settings(BaseSettings):
     # LLM call.  0 extra calls on a clean accept; up to
     # 1 + max_iterations*2 calls on a bad output.
     SYNEXIA_QUALITY_EVAL_MAX_ITERATIONS: int = 2
+    # Enable quality eval in non-FSM paths (ReAct v2, v3 non-FSM streaming).
+    # When True (default), both ReAct (v2) and v3 streaming non-FSM paths
+    # run the standalone evaluate_response_quality() after the response is
+    # generated.  Set False to restrict quality eval to FSM-only.
+    QUALITY_EVAL_ALL_PATHS: bool = True
 
     # Phase 1 response grounding: char cap for the findings block injected
     # into the FINALIZE response prompt (spec §3.3). Metadata is preserved
@@ -408,8 +457,90 @@ class Settings(BaseSettings):
     ECISCO_BI_PRICING_ENABLED: bool = False           # 5B
     ECISCO_BI_PERCEPTION_ENABLED: bool = False        # 5C
     ECISCO_BI_INTEL_ENHANCED_ENABLED: bool = False    # 5D
-    ECISCO_BI_WEEKLY_REPORT_ENABLED: bool = False     # 5E
     ECISCO_BI_ERP_WRITEBACK_ENABLED: bool = False     # 5F
+
+    # ── Experience layer (self-learning agent) ──────────────────────────
+    # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):
+    #   Layer 1 (recipes): record successful tool sequences per question
+    #     intent class and inject them as a playbook into the system prompt
+    #     so future turns follow proven recipes instead of exploring.
+    #   Layer 2 (semantic cache): cache final answers keyed by question
+    #     embedding + data version; similar questions (sim >= 0.92) with the
+    #     same data version get near-instant cached replies. Shared across
+    #     users for data-driven reports, per-user for conversational answers.
+    #   Layer 3 (user profile): per-user-per-agent preferences (language,
+    #     products, depth) injected into the prompt.
+    # All default False — safe to ship; enable per phase after tests pass.
+    ECISCO_BI_RECIPE_LEARNING_ENABLED: bool = False   # Layer 1
+    ECISCO_BI_USER_PROFILE_ENABLED: bool = False      # Layer 3
+    ECISCO_BI_RESPONSE_CACHE_ENABLED: bool = False    # Layer 2
+    ECISCO_BI_FEEDBACK_ENABLED: bool = False          # Phase C wiring
+
+    # ── Project Knowledge Graph / Semantic Catalog ───────────────────────
+    # Phase 1 flags (default OFF — roll out after catalog indexer + schema
+    # linker are tested against the EDIA warehouse).
+    # SEMANTIC_CATALOG_ENABLED: background indexer per KB (tables, columns,
+    #   FK, LLM descriptions, Chroma embeddings).
+    # SCHEMA_LINKING_ENABLED: query-time RRF retrieval + join-path expansion
+    #   into a curated ~800-token DDL slice for NLAnswerService/Data Agent.
+    SEMANTIC_CATALOG_ENABLED: bool = False
+    SCHEMA_LINKING_ENABLED: bool = False
+
+    # ── Data Agent latency optimizations ───────────────────────────────
+    # DATA_AGENT_FASTPATH_ENABLED: when the call targets a single bound
+    #   database source, ask_data_agent bypasses the iterative sub-agent
+    #   loop (3-5 LLM calls) and runs NLAnswerService directly (2 LLM
+    #   calls), falling back to the loop on any failure.
+    # SCHEMA_CACHE_TTL_SECONDS: in-process TTL cache for live schema
+    #   introspection (list_tables / describe_table / describe_all).
+    #   0 disables the cache.
+    DATA_AGENT_FASTPATH_ENABLED: bool = False
+    SCHEMA_CACHE_TTL_SECONDS: int = 3600
+
+    # ── Hierarchical LLM Configuration ───────────────────────────────────
+    # Master switch for admin-managed LLM catalog + project/agent model
+    # binding + locked-badge UX.  When False, the system behaves exactly as
+    # today (user model picker, single LLM_API_KEY/LLM_BASE_URL).
+    # Default True: feature is available out of the box. Set to False
+    # via env HIERARCHICAL_LLM_ENABLED=false to roll back to legacy
+    # single-LLM behavior.
+    HIERARCHICAL_LLM_ENABLED: bool = True
+
+    # Fernet key for encrypting llm_models.api_key at rest.
+    # Generate with: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    LLM_CRYPTO_KEY: str = ""
+
+    # ── Unified Agent Harness (P1) ──────────────────────────────────────
+    # Master switch: when True, SwarmRuntime and EDIA _run_sub_agent
+    # delegate to the AgentRunOrchestrator with persisted run records.
+    AGENT_HARNESS_ENABLED: bool = False
+
+    # Phase-2 fan-out: when BOTH this and AGENT_HARNESS_ENABLED are True,
+    # ask_* tools accept an optional ``async: true`` param that returns a
+    # run_id immediately instead of blocking (fire-and-collect pattern).
+    EDIA_DELEGATION_ASYNC_ENABLED: bool = False
+
+    # ── P2 Durability & Observability ────────────────────────────────────
+    # When AGENT_HARNESS_ENABLED + AGENT_TRACING_ENABLED are both True,
+    # the orchestrator loop opens OTEL spans for each iteration and each
+    # tool call.  Requires TRACING_PROVIDER != "noop" to produce output.
+    AGENT_TRACING_ENABLED: bool = False
+
+    # When AGENT_HARNESS_ENABLED + AGENT_CHECKPOINTING_ENABLED are both
+    # True, the orchestrator persists an AgentRunStep row on every
+    # llm_call / tool_call event so crashed queued runs can resume.
+    AGENT_CHECKPOINTING_ENABLED: bool = False
+
+    # ── P3 Deep Research & Planning ──────────────────────────────────────
+    # Enables the reflexion loop: intent_planner → harness.run →
+    # self_critic → verification_stop → reflexion → replan.
+    # Requires AGENT_HARNESS_ENABLED.
+    RESEARCH_LOOP_ENABLED: bool = False
+
+    # Enables the deep-research mode with parallel sub-agent fan-out.
+    # Requires AGENT_HARNESS_ENABLED + EDIA_DELEGATION_ASYNC_ENABLED +
+    # RESEARCH_LOOP_ENABLED.
+    DEEP_RESEARCH_MODE_ENABLED: bool = False
 
     # ── Sandbox (runbook §6) ────────────────────────────────────────────
     SANDBOX_ENABLED: bool = False
@@ -458,6 +589,31 @@ class Settings(BaseSettings):
     SANDBOX_DEFAULT_PIDS_LIMIT: int = 128
     SANDBOX_ALLOW_DOCKER_SOCKET_ONLY_IN_WORKER: bool = True
     SANDBOX_TMP_ROOT: str = "/tmp/zhanlu_sandbox"
+
+    # ── LLM proxy for skill-driven sandbox jobs ─────────────────────────
+    # The sandbox container runs --network none.  To let an LLM inside
+    # the container plan and generate documents, we mount a Unix-socket
+    # LLM proxy (see app/services/sandbox/llm_proxy.py) into the
+    # container.  This is the only path the container has to the LLM;
+    # no TCP/IP network is ever opened to the container.
+    # SANDBOX_LLM_PROXY_SOCKET — host-side Unix socket path the proxy
+    #   listens on.  The container sees this path bind-mounted at
+    #   SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER.
+    # SANDBOX_LLM_PROXY_ENABLED — master switch.  When False, the
+    #   container is started WITHOUT the proxy mount and skill-driven
+    #   generation immediately falls back to the deterministic
+    #   generator (no LLM call attempted).
+    SANDBOX_LLM_PROXY_ENABLED: bool = True
+    SANDBOX_LLM_PROXY_SOCKET: str = "/var/run/zhanlu-llm-proxy.sock"
+    SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER: str = "/var/run/llm-proxy.sock"
+    # Model the in-container client requests by default.  Must be in
+    # the proxy's allowlist (see llm_proxy.ALLOWED_MODELS).
+    SANDBOX_LLM_PROXY_MODEL: str = "gpt-4o-mini"
+    # Per-job resource budget for skill-driven runs (vs the lighter
+    # default 1g/120s).  Skill-driven jobs spawn Node.js + (sometimes)
+    # Chromium for html2pptx, so they need more headroom.
+    SANDBOX_SKILL_MEMORY_MB: int = 2048
+    SANDBOX_SKILL_TIMEOUT_SECONDS: int = 240
 
     # ── B3: Skill safety scanner ───────────────────────────────────────
     SKILL_SCAN_ENABLED: bool = True            # master switch (warn-only)

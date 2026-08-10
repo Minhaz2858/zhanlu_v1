@@ -1,8 +1,9 @@
-"""Custom endpoints for KnowledgeBase — connectivity test, document reindex, status.
+"""Custom endpoints for KnowledgeBase — connectivity test, document reindex, status,
+discovery scan.
 
 The generic entity router still owns CRUD; this router adds KB-specific
 actions that don't fit the generic CRUD shape: a pre-save connectivity
-test, document reindex, and indexing status.
+test, document reindex, indexing status, and manual discovery re-scan.
 """
 
 import asyncio
@@ -20,6 +21,8 @@ from app.services.db.connector_factory import (
     get_connector,
 )
 from app.services.document_ingestion import service as ingestion_service
+from app.services.forecasting.discovery import discover as run_discovery
+from app.services.universal_analytics.auto_discover import _write_targets
 
 logger = logging.getLogger(__name__)
 
@@ -181,7 +184,62 @@ async def reindex_kb(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     # Run ingestion in a thread so we don't block the event loop.
     ok = await asyncio.to_thread(ingestion_service.ingest_kb, db, kb_id)
     status = ingestion_service.get_status(db, kb_id)
+
+    # Also trigger catalog reindex if this is a db-type KB
+    try:
+        kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+        if kb:
+            from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog
+            await maybe_reindex_catalog(kb)
+    except Exception:
+        logger.warning("catalog: reindex trigger failed for kb=%s", kb_id, exc_info=True)
+
     return {"success": ok, **status}
+
+
+@router.post("/{kb_id}/catalog/reindex")
+async def reindex_catalog(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Manually trigger catalog (re)index for a database KnowledgeBase.
+
+    Spawns the catalog indexer as a background task and returns 202 immediately.
+    Only meaningful when SEMANTIC_CATALOG_ENABLED=True and db_type in (mysql, postgres).
+    """
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+    if (kb.db_type or "").lower() not in ("mysql", "postgres", "postgresql"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Catalog index is only for db_type='mysql'/'postgres' (got {kb.db_type!r})",
+        )
+
+    from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog
+    await maybe_reindex_catalog(kb)
+    return {
+        "status": "accepted",
+        "catalog_status": kb.catalog_status,
+        "kb_id": kb_id,
+    }
+
+
+@router.get("/{kb_id}/catalog/status")
+async def catalog_status(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Return the catalog indexing status for a database KB."""
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+    return {
+        "kb_id": kb_id,
+        "catalog_status": kb.catalog_status,
+    }
 
 
 @router.get("/{kb_id}/status")
@@ -191,3 +249,44 @@ async def kb_status(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     if not status.get("found"):
         raise HTTPException(status_code=404, detail="KnowledgeBase not found")
     return status
+
+
+@router.post("/{kb_id}/discover")
+async def discover_kb(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Manual re-scan: discover forecastable time series in a database KB.
+
+    Runs the discovery scanner against all tables, writes new
+    ForecastTarget rows, and returns the candidates found.  Always
+    available (not flag-gated) — this is an explicit user action.
+
+    Only works for source_kind='db' KBs; file-kind KBs return 400.
+    """
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+    if getattr(kb, "source_kind", "db") not in ("db", "database"):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Discovery is only for database-kind KBs (got source_kind={kb.source_kind!r})",
+        )
+
+    # Run the scanner (synchronous — may take 10-60 seconds on large DBs).
+    candidates = await asyncio.to_thread(run_discovery, db, kb_id)
+
+    # Write ForecastTarget rows, skipping duplicates.
+    org_id = getattr(kb, "org_id", "default")
+    written = _write_targets(db, kb_id, org_id, candidates)
+    db.commit()
+
+    return {
+        "success": True,
+        "kb_id": kb_id,
+        "tables_scanned": len(set(c.get("table", "") for c in candidates)),
+        "candidates_found": len(candidates),
+        "targets_written": written,
+        "candidates": candidates[:20],  # limit detail to first 20
+    }

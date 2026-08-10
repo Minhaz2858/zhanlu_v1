@@ -11,7 +11,11 @@
  * development.
  */
 import { appParams } from '@/lib/app-params';
-import { authFetch } from '@/api/authFetch';
+// Most call sites use `authFetch` (returns the raw Response). The
+// streaming endpoint uses `authFetchOrThrow`, which raises a typed
+// `SessionExpiredError` on a 401-with-no-recovery so the chat UI can
+// distinguish "session expired" from a generic stream failure.
+import { authFetch, authFetchOrThrow } from '@/api/authFetch';
 
 const APP_ID = appParams.appId || 'undefined';
 const API_BASE = `/api/apps/${APP_ID}`;
@@ -63,7 +67,12 @@ export function getPermissionMode(conversation) {
  * @param {AbortSignal} [signal]
  */
 export async function* streamAgentResponse(conversationId, message, signal) {
-  const resp = await authFetch(
+  // `authFetchOrThrow` raises a typed `SessionExpiredError` when a 401
+  // comes back even after the silent refresh-and-retry. The chat UI's
+  // catch block inspects this and shows "Session expired, please log in
+  // again" instead of the generic "Sorry, the connection was interrupted"
+  // — and critically, does NOT persist the error message to ChatMessage.
+  const resp = await authFetchOrThrow(
     `${API_BASE}/agents/conversations/v3/${conversationId}/messages/stream`,
     {
       method: 'POST',

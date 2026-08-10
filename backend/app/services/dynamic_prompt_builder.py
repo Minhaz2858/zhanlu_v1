@@ -36,10 +36,18 @@ def build_system_prompt(
     user_id: str | None = None,
     agent_app: Any = None,
     workspace_path: str | None = None,
+    # Project scope (2026-08-05). Forwarded to ``load_memory_snapshot``
+    # so the agent's notes (target='memory') are recalled only from
+    # the active project. Without this, a note taken in one project
+    # leaked into every other project's system prompt (the user saw
+    # the same "Q2 2026 sales report" greeting in every conv).
+    project_id: str | None = None,
     inject_memory: bool = True,
     inject_todos: bool = True,
     inject_coding_context: bool = True,
     inject_learning_graph: bool = True,
+    inject_recipes: bool = True,
+    inject_user_profile: bool = True,
 ) -> str:
     """Build the complete system prompt from all sources.
 
@@ -51,6 +59,7 @@ def build_system_prompt(
         user_id: Optional user ID for memory scoping.
         agent_app: Optional AgentApp object for workspace detection.
         workspace_path: Optional workspace path for coding context.
+        project_id: Optional project scope for the memory snapshot.
         inject_*: Toggle each injection on/off.
 
     Returns:
@@ -60,7 +69,7 @@ def build_system_prompt(
 
     # 1. Memory snapshot
     if inject_memory:
-        prompt = _inject_memory(prompt, db, agent_app_id, user_id)
+        prompt = _inject_memory(prompt, db, agent_app_id, user_id, project_id=project_id)
 
     # 2. Todo list
     if inject_todos:
@@ -74,6 +83,14 @@ def build_system_prompt(
     if inject_learning_graph:
         prompt = _inject_learning_graph(prompt, agent_app_id)
 
+    # 5. Proven answer recipes (experience layer Layer 1) — flag-gated
+    if inject_recipes:
+        prompt = _inject_recipes(prompt, agent_app_id)
+
+    # 6. User profile (experience layer Layer 3) — flag-gated
+    if inject_user_profile:
+        prompt = _inject_user_profile(prompt, agent_app_id, user_id)
+
     return prompt
 
 
@@ -82,11 +99,18 @@ def _inject_memory(
     db: Session,
     agent_app_id: str,
     user_id: str | None,
+    project_id: str | None = None,
 ) -> str:
-    """Inject frozen memory snapshot into the prompt."""
+    """Inject frozen memory snapshot into the prompt.
+
+    ``project_id`` is forwarded to ``load_memory_snapshot`` so the
+    agent's notes (target='memory') are recalled only from the
+    active project. User profile (target='user') is always
+    cross-project — it's about WHO the user is.
+    """
     try:
         from app.services.tool_handlers.memory_tool import load_memory_snapshot
-        snapshot = load_memory_snapshot(db, agent_app_id, user_id)
+        snapshot = load_memory_snapshot(db, agent_app_id, user_id, project_id=project_id)
         if snapshot["memory"]:
             prompt += f"\n\n{snapshot['memory']}"
         if snapshot["user"]:
@@ -145,6 +169,47 @@ def _inject_learning_graph(prompt: str, agent_app_id: str) -> str:
             prompt += f"\n\n{learning_text}"
     except Exception as e:
         logger.debug("Learning graph injection failed (non-fatal): %s", e)
+    return prompt
+
+
+def _inject_recipes(prompt: str, agent_app_id: str) -> str:
+    """Inject proven answer recipes (Layer 1) into the prompt.
+
+    Flag-gated by ECISCO_BI_RECIPE_LEARNING_ENABLED — off means no recipes
+    are recorded, so nothing to inject anyway; the guard also protects
+    non-eisco deployments where the store is empty.
+    """
+    try:
+        from app.config import settings
+        if not settings.ECISCO_BI_RECIPE_LEARNING_ENABLED:
+            return prompt
+        from app.services.learning_graph import get_recipe_prompt
+        recipe_text = get_recipe_prompt(agent_app_id)
+        if recipe_text:
+            prompt += f"\n\n{recipe_text}"
+    except Exception as e:
+        logger.debug("Recipe injection failed (non-fatal): %s", e)
+    return prompt
+
+
+def _inject_user_profile(prompt: str, agent_app_id: str, user_id: str | None) -> str:
+    """Inject the user's profile (Layer 3) into the prompt.
+
+    Flag-gated by ECISCO_BI_USER_PROFILE_ENABLED. Only injected when a
+    user_id is known (per-user memory).
+    """
+    try:
+        if not user_id:
+            return prompt
+        from app.config import settings
+        if not settings.ECISCO_BI_USER_PROFILE_ENABLED:
+            return prompt
+        from app.services.user_profile import get_profile_prompt
+        profile_text = get_profile_prompt(agent_app_id, user_id)
+        if profile_text:
+            prompt += f"\n\n{profile_text}"
+    except Exception as e:
+        logger.debug("User profile injection failed (non-fatal): %s", e)
     return prompt
 
 

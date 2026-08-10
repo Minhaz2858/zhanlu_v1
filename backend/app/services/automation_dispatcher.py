@@ -37,7 +37,7 @@ import asyncio
 import logging
 import os
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy import update
@@ -267,7 +267,7 @@ async def _tick() -> None:
     from app.database import SessionLocal
     db = SessionLocal()
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         due: list[AutomationTask] = db.query(AutomationTask).filter(
             AutomationTask.status == "active",
             AutomationTask.is_deleted == False,  # noqa: E712
@@ -509,7 +509,7 @@ async def _reap_stale_executions(force_all_active: bool = False) -> int:
     db = SessionLocal()
     reaped = 0
     try:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         rows = db.query(AutomationExecution).filter(
             AutomationExecution.status.in_(["queued", "running"]),
         ).all()
@@ -763,7 +763,7 @@ def recompute_next_run(task_id: str) -> Optional[datetime]:
         if not cron:
             return None
         task.cron_expression = cron
-        task.next_run_at = next_run_at(cron, after=datetime.utcnow(), tz_name=task.timezone)
+        task.next_run_at = next_run_at(cron, after=datetime.now(timezone.utc), tz_name=task.timezone)
         db.commit()
         return task.next_run_at
     except Exception as e:

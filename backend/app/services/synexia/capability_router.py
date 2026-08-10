@@ -11,7 +11,7 @@ The router records ObservationRecords for each execution.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -34,6 +34,7 @@ def execute_plan_nodes(
     max_replan_depth: Optional[int] = None,
     data_ctx_extras: Optional[dict] = None,
     on_plan_node=None,
+    adaptive_revisions: int = 0,
 ) -> list[ObservationRecord]:
     """Execute all nodes in a plan in dependency order.
 
@@ -82,7 +83,7 @@ def execute_plan_nodes(
     # ── Phase 3c: adaptive re-planning setup (opt-in, default off) ──────
     _adaptive_enabled = getattr(settings, "SYNEXIA_ADAPTIVE_PLANNING_ENABLED", False)
     _adaptive_max = getattr(settings, "SYNEXIA_ADAPTIVE_MAX_REVISIONS", 2)
-    _adaptive_revisions = 0
+    _adaptive_revisions = adaptive_revisions  # track across recursive calls
 
     def _adaptive_call_llm_fn(system_prompt, messages):
         # Sync wrapper around the async _synth_call_llm (run via the bridge)
@@ -110,7 +111,7 @@ def execute_plan_nodes(
 
         # Execute the node
         node.status = "running"
-        node.started_at = datetime.utcnow()
+        node.started_at = datetime.now(timezone.utc)
         db.commit()
         _emit(node, "running")
 
@@ -121,7 +122,7 @@ def execute_plan_nodes(
             node.status = "completed" if obs.success else "failed"
             node.result = obs.result_data
             node.error = obs.error_message
-            node.completed_at = datetime.utcnow()
+            node.completed_at = datetime.now(timezone.utc)
             _emit(
                 node,
                 "completed" if obs.success else "failed",
@@ -132,7 +133,7 @@ def execute_plan_nodes(
             logger.error("Node %s execution failed: %s", node.name, e)
             node.status = "failed"
             node.error = str(e)
-            node.completed_at = datetime.utcnow()
+            node.completed_at = datetime.now(timezone.utc)
 
             # Record error observation
             obs = ObservationRecord(
@@ -194,6 +195,7 @@ def execute_plan_nodes(
                                 max_replan_depth=max_replan_depth,
                                 data_ctx_extras=data_ctx_extras,
                                 on_plan_node=on_plan_node,
+                                adaptive_revisions=_adaptive_revisions,
                             ))
                             break  # adaptive tail executed; stop original loop
 
@@ -339,7 +341,7 @@ def _execute_single_node(
     elif node_type == "sandbox":
         return _execute_sandbox_node(db, execution, node)
     elif node_type == "skill":
-        return _execute_skill_node(db, execution, node)
+        return _execute_skill_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
     else:
         # Default: treat as tool
         return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
@@ -383,8 +385,13 @@ def _execute_tool_node(db, execution, node, user_id, data_ctx_extras=None) -> Ob
     """
     from app.services.agent_tools import execute_tool_with_retry
 
-    tool_name = node.name
-    args = node.inputs or {}
+    # When node.inputs carries a 'tool_name' key, use it as the dispatched
+    # tool name instead of node.name (which is a human-readable label).
+    # This allows plan nodes to have descriptive names while still routing
+    # to the correct tool handler (e.g. node.name="Edit pptx artifact" with
+    # inputs.tool_name="edit_artifact").
+    args = dict(node.inputs or {})
+    tool_name = args.pop("tool_name", None) or node.name
 
     # Build the tool context. Always include the FSM-friendly identifiers
     # so handlers can route to the right conversation/agent; then layer
@@ -799,11 +806,15 @@ def _execute_sandbox_node(db, execution, node) -> ObservationRecord:
         )
 
 
-def _execute_skill_node(db, execution, node) -> ObservationRecord:
+def _execute_skill_node(
+    db, execution, node,
+    user_id: Optional[str] = None,
+    data_ctx_extras: Optional[dict] = None,
+) -> ObservationRecord:
     """Execute a skill node."""
     # Skills are executed via sandbox or in-process
     # For now, route through the tool executor
-    return _execute_tool_node(db, execution, node, user_id=None)
+    return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
 
 
 def _record_observation(
@@ -841,21 +852,30 @@ def _record_observation(
 
 
 def _topological_sort(nodes) -> list:
-    """Sort plan nodes in topological order (dependencies first)."""
+    """Sort plan nodes in topological order (dependencies first).
+
+    Raises ValueError if a dependency cycle is detected.
+    """
     # Build node index by seq
     node_map = {n.seq: n for n in nodes}
-    visited = set()
+    visited = set()   # fully explored (black)
+    visiting = set()  # in current DFS path (gray)
     result = []
 
     def visit(seq):
+        if seq in visiting:
+            raise ValueError(f"Dependency cycle detected at node seq={seq}")
         if seq in visited:
             return
-        visited.add(seq)
+        visiting.add(seq)
         node = node_map.get(seq)
         if not node:
+            visiting.discard(seq)
             return
         for dep in (node.dependencies or []):
             visit(dep)
+        visiting.discard(seq)
+        visited.add(seq)
         result.append(node)
 
     for n in nodes:

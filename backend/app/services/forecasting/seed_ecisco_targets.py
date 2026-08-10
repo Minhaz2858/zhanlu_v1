@@ -55,15 +55,22 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
     },
     {
         "product_key": "ecisco.cracked_c5",
-        "name": "Cracked C5 (Average)",
+        "name": "Cracked C5 (ERP Sales)",
         "datasource": {
             "source": "edia_mysql",
-            "table": "md_t_lz_price",
-            "time_col": "FDATE",
+            "table": "sale_erp_v_工业用裂解碳五_data",
+            "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
+            "where": "material_code = '202000045' AND FTAXPRICE > 0",
             "granularity": "day",
+            # Market price as secondary (extends date range)
             "extra_sources": [
+                {
+                    "table": "md_t_lz_price",
+                    "time_col": "FDATE",
+                    "measure": "FTAXPRICE",
+                    "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
+                },
                 {
                     "table": "lz_v_裂解c5_data",
                     "time_col": "biz_date(业务日期)",
@@ -92,6 +99,13 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
                     "measure": "tax_price(含税单价)",
                     "where": "`material_name(产品名称)` = '裂解C9'",
                 },
+                # ERP transaction prices (70 rows, 2019-2023) — extends history
+                {
+                    "table": "sale_erp_v_工业用裂解碳九_data",
+                    "time_col": "PLANDATE",
+                    "measure": "FTAXPRICE",
+                    "where": "material_code = '101000006' AND FTAXPRICE > 0",
+                },
             ],
         },
         "include_in_weekly_report": True,
@@ -115,18 +129,22 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
     },
     {
         "product_key": "ecisco.isoprene",
-        "name": "Isoprene (East China)",
+        "name": "Isoprene (ERP Sales)",
         "datasource": {
             "source": "edia_mysql",
-            "table": "md_t_lz_price",
-            "time_col": "FDATE",
+            "table": "sale_erp_v_异戊二烯_data",
+            "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '异戊二烯-华东市场价'",
+            "where": "material_code = '202000001' AND FTAXPRICE > 0",
             "granularity": "day",
-            # Phase F1: union md_t_lz_price (2025-06+) with lz_v_*_data
-            # (2025-03+) for ~300 rows of history. Primary wins on date
-            # overlap; lz_v_*_data extends the back-half of the series.
+            # Market price as secondary (extends date range)
             "extra_sources": [
+                {
+                    "table": "md_t_lz_price",
+                    "time_col": "FDATE",
+                    "measure": "FTAXPRICE",
+                    "where": "FMATERIAL_NAME = '异戊二烯-华东市场价'",
+                },
                 {
                     "table": "lz_v_异戊二烯_data",
                     "time_col": "biz_date(业务日期)",
@@ -140,15 +158,22 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
     },
     {
         "product_key": "ecisco.piperylene",
-        "name": "Piperylene (East China)",
+        "name": "Piperylene (ERP Sales)",
         "datasource": {
             "source": "edia_mysql",
-            "table": "md_t_lz_price",
-            "time_col": "FDATE",
+            "table": "sale_erp_v_间戊二烯_data",
+            "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '间戊二烯-华东市场价'",
+            "where": "material_code = '202000002' AND FTAXPRICE > 0",
             "granularity": "day",
+            # Market price as secondary (extends date range)
             "extra_sources": [
+                {
+                    "table": "md_t_lz_price",
+                    "time_col": "FDATE",
+                    "measure": "FTAXPRICE",
+                    "where": "FMATERIAL_NAME = '间戊二烯-华东市场价'",
+                },
                 {
                     "table": "lz_v_间戊二烯_data",
                     "time_col": "biz_date(业务日期)",
@@ -162,15 +187,22 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
     },
     {
         "product_key": "ecisco.dcpd",
-        "name": "DCPD (East China)",
+        "name": "DCPD (ERP Sales)",
         "datasource": {
             "source": "edia_mysql",
-            "table": "md_t_lz_price",
-            "time_col": "FDATE",
+            "table": "sale_erp_v_双环戊二烯_data",
+            "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '双环戊二烯-华东市场价'",
+            "where": "material_code = '202000003' AND FTAXPRICE > 0",
             "granularity": "day",
+            # Market price as secondary (extends date range)
             "extra_sources": [
+                {
+                    "table": "md_t_lz_price",
+                    "time_col": "FDATE",
+                    "measure": "FTAXPRICE",
+                    "where": "FMATERIAL_NAME = '双环戊二烯-华东市场价'",
+                },
                 {
                     "table": "lz_v_双环戊二烯_data",
                     "time_col": "biz_date(业务日期)",
@@ -229,15 +261,22 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
     },
     {
         "product_key": "ecisco.blowing_agent",
-        "name": "Blowing Agent (East China)",
+        "name": "Blowing Agent (ERP Sales)",
         "datasource": {
             "source": "edia_mysql",
-            "table": "md_t_lz_price",
-            "time_col": "FDATE",
+            "table": "sale_erp_v_戊烷发泡剂_data",
+            "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '戊烷发泡剂-华东市场价'",
+            "where": "material_code = '202000023' AND FTAXPRICE > 0",
             "granularity": "day",
+            # Market price as secondary (extends date range)
             "extra_sources": [
+                {
+                    "table": "md_t_lz_price",
+                    "time_col": "FDATE",
+                    "measure": "FTAXPRICE",
+                    "where": "FMATERIAL_NAME = '戊烷发泡剂-华东市场价'",
+                },
                 {
                     "table": "lz_v_戊烷泡发剂_data",
                     "time_col": "biz_date(业务日期)",
@@ -302,8 +341,11 @@ def seed_ecisco_forecast_targets(
 # The seeder queries SELECT DISTINCT material_code from these tables
 # and creates one ForecastTarget per SKU (material_code) with >= 50 rows.
 _ERP_PRODUCT_TABLES: dict[str, str] = {
-    "c5_resin":     "sale_erp_v_碳五石油树脂_data",
-    "raffinate_c5": "sale_erp_v_抽余碳五_data",
+    "c5_resin":               "sale_erp_v_碳五石油树脂_data",
+    "raffinate_c5":           "sale_erp_v_抽余碳五_data",
+    "ethylene_carbon_black":  "sale_erp_v_乙烯炭黑料_data",
+    "industrial_hexane":      "sale_erp_v_工业己烷_data",
+    "mixed_trimethylbenzene": "sale_erp_v_混三甲苯_data",
 }
 
 # Minimum row count for a SKU to be forecastable.

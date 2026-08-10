@@ -257,11 +257,15 @@ def build_conversation_context(
 
         if not transcript and not recent_artifacts and not prior_entities:
             return {}
-        return {
+        result: dict = {
             "transcript": transcript,
             "recent_artifacts": recent_artifacts,
             "prior_entities": prior_entities,
         }
+        # Phase 4: carry forward artifact type of the most recent artifact
+        if recent_artifacts:
+            result["previous_artifact_type"] = recent_artifacts[0].get("artifact_type", "")
+        return result
     except Exception as e:
         logger.debug("build_conversation_context failed (non-fatal): %s", e)
         return {}

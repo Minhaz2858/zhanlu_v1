@@ -1,5 +1,6 @@
 import { Section, Field, inputCls, textareaCls } from './AgentParts';
 import ProjectSelector from '@/components/automation/ProjectSelector';
+import LlmModelSelector from '@/components/chat/LlmModelSelector';
 import { UserCog } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useProjectSync } from '@/lib/useProjectSync';
@@ -51,6 +52,14 @@ export default function RoleSection({ form, update, t, isRoot }) {
             />
           </Field>
         )}
+
+        {/* Model binding — visible to admins. Non-admin edits to company-
+            scoped agents show locked badge (Project still wins at runtime). */}
+        <LlmModelSelector
+          value={form.llm_model_id || null}
+          onChange={(id) => update({ llm_model_id: id })}
+          disabled={!isRoot}
+        />
 
       </div>
     </Section>

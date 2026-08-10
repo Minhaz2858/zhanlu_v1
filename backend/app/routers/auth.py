@@ -316,7 +316,7 @@ async def update_me(
             setattr(user, key, value)
 
     from datetime import datetime
-    user.updated_date = datetime.utcnow()
+    user.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(user)
     return user.to_dict()

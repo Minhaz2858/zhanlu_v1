@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from app.services.intelligence.event_types import ExtractedEvent
@@ -53,7 +53,7 @@ class EventDeduplicator:
     def mark_seen(self, event: ExtractedEvent) -> None:
         """Record an event as seen."""
         fp = _fingerprint(event)
-        self._seen[fp] = datetime.utcnow()
+        self._seen[fp] = datetime.now(timezone.utc)
 
     def deduplicate(self, events: list[ExtractedEvent]) -> list[ExtractedEvent]:
         """Filter a batch of events, returning only non-duplicate ones."""
@@ -65,7 +65,7 @@ class EventDeduplicator:
         return unique
 
     def _evict_expired(self) -> None:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = [fp for fp, t in self._seen.items() if now - t > self._window]
         for fp in expired:
             del self._seen[fp]

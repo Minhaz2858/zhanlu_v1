@@ -163,10 +163,10 @@ export default function AutomationTasks() {
           {filteredTasks.map((item) => (
             <div key={item.id} className="group rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-sm">
               <div className="mb-3 flex items-start justify-between">
-                <h3 className="font-display text-base text-foreground">{translate(item.name)}</h3>
-                <span className={`rounded-full px-2 py-0.5 text-xs ${statusStyle(item.status)}`}>{t.automation.statuses[item.status]}</span>
+                <h3 className="min-w-0 flex-1 break-words font-display text-base text-foreground">{translate(item.name)}</h3>
+                <span className={`shrink-0 rounded-full px-2 py-0.5 text-xs ${statusStyle(item.status)}`}>{t.automation.statuses[item.status]}</span>
               </div>
-              <p className="mb-4 text-xs text-muted-foreground">{item.description ? translate(item.description) : t.automation.types[item.type]}</p>
+              <p className="mb-4 break-words text-xs text-muted-foreground">{item.description ? translate(item.description) : t.automation.types[item.type]}</p>
               <div className="mb-4 space-y-1 text-xs text-muted-foreground">
                 <div className="flex items-center gap-1.5"><FolderOpen className="h-3 w-3" /> {item.project && item.project !== 'global' ? item.project : t.automation.ungrouped}</div>
                 <div className="flex items-center gap-1.5"><Clock className="h-3 w-3" /> {item.schedule ? translate(item.schedule) : t.automation.manual}</div>
@@ -224,11 +224,11 @@ export default function AutomationTasks() {
             <tbody className="divide-y divide-border">
               {filteredTasks.map((item) => (
                 <tr key={item.id} className="hover:bg-secondary/30">
-                  <td className="px-4 py-3 text-foreground">{translate(item.name)}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{item.project && item.project !== 'global' ? item.project : t.automation.ungrouped}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{t.automation.types[item.type]}</td>
+                  <td className="break-words px-4 py-3 text-foreground">{translate(item.name)}</td>
+                  <td className="break-words px-4 py-3 text-muted-foreground">{item.project && item.project !== 'global' ? item.project : t.automation.ungrouped}</td>
+                  <td className="break-words px-4 py-3 text-muted-foreground">{t.automation.types[item.type]}</td>
                   <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${statusStyle(item.status)}`}>{t.automation.statuses[item.status]}</span></td>
-                  <td className="px-4 py-3 text-muted-foreground">{item.schedule ? translate(item.schedule) : t.automation.manualShort}</td>
+                  <td className="break-words px-4 py-3 text-muted-foreground">{item.schedule ? translate(item.schedule) : t.automation.manualShort}</td>
                   <td className="px-4 py-3 text-muted-foreground">{fmtTime(item.last_run)}</td>
                   <td className="px-4 py-3 text-right">
                     <button

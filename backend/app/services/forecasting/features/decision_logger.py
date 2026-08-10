@@ -6,7 +6,7 @@ Enables Wave 1 ROI backtest and threshold calibration (T1.4).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Any, Optional, Sequence
 
 from sqlalchemy.orm import Session
@@ -118,7 +118,7 @@ def fill_realized_outcomes(
     log.actual_price_t = actual_price_t
     log.actual_price_th = actual_price_th
     log.roi_pct = roi_pct
-    log.realized_at = datetime.utcnow()
+    log.realized_at = datetime.now(timezone.utc)
     session.flush()
     return log
 

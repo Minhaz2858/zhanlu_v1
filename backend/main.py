@@ -22,6 +22,9 @@ from app.models import (
     AgentMemory, AgentTodo, WorkspaceSetting,
     MarketplaceSkill, MarketplaceRating,
     ProjectMemory, ProjectAgent,
+    AgentRun,
+    AgentRunStep,
+    LlmModel,
 )
 
 # Import tool_handlers to register all 8 new capability tools in the registry
@@ -55,6 +58,8 @@ from app.routers.forecast_ops import router as forecast_ops_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.resource_shares import router as resource_shares_router
 from app.routers.reports import router as reports_router
+from app.routers.llm import router as llm_router
+from app.routers.app_logs import router as app_logs_router
 
 
 ENTITY_MODELS = {
@@ -83,6 +88,8 @@ ENTITY_MODELS = {
     "OtpCode": OtpCode,
     "PasswordResetToken": PasswordResetToken,
     "WorkspaceSetting": WorkspaceSetting,
+    "AgentRun": AgentRun,
+    "AgentRunStep": AgentRunStep,
 }
 
 
@@ -198,6 +205,12 @@ def _run_auto_migrations():
                 ("importance", "INTEGER DEFAULT 0"),
                 ("ttl_days", "INTEGER"),
                 ("usage_count", "INTEGER DEFAULT 0"),
+                # 2026-08-05 added `project_id` to the SQLAlchemy model for memory
+                # scoping (Q2 2026 sales-report leak — see MEMORY), but no Alembic
+                # migration was written; consolidation turns it into a 500. Mirror
+                # it in the runtime auto-migrate list so SQLite + Postgres both
+                # gain the column on next restart without needing alembic upgrade.
+                ("project_id", "VARCHAR(36)"),
             ],
             "knowledge_bases": [
                 ("project_id", "VARCHAR(36)"),
@@ -667,6 +680,11 @@ def create_app() -> FastAPI:
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(resource_shares_router, prefix="/api")
     app.include_router(reports_router, prefix="/api")
+    app.include_router(llm_router)
+    app.include_router(app_logs_router, prefix="/api")
+    # NB: app_logs_router already declares its full path including ``/api/app-logs/...``
+    # internally so it ignores the extra ``/api`` prefix and lives at
+    # ``/api/app-logs/...`` — matching the @base44 plugin's expected URL.
 
     # Serve uploaded files under /api/uploads so the Vite proxy routes them to backend
     app.mount("/api/uploads", StaticFiles(directory=str(settings.upload_path)), name="uploads")

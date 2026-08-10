@@ -108,9 +108,9 @@ export default function SkillsSection({ form, update, t }) {
             const tool = userSkills.find((x) => x.name === s);
             const isMarketplace = !tool;
             return (
-              <span key={s} className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-secondary/50 px-2.5 py-1.5 text-xs text-foreground">
-                {isMarketplace ? <Store className="h-3 w-3 text-amber-600" /> : <Wrench className="h-3 w-3 text-primary" />}
-                <span>{s}</span>
+              <span key={s} className="inline-flex max-w-full items-center gap-1.5 rounded-lg border border-border bg-secondary/50 px-2.5 py-1.5 text-xs text-foreground">
+                {isMarketplace ? <Store className="h-3 w-3 shrink-0 text-amber-600" /> : <Wrench className="h-3 w-3 shrink-0 text-primary" />}
+                <span className="min-w-0 break-all">{s}</span>
                 {tool?.kind === 'system_skill' && (
                   <span className="rounded bg-primary/10 px-1 py-0.5 text-[10px] text-primary">{t.agentConfig.native}</span>
                 )}

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -594,7 +594,7 @@ async def _forecast_rules(
 
             rule.status = "active"
             rule.approved_by_id = user_id
-            rule.approved_at = datetime.utcnow()
+            rule.approved_at = datetime.now(timezone.utc)
             db.commit()
             return {"success": True, "rule": _serialize_rule(rule), "status": "active"}
 

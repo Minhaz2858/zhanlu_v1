@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -336,7 +336,7 @@ class WeeklyReportGenerator:
         }
 
         return WeeklyReport(
-            generated_at=datetime.utcnow(),
+            generated_at=datetime.now(timezone.utc),
             as_of_date=as_of_date,
             org_id=org_id,
             summary=summary,

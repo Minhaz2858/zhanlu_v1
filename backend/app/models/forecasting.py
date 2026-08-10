@@ -138,6 +138,8 @@ class ForecastAccuracyLog(TimestampedBase):
     # ── Realized accuracy (Phase 1 enhancement) ────────────────
     realized_error: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     realized_mape: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    mae: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    rmse: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     evaluated_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True, index=True)
 
     # ── Accuracy metrics ──────────────────────────────────────
@@ -454,5 +456,133 @@ class ForecastThresholdConfig(TimestampedBase):
     created_by: Mapped[Optional[str]] = mapped_column(
         String(100), nullable=True,
         comment="Who created this config",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 T3.0: External-feed store (CSV-onboarded time series)
+# ---------------------------------------------------------------------------
+
+# Allowed domain values for ForecastExternalSeries.domain. The column is a
+# free string at the DB level so new domains can be added without a migration;
+# this constant is the canonical list for the Wave 3 default domains.
+EXTERNAL_FEED_DOMAINS: tuple[str, ...] = (
+    "operating_rate",  # 下游开工率
+    "inventory",       # 港口/社会库存
+    "import_price",    # 进口/竞争对手价格
+)
+
+# Allowed source values for ForecastExternalSeries.source.
+EXTERNAL_FEED_SOURCES: tuple[str, ...] = (
+    "csv_upload",  # user-uploaded CSV via /external-feeds endpoint
+    "api",         # automated API ingestion adapter (future)
+    "mock",        # mock data generator (development only)
+)
+
+
+class ForecastExternalSeries(TimestampedBase):
+    """Registry of externally-onboarded time-series feeds (Wave 3 T3.0).
+
+    One row per onboarded feed (e.g. ``op_rate_isoprene``). Loaders query
+    ``forecast_external_points`` filtered by ``domain`` (and optionally
+    ``product_key``) to pull the raw values needed for XGBoost exogenous
+    features and AI Brief signals.
+
+    Populated by:
+      - CSV upload via ``POST /api/forecast-ops/external-feeds``
+      - Mock data generator via ``POST /api/forecast-ops/external-feeds/seed-mock``
+      - (Future) automated API ingestion adapters
+    """
+
+    __tablename__ = "forecast_external_series"
+    __table_args__ = (
+        UniqueConstraint("series_key", "org_id", name="uq_ext_series_key_org"),
+    )
+
+    # ── Identity ──────────────────────────────────────────────
+    series_key: Mapped[str] = mapped_column(
+        String(150), nullable=False, index=True,
+        comment="Unique feed identifier within org, e.g. 'op_rate_isoprene'",
+    )
+    domain: Mapped[str] = mapped_column(
+        String(50), nullable=False, index=True,
+        comment="Feed type: operating_rate | inventory | import_price (free string for forward-compat)",
+    )
+    product_key: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True, index=True,
+        comment="Forecast product this feed applies to (NULL = industry-wide)",
+    )
+
+    # ── Metadata ──────────────────────────────────────────────
+    unit: Mapped[Optional[str]] = mapped_column(
+        String(30), nullable=True,
+        comment="Unit string, e.g. '%', '吨', 'CNY/kg'",
+    )
+    source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="csv_upload",
+        comment="csv_upload | api | mock",
+    )
+    cadence: Mapped[Optional[str]] = mapped_column(
+        String(20), nullable=True,
+        comment="daily | weekly | monthly | irregular",
+    )
+
+    # ── Roll-up stats (maintained by ingest endpoints) ────────
+    last_value_date: Mapped[Optional[datetime]] = mapped_column(
+        DateTime, nullable=True,
+        comment="Date of the most recent point in this series",
+    )
+    row_count: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0,
+        comment="Cached count of points in forecast_external_points",
+    )
+
+    # ── Provenance ────────────────────────────────────────────
+    uploaded_by: Mapped[Optional[str]] = mapped_column(
+        String(100), nullable=True,
+        comment="User ID or system component that created this series",
+    )
+    notes: Mapped[Optional[str]] = mapped_column(
+        Text, nullable=True,
+        comment="Free-form notes about this feed",
+    )
+
+
+class ForecastExternalPoint(TimestampedBase):
+    """Individual data point for an external series (Wave 3 T3.0).
+
+    Loaders query by ``series_id`` with a date range filter to assemble
+    a DataFrame (``['date', '<metric>']``) that mirrors the shape of
+    ``ErpVolumeLoader`` / ``SupplierDispersionLoader``.
+
+    Uniqueness is enforced on ``(series_id, date)`` so uploads of the same
+    date replace (upsert) rather than duplicate.
+    """
+
+    __tablename__ = "forecast_external_points"
+    __table_args__ = (
+        UniqueConstraint("series_id", "date", name="uq_ext_point_series_date"),
+    )
+
+    series_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("forecast_external_series.id"),
+        nullable=False, index=True,
+        comment="FK to forecast_external_series.id",
+    )
+    date: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, index=True,
+        comment="Observation date (no time component expected for daily/weekly feeds)",
+    )
+    value: Mapped[float] = mapped_column(
+        Float, nullable=False,
+        comment="Numeric observation value",
+    )
+    # NOTE: column is named ``metadata`` in DB but Python attr is ``metadata_``
+    # to avoid colliding with SQLAlchemy's ``MetaData`` class attribute
+    # (the same pattern used by AgentConversation, see base.py:to_dict comment).
+    metadata_: Mapped[Optional[dict]] = mapped_column(
+        "metadata", JSON, nullable=True,
+        comment="Optional provenance / region / source-row tags",
     )
 

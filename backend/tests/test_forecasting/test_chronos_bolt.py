@@ -25,12 +25,17 @@ def test_chronos_is_forecast_model():
 
 
 def test_chronos_import_error_skipped():
-    """If torch/chronos not installed, __init__ should raise ImportError."""
-    with patch.dict("sys.modules", {"torch": None, "chronos": None}):
-        from app.services.forecasting.models.chronos_bolt import ChronosBoltModel
+    """Deferred loading: __init__ succeeds, _load_pipeline raises ImportError."""
+    from app.services.forecasting.models.chronos_bolt import ChronosBoltModel
 
+    # __init__ should NOT raise (pipeline loading is deferred)
+    model = ChronosBoltModel()
+    assert model._pipeline is None  # not loaded
+
+    # But _load_pipeline should raise ImportError when torch/chronos missing
+    with patch.dict("sys.modules", {"torch": None, "chronos": None}):
         with pytest.raises(ImportError):
-            ChronosBoltModel()
+            model._load_pipeline()
 
 
 def test_chronos_fit_forecast_mocked():

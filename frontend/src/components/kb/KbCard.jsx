@@ -20,10 +20,10 @@ export default function KbCard({ item, t, translate, onClick, onEdit, onTogglePa
     <div onClick={onClick} className="group flex cursor-pointer flex-col rounded-xl border border-border bg-card p-5 transition-shadow hover:shadow-sm">
       <div className="mb-2 flex items-start gap-2">
         <Icon className="mt-0.5 h-4 w-4 text-primary" />
-        <h3 className="flex-1 font-display text-base text-foreground group-hover:text-primary">{translate(item.name)}</h3>
+        <h3 className="min-w-0 flex-1 break-words font-display text-base text-foreground group-hover:text-primary">{translate(item.name)}</h3>
         <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] ${paused ? 'bg-secondary text-muted-foreground' : 'bg-primary/10 text-primary'}`}>{t.detail.kbStatuses[item.status] || item.status}</span>
       </div>
-      <p className="mb-1 flex-1 text-xs text-muted-foreground">{item.description ? translate(item.description) : sub}</p>
+      <p className="mb-1 flex-1 break-words text-xs text-muted-foreground">{item.description ? translate(item.description) : sub}</p>
       {isFile && idxLabel && (
         <div className="mb-2 flex items-center gap-2 text-[10px] text-muted-foreground">
           <span className={`rounded px-1.5 py-0.5 ${idxStatus === 'ready' ? 'bg-primary/10 text-primary' : idxStatus === 'failed' ? 'bg-destructive/10 text-destructive' : 'bg-secondary'}`}>{idxLabel}</span>

@@ -29,7 +29,7 @@ import json
 import logging
 import re
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.services.synexia.chart_quality import (
@@ -79,45 +79,110 @@ def _detect_task_type(user_message: str) -> str:
     return "general"
 
 
+# ── Column classification helpers for data-shape guard ──────────────
+_DATE_KEYWORDS = frozenset({
+    "date", "time", "timestamp", "period", "month", "year", "quarter",
+    "datetime", "created_at", "updated_at", "dt", "sale_date",
+    "order_date", "entry_date",
+})
+_LABEL_KEYWORDS = frozenset({
+    "name", "title", "label", "category", "segment", "region", "type",
+    "material", "product", "customer", "supplier", "warehouse", "sku",
+    "id", "code", "status", "department", "channel", "brand",
+})
+
+
+def _is_date_column(col_name: str) -> bool:
+    """Heuristic: does this column name look like a date/time field?"""
+    lower = col_name.lower().replace("_", "").replace(" ", "")
+    return any(kw in lower for kw in _DATE_KEYWORDS)
+
+
+def _is_label_column(col_name: str, rows: list[dict]) -> bool:
+    """Heuristic: is this column a categorical label (not numeric, not date)?"""
+    lower = col_name.lower().replace("_", "")
+    if any(kw in lower for kw in _DATE_KEYWORDS):
+        return False
+    if any(kw in lower for kw in _LABEL_KEYWORDS):
+        return True
+    # Fallback: check whether values are strings (label) or numbers (value)
+    sample_values = [r.get(col_name) for r in rows[:20] if r.get(col_name) is not None]
+    if not sample_values:
+        return False
+    str_count = sum(1 for v in sample_values if isinstance(v, str))
+    return str_count > len(sample_values) * 0.5
+
+
+def _is_value_column(col_name: str, rows: list[dict]) -> bool:
+    """Heuristic: is this column numeric (a measure/value)?"""
+    lower = col_name.lower().replace("_", "")
+    if any(kw in lower for kw in _DATE_KEYWORDS):
+        return False
+    sample_values = [r.get(col_name) for r in rows[:20] if r.get(col_name) is not None]
+    if not sample_values:
+        return False
+    num_count = sum(1 for v in sample_values if isinstance(v, (int, float)))
+    return num_count == len(sample_values)
+
+
 _SYNTHESIS_SYSTEM_PROMPT = """\
-You are the REPORT SYNTHESIZER for a data-driven chat agent.
+You are the REPORT SYNTHESIZER for a professional data-driven analytics platform.
+Your reports are read by executives, analysts, and operations managers who expect
+depth, rigour, and actionable intelligence — NOT thin summaries.
 
 You just received a data snapshot from the data agent.  Your job is to
-write a real report — not just hand back the table.
+produce a COMPREHENSIVE, WELL-STRUCTURED analytical report — not a thin
+summary and definitely not just the raw table.
 
 OUTPUT FORMAT (strict — the frontend parses this):
-- Write 1-2 sentences of plain prose as the `assistant_content` (the
-  user's text answer).  Be specific: name the top performer, the share,
-  the time period, and any anomaly you can defend from the rows.
+- Write a 3-5 sentence executive summary as the `assistant_content` (the
+  user's spoken text answer).  Name the top performer, its share, the
+  time period covered, any anomaly or standout pattern, and at least one
+  comparison (MoM, YoY, vs-mean, or vs-benchmark).
 - Append a single fenced JSON block ```json ... ``` that matches the
   ReportCardPayload schema:
 
   {
     "title": "Sales report — top materials by revenue",  // string
     "source": "erp_v_sale_orderentry · db_zhanlu_no1",     // string, may be empty
-    "summary": "Top 7 materials account for 76% of revenue; 碳五石油树脂 alone is 35%.",  // 1-2 sentences
+    "summary": "Top 7 materials generated 189.3M CNY (76% of total). 碳五石油树脂 leads at 66.2M (35% share, 3x the runner-up). Month-over-month, carbon five declined 12% while solvent oil surged 28%.",  // 3-5 sentences
+    "methodology": "Data sourced from erp_v_sale_orderentry (table db_zhanlu_no1) covering June–July 2026. Rows aggregated by material_name with SUM(revenue) and SUM(quantity). Top-N analysis includes the 7 highest-revenue materials; tail is grouped as 'Other.' All figures are in CNY unless noted.",  // REQUIRED — 2-4 sentences
     "kpis": [
-      {"label": "Total revenue", "value": "189.3M CNY", "caption": "Top 7 materials"},
-      {"label": "Total quantity", "value": "11,210 tons", "caption": "All time"},
-      {"label": "Top material share", "value": "35%", "caption": "碳五石油树脂"},
-      {"label": "Row count", "value": "7", "caption": "Distinct materials"}
+      {"label": "Total revenue", "value": "189.3M CNY", "caption": "Top 7 materials · Jun–Jul 2026"},
+      {"label": "Total quantity", "value": "11,210 tons", "caption": "Jun–Jul 2026"},
+      {"label": "Top material share", "value": "35%", "caption": "碳五石油树脂 · 66.2M CNY"},
+      {"label": "MoM change", "value": "+8.2%", "caption": "Jul vs Jun 2026"},
+      {"label": "Concentration (HHI)", "value": "2,140", "caption": "Moderately concentrated"}
     ],
     "chart": {
       "type": "bar",                 // "bar" | "line" | "pie"
-      "title": "Top materials by revenue",
+      "title": "Top materials by revenue (Jun–Jul 2026)",
       "x_key": "material_name",      // column from rows
       "y_keys": ["total_revenue"],   // one or more numeric columns
       "data": [<the actual rows>],   // copy the rows verbatim
       "unit": "CNY"
     },
     "insights": [
-      {"icon": "trending-up", "text": "Top 3 materials account for 76% of revenue — concentration risk."},
-      {"icon": "lightbulb",   "text": "碳五石油树脂 is 3x the next material."}
+      {"icon": "trending-up",   "text": "Top 3 materials account for 76% of revenue — moderate concentration risk; single-source dependency on carbon five resin warrants diversification review."},
+      {"icon": "bar-chart-3",   "text": "碳五石油树脂 (66.2M) is 3.1x the runner-up solvent oil (21.4M) — a classic Pareto distribution suggesting category leader economics."},
+      {"icon": "zap",           "text": "Solvent oil grew 28% MoM (Jul vs Jun), the fastest-growing material in the top 7 — potential shift in downstream demand mix."},
+      {"icon": "trending-down", "text": "Carbon five resin declined 12% MoM despite holding #1 rank — monitor for sustained erosion or seasonal dip."},
+      {"icon": "target",        "text": "The bottom 4 materials combined account for only 24% of revenue — evaluate SKU rationalization or bundling opportunities."}
     ],
-    "next_step": "Want to break this down by region, or save this as a weekly recurring report?",
+    "key_findings": [
+      {"icon": "shield-check",  "text": "Revenue is highly concentrated: carbon five petroleum resin alone represents 35% of the top-7 total (66.2M of 189.3M CNY). Any supply disruption or price correction in this single SKU would materially impact the P&L."},
+      {"icon": "shield-check",  "text": "Month-over-month trajectory is positive overall (+8.2% Jul vs Jun), but the composition is shifting — traditional leader carbon five is declining while solvent oil and modified resin are accelerating."},
+      {"icon": "shield-check",  "text": "The Herfindahl-Hirschman Index (HHI) of 2,140 indicates a moderately concentrated portfolio. This is below the 2,500 antitrust threshold but above the 1,500 level where diversification benefits typically emerge."}
+    ],
+    "recommendations": [
+      {"icon": "arrow-right",   "text": "Initiate dual-sourcing qualification for carbon five petroleum resin to mitigate single-supplier concentration risk — target Q4 2026."},
+      {"icon": "arrow-right",   "text": "Accelerate solvent oil capacity planning given 28% MoM growth trajectory; if sustained, current allocation will constrain supply by Q1 2027."},
+      {"icon": "arrow-right",   "text": "Run a 12-month trend analysis (Jul 2025–Jul 2026) to distinguish seasonal patterns from structural shifts — current 2-month window may over-fit transient signals."}
+    ],
+    "next_step": "Want to break this down by region, or extend the analysis to a 12-month window?",
     "actions": [
       {"label": "Break down by region", "prompt": "Break this down by region."},
-      {"label": "Save as weekly",       "prompt": "Save this as a recurring weekly report."}
+      {"label": "12-month trend",       "prompt": "Extend this analysis to the last 12 months."}
     ]
   }
 
@@ -126,30 +191,39 @@ NARRATIVE part, not the chart part):
 1. Every number, name, and category you mention MUST come from the
    data snapshot below.  No invented customers, no invented months.
 2. The KPIs' `value` strings must be derived from the rows (totals,
-   shares, counts) — not from your own memory.
-3. Insights must be derivable from the rows (top-N share, rank, ratio,
-   outlier, concentration).  Do not invent industry context.
+   shares, counts, growth rates) — not from your own memory.
+3. Insights MUST be: (a) derivable from the rows, (b) categorized
+   implicitly by icon (trending-up=driver, zap=outlier, target=opportunity,
+   trending-down=risk, bar-chart-3=structure, lightbulb=observation),
+   (c) at least one sentence with analytical commentary, not bare data recitation.
 4. If the rows are empty, set `kpis` to a single "no data" tile,
    `insights` to [{"icon": "info", "text": "No data found for this query."}],
    and `next_step` to "Try a different scope (region, time period, or product)."
+5. EMIT AT LEAST 5 insights and AT LEAST 2 key_findings and AT LEAST 2
+   recommendations.  Thin reports with <5 insights are rejected.
+6. ALWAYS include `methodology` (2-4 sentences covering data source,
+   time period, aggregation method, scope, and any caveats).
+7. When a date/timestamp column is present, always compute and mention
+   a comparison (MoM, YoY, period-over-period change) in both summary
+   and at least one insight.
 
 CHART RULES (these prevent the "all bars = 1" degenerate chart):
-5. The chart's `data` array MUST use the EXACT column names present in
+8. The chart's `data` array MUST use the EXACT column names present in
    the rows — never invent or fabricate new columns (e.g. do NOT add
    a synthetic "count": 1 per row). If the rows have no numeric
    measure suitable for charting, set `"chart": null` and explain in
    the summary why no chart is shown.
-6. Before building `chart.data`, GROUP rows by the x-axis column and
+9. Before building `chart.data`, GROUP rows by the x-axis column and
    SUM the y-axis values. Duplicate categories MUST be aggregated
    (e.g., 3 rows of "EMEA"/100/50/80 → one row "EMEA"/230). Raw row-
    by-row data is only acceptable for line charts over time (one
    row per period, deduped by date).
-7. Cap `chart.data` to the top 12 categories by y-value magnitude;
-   any remainder must be merged into a single row with the x value
-   "Other". Never emit more than 12 x-axis labels in a bar/pie chart.
-8. If after inspection the snapshot has no meaningful numeric
-   measure (e.g. it's a list of names only), set `"chart": null`
-   and prefer textual insights instead.
+10. Cap `chart.data` to the top 12 categories by y-value magnitude;
+    any remainder must be merged into a single row with the x value
+    "Other". Never emit more than 12 x-axis labels in a bar/pie chart.
+11. If after inspection the snapshot has no meaningful numeric
+    measure (e.g. it's a list of names only), set `"chart": null`
+    and prefer textual insights instead.
 
 LANGUAGE: write the prose and insights in the same language the user
 used.  If the user message is in English, respond in English.  If in
@@ -159,34 +233,46 @@ is English-keyed).
 TASK-AWARE GUIDANCE (use the detected task type from the user message):
 
 If the task is **sales** (user asks about sales / revenue / pipeline):
-- KPIs: total revenue, total quantity, top performer + share, distinct products/customers, average deal size, YoY/MoM comparison if columns allow
+- KPIs: total revenue, total quantity, top performer + share, distinct products/customers, average deal size, MoM/YoY growth rate, concentration (HHI or top-3 share)
 - Chart: bar or pie (top N by revenue/quantity); line if a date column exists
-- Insights: concentration risk, top-N share, outlier products, seasonal patterns
+- Insights (5-8, categorized): concentration risk, top-N share, outlier products, growth/decline drivers, seasonal patterns, cross-sell opportunities
+- key_findings: narrative analysis of revenue drivers, portfolio concentration, growth composition
+- recommendations: diversification, pricing, capacity, or channel actions
 
 If the task is **inventory** (user asks about stock / warehouse / SKU):
-- KPIs: total stock count, low-stock SKU count (if a threshold column exists), distinct SKUs, average quantity per SKU, total value
+- KPIs: total stock count, low-stock SKU count (if a threshold column exists), distinct SKUs, average quantity per SKU, total value, turnover ratio
 - Chart: bar (by category/warehouse); gauge-like summary if single value
-- Insights: stock-out risk, overstock items, category distribution
+- Insights (5-8): stock-out risk, overstock items, category distribution, turnover velocity, dead-stock identification
+- key_findings: inventory health summary, risk hotspots, optimization opportunities
+- recommendations: reorder points, SKU rationalization, safety-stock adjustments
 
 If the task is **customer** (user asks about clients / accounts / leads):
-- KPIs: total customers, active vs inactive, new this period, top segment, churn/retention rate if columns support it
+- KPIs: total customers, active vs inactive, new this period, top segment, churn/retention rate if columns support it, average revenue per customer
 - Chart: bar or pie (by segment/region); line if date column exists
-- Insights: segment concentration, new-customer trend, at-risk accounts
+- Insights (5-8): segment concentration, new-customer trend, at-risk accounts, lifetime value signals, regional patterns
+- key_findings: customer base health, growth engine assessment, churn drivers
+- recommendations: retention playbook, segment expansion, onboarding improvements
 
 If the task is **time_series** (user asks about trends over time):
-- KPIs: date range covered, total over period, peak value + date, average per period, growth rate
+- KPIs: date range covered, total over period, peak value + date, trough value + date, average per period, growth rate, volatility (std dev or CV)
 - Chart: ALWAYS line chart (date on X axis)
-- Insights: peak/trough, trend direction, anomaly dates, YoY comparison
+- Insights (5-8): peak/trough analysis, trend direction, anomaly dates, seasonal decomposition, YoY comparison, acceleration/deceleration signals
+- key_findings: trend narrative, structural vs cyclical patterns, inflection points
+- recommendations: forecast horizon, intervention timing, monitoring thresholds
 
 If the task is **financial** (user asks about cost / budget / profit):
-- KPIs: total cost/expense, total revenue (if both present: margin, margin %), top cost category, budget variance
-- Chart: bar (by category); line for trends
-- Insights: cost drivers, margin trend, budget overruns
+- KPIs: total cost/expense, total revenue (if both present: margin, margin %), top cost category, budget variance, cost-to-revenue ratio
+- Chart: bar (by category); line for trends; waterfall for margin breakdown
+- Insights (5-8): cost drivers, margin trend, budget overruns, efficiency ratios, one-off vs recurring costs
+- key_findings: profitability narrative, cost structure analysis, margin pressure points
+- recommendations: cost optimization, reallocation, hedging or budgeting adjustments
 
 If the task is **general** (no specific type detected):
-- KPIs: row count, any obvious aggregate (sum/count of numeric columns), top performer + share, distinct count of key column
+- KPIs: row count, any obvious aggregate (sum/count of numeric columns), top performer + share, distinct count of key column, any discoverable ratio
 - Chart: bar if label+value columns exist; line if date column; otherwise omit
-- Insights: top-N share, distribution shape, data completeness"""
+- Insights (5-8): top-N share, distribution shape, data completeness, outlier detection, correlation signals
+- key_findings: data landscape summary, signal-vs-noise assessment, analytical pathways
+- recommendations: data quality improvements, deeper-dive suggestions"""
 
 
 def _format_money(v: Any) -> str:
@@ -463,14 +549,71 @@ def _fallback_payload(
         ],
     }
 
+    # ── Methodology ──
+    methodology = (
+        f"Data sourced from {source_name or 'the bound data source'}"
+        + (f" (SQL: {sql[:80]}…)" if sql else "")
+        + f" returning {len(rows)} rows"
+        + (f" aggregated by {label_col.replace('_', ' ')}" if label_col else "")
+        + ". Analysis reflects snapshot at query time."
+    )
+
+    # ── Key findings (data-driven) ──
+    key_findings: list[InsightSpec] = []
+    if rows and value_col and total > 0:
+        key_findings.append(InsightSpec(
+            icon="shield-check",
+            text=f"The dataset contains {len(rows)} distinct "
+                 + (label_col.replace("_", " ") if label_col else "items")
+                 + f" with a total {value_col.replace('_', ' ')} of {_format_money(total)}. "
+                 + (f"Top performer {top_label} accounts for {top_share * 100:.0f}% of the total, "
+                    f"indicating a {'highly concentrated' if top_share > 0.5 else 'moderately concentrated' if top_share > 0.3 else 'well-distributed'} portfolio."
+                    if top_label and top_share > 0
+                    else ""),
+        ))
+    if len(rows) >= 3 and top_share > 0.25:
+        other_count = len(rows) - 1
+        tail_share = 1.0 - top_share
+        key_findings.append(InsightSpec(
+            icon="shield-check",
+            text=f"The remaining {other_count} item{'s' if other_count > 1 else ''} collectively represent "
+                 f"{tail_share * 100:.0f}% of total — "
+                 + ("a significant long tail worth investigating for upsell or rationalization."
+                    if tail_share < 0.3
+                    else "a meaningful contribution that should not be overlooked in strategic planning."),
+        ))
+
+    # ── Recommendations (task-aware) ──
+    recommendations: list[InsightSpec] = []
+    if rows and value_col and total > 0:
+        recommendations.append(InsightSpec(
+            icon="arrow-right",
+            text="Extend the analysis window to 12 months to distinguish seasonal patterns "
+                 "from structural trends — the current snapshot may over-fit short-term signals.",
+        ))
+        if top_share > 0.35:
+            recommendations.append(InsightSpec(
+                icon="arrow-right",
+                text=f"Given {top_label}'s {top_share * 100:.0f}% share, consider supply-chain diversification "
+                     "or strategic pricing to mitigate single-point concentration risk.",
+            ))
+        else:
+            recommendations.append(InsightSpec(
+                icon="arrow-right",
+                text="Set up a recurring weekly report to monitor shifts in the mix and catch anomalies early.",
+            ))
+
     return ReportCardPayload(
         title=title,
         source=f"{source_name or 'data source'}" + (f" · {sql[:60]}…" if sql else ""),
-        generated_at=datetime.utcnow().isoformat() + "Z",
+        generated_at=datetime.now(timezone.utc).isoformat() + "Z",
         summary=summary,
+        methodology=methodology,
         kpis=kpis,
         chart=chart,
         insights=insights or [InsightSpec(icon="info", text="No actionable insights — the data may be empty or unstructured.")],
+        key_findings=key_findings,
+        recommendations=recommendations,
         next_step="Want to narrow the scope, or save this as a recurring report?",
         actions=task_actions.get(task_type, task_actions["general"]),
         user_signal=user_signal,
@@ -628,18 +771,82 @@ async def synthesize_report(
             f"Snapshot had {len(rows)} rows; synthesis used the first {MAX_ROWS_FOR_LLM}."
         )
 
+    # ── Data-shape guard ─────────────────────────────────────────────
+    # Enrich the user payload with shape warnings when the snapshot is
+    # too sparse to support a professional analytical report.
+    shape_warnings: list[str] = []
+    if rows:
+        # Time-series sparsity check: if a date/timestamp column exists,
+        # count distinct periods.  Warn if fewer than 6 so the LLM can
+        # qualify its findings.
+        date_cols = [c for c in rows[0].keys() if _is_date_column(c)]
+        if date_cols:
+            date_col = date_cols[0]
+            distinct_periods = len({r.get(date_col) for r in rows})
+            if distinct_periods < 2:
+                shape_warnings.append(
+                    "⚠ DATA WARNING: Only 1 time period in snapshot — no comparison is possible. "
+                    "State this explicitly in the summary and avoid MoM/YoY claims."
+                )
+            elif distinct_periods < 6:
+                shape_warnings.append(
+                    f"⚠ DATA WARNING: Only {distinct_periods} time periods — this is below the "
+                    "recommended 6-period minimum for reliable trend analysis. "
+                    "Qualify all trend claims with the narrow window caveat."
+                )
+
+        # Category sparsity check
+        cat_cols = [c for c in rows[0].keys() if _is_label_column(c, rows)]
+        if cat_cols and len(rows) < 5:
+            shape_warnings.append(
+                f"⚠ DATA WARNING: Only {len(rows)} rows returned — the query may be too "
+                "narrow. If this is supposed to be a top-N ranking, ensure N≥7 for "
+                "meaningful Pareto analysis. Qualify findings with data-scope caveats."
+            )
+
+        # Value sparsity check: all-zero value columns
+        val_cols = [c for c in rows[0].keys() if _is_value_column(c, rows)]
+        if val_cols:
+            all_rows_zero = all(
+                all((r.get(vc) or 0) == 0 for vc in val_cols)
+                for r in rows
+            )
+            if all_rows_zero:
+                shape_warnings.append(
+                    "⚠ DATA WARNING: All numeric columns are zero — the snapshot may contain "
+                    "only header rows. Verify the query and data source."
+                )
+
+    if shape_warnings:
+        warnings.extend(shape_warnings)
+
+    # ── System prompt ─────────────────────────────────────────────────
+    # We previously injected a hardcoded template block here (sales_report,
+    # pitch_deck, etc.).  Templates were deleted in favor of the C-Heavy
+    # skill-driven runner, which plans the document structure dynamically
+    # inside the sandbox from the user's actual request.  The task-type
+    # guidance already built into _SYNTHESIS_SYSTEM_PROMPT (sales /
+    # inventory / customer / time_series / financial / general) provides
+    # all the per-task-type structural hints we need.
+    system_prompt = _SYNTHESIS_SYSTEM_PROMPT
+
     user_payload = (
         f"User message: {user_message}\n\n"
         f"Source: {source_name or 'unknown'} (id={source_id or 'n/a'})\n"
         f"SQL run: {sql or '(not provided)'}\n"
         f"Row count: {len(rows)}\n\n"
         f"Rows (JSON):\n```json\n{json.dumps(rows_for_llm, default=str, ensure_ascii=False)}\n```\n\n"
-        "Now write the synthesis in the format described in the system prompt."
+        + (
+            "─── DATA SHAPE NOTES (embed these caveats in your response) ───\n"
+            + "\n".join(shape_warnings) + "\n\n"
+            if shape_warnings else ""
+        )
+        + "Now write the synthesis in the format described in the system prompt."
     )
 
     try:
         llm_response = await call_llm_fn(
-            _SYNTHESIS_SYSTEM_PROMPT,
+            system_prompt,
             [{"role": "user", "content": user_payload}],
         )
     except Exception as e:
@@ -692,7 +899,7 @@ async def synthesize_report(
     payload.user_signal = user_signal
     payload.warnings = list({*payload.warnings, *warnings})
     if not payload.generated_at:
-        payload.generated_at = datetime.utcnow().isoformat() + "Z"
+        payload.generated_at = datetime.now(timezone.utc).isoformat() + "Z"
     if not payload.title:
         payload.title = "Sales report" if "report" in user_message.lower() else "Data summary"
 

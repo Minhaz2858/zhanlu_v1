@@ -7,13 +7,16 @@ use these helpers to call the configured OpenAI-compatible LLM (DeepSeek).
 import json
 import logging
 from dataclasses import dataclass
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Optional
 
 import httpx
 from fastapi import HTTPException
 
 from app.config import settings
 from app.services.tracing import get_tracer as _get_tracer
+from app.services.provider_health import (
+    is_healthy, record_success, record_failure, select_provider,
+)
 
 import time as _time
 
@@ -96,6 +99,17 @@ def get_model() -> str:
     return settings.LLM_MODEL
 
 
+def supports_json_schema(provider_name: str) -> bool:
+    """Return True if the provider supports native ``response_format`` json_schema.
+
+    Currently only OpenAI supports ``json_schema`` mode; DeepSeek and most
+    other providers only support ``json_object`` mode (which requires the
+    word "json" in the prompt). Returns False for unknown providers.
+    """
+    native_providers = {"openai", "gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"}
+    return provider_name.lower() in native_providers
+
+
 @dataclass
 class LLMProvider:
     """A single OpenAI-compatible LLM endpoint for failover."""
@@ -166,8 +180,12 @@ async def call_llm(
     messages: list[dict] | None = None,
     temperature: float = 0.7,
     response_json_schema: dict | None = None,
+    task_type: str | None = None,
 ) -> dict:
     """Call the configured LLM and return a parsed response dict.
+
+    Integrates model routing (per-task model selection), provider health
+    (circuit-breaker), and optional Redis response caching (temperature=0).
 
     Returns:
         dict with keys:
@@ -184,16 +202,49 @@ async def call_llm(
     if response_json_schema:
         body["response_json_schema"] = response_json_schema
 
-    payload, built_messages, has_schema = build_llm_payload(body, get_model())
+    # ── Task-based model routing ──
+    from app.services.model_router import get_model_for_request
+    resolved_messages = messages or [{"role": "user", "content": prompt}]
+    routed_model = get_model_for_request(
+        resolved_messages,
+        tools_specified=False,
+        explicit_task=task_type,
+    )
 
+    payload, built_messages, has_schema = build_llm_payload(body, routed_model)
+
+    # ── Cache check (temperature=0 only) ──
+    from app.services.llm_cache import get_cached_response, set_cached_response
+    cached = get_cached_response(
+        built_messages, routed_model, temperature,
+        schema=response_json_schema,
+    )
+    if cached is not None:
+        _get_tracer().record_llm_call(
+            model=routed_model,
+            prompt_tokens=cached.get("usage", {}).get("prompt_tokens", 0),
+            completion_tokens=cached.get("usage", {}).get("completion_tokens", 0),
+            latency_ms=0,
+        )
+        return cached
+
+    # ── Health-based provider selection ──
     providers = get_llm_providers()
+    if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
+        chosen = select_provider(providers)
+        # Reorder: chosen first, then the rest
+        providers = [chosen] + [p for p in providers if p.name != chosen.name]
+
     last_error: Exception | None = None
     _llm_start = _time.monotonic()
-    _llm_model = get_model()
+    _llm_model = routed_model
     _llm_prompt_tokens = 0
     _llm_completion_tokens = 0
     _llm_error: str | None = None
     for provider in providers:
+        if not is_healthy(provider.name):
+            logger.debug("Provider '%s' is unhealthy — skipping", provider.name)
+            continue
         request_payload = dict(payload)
         request_payload["model"] = provider.model
         try:
@@ -211,15 +262,12 @@ async def call_llm(
             ce = classify_api_error(e, status_code=status)
             last_error = e
             _llm_error = str(e)
+            record_failure(provider.name, ce.reason.value)
             logger.warning(
                 "call_llm: provider '%s' failed (%s, reason=%s): %s",
                 provider.name, type(e).__name__, ce.reason.value, e,
             )
             if not is_transient(ce):
-                # Permanent failure (bad request, auth, billing, …): trying
-                # the next provider would reproduce the same error and mask
-                # the real one. Fail fast with the historical HTTPException
-                # surface so existing callers keep working.
                 if isinstance(e, httpx.HTTPStatusError):
                     raise HTTPException(
                         status_code=e.response.status_code,
@@ -259,16 +307,24 @@ async def call_llm(
         else:
             result["response"] = choice
 
+        latency_ms = (_time.monotonic() - _llm_start) * 1000
+        record_success(provider.name, latency_ms)
         _get_tracer().record_llm_call(
             model=_llm_model,
             prompt_tokens=_llm_prompt_tokens,
             completion_tokens=_llm_completion_tokens,
-            latency_ms=(_time.monotonic() - _llm_start) * 1000,
+            latency_ms=latency_ms,
         )
+
+        # ── Cache result (temperature=0 only) ──
+        set_cached_response(
+            built_messages, provider.model, temperature,
+            result, schema=response_json_schema,
+        )
+
         return result
 
-    # All providers failed — preserve the historical HTTPException surface so
-    # existing callers (which catch HTTPException) keep working.
+    # All providers failed — preserve the historical HTTPException surface
     _get_tracer().record_llm_call(
         model=_llm_model,
         prompt_tokens=_llm_prompt_tokens,
@@ -390,6 +446,96 @@ def chat_completion_json_sync(
     return {}
 
 
+def _clean_excerpt(text: str, limit: int = 200) -> str:
+    """Collapse control chars and cap length so the text is safe for UI/logs."""
+    if text is None:
+        return ""
+    text = "".join(
+        ch for ch in text
+        if ch in "\n\t" or (31 < ord(ch) < 127) or ord(ch) > 127
+    )
+    text = text.strip()
+    return text[:limit] + ("…" if len(text) > limit else "")
+
+
+def test_llm_endpoint(
+    base_url: str,
+    api_key: str | None,
+    model: str,
+    prompt: str = "ping",
+    max_tokens: int = 8,
+    timeout: float = 8.0,
+) -> dict:
+    """Sync, one-shot probe of an OpenAI-compatible chat endpoint.
+
+    Returns ``{ok, latency_ms, status_code, response_text, error}``.
+    ``response_text`` / ``error`` are bounded excerpts, safe to surface in
+    UI or logs. Never includes the api_key.
+    """
+    url = f"{base_url.rstrip('/')}/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {api_key}" if api_key else "",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0,
+    }
+    started = _time.monotonic()
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(url, headers=headers, json=payload)
+        latency_ms = int((_time.monotonic() - started) * 1000)
+        if resp.status_code >= 400:
+            try:
+                snippet = _clean_excerpt(resp.text)
+            except Exception:
+                snippet = ""
+            return {
+                "ok": False,
+                "latency_ms": latency_ms,
+                "status_code": resp.status_code,
+                "response_text": None,
+                "error": snippet or resp.reason_phrase or f"HTTP {resp.status_code}",
+            }
+        try:
+            data = resp.json()
+            content = data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError):
+            return {
+                "ok": False,
+                "latency_ms": latency_ms,
+                "status_code": resp.status_code,
+                "response_text": None,
+                "error": "Invalid JSON response",
+            }
+        return {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "status_code": resp.status_code,
+            "response_text": _clean_excerpt(str(content)),
+            "error": None,
+        }
+    except httpx.TimeoutException:
+        return {
+            "ok": False,
+            "latency_ms": int((_time.monotonic() - started) * 1000),
+            "status_code": None,
+            "response_text": None,
+            "error": f"Timeout after {int(timeout)}s",
+        }
+    except httpx.RequestError as e:
+        return {
+            "ok": False,
+            "latency_ms": int((_time.monotonic() - started) * 1000),
+            "status_code": None,
+            "response_text": None,
+            "error": f"Network error: {e.__class__.__name__}: {e}",
+        }
+
+
 async def stream_chat_completion(
     prompt: str,
     temperature: float = 0.7,
@@ -407,12 +553,23 @@ async def stream_chat_completion(
     connection-level failure (before any token), the next provider is tried.
     If no provider connects, the generator yields nothing and the caller
     should fall back to a blocking ``call_llm``.
+
+    Health-based ordering: unhealthy providers are skipped; the healthiest
+    (lowest-latency healthy) provider is tried first.
     """
     body = {"prompt": prompt, "messages": None, "temperature": temperature}
     payload, _, _ = build_llm_payload(body, get_model())
     payload["stream"] = True
 
-    for provider in get_llm_providers():
+    providers = get_llm_providers()
+    if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
+        chosen = select_provider(providers)
+        providers = [chosen] + [p for p in providers if p.name != chosen.name]
+
+    for provider in providers:
+        if not is_healthy(provider.name):
+            logger.debug("stream_chat_completion: provider '%s' unhealthy — skip", provider.name)
+            continue
         request_payload = dict(payload)
         request_payload["model"] = provider.model
         started = False
@@ -430,6 +587,7 @@ async def stream_chat_completion(
                             continue
                         data_str = line[len("data: "):]
                         if data_str.strip() == "[DONE]":
+                            record_success(provider.name, 0)
                             return
                         try:
                             chunk = json.loads(data_str)
@@ -439,8 +597,10 @@ async def stream_chat_completion(
                         if content:
                             started = True
                             yield content
+            record_success(provider.name, 0)
             return  # streamed successfully from this provider
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            record_failure(provider.name, type(e).__name__)
             if started:
                 logger.warning(
                     "stream_chat_completion: provider '%s' failed mid-stream: %s — stopping",

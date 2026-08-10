@@ -23,20 +23,31 @@ def compute_realized_error(
     forecast_dates: list[pd.Timestamp],
     actual_values: pd.Series | None,
 ) -> dict:
-    """Compute realized MAPE if actuals are available."""
+    """Compute realized MAPE, MAE, and RMSE if actuals are available."""
     if actual_values is None or len(actual_values) == 0:
-        return {"mape": None, "mae": None, "n_matched": 0}
+        return {"mape": None, "mae": None, "rmse": None, "signed_error": None, "n_matched": 0}
 
-    errors = []
+    pct_errors = []
+    signed_errors = []
+    abs_errors = []  # in price units
     for i, fdate in enumerate(forecast_dates):
         if fdate in actual_values.index:
             actual = actual_values.loc[fdate]
             if actual > 0:
-                errors.append(abs(forecast_values[i] - actual) / actual * 100)
-    if not errors:
-        return {"mape": None, "mae": None, "n_matched": 0}
+                diff = forecast_values[i] - actual
+                abs_errors.append(abs(diff))
+                pct_errors.append(abs(diff) / actual * 100)
+                signed_errors.append(diff / actual)
+    if not pct_errors:
+        return {"mape": None, "mae": None, "rmse": None, "signed_error": None, "n_matched": 0}
 
-    return {"mape": float(np.mean(errors)), "n_matched": len(errors)}
+    return {
+        "mape": float(np.mean(pct_errors)),
+        "mae": float(np.mean(abs_errors)),
+        "rmse": float(np.sqrt(np.mean(np.square(abs_errors)))),
+        "signed_error": float(np.mean(signed_errors)),
+        "n_matched": len(pct_errors),
+    }
 
 
 def rolling_accuracy(
@@ -54,7 +65,7 @@ def rolling_accuracy(
     if not target:
         return {"mean_mape": None, "n_evaluations": 0, "trend": "unknown"}
 
-    cutoff = datetime.utcnow() - timedelta(days=window_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=window_days)
     logs = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.target_id == target.id,
         ForecastAccuracyLog.evaluated_at >= cutoff,
@@ -108,7 +119,7 @@ def detect_drift(
 
     baseline_mapes = []
     recent_mapes = []
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     baseline_cutoff = now - timedelta(days=baseline_window_days)
     recent_cutoff = now - timedelta(days=recent_window_days)
     for log in all_logs:
@@ -204,17 +215,23 @@ def score_pending_decisions(db) -> dict:
             # Fetch actual price at as_of_date + horizon_day from market data
             import datetime
             from sqlalchemy import text
+            from app.services.forecasting.features.exogenous_loaders import _ERP_TABLE_MAP
 
             target_date = log.as_of_date + datetime.timedelta(days=log.horizon_day)
-            table = f"sale_erp_v_{log.product_id}_data"
+            # Extract product_id from full product_key (e.g. "ecisco.dcpd" → "dcpd")
+            product_id = log.product_id.split(".")[-1] if "." in log.product_id else log.product_id
+            table = _ERP_TABLE_MAP.get(product_id, f"sale_erp_v_{product_id}_data")
 
             with engine.connect() as conn:
                 row = conn.execute(
                     text(
                         f"SELECT `date`, `price` FROM `{table}` "
-                        f"WHERE `date` = :target_date LIMIT 1"
+                        f"WHERE `date` <= :target_date "
+                        f"AND `date` >= :min_date "
+                        f"ORDER BY `date` DESC LIMIT 1"
                     ),
-                    {"target_date": target_date.isoformat()},
+                    {"target_date": target_date.isoformat(),
+                     "min_date": (target_date - datetime.timedelta(days=7)).isoformat()},
                 ).fetchone()
 
             if row is None:

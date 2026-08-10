@@ -2,6 +2,7 @@ import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import PageErrorBoundary from './PageErrorBoundary';
 import { ChatSessionProvider } from '@/lib/ChatSessionContext';
+import { PersistentStreamProvider } from '@/lib/PersistentStreamContext';
 import { useScreenSize } from '@/hooks/useScreenSize';
 
 /**
@@ -31,23 +32,25 @@ export default function AppLayout() {
   const contentPadding = settings.contentPadding ?? 0;
 
   return (
-    <ChatSessionProvider>
-      <div className="flex h-screen w-full bg-background">
-        <Sidebar />
-        <main className="h-full flex-1 overflow-hidden">
-          <div
-            className={contentMaxWidth ? 'mx-auto h-full' : 'h-full'}
-            style={{
-              ...(contentMaxWidth ? { maxWidth: contentMaxWidth } : {}),
-              ...(contentPadding ? { paddingLeft: contentPadding, paddingRight: contentPadding } : {}),
-            }}
-          >
-            <PageErrorBoundary>
-              <Outlet />
-            </PageErrorBoundary>
-          </div>
-        </main>
-      </div>
-    </ChatSessionProvider>
+    <PersistentStreamProvider>
+      <ChatSessionProvider>
+        <div className="flex h-screen w-full bg-background">
+          <Sidebar />
+          <main className="h-full flex-1 overflow-hidden">
+            <div
+              className={contentMaxWidth ? 'mx-auto h-full' : 'h-full'}
+              style={{
+                ...(contentMaxWidth ? { maxWidth: contentMaxWidth } : {}),
+                ...(contentPadding ? { paddingLeft: contentPadding, paddingRight: contentPadding } : {}),
+              }}
+            >
+              <PageErrorBoundary>
+                <Outlet />
+              </PageErrorBoundary>
+            </div>
+          </main>
+        </div>
+      </ChatSessionProvider>
+    </PersistentStreamProvider>
   );
 }

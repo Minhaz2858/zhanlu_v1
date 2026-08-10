@@ -289,35 +289,37 @@ export default function ChatInput({
               })}
             </div>
             <div className="flex shrink-0 items-center gap-1">
-              <VoiceInput onTranscript={(text) => onChange(value ? `${value} ${text}` : text)} disabled={disabled || isStreaming} lang={lang} />
               {isStreaming ? (
-                // P2 mid-turn steer: when streaming, show BOTH Stop and a
-                // small Send button. The Send button calls the same onSend
-                // callback, but the parent (Chat.jsx) routes the click to
-                // the steer endpoint when streamState.isActive. Disabled
-                // when the input is empty (no point steering with no text).
+                // While the agent is responding: only the Stop button is
+                // visible. The mic (VoiceInput) and the mid-turn Steer
+                // button are both hidden — three icons in the corner
+                // was visually loud and the user asked for just Stop
+                // during the response.
+                <button
+                  type="button"
+                  onClick={onStop}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 text-zinc-700 transition-colors hover:bg-zinc-200 hover:border-zinc-300"
+                  title={lang === 'en' ? 'Stop generating' : '停止生成'}
+                  aria-label={lang === 'en' ? 'Stop generating' : '停止生成'}
+                >
+                  <Square className="h-3.5 w-3.5 fill-current" />
+                </button>
+              ) : (
+                // Idle: mic + Send button. The mic routes voice
+                // transcripts into the input via onChange.
                 <>
-                  <button
-                    onClick={handleSend}
-                    disabled={!value.trim()}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity disabled:opacity-40"
-                    title={lang === 'en' ? 'Send a steer message to the running agent' : '向运行中的智能体发送引导消息'}
-                  >
-                    <Send className="h-3.5 w-3.5" /> {lang === 'en' ? 'Steer' : '引导'}
-                  </button>
+                  <VoiceInput onTranscript={(text) => onChange(value ? `${value} ${text}` : text)} disabled={disabled} lang={lang} />
                   <button
                     type="button"
-                    onClick={onStop}
-                    className="inline-flex items-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:bg-red-700"
-                    title={lang === 'en' ? 'Stop generating' : '停止生成'}
+                    onClick={handleSend}
+                    disabled={disabled || !value.trim()}
+                    title={t.common.send}
+                    aria-label={t.common.send}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/25 transition-all hover:from-indigo-600 hover:to-violet-700 hover:shadow-indigo-500/40 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
                   >
-                    <Square className="h-3 w-3 fill-current" /> {t.common.stop}
+                    <Send className="h-3.5 w-3.5" />
                   </button>
                 </>
-              ) : (
-                <button onClick={handleSend} disabled={disabled || !value.trim()} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity disabled:opacity-40">
-                  <Send className="h-3.5 w-3.5" /> {t.common.send}
-                </button>
               )}
             </div>
           </div>

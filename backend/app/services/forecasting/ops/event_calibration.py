@@ -7,7 +7,7 @@ intelligence_overlay then uses this data instead of the heuristic mapping.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -106,7 +106,7 @@ def _get_closed_events(
         _PRODUCT_ALIASES,
     )
 
-    cutoff = datetime.utcnow().date() - timedelta(days=window_days)
+    cutoff = datetime.now(timezone.utc).date() - timedelta(days=window_days)
     rows = (
         db.query(IntelligenceEvent)
         .filter(

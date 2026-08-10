@@ -45,7 +45,7 @@ export default function TracePanel({ message, onClose }) {
                 const Icon = meta.icon;
                 const SIcon = sm.icon;
                 return (
-                  <li key={i} className="relative flex gap-3">
+                  <li key={t.id || `trace-${t.step || i}`} className="relative flex gap-3">
                     <div className={`relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-border ${meta.ring} ${meta.color}`}>
                       <Icon className="h-3 w-3" />
                     </div>

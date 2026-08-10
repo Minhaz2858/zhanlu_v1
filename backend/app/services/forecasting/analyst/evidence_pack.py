@@ -70,7 +70,10 @@ def _horizon_stats(run_results: dict, day: int) -> dict:
 def build_pack(*, product_id, name_zh, day, history_rows, upstream_histories,
                run_results, model_detail, explanation, as_of_month,
                demand_signal: dict | None = None,
-               supplier_ladder: dict | None = None) -> dict:
+               supplier_ladder: dict | None = None,
+               downstream_utilization: dict | None = None,
+               inventory_pressure: dict | None = None,
+               import_pressure: dict | None = None) -> dict:
     """Assemble the full evidence pack (pure — all data passed in)."""
     exp = explanation or {}
     hs = _horizon_stats(run_results, day)
@@ -159,4 +162,8 @@ def build_pack(*, product_id, name_zh, day, history_rows, upstream_histories,
         # Phase F1: demand signal + supplier ladder (optional, zero regression risk)
         "demand": demand_signal or {},
         "supplier_ladder": supplier_ladder or {},
+        # Wave 3 T3.5: external-feed signals (optional, zero regression risk)
+        "downstream_utilization": downstream_utilization or {},
+        "inventory_pressure": inventory_pressure or {},
+        "import_pressure": import_pressure or {},
     }

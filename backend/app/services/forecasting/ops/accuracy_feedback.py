@@ -41,7 +41,7 @@ def run_accuracy_feedback(
         ForecastWeightAdjustment,
     )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     recent_cutoff = (now - timedelta(days=recent_window_days)).date()
     baseline_cutoff_start = (now - timedelta(days=baseline_days + recent_window_days)).date()
     baseline_cutoff_end = (now - timedelta(days=recent_window_days)).date()
@@ -149,3 +149,183 @@ def run_accuracy_feedback(
         "flagged": flagged,
         "products": products,
     }
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Post-forecast accuracy threshold checking (MAPE-based iteration trigger)
+# ═══════════════════════════════════════════════════════════════════════════
+
+import numpy as np  # noqa: E402
+
+
+def recommend_iteration(
+    product_key: str,
+    mape: float,
+    trend: str = "stable",
+) -> list[str]:
+    """Generate specific iteration recommendations based on MAPE and trend.
+
+    Args:
+        product_key: The product identifier.
+        mape: Latest realized MAPE (0-100 scale).
+        trend: Trend direction: 'stable', 'improving', 'degrading'.
+
+    Returns:
+        List of actionable recommendation strings.
+    """
+    recs: list[str] = []
+
+    if mape < 8.0:
+        recs.append(f"[{product_key}] MAPE {mape:.1f}% — within excellent range. No action needed.")
+        return recs
+
+    if mape < 15.0:
+        if trend == "degrading":
+            recs.append(
+                f"[{product_key}] MAPE {mape:.1f}% acceptable but trend is degrading. "
+                f"Monitor closely; consider preemptive XGBoost re-tuning."
+            )
+        else:
+            recs.append(
+                f"[{product_key}] MAPE {mape:.1f}% — acceptable. Monitor for regression."
+            )
+        return recs
+
+    # MAPE >= 15.0 — active action needed
+    recs.append(f"[{product_key}] MAPE {mape:.1f}% — **action recommended:**")
+
+    if mape >= 25.0:
+        recs.append(f"  1. [CRITICAL] Set needs_rebuild and trigger full re-fit cycle.")
+    else:
+        recs.append(f"  1. Re-run XGBoost tuning: tune_xgboost_params('{product_key}')")
+
+    recs.append(f"  2. Check ensemble weights — may need regime-aware pool adjustment.")
+    recs.append(f"  3. Review feature freshness (technical indicators, Fourier, Oilchem).")
+
+    if mape > 30.0:
+        recs.append(f"  4. [EXTREME] Disable ML models, fall back to statistical baseline.")
+        recs.append(f"  5. Investigate data pipeline — possible upstream data corruption.")
+
+    recs.append(f"  6. Consider enabling stacking or VAR model if disabled.")
+
+    return recs
+
+
+def _estimate_trend(db: Session, target_id: int, days: int = 30) -> str:
+    """Compare recent MAPE with older MAPE to determine trend."""
+    from app.models.forecasting import ForecastAccuracyLog
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    mid = datetime.now(timezone.utc) - timedelta(days=days // 2)
+
+    logs = (
+        db.query(ForecastAccuracyLog)
+        .filter(
+            ForecastAccuracyLog.target_id == target_id,
+            ForecastAccuracyLog.realized_mape.isnot(None),
+            ForecastAccuracyLog.evaluated_at >= cutoff,
+        )
+        .order_by(ForecastAccuracyLog.evaluated_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    if len(logs) < 3:
+        return "stable"
+
+    mid_idx = len(logs) // 2
+    older_mape = np.mean([lg.realized_mape for lg in logs[mid_idx:]])
+    newer_mape = np.mean([lg.realized_mape for lg in logs[:mid_idx]])
+
+    delta = newer_mape - older_mape
+    if delta < -2.0:
+        return "improving"
+    if delta > 2.0:
+        return "degrading"
+    return "stable"
+
+
+def _flag_needs_rebuild(db: Session, target, status: str, mape: float | None, now: datetime) -> None:
+    """Flag a ForecastTarget for rebuild when accuracy falls below thresholds."""
+    logger.warning(
+        "Flagging target %s (%s): status=%s, mape=%s — setting needs_rebuild",
+        target.product_key, target.name, status, mape,
+    )
+    target.status = "needs_rebuild"
+    target.model_config = target.model_config or {}
+    target.model_config["accuracy_alert"] = {
+        "status": status,
+        "mape": mape,
+        "flagged_at": now.isoformat(),
+    }
+    db.add(target)
+    db.flush()
+
+
+def check_accuracy_thresholds(
+    db: Session,
+    product_key: str | None = None,
+    days: int = 30,
+) -> dict[str, dict]:
+    """Check each product's latest ForecastAccuracyLog against MAPE thresholds.
+
+    For products in critical/blocked status, auto-flags ForecastTarget.status
+    to 'needs_rebuild' so downstream jobs can act.
+
+    Returns dict: {product_key: {status, mape, mae, rmse, trend, recommendations}}
+    """
+    from app.models.forecasting import ForecastTarget, ForecastAccuracyLog
+    from app.services.forecasting.accuracy_report import AccuracyThreshold
+    from sqlalchemy import func
+
+    threshold = AccuracyThreshold()
+
+    latest_eval = (
+        db.query(
+            ForecastAccuracyLog.target_id,
+            func.max(ForecastAccuracyLog.evaluated_at).label("max_eval"),
+        )
+        .filter(ForecastAccuracyLog.realized_mape.isnot(None))
+        .filter(ForecastAccuracyLog.horizon_days == 7)
+        .group_by(ForecastAccuracyLog.target_id)
+        .subquery()
+    )
+
+    query = (
+        db.query(ForecastAccuracyLog, ForecastTarget)
+        .join(latest_eval, ForecastAccuracyLog.target_id == latest_eval.c.target_id)
+        .join(ForecastTarget, ForecastTarget.id == ForecastAccuracyLog.target_id)
+        .filter(
+            ForecastAccuracyLog.evaluated_at == latest_eval.c.max_eval,
+            ForecastAccuracyLog.horizon_days == 7,
+            ForecastTarget.is_deleted == False,
+        )
+    )
+
+    if product_key:
+        query = query.filter(ForecastTarget.product_key == product_key)
+
+    results: dict[str, dict] = {}
+    now = datetime.now(timezone.utc)
+
+    for log, target in query.all():
+        pk = target.product_key
+        mape = log.realized_mape
+        status = threshold.check(mape)
+        trend = _estimate_trend(db, target.id, days)
+
+        recommendations = recommend_iteration(pk, mape, trend)
+        results[pk] = {
+            "status": status,
+            "mape": mape,
+            "mae": log.mae,
+            "rmse": log.rmse,
+            "trend": trend,
+            "target_id": target.id,
+            "recommendations": recommendations,
+        }
+
+        if status in ("critical", "blocked"):
+            _flag_needs_rebuild(db, target, status, mape, now)
+
+    return results

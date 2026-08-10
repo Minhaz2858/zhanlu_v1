@@ -19,7 +19,7 @@ NOT as forecast targets (transaction prices ≠ market quotations).
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -312,6 +312,22 @@ class ErpTxLoader:
 # ERP Volume Loader (Phase F1)
 # ---------------------------------------------------------------------------
 
+# English product_id → Chinese ERP table name (matching seed_ecisco_targets.py)
+_ERP_TABLE_MAP: dict[str, str] = {
+    "isoprene":               "sale_erp_v_异戊二烯_data",
+    "piperylene":             "sale_erp_v_间戊二烯_data",
+    "dcpd":                   "sale_erp_v_双环戊二烯_data",
+    "cracked_c5":             "sale_erp_v_工业用裂解碳五_data",
+    "cracked_c9":             "sale_erp_v_工业用裂解碳九_data",
+    "blowing_agent":          "sale_erp_v_戊烷发泡剂_data",
+    "c5_resin":               "sale_erp_v_碳五石油树脂_data",
+    "raffinate_c5":           "sale_erp_v_抽余碳五_data",
+    "ethylene_carbon_black":  "sale_erp_v_乙烯炭黑料_data",
+    "industrial_hexane":      "sale_erp_v_工业己烷_data",
+    "mixed_trimethylbenzene": "sale_erp_v_混三甲苯_data",
+}
+
+
 class ErpVolumeLoader:
     """Load daily sales volume from EDIA ERP (qty column — demand leading indicator).
 
@@ -351,7 +367,7 @@ class ErpVolumeLoader:
         if self.engine is None:
             return pd.DataFrame(columns=["date", "volume"])
 
-        table = f"sale_erp_v_{self.product_id}_data"
+        table = _ERP_TABLE_MAP.get(self.product_id, f"sale_erp_v_{self.product_id}_data")
         cutoff = date.today() - timedelta(days=self.lookback_days)
 
         sql = text(
@@ -477,3 +493,191 @@ class SupplierDispersionLoader:
         daily["supplier_count"] = daily["count"]
 
         return daily[["date", "spread", "supplier_count"]]
+
+
+# ===========================================================================
+# Wave 3 T3.1 / T3.2 / T3.3 — External-feed loaders
+# ===========================================================================
+#
+# All three read from the Wave 3 external-feed store
+# (``forecast_external_points`` JOIN ``forecast_external_series``) filtered by
+# domain (operating_rate | inventory | import_price). They mirror the
+# ``ErpVolumeLoader`` shape (constructor + ``.load() -> pd.DataFrame``) so
+# they slot into existing call sites without refactoring.
+#
+# The new abstraction is the DB session — Wave 3 loaders take an explicit
+# SQLAlchemy ``Session`` (injected at call time) because the data lives in
+# the Wave 3 external-feed store (PG), not in MySQL like Wave 0/1 loaders.
+
+class _ExternalSeriesBase:
+    """Shared scaffolding for the three Wave 3 loaders.
+
+    Subclasses set ``DOMAIN`` and ``METRIC_COLUMN`` (the DataFrame column
+    name to use for the loaded value).
+    """
+    DOMAIN: str = ""
+    METRIC_COLUMN: str = ""
+
+    def __init__(
+        self,
+        product_id: str,
+        lookback_days: int = 365,
+        org_id: str | None = None,
+        db_session=None,
+    ):
+        self.product_id = product_id
+        self.lookback_days = lookback_days
+        self.org_id = org_id
+        self._db = db_session
+
+    def _empty_df(self) -> pd.DataFrame:
+        return pd.DataFrame(columns=["date", self.METRIC_COLUMN])
+
+    def _query(self) -> pd.DataFrame:
+        """Query the external-feed store. Returns empty df if no data.
+
+        Guards against missing session, missing domain, or any backend error.
+        """
+        if self._db is None:
+            return self._empty_df()
+        if not self.DOMAIN:
+            return self._empty_df()
+
+        try:
+            from app.models.forecasting import (
+                ForecastExternalPoint,
+                ForecastExternalSeries,
+            )
+
+            today = datetime.now(timezone.utc).replace(
+                hour=0, minute=0, second=0, microsecond=0,
+            )
+            cutoff = today - timedelta(days=self.lookback_days)
+
+            q = (
+                self._db.query(ForecastExternalPoint.date, ForecastExternalPoint.value)
+                .join(ForecastExternalSeries,
+                      ForecastExternalPoint.series_id == ForecastExternalSeries.id)
+                .filter(ForecastExternalSeries.domain == self.DOMAIN)
+                .filter(ForecastExternalPoint.date >= cutoff)
+                .filter(ForecastExternalPoint.date <= today)
+            )
+            if self.org_id is not None:
+                q = q.filter(ForecastExternalSeries.org_id == self.org_id)
+            if self.product_id:
+                q = q.filter(ForecastExternalSeries.product_key == self.product_id)
+
+            rows = q.order_by(ForecastExternalPoint.date.asc()).all()
+            if not rows:
+                return self._empty_df()
+
+            df = pd.DataFrame(rows, columns=["date", self.METRIC_COLUMN])
+            df["date"] = pd.to_datetime(df["date"])
+            return df
+        except Exception as exc:
+            logger.warning(
+                "%s failed for product=%s: %s",
+                type(self).__name__, self.product_id, exc,
+            )
+            return self._empty_df()
+
+    def load(self) -> pd.DataFrame:
+        """Return DataFrame ``['date', <metric>]`` for this product's series.
+
+        Tries the PG external-feed store first. If empty, falls back to
+        the MySQL warehouse loaders (which read directly from the customer's
+        ERP tables — no ingestion pipeline needed).
+
+        Empty DataFrame (with correct columns) when no data is available.
+        No future leakage — only rows with ``date <= today`` are returned.
+        """
+        df = self._query()
+        if not df.empty:
+            return df
+        # Fallback: try MySQL warehouse loaders
+        return self._warehouse_fallback()
+
+    def _warehouse_fallback(self) -> pd.DataFrame:
+        """Try loading from MySQL warehouse when PG store is empty.
+
+        Maps each Wave 3 domain to the corresponding warehouse loader:
+          operating_rate → WarehouseProductionLoader (production throughput)
+          inventory      → WarehouseInventoryLoader (stock ledger)
+          import_price   → WarehousePurchasePriceLoader (purchase prices)
+        """
+        try:
+            from app.services.forecasting.features.warehouse_loaders import (
+                WarehouseProductionLoader,
+                WarehouseInventoryLoader,
+                WarehousePurchasePriceLoader,
+            )
+            common = dict(
+                product_id=self.product_id,
+                lookback_days=self.lookback_days,
+                org_id=self.org_id,
+            )
+            if self.DOMAIN == "operating_rate":
+                wdf = WarehouseProductionLoader(**common).load()
+                if not wdf.empty:
+                    logger.info(
+                        "Warehouse production fallback for %s: %d days",
+                        self.product_id, len(wdf),
+                    )
+                    return wdf.rename(columns={"production_t": self.METRIC_COLUMN})
+            elif self.DOMAIN == "inventory":
+                wdf = WarehouseInventoryLoader(**common).load()
+                if not wdf.empty:
+                    logger.info(
+                        "Warehouse inventory fallback for %s: %d days",
+                        self.product_id, len(wdf),
+                    )
+                    return wdf.rename(columns={"inventory_t": self.METRIC_COLUMN})
+            elif self.DOMAIN == "import_price":
+                wdf = WarehousePurchasePriceLoader(**common)
+                daily = wdf.load_daily()
+                if not daily.empty:
+                    logger.info(
+                        "Warehouse purchase-price fallback for %s: %d days",
+                        self.product_id, len(daily),
+                    )
+                    return daily.rename(columns={"purchase_price": self.METRIC_COLUMN})
+        except Exception as exc:
+            logger.warning(
+                "Warehouse fallback failed for %s/%s: %s",
+                self.DOMAIN, self.product_id, exc,
+            )
+        return self._empty_df()
+
+
+class OperatingRateLoader(_ExternalSeriesBase):
+    """Wave 3 T3.1 — Load downstream operating rates (开工率).
+
+    Reads from ``forecast_external_points`` JOIN ``forecast_external_series``
+    filtered by ``domain='operating_rate'`` and ``product_key = product_id``.
+    Returns ``['date', 'op_rate']`` DataFrame, sorted ascending, no future
+    leakage. Empty DataFrame when no data is available (graceful no-op).
+    """
+    DOMAIN = "operating_rate"
+    METRIC_COLUMN = "op_rate"
+
+
+class InventoryLoader(_ExternalSeriesBase):
+    """Wave 3 T3.2 — Load port / social inventory levels (库存).
+
+    Reads from ``forecast_external_points`` JOIN ``forecast_external_series``
+    filtered by ``domain='inventory'`` and ``product_key = product_id``.
+    Returns ``['date', 'inventory_t']`` DataFrame.
+    """
+    DOMAIN = "inventory"
+    METRIC_COLUMN = "inventory_t"
+
+
+class ImportPriceLoader(_ExternalSeriesBase):
+    """Wave 3 T3.3 — Load import / competitor prices (进口价格).
+
+    Reads from ``forecast_external_points`` JOIN ``forecast_external_series``
+    filtered by ``domain='import_price'`` and ``product_key = product_id``.
+    Returns ``['date', 'import_price_cny']`` DataFrame.
+    """
+    DOMAIN = "import_price"
+    METRIC_COLUMN = "import_price_cny"

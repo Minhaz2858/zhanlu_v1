@@ -29,7 +29,9 @@ _DEFAULT_HORIZONS = [7, 14, 30]
 # Sliding-origin step (days between consecutive origins).
 _DEFAULT_STEP = 14
 # Maximum backtest folds (cap to bound runtime on long series).
-_MAX_FOLDS = 10
+_MAX_FOLDS = 20
+_MIN_FOLDS = 10
+_FOLDS_RATIO = 30  # n // _FOLDS_RATIO = fold count floor for long series
 
 
 @dataclass
@@ -62,6 +64,7 @@ def evaluate(
     max_folds: int = _MAX_FOLDS,
     horizons: list[int] | None = None,
     step: int = _DEFAULT_STEP,
+    on_fold: object = None,  # optional callback: on_fold(T, y_train, fold_preds: {model_name: series})
 ) -> BacktestResult:
     """Evaluate all models via sliding-origin walk-forward holdout.
 
@@ -119,11 +122,14 @@ def evaluate(
             interval_width={},
         )
 
+    # Adaptive fold count: scale with series length (min 10, max 20)
+    effective_max = min(max_folds, max(_MIN_FOLDS, n // _FOLDS_RATIO))
+
     # Build the list of origins (sliding window).
     last_origin = n - h_max
     origins: list[int] = []
     origin = min_train
-    while origin <= last_origin and len(origins) < max_folds:
+    while origin <= last_origin and len(origins) < effective_max:
         origins.append(origin)
         origin += step
     if not origins:
@@ -164,6 +170,9 @@ def evaluate(
         evaluated_folds += 1
         last_train_val = float(y_train.iloc[-1])
 
+        # Per-fold predictions (for stacking meta-learner callback)
+        _fold_preds: dict[str, np.ndarray] = {}
+
         for name in all_model_names:
             if name == "seasonal_naive" and name not in models:
                 from app.services.forecasting.models.naive import SeasonalNaive
@@ -173,12 +182,13 @@ def evaluate(
 
             pred = _fit_forecast(model, y_train, h_max, seasonal_period)
             if pred is None:
-                # Model crashed on this fold — record inf for every horizon.
                 for h in horizons:
                     errors_by_horizon[h][name].append(float("inf"))
+                _fold_preds[name] = np.full(primary_h, np.nan)
                 continue
 
             pred_arr = np.asarray(pred, dtype=float)
+            _fold_preds[name] = pred_arr[:primary_h].copy()
 
             for h in horizons:
                 if h > len(y_actual) or h > len(pred_arr):
@@ -198,6 +208,14 @@ def evaluate(
                 dir_total_per_model[name] += 1
                 if (pred_dir > 0) == (actual_dir > 0):
                     dir_correct[name] += 1
+
+        # Stacking meta-learner callback: record fold predictions + actuals
+        if on_fold is not None:
+            _actuals_for_fold = np.asarray(y_actual.iloc[:primary_h], dtype=float)
+            try:
+                on_fold(int(T), y_train.copy(), _fold_preds, _actuals_for_fold)
+            except Exception:
+                logger.debug("on_fold callback failed (non-fatal)", exc_info=True)
 
     # Aggregate per-horizon MAPE (or RMSE — sqrt applied here for RMSE path).
     per_horizon_mape: dict[int, dict[str, float]] = {}

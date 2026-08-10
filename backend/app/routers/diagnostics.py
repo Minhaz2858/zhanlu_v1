@@ -30,9 +30,10 @@ from app.models import (  # noqa: F401 — full model import for the registry
     Execution, KnowledgeBase, LearningProposal, MarketAgent, MarketplaceRating,
     MarketplaceSkill, McpServer, MessageArtifact, MetricDefinition,
     ObservationRecord, Organization, OtpCode, PasswordResetToken, Plan, PlanNode,
-    PolicyDecision, Project, Report, SandboxCommand, SandboxJob, SandboxJobEvent,
-    SemanticMapping, SkillCandidate, SkillProfile, SkillRun, SkillTestCase,
-    SnapshotArtifactLink, Tool, User, UserFile, UserSetting, WorkspaceSetting,
+    PolicyDecision, Project, Report, ResponseCacheEntry, SandboxCommand, SandboxJob,
+    SandboxJobEvent, SemanticMapping, SkillCandidate, SkillProfile, SkillRun,
+    SkillTestCase, SnapshotArtifactLink, Tool, User, UserFile, UserSetting,
+    WorkspaceSetting,
 )
 
 

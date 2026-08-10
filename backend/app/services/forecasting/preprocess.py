@@ -13,6 +13,7 @@ Never mutates y_raw — all cleaning is done on a copied y_work.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
@@ -142,6 +143,40 @@ def preprocess_series(
         elif idx > 0:
             y_cleaned.iloc[idx] = y_work.iloc[idx - 1]
 
+    # ---- 2b. Ensemble anomaly detection (flag-gated) --------------------------
+    anomaly_count = 0
+    anomaly_detection_enabled = os.getenv(
+        "FORECAST_ANOMALY_DETECTION_ENABLED", "false"
+    ).lower() == "true"
+    if anomaly_detection_enabled:
+        try:
+            from app.services.forecasting.anomaly_detector import detect_anomalies
+            anom_result = detect_anomalies(y_cleaned, seasonal_period=seasonal_period)
+            if anom_result.anomaly_indices:
+                for idx in anom_result.anomaly_indices:
+                    # Use median of surrounding window for replacement
+                    half_win = max(1, seasonal_period // 2)
+                    w_start = max(0, idx - half_win)
+                    w_end = min(len(y_cleaned), idx + half_win + 1)
+                    window_vals = y_cleaned.iloc[w_start:w_end].values
+                    replacement = np.median(window_vals[np.abs(window_vals - np.median(window_vals)) < 2 * np.std(window_vals)] if len(window_vals) > 2 else window_vals)
+                    if np.isnan(replacement):
+                        replacement = y_cleaned.iloc[idx]
+                    y_cleaned.iloc[idx] = replacement
+                    date = y_cleaned.index[idx]
+                    report.spike_dates.append(
+                        f"anomaly:{str(date.date()) if hasattr(date, 'date') else str(date)}"
+                    )
+                anomaly_count = len(anom_result.anomaly_indices)
+                report.n_spikes_detected += anomaly_count
+                logger.info(
+                    "Anomaly detection for %s: %d flagged (STL=%d, ensemble=%d)",
+                    series_id, report.n_spikes_detected,
+                    len(spike_indices), anomaly_count,
+                )
+        except Exception as exc:
+            logger.warning("Ensemble anomaly detection failed for %s: %s", series_id, exc)
+
     # ---- 3. Level-shift detection (mark only — do NOT remove) --------------
     try:
         rolling_mean = y_cleaned.rolling(window=seasonal_period, center=True).mean()
@@ -179,3 +214,51 @@ def preprocess_series(
         f"winsorized={'yes' if report.winsorization_applied else 'no'}."
     )
     return PreprocessResult(y_clean=y_cleaned, y_raw=y_raw, report=report)
+
+
+# ---------------------------------------------------------------------------
+# ERP transaction-price smoothing (Phase 2A)
+# ---------------------------------------------------------------------------
+
+def smooth_erp_prices(
+    y: pd.Series,
+    window: int = 7,
+    method: str = "median",
+) -> pd.Series:
+    """Apply rolling smoothing to ERP transaction prices.
+
+    ERP prices have deal-to-deal noise that market quotes don't (bulk
+    discounts, grade premiums, supplier-negotiated terms).  A rolling
+    median preserves the underlying price trend while being robust to
+    single-transaction outliers.
+
+    Parameters
+    ----------
+    y : pd.Series
+        Raw price series (datetime index).
+    window : int
+        Rolling window size in observations (default 7 = weekly).
+    method : str
+        "median" (default) or "mean".
+
+    Returns
+    -------
+    pd.Series
+        Smoothed series (same length as input, NA at the leading edge).
+    """
+    if len(y.dropna()) < window:
+        logger.debug("smooth_erp_prices: series too short (%d < %d), skipping", len(y.dropna()), window)
+        return y
+
+    if method == "median":
+        smoothed = y.rolling(window=window, center=False, min_periods=1).median()
+    else:
+        smoothed = y.rolling(window=window, center=False, min_periods=1).mean()
+
+    # Drop leading/trailing NaN from rolling (fill with original values)
+    result = smoothed.combine_first(y)
+    logger.info(
+        "Applied ERP smoothing (window=%d, method=%s): %d points → %d non-NA",
+        window, method, len(y), result.notna().sum(),
+    )
+    return result

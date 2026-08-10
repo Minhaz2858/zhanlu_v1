@@ -267,19 +267,19 @@ def _render_via_python_docx(payload: ReportCardPayload, ctx: Optional[ExportCont
     if payload.key_findings:
         doc.add_heading("Key Findings", level=1)
         for finding in payload.key_findings:
-            doc.add_paragraph(str(finding))
+            doc.add_paragraph(_val(finding, "text") or "")
 
     # ---- 7. Insights (bullets) ----
     if payload.insights:
         doc.add_heading("Insights", level=1)
         for ins in payload.insights:
-            doc.add_paragraph(str(ins), style="List Bullet")
+            doc.add_paragraph(_val(ins, "text") or "", style="List Bullet")
 
     # ---- 8. Recommendations (bullets) ----
     if payload.recommendations:
         doc.add_heading("Recommendations", level=1)
         for rec in payload.recommendations:
-            doc.add_paragraph(str(rec), style="List Bullet")
+            doc.add_paragraph(_val(rec, "text") or "", style="List Bullet")
 
     # ---- 9. Custom sections ----
     for sec in payload.sections or []:

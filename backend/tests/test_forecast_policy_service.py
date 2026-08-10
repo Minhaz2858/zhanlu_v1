@@ -122,3 +122,83 @@ class TestPolicyApply:
         assert "bias_pct" in detail
         assert "volatility_regime" in detail
         assert "horizon_adjustment" in detail
+
+
+class TestComputeFromAccuracyLog:
+    """Bug #2 regression: compute_from_accuracy_log uses correct JOIN pattern."""
+
+    def test_no_target_returns_neutral(self):
+        """When product_key not found in ForecastTarget, returns neutral metrics."""
+        from app.services.forecasting.forecast_policy_service import ForecastPolicyService
+
+        mock_db = MagicMock()
+        # db.query(ForecastTarget).filter(...).first() → None
+        mock_db.query.return_value.filter.return_value.first.return_value = None
+
+        metrics = ForecastPolicyService.compute_from_accuracy_log(
+            mock_db,
+            product_key="ecisco.nonexistent",
+            org_id="default-org",
+        )
+        assert metrics.bias_pct == 0.0
+        assert metrics.sample_count == 0
+
+    def test_found_target_no_logs_returns_neutral(self):
+        """Target exists but no accuracy logs → neutral metrics."""
+        from app.services.forecasting.forecast_policy_service import ForecastPolicyService
+
+        mock_db = MagicMock()
+        mock_target = MagicMock()
+        mock_target.id = 42
+
+        # First query: ForecastTarget → returns target
+        target_query = MagicMock()
+        target_query.filter.return_value.first.return_value = mock_target
+
+        # Second query: ForecastAccuracyLog → returns empty list
+        log_query = MagicMock()
+        log_query.filter.return_value.all.return_value = []
+
+        mock_db.query.side_effect = [target_query, log_query]
+
+        metrics = ForecastPolicyService.compute_from_accuracy_log(
+            mock_db,
+            product_key="ecisco.isoprene",
+            org_id="default-org",
+        )
+        assert metrics.bias_pct == 0.0
+        assert metrics.sample_count == 0
+
+    def test_with_realized_error_computes_bias(self):
+        """Accuracy log entries with realized_error → non-zero bias."""
+        from app.services.forecasting.forecast_policy_service import ForecastPolicyService
+
+        mock_db = MagicMock()
+        mock_target = MagicMock()
+        mock_target.id = 42
+
+        mock_log1 = MagicMock()
+        mock_log1.realized_error = 0.03
+        mock_log2 = MagicMock()
+        mock_log2.realized_error = 0.02
+        mock_log3 = MagicMock()
+        mock_log3.realized_error = 0.01
+
+        # First query: ForecastTarget → returns target
+        target_query = MagicMock()
+        target_query.filter.return_value.first.return_value = mock_target
+
+        # Second query: ForecastAccuracyLog → returns 3 logs
+        log_query = MagicMock()
+        log_query.filter.return_value.all.return_value = [mock_log1, mock_log2, mock_log3]
+
+        mock_db.query.side_effect = [target_query, log_query]
+
+        metrics = ForecastPolicyService.compute_from_accuracy_log(
+            mock_db,
+            product_key="ecisco.isoprene",
+            org_id="default-org",
+        )
+        # Non-zero bias: mean(0.03, 0.02, 0.01) = 0.02, bias = -0.02 * 0.35 * 100 = -0.7
+        assert metrics.bias_pct == pytest.approx(-0.7, abs=0.01)
+        assert metrics.sample_count == 3

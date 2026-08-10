@@ -72,9 +72,18 @@ from app.models.forecasting import (
     DomainPackInstall,
     ForecastFeedback,
     ForecastWeightAdjustment,
+    ForecastExternalSeries,
+    ForecastExternalPoint,
 )
+from app.models.response_cache_entry import ResponseCacheEntry
 from app.models.intelligence import IntelligenceEvent, IntelligenceIngestionStatus
 from app.models.resource_share import ResourceShare
+from app.models.eval_result import EvalResult
+from app.models.prompt_ab_test import PromptABTest
+from app.models.agent_run import AgentRun
+from app.models.agent_run_step import AgentRunStep
+from app.models.llm_model import LlmModel
+from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta, KBTableRelation
 
 __all__ = [
     "TimestampedBase",
@@ -156,7 +165,18 @@ __all__ = [
     "DomainPackInstall",
     "ForecastFeedback",
     "ForecastWeightAdjustment",
+    "ForecastExternalSeries",
+    "ForecastExternalPoint",
     "IntelligenceEvent",
     "IntelligenceIngestionStatus",
     "ResourceShare",
+    "EvalResult",
+    "PromptABTest",
+    "AgentRun",
+    "AgentRunStep",
+    "LlmModel",
+    "ResponseCacheEntry",
+    "KBTableMeta",
+    "KBColumnMeta",
+    "KBTableRelation",
 ]

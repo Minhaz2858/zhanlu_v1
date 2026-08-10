@@ -22,7 +22,7 @@ import logging
 import mimetypes
 import os
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -673,7 +673,7 @@ def set_skip_confirmation(
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
     task.skip_confirmation = "true" if req.skip else "false"
-    task.updated_date = datetime.utcnow()
+    task.updated_date = datetime.now(timezone.utc)
     db.commit()
     return {
         "success": True,
@@ -927,7 +927,7 @@ def toggle_status(task_id: str, req: ToggleRequest, db: Session = Depends(get_db
     if new_status not in ("active", "paused", "failed", "completed"):
         raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
     task.status = new_status
-    task.updated_date = datetime.utcnow()
+    task.updated_date = datetime.now(timezone.utc)
     db.commit()
     if new_status == "active" and task.cron_expression:
         from app.services.automation_dispatcher import recompute_next_run
@@ -962,7 +962,7 @@ def delete_automation(task_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="Automation task not found")
     task.is_deleted = True
     task.status = "deleted"
-    task.updated_date = datetime.utcnow()
+    task.updated_date = datetime.now(timezone.utc)
     db.commit()
     return {"success": True, "id": task_id}
 

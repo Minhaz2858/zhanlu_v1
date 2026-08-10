@@ -14,7 +14,8 @@ from typing import Optional
 
 from app.models.market_dashboard import PRODUCT_GROUP_MAP, PRODUCT_LABELS
 from app.schemas.market_dashboard import (
-    AnalystBriefMeta, DecisionBoardProduct, DecisionBoardResponse, SkuBrief,
+    AnalystBriefMeta, DecisionBoardProduct, DecisionBoardResponse,
+    DecisionRoiMeta, DriverAttributionMeta, SkuBrief,
 )
 from app.services import market_dashboard_service as mds
 
@@ -183,6 +184,41 @@ def _pick(items, day):
     return None
 
 
+def _build_decision_roi(product_id: str, db) -> Optional[DecisionRoiMeta]:
+    """Query ForecastDecisionLog for a product and aggregate ROI stats.
+
+    Returns None if no logs exist (graceful — most products have none yet
+    since FORECAST_DECISION_LOGGING_ENABLED defaults OFF).
+    """
+    if db is None:
+        return None
+    try:
+        from app.models.forecasting import ForecastDecisionLog
+        from app.services.forecasting.features.decision_roi import aggregate_roi
+
+        logs = (
+            db.query(ForecastDecisionLog)
+            .filter(ForecastDecisionLog.product_id == product_id)
+            .all()
+        )
+        if not logs:
+            return None
+        summary = aggregate_roi(logs)
+        return DecisionRoiMeta(
+            total_decisions=summary.total_decisions,
+            total_realized=summary.total_realized,
+            buy_count=summary.buy_count,
+            sell_count=summary.sell_count,
+            accuracy_pct=summary.accuracy_pct,
+            weighted_roi_pct=summary.weighted_roi,
+            buy_correct=summary.buy_correct,
+            sell_correct=summary.sell_correct,
+        )
+    except Exception:
+        # Additive — never break the board on ROI computation failure.
+        return None
+
+
 def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResponse:
     product_ids = PRODUCT_GROUP_MAP.get(group, [])
     # get_market_snapshot enforces the EDIA fail-closed guard (503).
@@ -274,6 +310,9 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
             for s in (batch.sku_forecasts_by_product or {}).get(pid, [])
         ]
 
+        # Stream B1: Decision ROI track record (additive — None if no logs).
+        decision_roi = _build_decision_roi(pid, db)
+
         products.append(DecisionBoardProduct(
             id=pid,
             name_zh=name_zh,
@@ -300,6 +339,8 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
             ),
             narrative_zh=narrative_zh,
             analyst_brief=brief_meta,
+            decision_roi=decision_roi,
+            drivers=analysis.drivers if analysis else [],
             skus=skus,
         ))
 

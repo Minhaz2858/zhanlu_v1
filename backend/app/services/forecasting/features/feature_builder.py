@@ -35,10 +35,17 @@ def build_features(
     horizon: int,
     cascade_forecasts: dict[str, list[float]] | None = None,
     volume_df: pd.DataFrame | None = None,
+    operating_rate_df: pd.DataFrame | None = None,
+    inventory_df: pd.DataFrame | None = None,
+    import_price_df: pd.DataFrame | None = None,
+    demand_signal=None,  # DemandSignal | None
+    supplier_dispersion_df: pd.DataFrame | None = None,
+    # Wave 5: new feature engineering
+    oilchem_df: pd.DataFrame | None = None,
+    tech_indicators_enabled: bool = False,
+    fourier_enabled: bool = False,
+    oilchem_exog_enabled: bool = False,
 ) -> FeatureMatrix:
-    if not spec.feedstock_keys:
-        return FeatureMatrix(X_train=None, X_future=None, feature_names=[])
-
     # ---- preprocess volume_df (Wave 1: ERP volume exogenous) ----
     _volume_enabled = False
     if volume_df is not None and not volume_df.empty:
@@ -57,6 +64,125 @@ def build_features(
                 volume_df = None
             else:
                 _volume_enabled = True
+
+    # ---- preprocess Wave 3 external exog DataFrames ----
+    # Each tuple: (df, metric_col, lag_col_prefix)
+    _exog_specs = [
+        (operating_rate_df, "op_rate", "op_rate_lag"),
+        (inventory_df, "inventory_t", "inventory_lag"),
+        (import_price_df, "import_price_cny", "import_price_lag"),
+    ]
+    _exog_dfs: dict[str, tuple[pd.DataFrame, str]] = {}
+    for raw_df, metric_col, prefix in _exog_specs:
+        if raw_df is None or raw_df.empty:
+            continue
+        if not isinstance(raw_df.index, pd.DatetimeIndex):
+            if "date" in raw_df.columns:
+                raw_df = raw_df.set_index("date")
+            else:
+                logger.warning(
+                    "%s has no DatetimeIndex and no 'date' col; skipping.",
+                    prefix,
+                )
+                continue
+        raw_df = raw_df.sort_index()
+        if len(raw_df) < 8:
+            logger.warning(
+                "%s has only %d rows (< 8); skipping.", prefix, len(raw_df),
+            )
+            continue
+        # Use the metric column if present; otherwise default to single value col
+        if metric_col in raw_df.columns:
+            _exog_dfs[prefix] = (raw_df, metric_col)
+        else:
+            logger.warning(
+                "%s missing metric col '%s'; skipping.", prefix, metric_col,
+            )
+
+    # ---- demand signal + supplier dispersion (P0-1) ----
+    _use_demand_signal = demand_signal is not None
+    if _use_demand_signal:
+        _ds_vol_momentum_4wk = demand_signal.vol_momentum_4wk if demand_signal.vol_momentum_4wk is not None else 0.0
+        _ds_yoy_change_pct = demand_signal.yoy_change_pct if demand_signal.yoy_change_pct is not None else 0.0
+        _ds_vol_price_divergence = demand_signal.vol_price_divergence if demand_signal.vol_price_divergence is not None else 0.0
+        _ds_trend_encoded = {"rising": 1.0, "falling": -1.0}.get(demand_signal.demand_trend, 0.0)
+    else:
+        _ds_vol_momentum_4wk = 0.0
+        _ds_yoy_change_pct = 0.0
+        _ds_vol_price_divergence = 0.0
+        _ds_trend_encoded = 0.0
+
+    _use_supplier = supplier_dispersion_df is not None and not supplier_dispersion_df.empty
+    if _use_supplier:
+        sdf = supplier_dispersion_df.sort_values("date")
+        _supplier_spread = float(sdf["spread"].iloc[-1]) if len(sdf) > 0 else 0.0
+        _supplier_count = float(sdf["supplier_count"].iloc[-1]) if len(sdf) > 0 else 0.0
+    else:
+        _supplier_spread = 0.0
+        _supplier_count = 0.0
+
+    # ---- Wave 5: Pre-compute technical indicators & Fourier features ----
+    rsi_series: pd.Series | None = None
+    macd_series: pd.Series | None = None
+    bb_bw_series: pd.Series | None = None
+
+    if tech_indicators_enabled and len(y) >= 30:
+        try:
+            from app.services.forecasting.features.technical_indicators import (
+                compute_rsi, compute_macd, compute_bollinger,
+            )
+            rsi_series = compute_rsi(y, period=14)
+            macd_series, _macd_sig, _macd_h = compute_macd(y)
+            _bb_m, _bb_u, _bb_l, bb_bw_series = compute_bollinger(y)
+            logger.debug("Tech indicators computed for %s: RSI+MACD+BB", target_product_key)
+        except Exception:
+            logger.debug("Tech indicator computation failed for %s", target_product_key)
+            rsi_series = macd_series = bb_bw_series = None
+
+    fourier_df: pd.DataFrame | None = None
+    if fourier_enabled:
+        try:
+            from app.services.forecasting.features.fourier_features import compute_fourier_terms
+            fourier_df = compute_fourier_terms(y, n_harmonics=3, target_period=7)
+            logger.debug("Fourier features computed for %s: %d cols", target_product_key, len(fourier_df.columns))
+        except Exception:
+            logger.debug("Fourier feature computation failed for %s", target_product_key)
+            fourier_df = None
+
+    # ---- Wave 5: Pre-process oilchem for lag extraction ----
+    _oilchem_index: pd.DatetimeIndex | None = None
+    _oilchem_series_map: dict[str, pd.Series] = {}
+    _oilchem_last_known: dict[str, float] = {}
+    if oilchem_exog_enabled and oilchem_df is not None and not oilchem_df.empty:
+        if not isinstance(oilchem_df.index, pd.DatetimeIndex):
+            if "date" in oilchem_df.columns:
+                oilchem_df = oilchem_df.set_index("date")
+        oilchem_df = oilchem_df.sort_index()
+        _oilchem_index = oilchem_df.index
+        for col in oilchem_df.columns:
+            oc_series = oilchem_df[col].dropna()
+            if len(oc_series) > 0:
+                _oilchem_series_map[col] = oc_series
+                _oilchem_last_known[col] = float(oc_series.iloc[-1])
+        logger.debug("Oilchem prepped: %d cols", len(_oilchem_series_map))
+
+    if not spec.feedstock_keys:
+        # No feedstock features, but Wave 3 external exog may still contribute
+        # (Wave 3 T3.4). Build minimal feature matrix from external exog only.
+        if not (_volume_enabled or _exog_dfs):
+            return FeatureMatrix(X_train=None, X_future=None, feature_names=[])
+        # Fall through to the Wave-3-only feature matrix path below
+        return _build_external_only_matrix(
+            y, volume_df, _volume_enabled, _exog_dfs, horizon,
+            _use_demand_signal, _ds_vol_momentum_4wk, _ds_yoy_change_pct, _ds_vol_price_divergence, _ds_trend_encoded,
+            _use_supplier, _supplier_spread, _supplier_count,
+            rsi_series=rsi_series, macd_series=macd_series, bb_bw_series=bb_bw_series,
+            fourier_df=fourier_df,
+            oilchem_series_map=_oilchem_series_map, oilchem_last_known=_oilchem_last_known,
+            tech_indicators_enabled=tech_indicators_enabled,
+            fourier_enabled=fourier_enabled,
+            oilchem_exog_enabled=oilchem_exog_enabled,
+        )
 
     y_dates = y.index
     start_date = y_dates.min()
@@ -137,6 +263,64 @@ def build_features(
                 else:
                     prior = vol_series[vol_series.index <= lag_date]
                     row[col] = float(prior.iloc[-1]) if len(prior) > 0 else 0.0
+        # Wave 3 external exog lags
+        for prefix, (exog_df, metric_col) in _exog_dfs.items():
+            exog_series = exog_df[metric_col]
+            for lag in range(1, 8):
+                lag_date = date - timedelta(days=lag)
+                col = f"{prefix}{lag}"
+                if lag_date in exog_df.index:
+                    row[col] = float(exog_series.loc[lag_date])
+                else:
+                    prior = exog_series[exog_series.index <= lag_date]
+                    if len(prior) > 0:
+                        row[col] = float(prior.iloc[-1])
+                    else:
+                        # No prior data — fall back to the first known exog
+                        # value (carry-forward at start of series).
+                        row[col] = float(exog_series.iloc[0])
+        # P0-1 demand signal fields (constant per-row scalars)
+        if _use_demand_signal:
+            row["vol_momentum_4wk"] = _ds_vol_momentum_4wk
+            row["yoy_change_pct"] = _ds_yoy_change_pct
+            row["vol_price_divergence"] = _ds_vol_price_divergence
+            row["demand_trend_encoded"] = _ds_trend_encoded
+        # P0-1 supplier dispersion fields
+        if _use_supplier:
+            row["supplier_spread"] = _supplier_spread
+            row["supplier_count"] = _supplier_count
+        # Wave 5: technical indicators (pre-computed, no look-ahead bias)
+        if tech_indicators_enabled:
+            if rsi_series is not None and date in rsi_series.index:
+                v = rsi_series[date]
+                row["rsi_14"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 50.0
+            else:
+                row["rsi_14"] = 50.0
+            if macd_series is not None and date in macd_series.index:
+                v = macd_series[date]
+                row["macd"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 0.0
+            else:
+                row["macd"] = 0.0
+            if bb_bw_series is not None and date in bb_bw_series.index:
+                v = bb_bw_series[date]
+                row["bb_bandwidth"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 0.0
+            else:
+                row["bb_bandwidth"] = 0.0
+        # Wave 5: Fourier features
+        if fourier_enabled and fourier_df is not None and date in fourier_df.index:
+            for col in fourier_df.columns:
+                row[col] = float(fourier_df[col].loc[date])
+        # Wave 5: Oilchem exogenous lags (7-day lags, carry-forward on gaps)
+        if oilchem_exog_enabled and _oilchem_series_map:
+            for oc_col, oc_series in _oilchem_series_map.items():
+                for lag in range(1, 8):
+                    lag_date = date - timedelta(days=lag)
+                    col = f"oilchem_{oc_col}_lag{lag}"
+                    if lag_date in oc_series.index:
+                        row[col] = float(oc_series.loc[lag_date])
+                    else:
+                        prior = oc_series[oc_series.index <= lag_date]
+                        row[col] = float(prior.iloc[-1]) if len(prior) > 0 else _oilchem_last_known.get(oc_col, 0.0)
         train_rows.append(row)
         train_dates.append(date)
 
@@ -195,11 +379,189 @@ def build_features(
                             row[col] = float(prior.iloc[-1]) if len(prior) > 0 else float(vol_series.iloc[0])
                     else:
                         row[col] = float(vol_series.iloc[-1])
+            # Wave 3 external exog lags for future (carry last value forward)
+            for prefix, (exog_df, metric_col) in _exog_dfs.items():
+                exog_series = exog_df[metric_col]
+                last_exog_date = exog_df.index.max()
+                for lag in range(1, 8):
+                    lag_date = date - timedelta(days=lag)
+                    col = f"{prefix}{lag}"
+                    if lag_date <= last_exog_date:
+                        if lag_date in exog_df.index:
+                            row[col] = float(exog_series.loc[lag_date])
+                        else:
+                            prior = exog_series[exog_series.index <= lag_date]
+                            row[col] = float(prior.iloc[-1]) if len(prior) > 0 else float(exog_series.iloc[0])
+                    else:
+                        row[col] = float(exog_series.iloc[-1])
+            # P0-1 demand signal + supplier dispersion in future horizon (carry last known)
+            if _use_demand_signal:
+                row["vol_momentum_4wk"] = _ds_vol_momentum_4wk
+                row["yoy_change_pct"] = _ds_yoy_change_pct
+                row["vol_price_divergence"] = _ds_vol_price_divergence
+                row["demand_trend_encoded"] = _ds_trend_encoded
+            if _use_supplier:
+                row["supplier_spread"] = _supplier_spread
+                row["supplier_count"] = _supplier_count
+            # Wave 5: technical indicators (carry last known value forward)
+            if tech_indicators_enabled:
+                last_date = y_dates[-1]
+                if rsi_series is not None and last_date in rsi_series.index:
+                    v = rsi_series[last_date]
+                    row["rsi_14"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 50.0
+                else:
+                    row["rsi_14"] = 50.0
+                if macd_series is not None and last_date in macd_series.index:
+                    v = macd_series[last_date]
+                    row["macd"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 0.0
+                else:
+                    row["macd"] = 0.0
+                if bb_bw_series is not None and last_date in bb_bw_series.index:
+                    v = bb_bw_series[last_date]
+                    row["bb_bandwidth"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 0.0
+                else:
+                    row["bb_bandwidth"] = 0.0
+            # Wave 5: Fourier features (extend positionally into future)
+            if fourier_enabled:
+                _future_position = len(y_dates) + step
+                _period = 7
+                for h_idx in range(1, 4):  # harmonics 1–3
+                    row[f"fourier_sin_{h_idx}"] = float(np.sin(2 * np.pi * h_idx * _future_position / _period))
+                    row[f"fourier_cos_{h_idx}"] = float(np.cos(2 * np.pi * h_idx * _future_position / _period))
+            # Wave 5: Oilchem exogenous lags (carry last known value forward)
+            if oilchem_exog_enabled and _oilchem_series_map:
+                _last_date = y_dates[-1]
+                for oc_col in _oilchem_series_map:
+                    for lag in range(1, 8):
+                        lag_date = date - timedelta(days=lag)
+                        col = f"oilchem_{oc_col}_lag{lag}"
+                        if lag_date <= _last_date:
+                            oc_series = _oilchem_series_map[oc_col]
+                            if lag_date in oc_series.index:
+                                row[col] = float(oc_series.loc[lag_date])
+                            else:
+                                prior = oc_series[oc_series.index <= lag_date]
+                                row[col] = float(prior.iloc[-1]) if len(prior) > 0 else _oilchem_last_known.get(oc_col, 0.0)
+                        else:
+                            row[col] = _oilchem_last_known.get(oc_col, 0.0)
             future_rows.append(row)
         X_future = pd.DataFrame(future_rows, index=future_dates)
 
     return FeatureMatrix(
         X_train=X_train,
         X_future=X_future,
+        feature_names=list(X_train.columns),
+    )
+
+
+def _build_external_only_matrix(
+    y: pd.Series,
+    volume_df: pd.DataFrame | None,
+    volume_enabled: bool,
+    exog_dfs: dict[str, tuple[pd.DataFrame, str]],
+    horizon: int,
+    use_ds: bool = False,
+    ds_vol_momentum: float = 0.0,
+    ds_yoy: float = 0.0,
+    ds_vol_price_div: float = 0.0,
+    ds_trend: float = 0.0,
+    use_supplier: bool = False,
+    supplier_spread: float = 0.0,
+    supplier_count: float = 0.0,
+    # Wave 5: feature engineering
+    rsi_series: pd.Series | None = None,
+    macd_series: pd.Series | None = None,
+    bb_bw_series: pd.Series | None = None,
+    fourier_df: pd.DataFrame | None = None,
+    oilchem_series_map: dict | None = None,
+    oilchem_last_known: dict | None = None,
+    tech_indicators_enabled: bool = False,
+    fourier_enabled: bool = False,
+    oilchem_exog_enabled: bool = False,
+) -> FeatureMatrix:
+    """Build a minimal feature matrix from Wave 3 external exog only.
+
+    Used when spec.feedstock_keys is empty but external exog dataframes are
+    supplied (Wave 3 T3.4). Mirrors the lag-column generation in the main
+    ``build_features`` path so test expectations are consistent.
+    """
+    y_dates = y.index
+    train_rows: list[dict] = []
+    train_dates: list = []
+    for date in y_dates:
+        row: dict = {}
+        if volume_enabled:
+            vol_series = volume_df["volume"]
+            for lag in range(1, 8):
+                lag_date = date - timedelta(days=lag)
+                col = f"erp_volume_lag{lag}"
+                if lag_date in volume_df.index:
+                    row[col] = float(vol_series.loc[lag_date])
+                else:
+                    prior = vol_series[vol_series.index <= lag_date]
+                    row[col] = float(prior.iloc[-1]) if len(prior) > 0 else 0.0
+        for prefix, (exog_df, metric_col) in exog_dfs.items():
+            exog_series = exog_df[metric_col]
+            for lag in range(1, 8):
+                lag_date = date - timedelta(days=lag)
+                col = f"{prefix}{lag}"
+                if lag_date in exog_df.index:
+                    row[col] = float(exog_series.loc[lag_date])
+                else:
+                    prior = exog_series[exog_series.index <= lag_date]
+                    if len(prior) > 0:
+                        row[col] = float(prior.iloc[-1])
+                    else:
+                        # No prior data — fall back to first known exog value.
+                        row[col] = float(exog_series.iloc[0])
+        # P0-1 demand signal + supplier dispersion
+        if use_ds:
+            row["vol_momentum_4wk"] = ds_vol_momentum
+            row["yoy_change_pct"] = ds_yoy
+            row["vol_price_divergence"] = ds_vol_price_div
+            row["demand_trend_encoded"] = ds_trend
+        if use_supplier:
+            row["supplier_spread"] = supplier_spread
+            row["supplier_count"] = supplier_count
+        # Wave 5: technical indicators
+        if tech_indicators_enabled:
+            if rsi_series is not None and date in rsi_series.index:
+                v = rsi_series[date]
+                row["rsi_14"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 50.0
+            else:
+                row["rsi_14"] = 50.0
+            if macd_series is not None and date in macd_series.index:
+                v = macd_series[date]
+                row["macd"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 0.0
+            else:
+                row["macd"] = 0.0
+            if bb_bw_series is not None and date in bb_bw_series.index:
+                v = bb_bw_series[date]
+                row["bb_bandwidth"] = float(v) if (isinstance(v, (int, float, np.floating)) and pd.notna(v)) else 0.0
+            else:
+                row["bb_bandwidth"] = 0.0
+        # Wave 5: Fourier features
+        if fourier_enabled and fourier_df is not None and date in fourier_df.index:
+            for col in fourier_df.columns:
+                row[col] = float(fourier_df[col].loc[date])
+        # Wave 5: Oilchem lags
+        if oilchem_exog_enabled and oilchem_series_map:
+            for oc_col, oc_series in oilchem_series_map.items():
+                for lag in range(1, 8):
+                    lag_date = date - timedelta(days=lag)
+                    col = f"oilchem_{oc_col}_lag{lag}"
+                    if lag_date in oc_series.index:
+                        row[col] = float(oc_series.loc[lag_date])
+                    else:
+                        prior = oc_series[oc_series.index <= lag_date]
+                        lk = (oilchem_last_known or {}).get(oc_col, 0.0)
+                        row[col] = float(prior.iloc[-1]) if len(prior) > 0 else lk
+        train_rows.append(row)
+        train_dates.append(date)
+
+    X_train = pd.DataFrame(train_rows, index=train_dates)
+    return FeatureMatrix(
+        X_train=X_train,
+        X_future=None,  # no feedstock cascade → no future horizon
         feature_names=list(X_train.columns),
     )

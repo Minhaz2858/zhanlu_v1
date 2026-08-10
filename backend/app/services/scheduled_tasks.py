@@ -29,24 +29,44 @@ MEMORY_CONSOLIDATION_INTERVAL = 30 * 60  # 30 minutes
 SKILL_CURATION_INTERVAL = 6 * 60 * 60   # 6 hours
 ALERT_CHECK_INTERVAL = 5 * 60            # 5 minutes
 NEWS_INGESTION_INTERVAL = 60 * 60        # 1 hour (intelligence layer)
+DAILY_EVAL_INTERVAL = 24 * 60 * 60       # 24 hours (LLM quality eval pipeline)
 
 NIGHTLY_HOUR_UTC = 2  # 2:00 AM UTC
 
 _running_tasks: list[asyncio.Task] = []
+_scheduled_failure_count: dict[str, int] = {}
+
+
+def _inc_failure(task_name: str) -> None:
+    """Increment failure counter for observability — prevents silent dead tasks."""
+    _scheduled_failure_count[task_name] = _scheduled_failure_count.get(task_name, 0) + 1
+    count = _scheduled_failure_count[task_name]
+    if count <= 3:
+        logger.error("Scheduled task %s failed (occurrence #%d)", task_name, count)
+    else:
+        logger.warning("Scheduled task %s failed (occurrence #%d)", task_name, count)
 
 
 async def _run_memory_consolidation_cycle() -> None:
-    """Run memory consolidation for all agents with memories."""
+    """Run memory consolidation for all agents with memories.
+    
+    Delegated to a threadpool via to_thread so the sync ``run_consolidation``
+    (which uses ``SessionLocal + db.query``) does not block the event loop.
+    """
+    await asyncio.to_thread(_memory_consolidation_sync)
+
+
+def _memory_consolidation_sync() -> None:
+    """Sync body of memory consolidation — uses sync SessionLocal."""
     try:
-        from app.database import AsyncSessionLocal
-        from app.models.agent_app import AgentApp
+        from app.database import SessionLocal
+        from app.models.agent_memory import AgentMemory
         from app.services.memory_manager import run_consolidation
         from sqlalchemy import select, distinct
 
-        async with AsyncSessionLocal() as db:
-            # Get distinct agent_app_ids that have memories
-            from app.models.agent_memory import AgentMemory
-            result = await db.execute(
+        db = SessionLocal()
+        try:
+            result = db.execute(
                 select(distinct(AgentMemory.agent_app_id)).where(
                     AgentMemory.is_deleted == False
                 )
@@ -64,25 +84,42 @@ async def _run_memory_consolidation_cycle() -> None:
                         )
                 except Exception as e:
                     logger.warning("Memory consolidation failed for %s: %s", agent_id, e)
+                    _inc_failure("memory_consolidation")
+        finally:
+            db.close()
     except Exception as e:
         logger.warning("Memory consolidation cycle failed: %s", e)
+        _inc_failure("memory_consolidation")
 
 
 async def _run_skill_curation_cycle() -> None:
-    """Run skill curation (report only — no auto-modification)."""
+    """Run skill curation (report only — no auto-modification).
+    
+    Delegated to a threadpool via to_thread so the sync ``run_skill_curation``
+    (which uses ``SessionLocal + db.query``) does not block the event loop.
+    """
+    await asyncio.to_thread(_skill_curation_sync)
+
+
+def _skill_curation_sync() -> None:
+    """Sync body of skill curation — uses sync SessionLocal."""
     try:
-        from app.database import AsyncSessionLocal
+        from app.database import SessionLocal
         from app.services.skill_curator import run_skill_curation
 
-        async with AsyncSessionLocal() as db:
+        db = SessionLocal()
+        try:
             report = run_skill_curation(db)
             if report.overlapping_pairs > 0 or report.stale_skills > 0:
                 logger.info(
                     "Scheduled skill curation: %d skills, %d overlapping pairs, %d stale",
                     report.total_skills, report.overlapping_pairs, report.stale_skills,
                 )
+        finally:
+            db.close()
     except Exception as e:
         logger.warning("Skill curation cycle failed: %s", e)
+        _inc_failure("skill_curation")
 
 
 async def _run_alert_check_cycle() -> None:
@@ -108,6 +145,47 @@ async def _run_news_ingestion_cycle() -> None:
             await db.commit()
     except Exception as e:
         logger.warning("News ingestion cycle failed: %s", e)
+
+
+# ---- Daily LLM Quality Eval Pipeline -------------------------------------------
+
+def _run_daily_eval_sync() -> dict:
+    """Run the LLM quality evaluation pipeline on recent conversations (sync).
+
+    Gated by EVAL_PIPELINE_ENABLED (default False).
+    Returns summary dict: {total, pass_rate, dimensions, ...}.
+    """
+    from app.database import SessionLocal
+    from app.services.eval_pipeline import run_eval_pipeline, build_daily_report
+
+    db = SessionLocal()
+    try:
+        results = run_eval_pipeline(db)
+        report = build_daily_report(results)
+        if report["total"] > 0:
+            logger.info(
+                "[daily-eval] Evaluated %d conversations — pass_rate=%.1f%% — dims=%s",
+                report["total"],
+                report["pass_rate"] * 100,
+                report.get("dimensions", {}),
+            )
+        return report
+    except Exception:
+        logger.exception("[daily-eval] Cycle failed")
+        return {"error": True}
+    finally:
+        db.close()
+
+
+async def _run_daily_eval_cycle() -> None:
+    """Run the daily eval pipeline in a thread executor (non-blocking wrapper)."""
+    from app.config import settings
+    if not getattr(settings, "EVAL_PIPELINE_ENABLED", False):
+        return  # silently skip when disabled
+    try:
+        await asyncio.to_thread(_run_daily_eval_sync)
+    except Exception:
+        logger.exception("[daily-eval] Unhandled exception")
 
 
 # ---- Nightly Forecast (2 AM UTC daily, NOT a UI-visible AutomationTask) -------
@@ -278,6 +356,7 @@ def _run_nightly_forecast_sync() -> dict:
             target_t0 = time.monotonic()
             try:
                 engine.compute_target_anchored(target.id)
+                db.commit()  # Persist the ForecastRun (engine only flushes)
                 elapsed = time.monotonic() - target_t0
                 success_count += 1
                 logger.info(
@@ -286,6 +365,7 @@ def _run_nightly_forecast_sync() -> dict:
                     elapsed,
                 )
             except Exception:
+                db.rollback()  # Roll back failed target, keep prior commits
                 elapsed = time.monotonic() - target_t0
                 logger.exception(
                     "[nightly-forecast] ✗ %s failed (%.1fs)",
@@ -386,12 +466,22 @@ def start_scheduled_tasks() -> None:
     """Start all scheduled background tasks.
 
     Call this once at app startup. Tasks run fire-and-forget.
+    Uses a Postgres advisory lock to prevent duplicate startup when
+    running with multiple uvicorn workers — only ONE worker wins.
     """
     global _running_tasks
 
-    # Don't start twice
+    # Don't start twice (in-process guard)
     if _running_tasks:
         logger.warning("Scheduled tasks already running — skipping")
+        return
+
+    # ── Multi-worker guard: Postgres advisory lock ──
+    if not _try_acquire_scheduler_lock():
+        logger.info(
+            "Scheduled tasks NOT started — another worker holds the scheduler lock. "
+            "This is expected in multi-worker deployments."
+        )
         return
 
     try:
@@ -421,6 +511,10 @@ def start_scheduled_tasks() -> None:
             _nightly_forecast_loop(),
             name="sched-nightly-forecast",
         ),
+        loop.create_task(
+            _periodic_task("daily_eval", DAILY_EVAL_INTERVAL, _run_daily_eval_cycle),
+            name="sched-daily-eval",
+        ),
     ]
 
     for task in tasks:
@@ -428,6 +522,39 @@ def start_scheduled_tasks() -> None:
 
     _running_tasks = tasks
     logger.info("Started %d scheduled background tasks", len(tasks))
+
+
+def _try_acquire_scheduler_lock() -> bool:
+    """Acquire a Postgres advisory lock for the scheduler.
+
+    Only one uvicorn worker (or process) should run background tasks.
+    Returns True if the lock was acquired, False otherwise.
+    Falls back to an env-var gate when Postgres is unavailable.
+    """
+    # Env-var shortcut: SCHEDULER_WORKER_ID=0 always wins
+    worker_id = os.environ.get("SCHEDULER_WORKER_ID")
+    if worker_id is not None:
+        return worker_id == "0"
+
+    try:
+        from app.database import SessionLocal
+        db = SessionLocal()
+        try:
+            # pg_try_advisory_lock(380630) — arbitrary unique bigint key
+            result = db.execute("SELECT pg_try_advisory_lock(380630)").scalar()
+            db.commit()
+            if result:
+                logger.info("Scheduler advisory lock acquired (pg_try_advisory_lock)")
+            return bool(result)
+        finally:
+            db.close()
+    except Exception:
+        # Non-Postgres fallback (SQLite, etc.): allow startup
+        logger.warning(
+            "Could not acquire scheduler advisory lock (database may not support it). "
+            "Starting scheduled tasks anyway — if running multiple workers, tasks may duplicate."
+        )
+        return True
 
 
 async def stop_scheduled_tasks() -> None:
@@ -448,7 +575,9 @@ __all__ = [
     "SKILL_CURATION_INTERVAL",
     "ALERT_CHECK_INTERVAL",
     "NEWS_INGESTION_INTERVAL",
+    "DAILY_EVAL_INTERVAL",
     "_calculate_seconds_until_2am",
     "_run_nightly_forecast_cycle",
     "_run_nightly_forecast_sync",
+    "_run_daily_eval_cycle",
 ]

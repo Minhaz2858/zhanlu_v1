@@ -95,7 +95,7 @@ function InjectActiveId() {
 // The app's default language is Chinese. These constants match the
 // nav labels in `translations.js` for `lang=zh`.
 const LABELS = {
-  brand: 'Synexia',
+  brand: '伊斯科AI',
   nav_automation: '自动化任务',
   nav_mySpace: '我的空间',
   newTask: '新建任务',

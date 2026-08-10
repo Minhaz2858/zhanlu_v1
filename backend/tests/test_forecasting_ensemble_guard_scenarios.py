@@ -161,6 +161,73 @@ class TestGuard:
         )
         assert isinstance(gr, GuardResult)
 
+    # ── Soft-blend gate tests (Phase 2B) ───────────────────────────────
+
+    def test_soft_blend_marginal_loss_blends(self):
+        """Ensemble MAPE within 2% margin → blends, not hard discards."""
+        ep = _make_flat_forecast(10, 5.0)
+        np_fc = _make_flat_forecast(10, 6.0)
+        # naive=10%, ensemble=10.15% → within 2% margin (0.2% absolute)
+        gr = evaluate_guard(
+            ep, np_fc, ensemble_mape=0.1015, naive_mape=0.10,
+            soft_blend_enabled=True, soft_blend_margin_pct=2.0,
+        )
+        assert gr.below_naive_baseline is False
+        assert 0.0 < gr.blend_ratio < 1.0  # proportional blend
+        # Blended forecast should be between pure ensemble and pure naive
+        assert gr.published_forecast.iloc[0] != ep.iloc[0]
+        assert gr.published_forecast.iloc[0] != np_fc.iloc[0]
+
+    def test_soft_blend_hard_loss_still_discards(self):
+        """Ensemble MAPE way above margin → hard discard still applies."""
+        ep = _make_flat_forecast(10, 5.0)
+        np_fc = _make_flat_forecast(10, 6.0)
+        # naive=10%, ensemble=20% → way beyond 2% margin
+        gr = evaluate_guard(
+            ep, np_fc, ensemble_mape=0.20, naive_mape=0.10,
+            soft_blend_enabled=True, soft_blend_margin_pct=2.0,
+        )
+        assert gr.below_naive_baseline is True
+        assert gr.blend_ratio == 0.0
+        assert np.allclose(gr.published_forecast.values, np_fc.values)
+
+    def test_soft_blend_disabled_behaves_same_as_before(self):
+        """With soft_blend_enabled=False, behavior is unchanged."""
+        ep = _make_flat_forecast(10, 5.0)
+        np_fc = _make_flat_forecast(10, 6.0)
+        gr = evaluate_guard(
+            ep, np_fc, ensemble_mape=0.1015, naive_mape=0.10,
+            soft_blend_enabled=False,
+        )
+        assert gr.below_naive_baseline is True  # old behavior
+        assert gr.blend_ratio == 0.0
+
+    def test_soft_blend_equal_mape_blends_equally(self):
+        """Equal MAPE within margin → blend_ratio ≈ 1.0 (close to ensemble)."""
+        ep = _make_flat_forecast(10, 5.0)
+        np_fc = _make_flat_forecast(10, 6.0)
+        gr = evaluate_guard(
+            ep, np_fc, ensemble_mape=0.10, naive_mape=0.10,
+            soft_blend_enabled=True, soft_blend_margin_pct=2.0,
+        )
+        # Equal MAPE: excess=0 → blend_ratio=1.0 (won't be "below_naive")
+        assert gr.below_naive_baseline is False
+        assert gr.blend_ratio > 0.9
+
+    def test_soft_blend_at_margin_boundary(self):
+        """Ensemble exactly at margin boundary → blend_ratio ≈ 0."""
+        ep = _make_flat_forecast(10, 5.0)
+        np_fc = _make_flat_forecast(10, 6.0)
+        # naive=10%, ensemble=10.2% (2% margin exactly)
+        gr = evaluate_guard(
+            ep, np_fc, ensemble_mape=0.102, naive_mape=0.10,
+            soft_blend_enabled=True, soft_blend_margin_pct=2.0,
+        )
+        # At exact margin: blend_ratio = max(0, 1.0 - 0.002/0.002) = 0
+        # But with >= check, at exact boundary it's still within margin
+        # (excess=0.002, margin=0.002, excess <= margin → blend)
+        assert gr.blend_ratio <= 0.01  # nearly pure naive
+
 
 # ── Scenarios tests ───────────────────────────────────────────────────
 

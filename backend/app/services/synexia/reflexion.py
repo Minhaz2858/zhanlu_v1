@@ -190,4 +190,136 @@ async def critique(
     )
 
 
-__all__ = ["ReflexionVerdict", "critique"]
+# ── Document-specific critique ────────────────────────────────────────
+# Phase 3: document payload review with template-aware quality criteria.
+
+_DOC_RUBRIC_TEMPLATE = """\
+You are reviewing a generated {artifact_type} document payload for the user's request below.
+
+User request:
+{user_message}
+
+Document payload (JSON):
+{payload_json}
+
+Template: {template_name}
+Quality criteria:
+{quality_criteria}
+
+Rate the document on:
+- Structure: logical section ordering, appropriate slide/section types
+- Content: accuracy, professionalism, audience-appropriateness
+- Visuals: chart presence, KPI layout, visual-hint relevance
+- Completeness: required sections present, data populated
+- Density: neither too sparse nor too dense
+
+Return JSON ONLY with:
+  "verdict"      : "accept" | "revise" | "reject"
+  "confidence"   : number between 0 and 1
+  "issues"       : array of short strings
+  "suggestions"  : array of short strings
+  "score_breakdown": {{ "structure": 0..1, "content": 0..1, "visual": 0..1, "completeness": 0..1, "density": 0..1 }}
+"""
+
+
+async def critique_document(
+    *,
+    user_message: str,
+    artifact_type: str,
+    payload: dict,
+    llm_call=None,
+    template_name: str = "default",
+    quality_criteria: Optional[list[str]] = None,
+    max_chars: int = 4000,
+) -> ReflexionVerdict:
+    """Run the document rubric on a generated payload.
+
+    Args:
+        user_message: The user's original request.
+        artifact_type: One of pptrx / docx / pdf / html.
+        payload: The document's source_json dict.
+        llm_call: Optional async callable ``(messages) -> str``.
+        template_name: Name of the template applied.
+        quality_criteria: Optional override list of criteria strings.
+        max_chars: Cap on message excerpt in the prompt.
+
+    Returns:
+        A ``ReflexionVerdict`` with document-specific issues/suggestions.
+    """
+    import json as _json
+
+    if quality_criteria is None:
+        # Templates module was removed in favor of the C-Heavy skill-
+        # driven runner.  Quality criteria are now defined inline; if a
+        # future design wants template-specific rubrics again, this is
+        # the place to plug them in.
+        quality_criteria = [
+            "Document has clear structure with logical section flow",
+            "Content is accurate, professional, and audience-appropriate",
+            "Visual elements (charts, KPIs) are well-placed",
+            "All required sections are present and populated",
+            "Content density is appropriate for the format",
+        ]
+
+    try:
+        payload_json = _json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    except Exception:
+        payload_json = str(payload)
+    if len(payload_json) > 8000:
+        payload_json = payload_json[:8000] + "\n... [truncated]"
+
+    if not _enabled() or llm_call is None:
+        return _fallback_verdict(str(payload))
+
+    prompt = _DOC_RUBRIC_TEMPLATE.format(
+        artifact_type=artifact_type,
+        user_message=(user_message or "")[:max_chars],
+        payload_json=payload_json,
+        template_name=template_name,
+        quality_criteria="\n".join(f"- {c}" for c in quality_criteria),
+    )
+    messages = [
+        {"role": "system", "content": "You are a strict document editor. Reply with JSON only."},
+        {"role": "user", "content": prompt},
+    ]
+    try:
+        raw = await llm_call(messages)
+    except Exception as exc:
+        logger.warning("reflexion.doc_critique: llm_call raised (non-fatal): %s", exc)
+        return _fallback_verdict(str(payload))
+
+    parsed = _extract_json(raw)
+    if not parsed:
+        return _fallback_verdict(str(payload))
+
+    verdict = str(parsed.get("verdict", "accept")).lower()
+    if verdict not in ("accept", "revise", "reject"):
+        verdict = "accept"
+    try:
+        conf = float(parsed.get("confidence", 0.5))
+    except Exception:
+        conf = 0.5
+    conf = max(0.0, min(1.0, conf))
+    issues = [str(x) for x in (parsed.get("issues") or []) if str(x).strip()]
+    suggestions = [str(x) for x in (parsed.get("suggestions") or []) if str(x).strip()]
+
+    # Augment suggestions with score-breakdown detail
+    breakdown = parsed.get("score_breakdown", {})
+    if isinstance(breakdown, dict):
+        for dim, dim_score in breakdown.items():
+            try:
+                if float(dim_score) < 0.5:
+                    suggestions.append(f"Improve {dim}: currently {float(dim_score):.0%}")
+            except Exception:
+                pass
+
+    return ReflexionVerdict(
+        verdict=verdict,
+        confidence=conf,
+        issues=issues,
+        suggestions=suggestions,
+        raw=raw,
+    )
+
+
+__all__ = ["ReflexionVerdict", "critique", "critique_document"]

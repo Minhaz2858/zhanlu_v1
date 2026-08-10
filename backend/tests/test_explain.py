@@ -102,3 +102,48 @@ class TestExplainForecast:
             {"is_drifting": False}, honesty_gate_triggered=False,
         )
         assert len(explanation.drivers) == 0
+
+    def test_series_object_does_not_crash(self):
+        """Bug #1 regression: passing a pd.Series does NOT crash with 'Series'
+        object has no attribute '_model'."""
+        import pandas as pd
+        series = pd.Series([1.0, 2.0, 3.0])
+        explanation = explain_forecast(
+            "isoprene", [5500.0, 5520.0], None,
+            xgboost_model=series,  # Bug: passing Series instead of model
+            feature_names=["f1", "f2"],
+            cleaning_report=_make_cleaning_report(),
+            coherence_report=_make_coherence_report(),
+            drift_status={"is_drifting": False},
+            honesty_gate_triggered=False,
+        )
+        assert isinstance(explanation, Explanation)
+        assert len(explanation.drivers) == 0  # no crash, just empty drivers
+
+    def test_model_with_attr_extracts_drivers(self):
+        """Passing a proper model mock (with _model._feature_names) extracts drivers."""
+        model_mock = MagicMock()
+        model_mock._model = MagicMock()
+        model_mock._model.feature_importances_ = [0.6, 0.4]
+        model_mock._model.get_booster.return_value.feature_names = ["cracked_c5_lag1", "naphtha_lag1"]
+        explanation = explain_forecast(
+            "isoprene", [5500.0, 5520.0], None,
+            xgboost_model=model_mock,
+            feature_names=["cracked_c5_lag1", "naphtha_lag1"],
+            cleaning_report=_make_cleaning_report(),
+            coherence_report=_make_coherence_report(),
+            drift_status={"is_drifting": False},
+            honesty_gate_triggered=False,
+        )
+        assert len(explanation.drivers) >= 1
+        assert explanation.drivers[0].feature in ("cracked_c5_lag1", "naphtha_lag1")
+
+    def test_none_model_handled_gracefully(self):
+        """None xgboost_model does not crash (pre-existing behavior)."""
+        explanation = explain_forecast(
+            "isoprene", [5500.0], None, None, None,
+            _make_cleaning_report(), _make_coherence_report(),
+            {"is_drifting": False}, honesty_gate_triggered=False,
+        )
+        assert isinstance(explanation, Explanation)
+        assert len(explanation.drivers) == 0

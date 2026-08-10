@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 # Tools whose results must NEVER be persisted to disk. read_file is the
 # critical one: persisting its output creates a read->persist->read loop
 # where the LLM reads the persisted file, which gets persisted again.
-PINNED_NO_PERSIST: frozenset[str] = frozenset({"read_file"})
+PINNED_NO_PERSIST: frozenset[str] = frozenset({
+    "read_file",
+})
 
 # Default budget values (chars). Scaled to context window in budget_for_context.
 DEFAULT_RESULT_THRESHOLD: int = 20_000

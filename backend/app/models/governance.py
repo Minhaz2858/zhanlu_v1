@@ -7,7 +7,7 @@ These four tables form the governance and platform services layer:
 - AuditLog: append-only audit trail for compliance
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import String, Integer, Float, DateTime, Text, JSON, ForeignKey
@@ -40,7 +40,7 @@ class PolicyDecision(TimestampedBase):
     reasons: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     conditions: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     policy_packs: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
-    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    evaluated_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class ApprovalRequest(TimestampedBase):
@@ -105,7 +105,7 @@ class CostLedger(TimestampedBase):
 
     # Metadata
     metadata_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
 
 class AuditLog(TimestampedBase):
@@ -141,4 +141,4 @@ class AuditLog(TimestampedBase):
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     # Timing
-    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    occurred_at: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)

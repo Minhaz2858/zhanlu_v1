@@ -16,6 +16,28 @@ from sqlalchemy import event
 pytest_plugins = ("pytest_asyncio",)
 
 
+def pytest_configure(config):
+    """Register custom markers to silence warnings."""
+    config.addinivalue_line("markers", "llm: test requires a live LLM backend (DeepSeek)")
+
+
+def pytest_collection_modifyitems(config, items):
+    """Auto-skip LLM tests when --no-llm is passed or LLM is unavailable."""
+    skip_llm = config.getoption("--no-llm", default=False)
+    if not skip_llm:
+        # Check if LLM is available
+        try:
+            from app.services.llm_service import llm_call
+        except Exception:
+            skip_llm = True
+
+    if skip_llm:
+        skip_marker = pytest.mark.skip(reason="LLM not available")
+        for item in items:
+            if "llm" in item.keywords:
+                item.add_marker(skip_marker)
+
+
 @pytest.fixture(autouse=True, scope="session")
 def _ensure_shared_sqlite_engine():
     """Force the global SQLAlchemy engine to use StaticPool so the shared

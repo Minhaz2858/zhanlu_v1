@@ -25,6 +25,8 @@ _MIN_ML_ROWS = 90
 def build_model_pool(
     seasonal_period: int | None = None,
     y: "pd.Series | None" = None,
+    product_key: str = "",
+    correlated_data: dict[str, "pd.Series"] | None = None,
 ) -> dict[str, "ForecastModel"]:
     """Return a dict of {model_name: model_instance} for all known models.
 
@@ -79,6 +81,21 @@ def build_model_pool(
         except ImportError:
             logger.warning("xgboost not installed — skipping xgboost_reg model")
 
+    # Optional: direct multi-step XGBoost (Wave 3 — separate model per horizon)
+    direct_enabled = os.environ.get(
+        "FORECAST_XGB_DIRECT_ENABLED", "false"
+    ).lower() == "true"
+    if direct_enabled and not skip_ml:
+        try:
+            from app.services.forecasting.models.xgboost_direct import (
+                XGBoostDirect,
+            )
+
+            pool["xgboost_direct"] = XGBoostDirect()
+            logger.info("build_model_pool: added xgboost_direct")
+        except ImportError:
+            logger.warning("xgboost not installed — skipping xgboost_direct model")
+
     # Optional: foundation models (flag-gated, lazy import)
     foundation_enabled = os.environ.get(
         "FORECAST_FOUNDATION_MODELS_ENABLED", "false"
@@ -121,5 +138,33 @@ def build_model_pool(
         logger.info(
             "build_model_pool: skipping foundation models (series too short)"
         )
+
+    # Optional: VAR model (Wave 6 — cross-product multivariate)
+    var_enabled = os.environ.get(
+        "FORECAST_VAR_ENABLED", "false"
+    ).lower() == "true"
+    if var_enabled and y is not None and len(y) >= 60:
+        try:
+            from app.services.forecasting.models.var_model import VARModel
+            from app.services.forecasting.models.var_model import _CORRELATED_GROUPS
+
+            group_keys = _CORRELATED_GROUPS.get(product_key, [])
+            if len(group_keys) >= _VAR_MIN_PRODUCTS - 1:
+                pool["var_model"] = VARModel(
+                    product_key=product_key,
+                    correlated_data=correlated_data,
+                )
+                logger.info(
+                    "build_model_pool: added var_model for %s (group=%s)",
+                    product_key, group_keys,
+                )
+            else:
+                logger.debug(
+                    "build_model_pool: skipping var_model for %s "
+                    "(only %d correlated products, need ≥%d)",
+                    product_key, len(group_keys), _VAR_MIN_PRODUCTS - 1,
+                )
+        except ImportError:
+            logger.warning("statsmodels not installed — skipping var_model")
 
     return pool

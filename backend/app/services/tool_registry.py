@@ -490,6 +490,7 @@ DEFAULT_USER_AGENT_TOOLS: list[str] = [
     "memory",
     "todo",
     "create_artifact",
+    "edit_artifact",
     "load_skill_body",
     "Skill",
     "create_dashboard",

@@ -32,9 +32,8 @@ from app.services.forecasting.accuracy_tracker import (
 )
 from app.services.forecasting.backtest import BacktestResult, evaluate
 from app.services.forecasting.conformal import calibrate as conformal_calibrate
-from app.services.forecasting.edia_source import EdiaMysqlDataSource
 from app.services.forecasting.discovery import discover
-from app.services.forecasting.ensemble import EnsembleResult, blend, run_models
+from app.services.forecasting.ensemble import EnsembleResult, blend, run_models, auto_tune_tau
 from app.services.forecasting.explain import explain_forecast
 from app.services.forecasting.features.feature_registry import (
     FeatureSpec,
@@ -75,33 +74,6 @@ class ForecastEngine:
         for t in targets:
             run = engine.compute_target(t.id)
     """
-
-    # Map db_type → identifier-quoting style. Different SQL dialects use
-    # different identifier quotes: MySQL uses backticks, Postgres uses
-    # double quotes, SQL Server uses square brackets, etc. The previous
-    # implementation hardcoded Postgres-style double quotes which broke
-    # against MySQL.
-    _IDENTIFIER_QUOTES: dict[str, tuple[str, str]] = {
-        "mysql":     ("`", "`"),
-        "mariadb":   ("`", "`"),
-        "postgres":  ('"', '"'),
-        "postgresql":('"', '"'),
-        "sqlite":    ('"', '"'),
-        "mssql":     ("[", "]"),
-        "sqlserver": ("[", "]"),
-        "oracle":    ('"', '"'),
-    }
-
-    @classmethod
-    def _quote_identifier(cls, name: str, db_type: str | None) -> str:
-        """Quote an SQL identifier for the given db_type. Falls back to
-        double quotes (Postgres style) for unknown dialects."""
-        if not name:
-            return name
-        open_q, close_q = cls._IDENTIFIER_QUOTES.get(
-            (db_type or "").lower(), ('"', '"')
-        )
-        return f"{open_q}{name}{close_q}"
 
     def __init__(self, db: Session) -> None:
         self._db = db
@@ -234,6 +206,24 @@ class ForecastEngine:
                 )
                 return None
 
+        # --- ERP price smoothing (Phase 2A) ---
+        # ERP transaction prices have deal-to-deal noise; rolling median
+        # preserves trend while being robust to single-transaction outliers.
+        erp_smooth_enabled = os.environ.get("FORECAST_ERP_SMOOTHING_ENABLED", "false").lower() == "true"
+        datasource_cfg = target.datasource or {}
+        is_erp_table = (
+            isinstance(datasource_cfg, dict)
+            and isinstance(datasource_cfg.get("table"), str)
+            and datasource_cfg["table"].startswith("sale_erp_v_")
+        )
+        if erp_smooth_enabled and is_erp_table:
+            try:
+                from app.services.forecasting.preprocess import smooth_erp_prices
+                smooth_window = int(os.environ.get("FORECAST_ERP_SMOOTHING_WINDOW", "7"))
+                y = smooth_erp_prices(y, window=smooth_window)
+            except Exception as exc:
+                logger.warning("ERP smoothing failed for %s: %s", target.product_key, exc)
+
         # --- Quality scoring ---
         qr = score_series(y)
         target.quality_grade = qr.grade
@@ -244,7 +234,59 @@ class ForecastEngine:
         # --- Build model pool ---
         granularity = (target.datasource or {}).get("granularity", "daily")
         sp = _seasonal_period_for_granularity(granularity, seasonal_period)
-        models = build_model_pool(seasonal_period=sp, y=y)
+        models = build_model_pool(
+            seasonal_period=sp, y=y, product_key=target.product_key,
+            correlated_data={},  # filled below if VAR enabled
+        )
+
+        # Wave 6: Regime-aware model pool switching
+        _regime_enabled = os.environ.get(
+            "FORECAST_REGIME_AWARE_POOL_ENABLED", "false",
+        ).lower() == "true"
+        _dropped_regime: list[str] = []
+        if _regime_enabled and len(y) >= 20:
+            try:
+                import numpy as np
+                returns = np.diff(np.log(np.maximum(np.asarray(y, dtype=float), 1e-6)))
+                daily_vol = float(np.std(returns)) * 100  # as %
+                regime_drop = set()
+                if daily_vol > 5.0:
+                    # High vol (>5%): drop ML models, keep naive + statistical only
+                    regime_drop = {"xgboost_reg", "xgboost_exog", "xgboost_direct"}
+                    regime_label = "high_vol"
+                elif daily_vol > 1.5:
+                    # Moderate vol (1.5-5%): drop mean_reversion, keep rest
+                    regime_drop = {"mean_reversion"}
+                    regime_label = "moderate_vol"
+                else:
+                    regime_label = "normal_vol"
+
+                if regime_drop:
+                    _dropped_regime = [k for k in regime_drop if k in models]
+                    for k in _dropped_regime:
+                        del models[k]
+                    logger.info(
+                        "Regime-aware: %s (vol=%.2f%%), dropped %s",
+                        regime_label, daily_vol, _dropped_regime,
+                    )
+            except Exception as exc:
+                logger.warning("Regime-aware detection failed: %s", exc)
+
+        # Wave 6: Stacking meta-learner setup
+        _stacking_enabled = os.environ.get(
+            "FORECAST_STACKING_ENABLED", "false",
+        ).lower() == "true"
+        _stacker = None
+        if _stacking_enabled:
+            try:
+                from app.services.forecasting.models.stacking_meta import StackingMetaLearner
+                _stacker = StackingMetaLearner(alpha=1.0, scale=True)
+
+                def _on_fold_closure(fold_T: int, y_train, fold_preds, fold_actuals):
+                    _stacker.record_fold(fold_preds, fold_actuals)
+            except ImportError:
+                logger.warning("scikit-learn not available — stacking disabled")
+                _stacking_enabled = False
 
         # --- Step 3: Preprocessing (Phase 1) ---
         preprocess_enabled = _get_config_bool("FORECAST_PREPROCESS_ENABLED", True)
@@ -252,9 +294,23 @@ class ForecastEngine:
         cleaning_report = None
         if preprocess_enabled:
             try:
-                pp = preprocess_series(preprocess_cleaned, target.product_key, seasonal_period=sp)
-                preprocess_cleaned = pp.y_clean
-                cleaning_report = pp.report
+                # P2-3: Enhanced preprocessing (flag-gated)
+                enhanced_preprocess_enabled = os.environ.get(
+                    "FORECAST_ENHANCED_PREPROCESS_ENABLED", "false"
+                ).lower() == "true"
+                if enhanced_preprocess_enabled:
+                    from app.services.forecasting.preprocess_enhanced import preprocess_enhanced
+                    pp, enhanced_report, holiday_df = preprocess_enhanced(
+                        preprocess_cleaned, target.product_key, seasonal_period=sp,
+                        impute_missing=True, compute_anomaly_score=True,
+                        add_holiday_features=True,
+                    )
+                    preprocess_cleaned = pp.y_clean
+                    cleaning_report = enhanced_report
+                else:
+                    pp = preprocess_series(preprocess_cleaned, target.product_key, seasonal_period=sp)
+                    preprocess_cleaned = pp.y_clean
+                    cleaning_report = pp.report
             except Exception as exc:
                 logger.warning("Preprocess failed for %s: %s", target.product_key, exc)
 
@@ -262,13 +318,69 @@ class ForecastEngine:
         y_model = preprocess_cleaned
 
         # --- Backtest ---
-        bt = evaluate(y_model, models, seasonal_period=sp, horizons=horizons)
+        bt = evaluate(
+            y_model, models, seasonal_period=sp, horizons=horizons,
+            on_fold=_on_fold_closure if _stacking_enabled and _stacker is not None else None,
+        )
         per_model_mape = bt.per_model_mape
+
+        # Wave 6: Fit stacking meta-learner after backtest
+        if _stacking_enabled and _stacker is not None:
+            try:
+                fitted = _stacker.fit_meta()
+                if fitted:
+                    logger.info("Stacking meta-learner fitted for %s", target.product_key)
+                else:
+                    _stacking_enabled = False  # fall back to softmax
+            except Exception as exc:
+                logger.warning("Stacking fit_meta failed: %s", exc)
+                _stacking_enabled = False
+
+        # --- Model selector: prune consistently underperforming models ---
+        try:
+            from app.services.forecasting.model_selector import select_model_pool
+            from app.services.forecasting.accuracy_tracker import ForecastAccuracyLog
+
+            # Build rolling MAPE window from historical accuracy logs
+            rolling_mape: dict[str, list[float]] = {}
+            try:
+                latest = db.query(ForecastAccuracyLog).filter(
+                    ForecastAccuracyLog.product_key == target.product_key,
+                ).order_by(ForecastAccuracyLog.created_at.desc()).limit(10).all()
+                for log in reversed(latest):
+                    if isinstance(log.per_model, dict):
+                        for m_name, m_val in log.per_model.items():
+                            rolling_mape.setdefault(m_name, []).append(
+                                float(m_val) if m_val is not None and math.isfinite(m_val) else 0.0
+                            )
+            except Exception:
+                pass  # no accuracy logs yet — use bare selector
+
+            # If no history, seed with current backtest result
+            if not rolling_mape and per_model_mape:
+                for m_name, m_val in per_model_mape.items():
+                    if math.isfinite(m_val):
+                        rolling_mape[m_name] = [m_val]
+
+            models_pruned = select_model_pool(
+                models, target.product_key,
+                rolling_mape=rolling_mape or None,
+            )
+            if len(models_pruned) < len(models):
+                dropped = set(models.keys()) - set(models_pruned.keys())
+                logger.info(
+                    "Model selector pruned %d models for %s: %s",
+                    len(dropped), target.product_key, sorted(dropped),
+                )
+            models = models_pruned
+        except Exception as exc:
+            logger.warning("Model selector failed for %s: %s — using full pool", target.product_key, exc)
 
         # --- Fit + forecast ---
         h_max = max(horizons)
         forecasts, models_run, models_failed = run_models(
-            models, y_model, h=h_max, seasonal_period=sp
+            models, y_model, h=h_max, seasonal_period=sp,
+            product_key=target.product_key,
         )
 
         # --- Step 5: Exogenous features (Phase 1) ---
@@ -277,6 +389,7 @@ class ForecastEngine:
         exog_spec: FeatureSpec | None = None
         exog_degraded = False
         features_used: list[str] = []
+        xgb_exog_model = None   # model object (not forecast Series) — passed to explain_forecast
         coherence_report: CoherenceReport | None = None
 
         if exog_enabled:
@@ -312,6 +425,44 @@ class ForecastEngine:
                     except Exception as exc:
                         logger.warning("ERP volume load failed for %s: %s", target.product_key, exc)
                         volume_df = None
+
+                # P0-1: Demand signal + supplier dispersion exogenous features
+                demand_signal_obj = None
+                supplier_disp_df = None
+                if os.environ.get("FORECAST_DEMAND_SIGNAL_EXOG_ENABLED", "false").lower() == "true":
+                    try:
+                        parts = (target.product_key or "").split(".")
+                        product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
+                        from app.services.forecasting.features.demand_signal import (
+                            compute_demand_signal,
+                        )
+                        from app.services.forecasting.features.exogenous_loaders import (
+                            SupplierDispersionLoader,
+                        )
+                        # Compute demand signal from volume data (price_df optional)
+                        if volume_df is not None and not volume_df.empty:
+                            demand_signal_obj = compute_demand_signal(
+                                volume_df=volume_df.reset_index(),
+                                price_df=None,
+                                product_id=product_id,
+                            )
+                        # Load supplier dispersion
+                        disp_loader = SupplierDispersionLoader(
+                            product_id=product_id, lookback_days=365, org_id=target.org_id,
+                        )
+                        supplier_disp_df = disp_loader.load()
+                        if supplier_disp_df is not None and not supplier_disp_df.empty:
+                            logger.info(
+                                "P0-1: supplier dispersion loaded for %s: %d days",
+                                target.product_key, len(supplier_disp_df),
+                            )
+                    except Exception as exc:
+                        logger.warning(
+                            "P0-1 demand/supplier loading failed for %s: %s",
+                            target.product_key, exc,
+                        )
+                        demand_signal_obj = None
+                        supplier_disp_df = None
 
                 # Wave 3 T3.4 external-feed exogenous features (flag-gated)
                 operating_rate_df = None
@@ -383,6 +534,31 @@ class ForecastEngine:
                         )
                         import_price_df = None
 
+                # Wave 5: Oilchem exogenous features (Brent/naphtha/C5/C9 from 隆众资讯)
+                oilchem_df = None
+                _oilchem_enabled = os.environ.get("FORECAST_OILCHEM_EXOG_ENABLED", "false").lower() == "true"
+                if _oilchem_enabled:
+                    try:
+                        from app.services.forecasting.features.oilchem_loader import get_oilchem_loader
+                        oc_loader = get_oilchem_loader()
+                        oc_df = oc_loader.get_dataframe()
+                        if not oc_df.empty:
+                            oilchem_df = oc_df
+                            logger.info(
+                                "Oilchem loaded: %d rows, %d cols",
+                                len(oilchem_df), len(oilchem_df.columns),
+                            )
+                    except Exception as exc:
+                        logger.warning("Oilchem load failed: %s", exc)
+
+                # Wave 5: Feature engineering flags
+                _tech_ind_enabled = os.environ.get(
+                    "FORECAST_TECHNICAL_INDICATORS_ENABLED", "false",
+                ).lower() == "true"
+                _fourier_enabled = os.environ.get(
+                    "FORECAST_FOURIER_FEATURES_ENABLED", "false",
+                ).lower() == "true"
+
                 # Build feature matrix for exog models (no cascade in single-target mode)
                 feed_loader = FeedstockLoader()
                 fx_loader = FxLoader()
@@ -394,16 +570,23 @@ class ForecastEngine:
                     operating_rate_df=operating_rate_df,
                     inventory_df=inventory_df,
                     import_price_df=import_price_df,
+                    demand_signal=demand_signal_obj,
+                    supplier_dispersion_df=supplier_disp_df,
+                    # Wave 5: new feature engineering
+                    oilchem_df=oilchem_df,
+                    tech_indicators_enabled=_tech_ind_enabled,
+                    fourier_enabled=_fourier_enabled,
+                    oilchem_exog_enabled=_oilchem_enabled,
                 )
 
                 # Fit exog-aware models if feature matrix is available
                 if fm.X_train is not None and len(fm.X_train) > 0:
                     features_used = list(fm.X_train.columns)
-                    xgb_exog = models.get("xgboost_exog")
-                    if xgb_exog is not None and hasattr(xgb_exog, "fit"):
+                    xgb_exog_model = models.get("xgboost_exog")
+                    if xgb_exog_model is not None and hasattr(xgb_exog_model, "fit"):
                         try:
-                            xgb_exog.fit(y_model, seasonal_period=sp, exog=fm.X_train)
-                            exog_fc = xgb_exog.forecast(
+                            xgb_exog_model.fit(y_model, seasonal_period=sp, exog=fm.X_train)
+                            exog_fc = xgb_exog_model.forecast(
                                 h_max,
                                 exog_future=fm.X_future if fm.X_future is not None and len(fm.X_future) > 0 else None,
                             )
@@ -436,9 +619,53 @@ class ForecastEngine:
         # --- Ensemble (re-blend after exog models added) ---
         # Per-horizon weights: ARIMA may dominate at 7d while ETS/STL win at 30d.
         per_h = bt.per_horizon_mape if bt.per_horizon_mape else None
-        ensemble_result = blend(
-            forecasts, per_model_mape, per_model_error_by_horizon=per_h,
-        )
+
+        # Market regime detection (flag-gated)
+        regime_label: str | None = None
+        regime_detection_enabled = os.environ.get(
+            "FORECAST_REGIME_DETECTION_ENABLED", "false"
+        ).lower() == "true"
+        if regime_detection_enabled:
+            try:
+                from app.services.forecasting.regime_detector import detect_regime
+                regime_result = detect_regime(y_model)
+                regime_label = regime_result.regime
+                logger.info(
+                    "Regime detected for %s: %s (confidence=%.2f)",
+                    target.product_key, regime_label, regime_result.confidence,
+                )
+            except Exception as exc:
+                logger.warning("Regime detection failed for %s: %s", target.product_key, exc)
+
+        # Wave 6: Stacking meta-learner overrides softmax when fitted
+        if _stacking_enabled and _stacker is not None and _stacker.fitted:
+            stacking_fc = _stacker.blend(forecasts, h_max)
+            if stacking_fc is not None:
+                from app.services.forecasting.ensemble import EnsembleResult
+                ensemble_result = EnsembleResult(
+                    point_forecast=stacking_fc,
+                    weights={k: 1.0 / max(1, len(forecasts)) for k in forecasts},
+                    models_run=models_run,
+                    models_failed=models_failed,
+                    individual_forecasts=forecasts,
+                )
+                logger.info(
+                    "Used stacking meta-learner for %s (models: %s)",
+                    target.product_key, _stacker.feature_names,
+                )
+            else:
+                # Fallback to softmax
+                tau = auto_tune_tau(per_model_mape)
+                ensemble_result = blend(
+                    forecasts, per_model_mape, per_model_error_by_horizon=per_h,
+                    tau=tau, regime=regime_label,
+                )
+        else:
+            tau = auto_tune_tau(per_model_mape)
+            ensemble_result = blend(
+                forecasts, per_model_mape, per_model_error_by_horizon=per_h,
+                tau=tau, regime=regime_label,
+            )
 
         # --- Guard ---
         naive_fc = forecasts.get("seasonal_naive")
@@ -451,12 +678,42 @@ class ForecastEngine:
             except Exception:
                 naive_fc = ensemble_result.point_forecast
 
-        guard_result = evaluate_guard(
-            ensemble_result.point_forecast,
-            naive_fc,
-            bt.ensemble_mape,
-            bt.naive_mape,
-        )
+        # P2-1: Advanced guard flag-gated — replaces simple evaluate_guard
+        advanced_guard_enabled = os.environ.get(
+            "FORECAST_ADVANCED_GUARD_ENABLED", "false"
+        ).lower() == "true"
+        if advanced_guard_enabled:
+            from app.services.forecasting.guard_advanced import evaluate_guard_advanced
+            last_actual = float(y_model.iloc[-1]) if len(y_model) > 0 else None
+            last_data_date = y_model.index[-1].to_pydatetime() if isinstance(y_model.index, pd.DatetimeIndex) and len(y_model) > 0 else None
+            monotonicity_enabled = os.environ.get("FORECAST_MONOTONICITY_ENABLED", "false").lower() == "true"
+            soft_gate_enabled = os.environ.get("FORECAST_SOFT_GATE_ENABLED", "false").lower() == "true"
+            soft_gate_margin = float(os.environ.get("FORECAST_SOFT_GATE_MARGIN_PCT", "2.0"))
+            guard_result = evaluate_guard_advanced(
+                ensemble_result.point_forecast,
+                naive_fc,
+                bt.ensemble_mape,
+                bt.naive_mape,
+                last_actual=last_actual,
+                max_change_pct=15.0,
+                enforce_monotonicity=monotonicity_enabled,
+                vol_regime_blend=True,
+                daily_returns_std=float(y_model.pct_change().std() * 100) if len(y_model) > 1 else None,
+                last_data_date=last_data_date,
+                soft_blend_enabled=soft_gate_enabled,
+                soft_blend_margin_pct=soft_gate_margin,
+            )
+        else:
+            soft_gate_enabled = os.environ.get("FORECAST_SOFT_GATE_ENABLED", "false").lower() == "true"
+            soft_gate_margin = float(os.environ.get("FORECAST_SOFT_GATE_MARGIN_PCT", "2.0"))
+            guard_result = evaluate_guard(
+                ensemble_result.point_forecast,
+                naive_fc,
+                bt.ensemble_mape,
+                bt.naive_mape,
+                soft_blend_enabled=soft_gate_enabled,
+                soft_blend_margin_pct=soft_gate_margin,
+            )
 
         # --- Step 8: Coherence check (Phase 1) ---
         if exog_spec and exog_spec.feedstock_keys:
@@ -625,7 +882,7 @@ class ForecastEngine:
         # overlay-meta badges. Now assembled in correct order.
         drift_status = detect_drift(self._db, target.product_key)
         explanation_dict: dict | None = None
-        xgb_exog = forecasts.get("xgboost_exog")
+        xgb_exog_fc = forecasts.get("xgboost_exog")  # forecast Series (not model object)
 
         # ── MLOps / HITL publish-step adjustments (Task 7) ──────────────
         # Both adjust guard_result.published_forecast (the price users see)
@@ -648,7 +905,7 @@ class ForecastEngine:
                         guard_result, published_forecast=blended,
                     )
                     pending_drift.applied = True
-                    pending_drift.applied_at = datetime.utcnow()
+                    pending_drift.applied_at = datetime.now(timezone.utc)
                     self._db.flush()
                     drift_report = {
                         "blend_factor": f,
@@ -706,11 +963,51 @@ class ForecastEngine:
                 logger.warning("Price-change probability failed for %s: %s", target.product_key, exc)
 
         # --- Phase E1: directional classifier (per horizon) ---
-        from app.services.forecasting.directional_classifier import backtest_directional
+        from app.services.forecasting.directional_classifier import (
+            backtest_directional, DirectionalClassifier, build_features,
+        )
         from app.services.forecasting.decision_engine import recommend
+
+        # Phase 3: Build directional exog from warehouse causal features
+        _directional_exog_enabled = _get_config_bool(
+            "FORECAST_DIRECTIONAL_EXOG_ENABLED", False,
+        )
+        direction_exog_df = None
+        if _directional_exog_enabled:
+            try:
+                _parts = []
+                # Collect available warehouse DataFrames (DateIndex, aligned with y_model)
+                for _label, _df in [
+                    ("vol", volume_df),
+                    ("op_rate", operating_rate_df),
+                    ("inv", inventory_df),
+                    ("import_price", import_price_df),
+                    ("supplier_disp", supplier_disp_df),
+                ]:
+                    if _df is not None and not _df.empty:
+                        _sub = _df.copy()
+                        if isinstance(_sub.index, pd.DatetimeIndex):
+                            # Reindex to y_model's date range, forward-fill
+                            _sub = _sub.reindex(y_model.index, method="ffill")
+                            _sub = _sub.fillna(method="bfill")
+                        _named = _sub.add_prefix(f"{_label}_") if len(_sub.columns) > 0 else _sub
+                        _parts.append(_named)
+                if _parts:
+                    direction_exog_df = pd.concat(_parts, axis=1)
+                    direction_exog_df = direction_exog_df.fillna(0.0)
+                    logger.debug(
+                        "Directional exog built for %s: %d columns, %d rows",
+                        target.product_key,
+                        len(direction_exog_df.columns),
+                        len(direction_exog_df),
+                    )
+            except Exception as exc:
+                logger.debug("Directional exog build failed for %s: %s", target.product_key, exc)
+                direction_exog_df = None
 
         directional_report: dict = {}
         decision_report: dict = {}
+        directional_signal: str = ""
         for h in horizons:
             h_int = int(h)
             try:
@@ -730,6 +1027,30 @@ class ForecastEngine:
                 "status": dir_result.get("status", "no_edge"),
             }
 
+            # Compute directional signal from full-data classifier prediction (7d)
+            if h_int == 7 and not directional_signal:
+                try:
+                    clf = DirectionalClassifier()
+                    X_features = build_features(y_model, exog=direction_exog_df)
+                    if X_features is not None and len(X_features) > 10:
+                        # Bug 2 fix: fit(X, y_sign) not (y, exog=None)
+                        future_sign = (y_model.shift(-h_int) > y_model).astype(int)
+                        valid_mask = future_sign.notna()
+                        clf.fit(X_features[valid_mask], future_sign[valid_mask])
+                        latest_features = X_features.iloc[[-1]]
+                        proba = clf.predict_proba(latest_features)
+                        if proba is not None:
+                            p_rise_clf = float(proba[0])
+                            if p_rise_clf > 0.65:
+                                directional_signal = "↑"
+                            elif p_rise_clf < 0.35:
+                                directional_signal = "↓"
+                            else:
+                                directional_signal = "→"
+                            directional_report[str(h)]["p_rise"] = round(p_rise_clf, 3)
+                except Exception as exc:
+                    logger.debug("Directional signal compute failed: %s", exc)
+
             # Decision needs trust_tier which is built below; placeholder for now
             decision_report[str(h)] = None
 
@@ -739,12 +1060,14 @@ class ForecastEngine:
                 product_key=target.product_key,
                 forecast_values=ensemble_result.point_forecast.tolist()[:h_max],
                 previous_forecast=None,  # No previous comparison in single mode
-                xgboost_model=xgb_exog,
+                xgboost_model=xgb_exog_model,
                 feature_names=features_used,
                 cleaning_report=cleaning_report if cleaning_report else None,
                 coherence_report=coherence_report if coherence_report else None,
                 drift_status=drift_status,
                 honesty_gate_triggered=guard_result.below_naive_baseline,
+                regime=regime_label or "",
+                directional_signal=directional_signal,
             )
 
             # --- Trust tier (Phase B) ---
@@ -769,9 +1092,19 @@ class ForecastEngine:
             # --- Phase E2: decision engine (per horizon) ---
             # Now we have trust_tier, fill in decisions
             tier = (trust_tier_report or {}).get("tier") or "low"
+            _clf_p_rise_enabled = _get_config_bool(
+                "FORECAST_CLASSIFIER_P_RISE_ENABLED", False,
+            )
             for h_key in decision_report.keys():
                 prob_h = probability_report.get(h_key) or {}
                 p_rise = float(prob_h.get("p_rise", 0.5) or 0.5)
+                # Bug 3 fix: when flag is ON and classifier produced a
+                # directly-calibrated p_rise, use it instead of Gaussian-derived
+                if _clf_p_rise_enabled:
+                    dir_h_cp = directional_report.get(h_key) or {}
+                    clf_p_rise = dir_h_cp.get("p_rise")
+                    if clf_p_rise is not None:
+                        p_rise = float(clf_p_rise)
                 exp_chg = prob_h.get("expected_change_pct")
                 exp_chg_f = float(exp_chg) if exp_chg is not None else 0.0
                 dir_h = directional_report.get(h_key) or {}
@@ -781,6 +1114,7 @@ class ForecastEngine:
                     directional_acc=dir_h.get("accuracy"),
                     directional_status=dir_h.get("status"),
                     trust_tier=str(tier),
+                    product_key=target.product_key,  # Bug 7 fix
                 )
                 decision_report[h_key] = {
                     "action": decision.action,
@@ -813,6 +1147,8 @@ class ForecastEngine:
                 "directional": directional_report,
                 "decision": decision_report,
                 "model_agreement": model_agreement_report,
+                "regime": explanation.regime,
+                "directional_signal": explanation.directional_signal,
             }
         except Exception as exc:
             logger.warning("Explanation failed for %s: %s", target.product_key, exc)
@@ -846,6 +1182,21 @@ class ForecastEngine:
             ops_explanation["bias_correction"] = bias_report
         if ops_explanation:
             explanation_dict = {**(explanation_dict or {}), **ops_explanation}
+
+        # Convert numpy scalars to native Python for JSON serialization
+        def _to_native(obj):
+            if isinstance(obj, dict):
+                return {k: _to_native(v) for k, v in obj.items()}
+            if isinstance(obj, (list, tuple)):
+                return [_to_native(v) for v in obj]
+            if hasattr(obj, "dtype"):
+                return obj.item()  # numpy scalar → Python native
+            return obj
+
+        results = _to_native(results) if results else None
+        model_detail = _to_native(model_detail) if model_detail else None
+        explanation_dict = _to_native(explanation_dict) if explanation_dict else None
+
         run = ForecastRun(
             target_id=target_id,
             org_id=target.org_id,
@@ -898,13 +1249,16 @@ class ForecastEngine:
                 else:
                     actual_price_t = None
 
-                # Per-horizon thresholds (the values used for THIS run)
+                # Bug 6 fix: snapshot DB-resolved thresholds (not module constants)
                 from app.services.forecasting import decision_engine as _de
+                _actual_thresholds = _de.get_thresholds(
+                    target.product_key, db=self._db,
+                )
                 decision_thresholds = {
-                    "buy": _de._BUY_THRESHOLD,
-                    "sell": _de._SELL_THRESHOLD,
-                    "buy_min_change": _de._BUY_MIN_CHANGE,
-                    "edge": _de._EDGE_THRESHOLD,
+                    "buy": _actual_thresholds["buy"],
+                    "sell": _actual_thresholds["sell"],
+                    "buy_min_change": _actual_thresholds["buy_min_change"],
+                    "edge": _actual_thresholds.get("edge", _de._EDGE_THRESHOLD),
                 }
 
                 for h in horizons:
@@ -922,9 +1276,9 @@ class ForecastEngine:
                         product_id=target.product_key,
                         horizon_day=int(h),
                         as_of_date=as_of,
-                        action=str(decision_entry.action),
-                        confidence=(decision_entry.confidence or "low"),
-                        rationale=(decision_entry.rationale or ""),
+                        action=str(decision_entry["action"]),       # Bug 5 fix: dict, not object
+                        confidence=(decision_entry["confidence"] or "low"),
+                        rationale=(decision_entry["rationale"] or ""),
                         forecast_run_id=run.id,
                         predicted_p_rise=float(p_rise) if p_rise is not None else None,
                         predicted_change_pct=float(exp_chg) if exp_chg is not None else None,
@@ -1095,86 +1449,17 @@ class ForecastEngine:
     # ── Datasource fetch ───────────────────────────────────────────
 
     def _fetch_series(self, target: ForecastTarget) -> pd.Series | None:
-        """Pull the raw time series from the user's datasource."""
+        """Pull the raw time series from the user's datasource.
+
+        Dispatches through the DataSource strategy registry so that new
+        source types can be added without touching the engine.
+        """
+        from app.services.forecasting.datasource_registry import get_datasource
+
         ds = target.datasource or {}
-
-        # ── EDIA MySQL branch ─────────────────────────────────────
-        # When the datasource descriptor names edia_mysql as the source,
-        # read directly from the EDIA MySQL mirror via EdiaMysqlDataSource.
-        # This bypasses the KB/QueryService path entirely and is used by
-        # the nightly forecast scheduler for the 12 dashboard products.
-        if ds.get("source") == "edia_mysql":
-            try:
-                src = EdiaMysqlDataSource()
-                df = src.read_history(ds)
-                # Convert DataFrame to Series indexed by datetime, as the
-                # downstream pipeline (quality → models → ensemble) expects.
-                return pd.Series(df["y"].values, index=df["ds"])
-            except Exception as exc:
-                logger.warning(
-                    "EdiaMysqlDataSource failed for target %s: %s",
-                    target.id, exc,
-                )
-                return None
-
-        # ── Existing KB-backed path (unchanged) ──────────────────
-        table = ds.get("table")
-        tc = ds.get("time_column")
-        mc = ds.get("measure")
-        dims = ds.get("dimensions", [])
-        # Prefer kb_id from datasource; fall back to org_id for legacy targets.
-        kb_id = ds.get("kb_id") or target.org_id
-
-        if not table or not tc or not mc:
-            logger.warning("Target %s: missing datasource config", target.id)
-            return None
-
-        # Look up the KB to learn its db_type so we can quote identifiers
-        # correctly (MySQL needs backticks, Postgres needs double quotes, etc.).
-        from app.models.knowledge_base import KnowledgeBase
-        kb = self._db.query(KnowledgeBase).filter(
-            KnowledgeBase.id == kb_id,
-            KnowledgeBase.is_deleted == False,
-        ).first()
-        db_type = (kb.db_type if kb else None) or None
-
-        q = lambda n: self._quote_identifier(n, db_type)  # noqa: E731
-
-        query_svc = QueryService(self._db)
-
-        dim_selects = ", ".join(q(d) for d in dims)
-        dim_group = ", ".join(q(d) for d in dims) if dims else ""
-
-        group_clause = q(tc)
-        if dim_group:
-            group_clause += f", {dim_group}"
-
-        sql = (
-            f'SELECT {q(tc)} AS t, '
-            f'{dim_selects + ", " if dim_selects else ""}'
-            f'AVG({q(mc)}) AS y '
-            f'FROM {q(table)} '
-            f'WHERE {q(tc)} IS NOT NULL AND {q(mc)} IS NOT NULL '
-            f"GROUP BY {group_clause} "
-            f"ORDER BY t"
-        )
-
-        try:
-            result = query_svc.execute(kb_id, sql, timeout_s=30)
-        except Exception as exc:
-            logger.error("Failed to fetch series for target %s: %s", target.id, exc)
-            return None
-
-        rows = result.get("rows", [])
-        if not rows:
-            return None
-
-        df = pd.DataFrame(rows)
-        if "t" not in df.columns or "y" not in df.columns:
-            return None
-
-        y = df.set_index("t")["y"].astype(float)
-        return y
+        source_type = ds.get("source", "edia_mysql")
+        strategy = get_datasource(source_type)
+        return strategy.fetch(target, self._db)
 
     # ── Truth-anchor variants (Task 4) ─────────────────────────────
 

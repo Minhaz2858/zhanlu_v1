@@ -8,6 +8,7 @@ import { useChatSession } from '@/lib/ChatSessionContext';
 import { toast } from 'sonner';
 import ChatInput from '@/components/chat/ChatInput';
 import MessageBubble from '@/components/chat/MessageBubble';
+import { postMessageFeedback } from '@/api/agentFeedback';
 import RelatedContent from '@/components/chat/RelatedContent';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
@@ -21,8 +22,14 @@ import AutomationDraftCard from '@/components/chat/AutomationDraftCard';
 import DashboardDockPanel from '@/components/dashboard/DashboardDockPanel';
 import { buildSkillContext, buildDefaultSkillContext } from '@/lib/skillContext';
 import { watchForDashboardEdits } from '@/lib/dashboardStreamWatcher';
-import { streamAgentResponse, createAgentConversation, steerAgentConversation } from '@/api/agentEnhanced';
-import useStreamState from '@/hooks/useStreamState';
+import {
+  streamAgentResponse,
+  createAgentConversation,
+  steerAgentConversation,
+} from '@/api/agentEnhanced';
+import { SessionExpiredError } from '@/api/authFetch';
+import { usePersistentStream } from '@/lib/PersistentStreamContext';
+import { dedupeMessagesByFingerprint } from './messageDedup';
 import { useScreenSize } from '@/hooks/useScreenSize';
 import { classifyIntent, formatHint } from '@/lib/intentClassifier';
 import { detectLang } from '@/lib/detectLang';
@@ -242,6 +249,32 @@ export default function Chat() {
   const streamingIdRef = useRef(null);
   useEffect(() => { streamingIdRef.current = streamingId; }, [streamingId]);
   const [steerMarkers, setSteerMarkers] = useState([]);  // P2: inline markers rendered next to the messages
+  // Experience layer (Phase C): per-message feedback state for the
+  // thumbs up/down buttons on assistant bubbles. Optimistic — set
+  // immediately, reverted if the API call fails.
+  const [feedbackByMessage, setFeedbackByMessage] = useState({});
+  const handleMessageFeedback = async (messageId, rating) => {
+    const s = activeId ? getSession(activeId) : null;
+    const convId = s?.conversation_id;
+    if (!convId || !messageId) {
+      toast.error('无法提交反馈：会话信息不完整');
+      return;
+    }
+    const prev = feedbackByMessage[messageId];
+    // Toggle off when the same rating is clicked again.
+    if (prev === rating) {
+      setFeedbackByMessage((p) => ({ ...p, [messageId]: null }));
+      return;
+    }
+    setFeedbackByMessage((p) => ({ ...p, [messageId]: rating }));
+    try {
+      await postMessageFeedback(appParams.appId, convId, messageId, rating);
+      toast.success(rating > 0 ? '已记录好评，感谢反馈！' : '已记录差评，我们会持续改进。');
+    } catch (err) {
+      setFeedbackByMessage((p) => ({ ...p, [messageId]: prev }));
+      toast.error(`反馈提交失败：${err.message || err}`);
+    }
+  };
   // P2 (conversational dashboards): persistent dock panel state. `open` toggles
   // mount/unmount of the panel; `viewerRef` lets the stream watcher tell the
   // DashboardViewer to refetch without prop-drilling. `seenRef` dedupes the
@@ -258,7 +291,10 @@ export default function Chat() {
   const [pendingDraft, setPendingDraft] = useState(null); // { prefill: string, lang: 'zh' | 'en' } | null
   const scrollRef = useRef(null);
   const inputRef = useRef(null);
-  const genRef = useRef(0);
+  // genRef and stream lifecycle now come from PersistentStreamContext, which
+  // survives page navigation so streaming continues in the background.
+  const stream = usePersistentStream();
+  const genRef = stream.genRef; // alias for shorter line references below
   const persistTimerRef = useRef(null);
   // P3-bis: guard for the ?autorun=1 deep link (used by /automation's
   // "Run Now" button). The autorun useEffect below depends on
@@ -267,7 +303,7 @@ export default function Chat() {
   // duplicate the user message. Reset on URL change (the effect
   // itself checks the URL on every run).
   const autorunProcessedRef = useRef(false);
-  const streamState = useStreamState();
+
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     const prefill = params.get('prefill');
@@ -410,7 +446,17 @@ export default function Chat() {
         // The stored shape is ``[{role, content, tool_calls,
         // created_date, id, ...}]`` which is the same shape the
         // chat page already consumes.
-        setMessages(Array.isArray(conv.messages) ? conv.messages : []);
+        //
+        // DEDUP (2026-08-06 fix): the JSON column here is one of two
+        // parallel stores (the other being the chat_messages table,
+        // loaded later by loadMessages). The two stores share no id
+        // space, so a single logical message can appear under two
+        // different uuids with different created_date values. Apply
+        // the content-fingerprint dedup here so this direct set call
+        // does not leak cross-store duplicates into state.
+        setMessages(dedupeMessagesByFingerprint(
+          Array.isArray(conv.messages) ? conv.messages : [],
+        ));
         setLoadStatus('loaded');
         // Resolve the agent by name (the conv record stores
         // ``agent_name`` but not the AgentApp id). We do a
@@ -428,18 +474,60 @@ export default function Chat() {
             if (agent) setActiveAgent(agent);
           } catch { /* best-effort */ }
         }
+        // Forward the conv's PROJECT context into the URL —
+        // handleAgentSend reads project_id / project_name from
+        // window.location to include them in the v3 stream body,
+        // and the backend's prepare_data_source_runtime uses them
+        // to scope the data-source runtime + memory snapshot to
+        // the right project. Without this, legacy convs (created
+        // before the body-override path was added) and reloads
+        // (which never go through ``selectSession``) end up with
+        // the URL as ``?conv=...`` only — the agent then runs
+        // with no project context and falls back to per-user
+        // memory across all projects. Also seed ``pendingProject``
+        // (the chip in the chat input) and ``pendingProjectId``
+        // (the FK) from the conv so the input shows the correct
+        // project chip after a hard reload.
+        //
+        // Note (2026-08-06): we deliberately do NOT write
+        // ``agentName`` back into the URL here. The agent context
+        // for new messages is bound via ``setActiveAgent`` above
+        // and consumed by handleAgentSend from React state — no
+        // code path reads ``agentName`` from the URL for the v3
+        // stream body. Adding it to the URL on reload changed the
+        // visible URL bar without any functional benefit, so we
+        // keep the URL minimal.
+        try {
+          const url = new URL(window.location.href);
+          if (conv.project_id) {
+            url.searchParams.set('project', conv.project_id);
+            setPendingProjectId(conv.project_id);
+          }
+          if (conv.project_name || conv.project) {
+            const pname = conv.project_name || conv.project;
+            url.searchParams.set('projectName', pname);
+            setPendingProjectState(pname);
+          }
+          window.history.replaceState({}, '', url.toString());
+        } catch { /* SSR / non-browser env — best-effort */ }
       }).catch(() => {
         // 404 or network error — leave the chat empty and let
         // the user start a new session.
       });
     }
-    // Clean the transient params (?agent=, ?prefill=, ?project=,
-    // ?projectName=, ?agentName=) from the URL but PRESERVE
-    // ?conv= — that's the deep-link to the current conversation
-    // and the user must be able to reload / share the page
-    // without losing the session. We push the URL on every
-    // handleAgentSend anyway (see handleAgentSend), so this
-    // cleanup is only for the initial navigation params.
+    // Clean the TRULY transient params (?agent=, ?prefill=,
+    // ?autorun=) from the URL but PRESERVE ?conv= — that's the
+    // deep-link to the current conversation and the user must be
+    // able to reload / share the page without losing the session.
+    // We also PRESERVE ?project= / ?projectName= / ?agentName= —
+    // these are the conv's project context and must stay in the
+    // URL so handleAgentSend can forward them to the v3 stream
+    // body (which scopes the data-source runtime + memory
+    // snapshot to the right project). The previous version of
+    // this cleanup deleted them — that's why every reload of a
+    // ``?conv=...`` URL ended up with no project context, and
+    // why the Q2 2026 report (and other per-user memory items)
+    // leaked into every project.
     //
     // For ?autorun=1 the prefill is consumed by the autorun useEffect
     // below, so we leave ?prefill= (and ?autorun=) alone here to
@@ -448,7 +536,11 @@ export default function Chat() {
     try {
       const url = new URL(window.location.href);
       const skipForAutorun = url.searchParams.get('autorun') === '1';
-      ['agent', 'prefill', 'project', 'projectName', 'agentName'].forEach((k) => {
+      // Only the truly transient one-shot params get cleared here.
+      // project / projectName / agentName are sticky context
+      // params; their lifetime is managed by selectSession (sidebar
+      // clicks) and the conv rehydration above (reloads).
+      ['agent', 'prefill', 'autorun'].forEach((k) => {
         if (skipForAutorun && (k === 'prefill' || k === 'autorun')) return;
         url.searchParams.delete(k);
       });
@@ -539,15 +631,31 @@ export default function Chat() {
     // click would silently no-op.
   }, [activeId, chatGeneration]);
 
-  // When activeId becomes null (user clicked "+ New Task" via
-  // contextNewChat, or the active session was deleted), the URL's
-  // ?conv= is now stale — a reload would resume the previous
-  // conversation. SelectSession keeps the URL in sync for the
-  // non-null case; this effect handles the null case. handleNewChat
-  // also clears the URL explicitly (idempotent — we end up here
-  // anyway because it calls contextNewChat which nulls activeId).
+  // When activeId transitions from non-null to null (user clicked
+  // "+ New Task" via contextNewChat, or the active session was
+  // deleted), the URL's ?conv= is now stale — a reload would resume
+  // the previous conversation. SelectSession keeps the URL in sync
+  // for the non-null case; this effect handles the null case.
+  // handleNewChat also clears the URL explicitly (idempotent — we
+  // end up here anyway because it calls contextNewChat which nulls
+  // activeId).
+  //
+  // CRITICAL: do NOT run on initial mount. On a deep-link
+  // ``?conv=<id>`` the conv-rehydration useEffect at the top of
+  // the file loads the conv's messages and the deep-link restore
+  // effect below looks up the matching ChatSession asynchronously
+  // (sessions is loaded async). If this effect fires on mount
+  // (because activeId starts as null) it strips ?conv= before the
+  // restore effect ever gets a chance to find the session —
+  // activeId then stays null forever and the URL is broken.
+  // Track previous activeId and only clean up on the actual
+  // non-null → null transition.
+  const prevActiveIdRef = useRef(null);
   useEffect(() => {
+    const prev = prevActiveIdRef.current;
+    prevActiveIdRef.current = activeId;
     if (activeId) return;
+    if (!prev) return; // Initial mount or no transition — leave the URL alone.
     try {
       const url = new URL(window.location.href);
       if (url.searchParams.has('conv')) {
@@ -625,8 +733,16 @@ export default function Chat() {
   // runtime will apply on the next send. Best-effort: a network failure
   // just leaves the badge hidden (count = 0), it does not block the
   // chat.
+  // Mirror the server-side ``_extend_with_project_kbs``: it gates on
+  // either ``selected_project_id`` OR ``selected_project_name``
+  // (see data_source_runtime.py:435). When only the name is set
+  // (sidebar "+ New Chat", ``?projectName=…`` without ``?project=``,
+  // or a legacy row whose ``project_id`` was never populated), the
+  // KB count useEffect previously short-circuited to 0 and the badge
+  // silently disappeared. Fall back to filtering by the legacy
+  // ``kb.project`` name column.
   useEffect(() => {
-    if (!pendingProjectId) {
+    if (!pendingProjectId && !pendingProject) {
       setInheritedKbCount(0);
       return undefined;
     }
@@ -635,14 +751,16 @@ export default function Chat() {
       try {
         const kbs = await base44.entities.KnowledgeBase.list();
         if (cancelled) return;
-        const count = kbs.filter((kb) => kb.project_id === pendingProjectId).length;
+        const count = pendingProjectId
+          ? kbs.filter((kb) => kb.project_id === pendingProjectId).length
+          : kbs.filter((kb) => kb.project === pendingProject).length;
         if (!cancelled) setInheritedKbCount(count);
       } catch {
         if (!cancelled) setInheritedKbCount(0);
       }
     })();
     return () => { cancelled = true; };
-  }, [pendingProjectId]);
+  }, [pendingProjectId, pendingProject]);
 
   // Debounced persistence to localStorage so the chat survives refreshes
   useEffect(() => {
@@ -736,7 +854,11 @@ export default function Chat() {
   async function loadMessages(sid, opts) {
     const silent = !!(opts && opts.silent);
     if (!silent) setLoadStatus('loading');
-    const cacheKey = `zhanlu:messages:${sid}`;
+    // Cache key bumped on demand — bump "" → "v2" to invalidate any
+    // pre-fix caches that hold stale "Sorry" rows now deleted from the
+    // backend (the cache + DB were consistent at write time but the
+    // DB-side cleanup leaves the cache out-of-date).
+    const cacheKey = `zhanlu:messages:v2:${sid}`;
     let msgs = null;
 
     // Primary: load from backend
@@ -750,6 +872,9 @@ export default function Chat() {
       // Cache to localStorage on success
       try {
         localStorage.setItem(cacheKey, JSON.stringify(msgs.slice(0, 200)));
+        // Also drop any v1 cache so it doesn't get used after a /v2 cache
+        // miss (e.g. user private-browses or storage quota eviction).
+        try { localStorage.removeItem(`zhanlu:messages:${sid}`); } catch { /* noop */ }
       } catch { /* best-effort cache write */ }
     } catch {
       // Retry once after 500ms backoff
@@ -765,7 +890,7 @@ export default function Chat() {
           localStorage.setItem(cacheKey, JSON.stringify(msgs.slice(0, 200)));
         } catch { /* best-effort */ }
       } catch {
-        // Fallback to localStorage cache
+        // Fallback to localStorage cache (v2 only — see cacheKey above)
         try {
           const cached = localStorage.getItem(cacheKey);
           if (cached) {
@@ -807,10 +932,73 @@ export default function Chat() {
       merged.sort(
         (a, b) => new Date(a.created_date || 0) - new Date(b.created_date || 0),
       );
-      return merged;
+      // Inject persistent stream content that accumulated while Chat was
+      // on a different page. The stream kept running via PersistentStreamContext
+      // and buffered partial content — surface it in the last assistant message.
+      try {
+        const pending = stream.getPendingMessage(sid);
+        if (pending && pending.content) {
+          // Find the last assistant message and patch it with the buffer's
+          // fresher content (partial content during streaming is always
+          // newer than what was last committed to the DB).
+          const lastAssistantIndex = merged.reduce(
+            (best, m, i) => (m.role === 'assistant' ? i : best), -1
+          );
+          if (lastAssistantIndex >= 0) {
+            const existing = merged[lastAssistantIndex];
+            const bufLen = (pending.content || '').length;
+            const existingLen = (existing.content || '').length;
+            if (bufLen > existingLen) {
+              merged[lastAssistantIndex] = {
+                ...existing,
+                content: pending.content,
+                tool_calls: pending.toolCalls || existing.tool_calls || null,
+                loading: pending.loading !== false && stream.isActive,
+              };
+            }
+          } else if (pending.loading !== false && stream.isActive) {
+            // The assistant message was never committed to the DB (brand-new
+            // generation started while Chat was unmounted). Inject a placeholder
+            // so the user sees the partial content immediately on return.
+            merged.push({
+              id: pending.id || `pending-${Date.now()}`,
+              role: 'assistant',
+              content: pending.content,
+              tool_calls: pending.toolCalls || null,
+              loading: true,
+              created_date: new Date().toISOString(),
+            });
+          }
+        }
+      } catch { /* provider may not be available */ }
+      // Cross-store content-fingerprint dedup: conv.messages and chat_messages
+      // share no id space, so the id-based merge above keeps both copies when
+      // the same logical message was persisted to both stores. The fingerprint
+      // intentionally does NOT include ``created_date`` — the two stores set
+      // different timestamps for the same logical message (backend's
+      // ``datetime.utcnow()`` vs the chat_messages row's DB default), so any
+      // fingerprint that includes ``created_date`` would fail to match. First
+      // occurrence wins: ``fetchedKept`` is at the head of ``merged``, so the
+      // server-confirmed chat_messages copy is kept.
+      return dedupeMessagesByFingerprint(merged);
     });
     setLoadStatus('loaded');
   }
+
+  useEffect(() => {
+    // One-time migration: drop any v1 `zhanlu:messages:${sid}` entries so
+    // users with stale caches (post-cleanup of stale "Sorry" rows in the
+    // backend) immediately see empty convs instead of the old error. Only
+    // drops keys shaped like the v1 contract; v2 keys are untouched.
+    try {
+      const toRemove = [];
+      for (let i = 0; i < localStorage.length; i++) {
+        const k = localStorage.key(i);
+        if (k && /^zhanlu:messages:[^:]+$/.test(k)) toRemove.push(k);
+      }
+      toRemove.forEach((k) => { try { localStorage.removeItem(k); } catch { /* noop */ } });
+    } catch { /* noop */ }
+  }, []);
 
   // P2 mid-turn steer: post the current input to the in-flight v3 stream
   // without starting a new stream. Best-effort; a 429 (queue full) or 404
@@ -913,7 +1101,7 @@ export default function Chat() {
     setLoading(true);
     // Single source of truth for the Stop button — must happen before any
     // await so the AbortController exists for the fetch / SSE call below.
-    streamState.startSending();
+    stream.startSending();
     // --- Chat without an explicit agent: ALWAYS auto-select
     // ``general_assistant`` so the conversation runs through the agent
     // runtime (which injects the date anchor, project KBs, memory,
@@ -982,7 +1170,7 @@ export default function Chat() {
     // --- P2 mid-turn steer: if a v3 agent stream is already in flight,
     // route the message through the steer endpoint instead of starting a
     // new stream. Falls through to the normal agent path otherwise.
-    if (effectiveAgent && streamState.isActive && streamingConvId) {
+    if (effectiveAgent && stream.isActive && streamingConvId) {
       return handleSteer(fullText);
     }
     // --- Agent mode: route through the v3 conversations endpoint so the
@@ -997,7 +1185,7 @@ export default function Chat() {
       });
       if (gen !== genRef.current) {
         // A newer generation took over before we even started streaming.
-        streamState.reset();
+        stream.resetStream();
         return;
       }
       setMessages((prev) => [...prev, aiMsg]);
@@ -1048,7 +1236,7 @@ export default function Chat() {
           setStreamingId(null);
           // Always drain the stream state when this generation finishes
           // its work, otherwise the Stop button stays visible.
-          if (streamState.isActive) streamState.complete();
+          if (stream.isActive) stream.complete();
         }
       }
       return;
@@ -1203,7 +1391,7 @@ export default function Chat() {
       });
       if (gen !== genRef.current) {
         // A newer generation took over before SSE started.
-        streamState.reset();
+        stream.resetStream();
         return;
       }
       setMessages((prev) => [...prev, aiMsg]);
@@ -1216,7 +1404,7 @@ export default function Chat() {
       let fullContent = '';
       let aborted = false;
       try {
-        streamState.startStreaming();
+        stream.startSending();
         const streamRes = await authFetch(`/api/apps/${appParams.appId}/integration-endpoints/Core/InvokeLLMStream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1226,7 +1414,7 @@ export default function Chat() {
             model: 'gpt_5_4',
             ...(fileUrls.length ? { file_urls: fileUrls } : {}),
           }),
-          signal: streamState.abortRef.current?.signal,
+          signal: stream.abortRef.current?.signal,
         });
         if (!streamRes.ok) throw new Error(`Stream failed: ${streamRes.status}`);
         const reader = streamRes.body.getReader();
@@ -1249,6 +1437,8 @@ export default function Chat() {
                 const partial = extractPartialText(fullContent);
                 if (partial && gen === genRef.current) {
                   setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: partial } : m)));
+                  // Persist partial content so it survives page navigation
+                  stream.updatePendingMessage(sid, { id: aiMsg.id, content: partial, loading: true });
                 }
               }
               if (evt.done) fullContent = evt.content;
@@ -1259,7 +1449,12 @@ export default function Chat() {
         }
         // Normal end-of-stream — clear the in-flight flag so the
         // Stop button disappears immediately and the user can send again.
-        if (gen === genRef.current) streamState.complete();
+        if (gen === genRef.current) {
+          // Finalize the pending buffer with loading: false so the
+          // next loadMessages doesn't show a stale loading indicator.
+          stream.updatePendingMessage(sid, { id: null, content: partial, loading: false });
+          stream.complete();
+        }
       } catch (streamErr) {
         // AbortError: user clicked Stop. Mark aborted so we don't run the
         // non-streaming fallback and append a "Stopped generating." hint.
@@ -1271,7 +1466,8 @@ export default function Chat() {
               m.id === aiMsg.id ? { ...m, content: (m.content || '') + stoppedText } : m
             ));
             // Stop button should disappear immediately when the user cancels
-            streamState.complete();
+            stream.clearPendingMessage(sid);  // clear buffer on abort
+            stream.complete();
           }
           return;
         }
@@ -1288,12 +1484,13 @@ export default function Chat() {
         if (gen === genRef.current) {
           setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: resData.text || resData.response || '...' } : m)));
         }
-        // The fallback path never went through `streamState.complete()`, so
+        // The fallback path never went through `stream.complete()`, so
         // the input bar can stay stuck on "responding" even though the user
         // already got a reply. Flip the state now — the outer `finally` will
         // also do this, but doing it here keeps the indicator honest if any
         // later step throws before the finally runs.
-        if (streamState.isActive) streamState.complete();
+        stream.clearPendingMessage(sid);  // clear buffer on error fallback
+        if (stream.isActive) stream.complete();
       }
 
       // --- Parse complete JSON response ---
@@ -1446,7 +1643,7 @@ export default function Chat() {
               model: 'gpt_5_4',
               ...(fileUrls.length ? { file_urls: fileUrls } : {}),
             }),
-            signal: streamState.abortRef.current?.signal,
+            signal: stream.abortRef.current?.signal,
           });
           if (!retryRes.ok) throw new Error(`Retry stream failed: ${retryRes.status}`);
           // Reuse the same streaming pipeline (parse events, accumulate
@@ -1557,14 +1754,14 @@ export default function Chat() {
       });
       if (gen !== genRef.current) return;
       setMessages((prev) => [...prev, errMsg]);
-      if (gen === genRef.current) streamState.error();
+      if (gen === genRef.current) stream.complete();
     } finally {
       if (gen === genRef.current) {
         setLoading(false);
         setStreamingId(null);
         // Defensive: ensure the stream state is always drained, even on
         // unexpected early returns. complete() is a no-op if already done.
-        if (streamState.isActive) streamState.complete();
+        if (stream.isActive) stream.complete();
       }
     }
   }
@@ -1700,8 +1897,15 @@ export default function Chat() {
     let finalArtifacts = [];  // artifacts extracted from the done event's conversation
     let aborted = false;
     try {
-      streamState.startStreaming();
-      const stream = streamAgentResponse(
+      stream.startSending();
+      // Rename the inner stream variable to `streamGen` — the outer
+      // `stream` (from usePersistentStream()) is shadowed by `const stream`
+      // here, which creates a Temporal Dead Zone on the line above
+      // (`stream.startSending()`). The TDZ throws ReferenceError before
+      // the fetch is even made, so the backend never sees the v3 stream
+      // POST and the catch block writes "Sorry, the connection was
+      // interrupted" to the ChatMessage row.
+      const streamGen = streamAgentResponse(
         convId,
         {
           role: 'user',
@@ -1736,13 +1940,13 @@ export default function Chat() {
             } catch { return {}; }
           })(),
         },
-        streamState.abortRef.current?.signal,
+        stream.abortRef.current?.signal,
       );
-      for await (const evt of stream) {
+      for await (const evt of streamGen) {
         if (gen !== genRef.current) {
           // A newer generation has taken over — drain our state so the
           // Stop button doesn't stick around for the old generation.
-          streamState.reset();
+          stream.resetStream();
           return { convId, fullContent, toolCalls };
         }
         if (!evt || typeof evt !== 'object') continue;
@@ -1836,6 +2040,8 @@ export default function Chat() {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id ? { ...m, content: fullContent } : m
             ));
+            // Persist partial content so it survives page navigation
+            stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, loading: true });
           }
         } else if (evt.type === 'error') {
           // Bug 1 fix: don't surface raw server error text in the chat.
@@ -1897,6 +2103,8 @@ export default function Chat() {
                   }
                 : m
             ));
+            // Persist final content so it survives page navigation
+            stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, toolCalls, loading: false });
             // P2 (conversational dashboards): scan the freshly-pushed
             // tool_calls for a completed dashboard tool. When one is
             // detected, auto-open the dock panel and ask the viewer to
@@ -1912,12 +2120,12 @@ export default function Chat() {
           // 'streaming' after a normal `done` event, so the Stop button
           // stayed visible. Drain the state here so the input flips back
           // to Send.
-          if (gen === genRef.current) streamState.complete();
+          if (gen === genRef.current) stream.complete();
         }
       }
       // Defensive: if the stream ended without emitting `done` (e.g. the
       // server closed the connection), still drain the state.
-      if (gen === genRef.current && streamState.isActive) streamState.complete();
+      if (gen === genRef.current && stream.isActive) stream.complete();
     } catch (streamErr) {
       // AbortError → user clicked Stop. Append a hint and stop.
       if (streamErr && (streamErr.name === 'AbortError' || streamErr.code === 20)) {
@@ -1928,9 +2136,45 @@ export default function Chat() {
             m.id === aiMsg.id ? { ...m, content: (m.content || '') + stoppedText } : m
           ));
         }
+        // Clear pending buffer on abort so stale partial content isn't injected on remount
+        stream.clearPendingMessage(sid);
         return { convId, fullContent, toolCalls, aborted: true };
       }
       if (gen === genRef.current) {
+        // SessionExpiredError → the user's tokens are dead (refresh token
+        // revoked/replayed, mid-session expiry, etc). Show an actionable,
+        // localized message instead of the generic "connection interrupted"
+        // one — and CRITICALLY, do NOT persist the error text to the
+        // ChatMessage row (via the later ChatMessage.update). The user
+        // already sees error messages persisted by the legacy /auth/refresh
+        // bug; this branch stops creating new ones. Trigger a forced logout
+        // so AuthContext + redirect land the user back on /login.
+        if (streamErr && streamErr.sessionExpired) {
+          console.warn('[Chat] session expired mid-stream — forcing re-login:', streamErr);
+          const expiredText = lang === 'en'
+            ? '⚠️ Your session has expired. Please log in again to continue.'
+            : '⚠️ 登录已过期，请重新登录后再继续。';
+          setMessages((prev) => prev.map((m) =>
+            m.id === aiMsg.id ? { ...m, content: expiredText } : m
+          ));
+          stream.clearPendingMessage(sid);
+          stream.complete();
+          // Trigger re-auth without leaving the user stuck. AuthContext.logout
+          // already does the localStorage clear + redirect, so the next
+          // page load lands them on the login screen with full state cleared.
+          try {
+            await base44.auth.logout?.();
+          } catch { /* best-effort */ }
+          // Direct local cleanup in case the SDK's logout is async or broken.
+          try {
+            localStorage.removeItem('base44_access_token');
+            localStorage.removeItem('token');
+            localStorage.removeItem('refresh_token');
+          } catch { /* ignore */ }
+          // Defer the redirect a tick so React flushes the message update.
+          setTimeout(() => { window.location.href = '/login?next=' + encodeURIComponent(window.location.pathname + window.location.search); }, 100);
+          return { convId, fullContent: expiredText, toolCalls, sessionExpired: true };
+        }
         // Bug 1 fix: don't surface raw network/stream errors in the chat
         // content. Show a clean, localized message. The raw error is
         // still available in the browser console for debugging. This
@@ -1944,7 +2188,9 @@ export default function Chat() {
         setMessages((prev) => prev.map((m) =>
           m.id === aiMsg.id ? { ...m, content: fullContent } : m
         ));
-        streamState.error();
+        // Clear pending buffer on error so stale partial content isn't injected on remount
+        stream.clearPendingMessage(sid);
+        stream.complete();
       }
     }
     // Persist the final assistant message + tool_calls + artifacts +
@@ -1975,7 +2221,8 @@ export default function Chat() {
     setInputValue('');
     clearDraft('chat_input_draft');
     // Also abort any in-flight stream so the Stop button doesn't linger.
-    if (streamState.isActive) streamState.reset();
+    if (stream.isActive) stream.resetStream();
+    stream.clearPendingMessage(activeId);
     if (activeId) {
       await base44.entities.ChatMessage.deleteMany({ session_id: activeId });
       setMessages([]);
@@ -1991,6 +2238,7 @@ export default function Chat() {
     // active.
     genRef.current++;
     setStreamingId(null);
+    stream.clearPendingMessage(s.id);
     if (activeId === s.id) {
       setMessages([]);
       // Context clears activeId; the active session is gone.
@@ -2005,6 +2253,7 @@ export default function Chat() {
     // calls `selectSession` from the context.
     genRef.current++;
     setStreamingId(null);
+    stream.clearPendingMessage(activeId);  // clear buffer for the old session
     setActiveId(id);
     // Adopt the session's project so the next new chat inherits it
     // (consistent with the previous behavior).
@@ -2019,6 +2268,7 @@ export default function Chat() {
     genRef.current++;
     setStreamingId(null);
     setStreamingConvId(null);  // clear the resume handle so the next send creates a new conv
+    stream.clearPendingMessage(activeId);  // clear buffer for the old session
     setMessages([]);
     setChips([]);
     setActiveSkill(null);
@@ -2105,6 +2355,14 @@ export default function Chat() {
     handleSend(answerText);
   }
 
+  // Edit & resend: pre-fill the input with the original message text
+  // so the user can tweak and resend. This enables message branching
+  // without needing a full fork-history UI.
+  function handleEditMessage(msg) {
+    setInputValue(msg.content || '');
+    inputRef.current?.focus();
+  }
+
   // Preview a created agent: navigate to its config page.
   function handleAgentPreview(agentId) {
     if (agentId) navigate(`/my-space/agent/${agentId}`);
@@ -2180,12 +2438,12 @@ export default function Chat() {
                 <button
                   type="button"
                   onClick={() => { if (pendingProjectId) navigate(`/my-space/project/${pendingProjectId}`); }}
-                  className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
                   title={isEn ? 'Back to project' : '返回项目'}
                 >
-                  <FolderKanban className="h-3.5 w-3.5 text-primary" />
-                  <span className="font-medium text-foreground">{pendingProject}</span>
-                  <ArrowLeft className="h-3 w-3" />
+                  <FolderKanban className="h-3.5 w-3.5 shrink-0 text-primary" />
+                  <span className="min-w-0 flex-1 truncate font-medium text-foreground">{pendingProject}</span>
+                  <ArrowLeft className="h-3 w-3 shrink-0" />
                 </button>
               ) : <span />}
               <div className="flex items-center gap-1.5">
@@ -2254,7 +2512,7 @@ export default function Chat() {
                     const isStreaming = m.id === streamingId;
                     const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
                     return (
-                      <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={openRun} userRequestedFormat={userFormatByMessage[m.id] || null} />
+                      <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={openRun} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} />
                     );
                   })}
                   </div>
@@ -2299,16 +2557,16 @@ export default function Chat() {
                 )}
               </div>
             </div>
-            <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} />
+            <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={stream.isActive} onStop={stream.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} />
           </>
         ) : (
           <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
             <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
               <Bot className="h-6 w-6 text-primary" />
             </div>
-            <h1 className="font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
+            <h1 className="break-words px-4 text-center font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
             <div className="mt-8 w-full max-w-4xl">
-              <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={streamState.isActive} onStop={streamState.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name) => setPendingProject(name, null)} centered inheritedKbCount={inheritedKbCount} />
+              <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={stream.isActive} onStop={stream.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name) => setPendingProject(name, null)} centered inheritedKbCount={inheritedKbCount} />
               {chips.length > 0 && (
                 <RelatedContent
                   chips={chips}
@@ -2415,7 +2673,7 @@ You DO have real-time data access through your tools. When the user asks about c
 
 `;
 
-const baseSystemPrompt = `${_dateAnchor}你是战颅认知核心助手，一个企业级 AI 智能平台的核心中枢。
+const baseSystemPrompt = `${_dateAnchor}你是伊斯科AI认知核心助手，一个企业级 AI 智能平台的核心中枢。
 
 你的能力：
 1. 通过对话帮助用户创建、配置和管理：Agent 应用、自动化任务、知识库、工具技能、报表、决策编排流程。

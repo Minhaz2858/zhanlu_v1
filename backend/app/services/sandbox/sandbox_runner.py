@@ -28,7 +28,7 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 INPUT_DIR = Path("/input")
@@ -98,7 +98,7 @@ def derive_columns(rows):
 def write_manifest(config, rows, output_file, fmt):
     """Write build_manifest.json with generation metadata."""
     manifest = {
-        "generated_at": datetime.utcnow().isoformat() + "Z",
+        "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
         "format": fmt,
         "title": config.get("title", "Generated Report"),
         "row_count": len(rows),
@@ -171,7 +171,7 @@ def generate_xlsx(rows, config, instructions):
         ws2.cell(row=1, column=1, value="Report Title").font = Font(bold=True)
         ws2.cell(row=1, column=2, value=config.get("title", "Report"))
         ws2.cell(row=2, column=1, value="Generated At").font = Font(bold=True)
-        ws2.cell(row=2, column=2, value=datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC"))
+        ws2.cell(row=2, column=2, value=datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
         ws2.cell(row=3, column=1, value="Total Rows").font = Font(bold=True)
         ws2.cell(row=3, column=2, value=len(rows))
         ws2.cell(row=4, column=1, value="Columns").font = Font(bold=True)
@@ -332,7 +332,7 @@ def generate_pptx(rows, config, instructions):
     if source:
         _textbox(s, Inches(0.6), Inches(3.7), Inches(12.1), Inches(0.4),
                  f"Source: {source}", 16, color=C_MUTED)
-    meta = f"Generated {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}"
+    meta = f"Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}"
     if instructions:
         meta += f"  ·  {len(rows)} records"
     _textbox(s, Inches(0.6), Inches(6.6), Inches(12.1), Inches(0.4),
@@ -856,7 +856,7 @@ def generate_html(rows, config, instructions):
 <body>
     <div class="header">
         <h1>{config.get('title', 'Dashboard')}</h1>
-        <div class="meta">Generated on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | {len(rows)} records | {len(columns)} columns</div>
+        <div class="meta">Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} | {len(rows)} records | {len(columns)} columns</div>
     </div>
     <div class="container">
         {summary_section}
@@ -913,7 +913,7 @@ def generate_pdf(rows, config, instructions):
     # Meta info
     meta_style = styles["Normal"]
     elements.append(Paragraph(
-        f"Generated on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | {len(rows)} records",
+        f"Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} | {len(rows)} records",
         meta_style,
     ))
     elements.append(Spacer(1, 0.3 * inch))
@@ -1022,7 +1022,7 @@ def generate_docx(rows, config, instructions):
         sr.font.size = Pt(13)
         sr.font.color.rgb = MUTED
 
-    gen_at = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+    gen_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     sub2 = doc.add_paragraph()
     sub2.alignment = WD_ALIGN_PARAGRAPH.CENTER
     sub2.paragraph_format.space_after = Pt(2)
@@ -1327,7 +1327,7 @@ def generate_md(rows, config, instructions):
     lines = [
         f"# {config.get('title', 'Report')}",
         "",
-        f"Generated on {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} | {len(rows)} records",
+        f"Generated on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} | {len(rows)} records",
         "",
     ]
 
@@ -1408,7 +1408,7 @@ def main():
         traceback.print_exc(file=sys.stderr)
         # Write error manifest
         error_manifest = {
-            "generated_at": datetime.utcnow().isoformat() + "Z",
+            "generated_at": datetime.now(timezone.utc).isoformat() + "Z",
             "format": fmt,
             "title": config.get("title", "Report"),
             "status": "failed",

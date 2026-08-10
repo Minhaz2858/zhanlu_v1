@@ -1098,8 +1098,8 @@ def _update_agent(args: dict, db: Session, user_id: str | None) -> dict:
         agent.knowledge_bases,
     )
 
-    from datetime import datetime
-    agent.updated_date = datetime.utcnow()
+    from datetime import datetime, timezone
+    agent.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(agent)
     result = agent.to_dict()
@@ -1236,8 +1236,8 @@ def _update_skill(args: dict, db: Session, user_id: str | None) -> dict:
         if key in allowed_fields:
             setattr(tool, key, value)
 
-    from datetime import datetime
-    tool.updated_date = datetime.utcnow()
+    from datetime import datetime, timezone
+    tool.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(tool)
 
@@ -1451,7 +1451,7 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
         try:
             from app.models.agent_conversation import AgentConversation
             from app.models.chat_session import ChatSession
-            from datetime import datetime as _dt
+            from datetime import datetime, timezone as _dt
             task_name = (args.get("name") or "Untitled Automation").strip()
             # Use the same agent_name resolution that the chat
             # ``create_conversation`` endpoint uses (None → chat page
@@ -1658,7 +1658,7 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
     # If the user toggled the task active and we have a valid cron,
     # make sure next_run_at is in the future.
     if task.status == "active" and task.cron_expression and (
-        task.next_run_at is None or task.next_run_at < datetime.utcnow()
+        task.next_run_at is None or task.next_run_at < datetime.now(timezone.utc)
     ):
         try:
             from app.services.schedule_parser import next_run_at as _next_run_at
@@ -1666,8 +1666,8 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
         except Exception:
             pass
 
-    from datetime import datetime
-    task.updated_date = datetime.utcnow()
+    from datetime import datetime, timezone
+    task.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(task)
 

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import uuid
 from dataclasses import dataclass, field, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 
@@ -73,7 +73,7 @@ class ExtractedEvent:
 
     # auto-computed
     event_id: str = field(default_factory=lambda: f"evt_{uuid.uuid4().hex[:12]}")
-    detected_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    detected_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # ── Derived scores ────────────────────────────────────────────────────
     @property

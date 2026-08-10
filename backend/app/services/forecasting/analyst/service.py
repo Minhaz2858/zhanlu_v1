@@ -14,6 +14,18 @@ from app.services.llm_service import chat_completion_json_sync
 from app.services.forecasting.analyst.brief_writer import write_brief_llm
 from app.services.forecasting.analyst.evidence_pack import UPSTREAM_MAP, build_pack
 from app.services.forecasting.analyst.template_brief import render_template_brief
+from app.services.forecasting.features.operating_signal import (
+    compute_operating_signal,
+)
+from app.services.forecasting.features.inventory_signal import (
+    compute_inventory_signal,
+)
+from app.services.forecasting.features.import_parity_signal import (
+    compute_import_parity_signal,
+)
+from app.services.forecasting.features.exogenous_loaders import (
+    OperatingRateLoader, InventoryLoader, ImportPriceLoader,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +115,80 @@ def _build_pack_for(product_id: str, day: int, run) -> dict:
             logger.warning("[analyst] demand-signal load failed for %s: %s",
                            product_id, exc)
 
+    # Wave 3 T3.5: external-feed signals (operating rate / inventory /
+    # import parity) — flag-gated, default OFF.
+    downstream_utilization: dict | None = None
+    inventory_pressure: dict | None = None
+    import_pressure: dict | None = None
+    if os.environ.get("FORECAST_EXTERNAL_SIGNAL_ENABLED", "false").lower() == "true":
+        try:
+            # Build a price_df from history_rows for divergence computations
+            price_df = None
+            if history_rows and len(history_rows) >= 28:
+                price_df = pd.DataFrame(
+                    [{"date": d, "price": float(v)}
+                     for d, v in history_rows if v is not None]
+                )
+
+            # Operating rate
+            op_df = OperatingRateLoader(
+                product_id=product_id, lookback_days=365,
+            ).load()
+            if not op_df.empty:
+                op_sig = compute_operating_signal(
+                    op_df, price_df=price_df, product_id=product_id,
+                )
+                if op_sig.has_sufficient_data:
+                    downstream_utilization = {
+                        "rolling_4wk_op_rate": op_sig.rolling_4wk_op_rate,
+                        "yoy_change_pct": op_sig.yoy_change_pct,
+                        "op_rate_vs_price_divergence":
+                            op_sig.op_rate_vs_price_divergence,
+                        "utilization_regime": op_sig.utilization_regime,
+                        "has_sufficient_data": True,
+                    }
+
+            # Inventory
+            inv_df = InventoryLoader(
+                product_id=product_id, lookback_days=365,
+            ).load()
+            if not inv_df.empty:
+                inv_sig = compute_inventory_signal(
+                    inv_df, price_df=price_df, product_id=product_id,
+                )
+                if inv_sig.has_sufficient_data:
+                    inventory_pressure = {
+                        "inventory_4wk_change_pct":
+                            inv_sig.inventory_4wk_change_pct,
+                        "inventory_vs_price_divergence":
+                            inv_sig.inventory_vs_price_divergence,
+                        "days_of_supply": inv_sig.days_of_supply,
+                        "inventory_pressure": inv_sig.inventory_pressure,
+                        "has_sufficient_data": True,
+                    }
+
+            # Import parity
+            ip_df = ImportPriceLoader(
+                product_id=product_id, lookback_days=365,
+            ).load()
+            if not ip_df.empty:
+                ip_sig = compute_import_parity_signal(
+                    ip_df, domestic_price_df=price_df,
+                    product_id=product_id,
+                )
+                if ip_sig.has_sufficient_data:
+                    import_pressure = {
+                        "import_parity_gap": ip_sig.import_parity_gap,
+                        "import_window_open": ip_sig.import_window_open,
+                        "ceiling_pressure": ip_sig.ceiling_pressure,
+                        "has_sufficient_data": True,
+                    }
+        except Exception as exc:
+            logger.warning(
+                "[analyst] external-signal load failed for %s: %s",
+                product_id, exc,
+            )
+
     return build_pack(
         product_id=product_id,
         name_zh=labels.get("label_zh", product_id),
@@ -115,6 +201,9 @@ def _build_pack_for(product_id: str, day: int, run) -> dict:
         as_of_month=datetime.now().month,
         demand_signal=demand_signal,
         supplier_ladder=supplier_ladder,
+        downstream_utilization=downstream_utilization,
+        inventory_pressure=inventory_pressure,
+        import_pressure=import_pressure,
     )
 
 

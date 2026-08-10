@@ -41,7 +41,7 @@ def compute_bias_delta(db, product_id: str, author_id: str) -> dict:
         ForecastFeedback.status == "scored",
         ForecastFeedback.is_deleted == False,  # noqa: E712
     ).all()
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     deltas, weights = [], []
     for r in rows:
         if r.ai_price <= 0:
@@ -85,7 +85,7 @@ def apply_bias_correction(db, target, published_series: pd.Series, author_id: st
         triggered_by="bias_correction",
         reason=f"trusted author {author_id} delta={delta['delta_ratio']:.4f} (n={delta['n']})",
         old_weights=None, new_weights=None,
-        delta_ratio=delta["delta_ratio"], applied=True, applied_at=datetime.utcnow(),
+        delta_ratio=delta["delta_ratio"], applied=True, applied_at=datetime.now(timezone.utc),
     )
     db.add(audit); db.commit()
 

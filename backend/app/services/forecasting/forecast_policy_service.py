@@ -152,25 +152,33 @@ class ForecastPolicyService:
         Returns:
             ForecastPolicyMetrics with all fields populated.
         """
-        from datetime import datetime, timedelta
+        from datetime import datetime, timedelta, timezone
 
-        from app.models.forecasting import ForecastAccuracyLog
+        from app.models.forecasting import ForecastTarget, ForecastAccuracyLog
 
-        cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=lookback_days)
 
-        rows = (
-            db.query(ForecastAccuracyLog)
-            .filter(
-                ForecastAccuracyLog.org_id == org_id,
-                ForecastAccuracyLog.product_key == product_key,
-                ForecastAccuracyLog.created_date >= cutoff,
+        # Resolve target_id from product_key (ForecastAccuracyLog has no product_key column)
+        target = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key == product_key,
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).first()
+        if not target:
+            rows = []
+        else:
+            rows = (
+                db.query(ForecastAccuracyLog)
+                .filter(
+                    ForecastAccuracyLog.org_id == org_id,
+                    ForecastAccuracyLog.target_id == target.id,
+                    ForecastAccuracyLog.created_date >= cutoff,
+                )
+                .all()
             )
-            .all()
-        )
 
         signed_errors = [
-            r.signed_error for r in rows
-            if hasattr(r, "signed_error") and r.signed_error is not None
+            r.realized_error for r in rows
+            if r.realized_error is not None
         ]
 
         bias_pct = ForecastPolicyService.compute_bias_pct(signed_errors)

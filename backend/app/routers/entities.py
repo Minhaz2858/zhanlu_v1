@@ -98,8 +98,13 @@ def _check_shareable_write(
     gets a clear "view-only" message instead of a confusing 404.  If the
     record doesn't exist at all, raise 404.  For owner-writes and
     non-shareable entities, this is a pass-through.
+
+    Org admins bypass this check — they always get ``can_edit=True``.
     """
     if not _include_shared(entity_name):
+        return
+    is_admin = getattr(user, "role", "user") == "admin"
+    if is_admin:
         return
     visible = entity_service.get_record(
         model_class, record_id, db,
@@ -136,7 +141,7 @@ def register_entity_router(
 
     # --- GET / (list or filter) ---
     @router.get("")
-    async def list_or_filter(
+    def list_or_filter(
         app_id: str,
         q: str | None = Query(None, description="JSON query filter"),
         sort: str | None = Query(None, description="Sort field, - prefix for desc"),
@@ -148,6 +153,7 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         owner = _owner_id(entity_name, user)
+        is_admin = getattr(user, "role", "user") == "admin"
         # Cap unbounded reads: when the caller omits ``limit`` (Base44 SDK
         # default), apply a sane default so a giant table can't be pulled into
         # memory in one shot. Explicit limits are clamped to a hard max.
@@ -158,15 +164,17 @@ def register_entity_router(
             return entity_service.filter_records(
                 model_class, db, q, sort, effective_limit, skip,
                 owner_id=owner, include_shared=inc_shared,
+                is_admin=is_admin,
             )
         return entity_service.list_records(
             model_class, db, sort, effective_limit, skip,
             owner_id=owner, include_shared=inc_shared,
+            is_admin=is_admin,
         )
 
     # --- POST / (create) ---
     @router.post("")
-    async def create(
+    def create(
         app_id: str,
         data: dict,
         db: Session = Depends(get_db),
@@ -183,7 +191,7 @@ def register_entity_router(
 
     # --- DELETE / (delete many by query) ---
     @router.delete("")
-    async def delete_many(
+    def delete_many(
         app_id: str,
         query_data: dict,
         db: Session = Depends(get_db),
@@ -194,7 +202,7 @@ def register_entity_router(
 
     # --- POST /bulk (bulk create) ---
     @router.post("/bulk")
-    async def bulk_create(
+    def bulk_create(
         app_id: str,
         data_list: list,
         db: Session = Depends(get_db),
@@ -205,7 +213,7 @@ def register_entity_router(
 
     # --- PUT /bulk (bulk update) ---
     @router.put("/bulk")
-    async def bulk_update(
+    def bulk_update(
         app_id: str,
         data_list: list,
         db: Session = Depends(get_db),
@@ -215,7 +223,7 @@ def register_entity_router(
 
     # --- PATCH /update-many (update many by query) ---
     @router.patch("/update-many")
-    async def update_many(
+    def update_many(
         app_id: str,
         body: dict,
         db: Session = Depends(get_db),
@@ -228,7 +236,7 @@ def register_entity_router(
 
     # --- PUT /{id}/restore (must be before /{id} routes) ---
     @router.put("/{record_id}/restore")
-    async def restore(
+    def restore(
         app_id: str,
         record_id: str,
         db: Session = Depends(get_db),
@@ -241,17 +249,19 @@ def register_entity_router(
 
     # --- GET /{id} ---
     @router.get("/{record_id}")
-    async def get_by_id(
+    def get_by_id(
         app_id: str,
         record_id: str,
         db: Session = Depends(get_db),
         # Accept anonymous identities so unauthenticated browsing still works.
         user=Depends(get_current_user_required),
     ):
+        is_admin = getattr(user, "role", "user") == "admin"
         result = entity_service.get_record(
             model_class, record_id, db,
             owner_id=_owner_id(entity_name, user),
             include_shared=_include_shared(entity_name),
+            is_admin=is_admin,
         )
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
@@ -259,7 +269,7 @@ def register_entity_router(
 
     # --- PUT /{id} ---
     @router.put("/{record_id}")
-    async def update_by_id(
+    def update_by_id(
         app_id: str,
         record_id: str,
         data: dict,
@@ -274,7 +284,7 @@ def register_entity_router(
 
     # --- DELETE /{id} ---
     @router.delete("/{record_id}")
-    async def delete_by_id(
+    def delete_by_id(
         app_id: str,
         record_id: str,
         db: Session = Depends(get_db),
@@ -326,13 +336,15 @@ def register_project_kb_router() -> APIRouter:
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
 
-        # 2. Access gate: owner OR shared via ResourceShare
-        has_access = project.created_by_id == user.id
+        # 2. Access gate: owner OR shared via ResourceShare OR org admin
+        is_admin = getattr(user, "role", "user") == "admin"
+        has_access = is_admin or project.created_by_id == user.id
         if not has_access:
             share = db.query(ResourceShare).filter(
                 ResourceShare.resource_id == project_id,
-                ResourceShare.resource_type == "Project",
-                ResourceShare.user_id == user.id,
+                ResourceShare.resource_type == "project",
+                ResourceShare.shared_with_user_id == user.id,
+                ResourceShare.is_deleted == False,
             ).first()
             has_access = share is not None
 

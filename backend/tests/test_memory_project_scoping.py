@@ -86,29 +86,26 @@ def test_load_memory_snapshot_user_target_is_cross_project():
     )
 
 
-def test_load_memory_snapshot_no_active_project_only_matches_legacy_bucket():
-    """When project_id is None (the 'Ungrouped' chat), the memory chain
-    must only match the legacy NULL-project_id bucket — it must NOT
-    pull in notes stamped with any other project_id."""
+def test_load_memory_snapshot_no_active_project_skips_memory_target():
+    """When project_id is None (the 'Ungrouped' chat), the target='memory'
+    chain must be SKIPPED entirely so legacy pre-project-scoping notes
+    (which all have project_id=NULL) do not leak into every ungrouped chat."""
     chains = {"memory": _make_query_chain(), "user": _make_query_chain()}
-    n = [0]
     def _q_for(model):
-        target = "memory" if n[0] == 0 else "user"
-        n[0] += 1
-        return chains[target]
+        # In the new code only one query is issued (for user) because memory is skipped.
+        return chains["user"]
     db = MagicMock()
     db.query.side_effect = _q_for
 
-    load_memory_snapshot(db, agent_app_id="test", user_id="u1", project_id=None)
+    result = load_memory_snapshot(db, agent_app_id="test", user_id="u1", project_id=None)
 
-    mem_filter_strs = _filter_strs(chains["memory"])
-    # Must reference project_id, and must include the IS NULL bucket
-    # (legacy cross-project notes).
-    assert any("project_id" in s for s in mem_filter_strs), (
-        f"expected project_id filter on target='memory' chain (None branch); got: {mem_filter_strs}"
+    # target='memory' must be skipped — result['memory'] empty.
+    assert result["memory"] == "", (
+        f"expected empty memory block in ungrouped chat; got: {result['memory']!r}"
     )
-    assert any("IS NULL" in s for s in mem_filter_strs), (
-        f"expected IS NULL clause on target='memory' chain (None branch); got: {mem_filter_strs}"
+    # target='user' should still be queried (cross-project).
+    assert chains["user"].filter.called, (
+        "target='user' query should still be executed in ungrouped chat"
     )
 
 

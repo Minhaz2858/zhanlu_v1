@@ -12,7 +12,7 @@ existing raw tool loop runs.  When True, the FSM orchestrates.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 from uuid import uuid4
@@ -163,7 +163,7 @@ class SynexiaFSM:
             user_message=request.user_message,
             current_state=FSMState.INIT.value,
             mode=request.mode,
-            started_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
             org_id=request.org_id,
             app_id=request.app_id,
         )
@@ -693,7 +693,7 @@ class SynexiaFSM:
 
         self.execution.assistant_content = assistant_content
         self.execution.current_state = FSMState.DONE.value
-        self.execution.completed_at = datetime.utcnow()
+        self.execution.completed_at = datetime.now(timezone.utc)
         self.db.commit()
 
         # Collect tool calls for frontend compatibility

@@ -36,8 +36,19 @@ def _get_or_create_memory(
     agent_app_id: str,
     user_id: str | None,
     target: str,
+    project_id: str | None = None,
 ) -> AgentMemory:
-    """Get existing memory record or create a new one."""
+    """Get existing memory record or create a new one.
+
+    Project scoping (2026-08-05): when ``project_id`` is provided, the
+    lookup matches rows with that project_id; NULL project_id rows
+    are matched only for the ``target='user'`` case (user profile is
+    intentionally cross-project) or when the caller explicitly asks
+    for the legacy "no project" bucket (``project_id == ""`` is
+    treated as NULL). This prevents the cross-project memory leak
+    that surfaced when a note taken in one project got injected
+    into every other project's system prompt.
+    """
     query = db.query(AgentMemory).filter(
         AgentMemory.agent_app_id == agent_app_id,
         AgentMemory.target == target,
@@ -48,11 +59,35 @@ def _get_or_create_memory(
     else:
         query = query.filter(AgentMemory.user_id.is_(None))
 
+    # Project filter: user-profile rows are always cross-project
+    # (target='user' is about WHO the user is); for target='memory'
+    # we use STRICT match — no NULL fallback when an active project
+    # is set, so a write in project-A attaches to (or creates) the
+    # project-A row, never the legacy NULL bucket. The NULL bucket
+    # is only matched when the caller has no project context (e.g.
+    # the "Ungrouped" chat). This prevents two bugs:
+    #   1. Reusing a legacy NULL-bucket row when a project-scoped
+    #      note is being written (would attach the new note to the
+    #      legacy row and silently make it cross-project again).
+    #   2. Cross-project leakage via the NULL fallback at read time
+    #      (the Q2 2026 sales report that surfaced in every
+    #      project).
+    if target == "user":
+        pass  # user profile is always cross-project
+    elif project_id is None:
+        # Active project is None — only match the legacy NULL bucket.
+        query = query.filter(AgentMemory.project_id.is_(None))
+    else:
+        # Active project is set — strict match. If no row exists
+        # for this project yet, a new one is created below.
+        query = query.filter(AgentMemory.project_id == project_id)
+
     mem = query.first()
     if not mem:
         mem = AgentMemory(
             agent_app_id=agent_app_id,
             user_id=user_id,
+            project_id=project_id if target != "user" else None,
             target=target,
             content="",
             char_count=0,
@@ -118,10 +153,20 @@ async def _memory_tool(
     if not agent_app_id:
         agent_app_id = "default"
 
+    # Resolve the active project_id from the tool context (set by
+    # agent_tools.py when the LLM invokes the memory tool). This is
+    # what gets stamped on the AgentMemory row so a note taken in
+    # "Data Analysis" stays inside that project.
+    project_id = (context or {}).get("project_id")
+    # Treat empty string as None to match how the rest of the
+    # codebase handles the "no project" case.
+    if project_id == "":
+        project_id = None
+
     if target not in ("memory", "user"):
         return {"success": False, "error": f"Invalid target '{target}'. Use 'memory' or 'user'."}
 
-    mem = _get_or_create_memory(db, agent_app_id, user_id, target)
+    mem = _get_or_create_memory(db, agent_app_id, user_id, target, project_id=project_id)
     entries = _parse_entries(mem.content)
 
     if action == "read":
@@ -227,14 +272,36 @@ async def _memory_tool(
 # Frozen snapshot for system prompt injection
 # ---------------------------------------------------------------------------
 
-def load_memory_snapshot(db: Session, agent_app_id: str, user_id: str | None) -> dict[str, str]:
+def load_memory_snapshot(
+    db: Session,
+    agent_app_id: str,
+    user_id: str | None,
+    project_id: str | None = None,
+) -> dict[str, str]:
     """Load frozen memory snapshot for system prompt injection.
 
     Returns dict with 'memory' and 'user' keys containing formatted blocks
     (or empty strings if no entries). Called once at conversation start.
+
+    Project scoping (2026-08-05): ``target='user'`` rows (the user
+    profile) are always cross-project — they describe WHO the user
+    is, not what they did in a specific project. ``target='memory'``
+    rows are project-scoped: when ``project_id`` is set, the query
+    matches ONLY the active project (strict — no NULL fallback) so
+    a note taken in "ECISCO BI" cannot leak into "Data Analysis".
+    When ``project_id`` is None (the "Ungrouped" chat), **no**
+    ``target='memory'`` rows are loaded at all. This prevents legacy
+    pre-project-scoping memories (which all have project_id=NULL) from
+    leaking into every ungrouped chat. Without this guard, a note like
+    "Q2 2026 sales report" (written before the schema column existed)
+    would appear in every project's system prompt.
     """
     result = {"memory": "", "user": ""}
     for target in ("memory", "user"):
+        # Skip agent memory notes entirely in ungrouped chats to prevent
+        # cross-project leakage of legacy pre-scoping memories.
+        if target == "memory" and project_id is None:
+            continue
         query = db.query(AgentMemory).filter(
             AgentMemory.agent_app_id == agent_app_id,
             AgentMemory.target == target,
@@ -244,6 +311,17 @@ def load_memory_snapshot(db: Session, agent_app_id: str, user_id: str | None) ->
             query = query.filter(AgentMemory.user_id == user_id)
         else:
             query = query.filter(AgentMemory.user_id.is_(None))
+        # Project filter: user profile is always cross-project;
+        # agent notes are project-scoped strictly (no NULL fallback
+        # when an active project is set — that's what was leaking
+        # the Q2 2026 report into every project).
+        if target == "user":
+            pass
+        elif project_id is None:
+            # Already handled by the continue above, but kept for clarity.
+            query = query.filter(AgentMemory.project_id.is_(None))
+        else:
+            query = query.filter(AgentMemory.project_id == project_id)
         mem = query.first()
         if mem and mem.content:
             entries = _parse_entries(mem.content)

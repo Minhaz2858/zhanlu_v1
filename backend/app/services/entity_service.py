@@ -6,7 +6,7 @@ update, soft-delete, delete-many, bulk-create, bulk-update, update-many, restore
 """
 
 from typing import Any, Optional
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -163,11 +163,15 @@ def _coerce_for_model(model, key: str, value):
                   if col.type.__class__.__name__ in ("DateTime", "Date", "DateTimeField")}
     if key not in dt_columns:
         return value
-    s = value.strip().rstrip("Z")
+    s = value.strip()
     if not s:
         return None
-    for fmt in ("%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
-                "%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+    # Python 3.11+: fromisoformat handles Z, +08:00, and fractional seconds natively
+    try:
+        return datetime.fromisoformat(s)
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M:%S.%f", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
         try:
             return datetime.strptime(s, fmt)
         except ValueError:
@@ -184,7 +188,8 @@ def _apply_updates(record, model, updates: dict) -> None:
 _SHAREABLE_MODELS = {"Project", "AgentApp"}
 
 
-def _annotate_access(model, records: list, owner_id: str | None, db) -> list:
+def _annotate_access(model, records: list, owner_id: str | None, db,
+                      is_admin: bool = False) -> list:
     """Annotate serialized records with ``can_edit`` and ``is_shared_with_me``.
 
     Only called for shareable models (Project, AgentApp) on the read path so
@@ -192,11 +197,19 @@ def _annotate_access(model, records: list, owner_id: str | None, db) -> list:
     annotation is appended to the dict returned by ``to_dict()``; it does not
     exist on the ORM model itself.
 
-    ``can_edit`` → True when the caller owns the record (created_by_id match).
+    ``can_edit`` → True when the caller owns the record (created_by_id match)
+    **or** when the caller is an org admin (``is_admin=True``).
     ``is_shared_with_me`` → True when the caller received a ResourceShare grant
     but does NOT own the record (i.e. it was shared *to* them).
     """
     if not records or owner_id is None:
+        for r in records:
+            r["can_edit"] = False
+            r["is_shared_with_me"] = False
+        return records
+
+    # ── Admin short-circuit: full access to everything ──
+    if is_admin:
         for r in records:
             r["can_edit"] = True
             r["is_shared_with_me"] = False
@@ -234,6 +247,7 @@ def list_records(
     limit: int | None = None, skip: int | None = None,
     owner_id: str | None = None,
     include_shared: bool = False,
+    is_admin: bool = False,
 ) -> list:
     """List non-deleted records with optional sorting and pagination.
 
@@ -253,7 +267,7 @@ def list_records(
     if limit:
         query = query.limit(limit)
     records = [r.to_dict() for r in query.all()]
-    return _annotate_access(model, records, owner_id, db)
+    return _annotate_access(model, records, owner_id, db, is_admin=is_admin)
 
 
 def filter_records(
@@ -261,6 +275,7 @@ def filter_records(
     sort: str | None = None, limit: int | None = None,
     skip: int | None = None, owner_id: str | None = None,
     include_shared: bool = False,
+    is_admin: bool = False,
 ) -> list:
     """Filter non-deleted records by MongoDB-style query with sorting and pagination.
 
@@ -282,11 +297,11 @@ def filter_records(
     if limit:
         query = query.limit(limit)
     records = [r.to_dict() for r in query.all()]
-    return _annotate_access(model, records, owner_id, db)
+    return _annotate_access(model, records, owner_id, db, is_admin=is_admin)
 
 
 def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
-                include_shared: bool = False) -> dict | None:
+                include_shared: bool = False, is_admin: bool = False) -> dict | None:
     """Get a single non-deleted record by ID.
 
     ``owner_id`` (optional) scopes the lookup to the identity's own rows —
@@ -301,7 +316,7 @@ def get_record(model, record_id: str, db: Session, owner_id: str | None = None,
     if not record:
         return None
     result = record.to_dict()
-    _annotate_access(model, [result], owner_id, db)
+    _annotate_access(model, [result], owner_id, db, is_admin=is_admin)
     return result
 
 
@@ -342,7 +357,7 @@ def update_record(model, record_id: str, data: dict, db: Session, owner_id: str 
     filtered = _filter_data(model, data)
     _apply_updates(record, model, filtered)
 
-    record.updated_date = datetime.utcnow()
+    record.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)
     return record.to_dict()
@@ -371,7 +386,7 @@ def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None 
     if getattr(record, "is_system", False) is True:
         return False
     record.is_deleted = True
-    record.updated_date = datetime.utcnow()
+    record.updated_date = datetime.now(timezone.utc)
     db.commit()
     return True
 
@@ -404,7 +419,7 @@ def delete_many_records(model, query_data: dict, db: Session, owner_id: str | No
         if getattr(record, "is_system", False) is True:
             continue
         record.is_deleted = True
-        record.updated_date = datetime.utcnow()
+        record.updated_date = datetime.now(timezone.utc)
         count += 1
 
     db.commit()
@@ -450,7 +465,7 @@ def bulk_update_records(model, data_list: list, db: Session, owner_id: str | Non
         filtered.pop("id", None)
         _apply_updates(record, model, filtered)
 
-        record.updated_date = datetime.utcnow()
+        record.updated_date = datetime.now(timezone.utc)
         results.append(record)
 
     db.commit()
@@ -460,13 +475,18 @@ def bulk_update_records(model, data_list: list, db: Session, owner_id: str | Non
     return [r.to_dict() for r in results]
 
 
-def update_many_records(model, query_data: dict, update_data: dict, db: Session) -> int:
+def update_many_records(
+    model, query_data: dict, update_data: dict, db: Session,
+    owner_id: str | None = None,
+) -> int:
     """Update multiple records matching query. Supports $set, $inc, $push, $pull.
 
+    ``owner_id`` scopes writes to the caller's own rows (prevents mass-IDOR).
     Returns count of updated records.
     """
     query = db.query(model).filter(model.is_deleted == False)
     query = _apply_tenant(model, query)
+    query = _apply_owner(model, query, owner_id)
     import json
     q_str = json.dumps(query_data) if isinstance(query_data, dict) else query_data
     conditions = parse_query(model, q_str)
@@ -476,36 +496,36 @@ def update_many_records(model, query_data: dict, update_data: dict, db: Session)
     records = query.all()
     count = 0
     for record in records:
-        # Apply MongoDB-style update operators
+        # Apply MongoDB-style update operators — route through _filter_data
+        # to prevent privilege escalation (e.g. $set: {"role": "admin"}).
         if "$set" in update_data:
-            for key, value in update_data["$set"].items():
+            for key, value in _filter_data(model, update_data["$set"]).items():
                 col = getattr(model, key, None)
                 if col is not None:
-                    setattr(record, key, value)
+                    setattr(record, key, _coerce_for_model(model, key, value))
         if "$inc" in update_data:
-            for key, value in update_data["$inc"].items():
+            for key, value in _filter_data(model, update_data["$inc"]).items():
                 current = getattr(record, key, 0) or 0
                 col = getattr(model, key, None)
                 if col is not None:
                     setattr(record, key, current + value)
-        # $push and $pull operate on JSON array fields
+        # $push and $pull operate on JSON array fields.
+        # Build NEW list objects so SQLAlchemy flags the JSON column as dirty.
         if "$push" in update_data:
-            for key, value in update_data["$push"].items():
-                current = getattr(record, key, None) or []
-                if isinstance(current, list):
-                    if isinstance(value, list):
-                        current.extend(value)
-                    else:
-                        current.append(value)
-                    setattr(record, key, current)
+            for key, value in _filter_data(model, update_data["$push"]).items():
+                current = list(getattr(record, key, None) or [])
+                if isinstance(value, list):
+                    current.extend(value)
+                else:
+                    current.append(value)
+                setattr(record, key, current)
         if "$pull" in update_data:
-            for key, value in update_data["$pull"].items():
-                current = getattr(record, key, None) or []
-                if isinstance(current, list):
-                    current = [x for x in current if x != value]
-                    setattr(record, key, current)
+            for key, value in _filter_data(model, update_data["$pull"]).items():
+                current = list(getattr(record, key, None) or [])
+                current = [x for x in current if x != value]
+                setattr(record, key, current)
 
-        record.updated_date = datetime.utcnow()
+        record.updated_date = datetime.now(timezone.utc)
         count += 1
 
     db.commit()
@@ -524,7 +544,7 @@ def restore_record(model, record_id: str, db: Session, owner_id: str | None = No
     if not record:
         return None
     record.is_deleted = False
-    record.updated_date = datetime.utcnow()
+    record.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(record)
     return record.to_dict()

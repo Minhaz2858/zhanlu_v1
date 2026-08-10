@@ -1,9 +1,14 @@
 """AgentApp model — the most complex entity with 30+ fields including JSON columns."""
 
+from typing import TYPE_CHECKING, Optional
+
 from sqlalchemy import String, Text, Integer, Float, Boolean, JSON, ForeignKey
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import TimestampedBase
+
+if TYPE_CHECKING:
+    from app.models.llm_model import LlmModel
 
 
 class AgentApp(TimestampedBase):
@@ -61,6 +66,12 @@ class AgentApp(TimestampedBase):
 
     # Status
     status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="draft")
+
+    # Hierarchical LLM config — FK to llm_models catalog (gated by HIERARCHICAL_LLM_ENABLED)
+    llm_model_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("llm_models.id"), nullable=True, index=True,
+    )
+    llm_model: Mapped[Optional["LlmModel"]] = relationship("LlmModel", foreign_keys=[llm_model_id])
 
     # Per-agent tool configuration — controls which tools are available.
     # Expected shape: {"enabled_tools": ["web_search", "memory", ...], "disabled_tools": [...]}

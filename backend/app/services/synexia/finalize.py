@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Tuple
 from uuid import uuid4
 
@@ -74,7 +74,7 @@ def build_no_data_payload(
     return ReportCardPayload(
         title=title,
         source=source or "",
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(timezone.utc).isoformat(),
         summary=summary,
         kpis=[KPISpec(label="Rows returned", value="0")],
         chart=None,
@@ -323,7 +323,7 @@ def finalize_into_artifact(
             artifact_id=artifact.id,
             version_number=1,
             status="preview_ready",
-            built_at=datetime.utcnow(),
+            built_at=datetime.now(timezone.utc),
         )
         db.add(version)
 
@@ -369,9 +369,10 @@ def finalize_into_artifact(
                 artifact.id,
             )
         else:
+            eager_fmt: Optional[str] = None
             try:
                 exporter = ExportService(db)
-                rendered = exporter.eager_render_default(
+                eager_fmt = exporter.eager_render_default(
                     artifact,
                     user_message=user_message,
                     user_signal=payload.user_signal,
@@ -380,10 +381,10 @@ def finalize_into_artifact(
                     org_id=org,
                     app_id=app,
                 )
-                if rendered:
+                if eager_fmt:
                     logger.info(
                         "FINALIZE: eager-rendered %s for artifact %s",
-                        rendered, artifact.id,
+                        eager_fmt, artifact.id,
                     )
             except Exception as e:
                 logger.warning("FINALIZE: eager render failed (non-fatal): %s", e)
@@ -405,57 +406,12 @@ def finalize_into_artifact(
 
             requested_fmt = detect_file_intent(user_message)
             if requested_fmt:
-                chart_rows = (payload.chart.data if payload.chart else []) or []
-                if not chart_rows:
-                    # Try to use the KPI table if no chart data is present
-                    # (e.g. text-only reports).  We synthesize one row per
-                    # KPI so the DOCX/PPTX/XLSX has something to display.
-                    chart_rows = [
-                        {"label": k.label, "value": k.value, **( {"caption": k.caption} if k.caption else {} )}
-                        for k in (payload.kpis or [])
-                    ]
-
-                instructions = (
-                    f"Generate a {requested_fmt.upper()} report titled "
-                    f"{payload.title!r} from the provided data. "
-                    f"Source: {source or 'unknown'}. "
-                    f"Summary: {payload.summary}"
-                )
-
-                sandbox_result = run_sandbox_skill_sync(
-                    args={
-                        "format": requested_fmt,
-                        "data": chart_rows,
-                        "title": payload.title,
-                        "instructions": instructions,
-                        # Pass through the KPI list and insights so the
-                        # sandbox runner can render a styled KPI table
-                        # and bullet list in the DOCX (Layer 3) and the
-                        # sidecar rich-HTML preview (Layer 2).  We
-                        # serialize pydantic objects to plain dicts
-                        # because config.json is JSON-serialized for
-                        # the Docker job.
-                        "kpis": [
-                            {
-                                "label": k.label,
-                                "value": k.value,
-                                **({"caption": k.caption} if k.caption else {}),
-                            }
-                            for k in (payload.kpis or [])
-                        ],
-                        "insights": list(payload.insights or []),
-                        "source": source or "",
-                    },
-                    db=db,
-                    user_id=agent_name,
-                    context={
-                        "conversation_id": conversation_id,
-                        "agent_app_id": agent_name,
-                    },
-                )
-
-                if sandbox_result.get("success"):
-                    new_artifact_id = sandbox_result.get("artifact_id")
+                # ── Optimization: if eager_render_default already
+                # cached a blob for the requested format on this
+                # artifact, reuse it instead of spawning a sandbox.
+                # The download endpoint GET /artifacts/{id}/download
+                # ?format={fmt} will serve the cached blob.
+                if requested_fmt == eager_fmt:
                     new_signal = user_signal_for_format(requested_fmt)
                     payload.user_signal = new_signal
                     artifact.metadata_json = dict(artifact.metadata_json or {})
@@ -463,34 +419,127 @@ def finalize_into_artifact(
                         artifact.metadata_json.get("payload_formats") or {}
                     )
                     export_entry = {
-                        "artifact_id": new_artifact_id,
-                        "preview_url": sandbox_result.get("preview_url"),
-                        "download_url": sandbox_result.get("download_url"),
-                        "job_id": sandbox_result.get("job_id"),
+                        "artifact_id": artifact.id,
+                        "preview_url": None,
+                        "download_url": None,
+                        "job_id": None,
                         "user_signal": new_signal,
                     }
                     artifact.metadata_json["payload_formats"][requested_fmt] = export_entry
-                    # Build the returned file_exports dict so callers
-                    # (agents.py) can propagate it to the frontend
-                    # without an extra DB read.
                     file_exports[requested_fmt] = export_entry
-                    # Mirror the new artifact_id on the artifact itself
-                    # so chat-loop code that returns ``artifact_id``
-                    # picks it up without an extra read.
                     artifact.tags = list(artifact.tags or []) + [
                         f"file_export:{requested_fmt}",
                     ]
                     db.add(artifact)
                     db.flush()
                     logger.info(
-                        "FINALIZE: file-format intent=%s → sandbox artifact %s",
-                        requested_fmt, new_artifact_id,
+                        "FINALIZE: reusing cached %s blob for artifact %s (skip sandbox)",
+                        requested_fmt, artifact.id,
                     )
                 else:
-                    logger.warning(
-                        "FINALIZE: run_sandbox_skill returned error for %s: %s",
-                        requested_fmt, sandbox_result.get("error"),
+                    chart_rows = (payload.chart.data if payload.chart else []) or []
+                    if not chart_rows:
+                        # Try to use the KPI table if no chart data is present
+                        # (e.g. text-only reports).  We synthesize one row per
+                        # KPI so the DOCX/PPTX/XLSX has something to display.
+                        chart_rows = [
+                            {"label": k.label, "value": k.value, **( {"caption": k.caption} if k.caption else {} )}
+                            for k in (payload.kpis or [])
+                        ]
+
+                    instructions = (
+                        f"Generate a {requested_fmt.upper()} report titled "
+                        f"{payload.title!r} from the provided data. "
+                        f"Source: {source or 'unknown'}. "
+                        f"Summary: {payload.summary}"
                     )
+
+                    sandbox_result = run_sandbox_skill_sync(
+                        args={
+                            "format": requested_fmt,
+                            "data": chart_rows,
+                            "title": payload.title,
+                            "instructions": instructions,
+                            # Pass through the KPI list and insights so the
+                            # sandbox runner can render a styled KPI table
+                            # and bullet list in the DOCX (Layer 3) and the
+                            # sidecar rich-HTML preview (Layer 2).  We
+                            # serialize pydantic objects to plain dicts
+                            # because config.json is JSON-serialized for
+                            # the Docker job.
+                            "kpis": [
+                                {
+                                    "label": k.label,
+                                    "value": k.value,
+                                    **({"caption": k.caption} if k.caption else {}),
+                                }
+                                for k in (payload.kpis or [])
+                            ],
+                            "insights": list(payload.insights or []),
+                            "source": source or "",
+                            # C-Heavy skill-driven additions: the runner
+                            # uses the original user request + the full
+                            # ReportCardPayload to plan a custom document
+                            # structure (rather than the previous fixed
+                            # layout).  Falls back to ``instructions`` /
+                            # ``kpis`` / ``insights`` for the deterministic
+                            # generator when the LLM path is unavailable.
+                            "user_message": user_message or instructions or "",
+                            "synthesized_payload": (
+                                payload.model_dump(mode="json")
+                                if hasattr(payload, "model_dump")
+                                else (
+                                    payload.model_dump()
+                                    if hasattr(payload, "model_dump")
+                                    else (payload.dict() if hasattr(payload, "dict") else {})
+                                )
+                            ),
+                        },
+                        db=db,
+                        user_id=agent_name,
+                        context={
+                            "conversation_id": conversation_id,
+                            "agent_app_id": agent_name,
+                        },
+                    )
+
+                    if sandbox_result.get("success"):
+                        new_artifact_id = sandbox_result.get("artifact_id")
+                        new_signal = user_signal_for_format(requested_fmt)
+                        payload.user_signal = new_signal
+                        artifact.metadata_json = dict(artifact.metadata_json or {})
+                        artifact.metadata_json["payload_formats"] = dict(
+                            artifact.metadata_json.get("payload_formats") or {}
+                        )
+                        export_entry = {
+                            "artifact_id": new_artifact_id,
+                            "preview_url": sandbox_result.get("preview_url"),
+                            "download_url": sandbox_result.get("download_url"),
+                            "job_id": sandbox_result.get("job_id"),
+                            "user_signal": new_signal,
+                        }
+                        artifact.metadata_json["payload_formats"][requested_fmt] = export_entry
+                        # Build the returned file_exports dict so callers
+                        # (agents.py) can propagate it to the frontend
+                        # without an extra DB read.
+                        file_exports[requested_fmt] = export_entry
+                        # Mirror the new artifact_id on the artifact itself
+                        # so chat-loop code that returns ``artifact_id``
+                        # picks it up without an extra read.
+                        artifact.tags = list(artifact.tags or []) + [
+                            f"file_export:{requested_fmt}",
+                        ]
+                        db.add(artifact)
+                        db.flush()
+                        logger.info(
+                            "FINALIZE: file-format intent=%s → sandbox artifact %s",
+                            requested_fmt, new_artifact_id,
+                        )
+                    else:
+                        logger.warning(
+                            "FINALIZE: run_sandbox_skill returned error for %s: %s",
+                            requested_fmt, sandbox_result.get("error"),
+                        )
         except Exception as e:
             # Auto-export is best-effort.  The in-chat ReportCard still
             # works; the user can fall back to the export menu on the
@@ -611,7 +660,7 @@ def fsm_finalize_into_artifact(
     payload = ReportCardPayload(
         title=title,
         source=task_spec.get("entities", {}).get("source", ""),
-        generated_at=datetime.utcnow().isoformat() + "Z",
+        generated_at=datetime.now(timezone.utc).isoformat() + "Z",
         summary=summary,
         kpis=kpis,
         chart=chart,

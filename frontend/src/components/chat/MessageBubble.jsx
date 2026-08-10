@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp } from 'lucide-react';
+import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
 import ClarifyBatchForm from './ClarifyBatchForm';
@@ -13,6 +13,7 @@ import ReportCard from './ReportCard';
 import ArtifactPreviewCard from './ArtifactPreviewCard';
 import ArtifactCardList from './ArtifactCardList';
 import InlineArtifactPreview from './InlineArtifactPreview';
+import PlanEditor from './PlanEditor';
 import { partitionArtifacts } from './partitionArtifacts';
 import DashboardCard from '@/components/dashboard/DashboardCard';
 import DashboardPopup from '@/components/dashboard/DashboardPopup';
@@ -170,7 +171,7 @@ const components = {
   em: ({ node, ...props }) => <em className="italic" {...props} />,
   // Links
   a: ({ node, ...props }) => (
-    <a className="text-primary underline decoration-primary/30 underline-offset-2 transition-colors hover:decoration-primary" target="_blank" rel="noopener noreferrer" {...props} />
+    <a className="break-all text-primary underline decoration-primary/30 underline-offset-2 transition-colors hover:decoration-primary" target="_blank" rel="noopener noreferrer" {...props} />
   ),
   // Images
   img: ({ node, ...props }) => (
@@ -217,7 +218,7 @@ function parseContent(content) {
   return parts;
 }
 
-export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onShowTrace, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat }) {
+export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onShowTrace, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating }) {
   const { lang } = useLanguage();
   const isUser = message.role === 'user';
   const parts = isUser ? null : parseContent(message.content || '');
@@ -376,42 +377,58 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
       </div>
       <div className={`flex max-w-[90%] flex-col ${isUser ? 'items-end' : 'items-start'}`}>
         {isUser ? (
-          <div
-            className="max-w-full rounded-2xl rounded-tr-sm bg-secondary px-4 py-2.5 text-sm text-foreground"
-            title={needsTruncation ? rawContent : undefined}
-          >
-            {userExpanded ? (
-              <div className="whitespace-pre-wrap break-words">{rawContent}</div>
-            ) : (
-              <div className="truncate text-left" dir="auto">{previewText}</div>
+          <div className="group flex items-start gap-2">
+            {/* Edit button — appears on hover for user messages with the branching callback.
+                Rendered as a flex sibling (not absolutely positioned) so there is no
+                gap between the bubble and the button — the parent group-hover state
+                stays active as the cursor moves toward the icon. */}
+            {onEditMessage && !isStreaming && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); onEditMessage(message); }}
+                title={lang === 'en' ? 'Edit & resend' : '编辑并重发'}
+                className="mt-1 inline-flex shrink-0 rounded-md p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-secondary hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <Pencil className="h-3.5 w-3.5" />
+              </button>
             )}
-            {(attachmentList.length > 0 || needsTruncation) && (
-              <div className="mt-1.5 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
-                {attachmentBadge && <span>{attachmentBadge}</span>}
-                {needsTruncation && (
-                  <button
-                    type="button"
-                    onClick={() => setUserExpanded((v) => !v)}
-                    className="inline-flex items-center gap-0.5 rounded-full bg-secondary/60 px-2 py-0.5 font-medium text-foreground/80 transition-colors hover:bg-secondary hover:text-foreground"
-                  >
-                    {userExpanded ? (
-                      <>
-                        {lang === 'en' ? 'Show less' : '收起'}
-                        <ChevronUp className="h-3 w-3" />
-                      </>
-                    ) : (
-                      <>
-                        {lang === 'en' ? 'Show more' : '展开'}
-                        <ChevronDown className="h-3 w-3" />
-                      </>
-                    )}
-                  </button>
-                )}
-              </div>
-            )}
+            <div
+              className="max-w-full rounded-2xl rounded-tr-sm bg-secondary px-4 py-2.5 text-sm text-foreground"
+              title={needsTruncation ? rawContent : undefined}
+            >
+              {userExpanded ? (
+                <div className="whitespace-pre-wrap break-words">{rawContent}</div>
+              ) : (
+                <div className="truncate text-left" dir="auto">{previewText}</div>
+              )}
+              {(attachmentList.length > 0 || needsTruncation) && (
+                <div className="mt-1.5 flex items-center justify-end gap-2 text-[11px] text-muted-foreground">
+                  {attachmentBadge && <span>{attachmentBadge}</span>}
+                  {needsTruncation && (
+                    <button
+                      type="button"
+                      onClick={() => setUserExpanded((v) => !v)}
+                      className="inline-flex items-center gap-0.5 rounded-full bg-secondary/60 px-2 py-0.5 font-medium text-foreground/80 transition-colors hover:bg-secondary hover:text-foreground"
+                    >
+                      {userExpanded ? (
+                        <>
+                          {lang === 'en' ? 'Show less' : '收起'}
+                          <ChevronUp className="h-3 w-3" />
+                        </>
+                      ) : (
+                        <>
+                          {lang === 'en' ? 'Show more' : '展开'}
+                          <ChevronDown className="h-3 w-3" />
+                        </>
+                      )}
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
           </div>
         ) : (
-          <div className="rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
+          <div className="min-w-0 break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
             {/* Inline Claude-style numbered activity steps (+ phase headline).
                 The reasoning panel (model chain-of-thought) is rendered
                 INSIDE ActivitySteps — at the bottom of the expanded step
@@ -495,6 +512,11 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
             {isStreaming && (
               <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-primary align-text-bottom" />
             )}
+            {message.plan_summary && (
+              <div className="mt-3">
+                <PlanEditor plan={message.plan_summary} readOnly={!isStreaming} />
+              </div>
+            )}
             {htmlMatch && !hasResult && (
               <button onClick={() => onPreview?.({ type: 'file', name: 'HTML Preview', draft: true, fields: { file_type: 'html', html_content: htmlMatch[1].trim(), source: 'ai_generated', resource_kind: 'html_file' } })} className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border bg-secondary/40 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-secondary">
                 <Eye className="h-3.5 w-3.5" /> {lang === 'en' ? 'Preview HTML in Artifacts' : '在产物中预览 HTML'}
@@ -538,6 +560,32 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 variant="chat"
                 onClose={() => setOpenDashboardId(null)}
               />
+            )}
+            {/* Experience layer (Phase C): thumbs up/down feedback on
+                finalized assistant messages. Feeding the learning loop:
+                the backend records an ExperienceEntry and adjusts the
+                recipe / semantic cache / user profile accordingly. */}
+            {!isStreaming && onFeedback && message.id && (
+              <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
+                <button
+                  type="button"
+                  aria-label={lang === 'en' ? 'Good answer' : '回答有用'}
+                  title={lang === 'en' ? 'Good answer' : '回答有用'}
+                  onClick={() => onFeedback(message.id, 1)}
+                  className={`chat-feedback-up inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${feedbackRating === 1 ? 'bg-green-50 text-green-600' : 'text-gray-400 hover:bg-gray-100 hover:text-green-600'}`}
+                >
+                  <ThumbsUp className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={lang === 'en' ? 'Poor answer' : '回答不佳'}
+                  title={lang === 'en' ? 'Poor answer' : '回答不佳'}
+                  onClick={() => onFeedback(message.id, -1)}
+                  className={`chat-feedback-down inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${feedbackRating === -1 ? 'bg-red-50 text-red-600' : 'text-gray-400 hover:bg-gray-100 hover:text-red-600'}`}
+                >
+                  <ThumbsDown className="h-3.5 w-3.5" />
+                </button>
+              </div>
             )}
           </div>
         )}

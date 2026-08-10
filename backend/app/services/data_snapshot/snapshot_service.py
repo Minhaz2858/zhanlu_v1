@@ -15,7 +15,7 @@ import hashlib
 import json
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -97,7 +97,7 @@ class DataSnapshotService:
             conversation_id=conversation_id,
             execution_id=execution_id,
             created_by_agent_id=created_by_agent_id,
-            expires_at=datetime.utcnow() + timedelta(days=ttl_days),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=ttl_days),
             query_duration_ms=query_duration_ms,
             org_id=org_id,
             app_id=app_id,
@@ -281,7 +281,7 @@ Respond with ONLY the SQL query, no explanation. Start with SELECT or WITH."""
 
     def expire_old_snapshots(self) -> int:
         """Mark snapshots past their expiration as 'expired' (not deleted)."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = (
             self.db.query(DataSnapshot)
             .filter(

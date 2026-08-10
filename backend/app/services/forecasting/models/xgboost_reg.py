@@ -11,6 +11,7 @@ registry's ``build_model_pool()`` and the model is silently skipped.
 from __future__ import annotations
 
 import logging
+import os
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,9 @@ import pandas as pd
 from app.services.forecasting.models.base import ForecastModel, ModelFitError
 
 logger = logging.getLogger(__name__)
+
+_XGB_TUNING_ENABLED = os.getenv("FORECAST_XGB_TUNING_ENABLED", "false").lower() in ("true", "1")
+_FEATURE_SELECTION_ENABLED = os.getenv("FORECAST_FEATURE_SELECTION_ENABLED", "false").lower() in ("true", "1")
 
 
 class XGBoostReg(ForecastModel):
@@ -37,6 +41,8 @@ class XGBoostReg(ForecastModel):
         self._seasonal_period: int = 7
         self._exog_feature_names: list[str] = []
         self._exog_last: pd.DataFrame | None = None
+        self._product_key: str = ""
+        self._tuned_params: dict | None = None
 
     # ------------------------------------------------------------------
     def fit(
@@ -46,7 +52,7 @@ class XGBoostReg(ForecastModel):
         exog: pd.DataFrame | None = None,
         **kwargs,
     ) -> None:
-        _ = kwargs
+        self._product_key = kwargs.pop("product_key", "")
         if seasonal_period is not None:
             self._seasonal_period = seasonal_period
 
@@ -89,7 +95,72 @@ class XGBoostReg(ForecastModel):
                 f"feature construction: {len(X)}"
             )
 
-        self._model = self._xgb.XGBRegressor(
+        # ---- Bayesian hyperparameter tuning (flag-gated) ----
+        tuned_params = self._get_params()
+        if _XGB_TUNING_ENABLED and self._product_key:
+            try:
+                from app.services.forecasting.models.xgboost_tuner import (
+                    tune_xgboost_params,
+                )
+                tuned_params = tune_xgboost_params(
+                    y=y,
+                    product_key=self._product_key,
+                    seasonal_period=self._seasonal_period,
+                    exog=exog,
+                )
+                self._tuned_params = tuned_params
+                logger.info(
+                    "XGBoost tuning applied for %s: %s",
+                    self._product_key,
+                    {k: v for k, v in tuned_params.items() if k != "verbosity"},
+                )
+            except Exception as exc:
+                logger.warning(
+                    "XGBoost tuning failed for %s (using defaults): %s",
+                    self._product_key, exc,
+                )
+                tuned_params = self._get_params()
+
+        self._model = self._xgb.XGBRegressor(**tuned_params)
+        self._model.fit(X, Y)
+
+        # ---- Feature selection via permutation importance (flag-gated) ----
+        if (
+            _FEATURE_SELECTION_ENABLED
+            and self._product_key
+            and self._exog_feature_names
+            and hasattr(self._model, "feature_importances_")
+        ):
+            try:
+                from app.services.forecasting.features.feature_selector import (
+                    select_features,
+                )
+                selected = select_features(
+                    model=self._model,
+                    X=X,
+                    Y=Y,
+                    feature_names=self._exog_feature_names,
+                    product_key=self._product_key,
+                )
+                if selected and len(selected) < len(self._exog_feature_names):
+                    logger.info(
+                        "Feature selection for %s: %d → %d features",
+                        self._product_key,
+                        len(self._exog_feature_names),
+                        len(selected),
+                    )
+                    self._exog_feature_names = selected
+            except Exception as exc:
+                logger.warning(
+                    "Feature selection failed for %s: %s", self._product_key, exc
+                )
+
+        self._last_values = values
+
+    # ------------------------------------------------------------------
+    def _get_params(self) -> dict:
+        """Return XGBoost params (defaults or tuned)."""
+        return dict(
             n_estimators=100,
             max_depth=3,
             learning_rate=0.1,
@@ -97,8 +168,6 @@ class XGBoostReg(ForecastModel):
             random_state=42,
             verbosity=0,
         )
-        self._model.fit(X, Y)
-        self._last_values = values
 
     # ------------------------------------------------------------------
     def forecast(self, h: int, exog_future: pd.DataFrame | None = None) -> pd.Series:

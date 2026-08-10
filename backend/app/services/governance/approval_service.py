@@ -5,7 +5,7 @@ is created.  Execution pauses until the user approves or rejects it.
 """
 
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -45,7 +45,7 @@ class ApprovalService:
             plan_node_id=plan_node_id,
             artifact_id=artifact_id,
             status="pending",
-            expires_at=datetime.utcnow() + timedelta(hours=ttl_hours),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=ttl_hours),
             context_json=context_json,
             org_id=org_id,
             app_id=app_id,
@@ -90,7 +90,7 @@ class ApprovalService:
 
         request.status = "approved"
         request.reviewed_by = reviewed_by
-        request.reviewed_at = datetime.utcnow()
+        request.reviewed_at = datetime.now(timezone.utc)
         request.review_notes = notes
 
         self.db.commit()
@@ -113,7 +113,7 @@ class ApprovalService:
 
         request.status = "rejected"
         request.reviewed_by = reviewed_by
-        request.reviewed_at = datetime.utcnow()
+        request.reviewed_at = datetime.now(timezone.utc)
         request.review_notes = reason
 
         self.db.commit()
@@ -123,7 +123,7 @@ class ApprovalService:
 
     def expire_old_requests(self) -> int:
         """Mark expired requests as expired."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         expired = (
             self.db.query(ApprovalRequest)
             .filter(

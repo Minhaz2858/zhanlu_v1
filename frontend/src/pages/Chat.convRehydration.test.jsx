@@ -102,4 +102,35 @@ describe('Chat.jsx ?conv= rehydration', () => {
     expect(deps).toMatch(/sessions/);
     expect(deps).toMatch(/activeId/);
   });
+
+  it('the ?conv= cleanup effect does NOT fire on initial mount (regression: refresh wipes deep link)', () => {
+    // On a deep-link ``?conv=<id>`` the cleanup useEffect used to
+    // fire on initial mount (because ``activeId`` starts as null)
+    // and strip ``?conv=`` from the URL — before the deep-link
+    // restore effect ever got a chance to look up the matching
+    // ChatSession in the async-loaded ``sessions`` list. The
+    // result: refresh lost the conversation. The fix tracks
+    // previous activeId via a ref and only cleans up on the
+    // actual non-null → null transition.
+    // Find the cleanup block — the useEffect that handles
+    // activeId becoming null and deletes ``?conv=``.
+    const effectRe =
+      /useEffect\(\s*\(\)\s*=>\s*\{[\s\S]*?url\.searchParams\.delete\(['"]conv['"]\)[\s\S]*?\}\s*,\s*\[([^\]]+)\]\s*\)/;
+    const match = SOURCE.match(effectRe);
+    expect(match, '?conv= cleanup useEffect not found').not.toBeNull();
+    // The fix MUST use a useRef to track the previous activeId
+    // value, and skip the cleanup when ``prev`` is falsy.
+    const body = match[0];
+    expect(body, 'cleanup effect must use useRef to track previous activeId').toMatch(
+      /useRef\s*\(\s*null\s*\)/,
+    );
+    expect(body, 'cleanup effect must guard against initial mount (no prev)').toMatch(
+      /if\s*\(\s*!\s*prev\s*\)\s*return/,
+    );
+    // The dep array still contains activeId (it still reacts to
+    // the transition), but the effect body short-circuits on the
+    // initial render.
+    const deps = match[1];
+    expect(deps).toMatch(/activeId/);
+  });
 });

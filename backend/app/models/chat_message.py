@@ -31,3 +31,7 @@ class ChatMessage(TimestampedBase):
     # ChatMessage.update; declaring it here makes the generic entity CRUD
     # round-trip it (otherwise _filter_data silently drops unknown keys).
     phase: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Chain-of-thought / thinking trace from reasoning-capable models.
+    # Persisted so it survives page refresh and can be rendered in the
+    # ReasoningPanel.  NULL for models that do not emit reasoning.
+    reasoning_content: Mapped[str | None] = mapped_column(Text, nullable=True)

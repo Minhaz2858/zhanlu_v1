@@ -6,6 +6,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@
 import { Button } from '@/components/ui/button';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { base44 } from '@/api/base44Client';
+import LlmModelSelector from '@/components/chat/LlmModelSelector';
 import { Bot, Loader2, ArrowRight } from 'lucide-react';
 
 const TEMPLATES = {
@@ -44,6 +45,7 @@ export default function AgentCreateForm({
   description, onDescriptionChange,
   capabilities, onCapabilitiesChange,
   project, onProjectChange,
+  llmModelId, onLlmModelIdChange,
   initialProjectId,
   onBuild,
   building,
@@ -187,6 +189,13 @@ export default function AgentCreateForm({
                 : `该智能体将创建在「${selectedProject.name}」项目内，并自动继承该项目的数据源。`}
             </p>
           )}
+        </div>
+
+        <div>
+          <LlmModelSelector
+            value={llmModelId || null}
+            onChange={(id) => onLlmModelIdChange?.(id)}
+          />
         </div>
 
         <div>

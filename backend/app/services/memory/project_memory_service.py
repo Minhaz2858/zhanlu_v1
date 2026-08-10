@@ -3,7 +3,7 @@
 import hashlib
 import logging
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
@@ -50,7 +50,7 @@ class ProjectMemoryService:
         ).first()
         if existing:
             existing.usage_count = (existing.usage_count or 0) + 1
-            existing.last_accessed_at = datetime.utcnow()
+            existing.last_accessed_at = datetime.now(timezone.utc)
             self.db.flush()
             logger.debug(
                 "ProjectMemory dedup hit | project=%s hash=%s… usage=%s",
@@ -96,7 +96,7 @@ class ProjectMemoryService:
 
         Results are ordered by score descending, then by created_date desc.
         """
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         cutoff_1h = now - timedelta(hours=1)
         cutoff_24h = now - timedelta(hours=24)
         cutoff_7d = now - timedelta(days=7)

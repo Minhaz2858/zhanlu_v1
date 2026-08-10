@@ -23,7 +23,7 @@ them. Only the curated defaults (defined in
 from sqlalchemy import String, DateTime
 from sqlalchemy.orm import Mapped, mapped_column
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 
 from app.models.base import TimestampedBase
 
@@ -32,7 +32,7 @@ class RemovedCuratedUrl(TimestampedBase):
     __tablename__ = "removed_curated_urls"
 
     url: Mapped[str] = mapped_column(String(2048), nullable=False, unique=True, index=True)
-    removed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=datetime.utcnow)
+    removed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=lambda: datetime.now(timezone.utc))
     # User who removed it. Nullable so the seed can record URLs even
     # when no user context is available (startup scripts, tests).
     removed_by: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)

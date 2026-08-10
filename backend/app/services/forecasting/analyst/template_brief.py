@@ -179,6 +179,31 @@ def _supply_demand(p: dict) -> str:
                     f"趋势{supplier.get('spread_trend', '平稳')}"
                     f"（近{supplier.get('recent_days', 30)}天）")
 
+    # Wave 3 T3.5: downstream utilization (开工率)
+    op = p.get("downstream_utilization") or {}
+    if op.get("has_sufficient_data"):
+        rate = op.get("rolling_4wk_op_rate")
+        if rate is not None:
+            regime_map = {"tight": "开工率偏高", "normal": "开工率正常",
+                          "loose": "开工率偏低"}
+            regime_text = regime_map.get(op.get("utilization_regime", ""), "")
+            bits.append(f"下游开工率{rate:.1f}%（{regime_text}）")
+        yoy = op.get("yoy_change_pct")
+        if yoy is not None and abs(yoy) > 0.5:
+            sign = "+" if yoy >= 0 else ""
+            bits.append(f"开工率同比{sign}{yoy:.1f}%")
+
+    # Wave 3 T3.5: inventory pressure (库存)
+    inv = p.get("inventory_pressure") or {}
+    if inv.get("has_sufficient_data"):
+        change = inv.get("inventory_4wk_change_pct")
+        pressure_map = {"high": "库存高位", "low": "库存低位",
+                        "normal": "库存正常"}
+        pressure_text = pressure_map.get(inv.get("inventory_pressure", ""), "")
+        if change is not None and abs(change) > 0.5:
+            sign = "+" if change >= 0 else ""
+            bits.append(f"近4周库存{sign}{change:.1f}%（{pressure_text}）")
+
     if not bits:
         return ""
     return "供需研判:" + ";".join(bits) + "。"
@@ -259,6 +284,15 @@ def _risk(p: dict) -> str:
         risks.append("当前波动剧烈,注意仓位风险")
     if (p.get("intelligence") or {}).get("event_count", 0) == 0:
         risks.append("近期无重大市场事件,价格主要由供需基本面驱动")
+
+    # Wave 3 T3.5: import pressure (进口/竞争对手价格)
+    imp = p.get("import_pressure") or {}
+    if imp.get("has_sufficient_data") and imp.get("import_window_open"):
+        gap = imp.get("import_parity_gap")
+        if gap is not None:
+            risks.append(f"进口窗口打开(国内外价差{gap * 100:.1f}%),"
+                         f"价格上行空间受限")
+
     return "风险提示:" + ";".join(risks) + "。" if risks else ""
 
 

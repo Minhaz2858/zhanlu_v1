@@ -4,6 +4,8 @@ Field names mirror EDIA's frontend interfaces
 (MarketSnapshotItem, RegionalPriceData, etc.) so the ported EDIA React
 components can consume the payload without remapping.
 """
+from __future__ import annotations
+
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -155,7 +157,7 @@ class SkuForecastMeta(BaseModel):
     is_primary: bool = False
     row_count: Optional[int] = None
     forecast_base: Optional[float] = None
-    forecast_confidence: Optional[float] = None
+    forecast_confidence: Optional[str] = None
 
 
 class SkuBrief(BaseModel):
@@ -183,6 +185,23 @@ class AnalystBriefMeta(BaseModel):
     generated_at: Optional[str] = None
 
 
+class DecisionRoiMeta(BaseModel):
+    """Per-product decision ROI track record (Wave 0 F2 + Stream B1 surface).
+
+    Surfaces how often past buy/sell signals were directionally correct
+    and the cumulative ROI of following them. Builds trust (or exposes
+    weakness) in the AI's action recommendations.
+    """
+    total_decisions: int = 0
+    total_realized: int = 0          # decisions with actuals filled in
+    buy_count: int = 0
+    sell_count: int = 0
+    accuracy_pct: float = 0.0        # % of realized buy/sell that were correct
+    weighted_roi_pct: float = 0.0   # avg ROI across realized buy+sell
+    buy_correct: int = 0
+    sell_correct: int = 0
+
+
 class DecisionBoardProduct(BaseModel):
     """One product row on the decision board (plain-language bundle)."""
     id: str
@@ -207,6 +226,8 @@ class DecisionBoardProduct(BaseModel):
     one_liner_zh: str = ""
     narrative_zh: str = ""
     analyst_brief: Optional[AnalystBriefMeta] = None
+    decision_roi: Optional[DecisionRoiMeta] = None  # Stream B1: ROI track record
+    drivers: list[DriverAttributionMeta] = Field(default_factory=list)  # Stream B2: top-N feature drivers
     skus: list[SkuBrief] = []
 
 
@@ -311,6 +332,16 @@ class ForecastChartPoint(BaseModel):
     zone: str = "past"                   # "past" | "today" | "forecast"
 
 
+class DriverAttributionMeta(BaseModel):
+    """One feature driver from XGBoost feature_importances_ (Stream B2).
+
+    Surfaces 'why this forecast' — the top-N features that influenced the
+    model's prediction. Used by the Decision Board explainability panel.
+    """
+    feature: str
+    weight: float  # 0-1, normalized
+
+
 class ForecastAnalysisMeta(BaseModel):
     """AI 分析依据 — structured reasoning behind the forecast.
 
@@ -339,6 +370,8 @@ class ForecastAnalysisMeta(BaseModel):
     directional_status: Optional[str] = None     # "edge" | "no_edge"
     directional_n_test: Optional[int] = None
     rationale: Optional[str] = None              # decision rationale (en)
+    # Stream B2: top-N feature drivers from XGBoost (explanation.drivers)
+    drivers: list[DriverAttributionMeta] = Field(default_factory=list)
     # Pre-built Chinese narrative fragments
     basis_zh: str = ""                           # 【预测依据】
     action_logic_zh: str = ""                    # 【建议逻辑】

@@ -21,6 +21,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.services.db import NLAnswerService, QueryService, SchemaService
 from app.services.db.connector_factory import DriverUnavailable
 from app.services.tool_registry import registry
@@ -136,6 +137,22 @@ async def _describe_schema(
     table = args.get("table")
     full = bool(args.get("full", False))
     max_tables = int(args.get("max_tables", 30))
+
+    # ── Schema linker path (flag-gated) — runs before _do_work ──
+    if full and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+        try:
+            from app.services.knowledge_graph.schema_linker import link_schema
+            question = args.get("question", "") or (context or {}).get("user_query", "") or ""
+            linker_result = await link_schema(
+                question=question,
+                kb_ids=[kb_id],
+                db=db,
+                top_k=8,
+            )
+            if linker_result and linker_result.get("slice_text"):
+                return {"success": True, "schema": linker_result["slice_text"], "source": "catalog"}
+        except Exception:
+            pass  # fall through to describe_all
 
     def _do_work() -> dict:
         svc = SchemaService(db)

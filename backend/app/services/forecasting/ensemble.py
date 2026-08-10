@@ -28,6 +28,37 @@ _FLOOR_WEIGHT = 0.0
 # (prevents bad models from polluting the blend).
 _MAX_ERROR_RATIO = 2.0
 
+# Regime-aware weight multipliers applied BEFORE softmax normalization.
+# These boost/dampen model weights based on market state.
+_REGIME_WEIGHT_MULT: dict[str, dict[str, float]] = {
+    "bull": {
+        "xgboost_reg": 1.3,
+        "xgboost_exog": 1.3,
+        "ets": 1.2,
+        "mean_reversion": 0.7,
+        "naive_last": 0.8,
+    },
+    "bear": {
+        "mean_reversion": 1.3,
+        "naive_last": 1.2,
+        "seasonal_naive": 1.1,
+        "xgboost_reg": 0.8,
+        "xgboost_exog": 0.8,
+        "ets": 0.8,
+    },
+    "volatile": {
+        "naive_last": 1.5,
+        "seasonal_naive": 1.3,
+        "mean_reversion": 1.2,
+        "xgboost_reg": 0.6,
+        "xgboost_exog": 0.6,
+        "stl": 0.7,
+    },
+    "sideways": {
+        # No adjustment — equal opportunity
+    },
+}
+
 
 @dataclass
 class EnsembleResult:
@@ -42,12 +73,42 @@ class EnsembleResult:
     individual_forecasts: dict[str, pd.Series] = field(default_factory=dict)
 
 
+def auto_tune_tau(
+    per_model_mape: dict[str, float],
+    tau_min: float = 0.5,
+    tau_max: float = 3.0,
+) -> float:
+    """Compute optimal softmax temperature from backtest error variance.
+
+    - Low variance  (models agree)   → low tau  (concentrate on best model).
+    - High variance (models disagree) → high tau (diversify across models).
+
+    Returns a float in [tau_min, tau_max]; falls back to _DEFAULT_TAU when
+    fewer than 2 finite error values are available.
+    """
+    import math
+
+    values: list[float] = []
+    for v in per_model_mape.values():
+        if v is not None and math.isfinite(v) and v >= 0:
+            values.append(v)
+
+    if len(values) < 2:
+        return _DEFAULT_TAU
+
+    mean_v = max(float(np.mean(values)), 1e-10)
+    cv = float(np.std(values)) / mean_v
+    tau_raw = 0.5 + 1.5 * cv
+    return max(tau_min, min(tau_max, tau_raw))
+
+
 def blend(
     forecasts: dict[str, pd.Series],
     per_model_error: dict[str, float],
     tau: float = _DEFAULT_TAU,
     floor: float = _FLOOR_WEIGHT,
     per_model_error_by_horizon: dict[int, dict[str, float]] | None = None,
+    regime: str | None = None,
 ) -> EnsembleResult:
     """Blend individual model forecasts using softmax-weighted average.
 
@@ -141,6 +202,7 @@ def blend(
                 step_names = gated_names
                 step_errs = gated_errors
             step_w = _softmax(step_errs, tau)
+            step_w = _apply_regime_multipliers(step_names, step_w, regime)
             for n, wv in zip(step_names, step_w):
                 per_step_weights[n][t] = float(wv)
                 arr = np.asarray(forecasts[n].values, dtype=float)
@@ -160,6 +222,7 @@ def blend(
     # ── Flat path (backward compat) ────────────────────────────────────
     raw_weights = _softmax(gated_errors, tau)
     raw_weights = _apply_floor(raw_weights, floor, len(gated_names))
+    raw_weights = _apply_regime_multipliers(gated_names, raw_weights, regime)
     weights: dict[str, float | list[float]] = {name: 0.0 for name in all_valid_names}
     for n, wv in zip(gated_names, raw_weights):
         weights[n] = float(wv)
@@ -182,6 +245,7 @@ def run_models(
     y: pd.Series,
     h: int,
     seasonal_period: int,
+    product_key: str = "",
 ) -> tuple[dict[str, pd.Series], list[str], list[str]]:
     """Fit all models and produce forecasts.  Returns (forecasts, runs, failed)."""
     forecasts: dict[str, pd.Series] = {}
@@ -190,7 +254,7 @@ def run_models(
 
     for name, model in models.items():
         try:
-            model.fit(y, seasonal_period=seasonal_period)
+            model.fit(y, seasonal_period=seasonal_period, product_key=product_key)
             pred = model.forecast(h)
             forecasts[name] = pred
             models_run.append(name)
@@ -230,6 +294,29 @@ def _apply_floor(
     else:
         w = np.ones(n) / n
     return w
+
+
+def _apply_regime_multipliers(
+    model_names: list[str],
+    weights: np.ndarray,
+    regime: str | None,
+) -> np.ndarray:
+    """Apply regime-based weight multipliers, then re-normalize."""
+    if not regime or regime not in _REGIME_WEIGHT_MULT:
+        return weights
+
+    mults = _REGIME_WEIGHT_MULT[regime]
+    adjusted = weights.copy()
+    for i, name in enumerate(model_names):
+        for pattern, mult in mults.items():
+            if pattern in name:
+                adjusted[i] *= mult
+                break
+
+    total = adjusted.sum()
+    if total > 1e-15:
+        adjusted /= total
+    return adjusted
 
 
 def _weighted_sum(

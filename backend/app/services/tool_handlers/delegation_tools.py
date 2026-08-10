@@ -92,6 +92,17 @@ async def _ask_data_agent(
             ),
         }
 
+    # ── Fast path (flag-gated): a single bound database source goes
+    # through the one-shot NL2SQL pipeline (2 LLM calls) instead of the
+    # iterative sub-agent loop (3-5 calls). Returns None on any failure
+    # so the loop below runs as fallback.
+    if settings.DATA_AGENT_FASTPATH_ENABLED:
+        fastpath_result = await _try_nl_fastpath(
+            question, preferred_kb, bound_kb_ids, db
+        )
+        if fastpath_result is not None:
+            return fastpath_result
+
     system_prompt = _build_sub_agent_prompt(question, bound_kb_ids, preferred_kb)
     tool_schemas = _build_sub_agent_tool_schemas()
 
@@ -109,7 +120,7 @@ async def _ask_data_agent(
         sub_context["data_source_id"] = preferred_kb
 
     iterations = 0
-    max_iterations = min(args.get("max_iterations", 6), 10)
+    max_iterations = min(args.get("max_iterations", 4), 10)
     final_text = ""
     # Distinguish two failure modes:
     #   _initial_llm_failure: set ONLY when the FIRST _call_llm in the
@@ -342,6 +353,60 @@ async def _ask_data_agent(
 # Helpers
 # ---------------------------------------------------------------------------
 
+async def _try_nl_fastpath(
+    question: str,
+    preferred_kb: str | None,
+    bound_kb_ids: list[str],
+    db: Session,
+) -> dict | None:
+    """One-shot NL2SQL fast path for a single bound database source.
+
+    Runs NLAnswerService (introspect → text2sql → execute → narrate = 2 LLM
+    calls) and returns a fully-shaped ask_data_agent result on success.
+    Returns None when the fast path does not apply or fails — the caller
+    then falls back to the iterative sub-agent loop, which can self-correct
+    SQL across iterations.
+    """
+    kb_id = preferred_kb or (bound_kb_ids[0] if len(bound_kb_ids) == 1 else None)
+    if not kb_id:
+        return None
+
+    # Only database-kind KBs qualify — the bound set may include file sources.
+    from app.models.knowledge_base import KnowledgeBase
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None or (kb.source_kind or "database").lower() != "database":
+        return None
+
+    try:
+        from app.services.db import NLAnswerService
+        result = await NLAnswerService(db).answer(kb_id, question)
+    except Exception as e:
+        logger.warning("ask_data_agent fast path raised (falling back to loop): %s", e)
+        return None
+
+    if not result.get("success"):
+        logger.info(
+            "ask_data_agent fast path failed (falling back to loop): %s",
+            result.get("error"),
+        )
+        return None
+
+    return {
+        "success": True,
+        "answer": result.get("answer") or "",
+        "rows": result.get("rows"),
+        "sql": result.get("sql"),
+        "source_id": result.get("source_id") or kb_id,
+        "source_name": result.get("source_name") or kb.name,
+        "iterations": result.get("iterations", 1),
+        "fastpath": True,
+    }
+
+
 def _build_sub_agent_prompt(
     question: str, bound_kb_ids: list[str], preferred_kb: str | None
 ) -> str:
@@ -498,8 +563,8 @@ ASK_DATA_AGENT_SCHEMA = {
                 },
                 "max_iterations": {
                     "type": "integer",
-                    "description": "Max tool-calling iterations for the Data Agent (default 6, max 10).",
-                    "default": 6,
+                    "description": "Max tool-calling iterations for the Data Agent (default 4, max 10).",
+                    "default": 4,
                 },
             },
             "required": ["question"],

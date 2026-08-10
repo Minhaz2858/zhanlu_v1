@@ -29,11 +29,30 @@ from app.services.synexia.default_skills import (
 logger = logging.getLogger(__name__)
 
 # Refinement-verb patterns that signal a follow-up turn (case-insensitive).
+# Phase 4: expanded with document-specific edit verbs and change-intent patterns.
 _REFINEMENT_VERBS = (
     "better", "improve", "redo", "redesign", "change", "update", "modify",
     "adjust", "tweak", "fix", "dark", "light", "theme", "color", "colour",
     "style", "design", "add", "remove", "replace", "shorten", "expand",
     "simpler", "more", "less", "again", "instead",
+    # Phase 4 additions: document-specific edit verbs
+    "rename", "retitle", "edit", "revise", "rewrite", "reword",
+    "restructure", "reorder", "reformat", "convert",
+)
+
+# Document-editing intent patterns (Phase 4): when the user mentions
+# specific document elements, this is almost certainly an edit, not a
+# new request.  These match at the message level.
+_DOCUMENT_EDIT_PATTERNS = (
+    "title slide", "summary slide", "cover page", "table of contents",
+    "make it", "make the", "make this", "change it", "change the",
+    "change this", "switch to", "convert to", "add a slide", "add slide",
+    "remove slide", "delete slide", "move slide",
+    "more professional", "more formal", "more concise", "more detailed",
+    "less text", "more data", "bigger font", "smaller font",
+    "this slide", "that slide", "the chart", "the table",
+    "kpi section", "executive summary", "recommendations section",
+    "can you make", "could you make", "please make", "please change",
 )
 
 
@@ -42,6 +61,9 @@ def _detect_followup_hint(user_message: str, ctx: Optional[dict]) -> str:
 
     Returns a short hint string for the system prompt, or ``""`` when no
     signal is found.  Never forces the outcome — the LLM still decides.
+
+    Phase 4: also checks document-specific edit patterns (e.g. "add a
+    slide", "make it more professional").
     """
     if not ctx:
         return ""
@@ -49,10 +71,30 @@ def _detect_followup_hint(user_message: str, ctx: Optional[dict]) -> str:
     if not artifacts:
         return ""
     msg_lower = (user_message or "").lower().strip()
-    if not msg_lower or len(msg_lower) > 300:
-        # Long messages are more likely new requests than refinements.
+    if not msg_lower:
         return ""
-    if any(verb in msg_lower for verb in _REFINEMENT_VERBS):
+
+    # Check refinement verbs (original check)
+    has_verb = any(verb in msg_lower for verb in _REFINEMENT_VERBS)
+    # Phase 4: also check document-edit-specific patterns
+    has_doc_pattern = any(pattern in msg_lower for pattern in _DOCUMENT_EDIT_PATTERNS)
+
+    # Long messages with edit patterns are still edits (e.g. "can you
+    # please make the summary slide more professional and also add my
+    # name at the bottom")
+    if has_doc_pattern:
+        return (
+            "\nHeuristic: the message contains document-editing language "
+            "('add a slide', 'make it more professional', etc.) and the "
+            "conversation already produced an artifact — this is a "
+            "follow-up edit request. Set is_followup=true and "
+            "refines_artifact_id to the most relevant prior artifact id.\n"
+        )
+
+    if len(msg_lower) > 300:
+        return ""
+
+    if has_verb:
         return (
             "\nHeuristic: the message is short, uses refinement language, "
             "and the conversation already produced an artifact — this is "
@@ -63,7 +105,11 @@ def _detect_followup_hint(user_message: str, ctx: Optional[dict]) -> str:
 
 
 def _format_context_block(ctx: Optional[dict]) -> str:
-    """Render conversation_context as a compact prompt block, or ``""``."""
+    """Render conversation_context as a compact prompt block, or ``""``.
+
+    Phase 4: includes artifact_type for each recent artifact so the
+    LLM can carry forward the format when editing.
+    """
     if not ctx:
         return ""
     parts = []
@@ -83,6 +129,10 @@ def _format_context_block(ctx: Optional[dict]) -> str:
     if prior_entities:
         parts.append("=== Entities from the previous turn (inherit unless overridden) ===\n"
                      + json.dumps(prior_entities, ensure_ascii=False))
+    # Phase 4: carry forward previous_artifact_type for edit context
+    prev_artifact_type = ctx.get("previous_artifact_type")
+    if prev_artifact_type:
+        parts.append(f"\nPrevious artifact type: {prev_artifact_type}")
     if not parts:
         return ""
     return "\n".join(parts) + "\n"
@@ -217,6 +267,7 @@ Respond with ONLY a JSON object, no explanation."""
         task_spec.setdefault("user_signal", "default")
         task_spec.setdefault("is_followup", False)
         task_spec.setdefault("refines_artifact_id", None)
+        task_spec.setdefault("previous_artifact_type", "")
         task_spec["skill_override"] = skill_override
         task_spec["auto_picked_default"] = auto_picked_default
         task_spec["forced_skill"] = forced_skill
@@ -235,10 +286,15 @@ Respond with ONLY a JSON object, no explanation."""
 
             # If the LLM didn't pin a refines_artifact_id but we have
             # recent artifacts, default to the most recent one.
-            if not task_spec.get("refines_artifact_id"):
-                arts = conversation_context.get("recent_artifacts") or []
-                if arts:
-                    task_spec["refines_artifact_id"] = arts[0].get("id")
+            arts = conversation_context.get("recent_artifacts") or []
+            if not task_spec.get("refines_artifact_id") and arts:
+                task_spec["refines_artifact_id"] = arts[0].get("id")
+                task_spec["previous_artifact_type"] = arts[0].get("artifact_type")
+            # Phase 4: also carry forward previous_artifact_type from context
+            if not task_spec.get("previous_artifact_type"):
+                prev_at = conversation_context.get("previous_artifact_type")
+                if prev_at:
+                    task_spec["previous_artifact_type"] = prev_at
 
         # ── OVERRIDE: deterministic file-intent wins over the LLM ─────
         if override_artifact_intents:
@@ -276,6 +332,10 @@ Respond with ONLY a JSON object, no explanation."""
             "user_signal": user_signal,
             "is_followup": False,
             "refines_artifact_id": None,
+            "previous_artifact_type": (
+                conversation_context.get("previous_artifact_type", "")
+                if conversation_context else ""
+            ),
             "skill_override": skill_override,
             "auto_picked_default": auto_picked_default,
             "forced_skill": forced_skill,

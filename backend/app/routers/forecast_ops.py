@@ -2,13 +2,25 @@
 import os
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Body, Depends, HTTPException
+from fastapi import APIRouter, Body, Depends, File, HTTPException, UploadFile
 
 from app.database import get_db
 from app.deps import require_admin, get_current_user_required
-from app.models.forecasting import ForecastTarget, ForecastWeightAdjustment
+from app.models.forecasting import (
+    ForecastExternalSeries,
+    ForecastTarget,
+    ForecastWeightAdjustment,
+)
 from app.services.forecasting.ops.evaluation_job import run_evaluation
 from app.services.forecasting.features.threshold_calibrator import calibrate_thresholds
+from app.services.forecasting.features.external_feed_ingest import (
+    IngestError,
+    delete_series as _delete_series,
+    get_series_points,
+    ingest_csv,
+    list_series as _list_series,
+)
+from app.services.forecasting.features.mock_feeds import seed_mock_feeds
 
 router = APIRouter(prefix="/forecast-ops", tags=["forecast-ops"])
 
@@ -23,7 +35,7 @@ def get_status(
     user=Depends(get_current_user_required),
 ):
     """Per-product drift/adjustment chips (last 7 days) + whether eval is on."""
-    cutoff = datetime.utcnow() - timedelta(days=7)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     targets = db.query(ForecastTarget).filter(
         ForecastTarget.is_deleted == False  # noqa: E712
     ).all()
@@ -246,7 +258,7 @@ def apply_thresholds(
             ForecastThresholdConfig.product_key.is_(None),
         )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     count = 0
     for row in staged_query.order_by(
         ForecastThresholdConfig.created_date.desc()
@@ -258,4 +270,137 @@ def apply_thresholds(
 
     db.flush()
     return {"applied": count}
+
+
+# ---------------------------------------------------------------------------
+# Wave 3 T3.0 — External-feed store (CSV upload + CRUD)
+# ---------------------------------------------------------------------------
+
+
+@router.get("/external-feeds")
+def list_external_feeds(
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """List all external-feed series (registry). Read-only.
+
+    CSV-uploaded feeds become immediately visible here. Loaders query
+    ``forecast_external_points`` directly — they do NOT depend on this
+    listing, so missing or stale rows here won't affect the forecast.
+    """
+    return _list_series(db)
+
+
+@router.get("/external-feeds/{series_key}")
+def get_external_feed(
+    series_key: str,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Return one series + its full points list.
+
+    404 if series_key is unknown.
+    """
+    series = db.query(ForecastExternalSeries).filter_by(
+        series_key=series_key,
+    ).first()
+    if series is None:
+        raise HTTPException(
+            status_code=404, detail=f"series not found: {series_key}",
+        )
+    df = get_series_points(db, series_key)
+    return {
+        "series_key": series.series_key,
+        "domain": series.domain,
+        "product_key": series.product_key,
+        "unit": series.unit,
+        "source": series.source,
+        "cadence": series.cadence,
+        "row_count": series.row_count,
+        "last_value_date": (
+            series.last_value_date.isoformat() if series.last_value_date else None
+        ),
+        "points": [
+            {"date": d.isoformat() if hasattr(d, "isoformat") else str(d),
+             "value": float(v)}
+            for d, v in zip(df["date"].tolist(), df["value"].tolist())
+        ],
+    }
+
+
+@router.post("/external-feeds")
+def upload_external_feed(
+    series_key: str,
+    domain: str,
+    file: UploadFile = File(...),
+    product_key: str | None = None,
+    unit: str | None = None,
+    cadence: str | None = None,
+    notes: str | None = None,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Upload a CSV to populate (or update) an external-feed series.
+
+    CSV must have columns ``date`` and ``value``. Optional extra columns
+    are stored as per-row metadata. Re-uploading the same date overwrites
+    the previous value (upsert).
+
+    Returns a summary: { series_key, row_count, rows_inserted, rows_updated, ... }
+    """
+    try:
+        return ingest_csv(
+            db=db,
+            file=file.file,
+            series_key=series_key,
+            domain=domain,
+            product_key=product_key,
+            unit=unit,
+            cadence=cadence,
+            uploaded_by=user.id,
+            notes=notes,
+        )
+    except IngestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/external-feeds/{series_key}")
+def delete_external_feed(
+    series_key: str,
+    db=Depends(get_db),
+    user=Depends(require_admin),
+):
+    """Delete a series and cascade-delete its points. Admin-only.
+
+    404 if series_key is unknown.
+    """
+    series = db.query(ForecastExternalSeries).filter_by(series_key=series_key).first()
+    if series is None:
+        raise HTTPException(
+            status_code=404, detail=f"series not found: {series_key}",
+        )
+    _delete_series(db, series_key)
+    return {"deleted": True, "series_key": series_key}
+
+
+@router.post("/external-feeds/seed-mock")
+def seed_mock_external_feeds(
+    product_key: str = "isoprene",
+    n_weeks: int = 104,
+    db=Depends(get_db),
+    user=Depends(require_admin),
+):
+    """Seed all 3 Wave 3 external-feed domains with synthetic mock data.
+
+    Admin-only. Used for end-to-end pipeline testing while real Tier-3
+    feeds are blocked. Idempotent: re-running with the same product_key
+    replaces existing rows for those series.
+
+    Returns a per-domain summary: row_count, series_key, etc.
+    """
+    return seed_mock_feeds(
+        db=db,
+        product_key=product_key,
+        n_weeks=n_weeks,
+    )
 

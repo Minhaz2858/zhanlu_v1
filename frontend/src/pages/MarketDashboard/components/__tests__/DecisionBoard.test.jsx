@@ -123,4 +123,26 @@ describe('DecisionBoard', () => {
     fireEvent.click(btn);
     expect(await screen.findByText('近期无重大市场事件')).toBeInTheDocument();
   });
+
+  it('renders the forecast date range in the header when generated_at is valid', async () => {
+    renderBoard();
+    // zh locale: "2026年8月4日 – 8月11日" (timezone-tolerant regex so the
+    // assertion holds regardless of the runner's local TZ).
+    expect(
+      await screen.findByText(/2026年8月\d{1,2}日\s*–\s*8月\d{1,2}日/),
+    ).toBeInTheDocument();
+  });
+
+  it('hides the date range when generated_at is missing or invalid', async () => {
+    const { marketDashboardApi } = await import('@/api/marketDashboard');
+    // missing → degrade to just "未来 7 天"
+    marketDashboardApi.decisionBoard.mockResolvedValueOnce({ ...FIXTURE, generated_at: '' });
+    renderBoard();
+    expect((await screen.findAllByText(/重点关注/)).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/2026年8月/)).not.toBeInTheDocument();
+    // unparseable → same graceful degradation
+    marketDashboardApi.decisionBoard.mockResolvedValueOnce({ ...FIXTURE, generated_at: 'not-a-date' });
+    renderBoard();
+    expect(screen.queryByText(/2026年8月/)).not.toBeInTheDocument();
+  });
 });

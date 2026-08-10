@@ -37,15 +37,184 @@ logger = logging.getLogger(__name__)
 # Path to the generic sandbox runner script — gets mounted into the container
 _RUNNER_SCRIPT_PATH = Path(__file__).parent.parent / "sandbox" / "sandbox_runner.py"
 
-# Image mapping by output format
+# Source content of the C-Heavy skill-driven runner.  We read it once
+# at import time and re-embed it (base64) into every skill-driven job
+# rather than bind-mounting the file.  This keeps the sandbox image
+# stateless — the same image can be used for skill-driven and
+# deterministic jobs interchangeably.
+_SKILL_DRIVEN_RUNNER_PATH = Path(__file__).parent.parent / "sandbox" / "skill_driven_runner.py"
+try:
+    _SKILL_DRIVEN_RUNNER_SCRIPT = _SKILL_DRIVEN_RUNNER_PATH.read_text(encoding="utf-8")
+except OSError:
+    # Skill-driven path unavailable — every job will silently fall back
+    # to the deterministic runner.
+    _SKILL_DRIVEN_RUNNER_SCRIPT = ""
+
+# Image mapping by output format.
+#
+# Skill-driven formats (docx / pptx / xlsx / pdf) use the new unified
+# ``zhanlu-sandbox-skill:latest`` image, which bundles Node.js + the
+# docx-js / pptxgenjs npm packages alongside the Python document
+# libraries — the skill_driven_runner inside the container may either
+# invoke the LLM (skill-driven path) or fall back to the deterministic
+# generator, both of which need the same library set.
+#
+# HTML and MD don't benefit from skill-driven generation (an LLM call
+# to write HTML markup is wasteful when a deterministic template works
+# just as well), so they keep the lighter python image.
+_SKILL_DRIVEN_IMAGE = "zhanlu-sandbox-skill:latest"
 _IMAGE_BY_FORMAT = {
-    "xlsx": "zhanlu-sandbox-python:latest",
-    "pptx": "zhanlu-sandbox-python:latest",
+    "xlsx": _SKILL_DRIVEN_IMAGE,
+    "pptx": _SKILL_DRIVEN_IMAGE,
     "html": "zhanlu-sandbox-python:latest",
-    "pdf":  "zhanlu-sandbox-python:latest",
-    "docx": "zhanlu-sandbox-python:latest",
+    "pdf":  _SKILL_DRIVEN_IMAGE,
+    "docx": _SKILL_DRIVEN_IMAGE,
     "md":   "zhanlu-sandbox-python:latest",
 }
+
+# Formats where the C-Heavy skill-driven path is the primary generator.
+# These get the skill bundle (SKILL.md + companion docs) and the
+# LLM-equipped runner; HTML/MD stay on the deterministic utility path.
+_SKILL_DRIVEN_FORMATS = frozenset({"docx", "pptx", "xlsx", "pdf"})
+
+
+def _format_supports_skill_driven(fmt: str) -> bool:
+    """True if the format should go through the skill-driven path."""
+    return fmt in _SKILL_DRIVEN_FORMATS
+
+
+# Timeout (seconds) for skill-driven jobs.  Each job makes up to
+# 3 LLM calls + Node.js code execution, so the default 120s is too
+# tight.  Loaded lazily so a config override at import time is honored.
+def _skill_driven_timeout() -> int:
+    from app.config import settings
+    return int(getattr(settings, "SANDBOX_SKILL_TIMEOUT_SECONDS", 240))
+
+
+# Per-file size cap for skill bundle entries.  A 100 KB markdown file
+# is already huge for an LLM prompt; anything bigger almost certainly
+# is a font/asset tree we don't want to ship into the sandbox.
+_SKILL_BUNDLE_MAX_FILE_BYTES = 100 * 1024
+
+
+def _build_skill_bundle(format_key: str) -> list[dict]:
+    """Bundle the relevant document-skill files for a given format.
+
+    Returns a list of ``{"path": "<rel-path>", "data_base64": "..."}``
+    entries ready to drop into ``input_package["skill_bundle"]``.  The
+    worker materializes these into ``/input/skill_bundle/`` inside the
+    container; the skill_driven_runner reads SKILL.md and the
+    format-specific companion doc (docx-js.md, html2pptx.md, …) from
+    there.
+
+    Path-traversal guard: every file must live under
+    ``backend/skills/document-skills/<format_key>/``.  Anything outside
+    that directory is silently skipped.
+    """
+    from app.config import settings
+
+    # Try BASE_DIR if exposed; otherwise fall back to the canonical
+    # location relative to this file (backend/skills/document-skills).
+    # The file lives at backend/app/services/tool_handlers/sandbox_tool.py
+    # so the repo root is 4 parents up: tool_handlers → services → app → backend
+    candidates = []
+    if hasattr(settings, "BASE_DIR") and settings.BASE_DIR:
+        candidates.append(Path(settings.BASE_DIR) / "skills" / "document-skills")
+        candidates.append(Path(settings.BASE_DIR).parent / "skills" / "document-skills")
+    candidates.append(Path(__file__).parent.parent.parent.parent / "skills" / "document-skills")
+
+    skills_root = None
+    for c in candidates:
+        if c.exists():
+            skills_root = c
+            break
+    if skills_root is None:
+        logger.warning(
+            "Skill bundle dir not found; tried: %s",
+            [str(c) for c in candidates],
+        )
+        return []
+    fmt_dir = skills_root / format_key
+    if not fmt_dir.exists():
+        logger.warning("Skill bundle dir not found: %s", fmt_dir)
+        return []
+
+    # Curated list of files to bundle per format.  We deliberately skip
+    # ``scripts/`` Python files (the LLM writes its own code) and any
+    # binary assets (LICENSE.txt is included for attribution but is
+    # only a few hundred bytes).
+    wanted: list[str] = []
+    wanted.append("SKILL.md")
+    if format_key == "docx":
+        wanted.extend(["docx-js.md", "ooxml.md"])
+    elif format_key == "pptx":
+        wanted.extend(["html2pptx.md", "ooxml.md"])
+    elif format_key == "xlsx":
+        wanted.append("xlsx.md")
+    elif format_key == "pdf":
+        wanted.extend(["pdf.md" if (fmt_dir / "pdf.md").exists() else "reference.md", "forms.md"])
+
+    bundle: list[dict] = []
+    fmt_dir_resolved = fmt_dir.resolve()
+    for rel_name in wanted:
+        # Defence-in-depth: refuse anything that escapes the format dir
+        candidate = (fmt_dir / rel_name).resolve()
+        if fmt_dir_resolved not in candidate.parents and candidate != fmt_dir_resolved:
+            logger.warning("Refusing to bundle escaped path: %s", candidate)
+            continue
+        if not candidate.exists() or not candidate.is_file():
+            logger.info("Skill bundle file not present, skipping: %s", rel_name)
+            continue
+        size = candidate.stat().st_size
+        if size > _SKILL_BUNDLE_MAX_FILE_BYTES:
+            logger.warning("Skill bundle file too large (%d bytes), skipping: %s", size, rel_name)
+            continue
+        try:
+            content = candidate.read_bytes()
+        except OSError as e:
+            logger.warning("Could not read skill bundle file %s: %s", candidate, e)
+            continue
+        bundle.append({
+            "path": rel_name,
+            "data_base64": base64.b64encode(content).decode("ascii"),
+            "size_bytes": size,
+        })
+    logger.info(
+        "Built skill bundle for format=%s: %d files, %d bytes total",
+        format_key, len(bundle), sum(b["size_bytes"] for b in bundle),
+    )
+    return bundle
+
+
+def _build_runner_modules() -> dict[str, str]:
+    """Bundle the Python files the skill_driven_runner needs as imports.
+
+    Returns a dict of ``{filename: base64_content}`` for the worker to
+    write to ``/input/skill/`` alongside the main runner script.  We
+    inline the contents rather than mounting a directory because the
+    sandbox worker runs without a skills/ mount.
+
+    Path-traversal / extension guard is enforced inside
+    ``container_manager.write_runner_modules``.
+    """
+    sandbox_dir = Path(__file__).parent.parent / "sandbox"
+    targets = {
+        "skill_driven_runner.py": sandbox_dir / "skill_driven_runner.py",
+        "llm_client.py":          sandbox_dir / "llm_client.py",
+        "fallback_generator.py":  sandbox_dir / "fallback_generator.py",
+    }
+    out: dict[str, str] = {}
+    for filename, path in targets.items():
+        if not path.exists():
+            logger.error("Skill-driven runner module missing on host: %s", path)
+            continue
+        try:
+            content = path.read_bytes()
+        except OSError as e:
+            logger.error("Could not read runner module %s: %s", path, e)
+            continue
+        out[filename] = base64.b64encode(content).decode("ascii")
+    return out
 
 # Artifact type mapping
 _ARTIFACT_TYPE_BY_FORMAT = {
@@ -379,6 +548,31 @@ async def _run_sandbox_skill(
     # render a native chart slide and an amber warnings box respectively.
     chart = args.get("chart")
     warnings = args.get("warnings") or []
+    user_message = (args.get("user_message") or instructions or "").strip()
+    # synthesized_payload is the v2 Claude-style payload from the
+    # report_synthesis LLM call.  When present, the skill-driven runner
+    # uses it as the canonical source of content (the user_message +
+    # title alone are not enough to drive an LLM document plan).
+    synthesized_payload = args.get("synthesized_payload") or {}
+
+    # --- Decide which runner to use for this format ---
+    use_skill_driven = _format_supports_skill_driven(fmt)
+    if use_skill_driven:
+        # Pull the runner script content from the SKILL_DRIVEN_RUNNER_SCRIPT
+        # field (set below in module init) so the source-of-truth lives
+        # in one place.
+        runner_script_b64 = base64.b64encode(
+            _SKILL_DRIVEN_RUNNER_SCRIPT.encode("utf-8")
+        ).decode("ascii")
+        runner_script_name = "skill_driven_runner.py"
+        job_skill_name = "skill_runner"
+        job_timeout = _skill_driven_timeout()
+    else:
+        runner_script_b64 = base64.b64encode(runner_script.encode("utf-8")).decode("ascii")
+        runner_script_name = "sandbox_runner.py"
+        job_skill_name = "sandbox_runner"
+        job_timeout = 120
+
     input_package = {
         "skill_config": {
             "format": fmt,
@@ -398,6 +592,12 @@ async def _run_sandbox_skill(
             "next_step": next_step,
             "chart": chart,
             "warnings": warnings,
+            # C-Heavy skill-driven additions: the runner uses these to
+            # plan + generate the document via the LLM.  When the LLM
+            # path fails or is disabled, the fallback_generator uses
+            # the same fields as content.
+            "user_message": user_message,
+            "synthesized_payload": synthesized_payload,
         },
         "data_snapshots": [
             {
@@ -407,9 +607,38 @@ async def _run_sandbox_skill(
             }
         ],
         "instructions": instructions or f"Generate a {fmt.upper()} report titled '{title}' from the provided data.",
-        "runner_script": base64.b64encode(runner_script.encode("utf-8")).decode("ascii"),
-        "runner_script_name": "sandbox_runner.py",
+        "runner_script": runner_script_b64,
+        "runner_script_name": runner_script_name,
     }
+
+    # Skill-driven jobs need the skill bundle + runner modules written
+    # alongside the main script.  Both go through the existing base64
+    # mechanisms (``skill_bundle`` → /input/skill_bundle/,
+    # ``runner_modules_b64`` → /input/skill/).
+    if use_skill_driven:
+        skill_bundle = _build_skill_bundle(fmt)
+        runner_modules = _build_runner_modules()
+        if skill_bundle:
+            input_package["skill_bundle"] = skill_bundle
+        if runner_modules:
+            input_package["runner_modules_b64"] = runner_modules
+        # If we couldn't bundle any skill files, drop back to the
+        # deterministic path so we don't send the LLM into a job with
+        # no workflow to follow.
+        if not skill_bundle or not runner_modules:
+            logger.warning(
+                "Skill-driven bundle incomplete for format=%s "
+                "(skill_files=%d, modules=%d); falling back to deterministic runner",
+                fmt, len(skill_bundle), len(runner_modules),
+            )
+            runner_script_b64 = base64.b64encode(runner_script.encode("utf-8")).decode("ascii")
+            runner_script_name = "sandbox_runner.py"
+            job_skill_name = "sandbox_runner"
+            job_timeout = 120
+            input_package["runner_script"] = runner_script_b64
+            input_package["runner_script_name"] = runner_script_name
+            input_package.pop("skill_bundle", None)
+            input_package.pop("runner_modules_b64", None)
 
     output_spec = {
         "format": fmt,
@@ -421,13 +650,13 @@ async def _run_sandbox_skill(
     sandbox_service = SandboxService(db)
 
     job = sandbox_service.create_job(
-        skill_name="sandbox_runner",
+        skill_name=job_skill_name,
         artifact_id=artifact.id,
         artifact_version_id=version.id,
         conversation_id=conversation_id,
         input_package=input_package,
         output_spec=output_spec,
-        timeout_seconds=120,
+        timeout_seconds=job_timeout,
         image_name=_IMAGE_BY_FORMAT[fmt],
     )
 
@@ -647,7 +876,11 @@ RUN_SANDBOX_SKILL_SCHEMA = {
             "isolated Docker sandbox and stored as a versioned artifact with "
             "preview and download URLs. "
             "Supported formats: xlsx (spreadsheet), pptx (presentation), "
-            "html (interactive dashboard with charts), pdf (document), docx (Word), md (markdown)."
+            "html (interactive dashboard with charts), pdf (document), docx (Word), md (markdown). "
+            "For docx/pptx/xlsx/pdf, the document is generated by an LLM inside the sandbox "
+            "using the relevant document skill (docx-js, html2pptx, openpyxl, reportlab) so the "
+            "layout adapts to whatever document type the user asks for (competitive analysis, "
+            "risk assessment, sales report, etc.) — not just a single hardcoded layout."
         ),
         "parameters": {
             "type": "object",
@@ -675,6 +908,27 @@ RUN_SANDBOX_SKILL_SCHEMA = {
                         "Natural-language instructions for what to generate. "
                         "E.g. 'Create a weekly sales summary with totals and a chart' "
                         "or 'Make a dashboard with bar charts for revenue by month'."
+                    ),
+                },
+                "user_message": {
+                    "type": "string",
+                    "description": (
+                        "The original user request that motivated this document. "
+                        "For docx/pptx/xlsx/pdf, the LLM inside the sandbox uses this "
+                        "to understand the user's document-type intent (competitive "
+                        "analysis, risk assessment, sales report, etc.) and plan a "
+                        "structure that matches.  Falls back to ``instructions`` when omitted."
+                    ),
+                },
+                "synthesized_payload": {
+                    "type": "object",
+                    "description": (
+                        "Optional rich content payload from the report_synthesis LLM call. "
+                        "When present, the skill-driven runner uses summary/methodology/"
+                        "key_findings/recommendations/sections/kpis as the source-of-truth "
+                        "content instead of inventing values.  Keys mirror the "
+                        "ReportCardPayload schema (summary, methodology, key_findings, "
+                        "recommendations, sections, kpis, insights, next_step)."
                     ),
                 },
             },

@@ -10,7 +10,7 @@ Redis and executes them.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -125,9 +125,9 @@ class SandboxService:
             job.output_artifact_ids = output_artifact_ids
 
         if status == "running" and not job.started_at:
-            job.started_at = datetime.utcnow()
+            job.started_at = datetime.now(timezone.utc)
         if status in ("completed", "failed", "timeout", "cancelled"):
-            job.completed_at = datetime.utcnow()
+            job.completed_at = datetime.now(timezone.utc)
 
         self.db.commit()
         self.db.refresh(job)
@@ -227,8 +227,8 @@ class SandboxService:
             stdout=stdout,
             stderr=stderr,
             duration_ms=duration_ms,
-            started_at=datetime.utcnow(),
-            completed_at=datetime.utcnow(),
+            started_at=datetime.now(timezone.utc),
+            completed_at=datetime.now(timezone.utc),
         )
         self.db.add(cmd)
         self.db.commit()

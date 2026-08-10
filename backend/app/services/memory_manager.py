@@ -18,7 +18,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -204,7 +204,7 @@ def archive_stale(
         AgentMemory.is_deleted == False,
     ).all()
 
-    cutoff = datetime.utcnow() - timedelta(days=stale_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
     archived = 0
 
     for m in memories:

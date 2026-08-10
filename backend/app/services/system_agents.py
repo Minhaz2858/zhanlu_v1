@@ -30,7 +30,7 @@ ALL_TOOL_NAMES = [
     # Core CRUD (system meta-agents)
     "create_agent", "update_agent", "list_market_agents", "list_tools",
     "create_skill", "update_skill", "search_skills",
-    "create_automation", "update_automation", "list_knowledge_bases",
+    "create_automation", "update_automation", "execute_automation", "list_knowledge_bases",
     "ask_data_agent", "list_data_sources", "describe_schema",
     "execute_query", "answer_from_database",
     # Forecasting (Section 6)
@@ -62,7 +62,9 @@ ALL_TOOL_NAMES = [
     "skills", "skills_hub", "skills_sync", "skills_guard", "skill_manager",
     "skill_provenance", "skill_usage", "Skill",
     # Artifacts
-    "create_artifact",
+    "create_artifact", "edit_artifact", "load_skill_body",
+    # Dashboards (Phase 11 — live DB dashboards)
+    "create_dashboard", "update_dashboard", "undo_dashboard_edit",
     # Security
     "osv_check", "tirith_security",
     # Communication
@@ -398,68 +400,35 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
             "topology": "standalone",
             "status": "active",
             "tool_config": {
-                "enabled_tools": _tools_in_registry(registry, [
-                    # EDIA pipeline delegation tools (12 ask_* tools)
-                    "ask_perception", "ask_rag_research", "ask_diagnosis",
-                    "ask_forecast_agent", "ask_pricing", "ask_data_agent",
-                    "ask_report_agent", "ask_intelligence",
-                    "ask_knowledge_graph", "ask_decision", "ask_macro_override",
-                    "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback",
-                    # Full general_assistant toolset (mirrors the
-                    # general_assistant config above) so data sub-agents
-                    # (e.g. list_data_sources / describe_schema / execute_query)
-                    # are not blocked by the parent agent's allowlist.
-                    "create_artifact", "execute_automation",
-                    "web_search", "web_extract", "url_safety", "x_search",
-                    "agent_browser",
-                    "memory", "todo", "kanban", "session_search",
-                    "read_file", "write_file", "image_generation",
-                    "execute_code", "delegate_task",
-                    "run_sandbox_skill", "fuzzy_match", "patch_parser",
-                    "process_registry_list", "process_registry_tail",
-                    "process_registry_kill",
-                    "clarify", "slash_confirm", "approval", "interrupt",
-                    "checkpoint_manager", "osv_check", "tirith_security",
-                    "skills", "skills_hub", "skills_guard",
-                    "skill_provenance", "skill_usage", "Skill", "load_skill_body",
-                    "update_env_config", "docker_compose_restart",
-                ]),
+                "enabled_tools": _tools_in_registry(registry, list(dict.fromkeys(
+                    ALL_TOOL_NAMES +
+                    # EDIA pipeline delegation tools (14 ask_* tools)
+                    [
+                        "ask_perception", "ask_rag_research", "ask_diagnosis",
+                        "ask_forecast_agent", "ask_pricing", "ask_data_agent",
+                        "ask_report_agent", "ask_intelligence",
+                        "ask_knowledge_graph", "ask_decision", "ask_macro_override",
+                        # "ask_weekly_report" — not yet registered; will be added when weekly_report module is ported
+                        "ask_erp_kpi", "ask_erp_writeback",
+                        # Direct forecast read path
+                        "forecast_brief",
+                    ]
+                ))),
             },
             **_BASE_HARNESS,
             "manifest_json": {
                 "agent_name": "ecisco_bi_assistant",
-                "version": "1.0.0",
+                "version": "1.1.0",
                 "mission": "Serve as the default Ecisco BI assistant for C5/C9 petrochemical domain intelligence, covering the full EDIA 6-stage pipeline",
                 "task_scope": [
                     "market_analysis", "forecasting", "pricing",
                     "decision", "diagnosis", "weekly_report",
                     "knowledge_graph", "erp_writeback", "data_analysis",
+                    "dashboard", "data_query", "automation",
                 ],
                 "boundaries": {
-                    "allowed": [
-                        "ask_perception", "ask_rag_research", "ask_diagnosis",
-                        "ask_forecast_agent", "ask_pricing", "ask_data_agent",
-                        "ask_report_agent", "ask_intelligence",
-                        "ask_knowledge_graph", "ask_decision", "ask_macro_override",
-                        "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback",
-                        "create_artifact", "execute_automation",
-                        "web_search", "web_extract", "url_safety", "x_search",
-                        "agent_browser",
-                        "memory", "todo", "kanban", "session_search",
-                        "read_file", "write_file", "image_generation",
-                        "execute_code", "delegate_task",
-                        "run_sandbox_skill", "fuzzy_match", "patch_parser",
-                        "process_registry_list", "process_registry_tail",
-                        "process_registry_kill",
-                        "clarify", "slash_confirm", "approval", "interrupt",
-                        "checkpoint_manager", "osv_check", "tirith_security",
-                        "skills", "skills_hub", "skills_guard",
-                        "skill_provenance", "skill_usage", "Skill", "load_skill_body",
-                        "update_env_config", "docker_compose_restart",
-                    ],
-                    "forbidden": [
-                        "agent_creation", "skill_creation", "automation_creation",
-                    ],
+                    "allowed": ["all_registered_tools"],
+                    "forbidden": [],
                 },
                 "risk_tier": "low",
                 "created_by": "system",
@@ -580,11 +549,23 @@ def ensure_system_agents(db=None) -> None:
                 db.add(agent)
                 created.append(cfg["name"])
                 continue
-            # Refresh tool_config + description on existing rows so newly
-            # registered tools appear without a manual re-seed.
+            # Refresh tool_config + description + manifest_json on existing
+            # rows so newly-registered tools appear without a manual re-seed,
+            # and the manifest boundaries stay in sync with enabled_tools
+            # (otherwise the descriptive manifest drifts from the enforced
+            # tool_config, e.g. when wiring a new tool like forecast_brief).
+            # Also sync knowledge_bases and data_bindings to prevent stale
+            # bindings from persisting after UI edits (e.g. general_assistant
+            # leaking cross-project data sources when no project is selected).
             existing.tool_config = cfg["tool_config"]
             if cfg.get("description"):
                 existing.description = cfg["description"]
+            if cfg.get("manifest_json"):
+                existing.manifest_json = cfg["manifest_json"]
+            if cfg.get("knowledge_bases") is not None:
+                existing.knowledge_bases = cfg["knowledge_bases"]
+            if cfg.get("data_bindings") is not None:
+                existing.data_bindings = cfg["data_bindings"]
             # Stamp is_system=True even on rows that pre-date the
             # ``is_system`` column — they ARE system agents, even if
             # the column was False when the row was originally written

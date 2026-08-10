@@ -1,14 +1,15 @@
 """Project model."""
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import String, Text, Boolean
+from sqlalchemy import String, Text, Boolean, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import TimestampedBase
 
 if TYPE_CHECKING:
     from app.models.project_memory import ProjectMemory
+    from app.models.llm_model import LlmModel
 
 
 class Project(TimestampedBase):
@@ -33,6 +34,12 @@ class Project(TimestampedBase):
     resource_type: Mapped[str] = mapped_column(
         String(20), default="personal", nullable=False, index=True,
     )
+
+    # Hierarchical LLM config — FK to llm_models catalog (gated by HIERARCHICAL_LLM_ENABLED)
+    llm_model_id: Mapped[Optional[str]] = mapped_column(
+        String(36), ForeignKey("llm_models.id"), nullable=True, index=True,
+    )
+    llm_model: Mapped[Optional["LlmModel"]] = relationship("LlmModel", foreign_keys=[llm_model_id])
 
     # Reverse relationship populated by ProjectMemory.project
     project_memories: Mapped[list["ProjectMemory"]] = relationship(

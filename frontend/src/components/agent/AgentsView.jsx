@@ -138,7 +138,7 @@ function AgentGrid({ agents, tr, t, navigate }) {
         >
           <div className="mb-2 flex items-start gap-2">
             <Bot className="mt-0.5 h-4 w-4 text-primary" />
-            <h3 className="flex-1 font-display text-base text-foreground group-hover:text-primary">
+            <h3 className="min-w-0 flex-1 break-words font-display text-base text-foreground group-hover:text-primary">
               {tr(it.name || it.title)}
             </h3>
             {it.is_shared_with_me && (

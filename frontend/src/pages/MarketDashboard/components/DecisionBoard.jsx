@@ -16,11 +16,12 @@ import { normalizeForecastPoints } from '../lib/forecastChartMath';
 // the backend provides them — only `name_en`/`name_zh` are dual-language
 // from the backend today, so product names switch, other LLM content stays
 // as-is until the backend emits English variants.
-const UI = (lang) => lang === 'zh'
+      const UI = (lang) => lang === 'zh'
   ? {
       loading: 'AI 决策看板加载中…',
       title: '下周决策看板 · AI Decision Board',
       days: '未来 {d} 天',
+      range: '{start} – {end}',
       material: '物料',
       price: '现价',
       forecast7d: '7日预测',
@@ -47,11 +48,16 @@ const UI = (lang) => lang === 'zh'
       cMed: '中',
       cLow: '低',
       expandBtn: '展开',
+      roiTrack: '决策命中率',
+      roiPnl: '累计盈亏',
+      noRoi: '暂无决策记录',
+      drivers: '预测驱动因子',
     }
   : {
       loading: 'Loading AI Decision Board…',
       title: 'Next-Week Decision Board',
       days: 'Next {d} days',
+      range: '{start} – {end}',
       material: 'Material',
       price: 'Price',
       forecast7d: '7-Day Forecast',
@@ -78,6 +84,10 @@ const UI = (lang) => lang === 'zh'
       cMed: 'Medium',
       cLow: 'Low',
       expandBtn: 'Expand',
+      roiTrack: 'Decision Hit Rate',
+      roiPnl: 'Cumulative P&L',
+      noRoi: 'No decision track record yet',
+      drivers: 'Forecast Drivers',
     };
 
 const ACTION_STYLES = {
@@ -122,6 +132,28 @@ function fmtProb(v) {
   return `${Math.round(v * 100)}%`;
 }
 
+// Localize the forecast window [generatedAt, generatedAt + day] as a short
+// date range (e.g. "Aug 14 – Aug 20, 2026" / "2026年8月14日 – 8月20日").
+// Returns null when generated_at is missing or unparseable so the caller can
+// gracefully degrade to showing just the "{d} days" label (current behavior).
+function formatForecastRange(generatedAt, day, lang) {
+  if (!generatedAt) return null;
+  const start = new Date(generatedAt);
+  if (!Number.isFinite(start.getTime())) return null;
+  const end = new Date(start.getTime() + day * 86400000);
+  if (lang === 'zh') {
+    const startStr = start.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+    const sameYear = start.getFullYear() === end.getFullYear();
+    const endStr = sameYear
+      ? end.toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
+      : end.toLocaleDateString('zh-CN', { year: 'numeric', month: 'long', day: 'numeric' });
+    return { start: startStr, end: endStr };
+  }
+  const startStr = start.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+  const endStr = end.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+  return { start: startStr, end: endStr };
+}
+
 export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
   const { lang } = useLanguage();
   const t = UI(lang);
@@ -133,6 +165,8 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
     queryFn: () => marketDashboardApi.decisionBoard(group, 7),
     staleTime: 60_000,
   });
+
+  const range = formatForecastRange(data?.generated_at, data?.day, lang);
 
   if (isLoading) {
     return (
@@ -158,6 +192,11 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
             {t.title}
           </h2>
           <span className="text-xs text-slate-400">{t.days.replace('{d}', data.day)}</span>
+          {range && (
+            <span className="text-xs text-slate-400">
+              · {t.range.replace('{start}', range.start).replace('{end}', range.end)}
+            </span>
+          )}
         </div>
         <p className="mt-1 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
           {data.briefing_zh}
@@ -364,7 +403,7 @@ function ExpandedCard({ p, day, lang, t }) {
               {p.narrative_zh}
             </p>
           )}
-        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-4">
+        <div className="mt-2 grid grid-cols-2 gap-2 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-5">
           <div>{t.dirAccuracy}<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.directional_accuracy == null ? '—' : `${Math.round(p.directional_accuracy * 100)}%`}</span></div>
           <div>{t.intelEvents}<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{p.intel_event_count}{lang === 'zh' ? ' 条' : ''}</span>
             {p.intel_event_count === 0 && (
@@ -373,6 +412,20 @@ function ExpandedCard({ p, day, lang, t }) {
           </div>
           <div>{t.volLabel}<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{VOL[p.volatility_regime] || '—'}</span></div>
           <div>{t.confLabel}<br /><span className="font-semibold text-slate-700 dark:text-slate-200">{CONF[p.confidence] || t.cLow}</span></div>
+          <div>
+            {t.roiTrack}
+            <br />
+            {p.decision_roi && p.decision_roi.total_realized > 0 ? (
+              <span className={`font-semibold ${p.decision_roi.accuracy_pct >= 50 ? 'text-emerald-600 dark:text-emerald-400' : 'text-amber-600 dark:text-amber-400'}`}>
+                {Math.round(p.decision_roi.accuracy_pct)}%
+                <span className="block text-[10px] font-normal text-slate-400 dark:text-slate-500">
+                  {p.decision_roi.total_realized}/{p.decision_roi.total_decisions}{lang === 'zh' ? ' 已兑现' : ' realized'}
+                </span>
+              </span>
+            ) : (
+              <span className="text-xs text-slate-400">{t.noRoi}</span>
+            )}
+          </div>
         </div>
         {p.skus?.length > 0 && (
           <table className="mt-3 w-full text-xs">
@@ -393,6 +446,19 @@ function ExpandedCard({ p, day, lang, t }) {
               ))}
             </tbody>
           </table>
+        )}
+        {p.drivers?.length > 0 && (
+          <div className="mt-3 border-t border-slate-100 pt-2 dark:border-slate-800">
+            <p className="mb-1 text-xs font-medium text-slate-500 dark:text-slate-400">{t.drivers}</p>
+            <div className="flex flex-wrap gap-1.5">
+              {p.drivers.map((d, i) => (
+                <span key={i} className="inline-flex items-center gap-1 rounded bg-slate-100 px-1.5 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300">
+                  <span className="font-mono">{d.feature}</span>
+                  <span className="text-slate-400">{Math.round(d.weight * 100)}%</span>
+                </span>
+              ))}
+            </div>
+          </div>
         )}
       </div>
     </div>

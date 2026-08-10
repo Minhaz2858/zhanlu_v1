@@ -143,8 +143,8 @@ export default function Market() {
             const kinds = getAgentKinds(a);
             return (
               <button key={a.id} onClick={() => navigate(`/market/${a.id}`)} className="group flex flex-col rounded-xl border border-border bg-card p-5 text-left transition-shadow hover:shadow-md hover:border-primary/20">
-                <h3 className="mb-2 font-display text-base text-foreground group-hover:text-primary">{translate(a.name)}</h3>
-                <p className="mb-3 flex-1 text-xs text-muted-foreground line-clamp-2">{translate(a.description)}</p>
+                <h3 className="mb-2 min-w-0 break-words font-display text-base text-foreground group-hover:text-primary">{translate(a.name)}</h3>
+                <p className="mb-3 min-w-0 flex-1 break-words text-xs text-muted-foreground line-clamp-2">{translate(a.description)}</p>
                 {/* Kind chips */}
                 <div className="mb-3 flex flex-wrap gap-1.5">
                   {kinds.map((k) => (

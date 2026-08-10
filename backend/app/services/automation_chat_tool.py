@@ -65,7 +65,7 @@ def _find_in_flight_execution(db: Session, task_id: str):
     runs were observed in a single chat turn. Attaching to the in-flight
     run gives the re-call a meaningful answer without duplicating work.
     """
-    from datetime import datetime
+    from datetime import datetime, timezone
     from app.models.automation_execution import AutomationExecution
     return db.query(AutomationExecution).filter(
         AutomationExecution.automation_task_id == task_id,
@@ -74,7 +74,7 @@ def _find_in_flight_execution(db: Session, task_id: str):
         # Skip expired/stale rows — the janitor reaps those; a fresh
         # trigger is more useful than attaching to a zombie.
         (AutomationExecution.timeout_at.is_(None))
-        | (AutomationExecution.timeout_at > datetime.utcnow()),
+        | (AutomationExecution.timeout_at > datetime.now(timezone.utc)),
     ).order_by(AutomationExecution.created_date.desc()).first()
 
 

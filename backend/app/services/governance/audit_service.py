@@ -6,7 +6,7 @@ or deleted — they provide a complete trail for compliance and debugging.
 """
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -53,7 +53,7 @@ class AuditService:
             execution_id=execution_id,
             result=result,  # success | failure | denied
             error_message=error_message,
-            occurred_at=datetime.utcnow(),
+            occurred_at=datetime.now(timezone.utc),
             org_id=org_id,
             app_id=app_id,
         )

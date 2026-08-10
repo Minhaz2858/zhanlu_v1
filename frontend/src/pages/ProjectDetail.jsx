@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { appParams } from '@/lib/app-params';
+import { authFetch } from '@/api/authFetch';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useAuth } from '@/lib/AuthContext';
 import { useTranslate } from '@/lib/useTranslate';
@@ -12,6 +13,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import AddAgentToProjectDialog from '@/components/project/AddAgentToProjectDialog';
 import AddKbToProjectDialog from '@/components/project/AddKbToProjectDialog';
+import LlmModelSelector from '@/components/chat/LlmModelSelector';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
 import ResourceAccessDialog from '@/components/ResourceAccessDialog';
 import { toast } from '@/components/ui/use-toast';
@@ -20,7 +22,7 @@ import {
   Sparkles, Check, X, Trash2, Plus, Loader2, Folder,
   ArrowUpRight, Zap, Settings2, ListChecks,
   Pencil, Save, MoreVertical, FileStack, Layers,
-  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users,
+  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users, Cpu,
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
@@ -66,15 +68,6 @@ export default function ProjectDetail() {
   const { id: projectId } = useParams();
   const navigate = useNavigate();
 
-  // Whether the current user can manage (edit/delete/add-resources) this
-  // project.  Uses the backend-annotated ``can_edit`` field (populated by
-  // ``entity_service._annotate_access``) OR falls back to comparing the
-  // ``created_by_id`` against the authenticated user.
-  const canEditProject = useMemo(() => {
-    if (project == null) return false;
-    if (project.can_edit !== undefined) return Boolean(project.can_edit);
-    return project.created_by_id === user?.id;
-  }, [project, user?.id]);
   // `newChat` is the ChatSessionContext's "drop the current active
   // session so the user lands on a fresh empty chat" function. We
   // call it inside `chatWithAgent` so clicking an agent in the
@@ -93,11 +86,59 @@ export default function ProjectDetail() {
   const [project, setProject] = useState(null);
   const [loading, setLoading] = useState(true);
 
+  // Whether the current user can manage (edit/delete/add-resources) this
+  // project.  Uses the backend-annotated ``can_edit`` field (populated by
+  // ``entity_service._annotate_access``) OR falls back to comparing the
+  // ``created_by_id`` against the authenticated user.
+  //
+  // NOTE: This hook MUST sit *after* the `project` useState above.
+  // Previously it was declared earlier in the component (where it
+  // appeared to read `project` from `useAuth()` context), which put
+  // the dependency array `[project, user?.id]` into the temporal dead
+  // zone and crashed the page with
+  // "Cannot access 'project' before initialization" (renamed to 'o' in
+  // minified builds) on every render.
+  const canEditProject = useMemo(() => {
+    if (project == null) return false;
+    if (isAdmin) return true;
+    if (project.can_edit !== undefined) return Boolean(project.can_edit);
+    return project.created_by_id === user?.id;
+  }, [project, user?.id, isAdmin]);
+
   // ── Edit state ──
   const [editing, setEditing] = useState(false);
   const [editName, setEditName] = useState('');
   const [editDesc, setEditDesc] = useState('');
   const [editStatus, setEditStatus] = useState('active');
+  const [editLlmModelId, setEditLlmModelId] = useState(null);
+
+  // ── LLM catalog (for badge + per-agent chips) ──
+  const [llmModels, setLlmModels] = useState([]);
+
+  // Helper: resolve model_id → {name, is_private, ...}
+  const llmModelById = (id) => (id ? llmModels.find((m) => m.id === id) : null);
+  const llmModelName = (id) => llmModelById(id)?.name || null;
+
+  // Fetch the LLM catalog once on mount (best-effort; hidden if feature is off)
+  useEffect(() => {
+    let cancelled = false;
+    authFetch('/api/llm/feature-status')
+      .then((r) => (r.ok ? r.json() : null))
+      .then((status) => {
+        if (cancelled || !status?.enabled) return;
+        return authFetch('/api/llm/models');
+      })
+      .then((res) => {
+        if (cancelled || !res || !res.ok) return null;
+        return res.json();
+      })
+      .then((rows) => {
+        if (cancelled || !Array.isArray(rows)) return;
+        setLlmModels(rows);
+      })
+      .catch(() => { /* silent — feature off or no models */ });
+    return () => { cancelled = true; };
+  }, []);
 
   // ── Lazy-loaded sections ──
   const [agents, setAgents] = useState([]);
@@ -145,6 +186,7 @@ export default function ProjectDetail() {
       setEditName(p.name || '');
       setEditDesc(p.description || '');
       setEditStatus(p.status || 'active');
+      setEditLlmModelId(p.llm_model_id || null);
       const legacyName = (p.name && p.name !== 'global') ? p.name : null;
 
       // Agents: many-to-many via ProjectAgent membership table. We
@@ -194,10 +236,13 @@ export default function ProjectDetail() {
         // The backend OR-filter handles both project_id and legacy
         // project name, so no mergeFbk fallback is needed.
         (async () => {
-          const res = await fetch(
-            `${appParams.appBaseUrl}/api/apps/${appParams.appId}/projects/${projectId}/knowledge-bases?limit=200`
+          const res = await authFetch(
+            `/api/apps/${appParams.appId}/projects/${projectId}/knowledge-bases?limit=200`
           );
-          if (!res.ok) throw new Error('Failed to load project KBs');
+          if (!res.ok) {
+            console.warn(`[ProjectDetail] Failed to load project KBs (${res.status}): ${res.statusText}`);
+            throw new Error('Failed to load project KBs');
+          }
           return res.json();
         })(),
         // AgentConversation has only a ``project_id`` FK — there is no
@@ -250,9 +295,29 @@ export default function ProjectDetail() {
       name: editName.trim(),
       description: editDesc.trim() || undefined,
       status: editStatus,
+      llm_model_id: editLlmModelId || null,
     });
     setProject(updated);
     setEditing(false);
+  }
+
+  // Set / clear a single agent's llm_model_id (for per-agent chip action).
+  async function handleSetAgentLlm(agentId, modelId) {
+    try {
+      const res = await authFetch('/api/llm/apply-to-agent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent_id: agentId, model_id: modelId }),
+      });
+      if (!res.ok) {
+        const detail = (await res.json().catch(() => ({}))).detail || `HTTP ${res.status}`;
+        toast({ title: isEn ? `Update failed: ${detail}` : `更新失败：${detail}`, variant: 'destructive' });
+        return;
+      }
+      await loadAll();
+    } catch (e) {
+      toast({ title: isEn ? `Network error: ${e.message}` : `网络错误：${e.message}`, variant: 'destructive' });
+    }
   }
 
   async function archive() {
@@ -455,6 +520,38 @@ export default function ProjectDetail() {
               )}
               <div className="mt-1.5 flex flex-wrap items-center gap-2">
                 <StatusPill status={project.status} />
+                {/* LLM model — inline selector (always visible when user can edit).
+                    Self-handles empty-catalog state with a link to Settings. */}
+                {canEditProject && (
+                  <div className="inline-flex items-center">
+                    <LlmModelSelector
+                      showLabel={false}
+                      value={project.llm_model_id || null}
+                      onChange={async (id) => {
+                        try {
+                          const updated = await base44.entities.Project.update(projectId, { llm_model_id: id });
+                          setProject(updated);
+                          toast({
+                            title: isEn
+                              ? `Project model ${id ? 'set' : 'cleared'}`
+                              : `项目模型已${id ? '设置' : '清除'}`,
+                          });
+                        } catch (e) {
+                          toast({
+                            title: isEn ? `Save failed: ${e.message}` : `保存失败：${e.message}`,
+                            variant: 'destructive',
+                          });
+                        }
+                      }}
+                    />
+                  </div>
+                )}
+                {!canEditProject && project.llm_model_id && llmModelName(project.llm_model_id) && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-border bg-secondary/40 px-2 py-0.5 text-[11px] font-medium text-foreground">
+                    <Cpu className="h-3 w-3" />
+                    {llmModelName(project.llm_model_id)}
+                  </span>
+                )}
                 <span className="text-xs text-muted-foreground">
                   {agents.length + kbs.length + conversations.length}
                   {' '}{isEn ? 'items' : '项资产'}
@@ -497,6 +594,13 @@ export default function ProjectDetail() {
                     <option value="active">{isEn ? 'Active' : '活跃'}</option>
                     <option value="archived">{isEn ? 'Archived' : '已归档'}</option>
                   </select>
+                  <div className="mt-2">
+                    <LlmModelSelector
+                      value={project.llm_model_id || null}
+                      onChange={(id) => setEditLlmModelId(id)}
+                      disabled={!canEditProject || project.resource_type === 'company'}
+                    />
+                  </div>
                   <div className="ml-auto flex gap-2">
                     <Button size="sm" variant="outline" onClick={() => setEditing(false)}>
                       <X className="mr-1 h-3 w-3" /> {t.projectDetail?.cancel || 'Cancel'}
@@ -933,6 +1037,7 @@ export default function ProjectDetail() {
           onClose={() => setAccessDialogOpen(false)}
         />
       )}
+
     </div>
   );
 }
@@ -1022,7 +1127,7 @@ function formatTime(iso) {
 //                          Section bodies
 // ───────────────────────────────────────────────────────────────────
 
-function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true }) {
+function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, project, llmModels = [] }) {
   if (!agents.length) {
     return (
       <EmptyState
@@ -1060,6 +1165,30 @@ function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true }) {
               <Badge variant="secondary" className="text-[10px]">
                 {a.status || 'active'}
               </Badge>
+              {/* Per-agent LLM chip — shows current binding (own or
+                  inherited from project). Inherited = project has the
+                  model and agent doesn't have its own. */}
+              {(() => {
+                const ownModel = a.llm_model_id ? llmModels.find((m) => m.id === a.llm_model_id) : null;
+                const projModel = project?.llm_model_id ? llmModels.find((m) => m.id === project.llm_model_id) : null;
+                if (ownModel) {
+                  return (
+                    <Badge variant="outline" className="border-primary/40 text-[10px] text-primary">
+                      <Cpu className="mr-1 h-2.5 w-2.5" />
+                      {ownModel.name}
+                    </Badge>
+                  );
+                }
+                if (projModel) {
+                  return (
+                    <Badge variant="outline" className="border-dashed text-[10px] text-muted-foreground" title={isEn ? `Inherited from project (${projModel.name})` : `继承自项目（${projModel.name}）`}>
+                      <Cpu className="mr-1 h-2.5 w-2.5" />
+                      {isEn ? 'inherits project model' : '继承项目模型'}
+                    </Badge>
+                  );
+                }
+                return null;
+              })()}
               <span className="text-[10px] text-muted-foreground">· {formatTime(a.updated_date)}</span>
             </div>
           </div>

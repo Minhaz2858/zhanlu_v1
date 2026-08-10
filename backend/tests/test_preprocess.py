@@ -9,6 +9,7 @@ from app.services.forecasting.preprocess import (
     CleaningReport,
     PreprocessResult,
     preprocess_series,
+    smooth_erp_prices,
 )
 
 
@@ -118,3 +119,37 @@ class TestWinsorization:
         y = pd.Series(values, index=dates)
         result = preprocess_series(y, "test_product", spike_k=100.0)
         assert result.y_clean.max() < 50000.0
+
+
+# ---------------------------------------------------------------------------
+# ERP Smoothing — center=False (Bug #6 fix)
+# ---------------------------------------------------------------------------
+
+class TestErpSmoothingNoFutureLeakage:
+    """Verify that smooth_erp_prices uses trailing-only windows (center=False)."""
+
+    def test_trailing_window_does_not_use_future(self):
+        """The last smoothed value must only depend on past observations."""
+        dates = pd.date_range("2026-07-01", periods=20, freq="D")
+        values = np.concatenate([np.full(10, 100.0), np.full(10, 200.0)])
+        y = pd.Series(values, index=dates)
+
+        smoothed = smooth_erp_prices(y, window=7, method="median")
+
+        # With center=False, the trailing window at the step point (index 9→10)
+        # should still show the step — it won't be pre-smoothed by future data
+        # With center=True, index 9 would have been pulled toward 200 by future data
+        assert smoothed.iloc[9] == pytest.approx(100.0)  # Still in past-only window
+        # By index 13 (7 steps after step), the window is fully in 200 territory
+        assert smoothed.iloc[13] == pytest.approx(200.0)
+
+    def test_trailing_window_preserves_lag(self):
+        """Trailing smooth should introduce a ~window/2 lag vs future-leaking center."""
+        dates = pd.date_range("2026-07-01", periods=30, freq="D")
+        values = np.arange(30, dtype=float)
+        y = pd.Series(values, index=dates)
+
+        smoothed = smooth_erp_prices(y, window=7, method="median")
+
+        # Trailing window for index 29 uses indices 23-29 → median should be ~26
+        assert smoothed.iloc[-1] == pytest.approx(26.0)

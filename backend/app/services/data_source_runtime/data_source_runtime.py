@@ -65,7 +65,23 @@ def get_bound_data_source_ids(agent_app: AgentApp | None) -> list[str]:
 # (BEFORE the base content) so it's the first thing the LLM reads. This is
 # the top-level guardrail — the detailed "Bound Data Sources" section is still
 # appended at the end for reference.
-_CRITICAL_ANTI_HALLUCINATION_DIRECTIVE = (
+def _build_anti_hallucination_directive() -> str:
+    return (
+        "CRITICAL RULE: You have bound data sources (database and/or document). "
+        "For ANY data question, you MUST call the `ask_data_agent` tool FIRST. "
+        "Do NOT fabricate data, invent customer names, or generate data tables "
+        "without calling `ask_data_agent`. Once you receive real data from "
+        "`ask_data_agent`, summarize the key findings clearly: name the top "
+        "performers, cite totals and shares, note the time period, and highlight "
+        "any notable patterns. Every number you mention must come from the tool "
+        "result — but you SHOULD produce a substantive narrative, not just a "
+        "one-line handoff."
+    )
+
+
+# Keep the legacy constant for backward compatibility with any external
+# references (e.g. tests that import it for inspection).
+_LEGACY_DIRECTIVE = (
     "CRITICAL RULE: You have bound data sources (database and/or document). "
     "For ANY data question, you MUST call the `ask_data_agent` tool FIRST. "
     "Do NOT fabricate data, invent customer names, or generate data tables "
@@ -163,6 +179,8 @@ def _build_data_source_prompt_section(bound_meta: list[dict]) -> str:
         "- Any time you need to know what tables/columns exist (the Data Agent can introspect the schema for you).",
         "- Any time a downstream step (report, chart, summary) requires real numbers — fetch them via `ask_data_agent` first.",
         "- Any time the user asks about content in an uploaded document (PDF, DOCX, CSV, etc.).",
+    ])
+    lines.extend([
         "",
         "**Workflow for any data question:**",
         "1. Call `ask_data_agent` with a clear natural-language `question`.",
@@ -438,6 +456,14 @@ def prepare_data_source_runtime(
             project_name=selected_project_name,
         )
 
+    # Guard: general_assistant must have zero data source access when no
+    # project is selected. This prevents cross-project data leakage in
+    # ungrouped chats even if stale knowledge_bases or workspace auto-bind
+    # settings are present in the database.
+    if not selected_project_id and not _normalize_project_name(selected_project_name):
+        if agent_app and getattr(agent_app, "name", None) == "general_assistant":
+            bound_ids = []
+
     # Inject project context (description + shared memory) whenever a
     # project is selected — independent of whether the agent has any bound
     # data sources, so non-data questions are still project-aware.
@@ -472,7 +498,7 @@ def prepare_data_source_runtime(
     # thing the LLM reads. The detailed "Bound Data Sources" section and
     # the optional "Project Context" block are appended at the end.
     new_prompt = (
-        _CRITICAL_ANTI_HALLUCINATION_DIRECTIVE
+        _build_anti_hallucination_directive()
         + "\n\n"
         + base_system_prompt
         + ("\n\n" + section if section else "")

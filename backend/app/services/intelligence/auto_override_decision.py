@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, Callable, Any
 
 from app.services.intelligence.event_types import ExtractedEvent
@@ -136,7 +136,7 @@ class AutoOverrideDecisionEngine:
             event_type=event.event_type,
             description=f"[{event.event_type}] {event.headline}",
             reasoning=reasoning,
-            timestamp=datetime.utcnow().isoformat(),
+            timestamp=datetime.now(timezone.utc).isoformat(),
         )
 
         if action == "auto_inject":

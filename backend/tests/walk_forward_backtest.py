@@ -47,9 +47,41 @@ MAX_ORIGINS = 10         # Max number of walk-forward origins per series
 HORIZONS = [7, 14, 30]   # Forecast horizons to evaluate (days)
 MAX_HORIZON = 30         # Must be at least max(HORIZONS)
 
-# Products to test — from ECISCO_FORECAST_TARGETS in seed_ecisco_targets.py
-# Only family-level md_t_lz_price targets (ERP SKU targets require discovery).
-TARGETS: list[dict] = [
+# ── Target registry (dynamic from DB + legacy fallback) ──────────────────
+
+def _get_targets_from_db() -> list[dict]:
+    """Read all ForecastTarget rows from PostgreSQL.
+
+    Each dict mirrors the legacy TARGETS format plus includes the full
+    datasource JSON for flexible data fetching.
+    """
+    from app.database import SessionLocal
+    from app.models.forecasting import ForecastTarget
+
+    db = SessionLocal()
+    try:
+        rows = (
+            db.query(ForecastTarget)
+            .filter(ForecastTarget.is_deleted == False)
+            .filter(ForecastTarget.datasource.isnot(None))
+            .all()
+        )
+        targets = []
+        for t in rows:
+            ds = t.datasource or {}
+            targets.append({
+                "product_key": t.product_key,
+                "name": t.name or t.product_key,
+                "where": ds.get("where", f"FPRODUCTNAME='{t.product_key}'"),
+                "@datasource": ds,
+            })
+        return targets
+    finally:
+        db.close()
+
+
+# Legacy hardcoded fallback — md_t_lz_price targets only
+_LEGACY_TARGETS: list[dict] = [
     {"product_key": "crude_oil",     "name": "Crude Oil (Brent)",             "where": "FMATERIAL_NAME = '裂解C5-布伦特'"},
     {"product_key": "naphtha",       "name": "Naphtha (Japan)",               "where": "FMATERIAL_NAME = '裂解C5-日本石脑油'"},
     {"product_key": "cracked_c5",    "name": "Cracked C5 (Average)",          "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'"},
@@ -91,22 +123,40 @@ class TargetResult:
 _SENTINEL_VALUES = {"F7", "NaN", "nan", "None", "", "null", "NULL"}
 
 
-def fetch_series(where_clause: str) -> pd.DataFrame:
-    """Pull time series from md_t_lz_price via EdiaMysqlDataSource."""
+def fetch_series(target: dict) -> pd.DataFrame:
+    """Pull time series using the target's datasource config.
+
+    Supports both legacy targets (with 'where' key) and DB-sourced targets
+    (with '@datasource' key).
+    """
     from app.services.forecasting.edia_source import EdiaMysqlDataSource
 
-    datasource = {
-        "source": "edia_mysql",
-        "table": "md_t_lz_price",
-        "time_col": "FDATE",
-        "measure": "FTAXPRICE",
-        "where": where_clause,
-        "granularity": "day",
-    }
+    ds = target.get("@datasource")
+    if ds is None:
+        # Legacy target — build datasource from where clause
+        ds = {
+            "source": "edia_mysql",
+            "table": "md_t_lz_price",
+            "time_col": "FDATE",
+            "measure": "FTAXPRICE",
+            "where": target["where"],
+            "granularity": "day",
+        }
 
     src = EdiaMysqlDataSource()
-    df = src.read_history(datasource)
+    df = src.read_history(ds)
     return df
+
+
+def get_targets() -> list[dict]:
+    """Load targets: prefer DB, fall back to legacy hardcoded list."""
+    try:
+        targets = _get_targets_from_db()
+        if targets:
+            return targets
+    except Exception:
+        pass
+    return _LEGACY_TARGETS
 
 
 # ── Core walk-forward logic ──────────────────────────────────────────────
@@ -449,9 +499,9 @@ def compare_strategies() -> None:
     print("  A/B COMPARISON — Flat ensemble vs Per-horizon ensemble")
     print("=" * 90)
 
-    for target in TARGETS:
+    for target in get_targets():
         try:
-            df = fetch_series(target["where"])
+            df = fetch_series(target)
         except Exception as exc:
             print(f"\n  [{target['name']}] SKIP: {exc}")
             continue
@@ -496,7 +546,8 @@ def main() -> None:
     print("=" * 80)
     print("  WALK-FORWARD BACKTEST — End-to-End Forecast Accuracy Test")
     print("=" * 80)
-    print(f"  Targets:  {len(TARGETS)} products (md_t_lz_price)")
+    targets = get_targets()
+    print(f"  Targets:  {len(targets)} products")
     print(f"  Config:   min_train={MIN_TRAIN_DAYS}d  step={STEP_DAYS}d  max_origins={MAX_ORIGINS}")
     print(f"  Horizons: {HORIZONS}")
     print()
@@ -508,10 +559,10 @@ def main() -> None:
     target_results: list[TargetResult] = []
     total_start = time.time()
 
-    for target in TARGETS:
+    for target in targets:
         print(f"\n  [{target['name']}] Fetching series...", end=" ", flush=True)
         try:
-            df = fetch_series(target["where"])
+            df = fetch_series(target)
         except Exception as exc:
             print(f"SKIP: {exc}")
             continue

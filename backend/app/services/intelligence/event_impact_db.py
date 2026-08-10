@@ -9,7 +9,7 @@ Ported from EDIA 5.1.2 — in-memory, no external dependencies.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -245,7 +245,7 @@ class EventImpactDB:
             candidates = all_events[:k]
 
         scored = []
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         for ev in candidates:
             try:
                 ev_date = datetime.strptime(ev["date"], "%Y-%m-%d")
@@ -284,7 +284,7 @@ class EventImpactDB:
                 "confidence": 0.3,
             }
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         weights, c5_impacts, durations = [], [], []
 
         for ev in events:

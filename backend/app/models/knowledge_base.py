@@ -49,3 +49,10 @@ class KnowledgeBase(TimestampedBase):
     last_indexed_at: Mapped[datetime | None] = mapped_column(
         DateTime, nullable=True
     )
+
+    # Semantic catalog state (db_type in (mysql, postgres) only)
+    # Lifecycle: "pending" -> "indexing" -> "ready" | "error"
+    # Populated by knowledge_graph.catalog_indexer when SEMANTIC_CATALOG_ENABLED=True.
+    catalog_status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="pending", index=True
+    )

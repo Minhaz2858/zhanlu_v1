@@ -16,7 +16,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -52,7 +52,7 @@ def is_expired(memory: AgentMemory) -> bool:
         except ValueError:
             return False
     expiry = created + timedelta(days=memory.ttl_days)
-    return datetime.utcnow() > expiry
+    return datetime.now(timezone.utc) > expiry
 
 
 def filter_expired(memories: list[AgentMemory]) -> list[AgentMemory]:
@@ -180,7 +180,7 @@ def search_memories(
     if not memories:
         return []
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     query_vec = _get_query_embedding(query)
     semantic = query_vec is not None
 

@@ -4,10 +4,10 @@ All entity models inherit from TimestampedBase to get these columns automaticall
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
-from sqlalchemy import String, DateTime, Boolean, inspect
+from sqlalchemy import String, DateTime, Boolean, inspect, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -28,16 +28,16 @@ class TimestampedBase(Base):
         String(36), primary_key=True, default=lambda: str(uuid.uuid4())
     )
     created_date: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc)
     )
     updated_date: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow
+        DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc)
     )
     created_by_id: Mapped[Optional[str]] = mapped_column(
         String(36), nullable=True
     )
     is_deleted: Mapped[bool] = mapped_column(
-        Boolean, default=False, nullable=False
+        Boolean, server_default=text("false"), default=False, nullable=False
     )
     # --- Multi-tenant isolation wall (Layer 1) ---
     org_id: Mapped[str] = mapped_column(

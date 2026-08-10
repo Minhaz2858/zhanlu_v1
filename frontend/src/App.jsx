@@ -50,7 +50,7 @@ const ResourceDetail = lazy(() => import('@/pages/ResourceDetail'));
 const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
 const UITest = lazy(() => import('@/pages/UITest'));
 const DashboardView = lazy(() => import('@/pages/DashboardView'));
-const MarketDashboardPage = lazy(() => import('@/pages/MarketDashboard/MarketDashboardPage'));
+const MarketDashboardLayout = lazy(() => import('@/pages/MarketDashboard/MarketDashboardLayout'));
 
 // Shared fallback for any suspended lazy route — matches the app's loading
 // spinner so navigation feels seamless instead of flashing blank content.
@@ -164,7 +164,7 @@ const AuthenticatedApp = () => {
         <Route path="/my-files" element={<MyFilesPage />} />
         <Route path="/from-personal" element={<FromPersonalPage />} />
         <Route path="/from-company" element={<FromCompanyPage />} />
-        <Route path="/market-dashboard/:section" element={<MarketDashboardPage />} />
+        <Route path="/market-dashboard/:section" element={<MarketDashboardLayout />} />
       </Route>
     </Route>
   );

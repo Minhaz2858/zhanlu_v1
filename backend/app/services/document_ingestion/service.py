@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy.orm import Session
@@ -280,7 +280,7 @@ def ingest_kb(db: Session, kb_id: str) -> bool:
         kb.indexing_status = "ready"
         kb.chunk_count = n
         kb.index_error = None
-        kb.last_indexed_at = datetime.utcnow()
+        kb.last_indexed_at = datetime.now(timezone.utc)
         db.commit()
         logger.info("ingest_kb: kb %s ready, %d chunks", kb_id, n)
         return True

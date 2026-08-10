@@ -42,21 +42,38 @@ class MoiraiModel(ForecastModel):
         self._y: pd.Series | None = None
         self._exog: pd.DataFrame | None = None
         self._exog_last: pd.DataFrame | None = None
-        self._model = self._load_model()
+        self._model_loaded = False
 
     def _load_model(self):
-        """Lazy-load Moirai. Raises ImportError if deps missing."""
+        """Lazy-load Moirai pipeline. Returns None if download fails."""
         if self._model is not None:
             return self._model
-        import torch  # noqa: F401 — fail fast if torch missing
-        from uni2ts.model.moirai import MoiraiForecast, MoiraiLinear
+        if self._model_loaded:
+            return None  # already tried and failed
 
-        model = MoiraiForecast(
-            module=MoiraiLinear.from_pretrained(self._model_name),
-            prediction_length=7,
-            context_length=512,
-        )
-        return model
+        self._model_loaded = True
+        try:
+            import torch  # noqa: F401 — fail fast if torch missing
+            from uni2ts.model.moirai import MoiraiForecast, MoiraiLinear
+
+            self._model = MoiraiForecast(
+                module=MoiraiLinear.from_pretrained(
+                    self._model_name, local_files_only=True,
+                ),
+                prediction_length=7,
+                context_length=512,
+            )
+            logger.info("Moirai pipeline loaded: %s", self._model_name)
+            return self._model
+        except (OSError, ValueError, FileNotFoundError) as exc:
+            logger.warning(
+                "Moirai model not available (offline/no-cache): %s — "
+                "download with: huggingface-cli download %s",
+                exc, self._model_name,
+            )
+            return None
+        except ImportError:
+            raise  # propagate for build_model_pool skip
 
     def fit(
         self,
@@ -70,6 +87,9 @@ class MoiraiModel(ForecastModel):
             raise ModelFitError(
                 f"Moirai needs >= {self.min_history} points, got {len(y)}"
             )
+        # Deferred load — first fit triggers download
+        if self._model is None:
+            self._model = self._load_model()
         self._y = y
         if exog is not None and len(exog) > 0:
             self.uses_exog = True

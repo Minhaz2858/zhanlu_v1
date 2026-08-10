@@ -156,3 +156,12 @@ try:
     from app.services.tool_handlers import forecast_tool  # noqa: F401
 except Exception as _fc_err:  # pragma: no cover - defensive
     logger.warning("forecast_tool registration failed (non-fatal): %s", _fc_err)
+
+# Universal Analytics Engine (P2): 6 tools with enabled_by_default=True.
+# Guarded: missing pandas/statsmodels deps must not break tool-registry startup.
+try:
+    from app.services.universal_analytics import tools  # noqa: F401
+except Exception as _ua_err:  # pragma: no cover - defensive
+    logger.warning(
+        "universal_analytics registration failed (non-fatal): %s", _ua_err
+    )

@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 from sqlalchemy import select, update, and_
@@ -131,7 +131,7 @@ class IntelligenceEventRegistry:
                         )
                         continue
                 setattr(existing, key, val)
-            existing.updated_date = datetime.utcnow()
+            existing.updated_date = datetime.now(timezone.utc)
             await db.flush()
             return existing
         else:
@@ -150,7 +150,7 @@ class IntelligenceEventRegistry:
         org_id: Optional[str] = None,
     ) -> List[ExtractedEvent]:
         """List events detected within the last ``hours`` hours."""
-        cutoff = (datetime.utcnow() - timedelta(hours=hours)).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
         conditions = [IntelligenceEvent.detected_at >= cutoff]
         if min_impact is not None:
             conditions.append(IntelligenceEvent.impact_magnitude >= min_impact)
@@ -235,9 +235,9 @@ class IntelligenceEventRegistry:
         values: dict[str, Any] = {
             "review_status": status,
             "reviewed_by": reviewed_by.strip(),
-            "reviewed_at": datetime.utcnow().isoformat(),
+            "reviewed_at": datetime.now(timezone.utc).isoformat(),
             "review_note": review_note.strip(),
-            "updated_date": datetime.utcnow(),
+            "updated_date": datetime.now(timezone.utc),
         }
         if score is not None:
             values["usefulness_score"] = score
@@ -326,7 +326,7 @@ class IntelligenceEventRegistry:
         if existing:
             for key, val in payload.items():
                 setattr(existing, key, val)
-            existing.updated_date = datetime.utcnow()
+            existing.updated_date = datetime.now(timezone.utc)
             await db.flush()
             return existing
         else:
@@ -387,7 +387,7 @@ class IntelligenceEventRegistry:
             }
         try:
             last_success = datetime.fromisoformat(last_success_raw)
-            age = datetime.utcnow() - last_success
+            age = datetime.now(timezone.utc) - last_success
             age_minutes = max(0, int(age.total_seconds() // 60))
             stale = age > timedelta(hours=stale_after_hours)
             return {
@@ -427,7 +427,7 @@ class IntelligenceEventRegistry:
             source_credibility=row.source_credibility or "tier2",
             full_text=row.full_text or "",
             raw_quote=row.raw_quote or "",
-            detected_at=row.detected_at or datetime.utcnow().isoformat(),
+            detected_at=row.detected_at or datetime.now(timezone.utc).isoformat(),
             review_status=row.review_status or "approved",
             usefulness_score=int(row.usefulness_score or 0),
             reviewed_by=row.reviewed_by or "",

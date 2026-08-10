@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.services.synexia.contracts import (
@@ -107,7 +107,7 @@ def stamp_filename(title: str, ext: str) -> str:
     non-overwriting on the user's disk.
     """
     slug = slugify_title(title)
-    ts = datetime.utcnow().strftime("%Y%m%d-%H%M")
+    ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M")
     # Strip leading dot from ext if caller passed it
     ext = ext.lstrip(".")
     return f"{slug}-{ts}.{ext}"
@@ -191,7 +191,7 @@ def short_generated_at(payload: ReportCardPayload) -> str:
     """A compact, human-friendly timestamp string for headers/footers."""
     raw = payload.generated_at
     if not raw:
-        return datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     # Try ISO 8601 first (the LLM emits "...+00:00" or "Z")
     try:
         cleaned = raw.replace("Z", "+00:00") if raw.endswith("Z") else raw

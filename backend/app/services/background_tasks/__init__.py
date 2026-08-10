@@ -10,7 +10,7 @@ import asyncio
 import logging
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Callable
 
@@ -79,7 +79,7 @@ class BackgroundTaskManager:
             id=task_id,
             name=name,
             type=type,
-            created_at=datetime.utcnow().isoformat(),
+            created_at=datetime.now(timezone.utc).isoformat(),
             metadata=metadata or {},
         )
         self._tasks[task_id] = task
@@ -119,7 +119,7 @@ class BackgroundTaskManager:
             task.status = TaskStatus.FAILED.value
             task.error = str(e)
         finally:
-            task.finished_at = datetime.utcnow().isoformat()
+            task.finished_at = datetime.now(timezone.utc).isoformat()
 
     async def _run_python_task(self, task: BackgroundTask, code: str) -> None:
         """Run Python code as a background task."""
@@ -141,7 +141,7 @@ class BackgroundTaskManager:
             task.status = TaskStatus.FAILED.value
             task.error = str(e)
         finally:
-            task.finished_at = datetime.utcnow().isoformat()
+            task.finished_at = datetime.now(timezone.utc).isoformat()
 
     async def _run_agent_task(self, task: BackgroundTask, agent_name: str | None, prompt: str) -> None:
         """Run an agent conversation as a background task."""
@@ -158,7 +158,7 @@ class BackgroundTaskManager:
             task.status = TaskStatus.FAILED.value
             task.error = str(e)
         finally:
-            task.finished_at = datetime.utcnow().isoformat()
+            task.finished_at = datetime.now(timezone.utc).isoformat()
 
     def get(self, task_id: str) -> BackgroundTask | None:
         return self._tasks.get(task_id)
@@ -177,7 +177,7 @@ class BackgroundTaskManager:
         if task._async_task:
             task._async_task.cancel()
         task.status = TaskStatus.STOPPED.value
-        task.finished_at = datetime.utcnow().isoformat()
+        task.finished_at = datetime.now(timezone.utc).isoformat()
         return True
 
     def update_output(self, task_id: str, output: str) -> bool:

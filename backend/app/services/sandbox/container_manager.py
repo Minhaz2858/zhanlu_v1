@@ -20,6 +20,10 @@ from typing import Optional
 
 logger = logging.getLogger(__name__)
 
+# Output collection size caps — prevent OOM from large sandbox outputs
+MAX_OUTPUT_FILE_SIZE = 50 * 1024 * 1024   # 50 MB per file
+MAX_TOTAL_OUTPUT_SIZE = 200 * 1024 * 1024  # 200 MB total across all files
+
 
 # Fallback extension→MIME map for formats that the system mimetypes
 # database (often trimmed in minimal container images) doesn't know
@@ -66,6 +70,7 @@ def run_sandbox_container(
     env_vars: Optional[dict] = None,
     host_input_dir: Optional[str] = None,
     host_output_dir: Optional[str] = None,
+    extra_mounts: Optional[list[dict]] = None,
 ) -> dict:
     """Run a command in an isolated Docker container.
 
@@ -78,6 +83,14 @@ def run_sandbox_container(
             ``-v`` bind mounts, while the caller keeps using the local
             paths for writing inputs and collecting outputs.  Defaults to
             ``input_dir``/``output_dir`` (direct host execution).
+        extra_mounts: List of additional bind mounts to apply inside the
+            sandbox container.  Each entry is a dict with keys:
+              - ``source`` (host path, required; for DooD the host path)
+              - ``target`` (in-container path, required)
+              - ``read_only`` (bool, default True)
+            Used by the skill-driven runner to bind-mount the host-side
+            LLM proxy Unix socket at ``/var/run/llm-proxy.sock`` so the
+            container can call the LLM API without TCP/IP network access.
 
     Returns:
         {
@@ -100,6 +113,7 @@ def run_sandbox_container(
     import tempfile
     import os
     import time
+    import uuid
 
     start_time = time.time()
 
@@ -108,9 +122,15 @@ def run_sandbox_container(
     mount_input = host_input_dir or input_dir
     mount_output = host_output_dir or output_dir
 
+    # Generate a unique container name so we can force-remove it on timeout.
+    # --rm alone only fires when the container exits on its own; on TimeoutExpired
+    # the subprocess kills the docker-run CLIENT but the container keeps running.
+    container_name = f"zhanlu-sbx-{uuid.uuid4().hex[:12]}"
+
     # Build Docker run command with security constraints
     docker_cmd = [
         _DOCKER_PATH, "run",
+        "--name", container_name,  # named so we can docker rm -f on timeout
         "--rm",                    # Remove container after exit
         "--network", "none",       # No network access
         "--read-only",             # Read-only filesystem
@@ -122,6 +142,18 @@ def run_sandbox_container(
         "-v", f"{mount_output}:/output:rw", # Output writable
         "-w", "/output",           # Working directory
     ]
+
+    # Add any extra bind mounts (e.g. LLM proxy Unix socket).
+    if extra_mounts:
+        for m in extra_mounts:
+            src = m.get("source")
+            tgt = m.get("target")
+            ro = bool(m.get("read_only", True))
+            if not src or not tgt:
+                logger.warning("Skipping malformed extra_mount: %r", m)
+                continue
+            ro_suffix = ":ro" if ro else ":rw"
+            docker_cmd.extend(["-v", f"{src}:{tgt}{ro_suffix}"])
 
     # Add environment variables
     if env_vars:
@@ -152,6 +184,16 @@ def run_sandbox_container(
 
     except subprocess.TimeoutExpired:
         duration_ms = int((time.time() - start_time) * 1000)
+        # Force-remove the container — the docker-run client was killed but
+        # the container is still running, leaking CPU/memory.
+        try:
+            subprocess.run(
+                [_DOCKER_PATH, "rm", "-f", container_name],
+                capture_output=True, timeout=15,
+            )
+            logger.warning("Sandbox container %s timed out and was force-removed", container_name)
+        except Exception as cleanup_err:
+            logger.error("Failed to force-remove timed-out container %s: %s", container_name, cleanup_err)
         return {
             "exit_code": -1,
             "stdout": "",
@@ -253,13 +295,34 @@ def collect_outputs(output_dir: str) -> list[dict]:
     if not os.path.exists(output_dir):
         return results
 
+    max_per_file = MAX_OUTPUT_FILE_SIZE
+    max_total = MAX_TOTAL_OUTPUT_SIZE
+    total_collected = 0
+
     for root, dirs, files in os.walk(output_dir):
         for fname in files:
             fpath = os.path.join(root, fname)
             rel_path = os.path.relpath(fpath, output_dir)
 
+            file_size = os.path.getsize(fpath)
+            if file_size > max_per_file:
+                logger.warning(
+                    "Skipping oversized output file %s (%d bytes > %d cap)",
+                    rel_path, file_size, max_per_file,
+                )
+                continue
+
+            if total_collected + file_size > max_total:
+                logger.warning(
+                    "Output total cap reached (%d bytes); skipping remaining files",
+                    total_collected,
+                )
+                return results
+
             with open(fpath, "rb") as f:
                 data = f.read()
+
+            total_collected += file_size
 
             mime_type, _ = mimetypes.guess_type(fname)
             if not mime_type:
@@ -312,3 +375,45 @@ def write_runner_script(input_dir: str, runner_script_b64: str, script_name: str
         f.write(script_content)
 
     logger.info("Wrote runner script to %s (%d bytes)", script_path, len(script_content))
+
+
+def write_runner_modules(input_dir: str, modules_b64: dict[str, str]) -> list[str]:
+    """Write additional runner modules alongside the main runner script.
+
+    Skill-driven jobs (skill_driven_runner.py) need to import sibling
+    modules like ``llm_client`` and ``fallback_generator``.  The tool
+    handler base64-encodes them into ``runner_modules_b64`` (a dict of
+    {filename: base64_content}); this helper decodes each and writes it
+    to ``<input_dir>/skill/<filename>`` so the runner can ``import`` them
+    via the existing ``sys.path.insert(0, "/input/skill")`` line.
+
+    Returns the list of filenames actually written (skipping any
+    whose name would escape the skill directory).
+    """
+    import os
+    import base64
+
+    skill_dir = os.path.join(input_dir, "skill")
+    os.makedirs(skill_dir, exist_ok=True)
+
+    written: list[str] = []
+    for filename, content_b64 in (modules_b64 or {}).items():
+        # Path-traversal guard: only allow simple filenames, no slashes,
+        # no parent-directory refs, no absolute paths.
+        if not filename or "/" in filename or "\\" in filename or filename.startswith("."):
+            logger.warning("Skipping suspicious runner module filename: %r", filename)
+            continue
+        if not filename.endswith(".py"):
+            logger.warning("Skipping non-Python runner module: %r", filename)
+            continue
+        try:
+            content = base64.b64decode(content_b64)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("Could not decode runner module %s: %s", filename, e)
+            continue
+        out_path = os.path.join(skill_dir, filename)
+        with open(out_path, "wb") as f:
+            f.write(content)
+        written.append(filename)
+        logger.info("Wrote runner module %s (%d bytes)", out_path, len(content))
+    return written

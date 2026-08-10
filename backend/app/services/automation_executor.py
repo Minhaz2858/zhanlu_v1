@@ -26,7 +26,7 @@ import logging
 import os
 import traceback
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional, Tuple
 
 from sqlalchemy import func, update
@@ -452,7 +452,7 @@ def _mark_failed_no_retry(db: Session, execution: AutomationExecution, error: st
         .values(
             status="failed",
             error=(error or "")[:5000],
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(timezone.utc),
         )
     )
     db.commit()
@@ -727,7 +727,7 @@ def execute_automation(execution_id: str) -> None:
         # CAS transition queued -> running. Guards against duplicate spawns
         # (e.g. a retry firing twice) and stamps the wall-clock deadline the
         # janitor uses to reap hung runs.
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         rc = db.execute(
             update(AutomationExecution)
             .where(
@@ -1042,7 +1042,7 @@ def execute_automation(execution_id: str) -> None:
         # Final CAS: running -> completed. Only succeeds if the janitor
         # hasn't reaped us in the meantime (prevents overwriting a reaped
         # "failed" status with "completed").
-        completed_at = datetime.utcnow()
+        completed_at = datetime.now(timezone.utc)
         duration = (
             int((completed_at - execution.started_at).total_seconds())
             if execution.started_at else None
@@ -1142,7 +1142,7 @@ def _mark_failed(db: Session, execution: AutomationExecution, error: str) -> Non
         .values(
             status="failed",
             error=(error or "")[:5000],
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(timezone.utc),
         )
     )
     db.commit()
@@ -1439,7 +1439,7 @@ def _run_agent_in_conversation(
     skip_conf = str(getattr(task, "skip_confirmation", "") or "").lower() in ("1", "true", "yes")
     try:
         # Build a dedicated conversation. Title: <Automation Name> · <date>
-        title = f"🤖 {task.name} · {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+        title = f"🤖 {task.name} · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
         conv = AgentConversation(
             id=str(uuid.uuid4()),
             agent_name=agent.name,
@@ -1968,7 +1968,7 @@ def _post_run_request_marker(
             session_id=session_id,
             role="user",
             content=body,
-            order=int(datetime.utcnow().timestamp()),
+            order=int(datetime.now(timezone.utc).timestamp()),
             tool_calls=None,
             activity_steps=None,
             artifacts=None,
@@ -2030,7 +2030,7 @@ def _notify_chat(
         f"{preview}\n\n"
         + _tool_warnings_line(tool_outcome)
         + (f"**Generated files:**\n{file_links}\n\n" if file_links else "")
-        + f"_Ran at {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · "
+        + f"_Ran at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
         f"execution id `{execution.id[:8]}`_"
     )
 
@@ -2039,7 +2039,7 @@ def _notify_chat(
         session_id=session_id,
         role="assistant",
         content=body,
-        order=int(datetime.utcnow().timestamp()),
+        order=int(datetime.now(timezone.utc).timestamp()),
         tool_calls=None,
         activity_steps=None,
         artifacts=(
@@ -2111,7 +2111,7 @@ def _notify_chat_failure(
         f"**⚠️ Scheduled run failed: {task.name}**\n\n"
         f"**Error:** {err}\n\n"
         + (f"**Partial output:**\n{preview}\n\n" if preview else "")
-        + f"_Failed at {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')} · "
+        + f"_Failed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
         f"execution id `{execution.id[:8]}`_"
     )
 
@@ -2120,7 +2120,7 @@ def _notify_chat_failure(
         session_id=session_id,
         role="assistant",
         content=body,
-        order=int(datetime.utcnow().timestamp()),
+        order=int(datetime.now(timezone.utc).timestamp()),
         tool_calls=None,
         activity_steps=None,
         artifacts=None,

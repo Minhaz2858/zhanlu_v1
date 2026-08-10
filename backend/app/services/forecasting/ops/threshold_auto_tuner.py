@@ -70,6 +70,43 @@ def run_threshold_autotune(
             details.append({"product_key": pk, "reason": "insufficient_decisions", "scored": scored})
             continue
 
+        # Guardrail: directional accuracy check (was declared at line 21, never enforced)
+        scored_rows = (
+            db.query(
+                ForecastDecisionLog.predicted_p_rise,
+                ForecastDecisionLog.actual_price_t,
+                ForecastDecisionLog.actual_price_th,
+            )
+            .filter(
+                ForecastDecisionLog.product_id == pk,
+                ForecastDecisionLog.roi_pct.isnot(None),
+                ForecastDecisionLog.actual_price_t.isnot(None),
+                ForecastDecisionLog.actual_price_th.isnot(None),
+                ForecastDecisionLog.predicted_p_rise.isnot(None),
+            )
+            .all()
+        )
+        if scored_rows:
+            correct = sum(
+                1 for row in scored_rows
+                if (row.predicted_p_rise > 0.5) == (row.actual_price_th > row.actual_price_t)
+            )
+            dir_accuracy = correct / len(scored_rows)
+            if dir_accuracy < min_accuracy:
+                skipped += 1
+                details.append({
+                    "product_key": pk,
+                    "reason": "directional_accuracy_below_minimum",
+                    "dir_accuracy": round(dir_accuracy, 3),
+                    "min_accuracy": min_accuracy,
+                    "scored": scored,
+                })
+                continue
+        else:
+            skipped += 1
+            details.append({"product_key": pk, "reason": "no_scored_with_actuals", "scored": scored})
+            continue
+
         try:
             report = calibrate_thresholds(
                 db,

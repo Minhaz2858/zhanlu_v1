@@ -1,5 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import html2canvas from 'html2canvas';
+import { jsPDF } from 'jspdf';
+import { Download, FileImage, FileText, Loader2 } from 'lucide-react';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { PRODUCT_LABELS } from '@/constants/marketDashboard';
 import { getPriceChangeTextClass } from '../lib/priceChange';
@@ -638,6 +641,11 @@ export default function OverviewDashboard({
         openLink: 'Open',
         noNews: 'No recent industry events found.',
         sourcesNote: 'Sources: Longzhong · SCI · Sinopec · ERP · Internal use only · All prices RMB/mt unless noted',
+        exportTitle: 'Export',
+        exportPng: 'Export as PNG',
+        exportPdf: 'Export as PDF',
+        exporting: 'Generating…',
+        exportFailed: 'Export failed. Please try again.',
       }
     : {
         reportDate: '报告日期',
@@ -666,6 +674,11 @@ export default function OverviewDashboard({
         openLink: '查看',
         noNews: '暂无近期行业事件。',
         sourcesNote: '来源：隆众 · SCI · 中石化 · ERP · 仅供内部使用 · 除特别说明外单位为人民币/吨',
+        exportTitle: '导出',
+        exportPng: '导出为 PNG',
+        exportPdf: '导出为 PDF',
+        exporting: '正在生成…',
+        exportFailed: '导出失败，请重试。',
       };
 
   /* ── News (events) — caching/refresh handled inside component ─── */
@@ -674,6 +687,91 @@ export default function OverviewDashboard({
   const [newsLoading, setNewsLoading] = useState(false);
   const [newsError, setNewsError] = useState(null);
   const [newsUpdatedAt, setNewsUpdatedAt] = useState('');
+
+  /* ── Export (PNG / PDF) ─────────────────────────────────────────── */
+
+  const exportRef = useRef(null);
+  const [exportMenuOpen, setExportMenuOpen] = useState(false);
+  const [exportingFormat, setExportingFormat] = useState(null);
+  const exportMenuRef = useRef(null);
+
+  // Close the dropdown on outside click / Escape.
+  useEffect(() => {
+    if (!exportMenuOpen) return undefined;
+    const onPointerDown = (event) => {
+      if (exportMenuRef.current && !exportMenuRef.current.contains(event.target)) {
+        setExportMenuOpen(false);
+      }
+    };
+    const onKeyDown = (event) => {
+      if (event.key === 'Escape') setExportMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [exportMenuOpen]);
+
+  const handleExport = async (format) => {
+    if (!exportRef.current || exportingFormat) return;
+    setExportMenuOpen(false);
+    setExportingFormat(format);
+    try {
+      // Give React a tick to close the dropdown before capturing.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      // Force the desktop 3-column export layout (sidebar + 3 columns),
+      // then remove the class once the canvas is captured.
+      exportRef.current.classList.add('overview-export-mode');
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      const canvas = await html2canvas(exportRef.current, {
+        scale: 2,
+        useCORS: true,
+        backgroundColor: '#ffffff',
+        logging: false,
+        windowWidth: 1440,
+      });
+      const dateStamp = new Date().toISOString().slice(0, 10);
+      const baseName = `chemical-market-overview-${dateStamp}`;
+      if (format === 'png') {
+        const blob = await new Promise((resolve) => canvas.toBlob(resolve, 'image/png'));
+        if (!blob) throw new Error('canvas toBlob returned null');
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        anchor.href = url;
+        anchor.download = `${baseName}.png`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      } else {
+        const pdf = new jsPDF({
+          orientation: 'landscape',
+          unit: 'mm',
+          format: 'a4',
+          compress: true,
+        });
+        const pageWidth = pdf.internal.pageSize.getWidth();
+        const pageHeight = pdf.internal.pageSize.getHeight();
+        const imgWidth = pageWidth;
+        const imgHeight = (canvas.height * imgWidth) / canvas.width;
+        const totalPages = Math.ceil(imgHeight / pageHeight);
+        for (let pageIndex = 0; pageIndex < totalPages; pageIndex += 1) {
+          if (pageIndex > 0) pdf.addPage();
+          const yOffset = -pageHeight * pageIndex;
+          pdf.addImage(canvas.toDataURL('image/jpeg', 0.92), 'JPEG', 0, yOffset, imgWidth, imgHeight, undefined, 'FAST');
+        }
+        pdf.save(`${baseName}.pdf`);
+      }
+    } catch (error) {
+      console.error('Overview export failed:', error);
+      window.alert(text.exportFailed);
+    } finally {
+      if (exportRef.current) exportRef.current.classList.remove('overview-export-mode');
+      setExportingFormat(null);
+    }
+  };
 
   const loadNews = async (showLoading) => {
     if (showLoading) setNewsLoading(true);
@@ -902,7 +1000,7 @@ export default function OverviewDashboard({
 
   return (
     <div className="h-full overflow-y-auto bg-background">
-      <div className="flex min-h-full">
+      <div ref={exportRef} className="flex min-h-full">
         <aside className="hidden xl:flex w-[168px] shrink-0 flex-col border-r border-border bg-secondary px-3.5 py-5 text-foreground sticky top-0 self-start max-h-screen">
           <div className="rounded-lg border border-border bg-card px-3 py-2.5">
             <p className={TYPO.micro}>{text.reportDate}</p>
@@ -967,6 +1065,49 @@ export default function OverviewDashboard({
                     : (language === 'zh' ? '实时' : 'live')}
                 </span>
               )}
+              <div ref={exportMenuRef} className="relative">
+                <button
+                  type="button"
+                  aria-label={text.exportTitle}
+                  aria-haspopup="menu"
+                  aria-expanded={exportMenuOpen}
+                  disabled={Boolean(exportingFormat)}
+                  onClick={() => setExportMenuOpen((open) => !open)}
+                  className="inline-flex items-center gap-1 rounded border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 py-1 font-medium text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-60"
+                >
+                  {exportingFormat ? (
+                    <Loader2 width="11" height="11" className="animate-spin" />
+                  ) : (
+                    <Download width="11" height="11" />
+                  )}
+                  {exportingFormat ? text.exporting : text.exportTitle}
+                </button>
+                {exportMenuOpen && !exportingFormat && (
+                  <div
+                    role="menu"
+                    className="absolute right-0 top-full z-50 mt-1 w-44 overflow-hidden rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 shadow-lg"
+                  >
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => handleExport('png')}
+                      className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                    >
+                      <FileImage width="13" height="13" className="shrink-0 text-slate-400" />
+                      {text.exportPng}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => handleExport('pdf')}
+                      className="flex w-full items-center gap-2 border-t border-slate-100 dark:border-slate-700 px-3 py-2 text-left text-[12px] text-slate-700 dark:text-slate-200 hover:bg-slate-50 dark:hover:bg-slate-700"
+                    >
+                      <FileText width="13" height="13" className="shrink-0 text-slate-400" />
+                      {text.exportPdf}
+                    </button>
+                  </div>
+                )}
+              </div>
               <button
                 type="button"
                 aria-label="Refresh overview"
@@ -1014,7 +1155,7 @@ export default function OverviewDashboard({
               {text.prices}
             </h3>
 
-            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
+            <div data-overview-grid="3col" className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
               {groupedRows.map((group) => (
                 <article key={group.key} className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
                   <div className={`${GROUP_VISUALS[group.key].priceHeader} flex items-center justify-between px-3.5 py-2`}>
@@ -1042,7 +1183,7 @@ export default function OverviewDashboard({
                       return (
                         <div key={item.id} className="overview-product-unit product-unit border-b border-slate-200 dark:border-slate-700 last:border-b-0">
                           <div className="overview-product-label px-3.5 py-2 border-b border-slate-200 dark:border-slate-700">
-                            <span className="overview-exec-primary text-[14px] md:text-[15px] font-semibold">
+                            <span className="overview-exec-primary block min-w-0 break-words text-[14px] md:text-[15px] font-semibold">
                               {resolveName(item.id, item.name)}
                             </span>
                           </div>
@@ -1155,7 +1296,7 @@ export default function OverviewDashboard({
               )}
             </h3>
 
-            <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2 xl:grid-cols-3">
+            <div data-overview-grid="3col" className="grid grid-cols-1 gap-2.5 lg:grid-cols-2 xl:grid-cols-3">
               {groupedRows.map((group) => (
                 <article key={`${group.key}-movement`} className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900">
                   <div className={`${GROUP_VISUALS[group.key].futuresHeader} flex items-center justify-between px-3.5 py-2`}>
@@ -1257,7 +1398,7 @@ export default function OverviewDashboard({
                 {text.noNews}
               </div>
             ) : (
-              <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
+              <div data-overview-grid="3col" className="grid grid-cols-1 gap-2.5 lg:grid-cols-3">
                 {newsColumns.map((column, idx) => (
                   <article key={`news-col-${idx}`} className="overflow-hidden rounded-xl border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-900 shadow-[0_1px_3px_rgba(15,23,42,0.06)]">
                     <div className="flex items-center justify-between bg-card border-b border-border px-3.5 py-2.5 text-[12px] md:text-[13px] font-semibold uppercase tracking-[0.06em] text-foreground">

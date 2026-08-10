@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="https://base44.com/logo_v2.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="manifest" href="/manifest.json" />
+    <title>伊斯科AI · Ecisco AI</title>
+    <script>
+      // ── One-time cache invalidation (2026-08-09) ─────────────────────────
+      // Earlier versions of the app cached chat messages under
+      // `zhanlu:messages:${sid}` in localStorage. After a backend cleanup
+      // (deleted stale "Sorry" assistant rows), those caches would render
+      // stale content even when the DB was empty. The frontend now uses
+      // a v2 key (`zhanlu:messages:v2:${sid}`), but users with old bundles
+      // may still hit v1 keys. This boot script:
+      //   1. Removes every v1-shaped key
+      //   2. Records that the migration ran so it only fires once
+      // Runs synchronously before React mounts so the cache is clean.
+      (function () {
+        try {
+          var FLAG = '__zhanlu_msg_cache_v2_migrated';
+          if (window.localStorage.getItem(FLAG)) return;
+          var toRemove = [];
+          for (var i = 0; i < window.localStorage.length; i++) {
+            var k = window.localStorage.key(i);
+            // v1 shape:  zhanlu:messages:<sid>   (no extra colon)
+            // v2 shape:  zhanlu:messages:v2:<sid>  (extra colon — keep)
+            if (k && /^zhanlu:messages:[^:]+$/.test(k)) toRemove.push(k);
+          }
+          for (var j = 0; j < toRemove.length; j++) {
+            try { window.localStorage.removeItem(toRemove[j]); } catch (_) {}
+          }
+          window.localStorage.setItem(FLAG, '1');
+        } catch (_) { /* noop — localStorage may be disabled */ }
+      })();
+    </script>
+    <script type="module" crossorigin src="/assets/index-D3xWkbln.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/query-vendor-B4t1pFSw.js">
+    <link rel="modulepreload" crossorigin href="/assets/react-vendor-Dhukp042.js">
+    <link rel="modulepreload" crossorigin href="/assets/chart-vendor-BleccCLz.js">
+    <link rel="modulepreload" crossorigin href="/assets/radix-vendor-BtHB9uVb.js">
+    <link rel="modulepreload" crossorigin href="/assets/markdown-vendor-BREGfHs4.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-p7pFSrtc.css">
+    <script type="module">
+if (window.self === window.top) {
+  let lastPath = "";
+  function getPageNameFromPath(path) {
+    const segments = path.split("/").filter(Boolean);
+    return segments[0] || null;
+  }
+  function trackPageView() {
+    const path = window.location.pathname;
+    if (path === lastPath) return;
+    lastPath = path;
+    const pageName = getPageNameFromPath(path) || "home";
+    const appId = "local-zhanlu-app";
+    if (!appId) return;
+    fetch(`/api/app-logs/${appId}/log-user-in-app/${pageName}`, {
+      method: "POST",
+    }).catch(() => {});
+  }
+  const originalPushState = history.pushState.bind(history);
+  history.pushState = function (...args) {
+    originalPushState(...args);
+    trackPageView();
+  };
+  const originalReplaceState = history.replaceState.bind(history);
+  history.replaceState = function (...args) {
+    originalReplaceState(...args);
+    trackPageView();
+  };
+  window.addEventListener("popstate", trackPageView);
+  trackPageView();
+}
+</script>
+  </head>
+  <body>
+    <div id="root"></div>
+  </body>
+</html>

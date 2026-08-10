@@ -157,6 +157,20 @@ export function ChatSessionProvider({ children }) {
       // would resume the wrong conversation. Do it here because
       // selectSession is the single entry point both the sidebar and
       // any future session picker use.
+      //
+      // Also forward the session's project context in the URL so
+      // Chat.jsx's handleAgentSend can read it from the live URL
+      // and include it in the v3 stream body — the backend then
+      // scopes the data-source runtime to the right project.
+      // Without this, clicking a conv in a different project (e.g.
+      // ECISCO BI vs Global) leaves the URL as ``?conv=...`` only,
+      // the agent has no project_id to extend its bound KBs with,
+      // and the user sees the same generic "user-memory" response
+      // across every project (because the only thing the runtime
+      // can fall back to is the per-user memory store). The
+      // ``?project=`` FK lets the backend resolve the project's
+      // KBs server-side even when ``s.project_id`` is null (legacy
+      // rows backfilled by name only — see migration 020).
       try {
         const url = new URL(window.location.href);
         if (s.conversation_id) {
@@ -166,6 +180,21 @@ export function ChatSessionProvider({ children }) {
           // row exists, so drop the stale ?conv= from any previous
           // session.
           url.searchParams.delete('conv');
+        }
+        if (s.project_id) {
+          url.searchParams.set('project', s.project_id);
+        } else {
+          url.searchParams.delete('project');
+        }
+        if (projectName) {
+          url.searchParams.set('projectName', projectName);
+        } else {
+          url.searchParams.delete('projectName');
+        }
+        if (s.agent_name) {
+          url.searchParams.set('agentName', s.agent_name);
+        } else {
+          url.searchParams.delete('agentName');
         }
         window.history.replaceState({}, '', url.toString());
       } catch { /* SSR / non-browser env — best-effort */ }
@@ -217,7 +246,40 @@ export function ChatSessionProvider({ children }) {
     // null so it doesn't render a "Ungrouped" chip. Use the
     // shared helper to keep this consistent with selectSession
     // and adoptSessionProject.
-    setPendingProjectState(isUngroupedProjectName(projectName) ? null : (projectName || null));
+    const normalizedName = isUngroupedProjectName(projectName) ? null : (projectName || null);
+    setPendingProjectState(normalizedName);
+    // Sync the URL with the project context the same way
+    // selectSession does. Without this, "+ New Chat" in a sidebar
+    // group (e.g. Marketing Team, ECISCO BI) leaves the URL as
+    // ``/?`` with no projectName, so the v3 stream request body
+    // (read from window.location by Chat.jsx's handleAgentSend)
+    // has no project_id to scope the data-source runtime with —
+    // the agent then falls back to per-user memory across all
+    // projects. Drop ?conv= and ?agentName= so the next send
+    // creates a fresh AgentConversation row (instead of reusing
+    // the previously-active conv's id) and is not bound to a
+    // stale agent.
+    //
+    // We intentionally do NOT set ``?project=`` here — the newChat
+    // caller (sidebar "+ New Chat" button) only has the project
+    // NAME, not the FK. Resolving name → FK on the client is racy
+    // and the chat's own URL-driven resolution in Chat.jsx's
+    // handleAgentSend will look up the FK by name on the server
+    // if it sees only projectName. (See backend
+    // ``add_message_stream`` v3: validates body project_id, then
+    // falls back to name lookup against the live projects table.)
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('conv');
+      url.searchParams.delete('agentName');
+      url.searchParams.delete('project');
+      if (normalizedName) {
+        url.searchParams.set('projectName', normalizedName);
+      } else {
+        url.searchParams.delete('projectName');
+      }
+      window.history.replaceState({}, '', url.toString());
+    } catch { /* SSR / non-browser env — best-effort */ }
   }, []);
 
   // --- Delete a session ---

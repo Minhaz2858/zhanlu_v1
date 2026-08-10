@@ -38,23 +38,40 @@ class ChronosBoltModel(ForecastModel):
         self._model_name = model_name
         self._pipeline = None
         self._y: pd.Series | None = None
-        # Eagerly trigger lazy import to fail fast in build_model_pool.
-        # Store return value so mocked _load_pipeline works in tests.
-        self._pipeline = self._load_pipeline()
+        self._pipeline_loaded = False
+        # Defer loading — download happens at first fit().
+        # build_model_pool catches ImportError; download errors are
+        # caught in _load_pipeline() with a warning + disable.
 
     def _load_pipeline(self):
-        """Lazy-load the Chronos pipeline. Raises ImportError if deps missing."""
+        """Lazy-load the Chronos pipeline. Returns None if download fails."""
         if self._pipeline is not None:
             return self._pipeline
-        import torch  # noqa: F401 — fail fast if torch missing
-        from chronos import ChronosPipeline
+        if self._pipeline_loaded:
+            return None  # already tried and failed
 
-        self._pipeline = ChronosPipeline.from_pretrained(
-            self._model_name,
-            device_map="cpu",
-            torch_dtype=torch.float32,
-        )
-        return self._pipeline
+        self._pipeline_loaded = True
+        try:
+            import torch  # noqa: F401 — fail fast if torch missing
+            from chronos import ChronosPipeline
+
+            self._pipeline = ChronosPipeline.from_pretrained(
+                self._model_name,
+                device_map="cpu",
+                torch_dtype=torch.float32,
+                local_files_only=True,
+            )
+            logger.info("ChronosBolt pipeline loaded: %s", self._model_name)
+            return self._pipeline
+        except (OSError, ValueError) as exc:
+            logger.warning(
+                "ChronosBolt model not available (offline/no-cache): %s — "
+                "download with: huggingface-cli download %s",
+                exc, self._model_name,
+            )
+            return None
+        except ImportError:
+            raise  # propagate ImportError for build_model_pool skip
 
     def fit(
         self,
@@ -67,10 +84,18 @@ class ChronosBoltModel(ForecastModel):
             raise ModelFitError(
                 f"ChronosBolt needs >= {self.min_history} points, got {len(y)}"
             )
+        # Deferred load — first fit triggers download
+        if self._pipeline is None:
+            self._pipeline = self._load_pipeline()
         self._y = y
 
     def _predict_samples(self, h: int) -> np.ndarray:
         """Return raw forecast samples (num_samples, h)."""
+        if self._pipeline is None:
+            raise ModelFitError(
+                "ChronosBolt model is not loaded. Pre-download the model with: "
+                f"huggingface-cli download {self._model_name}"
+            )
         import torch
 
         if self._y is None:

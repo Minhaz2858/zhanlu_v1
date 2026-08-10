@@ -54,6 +54,7 @@ IMAGE_MAP = {
     "html": "zhanlu-sandbox-python:latest",
     "chart": "zhanlu-sandbox-python:latest",
     "dashboard": "zhanlu-sandbox-python:latest",
+    "skill_runner": "zhanlu-sandbox-skill:latest",  # C-Heavy skill-driven path
     "default": "zhanlu-sandbox-python:latest",
 }
 
@@ -184,17 +185,78 @@ def execute_job(job_id: str, skill_name: str):
                     write_runner_script(input_dir, runner_b64, script_name)
                     service.record_event(job_id, "script_prepared", f"Runner script written to /input/skill/{script_name}")
 
+                # Write any additional runner modules (e.g. for skill-driven
+                # jobs that need llm_client.py + fallback_generator.py next
+                # to the main runner script so the runner can ``import``
+                # them at /input/skill/).
+                runner_modules = job.input_package.get("runner_modules_b64") or {}
+                if runner_modules:
+                    from app.services.sandbox.container_manager import write_runner_modules
+                    written = write_runner_modules(input_dir, runner_modules)
+                    service.record_event(
+                        job_id,
+                        "modules_prepared",
+                        f"Wrote {len(written)} runner modules: {sorted(written)}",
+                    )
+
             # Run the container
             try:
-                command = ["python", "/input/skill/sandbox_runner.py"]
+                # Skill-driven jobs use a different runner script and
+                # image; we also need to bind-mount the LLM proxy
+                # socket and pass its config via env vars.
+                is_skill_driven = (
+                    job.input_package
+                    and job.input_package.get("runner_script_name") == "skill_driven_runner.py"
+                ) or job.skill_name == "skill_runner"
+
+                if is_skill_driven:
+                    runner_script_name = "skill_driven_runner.py"
+                    # Skill-driven jobs default to the new unified image
+                    # unless the caller already specified something else.
+                    skill_image = (
+                        job.image_name
+                        or IMAGE_MAP.get("skill_runner")
+                        or IMAGE_MAP["default"]
+                    )
+                    # LLM proxy mount (None when disabled / not ready).
+                    extra_mounts = _resolve_llm_proxy_mount()
+                    # Tell the runner where the proxy lives + which model
+                    # to ask for.
+                    skill_env = {
+                        "LLM_PROXY_SOCKET": settings.SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER,
+                        "LLM_PROXY_MODEL": settings.SANDBOX_LLM_PROXY_MODEL,
+                        "PYTHONUNBUFFERED": "1",
+                    }
+                    # The proxy may be disabled but the job still wants
+                    # to run — the runner will fall back to the
+                    # deterministic generator when LLM_PROXY_SOCKET is
+                    # absent or unreachable.  That's fine.
+                else:
+                    runner_script_name = job.input_package.get(
+                        "runner_script_name", "sandbox_runner.py"
+                    ) if job.input_package else "sandbox_runner.py"
+                    skill_image = image
+                    extra_mounts = None
+                    skill_env = {"PYTHONUNBUFFERED": "1"}
+
+                command = ["python", f"/input/skill/{runner_script_name}"]
+
+                # Merge base env vars (always PYTHONUNBUFFERED) with any
+                # per-job extras from the input package.
+                env_vars = dict(skill_env)
+                if job.input_package and job.input_package.get("env_vars"):
+                    env_vars.update(job.input_package["env_vars"])
+
                 result = run_sandbox_container(
-                    image_name=image,
+                    image_name=skill_image,
                     input_dir=input_dir,
                     output_dir=output_dir,
                     command=command,
                     timeout=job.timeout_seconds,
                     host_input_dir=host_input_dir,
                     host_output_dir=host_output_dir,
+                    extra_mounts=extra_mounts,
+                    env_vars=env_vars,
                 )
 
                 # Record command
@@ -309,11 +371,105 @@ def _store_outputs_as_blobs(db, job: SandboxJob, outputs: list[dict], service: S
         artifact_service.mark_version_built(job.artifact_version_id)
 
 
+def _start_llm_proxy_background():
+    """Start the LLM Unix-socket proxy in a daemon thread.
+
+    The proxy gives skill-driven sandbox containers access to the LLM
+    API without TCP/IP network (the sandbox runs --network none).
+    Without it, skill-driven jobs would fall back to the deterministic
+    generator immediately.
+
+    The thread dies with the main process (daemon=True) — no orphaned
+    socket files left behind.
+    """
+    if not getattr(settings, "SANDBOX_LLM_PROXY_ENABLED", False):
+        logger.info("LLM proxy disabled (SANDBOX_LLM_PROXY_ENABLED=false)")
+        return None
+    import threading
+    from app.services.sandbox.llm_proxy import LLMProxy
+
+    socket_path = settings.SANDBOX_LLM_PROXY_SOCKET
+    # Ensure the socket directory exists and is writable by the worker user.
+    try:
+        os.makedirs(os.path.dirname(socket_path), exist_ok=True)
+    except OSError as e:
+        logger.warning("Cannot create LLM proxy socket dir: %s", e)
+        return None
+
+    container: dict = {"proxy": None, "loop": None, "ready": threading.Event()}
+
+    def _runner():
+        import asyncio
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        container["loop"] = loop
+        proxy = LLMProxy(socket_path=socket_path)
+        container["proxy"] = proxy
+        try:
+            loop.run_until_complete(proxy.start())
+            container["ready"].set()
+            # Block forever; cancellation arrives when the daemon thread
+            # is killed (parent process exit).
+            loop.run_forever()
+        except Exception:  # noqa: BLE001
+            logger.exception("LLM proxy crashed")
+            container["ready"].set()
+        finally:
+            try:
+                loop.run_until_complete(proxy.stop())
+            except Exception:
+                pass
+            loop.close()
+
+    thread = threading.Thread(target=_runner, name="llm-proxy", daemon=True)
+    thread.start()
+    # Wait briefly for the proxy to bind the socket so the first job
+    # doesn't race the startup.
+    if not container["ready"].wait(timeout=10):
+        logger.warning("LLM proxy did not become ready within 10s")
+    else:
+        logger.info("LLM proxy thread started on unix:%s", socket_path)
+    return container
+
+
+def _resolve_llm_proxy_mount() -> list[dict] | None:
+    """Build the extra_mounts entry to bind-mount the LLM proxy socket
+    into a sandbox container.
+
+    Returns None when the proxy is disabled (caller should skip the
+    mount).  The container sees the socket at
+    ``settings.SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER`` and reads
+    ``LLM_PROXY_SOCKET`` from its environment to find it.
+    """
+    if not getattr(settings, "SANDBOX_LLM_PROXY_ENABLED", False):
+        return None
+    host_socket = settings.SANDBOX_LLM_PROXY_SOCKET
+    if not os.path.exists(host_socket):
+        # Proxy didn't start — skip the mount so the container doesn't
+        # fail at bind-mount time.  The runner will see no socket and
+        # fall back to the deterministic generator.
+        logger.warning(
+            "LLM proxy socket %s does not exist — skipping mount",
+            host_socket,
+        )
+        return None
+    return [{
+        "source": host_socket,
+        "target": settings.SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER,
+        "read_only": True,
+    }]
+
+
 def main():
     """Main worker loop — poll for jobs and execute them."""
     logger.info("Sandbox worker started")
     logger.info("Docker available: %s", is_docker_available())
     logger.info("Redis URL: %s", settings.REDIS_URL or "(not configured)")
+
+    # Start the LLM proxy in a background daemon thread (if enabled).
+    # This must happen BEFORE the main loop starts accepting jobs so the
+    # first skill-driven job doesn't race the socket creation.
+    _start_llm_proxy_background()
 
     use_redis = bool(settings.REDIS_URL)
 

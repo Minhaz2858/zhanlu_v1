@@ -32,12 +32,17 @@ def test_moirai_is_forecast_model():
 
 
 def test_moirai_import_error_skipped():
-    """If torch/uni2ts not installed, __init__ should raise ImportError."""
-    with patch.dict("sys.modules", {"torch": None, "uni2ts": None}):
-        from app.services.forecasting.models.moirai import MoiraiModel
+    """Deferred loading: __init__ succeeds, _load_model raises ImportError."""
+    from app.services.forecasting.models.moirai import MoiraiModel
 
+    # __init__ should NOT raise (model loading is deferred)
+    model = MoiraiModel()
+    assert model._model is None  # not loaded
+
+    # But _load_model should raise ImportError when torch/uni2ts missing
+    with patch.dict("sys.modules", {"torch": None, "uni2ts": None}):
         with pytest.raises(ImportError):
-            MoiraiModel()
+            model._load_model()
 
 
 def test_moirai_fit_forecast_mocked():

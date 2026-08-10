@@ -21,6 +21,11 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 class AuthService:
 
+    @staticmethod
+    def _utcnow() -> datetime:
+        """Return a naive UTC datetime, matching the naive DB DateTime columns."""
+        return datetime.now(timezone.utc).replace(tzinfo=None)
+
     def hash_password(self, password: str) -> str:
         return pwd_context.hash(password)
 
@@ -33,8 +38,8 @@ class AuthService:
     def create_token(self, user_id: str) -> str:
         payload = {
             "sub": user_id,
-            "exp": datetime.now(timezone.utc) + timedelta(hours=settings.JWT_EXPIRE_HOURS),
-            "iat": datetime.now(timezone.utc),
+            "exp": self._utcnow() + timedelta(hours=settings.JWT_EXPIRE_HOURS),
+            "iat": self._utcnow(),
         }
         return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
@@ -61,8 +66,8 @@ class AuthService:
             "sub": user_id,
             "jti": jti,
             "type": "access",
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
-            "iat": datetime.now(timezone.utc),
+            "exp": self._utcnow() + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES),
+            "iat": self._utcnow(),
         }
         return jwt.encode(payload, settings.JWT_SECRET, algorithm=settings.JWT_ALGORITHM)
 
@@ -72,7 +77,7 @@ class AuthService:
         record = RefreshToken(
             user_id=user_id,
             token_hash=hashlib.sha256(raw.encode()).hexdigest(),
-            expires_at=datetime.utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+            expires_at=self._utcnow() + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
         )
         db.add(record)
         db.commit()
@@ -88,7 +93,7 @@ class AuthService:
         ).first()
         if not record:
             return None
-        if datetime.utcnow() > record.expires_at:
+        if self._utcnow() > record.expires_at:
             return None
         return record.user_id
 
@@ -148,7 +153,7 @@ class AuthService:
         record = OtpCode(
             email=email,
             code=otp,
-            expires_at=datetime.utcnow() + timedelta(minutes=10),
+            expires_at=self._utcnow() + timedelta(minutes=10),
         )
         db.add(record)
         db.commit()
@@ -165,7 +170,7 @@ class AuthService:
 
         if not record:
             return False
-        if datetime.utcnow() > record.expires_at:
+        if self._utcnow() > record.expires_at:
             return False
 
         record.used = True
@@ -180,7 +185,7 @@ class AuthService:
         record = PasswordResetToken(
             user_id=user_id,
             token=token,
-            expires_at=datetime.utcnow() + timedelta(hours=1),
+            expires_at=self._utcnow() + timedelta(hours=1),
         )
         db.add(record)
         db.commit()
@@ -196,7 +201,7 @@ class AuthService:
 
         if not record:
             return None
-        if datetime.utcnow() > record.expires_at:
+        if self._utcnow() > record.expires_at:
             return None
 
         return record.user_id

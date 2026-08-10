@@ -12,7 +12,7 @@ artifact models.  It handles:
 
 import hashlib
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 from uuid import uuid4
 
@@ -262,7 +262,7 @@ class ArtifactService:
             return None
 
         version.status = "preview_ready"
-        version.built_at = datetime.utcnow()
+        version.built_at = datetime.now(timezone.utc)
         version.validation_report = validation_report
 
         # Update artifact status
@@ -282,7 +282,7 @@ class ArtifactService:
             return None
 
         version.status = "failed"
-        version.built_at = datetime.utcnow()
+        version.built_at = datetime.now(timezone.utc)
         version.validation_report = {"passed": False, "error": error}
 
         artifact = version.artifact

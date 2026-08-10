@@ -439,7 +439,7 @@ class TestAgentDefinitions:
         assert "report_agent" in names
 
     def test_forecast_agent_tools(self):
-        """forecast_agent has 5 tools: discover, run, get, accuracy, rules."""
+        """forecast_agent has 6 tools: discover, run, get, accuracy, rules, brief."""
         agent = next(a for a in BUILTIN_AGENTS if a.name == "forecast_agent")
         assert agent.tools == [
             "forecast_discover",
@@ -447,7 +447,30 @@ class TestAgentDefinitions:
             "forecast_get",
             "forecast_accuracy",
             "forecast_rules",
+            "forecast_brief",
         ]
+
+    def test_intelligence_agent_exists(self):
+        """intelligence_agent is registered with 3 tools."""
+        agent = next(a for a in BUILTIN_AGENTS if a.name == "intelligence_agent")
+        assert agent is not None
+        assert set(agent.tools) == {
+            "get_intelligence_context",
+            "get_market_events",
+            "ingest_manual_event",
+        }
+        assert agent.color == "orange"
+        assert agent.source == "builtin"
+
+    def test_ecisco_bi_assistant_exists(self):
+        """ecisco_bi_assistant is registered with tools=None (prompt-only, tools from DB)."""
+        agent = next(a for a in BUILTIN_AGENTS if a.name == "ecisco_bi_assistant")
+        assert agent is not None
+        assert agent.tools is None
+        assert agent.color == "blue"
+        assert agent.source == "builtin"
+        assert "forecast_brief" in agent.system_prompt
+        assert "PARALLEL BATCHING" in agent.system_prompt
 
     def test_report_agent_tools(self):
         """report_agent has 3 tools: report, ppt, create_artifact."""
@@ -523,15 +546,18 @@ class TestAgentDefinitions:
         assert "pricing_agent" in names
 
     def test_ecisco_bi_assistant_has_delegation_tools(self):
-        """ecisco_bi_assistant has delegation tools for all EDIA sub-agents."""
+        """ecisco_bi_assistant uses tools=None — tool_config from DB AgentApp row.
+        The DB row provides all ask_* delegation tools + direct tools (forecast_brief, etc)."""
         agent = next(a for a in BUILTIN_AGENTS if a.name == "ecisco_bi_assistant")
-        expected = [
-            "ask_perception", "ask_rag_research", "ask_diagnosis",
-            "ask_forecast_agent", "ask_pricing", "ask_data_agent",
-            "ask_report_agent",
-        ]
-        for tool in expected:
-            assert tool in agent.tools, f"ecisco_bi_assistant missing tool: {tool}"
+        # tools=None means "all tools from DB register" — correct for the orchestrator
+        assert agent.tools is None, (
+            "ecisco_bi_assistant tools should be None — tool_config from DB AgentApp row. "
+            "This matches data_agent/forecast_agent pattern: BUILTIN_AGENTS provides prompt, "
+            "DB AgentApp provides tool_config."
+        )
+        # Verify domain prompt is loaded
+        assert "forecast_brief" in agent.system_prompt
+        assert "PARALLEL BATCHING" in agent.system_prompt
 
     def test_perception_agent_has_data_and_web_tools(self):
         """perception_agent has ask_data_agent, web_search, search_documents."""

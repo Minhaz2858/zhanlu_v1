@@ -92,6 +92,7 @@ export default function StepsAgentBuilder({ onClose, initialProjectId }) {
   const [name, setName] = useState('');
   const [description, setDescription] = useState('');
   const [capabilities, setCapabilities] = useState('');
+  const [llmModelId, setLlmModelId] = useState(null);
   // `project` now holds the selected project *id* (the FK column on AgentApp).
   // Falls back to 'global' for "Ungrouped". The legacy `project` name string
   // is derived from project_id at save time and written alongside it for
@@ -237,7 +238,7 @@ export default function StepsAgentBuilder({ onClose, initialProjectId }) {
   function discardDraft() {
     clearDraft(DRAFT_KEY_FORM);
     clearDraft(DRAFT_KEY_CONFIG);
-    setName(''); setDescription(''); setCapabilities(''); setProject('global');
+    setName(''); setDescription(''); setCapabilities(''); setProject('global'); setLlmModelId(null);
     setDraftDialog(false);
     // Notify MySpace so its draft banner refreshes immediately.
     if (typeof window !== 'undefined') {
@@ -257,7 +258,7 @@ export default function StepsAgentBuilder({ onClose, initialProjectId }) {
       // Only persist when the user has typed something — don't litter
       // localStorage with empty drafts.
       if (name.trim() || description.trim() || capabilities.trim()) {
-        saveDraft(DRAFT_KEY_FORM, { name, description, capabilities, project }, 0);
+        saveDraft(DRAFT_KEY_FORM, { name, description, capabilities, project, llmModelId }, 0);
       } else {
         clearDraft(DRAFT_KEY_FORM);
       }
@@ -328,9 +329,10 @@ export default function StepsAgentBuilder({ onClose, initialProjectId }) {
       capabilities: parseCapabilities(capabilities),
       project_id: selectedProjectId === 'global' ? null : selectedProjectId,
       project: selectedProjectName,
+      llm_model_id: llmModelId || null,
     }));
     // Mark form fields as user-set so future decisionPayload won't override
-    setDirtyFields(new Set(['name', 'description', 'capabilities', 'project']));
+    setDirtyFields(new Set(['name', 'description', 'capabilities', 'project', 'llm_model_id']));
     setStep('config');
     setEnteredWithPrefill(true);
     clearDraft(DRAFT_KEY_FORM);
@@ -502,6 +504,8 @@ export default function StepsAgentBuilder({ onClose, initialProjectId }) {
             onCapabilitiesChange={setCapabilities}
             project={project}
             onProjectChange={setProject}
+            llmModelId={llmModelId}
+            onLlmModelIdChange={setLlmModelId}
             initialProjectId={initialProjectId}
             onBuild={handleBuild}
             building={initializing}

@@ -29,6 +29,57 @@ class TestComputeRealizedError:
         result = compute_realized_error([110.0], dates, actual)
         assert result["mape"] == pytest.approx(10.0)
 
+    def test_signed_error_positive_when_overpredict(self):
+        """signed_error should be (predicted-actual)/actual, positive on overprediction."""
+        import pandas as pd
+        dates = [pd.Timestamp("2026-07-01")]
+        actual = pd.Series([100.0], index=dates)
+        result = compute_realized_error([110.0], dates, actual)  # 10% over
+        assert result["signed_error"] == pytest.approx(0.10)
+
+    def test_signed_error_negative_when_underpredict(self):
+        """signed_error should be negative when forecast is below actual."""
+        import pandas as pd
+        dates = [pd.Timestamp("2026-07-01")]
+        actual = pd.Series([100.0], index=dates)
+        result = compute_realized_error([90.0], dates, actual)  # 10% under
+        assert result["signed_error"] == pytest.approx(-0.10)
+
+    def test_signed_error_none_with_no_match(self):
+        """signed_error should be None when no actuals match."""
+        result = compute_realized_error([5000.0], [None], None)
+        assert result["signed_error"] is None
+
+    def test_mae_rmse_simple(self):
+        """MAE = mean(|pred - actual|), RMSE = sqrt(mean((pred-actual)^2))."""
+        import pandas as pd
+        dates = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        actual = pd.Series([100.0, 200.0], index=dates)
+        # pred=110, actual=100 => error=10; pred=190, actual=200 => error=10
+        result = compute_realized_error([110.0, 190.0], dates, actual)
+        # MAE = (10 + 10) / 2 = 10.0
+        assert result["mae"] == pytest.approx(10.0)
+        # RMSE = sqrt((100 + 100) / 2) = sqrt(100) = 10.0
+        assert result["rmse"] == pytest.approx(10.0)
+        # MAPE = (10/100 + 10/200) / 2 * 100 = (0.10 + 0.05) / 2 * 100 = 7.5
+        assert result["mape"] == pytest.approx(7.5)
+
+    def test_mae_rmse_perfect_match(self):
+        """MAE and RMSE should be 0 for perfect predictions."""
+        import pandas as pd
+        dates = [pd.Timestamp("2026-07-01"), pd.Timestamp("2026-07-02")]
+        actual = pd.Series([100.0, 200.0], index=dates)
+        result = compute_realized_error([100.0, 200.0], dates, actual)
+        assert result["mae"] == 0.0
+        assert result["rmse"] == 0.0
+        assert result["mape"] == 0.0
+
+    def test_mae_rmse_none_with_no_actuals(self):
+        """mae and rmse should be None when no actuals are available."""
+        result = compute_realized_error([5000.0], [None], None)
+        assert result["mae"] is None
+        assert result["rmse"] is None
+
 
 class TestAdaptiveWeights:
     def test_cold_start_returns_backtest_weights(self):

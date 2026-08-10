@@ -1,8 +1,10 @@
-"""artifact_tool — create downloadable documents (docx, pdf, pptx, html).
+"""artifact_tool — create and edit downloadable documents (docx, pdf, pptx, html).
 
-A single LLM-callable tool that the agent can use after loading a skill's
-methodology via `skills.execute(...)`.  The tool wraps the existing
-ArtifactService + exporters + preview_builder pipeline end-to-end:
+Two LLM-callable tools for document lifecycle:
+
+``create_artifact``
+  After loading a skill's methodology via ``skills.execute(...)``, the
+  agent calls this tool to produce a file.  The pipeline:
 
   1. Create an Artifact row (draft)
   2. Create a version row (building)
@@ -12,6 +14,16 @@ ArtifactService + exporters + preview_builder pipeline end-to-end:
   6. Mark version as preview_ready
   7. Return {artifact_id, version, file_url, preview_url, ...}
 
+``edit_artifact``
+  Refine an existing artifact via natural-language instructions (e.g.
+  "make the title bolder", "add a summary slide").  The pipeline:
+
+  1. Look up the artifact and its current version's source_json
+  2. Call LLM to interpret the edit instructions → produce modified payload
+  3. Create a new version with the modified payload (version-bumps)
+  4. Re-render the file bytes and store the new blob
+  5. Return updated artifact info with new version_number
+
 The message-linking and artifact[] surface on the assistant message are
 handled by the post-processing step in agents.py.
 """
@@ -19,7 +31,7 @@ handled by the post-processing step in agents.py.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -733,7 +745,7 @@ def _payload_to_reportcard(payload: dict, title: str) -> ReportCardPayload:
     return ReportCardPayload(
         title=payload.get("title") or title,
         source=payload.get("source") or "",
-        generated_at=datetime.utcnow().isoformat(),
+        generated_at=datetime.now(timezone.utc).isoformat(),
         summary=payload.get("summary") or "",
         kpis=[
             KPISpec(
@@ -855,4 +867,485 @@ registry.register(
     description="Produce a downloadable document (docx, pdf, pptx, html) and surface it inline in the chat.",
     emoji="📄",
     max_result_size_chars=4_000,
+)
+
+
+# ── edit_artifact ──────────────────────────────────────────────────────
+
+
+async def _edit_artifact_tool(
+    args: dict,
+    db: Optional[Session] = None,
+    user_id: Optional[str] = None,
+    context: Optional[dict] = None,
+) -> dict:
+    """Handler for the edit_artifact LLM tool.
+
+    Refine an existing artifact via natural-language instructions.
+    The LLM interprets the instruction against the current source_json
+    payload, produces a modified payload, and the tool re-renders the
+    file with a new version.
+
+    Args:
+        args: Must contain ``artifact_id`` (str/int) and ``instructions``
+              (str).  Optional: ``title``, ``format``, ``payload``
+              (partial overrides that bypass the LLM interpretation step).
+    """
+    if db is None:
+        return {"success": False, "error": "Database session is required"}
+
+    artifact_id = args.get("artifact_id")
+    instructions = (args.get("instructions") or "").strip()
+
+    if not artifact_id:
+        return {"success": False, "error": "artifact_id is required"}
+    if not instructions and not args.get("payload"):
+        return {"success": False, "error": "instructions or payload overrides are required"}
+
+    # Normalise artifact_id (LLMs sometimes pass an int)
+    try:
+        artifact_id = str(artifact_id)
+    except (ValueError, TypeError):
+        return {"success": False, "error": f"Invalid artifact_id: {artifact_id}"}
+
+    conversation_id = context.get("conversation_id") if context else None
+    agent_app_id = context.get("agent_app_id") if context else None
+
+    try:
+        from app.services.artifacts.artifact_service import ArtifactService
+        from app.services.artifacts.preview_builder import convert_to_preview
+
+        service = ArtifactService(db)
+
+        # 1. Look up the existing artifact
+        artifact = service.get_artifact(artifact_id)
+        if artifact is None:
+            return {"success": False, "error": f"Artifact {artifact_id} not found"}
+
+        # 2. Get the current version's source_json payload
+        prev_version = service.get_current_version(artifact_id)
+        if prev_version is None:
+            return {"success": False, "error": f"No version found for artifact {artifact_id}"}
+
+        current_payload: dict = (prev_version.source_json or {})
+        if isinstance(current_payload, str):
+            import json as _json
+            try:
+                current_payload = _json.loads(current_payload)
+            except Exception:
+                current_payload = {"_raw": current_payload}
+        if not isinstance(current_payload, dict):
+            current_payload = {}
+        # Normalise legacy / wrapper shapes
+        current_payload = _unwrap_payload(current_payload)
+
+        artifact_type = artifact.artifact_type or "pptx"
+
+        # 3. Produce the modified payload
+        modified_payload: dict
+        direct_overrides = args.get("payload")
+        if isinstance(direct_overrides, dict) and direct_overrides and not instructions:
+            # Purely declarative override — merge directly (no LLM call).
+            modified_payload = dict(current_payload)
+            _deep_merge(modified_payload, direct_overrides)
+        else:
+            # Natural-language instruction — use LLM to interpret the edit.
+            modified_payload = await _llm_edit_payload(
+                artifact_type=artifact_type,
+                current_payload=current_payload,
+                instructions=instructions,
+                direct_overrides=direct_overrides if isinstance(direct_overrides, dict) else None,
+            )
+
+        # 4. Create a new version with the modified payload
+        new_title = (args.get("title") or current_payload.get("title") or artifact.title or "Untitled").strip()
+        # Also update title in the payload so the renderer picks it up
+        modified_payload["title"] = new_title
+
+        version = service.create_version(
+            artifact_id=artifact.id,
+            changelog=instructions or "Payload overrides applied",
+            source_json=modified_payload,
+            produced_by_skill=prev_version.produced_by_skill or None,
+        )
+        if not version:
+            return {"success": False, "error": "Failed to create artifact version"}
+
+        # 5. Re-render the file bytes
+        ext = _TYPE_EXT.get(artifact_type, ".pptx")
+        mime = _TYPE_MIME.get(artifact_type, _TYPE_MIME["pptx"])
+        file_name = _safe_filename(new_title, ext)
+
+        if artifact_type == "html":
+            html_content = modified_payload.get("html_content", "")
+            if isinstance(html_content, dict):
+                html_content = str(html_content)
+            if not html_content:
+                # Keep the old html_content if the edit didn't change it
+                html_content = current_payload.get("html_content", "")
+                if isinstance(html_content, dict):
+                    html_content = str(html_content)
+            if not html_content:
+                html_content = "<html><body><h1>{}</h1></body></html>".format(
+                    _esc(new_title)
+                )
+            data = html_content.encode("utf-8")
+        elif artifact_type == "pptx":
+            from app.services.artifacts.exporters.pptx_export import render as _render_pptx
+            rcp = _payload_to_reportcard(modified_payload, new_title)
+            data, mime, ext = _render_pptx(rcp)
+            file_name = _safe_filename(new_title, ext)
+        elif artifact_type == "docx":
+            from app.services.artifacts.exporters.docx_export import render as _render_docx
+            rcp = _payload_to_reportcard(modified_payload, new_title)
+            data, mime, ext = _render_docx(rcp)
+            file_name = _safe_filename(new_title, ext)
+        elif artifact_type == "pdf":
+            from app.services.artifacts.exporters.pdf_export import render as _render_pdf
+            rcp = _payload_to_reportcard(modified_payload, new_title)
+            data, mime, ext = _render_pdf(rcp)
+            file_name = _safe_filename(new_title, ext)
+        else:
+            return {"success": False, "error": f"Unknown artifact type: {artifact_type}"}
+
+        # 6. Store the new blob
+        service.store_blob(
+            version_id=version.id,
+            blob_type="original",
+            file_name=file_name,
+            mime_type=mime,
+            data=data,
+        )
+
+        # 7. Generate and store preview
+        has_preview = False
+        preview_result = convert_to_preview(data, file_name, artifact_type)
+        if preview_result:
+            preview_data, preview_name, preview_mime = preview_result
+            service.store_blob(
+                version_id=version.id,
+                blob_type="preview",
+                file_name=preview_name,
+                mime_type=preview_mime,
+                data=preview_data,
+            )
+            has_preview = True
+            # Try thumbnail for PDF previews
+            if preview_mime == "application/pdf":
+                try:
+                    from app.services.artifacts.preview_builder import generate_thumbnail
+                    thumb = generate_thumbnail(preview_data)
+                    if thumb:
+                        service.store_blob(
+                            version_id=version.id,
+                            blob_type="thumbnail",
+                            file_name=f"{file_name.rsplit('.', 1)[0]}.png",
+                            mime_type="image/png",
+                            data=thumb,
+                        )
+                except Exception:
+                    pass
+
+        # 8. Mark version as built
+        service.mark_version_built(version.id)
+
+        # Update artifact title if changed
+        if new_title and new_title != artifact.title:
+            artifact.title = new_title
+            db.add(artifact)
+        service.update_status(artifact.id, "preview_ready")
+
+        # 9. Build response
+        preview_url = f"/api/artifacts/{artifact.id}/preview" if has_preview else None
+        download_url = f"/api/artifacts/{artifact.id}/download"
+
+        result = {
+            "success": True,
+            "action": "edited",
+            "artifact_id": artifact.id,
+            "version_id": version.id,
+            "version_number": version.version_number,
+            "previous_version_number": prev_version.version_number,
+            "file_url": download_url,
+            "preview_url": preview_url,
+            "file_name": file_name,
+            "mime_type": mime,
+            "title": new_title,
+            "type": artifact_type,
+            "file_size": len(data),
+            "has_preview": has_preview,
+            # Include a compact change summary for the agent to use in its response
+            "change_summary": _summarise_changes(current_payload, modified_payload, instructions),
+        }
+
+        logger.info(
+            "edit_artifact: artifact=%s v%d→v%d, instructions=%r",
+            artifact.id, prev_version.version_number, version.version_number,
+            instructions[:120] if instructions else "(direct overrides)",
+        )
+        return result
+
+    except Exception as exc:
+        logger.exception("edit_artifact failed for artifact_id=%s", artifact_id)
+        try:
+            if "version" in locals() and version is not None and "service" in locals():
+                service.mark_version_failed(version.id, f"Artifact edit failed: {exc}")
+        except Exception:
+            pass
+        return {"success": False, "error": f"Artifact edit failed: {exc}"}
+
+
+# --- Helpers for edit_artifact ---
+
+
+def _unwrap_payload(payload: dict) -> dict:
+    """Unwrap common nesting patterns in source_json so the edit LLM sees
+    a flat report-card dict rather than a wrapper.
+
+    Patterns handled:
+      - ``{rcp: {...}}`` or ``{report_card_payload: {...}}``
+      - ``{"source_json": "{\\"title\\":...}"}``  (stringified inner json)
+      - Bare payload with top-level ``type`` / ``title`` / ``kpis`` / etc.
+    """
+    import json as _json
+
+    if isinstance(payload, str):
+        try:
+            payload = _json.loads(payload)
+        except Exception:
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+
+    # Unwrap common wrapper keys
+    for wrapper_key in ("rcp", "report_card_payload", "report_card"):
+        inner = payload.get(wrapper_key)
+        if isinstance(inner, dict) and inner:
+            return _unwrap_payload(inner)
+
+    # If the top-level payload has a 'payload' key that is a dict, unwrap it
+    inner_payload = payload.get("payload")
+    if isinstance(inner_payload, dict) and inner_payload:
+        # Check if there's meaningful content beyond just a wrapper
+        inner_keys = set(inner_payload.keys())
+        wrapper_only_keys = {"rcp", "report_card_payload", "payload"}
+        if inner_keys - wrapper_only_keys:
+            return _unwrap_payload(inner_payload)
+
+    return payload
+
+
+def _deep_merge(base: dict, overrides: dict) -> None:
+    """Merge ``overrides`` into ``base`` in place, recursively for nested dicts."""
+    for k, v in overrides.items():
+        if isinstance(v, dict) and isinstance(base.get(k), dict):
+            _deep_merge(base[k], v)
+        elif isinstance(v, list) and isinstance(base.get(k), list):
+            # For lists (slides, kpis, insights), replace item-by-item
+            # by index when the override supplies a list; otherwise
+            # just replace the whole list.
+            if v and isinstance(v[0], dict) and all(isinstance(bi, dict) for bi in (base[k] or [])):
+                base_list = list(base[k] or [])
+                for i, item in enumerate(v):
+                    if i < len(base_list):
+                        _deep_merge(base_list[i], item)
+                    else:
+                        base_list.append(item)
+                base[k] = base_list
+            else:
+                base[k] = v
+        else:
+            base[k] = v
+
+
+async def _llm_edit_payload(
+    *,
+    artifact_type: str,
+    current_payload: dict,
+    instructions: str,
+    direct_overrides: Optional[dict] = None,
+) -> dict:
+    """Use the LLM to interpret an edit instruction and produce a modified payload.
+
+    Args:
+        artifact_type: One of docx / pptx / pdf / html.
+        current_payload: The current source_json (unwrapped) as a dict.
+        instructions: Natural-language edit instruction from the user.
+        direct_overrides: Optional partial overrides to apply after the LLM
+            interpretation (applied as safety-net key-value replacements).
+
+    Returns:
+        The modified payload dict as returned by the LLM (best-effort;
+        falls back to the original payload on failure).
+    """
+    from app.services.llm_service import call_llm
+    import json as _json
+
+    # Serialize current payload as pretty JSON for the LLM
+    current_json = _json.dumps(current_payload, ensure_ascii=False, indent=2, default=str)
+
+    # Build a compact prompt that asks the LLM to edit the payload
+    system_prompt = (
+        f"You are a document payload editor. The user wants to modify a "
+        f"{artifact_type.upper()} document. Below is the current structured "
+        f"payload (ReportCard JSON). Apply the user's edit instruction and "
+        f"return the FULL modified JSON object."
+        f"\n\nRules:\n"
+        f"- Preserve ALL existing fields unless the instruction explicitly "
+        f"removes or replaces them.\n"
+        f"- Keep the JSON structure identical (same keys, same nesting).\n"
+        f"- For pptx: edit the 'slides' array when the instruction mentions "
+        f"slides, titles, or bullet points.\n"
+        f"- For docx/pdf: edit 'summary', 'methodology', 'kpis', "
+        f"'key_findings', 'recommendations', 'sections', 'chart' as needed.\n"
+        f"- If the instruction asks to ADD something, add it to the "
+        f"appropriate field.\n"
+        f"- If the instruction asks to CHANGE something, update the field "
+        f"in place.\n"
+        f"- If the instruction asks to make something 'more professional', "
+        f"'better', or similar qualitative requests, improve the language "
+        f"in the text fields (summary, key_findings, recommendations, "
+        f"slide content) while preserving factual content.\n"
+        f"- Return ONLY the JSON object (no markdown fences, no explanation).\n"
+        f"- If you truly cannot interpret the instruction, return the "
+        f"original JSON unchanged.\n\n"
+        f"=== Current Payload ({artifact_type}) ===\n"
+        f"{current_json}\n\n"
+        f"=== Edit Instruction ===\n"
+        f"{instructions}"
+    )
+
+    overrides_block = ""
+    if direct_overrides and isinstance(direct_overrides, dict):
+        overrides_block = (
+            "\n\n=== Direct Overrides (apply last, highest priority) ===\n"
+            + _json.dumps(direct_overrides, ensure_ascii=False, indent=2, default=str)
+        )
+        system_prompt += overrides_block
+
+    try:
+        result = call_llm(
+            prompt=system_prompt,
+            messages=[],
+            temperature=0.2,  # Low temperature for precise edits
+        )
+        response_text = (result.get("response") or "").strip()
+
+        # Strip markdown fence if present
+        if response_text.startswith("```"):
+            lines = response_text.split("\n")
+            # Remove opening fence
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            # Remove closing fence
+            if lines and lines[-1].strip() == "```":
+                lines = lines[:-1]
+            response_text = "\n".join(lines).strip()
+
+        modified = _json.loads(response_text)
+        if isinstance(modified, dict) and modified:
+            return modified
+        else:
+            logger.warning("edit_artifact LLM returned non-dict, falling back to original")
+            return dict(current_payload)
+    except Exception as e:
+        logger.warning("edit_artifact LLM call failed (non-fatal): %s", e)
+        # Fall back: merge direct overrides if provided, else return original
+        if direct_overrides and isinstance(direct_overrides, dict):
+            fallback = dict(current_payload)
+            _deep_merge(fallback, direct_overrides)
+            return fallback
+        return dict(current_payload)
+
+
+def _summarise_changes(original: dict, modified: dict, instructions: str) -> str:
+    """Produce a human-readable change summary for the agent's response."""
+    if not instructions:
+        return "Payload overrides applied."
+    # Compact: detect which top-level keys changed
+    changed_keys = []
+    all_keys = set(list(original.keys()) + list(modified.keys()))
+    for k in sorted(all_keys):
+        if k in ("generated_at", "rcp", "report_card_payload"):
+            continue
+        ov = original.get(k)
+        mv = modified.get(k)
+        if ov != mv:
+            if isinstance(ov, list) and isinstance(mv, list) and len(mv) != len(ov):
+                changed_keys.append(f"{k} ({len(ov)}→{len(mv)} items)")
+            else:
+                changed_keys.append(k)
+    if changed_keys:
+        return f"Edited: {', '.join(changed_keys[:5])}"
+    return f"Applied: {instructions[:80]}"
+
+
+# --- Schema ---
+
+EDIT_ARTIFACT_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "edit_artifact",
+        "description": (
+            "Refine an existing artifact (document, presentation, report) "
+            "using natural-language instructions. Use this when the user "
+            "wants to modify content they already generated — e.g. 'make "
+            "the title bolder', 'add a summary slide', 'change the KPI "
+            "headline to Q3 results', 'make it more professional'. "
+            "The tool loads the current payload, applies your edit via the "
+            "LLM, re-renders the file, and returns the updated version. "
+            "Always call this instead of create_artifact when refining an "
+            "existing document."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "artifact_id": {
+                    "type": "string",
+                    "description": "The ID of the existing artifact to edit.",
+                },
+                "instructions": {
+                    "type": "string",
+                    "description": (
+                        "Natural-language description of what to change. "
+                        "Be specific: mention which slide, which KPI, or "
+                        "which section to modify. Qualitative instructions "
+                        "('make it more professional', 'improve the flow') "
+                        "are also supported — the LLM will interpret them."
+                    ),
+                },
+                "title": {
+                    "type": "string",
+                    "description": "Optional new title for the artifact (changes the file name too).",
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["docx", "pdf", "pptx", "html"],
+                    "description": "Optional target format (converts the artifact if different from current).",
+                },
+                "payload": {
+                    "type": "object",
+                    "description": (
+                        "Optional direct key-value overrides (shortcut for "
+                        "simple changes like renaming a KPI label). When "
+                        "instructions is also provided, overrides merge in "
+                        "after the LLM interpretation."
+                    ),
+                },
+            },
+            "required": ["artifact_id", "instructions"],
+        },
+    },
+}
+
+# Register the tool
+registry.register(
+    name="edit_artifact",
+    schema=EDIT_ARTIFACT_SCHEMA,
+    handler=_edit_artifact_tool,
+    category="artifacts",
+    toolset="artifacts",
+    description="Refine an existing document (pptx, docx, pdf, html) with natural-language instructions.",
+    emoji="✏️",
+    max_result_size_chars=3_000,
 )

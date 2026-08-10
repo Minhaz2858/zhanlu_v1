@@ -151,10 +151,14 @@ Respond with ONLY a JSON array."""
         if is_followup:
             followup_rules = (
                 "\nFollow-up rules (this turn refines a prior artifact):\n"
-                f"- Refine artifact id={refines_id} from the conversation; do NOT re-query data "
-                "unless the user explicitly asks for new/different data.\n"
+                f"- Refine artifact id={refines_id} from the conversation using the "
+                "``edit_artifact`` tool (NOT create_artifact).\n"
+                "- Do NOT re-query data unless the user explicitly asks for "
+                "new/different data.\n"
                 "- Inherit entities from the prior turn (already merged into the task spec).\n"
                 "- Keep the plan minimal: only the steps needed to update the artifact.\n"
+                "- The edit_artifact tool accepts: artifact_id, instructions, "
+                "and optional title/format/payload overrides.\n"
             )
         system_prompt = f"""Create an execution plan for the following task.
 
@@ -321,6 +325,50 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
     )
     _entities = task_spec.get("entities", {}) or {}
     _report_title = _entities.get("report_title")
+
+    # ── Follow-up artifact edit (Phase 4: chat-based refinement) ──────────
+    # When the user is refining an existing artifact (is_followup +
+    # refines_artifact_id), emit an edit_artifact tool node.  The planner
+    # prompt also receives the follow-up rules block (see generate_plan)
+    # so the LLM planner can do the same when enabled, but the curated
+    # default path must handle this explicitly.
+    is_followup = task_spec.get("is_followup", False)
+    refines_artifact_id = task_spec.get("refines_artifact_id")
+    if is_followup and refines_artifact_id:
+        # Determine the artifact type from context
+        artifact_type = (
+            (artifact_intents[0] if artifact_intents else None)
+            or task_spec.get("previous_artifact_type")
+            or "pptx"
+        )
+        # If user is also asking for fresh data, prepend a data step
+        if requires_data:
+            steps.append({
+                "node_type": "nl2sql",
+                "name": "Retrieve updated data",
+                "description": "Query the datasource for updated data to feed into the edit",
+                "dependencies": [],
+                "expected_output": "DataSnapshot",
+                "inputs": {"question": _question},
+            })
+        # Emit the edit step
+        steps.append({
+            "node_type": "tool",
+            "name": f"Edit {artifact_type} artifact",
+            "description": (
+                f"Refine artifact id={refines_artifact_id} "
+                f"based on user instruction"
+            ),
+            "tool_name": "edit_artifact",
+            "dependencies": [len(steps) - 1] if steps else [],
+            "expected_output": f"Updated {artifact_type} artifact",
+            "output_artifact_type": artifact_type,
+            "inputs": {
+                "artifact_id": str(refines_artifact_id),
+                "instructions": _question,
+            },
+        })
+        return steps
 
     # ── Forced skill (post-router hook strong match) ──────────────────────
     # When the post-router hook fires, the plan MUST begin with a skill

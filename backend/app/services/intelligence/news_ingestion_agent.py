@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional, Callable
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -53,7 +53,7 @@ class NewsIngestionAgent:
     async def run_news_cycle(self, trigger: str = "scheduled") -> dict[str, Any]:
         """Run one news ingestion cycle. Returns a status report."""
         start_time = time.time()
-        started_at = datetime.utcnow().isoformat()
+        started_at = datetime.now(timezone.utc).isoformat()
 
         await self._registry.upsert_ingestion_status(
             self._agent_name,
@@ -93,7 +93,7 @@ class NewsIngestionAgent:
                     logger.debug("Article extraction failed: %s", e)
 
             elapsed_ms = (time.time() - start_time) * 1000
-            completed_at = datetime.utcnow().isoformat()
+            completed_at = datetime.now(timezone.utc).isoformat()
 
             status = {
                 "running": False,
@@ -133,7 +133,7 @@ class NewsIngestionAgent:
                 self._agent_name,
                 {
                     "running": False, "cycle_in_progress": False,
-                    "last_completed_at": datetime.utcnow().isoformat(),
+                    "last_completed_at": datetime.now(timezone.utc).isoformat(),
                     "last_error": error_msg,
                     "last_cycle_duration_ms": round(elapsed_ms, 1),
                 },

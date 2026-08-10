@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -173,7 +173,7 @@ def find_stale_skills(
 ) -> list[SkillInfo]:
     """Find skills that haven't been used in ``stale_days`` days."""
     skills = _load_skills(db)
-    cutoff = datetime.utcnow() - timedelta(days=stale_days)
+    cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
 
     stale: list[SkillInfo] = []
     for s in skills:

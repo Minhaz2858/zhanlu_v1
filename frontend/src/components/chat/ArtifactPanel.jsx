@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { X, Save, CheckCircle2, Loader2, Download } from 'lucide-react';
+import { X, Save, CheckCircle2, Loader2, Download, AlertCircle } from 'lucide-react';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ArtifactPreview from './ArtifactPreview';
@@ -15,6 +15,19 @@ const ENTITY_MAP = {
 
 export default function ArtifactPanel({ result, onClose, onSaved, sessionId }) {
   const { t } = useLanguage();
+
+  // Guard against null/undefined result — parent may pass falsy during loading
+  if (!result) {
+    return (
+      <div className="flex h-full items-center justify-center p-6">
+        <div className="text-center">
+          <Loader2 className="mx-auto h-6 w-6 animate-spin text-muted-foreground" />
+          <p className="mt-2 text-sm text-muted-foreground">{t.chat?.loading || 'Loading...'}</p>
+        </div>
+      </div>
+    );
+  }
+
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(!result.draft);
   const [savedId, setSavedId] = useState(result.id);

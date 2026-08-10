@@ -108,6 +108,34 @@ class MySQLConnector:
                 return [row_to_dict(columns, tuple(r)) for r in rows]
             return [{"affected_rows": result.rowcount}]
 
+    def get_foreign_keys(self, table: str) -> list[dict]:
+        """Return FK constraints for a table.
+
+        Returns:
+            [{"column": "product_id", "ref_table": "products",
+              "ref_schema": "aipdp", "ref_column": "id"}, ...]
+        """
+        assert self._engine is not None
+        sql = text(
+            "SELECT kcu.COLUMN_NAME, kcu.REFERENCED_TABLE_SCHEMA, "
+            "       kcu.REFERENCED_TABLE_NAME, kcu.REFERENCED_COLUMN_NAME "
+            "FROM information_schema.KEY_COLUMN_USAGE kcu "
+            "WHERE kcu.TABLE_SCHEMA = DATABASE() "
+            "  AND kcu.TABLE_NAME = :t "
+            "  AND kcu.REFERENCED_TABLE_NAME IS NOT NULL"
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"t": table}).fetchall()
+        return [
+            {
+                "column": r[0],
+                "ref_schema": r[1] or "",
+                "ref_table": r[2],
+                "ref_column": r[3],
+            }
+            for r in rows
+        ]
+
     def test_connection(self) -> dict:
         try:
             with self:

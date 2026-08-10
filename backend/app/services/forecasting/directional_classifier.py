@@ -13,7 +13,8 @@ overfits noise (large N). A binomial test at alpha=0.01 controls the
 false-positive rate regardless of N.
 
 Features: recent returns, momentum (7/14d), volatility, calendar month,
-optional exogenous signals (naphtha delta).
+optional exogenous signals (naphtha delta, warehouse production, inventory,
+supplier dispersion).
 """
 from __future__ import annotations
 
@@ -65,9 +66,28 @@ def build_features(y: pd.Series, exog: pd.DataFrame | None = None) -> pd.DataFra
         df["month"] = np.array([getattr(idx, "month", 1) for idx in y.index])
     else:
         df["month"] = 1
-    if exog is not None and "naphtha_delta" in exog:
-        df["naphtha_delta"] = exog["naphtha_delta"].values[:len(df)]
-    return df.fillna(0.0)
+    # --- Exogenous signals (merge all columns from exog DataFrame) ---
+    if exog is not None:
+        _exog_df = exog.copy()
+        # If exog has DatetimeIndex, keep first N rows matching price length
+        if hasattr(_exog_df.index, "freq") or isinstance(
+            _exog_df.index, pd.DatetimeIndex,
+        ):
+            if len(_exog_df) > len(df):
+                _exog_df = _exog_df.iloc[:len(df)]
+        else:
+            # Default RangeIndex: ensure same length
+            if len(_exog_df) > len(df):
+                _exog_df = _exog_df.iloc[:len(df)]
+        # Align: if exog is shorter, pad with NaN; if longer, trim
+        if len(_exog_df) < len(df):
+            _exog_df = _exog_df.reindex(range(len(df)))
+        for col in _exog_df.columns:
+            if col not in df.columns:
+                df[col] = _exog_df[col].values
+    # Replace inf/-inf (from pct_change on near-zero values) before fillna
+    df = df.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    return df
 
 
 class DirectionalClassifier:

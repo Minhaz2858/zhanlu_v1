@@ -415,11 +415,11 @@ def append_run_summary(
     summary: str,
 ) -> None:
     """Append a compact ledger entry for one run, trimming old entries."""
-    from datetime import datetime
+    from datetime import datetime, timezone
     msgs = list(conv.messages or [])
     msgs.append({
         "role": "assistant",
-        "content": f"[run {run_id} @ {datetime.utcnow().isoformat()}] "
+        "content": f"[run {run_id} @ {datetime.now(timezone.utc).isoformat()}] "
                     f"status: {status} | {summary[:500]}",
     })
     # Trim to the most recent N entries (keep the system message at index 0).

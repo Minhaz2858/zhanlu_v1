@@ -4,24 +4,29 @@
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
+    /* Light theme — kept a *very* subtle warm tint (≈1/10 of the original
+       40°/30%+saturation palette) so the surface still feels like warm
+       "off-white" paper rather than flat pure-white. The user reported the
+       earlier neutral 0 0% 100% felt too clinical — this restores a hint
+       of cream without going back to the strong yellow-cream look. */
+    --background: 40 3% 99%;
     --foreground: 220 14% 10%;
     --card: 0 0% 100%;
     --card-foreground: 220 14% 10%;
-    --popover: 0 0% 100%;
+    --popover: 40 3% 99%;
     --popover-foreground: 220 14% 10%;
     --primary: 25 65% 46%;
     --primary-foreground: 40 33% 97%;
-    --secondary: 220 14% 96%;
+    --secondary: 40 2% 97%;
     --secondary-foreground: 220 14% 10%;
-    --muted: 220 14% 96%;
+    --muted: 40 2% 97%;
     --muted-foreground: 220 9% 44%;
-    --accent: 220 14% 94%;
+    --accent: 40 3% 96%;
     --accent-foreground: 25 65% 40%;
     --destructive: 0 70% 50%;
     --destructive-foreground: 40 33% 97%;
-    --border: 220 13% 91%;
-    --input: 220 13% 91%;
+    --border: 34 2% 91%;
+    --input: 34 2% 91%;
     --ring: 25 65% 46%;
     --chart-1: 25 65% 46%;
     --chart-2: 160 35% 40%;
@@ -33,13 +38,13 @@
     --font-body: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
     --font-display: Georgia, Cambria, 'Times New Roman', Times, serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
-    --sidebar-background: 0 0% 100%;
+    --sidebar-background: 40 3% 98%;
     --sidebar-foreground: 220 14% 14%;
     --sidebar-primary: 25 65% 46%;
     --sidebar-primary-foreground: 40 33% 97%;
-    --sidebar-accent: 220 14% 96%;
+    --sidebar-accent: 40 3% 96%;
     --sidebar-accent-foreground: 25 65% 40%;
-    --sidebar-border: 220 13% 91%;
+    --sidebar-border: 34 2% 91%;
     --sidebar-ring: 25 65% 46%;
   }
 
@@ -108,6 +113,14 @@
   }
 }
 
+/* ── Scrollbar: hidden by default, revealed on hover ────────────
+   Keeps the UI clean by default; the thumb only appears while the
+   pointer is over a scrollable container. The wheel/keyboard still
+   scrolls, so hiding the bar never disables scrolling. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
@@ -116,17 +129,26 @@
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: hsl(220 13% 84%);
+  background: transparent;
   border-radius: 4px;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: hsl(220 13% 74%);
+*:hover::-webkit-scrollbar-thumb {
+  background: hsl(34 2% 86%);
 }
-.dark ::-webkit-scrollbar-thumb {
+*:hover::-webkit-scrollbar-thumb:hover {
+  background: hsl(34 2% 76%);
+}
+.dark *:hover::-webkit-scrollbar-thumb {
   background: hsl(0 0% 22%);
 }
-.dark ::-webkit-scrollbar-thumb:hover {
+.dark *:hover::-webkit-scrollbar-thumb:hover {
   background: hsl(0 0% 30%);
+}
+*:hover {
+  scrollbar-color: hsl(34 2% 86%) transparent;
+}
+.dark *:hover {
+  scrollbar-color: hsl(0 0% 22%) transparent;
 }
 
 /* ── Market Dashboard Overview (ported from EDIA_5.1.2) ───────
@@ -217,6 +239,30 @@ html.dark .overview-regional-internal {
 html.dark .overview-regional-internal .font-semibold,
 html.dark .overview-regional-internal .font-semibold.text-foreground {
   color: hsl(0 0% 92%) !important; /* light text on dark gray in dark mode */
+}
+
+/* ── Overview export mode ──────────────────────────────────
+   html2canvas clones the captured element into an isolated iframe,
+   which loses the parent flex context and responsive media queries.
+   `.overview-export-mode` is added temporarily by handleExport()
+   during PNG/PDF capture to force the desktop layout:
+   sidebar visible + 3-column grids. */
+
+.overview-export-mode {
+  overflow: visible !important;
+}
+
+.overview-export-mode aside {
+  display: flex !important;
+  width: 168px !important;
+  position: static !important;
+  max-height: none !important;
+  align-self: auto !important;
+}
+
+.overview-export-mode [data-overview-grid='3col'] {
+  display: grid !important;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) !important;
 }
 
 /* ── Mobile safe-area helpers ─────────────────────────────

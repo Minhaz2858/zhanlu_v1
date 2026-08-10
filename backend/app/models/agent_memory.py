@@ -16,6 +16,19 @@ class AgentMemory(TimestampedBase):
 
     agent_app_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
     user_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    # Project scope (2026-08-05). When set, the memory row is recalled
+    # only when the active conversation's project_id matches this
+    # value. NULL = legacy cross-project (no project at write time)
+    # or the explicit "user profile" rows (target='user' is always
+    # cross-project — it's about WHO the user is, not what they did
+    # in a specific project). The Q2 2026 sales report leak that
+    # surfaced when users opened convs in different projects was
+    # because this column didn't exist; legacy rows therefore always
+    # matched the by-user filter and got injected into every
+    # conversation's system prompt. Going forward, the memory tool
+    # stamps the active project's id at write time so a note taken
+    # in "Data Analysis" stays inside that project.
+    project_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     target: Mapped[str] = mapped_column(String(20), nullable=False)  # "memory" or "user"
     content: Mapped[str] = mapped_column(Text, nullable=False)
     char_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

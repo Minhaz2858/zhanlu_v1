@@ -18,7 +18,7 @@ export default function SkillCard({ skill, isInstalled, onInstall, onOpenDetail 
     <div className="group relative flex flex-col rounded-xl border border-border bg-card p-4 transition hover:border-foreground/30">
       <div className="flex items-start justify-between gap-2">
         <h3
-          className="cursor-pointer text-sm font-semibold text-foreground hover:text-primary"
+          className="min-w-0 flex-1 cursor-pointer break-words text-sm font-semibold text-foreground hover:text-primary"
           onClick={() => onOpenDetail?.(skill)}
         >
           {skill.display_name || skill.name}
@@ -28,7 +28,7 @@ export default function SkillCard({ skill, isInstalled, onInstall, onOpenDetail 
         </span>
       </div>
 
-      <p className="mt-1 line-clamp-2 text-xs text-muted-foreground">{skill.description}</p>
+      <p className="mt-1 break-words line-clamp-2 text-xs text-muted-foreground">{skill.description}</p>
 
       {tags.length > 0 && (
         <div className="mt-2 flex flex-wrap gap-1">

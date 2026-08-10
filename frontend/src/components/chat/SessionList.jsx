@@ -157,15 +157,14 @@ export default function SessionList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
-  // When the user selects a project (via dropdown, sidebar "+", or the
-  // + menu), automatically expand that project and collapse all others.
-  // This keeps the sidebar focused on the currently-relevant project's
-  // recent chats and avoids visual noise from every group being open.
+  // All groups default to collapsed (including the current project), so
+  // the sidebar shows a clean, scannable header list instead of a wall of
+  // sessions. The user can expand any group manually via its header —
+  // that manual state is kept until the group set actually changes.
   useEffect(() => {
     if (!currentProject) return;
-    // Build a "collapsed" map where every known group is collapsed
-    // EXCEPT the current project. Done inside this effect to keep
-    // the closure over `groups` accurate.
+    // Build a "collapsed" map where every known group is collapsed.
+    // Done inside this effect to keep the closure over `groups` accurate.
     setCollapsed((prev) => {
       // groups is defined below via useMemo; recompute the same key set
       // here without depending on the memo (to avoid an init-order
@@ -184,13 +183,13 @@ export default function SessionList() {
       const keys = Object.keys(map);
       const next = {};
       keys.forEach((k) => {
-        if (k !== currentProject) next[k] = true;
+        next[k] = true;
       });
       // Only update state if something actually changed to avoid
       // pointless re-renders.
       const changed = keys.some((k) => {
         const wasCollapsed = !!prev[k];
-        const shouldBeCollapsed = k !== currentProject;
+        const shouldBeCollapsed = true;
         return wasCollapsed !== shouldBeCollapsed;
       });
       return changed ? next : prev;
@@ -350,11 +349,11 @@ export default function SessionList() {
           {menuOpen && (
             <div onMouseDown={(e) => e.stopPropagation()} className="absolute left-0 right-7 top-full z-20 mt-1 rounded-md border border-border bg-popover py-1 shadow-md">
               {groups.map((g) => (
-                <button key={g.project} onClick={() => { setPendingProject(g.project, projectIdsByName[g.project] || null); setMenuOpen(false); }} className={`flex w-full items-center gap-1.5 px-3 py-1.5 text-xs transition-colors hover:bg-secondary ${currentProject === g.project ? 'text-primary' : 'text-foreground'}`}>
-                  <Folder className="h-3 w-3" />
+                <button key={g.project} onClick={() => { setPendingProject(g.project, projectIdsByName[g.project] || null); setMenuOpen(false); }} className={`flex w-full min-w-0 items-center gap-1.5 px-3 py-1.5 text-xs transition-colors hover:bg-secondary ${currentProject === g.project ? 'text-primary' : 'text-foreground'}`}>
+                  <Folder className="h-3 w-3 shrink-0" />
                   {/* Project name only — the session count was removed
                       here too to match the sidebar group headers. */}
-                  <span className="flex-1 text-left">{g.project}</span>
+                  <span className="min-w-0 flex-1 truncate text-left">{g.project}</span>
                 </button>
               ))}
               <div className="my-1 border-t border-border" />

@@ -101,6 +101,7 @@ class SwarmRuntime:
         user_id: str | None = None,
         member_name: str | None = None,
         max_iterations: int = 8,
+        use_harness: bool | None = None,
     ) -> SwarmAgentResult:
         """Run a single agent on a task using the tool-calling loop.
 
@@ -118,11 +119,32 @@ class SwarmRuntime:
             member_name: Optional display name for the spawned member.
             max_iterations: Maximum tool-calling iterations before forcing
                 a final answer. Default 8.
+            use_harness: If True, delegate to AgentRunOrchestrator (P1 harness).
+                If None, reads AGENT_HARNESS_ENABLED from config.
 
         Returns:
             A :class:`SwarmAgentResult` with the final response, the
             list of tool calls made, and a success flag.
         """
+        # ---- Harness path (P1 unified agent harness) ----
+        if use_harness is None:
+            try:
+                from app.config import settings
+                use_harness = settings.AGENT_HARNESS_ENABLED
+            except Exception:
+                use_harness = False
+
+        if use_harness:
+            return await self._run_via_harness(
+                agent_name=agent_name,
+                task=task,
+                llm_fn=llm_fn,
+                tool_dispatcher=tool_dispatcher,
+                db=db,
+                user_id=user_id,
+                member_name=member_name,
+                max_iterations=max_iterations,
+            )
         definition = self.resolve_agent(agent_name)
         if definition is None:
             return SwarmAgentResult(
@@ -210,6 +232,70 @@ class SwarmRuntime:
             final_response=final,
             success=False,
             error=f"max_iterations={max_iterations}",
+        )
+
+    async def _run_via_harness(
+        self,
+        *,
+        agent_name: str,
+        task: str,
+        llm_fn: Callable[[str, list[dict]], Awaitable[dict]],
+        tool_dispatcher: Callable[[str, dict, Any, str | None, dict | None], Awaitable[dict]],
+        db: Any = None,
+        user_id: str | None = None,
+        member_name: str | None = None,
+        max_iterations: int = 8,
+    ) -> SwarmAgentResult:
+        """Delegate the run to AgentRunOrchestrator (P1 harness)."""
+        definition = self.resolve_agent(agent_name)
+        if definition is None:
+            return SwarmAgentResult(
+                member_name=member_name or agent_name,
+                agent_name=agent_name,
+                task=task,
+                success=False,
+                error=f"Unknown agent: {agent_name}",
+            )
+
+        system_prompt = definition["system_prompt"]
+        allowed_tools = set(definition.get("tools") or [])
+        tool_names = sorted(allowed_tools)
+
+        # Bridge llm_fn: SwarmRuntime signature → orchestrator signature
+        async def _harness_llm(
+            messages: list[dict],
+            tools: list[dict] | None,
+            temperature: float,
+        ) -> dict:
+            raw = await llm_fn(system_prompt, messages)
+            return {
+                "content": raw.get("response", raw.get("content", "")),
+                "tool_calls": raw.get("tool_calls", []),
+            }
+
+        from app.services.harness.orchestrator import AgentRunOrchestrator
+
+        orch = AgentRunOrchestrator(
+            agent_name=agent_name,
+            task=task,
+            system_prompt=system_prompt,
+            tool_schemas=[],  # Swarm agents use their own tool schemas
+            allowed_tools=allowed_tools,
+            llm_fn=_harness_llm,
+            tool_dispatcher=tool_dispatcher,
+            db=db,
+            user_id=user_id,
+            max_iterations=max_iterations,
+        )
+        result = await orch.run()
+        return SwarmAgentResult(
+            member_name=member_name or agent_name,
+            agent_name=agent_name,
+            task=task,
+            final_response=result.answer,
+            tool_calls=result.tool_calls,
+            success=result.success,
+            error=result.error,
         )
 
 

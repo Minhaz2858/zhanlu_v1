@@ -36,7 +36,7 @@ def _to_naive_utc(dt: datetime) -> datetime:
     SQLite returns datetimes without tzinfo, but in-memory test objects may
     carry tzinfo. Normalizing to naive UTC makes every comparison and pandas
     index lookup safe (naive vs naive) and matches the codebase convention
-    (TimestampedBase defaults use ``datetime.utcnow()``).
+    (TimestampedBase defaults use ``datetime.now(timezone.utc)``).
     """
     if dt.tzinfo is not None:
         return dt.astimezone(timezone.utc).replace(tzinfo=None)
@@ -86,7 +86,7 @@ def run_evaluation(
     if actuals_loader is None:
         actuals_loader = _default_actuals_loader()
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     runs_scored = 0
     runs_skipped = 0
     feedback_scored = 0
@@ -142,7 +142,9 @@ def run_evaluation(
                 mape=md.get("ensemble_mape"),
                 naive_mape=md.get("naive_mape"),
                 realized_mape=res["mape"],
-                realized_error=res.get("mae"),
+                realized_error=res.get("signed_error"),
+                mae=res.get("mae"),
+                rmse=res.get("rmse"),
                 evaluated_at=now,
                 below_naive_baseline=run.below_naive_baseline,
                 per_model=None,  # marker: realized-eval row (backtest rows always set per_model)

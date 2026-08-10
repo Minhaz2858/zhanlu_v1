@@ -12,7 +12,7 @@ Key safety rules (from architecture docs):
 * Container runs with --network none --read-only --memory 1g --cap-drop ALL
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional
 
 from sqlalchemy import String, Integer, DateTime, Text, JSON, ForeignKey
@@ -95,7 +95,7 @@ class SandboxJobEvent(TimestampedBase):
     event_type: Mapped[str] = mapped_column(String(50), nullable=False)
     message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     data_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
 
     job: Mapped["SandboxJob"] = relationship(back_populates="events")
 
