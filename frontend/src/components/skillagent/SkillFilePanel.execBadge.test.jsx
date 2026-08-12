@@ -49,7 +49,7 @@ const SAMPLE_SKILL = {
 
 const SAMPLE_EXECUTIONS = [
   { id: 'e1', skill_name: 'data-analysis-report', action: 'execute', status: 'completed', duration_ms: 1200 },
-  { id: 'e2', skill_name: 'data-analysis-report', action: 'load', status: 'completed', duration_ms: 30 },
+  { id: 'e2', skill_name: 'data-analysis-report', action: 'load', status: 'completed', duration_ms: 30, skill_id: 'tool-123', skill_version: '1.0.0', body_length: 2048 },
   { id: 'e3', skill_name: 'data-analysis-report', action: 'load', status: 'failed', duration_ms: 50, error_message: 'timeout' },
 ];
 
@@ -77,6 +77,8 @@ describe('SkillFilePanel — execution evidence badge', () => {
     expect(screen.getByText('67% success')).toBeDefined();
     // Failed count
     expect(screen.getByText('1 failed')).toBeDefined();
+    expect(screen.getByText('avg load 40ms')).toBeDefined();
+    expect(screen.getByText('v1.0.0')).toBeDefined();
     // Last execution action (execs[0] = first in array = most recent = 'execute')
     expect(screen.getByText(/execute/)).toBeDefined();
   });

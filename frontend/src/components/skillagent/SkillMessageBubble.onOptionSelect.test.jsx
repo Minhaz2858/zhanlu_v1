@@ -59,6 +59,25 @@ describe('SkillMessageBubble.onOptionSelect wiring (2026-07-28 regression)', () 
   });
 });
 
+describe('SkillMessageBubble skill result card', () => {
+  it('recognizes skill create/update tool names', () => {
+    expect(SOURCE).toMatch(/function\s+isSkillMutationTool/);
+    expect(SOURCE).toMatch(/create_skill/);
+    expect(SOURCE).toMatch(/update_skill/);
+    expect(SOURCE).toMatch(/Tool\.create/);
+    expect(SOURCE).toMatch(/Tool\.update/);
+  });
+
+  it('renders a structured card from parsed skill mutation results', () => {
+    expect(SOURCE).toMatch(/function\s+SkillResultCard/);
+    expect(SOURCE).toMatch(/result\.id/);
+    expect(SOURCE).toMatch(/Skill created/);
+    expect(SOURCE).toMatch(/Skill updated/);
+    expect(SOURCE).toMatch(/SKILL\.md/);
+    expect(SOURCE).toMatch(/<SkillResultCard\s+result=\{parsedResults\}\s+toolName=\{name\}/);
+  });
+});
+
 describe('SkillAgent.jsx wires onOptionSelect to SkillMessageBubble', () => {
   const SKILL_AGENT_PATH = resolve(
     __dirname,

@@ -56,8 +56,9 @@ class _FakeQuery:
 
 
 class _FakeConv:
-    def __init__(self, messages):
+    def __init__(self, messages, dashboard_id=None):
         self.messages = messages
+        self.dashboard_id = dashboard_id
 
 
 class _FakeArtifact:
@@ -84,6 +85,9 @@ class _FakeDB:
 
     def query(self, model):
         name = getattr(model, "__name__", "")
+        key = getattr(model, "key", "")
+        if key == "dashboard_id":
+            return _FakeQuery(first_result=(self._conv.dashboard_id,) if self._conv and self._conv.dashboard_id else None)
         if name == "AgentConversation":
             return _FakeQuery(first_result=self._conv)
         if name == "Artifact":
@@ -125,6 +129,16 @@ class TestBuildConversationContext(unittest.TestCase):
         from app.services.synexia.context_assembler import build_conversation_context
 
         self.assertEqual(build_conversation_context(MagicMock(), None, "x"), {})
+
+    def test_includes_bound_dashboard_id(self):
+        from app.services.synexia.context_assembler import build_conversation_context
+
+        conv = _FakeConv(messages=[], dashboard_id="dash-1")
+        db = _FakeDB(conv=conv)
+
+        ctx = build_conversation_context(db, "conv-1", "data_analyst")
+
+        self.assertEqual(ctx["dashboard_id"], "dash-1")
 
     def test_non_fatal_on_db_error(self):
         from app.services.synexia.context_assembler import build_conversation_context
@@ -411,6 +425,25 @@ class TestIsFollowupRefinement(unittest.TestCase):
         from app.services.planning_trigger import is_followup_refinement
 
         self.assertFalse(is_followup_refinement("hello how are you today", _refinement_ctx()))
+
+    def test_true_for_dashboard_breakdown_when_dashboard_is_bound(self):
+        from app.services.planning_trigger import is_followup_refinement
+
+        ctx = {
+            "transcript": "User: make a weekly sales dashboard\nAssistant: Created Weekly Sales Dashboard",
+            "recent_artifacts": [],
+            "dashboard_id": "dash-1",
+        }
+        self.assertTrue(is_followup_refinement("Customer breakdown", ctx))
+
+    def test_false_for_dashboard_breakdown_without_bound_dashboard(self):
+        from app.services.planning_trigger import is_followup_refinement
+
+        ctx = {
+            "transcript": "User: what are top customers?\nAssistant: Here is a table",
+            "recent_artifacts": [],
+        }
+        self.assertFalse(is_followup_refinement("Customer breakdown", ctx))
 
     def test_word_boundary_precision(self):
         """'edit' contains 'it' but must NOT match — cues are word-boundary matched."""

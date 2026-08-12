@@ -57,6 +57,8 @@ RUNTIME_ENABLED_TOOLS = [
     "skill_usage", "Skill", "load_skill_body",
     # Delegation / artifacts / notify
     "delegate_task", "create_artifact", "send_message",
+    # Dashboard creation (required for scheduled dashboard/report tasks)
+    "create_dashboard", "update_dashboard", "uiux_design_system",
     # Security
     "osv_check", "tirith_security",
     # Interactive control-flow (granted as-is per parity decision; in
@@ -95,7 +97,7 @@ def _runtime_base_harness() -> dict:
         "data_bindings": [],
         "skill_bindings": [],
         "output_contract": {
-            "allowed_artifact_types": ["markdown", "json", "csv", "text", "docx", "pdf", "pptx", "html"],
+            "allowed_artifact_types": ["markdown", "json", "csv", "text", "docx", "pdf", "pptx", "html", "dashboard"],
             "must_include_sources": True,
             "citation_format": "inline",
             "max_response_length": 8192,
@@ -137,6 +139,7 @@ def _runtime_manifest() -> dict:
         "task_scope": [
             "scheduled_automation_execution", "report_generation", "data_read",
             "web_search", "code_execution", "file_operations", "delegation",
+            "dashboard_creation", "dashboard_editing",
         ],
         "boundaries": {
             "allowed": [t for t in RUNTIME_ENABLED_TOOLS if t not in _FORBIDDEN_TOOLS],
@@ -165,7 +168,8 @@ _RUNTIME_SYSTEM_PROMPT = (
     "load_skill_body), task delegation (delegate_task, ask_data_agent), data "
     "query (list_knowledge_bases, list_data_sources, describe_schema, "
     "execute_query, answer_from_database), artifact creation (create_artifact), "
-    "chat notification (send_message), security checks (osv_check, "
+    "dashboard creation and editing (create_dashboard, update_dashboard, "
+    "uiux_design_system), chat notification (send_message), security checks (osv_check, "
     "tirith_security), interactive control-flow tools (clarify, "
     "slash_confirm, approval, interrupt, checkpoint_manager), and the ability "
     "to trigger the user's own automation tasks (execute_automation).\n\n"
@@ -214,6 +218,7 @@ def _runtime_agent_fields() -> dict:
         "capabilities": [
             "automation_execution", "report_generation", "web_search",
             "code_execution", "file_operations", "delegation", "memory",
+            "dashboard_creation", "dashboard_editing",
         ],
         "tool_config": _runtime_tool_config(),
         "manifest_json": _runtime_manifest(),

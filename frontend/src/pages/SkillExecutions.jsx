@@ -9,13 +9,7 @@ const STATUS_CONFIG = {
   timeout: { icon: Clock, color: 'text-amber-400', bg: 'bg-amber-500/10', border: 'border-amber-500/20', label: 'Timeout' },
 };
 
-function formatTimestamp(ts) {
-  if (!ts) return '—';
-  try {
-    const d = new Date(ts);
-    return d.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' });
-  } catch { return ts; }
-}
+import { formatShortDateTime } from '@/lib/time';
 
 function formatDuration(ms) {
   if (ms == null) return '—';
@@ -32,12 +26,18 @@ export default function SkillExecutions() {
   const [selected, setSelected] = useState(null);
   const [lastUpdated, setLastUpdated] = useState(null);
   const [total, setTotal] = useState(0);
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+
+  useEffect(() => {
+    const timer = setTimeout(() => setDebouncedSearch(search.trim()), 300);
+    return () => clearTimeout(timer);
+  }, [search]);
 
   const fetchData = useCallback(async () => {
     try {
       const params = {};
       if (statusFilter) params.status = statusFilter;
-      if (search.trim()) params.skill_name = search.trim();
+      if (debouncedSearch) params.skill_name = debouncedSearch;
       const data = await listExecutions({ ...params, limit: 100 });
       setExecutions(data.executions || []);
       setTotal(data.total || 0);
@@ -48,20 +48,18 @@ export default function SkillExecutions() {
       setLoading(false);
       setLastUpdated(new Date());
     }
-  }, [search, statusFilter]);
+  }, [debouncedSearch, statusFilter]);
 
-  // Initial load + auto-refresh every 30s
+  // Initial load + refresh when the debounced filters change.
   useEffect(() => {
     fetchData();
+  }, [fetchData]);
+
+  // Auto-refresh every 30s using the latest debounced filters.
+  useEffect(() => {
     const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
   }, [fetchData]);
-
-  // Debounce search
-  useEffect(() => {
-    const timer = setTimeout(() => { setLoading(true); fetchData(); }, 300);
-    return () => clearTimeout(timer);
-  }, [search, statusFilter]);
 
   const stats = {
     total: executions.length,
@@ -133,11 +131,10 @@ export default function SkillExecutions() {
             <button
               key={s || 'all'}
               onClick={() => setStatusFilter(s)}
-              className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${
-                statusFilter === s
+              className={`rounded-md px-2.5 py-1 text-xs font-medium transition ${statusFilter === s
                   ? 'bg-indigo-500 text-white'
                   : 'bg-slate-800/50 text-slate-400 hover:bg-slate-700'
-              }`}
+                }`}
             >
               {s ? s.charAt(0).toUpperCase() + s.slice(1) : 'All'}
             </button>
@@ -187,9 +184,8 @@ export default function SkillExecutions() {
                     <tr
                       key={exec.id}
                       onClick={() => setSelected(exec)}
-                      className={`cursor-pointer border-b border-slate-800/50 transition hover:bg-slate-800/40 ${
-                        isSelected ? 'bg-indigo-500/5' : ''
-                      }`}
+                      className={`cursor-pointer border-b border-slate-800/50 transition hover:bg-slate-800/40 ${isSelected ? 'bg-indigo-500/5' : ''
+                        }`}
                     >
                       <td className="px-4 py-2.5">
                         <span className="font-mono text-sm text-slate-200">{exec.skill_name}</span>
@@ -212,7 +208,7 @@ export default function SkillExecutions() {
                         <span className="text-xs text-slate-400">{formatDuration(exec.duration_ms)}</span>
                       </td>
                       <td className="px-4 py-2.5">
-                        <span className="text-xs text-slate-500">{formatTimestamp(exec.started_at || exec.created_date)}</span>
+                        <span className="text-xs text-slate-500">{formatShortDateTime(exec.started_at || exec.created_date)}</span>
                       </td>
                       <td className="px-2 py-2.5">
                         <ChevronRight className={`h-3.5 w-3.5 transition ${isSelected ? 'text-indigo-400' : 'text-slate-600'}`} />
@@ -242,12 +238,15 @@ export default function SkillExecutions() {
             </div>
             <div className="flex-1 overflow-y-auto p-4 space-y-4">
               <DetailField label="Skill Name" value={selected.skill_name} mono />
+              <DetailField label="Skill ID" value={selected.skill_id || '—'} mono />
+              <DetailField label="Skill Version" value={selected.skill_version || '—'} mono />
               <DetailField label="Agent" value={selected.agent_name} />
               <DetailField label="Action" value={selected.action} mono />
               <DetailField label="Status" value={selected.status} />
               <DetailField label="Duration" value={formatDuration(selected.duration_ms)} />
-              <DetailField label="Started" value={formatTimestamp(selected.started_at)} />
-              <DetailField label="Completed" value={formatTimestamp(selected.completed_at)} />
+              <DetailField label="Body Length" value={selected.body_length != null ? `${selected.body_length} chars` : '—'} />
+              <DetailField label="Started" value={formatShortDateTime(selected.started_at)} />
+              <DetailField label="Completed" value={formatShortDateTime(selected.completed_at)} />
               <DetailField label="Conversation ID" value={selected.conversation_id || '—'} mono />
               {selected.error_message && (
                 <div>

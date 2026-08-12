@@ -7,11 +7,7 @@ import InlineArtifactPreview from '@/components/chat/InlineArtifactPreview';
 import RunChecklist from './RunChecklist';
 import RunFailureActions from './RunFailureActions';
 import { authFetch } from '@/api/authFetch';
-
-function fmtTime(v) {
-  if (!v) return '—';
-  return new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
+import { formatShortDateTime } from '@/lib/time';
 
 function fmtDuration(seconds) {
   if (!seconds && seconds !== 0) return '—';
@@ -135,7 +131,7 @@ export default function ExecutionLogsList({ task, noLogsText, refreshKey }) {
                       <span className="text-[11px] text-muted-foreground">· {fmtDuration(entry.duration_seconds)}</span>
                     )}
                   </div>
-                  <span className="text-xs text-muted-foreground">{fmtTime(entry.started_at || entry.created_date)}</span>
+                  <span className="text-xs text-muted-foreground">{formatShortDateTime(entry.started_at || entry.created_date)}</span>
                 </div>
                 {entry.error && (
                   <p className="mt-1 text-xs text-red-700">{entry.error}</p>

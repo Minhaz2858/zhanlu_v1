@@ -32,6 +32,20 @@ vi.mock('@/components/chat/InlineArtifactPreview', () => ({ default: () => null 
 vi.mock('@/components/chat/PlanEditor', () => ({ default: () => null }));
 vi.mock('@/components/dashboard/DashboardCard', () => ({ default: () => null }));
 vi.mock('@/components/dashboard/DashboardPopup', () => ({ default: () => null }));
+vi.mock('sonner', () => ({ toast: { success: vi.fn(), error: vi.fn() } }));
+vi.mock('@/components/ui/tooltip', () => ({
+  TooltipProvider: ({ children }) => React.createElement('div', null, children),
+  Tooltip: ({ children }) => React.createElement('div', null, children),
+  TooltipTrigger: ({ children }) => children,
+  TooltipContent: () => null,
+}));
+vi.mock('@/components/ui/dropdown-menu', () => ({
+  DropdownMenu: ({ children }) => React.createElement('div', null, children),
+  DropdownMenuTrigger: ({ children }) => children,
+  DropdownMenuContent: ({ children }) => React.createElement('div', null, children),
+  DropdownMenuItem: ({ children, onClick }) => React.createElement('button', { onClick }, children),
+  DropdownMenuSeparator: () => null,
+}));
 
 // ---------------------------------------------------------------------------
 // Module under test (loaded after mocks)
@@ -65,45 +79,45 @@ describe('MessageBubble feedback buttons', () => {
 
   it('renders thumbs up/down on a finalized assistant message', () => {
     renderBubble({ message: makeMessage(), onFeedback: vi.fn() });
-    expect(screen.getByLabelText('Good answer')).toBeTruthy();
-    expect(screen.getByLabelText('Poor answer')).toBeTruthy();
+    expect(screen.getByLabelText('Like')).toBeTruthy();
+    expect(screen.getByLabelText('Dislike')).toBeTruthy();
   });
 
   it('does not render on user messages', () => {
     renderBubble({ message: makeMessage({ role: 'user' }), onFeedback: vi.fn() });
-    expect(screen.queryByLabelText('Good answer')).toBeNull();
-    expect(screen.queryByLabelText('Poor answer')).toBeNull();
+    expect(screen.queryByLabelText('Like')).toBeNull();
+    expect(screen.queryByLabelText('Dislike')).toBeNull();
   });
 
   it('does not render while streaming', () => {
     renderBubble({ message: makeMessage(), isStreaming: true, onFeedback: vi.fn() });
-    expect(screen.queryByLabelText('Good answer')).toBeNull();
-    expect(screen.queryByLabelText('Poor answer')).toBeNull();
+    expect(screen.queryByLabelText('Like')).toBeNull();
+    expect(screen.queryByLabelText('Dislike')).toBeNull();
   });
 
-  it('does not render without an onFeedback handler', () => {
+  it('does not render like/dislike without an onFeedback handler', () => {
     renderBubble({ message: makeMessage() });
-    expect(screen.queryByLabelText('Good answer')).toBeNull();
-    expect(screen.queryByLabelText('Poor answer')).toBeNull();
+    expect(screen.queryByLabelText('Like')).toBeNull();
+    expect(screen.queryByLabelText('Dislike')).toBeNull();
   });
 
   it('clicking thumbs up calls onFeedback with (id, 1)', () => {
     const onFeedback = vi.fn();
     renderBubble({ message: makeMessage(), onFeedback });
-    fireEvent.click(screen.getByLabelText('Good answer'));
+    fireEvent.click(screen.getByLabelText('Like'));
     expect(onFeedback).toHaveBeenCalledWith('m-1', 1);
   });
 
   it('clicking thumbs down calls onFeedback with (id, -1)', () => {
     const onFeedback = vi.fn();
     renderBubble({ message: makeMessage(), onFeedback });
-    fireEvent.click(screen.getByLabelText('Poor answer'));
+    fireEvent.click(screen.getByLabelText('Dislike'));
     expect(onFeedback).toHaveBeenCalledWith('m-1', -1);
   });
 
   it('applies selected state from feedbackRating (optimistic UI)', () => {
     const { rerender } = renderBubble({ message: makeMessage(), onFeedback: vi.fn(), feedbackRating: 1 });
-    expect(screen.getByLabelText('Good answer').className).toContain('text-green-600');
+    expect(screen.getByLabelText('Like').className).toContain('text-green-600');
     rerender(
       React.createElement(MessageBubble, {
         message: makeMessage(),
@@ -111,7 +125,13 @@ describe('MessageBubble feedback buttons', () => {
         feedbackRating: -1,
       }),
     );
-    expect(screen.getByLabelText('Poor answer').className).toContain('text-red-600');
+    expect(screen.getByLabelText('Dislike').className).toContain('text-red-600');
+  });
+
+  it('always renders copy and share buttons on finalized assistant messages', () => {
+    renderBubble({ message: makeMessage() });
+    expect(screen.getByLabelText('Copy')).toBeTruthy();
+    expect(screen.getByLabelText('Share')).toBeTruthy();
   });
 });
 

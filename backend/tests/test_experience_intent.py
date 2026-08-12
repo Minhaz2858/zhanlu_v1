@@ -1,6 +1,6 @@
 """Tests for the rule-based intent classifier (experience layer Phase A).
 
-Covers all six intent classes across Chinese and English questions.
+Covers all seven intent classes across Chinese and English questions.
 Pure function tests — no DB required.
 """
 
@@ -16,6 +16,7 @@ import pytest
 
 from app.services.experience_intent import (
     classify_question,
+    INTENT_WEEKLY_REPORT,
     INTENT_PRICE_REPORT,
     INTENT_MARKET_ANALYSIS,
     INTENT_FORECAST,
@@ -61,6 +62,31 @@ class TestClassifyMarketAnalysis:
         assert classify_question("analyze the market trend this week") == INTENT_MARKET_ANALYSIS
 
 
+class TestClassifyWeeklyReport:
+    def test_chinese_weekly_report(self):
+        assert classify_question("生成本周C5/C9周报") == INTENT_WEEKLY_REPORT
+
+    def test_chinese_weekly_report_short(self):
+        assert classify_question("生成周报") == INTENT_WEEKLY_REPORT
+
+    def test_chinese_weekly_report_write(self):
+        assert classify_question("写一份周度报告") == INTENT_WEEKLY_REPORT
+
+    def test_chinese_weekly_report_this_week(self):
+        assert classify_question("制作本周报告") == INTENT_WEEKLY_REPORT
+
+    def test_english_weekly_report(self):
+        assert classify_question("generate the weekly report for C5 products") == INTENT_WEEKLY_REPORT
+
+    def test_english_draft_weekly(self):
+        assert classify_question("produce weekly report for all products") == INTENT_WEEKLY_REPORT
+
+    def test_weekly_beats_market_on_mixed(self):
+        # "生成周报 with market data" — weekly_report keyword score may be lower
+        # but if both match, priority tie-break favors weekly_report
+        assert classify_question("生成带有市场数据的周报") == INTENT_WEEKLY_REPORT
+
+
 class TestClassifyForecast:
     def test_chinese_forecast(self):
         assert classify_question("预测下周苯乙烯价格走势") == INTENT_FORECAST
@@ -101,6 +127,14 @@ class TestClassifyConversational:
 
 
 class TestPriority:
+    def test_weekly_report_beats_comparison(self):
+        # "draft weekly report with 对比" → weekly_report outranks comparison
+        assert classify_question("写一份包含对比分析的周报") == INTENT_WEEKLY_REPORT
+
+    def test_weekly_report_beats_forecast(self):
+        # "weekly report with forecast" → weekly_report beats forecast
+        assert classify_question("生成包含预测的周报") == INTENT_WEEKLY_REPORT
+
     def test_forecast_beats_price(self):
         # "预测价格" contains both forecast + price keywords -> forecast wins
         assert classify_question("预测一下价格走势") == INTENT_FORECAST
@@ -114,8 +148,9 @@ class TestPriority:
         assert classify_question("你好，请问苯乙烯价格是多少") == INTENT_PRICE_REPORT
 
     def test_all_intents_exported(self):
-        assert len(INTENTS) == 6
+        assert len(INTENTS) == 7
         for intent in (
+            INTENT_WEEKLY_REPORT,
             INTENT_PRICE_REPORT,
             INTENT_MARKET_ANALYSIS,
             INTENT_FORECAST,

@@ -1,6 +1,16 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest';
-import { render, cleanup } from '@testing-library/react';
+import { render, cleanup, screen } from '@testing-library/react';
 import ArtifactPreviewPane from './ArtifactPreviewPane';
+
+const getDashboard = vi.fn();
+vi.mock('@/api/dashboards', () => ({
+  getDashboard: (...args) => getDashboard(...args),
+}));
+vi.mock('@/components/dashboard/DashboardViewer', () => ({
+  default: ({ dashboard }) => (
+    <div data-testid="live-dashboard-viewer">{dashboard.name}</div>
+  ),
+}));
 
 // Mock docx-preview so DocxBrowserRenderer's dynamic import resolves instantly
 vi.mock('docx-preview', () => ({
@@ -33,6 +43,33 @@ function mockFetchPdfOk() {
 }
 
 describe('ArtifactPreviewPane (artifact_source routing)', () => {
+  it('renders live dashboard artifacts with DashboardViewer', async () => {
+    getDashboard.mockResolvedValue({
+      id: 'dash-1',
+      name: 'Weekly Sales Dashboard',
+      definition: { widgets: [] },
+      refresh_interval_seconds: 60,
+      can_edit: true,
+    });
+
+    render(
+      <ArtifactPreviewPane
+        artifact={{
+          type: 'dashboard',
+          source: 'dashboard',
+          dashboard_id: 'dash-1',
+          title: 'Weekly Sales Dashboard',
+          live: true,
+          has_preview: true,
+        }}
+        onClose={() => { }}
+      />,
+    );
+
+    expect(await screen.findByTestId('live-dashboard-viewer')).toHaveTextContent('Weekly Sales Dashboard');
+    expect(getDashboard).toHaveBeenCalledWith('dash-1');
+  });
+
   it('routes an automation_file docx to the correct download URL (via file_url)', async () => {
     const artifact = {
       id: 'auto-file-uuid-123',
@@ -46,7 +83,7 @@ describe('ArtifactPreviewPane (artifact_source routing)', () => {
     };
     mockFetchPdfOk();
 
-    render(<ArtifactPreviewPane artifact={artifact} onClose={() => {}} />);
+    render(<ArtifactPreviewPane artifact={artifact} onClose={() => { }} />);
 
     await vi.waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalled();
@@ -74,7 +111,7 @@ describe('ArtifactPreviewPane (artifact_source routing)', () => {
     };
     mockFetchPdfOk();
 
-    render(<ArtifactPreviewPane artifact={artifact} onClose={() => {}} />);
+    render(<ArtifactPreviewPane artifact={artifact} onClose={() => { }} />);
 
     await vi.waitFor(() => {
       expect(globalThis.fetch).toHaveBeenCalled();

@@ -94,10 +94,42 @@ DEFAULT_CONTEXT_WINDOW = 128_000  # Conservative for DeepSeek/OpenAI models
 
 
 def get_context_window(model: str, *, context_window_tokens: int | None = None) -> int:
-    """Return the context window size for a model."""
+    """Return the context window size for a model.
+
+    Resolution order:
+      1. explicit ``context_window_tokens`` override,
+      2. the ``MODEL_CONTEXT_WINDOWS`` config map (per-model JSON, matched
+         by substring so ``"qwen3.5-27b-tools"`` matches a ``"qwen3.5-27b"``
+         entry) — this is how a locally-served model with a small
+         ``num_ctx`` (e.g. Ollama's default 8192) gets its REAL budget
+         instead of the 128k cloud default,
+      3. name-based heuristics,
+      4. ``DEFAULT_CONTEXT_WINDOW``.
+
+    Bug fix: previously ``MODEL_CONTEXT_WINDOWS`` was declared in config
+    but never read here, so a small local model always fell through to the
+    128k default — autocompact/prune never fired and the report-synthesis
+    LLM call overflowed the real context (empty automation reports).
+    """
     if context_window_tokens is not None and context_window_tokens > 0:
         return int(context_window_tokens)
     m = (model or "").lower()
+    # Config-driven per-model override (substring match, longest key first
+    # so a more specific model name wins over a generic family prefix).
+    try:
+        import json as _json
+        from app.config import settings as _settings
+        _raw = getattr(_settings, "MODEL_CONTEXT_WINDOWS", "") or ""
+        if _raw:
+            _table = _json.loads(_raw)
+            if isinstance(_table, dict):
+                for key in sorted(_table, key=len, reverse=True):
+                    if key and key.lower() in m:
+                        _val = int(_table[key])
+                        if _val > 0:
+                            return _val
+    except Exception:  # never let config parsing break context resolution
+        pass
     if "deepseek" in m:
         return 128_000
     if "gpt-4o" in m:
@@ -121,9 +153,23 @@ def get_autocompact_threshold(
     if auto_compact_threshold_tokens is not None and auto_compact_threshold_tokens > 0:
         return int(auto_compact_threshold_tokens)
     context_window = get_context_window(model, context_window_tokens=context_window_tokens)
-    reserved = min(MAX_OUTPUT_TOKENS_FOR_SUMMARY, 20_000)
+    # Scale the summary-reserve + buffer to the window. The flat 20k/13k
+    # constants assume a large cloud context; on a small local model
+    # (e.g. Ollama num_ctx=8192) they exceed the whole window and push the
+    # threshold negative, so autocompact NEVER fired and the next LLM call
+    # overflowed (empty report). Reserve ~25% for the summary output and a
+    # ~15% safety buffer, floored so tiny windows still compact early.
+    if context_window >= 64_000:
+        reserved = min(MAX_OUTPUT_TOKENS_FOR_SUMMARY, 20_000)
+        buffer = AUTOCOMPACT_BUFFER_TOKENS
+    else:
+        reserved = max(1_000, int(context_window * 0.25))
+        buffer = max(500, int(context_window * 0.15))
     effective = context_window - reserved
-    return effective - AUTOCOMPACT_BUFFER_TOKENS
+    threshold = effective - buffer
+    # Never let the threshold collapse to/below zero — compact once we cross
+    # ~60% of a small window so there is still room for the summary + reply.
+    return max(threshold, int(context_window * 0.5))
 
 
 def should_autocompact(

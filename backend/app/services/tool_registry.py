@@ -409,7 +409,8 @@ DEFAULT_TOOLS_BY_AGENT: dict[str, list[str]] = {
         "create_skill", "update_skill", "list_tools",
     ],
     "automation_agent": [
-        "create_automation", "update_automation", "list_knowledge_bases",
+        "create_automation", "update_automation", "execute_automation",
+        "list_knowledge_bases", "list_data_sources", "clarify",
     ],
     "general_assistant": [
         "web_search", "web_extract", "memory", "todo",
@@ -430,6 +431,9 @@ DEFAULT_TOOLS_BY_AGENT: dict[str, list[str]] = {
         # Phase 11: live dashboards — let the chat agent build live DB dashboards
         "create_dashboard",
         "update_dashboard",
+        "undo_dashboard_edit",
+        "uiux_search",
+        "uiux_design_system",
     ],
     # Phase 9 will expand this and add a "power_user" agent; kept in sync
     # via DEFAULT_POWER_USER_TOOLS in system_agents.py.
@@ -495,6 +499,9 @@ DEFAULT_USER_AGENT_TOOLS: list[str] = [
     "Skill",
     "create_dashboard",
     "update_dashboard",
+    "undo_dashboard_edit",
+    "uiux_search",
+    "uiux_design_system",
 ]
 
 

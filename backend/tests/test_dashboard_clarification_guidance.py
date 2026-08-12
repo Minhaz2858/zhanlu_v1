@@ -23,11 +23,23 @@ def test_skill_md_has_clarify_before_building():
         assert keyword in body, f"SKILL.md missing '{keyword}'"
 
 
+def test_skill_md_limits_exploration_and_requires_create_dashboard():
+    from pathlib import Path
+    p = Path(__file__).resolve().parents[1] / "skills" / "dashboard-generation" / "SKILL.md"
+    body = p.read_text(encoding="utf-8")
+    assert "Do not call `ask_data_agent` for dashboard creation" in body
+    assert "At most two exploratory `execute_query` calls" in body
+    assert "call `create_dashboard` before the tool loop budget is exhausted" in body
+
+
 def test_template_skill_md_has_clarify_before_building():
+    import pytest
     from pathlib import Path
     p = (Path(__file__).resolve().parents[1].parent
          / "docs" / "starter_templates" / "skill_library" / "system" / "visualization"
          / "dashboard-generation" / "SKILL.md")
+    if not p.exists():
+        pytest.skip("starter template dashboard-generation skill is not present in this checkout")
     body = p.read_text(encoding="utf-8").lower()
     assert "clarify before building" in body
 

@@ -82,8 +82,14 @@ from app.models.eval_result import EvalResult
 from app.models.prompt_ab_test import PromptABTest
 from app.models.agent_run import AgentRun
 from app.models.agent_run_step import AgentRunStep
+from app.models.alert import AlertLog
 from app.models.llm_model import LlmModel
-from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta, KBTableRelation
+from app.models.knowledge_catalog import (
+    KBTableMeta, KBColumnMeta, KBTableRelation,
+    ProjectEntity, ProjectEntityLink, ProjectCatalogOverlay,
+)
+from app.models.resource_registry import ResourceRegistry
+from app.models.report_recipe import ReportRecipe
 
 __all__ = [
     "TimestampedBase",
@@ -176,7 +182,4 @@ __all__ = [
     "AgentRunStep",
     "LlmModel",
     "ResponseCacheEntry",
-    "KBTableMeta",
-    "KBColumnMeta",
-    "KBTableRelation",
 ]

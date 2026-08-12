@@ -52,30 +52,25 @@ except OSError:
 
 # Image mapping by output format.
 #
-# Skill-driven formats (docx / pptx / xlsx / pdf) use the new unified
-# ``zhanlu-sandbox-skill:latest`` image, which bundles Node.js + the
-# docx-js / pptxgenjs npm packages alongside the Python document
-# libraries — the skill_driven_runner inside the container may either
-# invoke the LLM (skill-driven path) or fall back to the deterministic
-# generator, both of which need the same library set.
-#
-# HTML and MD don't benefit from skill-driven generation (an LLM call
-# to write HTML markup is wasteful when a deterministic template works
-# just as well), so they keep the lighter python image.
+# Deterministic office formats use the existing office/pptx images. The
+# separate ``zhanlu-sandbox-skill`` image is only for the optional slow
+# skill-driven runner, currently disabled by _SKILL_DRIVEN_FORMATS.
 _SKILL_DRIVEN_IMAGE = "zhanlu-sandbox-skill:latest"
 _IMAGE_BY_FORMAT = {
-    "xlsx": _SKILL_DRIVEN_IMAGE,
-    "pptx": _SKILL_DRIVEN_IMAGE,
+    "xlsx": "zhanlu-sandbox-office:latest",
+    "pptx": "zhanlu-sandbox-pptx:latest",
     "html": "zhanlu-sandbox-python:latest",
-    "pdf":  _SKILL_DRIVEN_IMAGE,
-    "docx": _SKILL_DRIVEN_IMAGE,
+    "pdf":  "zhanlu-sandbox-office:latest",
+    "docx": "zhanlu-sandbox-office:latest",
     "md":   "zhanlu-sandbox-python:latest",
 }
 
 # Formats where the C-Heavy skill-driven path is the primary generator.
-# These get the skill bundle (SKILL.md + companion docs) and the
-# LLM-equipped runner; HTML/MD stay on the deterministic utility path.
-_SKILL_DRIVEN_FORMATS = frozenset({"docx", "pptx", "xlsx", "pdf"})
+# Disabled in production for now: the LLM-equipped runner can exceed the
+# sandbox timeout for ordinary weekly reports. The deterministic runner still
+# receives synthesized summary/methodology/KPIs/recommendations and produces
+# reliable DOCX/PPTX/PDF/XLSX artifacts.
+_SKILL_DRIVEN_FORMATS = frozenset()
 
 
 def _format_supports_skill_driven(fmt: str) -> bool:
@@ -435,7 +430,7 @@ def run_sandbox_skill_sync(
                     asyncio.run,
                     _run_sandbox_skill(args, db, user_id, context),
                 )
-                return future.result(timeout=_MAX_POLL_SECONDS + 30)
+                return future.result(timeout=max(_MAX_POLL_SECONDS, _skill_driven_timeout()) + 30)
         return loop.run_until_complete(
             _run_sandbox_skill(args, db, user_id, context)
         )
@@ -666,8 +661,13 @@ async def _run_sandbox_skill(
     )
 
     # --- 5. Poll for completion ---
+    # Skill-driven document jobs can legitimately run longer than the
+    # historical 120s handler window. Poll for the job's own timeout plus a
+    # small grace period so we don't return "status running" while the worker
+    # is still rendering the artifact.
+    poll_limit = max(_MAX_POLL_SECONDS, int(job_timeout or 0) + 10)
     elapsed = 0.0
-    while elapsed < _MAX_POLL_SECONDS:
+    while elapsed < poll_limit:
         await asyncio.sleep(_POLL_INTERVAL_SECONDS)
         elapsed += _POLL_INTERVAL_SECONDS
 
@@ -687,14 +687,27 @@ async def _run_sandbox_skill(
         return {"success": False, "error": "Sandbox job disappeared during polling"}
 
     if final_job.status != "completed":
-        error_msg = final_job.error_message or f"Sandbox job ended with status '{final_job.status}'"
+        if final_job.status in ("queued", "running"):
+            error_msg = (
+                final_job.error_message
+                or f"Sandbox job is still {final_job.status} after {int(elapsed)}s "
+                f"(timeout window {poll_limit}s). The worker may still be rendering; job_id={job.id}."
+            )
+            try:
+                sandbox_service.update_job_status(job.id, "timeout", error_message=error_msg)
+                final_status = "timeout"
+            except Exception:
+                final_status = final_job.status
+        else:
+            error_msg = final_job.error_message or f"Sandbox job ended with status '{final_job.status}'"
+            final_status = final_job.status
         # Mark artifact version as failed
         artifact_service.mark_version_failed(version.id, error_msg)
         return {
             "success": False,
             "error": error_msg,
             "job_id": job.id,
-            "job_status": final_job.status,
+            "job_status": final_status,
             "artifact_id": artifact.id,
         }
 

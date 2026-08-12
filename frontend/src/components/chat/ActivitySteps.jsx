@@ -95,6 +95,10 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
   const totalCount = steps.length;
   const doneCount = steps.filter((s) => s.status === 'done').length;
   const failedCount = steps.filter((s) => s.status === 'failed').length;
+  const totalMs = steps.reduce((sum, s) => sum + (s.duration_ms || 0), 0);
+  const totalDurStr = totalMs >= 1000
+    ? `${(totalMs / 1000).toFixed(1)}s`
+    : totalMs > 0 ? `${totalMs}ms` : '';
 
   // Localized summary copy (matches TracePanel.jsx pattern: hardcoded lang ternary)
   const stepWord = isEn
@@ -103,8 +107,8 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
   const doneWord = isEn ? 'done' : '成功';
   const failedWord = isEn ? 'failed' : '失败';
   const summaryText = isEn
-    ? `${totalCount} ${stepWord} · ${doneCount} ${doneWord} · ${failedCount} ${failedWord}`
-    : `${totalCount} ${stepWord} · ${doneCount} ${doneWord} · ${failedCount} ${failedWord}`;
+    ? `${totalCount} ${stepWord} · ${doneCount} ${doneWord} · ${failedCount} ${failedWord}${totalDurStr ? ` · ${totalDurStr}` : ''}`
+    : `${totalCount} ${stepWord} · ${doneCount} ${doneWord} · ${failedCount} ${failedWord}${totalDurStr ? ` · ${totalDurStr}` : ''}`;
 
   const toggleStep = (num) =>
     setExpandedSteps((prev) => ({ ...prev, [num]: !prev[num] }));
@@ -211,6 +215,15 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
                   <span className="flex shrink-0 items-center">
                     <Icon className={`h-3.5 w-3.5 ${iconClass}`} />
                   </span>
+
+                  {/* Duration label — shows "X.Xs" when the step is done/failed */}
+                  {step.duration_ms != null && (isDone || isFailed) && (
+                    <span className="text-[10px] text-muted-foreground/50 shrink-0 tabular-nums">
+                      {step.duration_ms >= 1000
+                        ? `${(step.duration_ms / 1000).toFixed(1)}s`
+                        : `${step.duration_ms}ms`}
+                    </span>
+                  )}
 
                   {/* Detail tooltip (optional) */}
                   {step.detail && (

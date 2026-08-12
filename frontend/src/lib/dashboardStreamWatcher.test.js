@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { watchForDashboardEdits } from './dashboardStreamWatcher';
+import { dashboardArtifactFromToolCall, watchForDashboardEdits } from './dashboardStreamWatcher';
 
 // `onRefresh` is intentionally deferred via setTimeout(..., 0) so the panel can
 // mount + DashboardViewer's forwardRef can attach before the refresh fires.
@@ -81,6 +81,59 @@ describe('watchForDashboardEdits', () => {
     const toolCalls = [{ tool_name: 'update_dashboard', results: { id: 'd1' } }];
     expect(watchForDashboardEdits(toolCalls, 0, { onOpen, onRefresh })).toBe(1);
     expect(onOpen).toHaveBeenCalledTimes(1);
+    vi.runAllTimers();
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('builds a first-class live dashboard artifact from dashboard tool results', () => {
+    const toolCall = {
+      name: 'create_dashboard',
+      results: {
+        dashboard: { id: 'dash-1', name: 'Weekly Sales Dashboard' },
+        artifact: {
+          source: 'dashboard',
+          dashboard_id: 'dash-1',
+          title: 'Weekly Sales Dashboard',
+          datasource_name: 'aipdp_data_warehouse_prod',
+          widget_count: 7,
+        },
+      },
+    };
+
+    expect(dashboardArtifactFromToolCall(toolCall)).toEqual({
+      type: 'dashboard',
+      source: 'dashboard',
+      id: 'dash-1',
+      artifact_id: 'dash-1',
+      dashboard_id: 'dash-1',
+      title: 'Weekly Sales Dashboard',
+      file_name: 'Weekly Sales Dashboard',
+      datasource_name: 'aipdp_data_warehouse_prod',
+      widget_count: 7,
+      live: true,
+      has_preview: true,
+    });
+  });
+
+  it('opens live dashboard artifacts when an artifact handler is provided', () => {
+    const onArtifact = vi.fn();
+    const onRefresh = vi.fn();
+    const toolCalls = [{
+      name: 'update_dashboard',
+      results: {
+        dashboard: { id: 'dash-2', name: 'Customer Dashboard' },
+        artifact: { dashboard_id: 'dash-2', title: 'Customer Dashboard', widget_count: 8 },
+      },
+    }];
+
+    expect(watchForDashboardEdits(toolCalls, 0, { onArtifact, onRefresh })).toBe(1);
+    expect(onArtifact).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'dashboard',
+      source: 'dashboard',
+      dashboard_id: 'dash-2',
+      title: 'Customer Dashboard',
+      live: true,
+    }));
     vi.runAllTimers();
     expect(onRefresh).toHaveBeenCalledTimes(1);
   });

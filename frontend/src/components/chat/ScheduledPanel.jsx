@@ -6,6 +6,7 @@ import {
   Code2, Download, MoreVertical, ListChecks, MessageSquare,
 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { formatAbsoluteTime, formatRunDate, formatTimeOfDay } from '@/lib/time';
 import { authFetch } from '@/api/authFetch';
 import RunChecklist from '@/components/automation/RunChecklist';
 import RunFailureActions from '@/components/automation/RunFailureActions';
@@ -92,25 +93,6 @@ function formatRrule(rrule) {
   return rrule.length > 40 ? `${rrule.slice(0, 37)}…` : rrule;
 }
 
-function formatRunDate(iso) {
-  if (!iso) return '';
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  } catch {
-    return '';
-  }
-}
-
-function formatTimeOfDay(iso) {
-  if (!iso) return '';
-  try {
-    const d = new Date(iso);
-    return d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
-  } catch {
-    return '';
-  }
-}
 
 function fileCategory(file) {
   const ext = (file.file_type || '').toLowerCase().replace(/^\./, '');
@@ -359,7 +341,7 @@ export default function ScheduledPanel({ sessionId, focusExecutionId, onClose })
               <div className="flex items-center gap-2 text-muted-foreground">
                 <Clock className="h-3.5 w-3.5" aria-hidden="true" />
                 <span>
-                  {isEn ? 'Next run' : '下次运行'} · {new Date(nextRun).toLocaleString()}
+                  {isEn ? 'Next run' : '下次运行'} · {formatAbsoluteTime(nextRun)}
                 </span>
               </div>
             )}
@@ -443,7 +425,7 @@ export default function ScheduledPanel({ sessionId, focusExecutionId, onClose })
                       </span>
                       <div className="min-w-0 flex-1">
                         <div className="flex items-center gap-2 text-[11px] font-medium text-foreground">
-                          <span>{formatRunDate(ex.started_at || ex.completed_at)}</span>
+                          <span>{formatRunDate(ex.started_at || ex.completed_at, 'en')}</span>
                           <span className="text-muted-foreground">·</span>
                           <span className="text-muted-foreground">{formatTimeOfDay(ex.started_at || ex.completed_at)}</span>
                         </div>

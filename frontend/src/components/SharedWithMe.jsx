@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { authFetch } from '@/api/authFetch';
+import { formatDate } from '@/lib/time';
 import { Loader2, Share2, FolderKanban, Bot, Trash2 } from 'lucide-react';
 
 /**
@@ -76,7 +77,7 @@ export default function SharedWithMe() {
                   {s.resource_type}
                 </span>
                 <span className="text-xs text-muted-foreground">
-                  {s.created_date ? new Date(s.created_date).toLocaleDateString() : ''}
+                  {s.created_date ? formatDate(s.created_date) : ''}
                 </span>
               </div>
             </div>

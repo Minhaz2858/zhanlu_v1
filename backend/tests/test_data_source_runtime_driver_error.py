@@ -90,6 +90,40 @@ class TestExecuteQueryReturnsFriendlyError(unittest.TestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["error_kind"], "driver_missing")
 
+    def test_describe_schema_falls_back_when_semantic_catalog_is_empty(self):
+        """A catalog header with no tables is not useful schema; fall back
+        to live table listing so dashboard agents can continue."""
+        from app.services.tool_handlers.db_tools import _describe_schema
+
+        db = MagicMock()
+        args = {"data_source_id": "kb-1"}
+        context = {"data_source_id": "kb-1", "user_query": "sales dashboard"}
+
+        class FakeSchemaService:
+            def __init__(self, _db):
+                pass
+
+            def list_tables(self, kb_id):
+                return {"source": {"id": kb_id}, "tables": ["erp_v_sale_orderentry"]}
+
+        async def fake_link_schema(**_kwargs):
+            return {"slice_text": "-- Semantic catalog: relevant tables for this query\n"}
+
+        with patch("app.services.tool_handlers.db_tools._require_kb_id", return_value=("kb-1", None)):
+            with patch("app.services.tool_handlers.db_tools.settings.SCHEMA_LINKING_ENABLED", True):
+                with patch("app.services.tool_handlers.db_tools.settings.SEMANTIC_CATALOG_ENABLED", True):
+                    with patch("app.services.knowledge_graph.schema_linker.link_schema", side_effect=fake_link_schema):
+                        with patch("app.services.tool_handlers.db_tools.SchemaService", FakeSchemaService):
+                            async def _run():
+                                return await _describe_schema(args, db, user_id=None, context=context)
+
+                            import asyncio
+                            result = asyncio.run(_run())
+
+        self.assertTrue(result["success"])
+        self.assertEqual(result["tables"], ["erp_v_sale_orderentry"])
+        self.assertNotIn("schema", result)
+
     def test_answer_from_database_surfaces_driver_missing(self):
         """_answer_from_database must return error_kind='driver_missing'."""
         from app.services.db.connector_factory import DriverUnavailable

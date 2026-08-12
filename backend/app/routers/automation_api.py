@@ -29,6 +29,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
@@ -761,6 +762,72 @@ def recompute_next_run_endpoint(task_id: str, db: Session = Depends(get_db)):
             detail="Task has no valid schedule to recompute",
         )
     return {"success": True, "next_run_at": nxt.isoformat()}
+
+
+@router.post("/executions/{execution_id}/cancel")
+def cancel_execution_endpoint(
+    execution_id: str,
+    db: Session = Depends(get_db),
+):
+    """Stop a queued or running execution.
+
+    Idempotent: cancelling an already-cancelled run is a no-op. Cancelling
+    a run that already finished (succeeded / failed) returns the
+    current status with ``already_terminal=True`` rather than 409 — the
+    frontend can stop polling in either case.
+
+    Implementation:
+      1. CAS the DB row from queued|running -> cancelled (atomic UPDATE
+         with WHERE status IN (...)). No-op if the row is already
+         terminal.
+      2. Set the executor's in-process cancel event
+         (``request_cancel``) so the agent loop bails out at the next
+         SSE-chunk checkpoint. Returns ``delivered=True`` if a live
+         event was signalled, ``False`` if the executor already exited
+         (the DB flip above is still authoritative).
+    """
+    from app.services.automation_executor import request_cancel
+
+    ex = (
+        db.query(AutomationExecution)
+        .filter(AutomationExecution.id == execution_id)
+        .first()
+    )
+    if ex is None:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    if ex.status in ("succeeded", "failed", "cancelled"):
+        return {
+            "id": ex.id,
+            "status": ex.status,
+            "already_terminal": True,
+            "delivered": False,
+        }
+
+    rc = db.execute(
+        update(AutomationExecution)
+        .where(
+            AutomationExecution.id == execution_id,
+            AutomationExecution.status.in_(["queued", "running"]),
+        )
+        .values(
+            status="cancelled",
+            error="Cancelled by user",
+            completed_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+    flipped = rc.rowcount == 1
+    delivered = request_cancel(execution_id)
+    # If two callers raced (cancel + janitor), one of them wins the CAS
+    # and the other gets rowcount=0. Re-read for the response.
+    if not flipped:
+        db.refresh(ex)
+    return {
+        "id": ex.id,
+        "status": ex.status if not flipped else "cancelled",
+        "already_terminal": not flipped,
+        "delivered": delivered,
+    }
 
 
 # ---------------------------------------------------------------------------

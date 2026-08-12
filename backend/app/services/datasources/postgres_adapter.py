@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 class PostgresAdapter:
     """Postgres adapter satisfying the ``DatasourceAdapter`` Protocol."""
 
+    quote_char = '"'
+
     def __init__(
         self,
         dsn: str = "",

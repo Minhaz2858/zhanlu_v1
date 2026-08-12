@@ -104,12 +104,12 @@ def test_build_runner_modules_are_decodable():
 # ── _format_supports_skill_driven ────────────────────────────────────────
 
 
-def test_format_supports_skill_driven_true_for_rich_formats():
-    """docx/pptx/xlsx/pdf support the skill-driven path."""
+def test_format_supports_skill_driven_false_for_rich_formats():
+    """docx/pptx/xlsx/pdf currently use the deterministic runner."""
     from app.services.tool_handlers.sandbox_tool import _format_supports_skill_driven
 
     for fmt in ("docx", "pptx", "xlsx", "pdf"):
-        assert _format_supports_skill_driven(fmt) is True, fmt
+        assert _format_supports_skill_driven(fmt) is False, fmt
 
 
 def test_format_supports_skill_driven_false_for_html_md():
@@ -118,6 +118,15 @@ def test_format_supports_skill_driven_false_for_html_md():
 
     for fmt in ("html", "md", "dashboard", ""):
         assert _format_supports_skill_driven(fmt) is False, fmt
+
+
+def test_deterministic_office_formats_use_existing_images():
+    from app.services.tool_handlers import sandbox_tool
+
+    assert sandbox_tool._IMAGE_BY_FORMAT["docx"] == "zhanlu-sandbox-office:latest"
+    assert sandbox_tool._IMAGE_BY_FORMAT["pdf"] == "zhanlu-sandbox-office:latest"
+    assert sandbox_tool._IMAGE_BY_FORMAT["xlsx"] == "zhanlu-sandbox-office:latest"
+    assert sandbox_tool._IMAGE_BY_FORMAT["pptx"] == "zhanlu-sandbox-pptx:latest"
 
 
 # ── _SKILL_DRIVEN_RUNNER_SCRIPT ─────────────────────────────────────────

@@ -242,6 +242,140 @@ async def catalog_status(app_id: str, kb_id: str, db: Session = Depends(get_db))
     }
 
 
+@router.get("/{kb_id}/catalog/tables")
+async def list_catalog_tables(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Return the catalog tables discovered for a database KnowledgeBase.
+
+    Returns kb metadata (id, name, catalog_status, item_count) plus a list of
+    tables with name, type, row_count, column_count, descriptions, column
+    names (comma-joined for search), and indexed_at timestamp.
+    """
+    from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta
+
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+    tables = (
+        db.query(KBTableMeta)
+        .filter(KBTableMeta.kb_id == kb_id)
+        .order_by(KBTableMeta.schema_name, KBTableMeta.table_name)
+        .all()
+    )
+
+    # Single aggregate query for column counts, grouped by table_meta_id.
+    # Column names are collected in-Python for portability across PG / SQLite
+    # (PG lacks group_concat; we'd rather avoid dialect-specific SQL here).
+    table_ids = [t.id for t in tables]
+    col_counts: dict[str, int] = {}
+    col_names: dict[str, list[str]] = {}
+    if table_ids:
+        from sqlalchemy import func
+        count_rows = (
+            db.query(KBColumnMeta.table_meta_id, func.count(KBColumnMeta.id))
+            .filter(KBColumnMeta.table_meta_id.in_(table_ids))
+            .group_by(KBColumnMeta.table_meta_id)
+            .all()
+        )
+        col_counts = {str(r[0]): r[1] for r in count_rows}
+
+        name_rows = (
+            db.query(KBColumnMeta.table_meta_id, KBColumnMeta.column_name)
+            .filter(KBColumnMeta.table_meta_id.in_(table_ids))
+            .all()
+        )
+        for tid, cname in name_rows:
+            col_names.setdefault(str(tid), []).append(cname)
+
+    return {
+        "kb_id": kb_id,
+        "kb_name": kb.name,
+        "catalog_status": kb.catalog_status,
+        "item_count": kb.item_count,
+        "tables": [
+            {
+                "id": str(t.id),
+                "schema_name": t.schema_name,
+                "table_name": t.table_name,
+                "table_type": t.table_type,
+                "row_count": t.row_count,
+                "column_count": col_counts.get(str(t.id), 0),
+                "column_names": col_names.get(str(t.id), []),
+                "description_zh": t.description_zh,
+                "description_en": t.description_en,
+                "indexed_at": t.indexed_at.isoformat() if t.indexed_at else None,
+            }
+            for t in tables
+        ],
+    }
+
+
+@router.patch("/{kb_id}/catalog/tables/{table_id}")
+async def update_catalog_table(
+    app_id: str,
+    kb_id: str,
+    table_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """Update a catalog table's human-editable fields (description_zh/en).
+
+    Only description_zh and description_en are writable.  Used by the
+    Catalog Tables edit pencil to let users override LLM-generated
+    descriptions without triggering a full reindex.  Also refreshes the
+    table's ChromaDB embedding so agent retrieval sees the new text.
+    """
+    from app.models.knowledge_catalog import KBTableMeta
+    from app.services.knowledge_graph.catalog_indexer import update_table_embedding
+
+    table = (
+        db.query(KBTableMeta)
+        .filter(KBTableMeta.id == table_id, KBTableMeta.kb_id == kb_id)
+        .first()
+    )
+    if table is None:
+        raise HTTPException(status_code=404, detail="Catalog table not found")
+
+    allowed = {"description_zh", "description_en"}
+    applied = []
+    for field in allowed:
+        if field in body:
+            value = body[field]
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=f"{field} must be a string or null")
+            setattr(table, field, value)
+            applied.append(field)
+    if not applied:
+        raise HTTPException(status_code=400, detail="No editable fields supplied")
+
+    db.commit()
+    db.refresh(table)
+
+    # Refresh ChromaDB embedding so semantic catalog sees the edit
+    update_table_embedding(
+        kb_id=kb_id,
+        table_meta_id=table.id,
+        table_name=table.table_name,
+        description_zh=table.description_zh,
+        description_en=table.description_en,
+        row_count=table.row_count,
+        table_type=table.table_type or "TABLE",
+    )
+
+    logger.info("catalog table %s edited: %s", table_id, applied)
+
+    return {
+        "id": str(table.id),
+        "description_zh": table.description_zh,
+        "description_en": table.description_en,
+        "indexed_at": table.indexed_at.isoformat() if table.indexed_at else None,
+    }
+
+
 @router.get("/{kb_id}/status")
 async def kb_status(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     """Return the indexing status of a file-kind KB."""

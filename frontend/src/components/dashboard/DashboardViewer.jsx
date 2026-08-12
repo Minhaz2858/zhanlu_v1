@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, forwardRef, useImperativeHandle } from 'react';
 import { RefreshCw, Download, Share2, Pencil, Plus, Trash2, GripVertical } from 'lucide-react';
 import { queryDashboard, updateDashboard, createDashboard } from '@/api/dashboards';
+import { formatTimeOfDay } from '@/lib/time';
 import html2canvas from 'html2canvas';
 import WidgetShell from './widgets/WidgetShell';
 import KpiWidget from './widgets/KpiWidget';
@@ -269,7 +270,7 @@ const DashboardViewer = forwardRef(function DashboardViewer({ dashboard, polling
           <p className="text-xs text-muted-foreground">
             {widgets.length} widget{widgets.length === 1 ? '' : 's'}
             {' · '}
-            Updated {refreshedAt ? new Date(refreshedAt).toLocaleTimeString() : '—'}
+            Updated {refreshedAt ? formatTimeOfDay(refreshedAt) : '—'}
           </p>
         </div>
         <div className="flex items-center gap-1.5">

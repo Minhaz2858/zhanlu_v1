@@ -215,14 +215,19 @@ def list_skill_executions_by_name(
 def _skill_run_to_dict(run) -> dict:
     """Serialize a SkillRun model instance to a dict for API responses."""
     input_data = run.input_json or {}
+    output_data = run.output_json or {}
     return {
         "id": run.id,
         "skill_name": input_data.get("skill_name", "unknown"),
+        "skill_id": input_data.get("skill_id") or output_data.get("skill_id"),
+        "skill_version": input_data.get("skill_version") or output_data.get("skill_version"),
+        "lookup_name": input_data.get("lookup_name"),
         "action": input_data.get("action", "unknown"),
         "agent_name": input_data.get("agent_name", "unknown"),
         "conversation_id": run.conversation_id,
         "status": run.status,
         "duration_ms": run.duration_ms,
+        "body_length": output_data.get("body_length"),
         "error_message": run.error_message,
         "started_at": run.started_at.isoformat() if run.started_at else None,
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,

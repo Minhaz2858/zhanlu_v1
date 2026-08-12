@@ -140,9 +140,14 @@ export default function SkillFilePanel({ skill, messages, onClose }) {
         const total = execs.length;
         const completed = execs.filter((e) => e.status === 'completed').length;
         const failed = execs.filter((e) => e.status === 'failed').length;
+        const loadExecs = execs.filter((e) => e.action === 'load' && typeof e.duration_ms === 'number');
+        const avgLoadMs = loadExecs.length > 0
+          ? Math.round(loadExecs.reduce((sum, e) => sum + e.duration_ms, 0) / loadExecs.length)
+          : null;
         const successRate = total > 0 ? Math.round((completed / total) * 100) : 0;
         const lastExec = execs[0];
-        setExecStats({ total, completed, failed, successRate, lastExec });
+        const latestLoad = execs.find((e) => e.action === 'load' && (e.skill_id || e.skill_version || e.body_length));
+        setExecStats({ total, completed, failed, successRate, avgLoadMs, lastExec, latestLoad });
       })
       .catch(() => { if (!cancelled) setExecStats(null); });
     return () => { cancelled = true; };
@@ -191,6 +196,15 @@ export default function SkillFilePanel({ skill, messages, onClose }) {
               {execStats.lastExec.action} · {execStats.lastExec.duration_ms ? `${execStats.lastExec.duration_ms}ms` : '—'}
             </span>
           )}
+        </div>
+      )}
+
+      {execStats?.latestLoad && (
+        <div className="flex flex-wrap items-center gap-2 border-b border-border bg-primary/5 px-3 py-1.5 text-[10px] text-muted-foreground">
+          {execStats.latestLoad.skill_version && <span className="rounded-full bg-secondary px-2 py-0.5">v{execStats.latestLoad.skill_version}</span>}
+          {execStats.latestLoad.skill_id && <span className="rounded-full bg-secondary px-2 py-0.5 font-mono">{execStats.latestLoad.skill_id}</span>}
+          {execStats.latestLoad.body_length && <span className="rounded-full bg-secondary px-2 py-0.5">{execStats.latestLoad.body_length} chars</span>}
+          {execStats.avgLoadMs != null && <span className="rounded-full bg-secondary px-2 py-0.5">avg load {execStats.avgLoadMs}ms</span>}
         </div>
       )}
 

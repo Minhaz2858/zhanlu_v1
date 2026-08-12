@@ -148,13 +148,7 @@ export default function DashboardDockPanel({
             onSaved={setDashboard}
             onCopied={setDashboard}
           />
-        ) : (
-          !error && (
-            <div className="p-4 text-sm text-muted-foreground">
-              No dashboard yet — ask the agent to build one.
-            </div>
-          )
-        )}
+        ) : null}
       </div>
     </div>
   );

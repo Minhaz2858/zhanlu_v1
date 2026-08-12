@@ -65,6 +65,10 @@ class ExecutionRequest(BaseModel):
     # reports "no data sources bound" even when the project has a
     # connected database.
     data_ctx_extras: Optional[dict] = None
+    # Skill explicitly selected by the user in chat. This is authoritative
+    # routing context: selected skills override default-skill auto-pick, but
+    # still pass through normal permission/policy/tool gates downstream.
+    selected_skill: Optional[dict] = None
     # True when this run originates from a scheduled automation (the SSE
     # path sets it from the ``force_planning`` body flag, which only the
     # automation executor sends). Drives the stricter quality-gate
@@ -285,6 +289,7 @@ class SynexiaFSM:
         task_spec = parse_task_spec(
             request.user_message,
             request.agent_name,
+            active_skill=request.selected_skill,
             conversation_context=conv_ctx or None,
         )
         self.execution.task_spec = task_spec
@@ -764,6 +769,53 @@ class SynexiaFSM:
         report_card_payload = _select_finalize_report_card_payload(
             observations, report_card_payload,
         )
+
+        # ── Selected-skill validation: check whether the generated payload
+        # still satisfies the structure/signals implied by the user-selected
+        # runtime skill. This is a lightweight heuristic pass that lowers
+        # confidence and warns the user when the output drifted away from the
+        # selected skill's template requirements.
+        if report_card_payload and (task_spec.get("selected_skill") or task_spec.get("selected_skill_name") or task_spec.get("selected_skill_id")):
+            try:
+                from app.services.synexia.quality_eval import validate_selected_skill_payload
+
+                _selected_name = task_spec.get("selected_skill_name") or (task_spec.get("selected_skill") or {}).get("name") or "selected-skill"
+                _skill_body = ""
+                for _obs in reversed(observations):
+                    if getattr(_obs, "observation_type", "") == "skill_call" and getattr(_obs, "success", False):
+                        _rd = getattr(_obs, "result_data", None) or {}
+                        if isinstance(_rd, dict) and _rd.get("body"):
+                            _skill_body = _rd.get("body") or ""
+                            break
+                _artifact_type = "docx"
+                _ais = task_spec.get("artifact_intents") or []
+                if _ais:
+                    _artifact_type = _ais[0]
+                elif user_signal.startswith("export_"):
+                    _artifact_type = user_signal.replace("export_", "") or "docx"
+
+                _validation = validate_selected_skill_payload(
+                    skill_name=_selected_name,
+                    skill_body=_skill_body,
+                    artifact_type=_artifact_type,
+                    payload=report_card_payload,
+                )
+                factors = dict(factors or {})
+                factors["selected_skill_validation"] = _validation
+                if not _validation.get("is_ok", True):
+                    confidence = min(confidence, 0.55)
+                    notice = (
+                        "\n\n---\n*Selected skill validation: the output may not fully match the chosen skill template. "
+                        + "; ".join(_validation.get("issues") or ["template requirements missing"])
+                        + "*"
+                    )
+                    assistant_content = (assistant_content or "") + notice
+                    self.execution.assistant_content = assistant_content
+                    self.execution.confidence_score = confidence
+                    self.execution.confidence_factors = factors
+                    self.db.commit()
+            except Exception as e:
+                logger.warning("Selected skill validation failed (non-fatal): %s", e)
 
         # Plan summary for ActivityRail
         plan_summary = None

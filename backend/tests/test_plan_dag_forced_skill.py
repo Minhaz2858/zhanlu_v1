@@ -106,3 +106,26 @@ class TestForcedSkillInDefaultPlan(unittest.TestCase):
         self.assertIsInstance(steps, list)
         for step in steps:
             self.assertNotEqual(step["node_type"], "skill")
+
+    def test_selected_skill_precedes_forced_skill(self):
+        from app.services.synexia.plan_dag import _build_default_plan
+
+        task_spec = {
+            "user_message": "make a weekly sales report",
+            "selected_skill": {"id": "tool-123", "name": "weekly-sales-report"},
+            "selected_skill_id": "tool-123",
+            "selected_skill_name": "weekly-sales-report",
+            "forced_skill": True,
+            "forced_skill_name": "docx",
+            "task_kind": "create_artifact",
+            "user_signal": "export_pptx",
+            "requires_data": True,
+            "artifact_intents": ["pptx"],
+        }
+        steps = _build_default_plan(task_spec, "general_assistant")
+        self.assertGreater(len(steps), 0)
+        first = steps[0]
+        self.assertEqual(first["node_type"], "skill")
+        self.assertEqual(first["inputs"]["skill_id"], "tool-123")
+        self.assertEqual(first["inputs"]["skill_name"], "weekly-sales-report")
+        self.assertEqual(first["skill"], "weekly-sales-report")

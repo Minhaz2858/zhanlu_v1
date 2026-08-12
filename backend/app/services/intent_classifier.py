@@ -101,6 +101,10 @@ class IntentResult:
     suggested_tools: list[str] = field(default_factory=list)
     suggested_query: str = ""
     reasoning: str = ""
+    # Optional resource-route passthrough (database / document / memory /
+    # report / multi_resource) — populated only when the LLM returns the
+    # key; consumed as an assist hint by knowledge_graph.resource_router.
+    resource_route: str = ""
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -250,6 +254,7 @@ class IntentClassifier:
             suggested_tools=_coerce_tools(parsed.get("suggested_tools")),
             suggested_query=str(parsed.get("suggested_query") or "").strip(),
             reasoning=str(parsed.get("reasoning") or "").strip(),
+            resource_route=str(parsed.get("resource_route") or "").strip().lower(),
         )
 
         if self._enable_cache:

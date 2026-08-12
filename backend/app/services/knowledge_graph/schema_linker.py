@@ -26,7 +26,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_TOP_K = 8       # tables returned to the caller
 DEFAULT_HOPS = 2        # max join-path depth
 DEFAULT_TOKEN_BUDGET = 800
-DENSE_TOP_K = 50        # candidates from Chroma before RRF
+DENSE_TOP_K = 100       # candidates from Chroma before RRF
+# CJK-weighted fusion: the default dense model (MiniLM-L6-v2) is weak on
+# Chinese, while bigram lexical matching is reliable — lean on sparse.
+CATALOG_DENSE_WEIGHT = 0.25
+CATALOG_SPARSE_WEIGHT = 0.75
 
 
 # ── public API ─────────────────────────────────────────────────────────────
@@ -66,6 +70,9 @@ async def link_schema(
             unique.append(r)
     retrieved = unique
 
+    # ── 1b. Entity-graph boost (flag-gated, best-effort) ──
+    _apply_entity_boost(db, retrieved, question, kb_ids)
+
     # ── 2. Enrich from DB (descriptions, columns) ──
     enriched = _enrich_tables(db, retrieved, top_k)
 
@@ -86,6 +93,71 @@ async def link_schema(
 
 # ── retrieval ──────────────────────────────────────────────────────────────
 
+def _apply_entity_boost(
+    db: Session, retrieved: list[dict], question: str, kb_ids: list[str]
+) -> None:
+    """Boost tables linked to project entities mentioned in the question.
+
+    Flag-gated (ENTITY_GRAPH_ENABLED). Best-effort: never raises.
+    Adds a fixed score bonus (0.1) to any retrieved table whose name
+    appears in the entity-link graph for entities matched in the question.
+    """
+    if not getattr(settings, "ENTITY_GRAPH_ENABLED", False):
+        return
+    try:
+        from app.models.knowledge_base import KnowledgeBase
+        from app.models.knowledge_catalog import ProjectEntity, ProjectEntityLink
+
+        project_ids = set(
+            pid
+            for (pid,) in db.query(KnowledgeBase.project_id)
+            .filter(
+                KnowledgeBase.id.in_(kb_ids),
+                KnowledgeBase.project_id.isnot(None),
+            )
+            .all()
+        )
+        if not project_ids:
+            return
+
+        entities = (
+            db.query(ProjectEntity)
+            .filter(
+                ProjectEntity.project_id.in_(project_ids),
+                ProjectEntity.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+
+        q_lower = (question or "").lower()
+        matched_table_names: set[str] = set()
+        for ent in entities:
+            names = [ent.name.lower()] + [
+                a.lower() for a in (ent.aliases or [])
+            ]
+            if any(n and n in q_lower for n in names):
+                links = (
+                    db.query(ProjectEntityLink)
+                    .filter(
+                        ProjectEntityLink.entity_id == ent.id,
+                        ProjectEntityLink.target_type == "table",
+                        ProjectEntityLink.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
+                for link in links:
+                    matched_table_names.add(link.target_id)
+
+        if not matched_table_names:
+            return
+
+        for r in retrieved:
+            if r.get("table_name", "") in matched_table_names:
+                r["rrf_score"] = r.get("rrf_score", 0.0) + 0.1
+    except Exception:
+        pass  # entity boost is best-effort — never disrupt retrieval
+
+
 def _retrieve_from_catalog(
     question: str, kb_id: str, top_k: int
 ) -> list[dict] | None:
@@ -100,16 +172,20 @@ def _retrieve_from_catalog(
     except Exception:
         return None  # catalog doesn't exist → graceful fallback
 
-    # Run hybrid query (dense + sparse + RRF)
+    # Run hybrid query (dense + sparse + RRF), CJK-weighted, full sparse scan
     hits = hybrid_query_collection(
         coll,
         question,
         top_k=DENSE_TOP_K,
+        dense_weight=CATALOG_DENSE_WEIGHT,
+        sparse_weight=CATALOG_SPARSE_WEIGHT,
+        prefetch_limit=0,  # scan the whole catalog collection lexically
     )
 
     # hits are (doc_id, rrf_score) tuples
     # Extract table-level metadata and aggregate column scores into tables
     table_scores: dict[str, tuple[float, dict]] = {}
+    col_best: dict[str, float] = {}  # best column hit per table (max, not sum)
     for doc_id, score in hits:
         try:
             meta = coll.get(ids=[doc_id], include=["metadatas"])
@@ -131,14 +207,28 @@ def _retrieve_from_catalog(
                     "kb_id": kb_id,
                 })
         elif kind == "column":
-            # Boost the parent table's score
-            entry = table_scores.get(mid)
-            if entry is not None:
-                # Aggregate: add column score to table score
-                new_score = entry[0] + score * 0.5
-                entry_data = dict(entry[1])
-                entry_data["rrf_score"] = new_score
-                table_scores[mid] = (new_score, entry_data)
+            # Column evidence surfaces the parent table too — columns
+            # outnumber tables ~18:1 in the catalog, so without this the
+            # top-K hits can be all columns and retrieval returns empty.
+            col_best[mid] = max(col_best.get(mid, 0.0), score)
+            if mid not in table_scores:
+                table_scores[mid] = (0.0, {
+                    "table_meta_id": mid,
+                    "table_name": m.get("table_name", ""),
+                    "rrf_score": 0.0,
+                    "kb_id": kb_id,
+                })
+
+    # Final score: best table-doc hit + 0.5 × best column hit. Using max
+    # (not sum) for columns prevents wide tables from winning on hit count.
+    for mid, best in col_best.items():
+        entry = table_scores.get(mid)
+        if entry is None:
+            continue
+        new_score = entry[0] + best * 0.5
+        entry_data = dict(entry[1])
+        entry_data["rrf_score"] = new_score
+        table_scores[mid] = (new_score, entry_data)
 
     # Return top-k sorted by score
     sorted_tables = sorted(table_scores.values(), key=lambda x: -x[0])

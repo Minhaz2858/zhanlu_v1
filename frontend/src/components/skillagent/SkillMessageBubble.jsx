@@ -19,6 +19,37 @@ const STATUS_META = {
   rejected: { icon: XCircle, className: 'text-red-500', label: 'Rejected' },
 };
 
+function isSkillMutationTool(name) {
+  return ['create_skill', 'update_skill', 'Tool.create', 'Tool.update'].includes(String(name || ''));
+}
+
+function SkillResultCard({ result, toolName }) {
+  if (!result || typeof result !== 'object') return null;
+  if (!result.id || !isSkillMutationTool(toolName)) return null;
+  const isUpdate = String(toolName || '').includes('update') || toolName === 'Tool.update';
+  const title = isUpdate ? 'Skill updated' : 'Skill created';
+  const bodyLength = String(result.skill_md || '').trim().length;
+
+  return (
+    <div className="mt-2 rounded-lg border border-primary/20 bg-primary/5 p-3 text-xs">
+      <div className="mb-2 flex items-center gap-2 text-sm font-medium text-foreground">
+        <CheckCircle2 className="h-4 w-4 text-green-500" />
+        <span>{title}</span>
+      </div>
+      <div className="space-y-1 text-muted-foreground">
+        <div><span className="font-medium text-foreground">Name:</span> {result.name || 'Untitled skill'}</div>
+        {result.description && <div><span className="font-medium text-foreground">Description:</span> {result.description}</div>}
+        <div className="flex flex-wrap gap-2 pt-1">
+          {result.category && <span className="rounded-full bg-secondary px-2 py-0.5">{result.category}</span>}
+          {result.trigger && <span className="rounded-full bg-secondary px-2 py-0.5">Trigger: {result.trigger}</span>}
+          {result.version && <span className="rounded-full bg-secondary px-2 py-0.5">v{result.version}</span>}
+          {bodyLength > 0 && <span className="rounded-full bg-secondary px-2 py-0.5">SKILL.md {bodyLength} chars</span>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ToolCallDisplay({ toolCall, conversationId }) {
   const [expanded, setExpanded] = useState(!['completed', 'success', 'failed', 'error', 'rejected'].includes(toolCall.status));
   const [approving, setApproving] = useState(false);
@@ -100,6 +131,7 @@ function ToolCallDisplay({ toolCall, conversationId }) {
           )}
           {parsedResults !== undefined && parsedResults !== null && (
             <div>
+              <SkillResultCard result={parsedResults} toolName={name} />
               <div className="mb-1 text-[10px] font-medium uppercase text-muted-foreground">Result</div>
               <pre className={`overflow-x-auto rounded bg-background/60 p-2 font-mono text-[11px] ${isFailed ? 'text-red-500' : 'text-foreground'}`}>{typeof parsedResults === 'string' ? parsedResults : JSON.stringify(parsedResults, null, 2)}</pre>
             </div>
@@ -139,16 +171,16 @@ export default function SkillMessageBubble({ message, conversationId, onArtifact
   const trace = (message.trace_steps && message.trace_steps.length > 0)
     ? message.trace_steps
     : (message.trace && message.trace.length > 0)
-    ? message.trace
-    : (toolCalls.length > 0
+      ? message.trace
+      : (toolCalls.length > 0
         ? toolCalls.map((tc, i) => ({
-            step: i + 1,
-            type: 'tool_call',
-            title: tc.name || `Tool ${i + 1}`,
-            detail: tc.status === 'completed' ? 'Completed' : tc.status || '',
-            status: tc.status === 'completed' || tc.status === 'success' ? 'completed' : tc.status === 'failed' ? 'failed' : 'pending',
-            duration_ms: 0,
-          }))
+          step: i + 1,
+          type: 'tool_call',
+          title: tc.name || `Tool ${i + 1}`,
+          detail: tc.status === 'completed' ? 'Completed' : tc.status || '',
+          status: tc.status === 'completed' || tc.status === 'success' ? 'completed' : tc.status === 'failed' ? 'failed' : 'pending',
+          duration_ms: 0,
+        }))
         : []);
 
   return (

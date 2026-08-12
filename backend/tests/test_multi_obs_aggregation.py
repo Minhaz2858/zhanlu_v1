@@ -57,7 +57,8 @@ class TestSynthesizeAggregatesMultipleObs:
         captured = {}
 
         async def fake_synthesize(*, user_message, rows, sql, source_name,
-                                  source_id, call_llm_fn, user_signal=None):
+                      source_id, call_llm_fn, user_signal=None,
+                      skill_name=None, skill_methodology=None):
             captured.update(rows=rows, sql=sql)
             from app.services.synexia.contracts import FinalizeResult
             return FinalizeResult(task_kind="report", assistant_content="prose",
@@ -84,7 +85,8 @@ class TestSynthesizeAggregatesMultipleObs:
         captured = {}
 
         async def fake_synthesize(*, user_message, rows, sql, source_name,
-                                  source_id, call_llm_fn, user_signal=None):
+                      source_id, call_llm_fn, user_signal=None,
+                      skill_name=None, skill_methodology=None):
             captured.update(rows=rows, sql=sql)
             from app.services.synexia.contracts import FinalizeResult
             return FinalizeResult(task_kind="report", assistant_content="prose",

@@ -33,10 +33,8 @@ DEFAULT_SKILL_MAP: dict[str, str] = {
     "docx": "docx",
     "pptx": "pptx",
     "pdf": "pdf",
-    # html + dashboard both alias to the Claude artifacts-builder skill
-    # (it builds stateful React apps, covering web pages and dashboards).
     "html": "artifacts-builder",
-    "dashboard": "artifacts-builder",
+    "dashboard": "dashboard-generation",
     # Companion design intelligence — explicit /design, /uiux, /palette
     # commands resolve here. Does NOT auto-trigger from soft-intent
     # (handled separately by default_skills._build_default_skills_block).

@@ -27,6 +27,41 @@ const FSM_STATES = [
   { key: 'finalize', label: 'Finalize', icon: Flag, desc: 'Computing confidence' },
 ];
 
+function factorScore(factor) {
+  if (!factor || typeof factor !== 'object') return 0;
+  const raw = factor.score ?? factor.overall_score ?? factor.confidence ?? factor.completeness_score ?? 0;
+  const score = Number(raw);
+  if (!Number.isFinite(score)) return 0;
+  return Math.max(0, Math.min(1, score));
+}
+
+function SelectedSkillValidation({ validation }) {
+  if (!validation || typeof validation !== 'object') return null;
+  const ok = validation.is_ok !== false;
+  const score = factorScore(validation);
+  const missing = validation.missing_elements || [];
+  const issues = validation.issues || [];
+
+  return (
+    <div className={`rounded-lg border px-3 py-2 text-xs ${ok ? 'border-green-500/20 bg-green-50/60' : 'border-amber-500/30 bg-amber-50/70'}`}>
+      <div className="flex items-center gap-2">
+        {ok ? <CheckCircle2 className="h-3.5 w-3.5 text-green-600" /> : <AlertCircle className="h-3.5 w-3.5 text-amber-600" />}
+        <span className="font-medium text-foreground">Selected skill validation</span>
+        <span className={`ml-auto font-mono ${ok ? 'text-green-600' : 'text-amber-600'}`}>{(score * 100).toFixed(0)}%</span>
+      </div>
+      {validation.skill_name && (
+        <div className="mt-1 text-[11px] text-muted-foreground">Skill: {validation.skill_name}</div>
+      )}
+      {missing.length > 0 && (
+        <div className="mt-1 text-[11px] text-amber-700">Missing: {missing.join(', ')}</div>
+      )}
+      {issues.length > 0 && (
+        <div className="mt-1 text-[11px] text-muted-foreground">{issues[0]}</div>
+      )}
+    </div>
+  );
+}
+
 export default function ActivityRail({ execution }) {
   const [expandedObs, setExpandedObs] = useState({});
 
@@ -47,9 +82,8 @@ export default function ActivityRail({ execution }) {
         {isDone && confidence !== null && confidence !== undefined && (
           <div className="flex items-center gap-1.5">
             <span className="text-[11px] text-muted-foreground">Confidence</span>
-            <span className={`text-xs font-bold ${
-              confidence >= 0.8 ? 'text-green-600' : confidence >= 0.5 ? 'text-amber-500' : 'text-red-500'
-            }`}>
+            <span className={`text-xs font-bold ${confidence >= 0.8 ? 'text-green-600' : confidence >= 0.5 ? 'text-amber-500' : 'text-red-500'
+              }`}>
               {(confidence * 100).toFixed(0)}%
             </span>
           </div>
@@ -68,9 +102,8 @@ export default function ActivityRail({ execution }) {
             return (
               <div
                 key={state.key}
-                className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 ${
-                  isCurrent ? 'bg-blue-50' : isCompleted ? 'bg-green-50/50' : ''
-                }`}
+                className={`flex items-center gap-2.5 rounded-lg px-2 py-1.5 ${isCurrent ? 'bg-blue-50' : isCompleted ? 'bg-green-50/50' : ''
+                  }`}
               >
                 <div className="flex h-6 w-6 shrink-0 items-center justify-center">
                   {isCompleted ? (
@@ -83,9 +116,8 @@ export default function ActivityRail({ execution }) {
                 </div>
                 <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-1.5">
-                    <span className={`text-xs font-medium ${
-                      isCurrent ? 'text-blue-600' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
-                    }`}>
+                    <span className={`text-xs font-medium ${isCurrent ? 'text-blue-600' : isCompleted ? 'text-foreground' : 'text-muted-foreground'
+                      }`}>
                       {state.label}
                     </span>
                     {isCurrent && (
@@ -119,9 +151,8 @@ export default function ActivityRail({ execution }) {
               return (
                 <div
                   key={i}
-                  className={`rounded-lg px-2 py-1.5 text-xs ${
-                    obs.success ? 'bg-green-50/50' : 'bg-red-50/50'
-                  }`}
+                  className={`rounded-lg px-2 py-1.5 text-xs ${obs.success ? 'bg-green-50/50' : 'bg-red-50/50'
+                    }`}
                 >
                   <div className="flex items-center gap-1.5">
                     {obs.success ? (
@@ -161,23 +192,26 @@ export default function ActivityRail({ execution }) {
       {isDone && execution.confidence_factors && (
         <div className="border-t border-border p-3">
           <p className="mb-2 text-[11px] font-medium text-muted-foreground">Confidence Factors</p>
+          <SelectedSkillValidation validation={execution.confidence_factors.selected_skill_validation} />
           <div className="space-y-1">
-            {Object.entries(execution.confidence_factors).map(([key, factor]) => (
-              <div key={key} className="flex items-center gap-2 text-[11px]">
-                <span className="w-32 shrink-0 text-muted-foreground">{key.replace(/_/g, ' ')}</span>
-                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">
-                  <div
-                    className={`h-full ${
-                      factor.score >= 0.8 ? 'bg-green-500' : factor.score >= 0.5 ? 'bg-amber-500' : 'bg-red-500'
-                    }`}
-                    style={{ width: `${factor.score * 100}%` }}
-                  />
+            {Object.entries(execution.confidence_factors).filter(([key]) => key !== 'selected_skill_validation').map(([key, factor]) => {
+              const score = factorScore(factor);
+              return (
+                <div key={key} className="flex items-center gap-2 text-[11px]">
+                  <span className="w-32 shrink-0 text-muted-foreground">{key.replace(/_/g, ' ')}</span>
+                  <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-secondary">
+                    <div
+                      className={`h-full ${score >= 0.8 ? 'bg-green-500' : score >= 0.5 ? 'bg-amber-500' : 'bg-red-500'
+                        }`}
+                      style={{ width: `${score * 100}%` }}
+                    />
+                  </div>
+                  <span className="w-8 shrink-0 text-right font-mono text-muted-foreground">
+                    {(score * 100).toFixed(0)}%
+                  </span>
                 </div>
-                <span className="w-8 shrink-0 text-right font-mono text-muted-foreground">
-                  {(factor.score * 100).toFixed(0)}%
-                </span>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

@@ -1541,35 +1541,14 @@ def _pick_horizon_payload(results: dict, days: int) -> tuple:
     Preference: exact key f"{days}d" → str(days); otherwise the nearest
     available numeric horizon key (ties → larger key).  Returns ({}, None)
     if no usable horizon is found.
+
+    Delegates to forecasting.answer_format.pick_horizon_payload — the shared
+    implementation the chat agent's forecast_get/forecast_run tools also use,
+    so dashboard and chat always select the same horizon slice of a run.
     """
-    if not results:
-        return {}, None
+    from app.services.forecasting.answer_format import pick_horizon_payload
 
-    # Exact-key preference
-    for key in (f"{days}d", str(days)):
-        payload = results.get(key)
-        if isinstance(payload, dict) and payload:
-            return payload, days
-
-    # Nearest-horizon fallback: parse numeric horizon keys
-    numeric_keys = []
-    for k in results:
-        try:
-            h = int(k.rstrip("d"))
-            numeric_keys.append(h)
-        except (ValueError, TypeError):
-            continue
-
-    if not numeric_keys:
-        return {}, None
-
-    # Closest absolute distance; ties → larger horizon (more data to slice from)
-    best_h = max(numeric_keys, key=lambda h: (-abs(h - days), h))
-    payload = results.get(f"{best_h}d") or results.get(str(best_h)) or {}
-    if isinstance(payload, dict) and payload:
-        return payload, best_h
-
-    return {}, None
+    return pick_horizon_payload(results, days)
 
 
 def _slice_curve(curve, days: int) -> list[float] | None:

@@ -1402,9 +1402,9 @@ class ForecastEngine:
 
     # ── Read cached forecast ───────────────────────────────────────
 
-    def get_forecast(self, target_id: str) -> dict | None:
-        """Return the most recent cached ForecastRun for a target."""
-        run = (
+    def get_latest_run(self, target_id: str) -> ForecastRun | None:
+        """Return the most recent cached ForecastRun row for a target."""
+        return (
             self._db.query(ForecastRun)
             .filter(
                 ForecastRun.target_id == target_id,
@@ -1413,6 +1413,10 @@ class ForecastEngine:
             .order_by(ForecastRun.created_date.desc())
             .first()
         )
+
+    def get_forecast(self, target_id: str) -> dict | None:
+        """Return the most recent cached ForecastRun for a target."""
+        run = self.get_latest_run(target_id)
         if not run:
             return None
         return {

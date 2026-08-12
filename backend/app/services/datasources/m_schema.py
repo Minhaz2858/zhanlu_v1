@@ -45,12 +45,13 @@ def render_m_schema(
     # Sample distinct values for low-cardinality TEXT columns
     samples: dict[str, dict[str, list[str]]] = {}
     if sample_rows > 0:
+        q = getattr(adapter, 'quote_char', '"')
         for table, cols in schema.items():
             for col in cols:
-                if col.dtype.upper() in ("TEXT", "VARCHAR", "CHARACTER VARYING"):
+                if col.dtype.upper() in ("TEXT", "VARCHAR", "CHARACTER VARYING", "CHAR", "LONGTEXT", "MEDIUMTEXT", "TINYTEXT", "ENUM", "SET"):
                     try:
                         result = adapter.query(
-                            f'SELECT DISTINCT "{col.name}" FROM "{table}"',
+                            f'SELECT DISTINCT {q}{col.name}{q} FROM {q}{table}{q}',
                             row_limit=sample_rows,
                             timeout_ms=1000,
                         )

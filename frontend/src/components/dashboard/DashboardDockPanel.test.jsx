@@ -46,7 +46,7 @@ beforeEach(() => {
 describe('DashboardDockPanel', () => {
   it('auto-opens the bound dashboard by conversation id', async () => {
     getDashboardByConversation.mockResolvedValue({ ...DASHBOARD });
-    render(<DashboardDockPanel conversationId="conv1" onClose={() => {}} />);
+    render(<DashboardDockPanel conversationId="conv1" onClose={() => { }} />);
     await waitFor(() => expect(getDashboardByConversation).toHaveBeenCalledWith('conv1'));
     await waitFor(() => expect(screen.getByText('Sales')).toBeInTheDocument());
   });
@@ -57,7 +57,7 @@ describe('DashboardDockPanel', () => {
       <DashboardDockPanel
         conversationId="conv1"
         dashboardId="d-explicit"
-        onClose={() => {}}
+        onClose={() => { }}
       />,
     );
     await waitFor(() => expect(getDashboard).toHaveBeenCalledWith('d-explicit'));
@@ -67,21 +67,21 @@ describe('DashboardDockPanel', () => {
 
   it('shows Undo button enabled when can_undo is true', async () => {
     getDashboardByConversation.mockResolvedValueOnce({ ...DASHBOARD, can_undo: true });
-    render(<DashboardDockPanel conversationId="conv1" onClose={() => {}} />);
+    render(<DashboardDockPanel conversationId="conv1" onClose={() => { }} />);
     const undo = await screen.findByRole('button', { name: /undo/i });
     expect(undo).not.toBeDisabled();
   });
 
   it('shows Undo button disabled when can_undo is false', async () => {
     getDashboardByConversation.mockResolvedValueOnce({ ...DASHBOARD, can_undo: false });
-    render(<DashboardDockPanel conversationId="conv1" onClose={() => {}} />);
+    render(<DashboardDockPanel conversationId="conv1" onClose={() => { }} />);
     const undo = await screen.findByRole('button', { name: /undo/i });
     expect(undo).toBeDisabled();
   });
 
   it('hides Undo button when can_edit is false', async () => {
     getDashboardByConversation.mockResolvedValueOnce({ ...DASHBOARD, can_edit: false, can_undo: true });
-    render(<DashboardDockPanel conversationId="conv1" onClose={() => {}} />);
+    render(<DashboardDockPanel conversationId="conv1" onClose={() => { }} />);
     await waitFor(() => expect(screen.getByText('Sales')).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /undo/i })).not.toBeInTheDocument();
   });
@@ -90,18 +90,17 @@ describe('DashboardDockPanel', () => {
     const restored = { ...DASHBOARD, name: 'Sales (reverted)', can_undo: false };
     getDashboardByConversation.mockResolvedValueOnce({ ...DASHBOARD, can_undo: true });
     undoDashboardEdit.mockResolvedValueOnce(restored);
-    render(<DashboardDockPanel conversationId="conv1" onClose={() => {}} />);
+    render(<DashboardDockPanel conversationId="conv1" onClose={() => { }} />);
     const undo = await screen.findByRole('button', { name: /undo/i });
     undo.click();
     await waitFor(() => expect(undoDashboardEdit).toHaveBeenCalledWith('d1'));
     await waitFor(() => expect(screen.getByText('Sales (reverted)')).toBeInTheDocument());
   });
 
-  it('shows the empty-state hint when no dashboard is bound (404)', async () => {
+  it('does not show a dashboard empty-state hint when no dashboard is bound (404)', async () => {
     getDashboardByConversation.mockRejectedValueOnce(new Error('404'));
-    render(<DashboardDockPanel conversationId="conv-empty" onClose={() => {}} />);
-    await waitFor(() =>
-      expect(screen.getByText(/no dashboard yet/i)).toBeInTheDocument(),
-    );
+    render(<DashboardDockPanel conversationId="conv-empty" onClose={() => { }} />);
+    await waitFor(() => expect(getDashboardByConversation).toHaveBeenCalledWith('conv-empty'));
+    expect(screen.queryByText(/no dashboard yet/i)).not.toBeInTheDocument();
   });
 });

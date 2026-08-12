@@ -62,6 +62,14 @@ export default function KbSetupDialog({ open, onOpenChange, onSaved, editItem })
           saved = await base44.entities.KnowledgeBase.get(saved.id);
         } catch { /* non-fatal — user can reindex from the card */ }
       }
+      // Trigger catalog discovery for database KBs (belt-and-suspenders —
+      // the backend entities hook also fires; the /catalog/reindex endpoint
+      // guards against duplicate indexing).
+      if (saved?.source_kind === 'database' && ['mysql','postgres','postgresql'].includes((saved?.db_type||'').toLowerCase())) {
+        try {
+          await authFetch(`/api/apps/${saved.app_id || 'default-app'}/knowledge_bases/${saved.id}/catalog/reindex`, { method: 'POST' });
+        } catch { /* non-fatal — backend auto-trigger also covers this */ }
+      }
       onSaved?.(saved);
       onOpenChange(false);
     } catch (e) {

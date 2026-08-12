@@ -61,8 +61,8 @@ export default function PlusMenu({
       .then((list) => {
         const filtered = (list || [])
           .filter((p) => p.status !== 'archived')
-          .map((p) => p.name)
-          .filter(Boolean);
+          .map((p) => ({ id: p.id, name: p.name }))
+          .filter((p) => p.name);
         setProjects(filtered);
       })
       .catch(() => {});
@@ -115,7 +115,7 @@ export default function PlusMenu({
   const ql = q.toLowerCase();
   const filteredSkills = skills.filter((s) => (s.name || '').toLowerCase().includes(ql) || (s.trigger || '').toLowerCase().includes(ql));
   const filteredAgents = agents.filter((a) => (a.name || '').toLowerCase().includes(ql));
-  const filteredProjects = projects.filter((p) => p.toLowerCase().includes(ql));
+  const filteredProjects = projects.filter((p) => p.name.toLowerCase().includes(ql));
 
   // The dropdown is rendered in a portal so it's never clipped by an
   // ancestor with overflow:hidden (the Panel from react-resizable-panels
@@ -191,10 +191,10 @@ export default function PlusMenu({
             {view === 'project' && (filteredProjects.length === 0 ? (
               <p className="px-2 py-3 text-center text-xs text-muted-foreground">No projects found</p>
             ) : filteredProjects.map((p) => (
-              <button key={p} onClick={() => { onSelectProject?.(p); setOpen(false); setView('main'); setQ(''); }} className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
+              <button key={p.id} onClick={() => { onSelectProject?.(p.name, p.id); setOpen(false); setView('main'); setQ(''); }} className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
                 <Folder className="h-3 w-3 shrink-0 text-muted-foreground" />
-                <span className="truncate">{p}</span>
-                {activeProject === p && <Check className="ml-auto h-3 w-3 shrink-0 text-amber-700 dark:text-amber-300" />}
+                <span className="truncate">{p.name}</span>
+                {activeProject === p.name && <Check className="ml-auto h-3 w-3 shrink-0 text-amber-700 dark:text-amber-300" />}
               </button>
             )))}
           </div>

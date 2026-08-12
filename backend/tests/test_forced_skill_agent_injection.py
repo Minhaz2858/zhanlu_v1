@@ -160,3 +160,35 @@ class TestAgentsForcedSkillInjection(unittest.TestCase):
         result = post_router_pick("hello", db=None)
         self.assertIsNone(result)
         # Caller would not build a directive in this case.
+
+
+class TestSelectedRuntimeSkillBlock(unittest.TestCase):
+    def test_selected_skill_block_mentions_priority_and_skill_body(self):
+        from types import SimpleNamespace
+        from app.routers.agents import _build_selected_skill_runtime_block
+
+        class Query:
+            def filter(self, *args, **kwargs):
+                return self
+            def first(self):
+                return SimpleNamespace(
+                    name="weekly-report-generation",
+                    description="Weekly report skill",
+                    trigger="weekly report",
+                    skill_md="# Weekly Report\n\nUse KPI-first weekly report structure.",
+                )
+
+        class DB:
+            def query(self, *args, **kwargs):
+                return Query()
+
+        block = _build_selected_skill_runtime_block(
+            DB(),
+            {"id": "tool-123", "name": "weekly-report-generation"},
+            "tool-123",
+        )
+        self.assertIn("<selected_runtime_skill>", block)
+        self.assertIn("highest priority", block)
+        self.assertIn("weekly-report-generation", block)
+        self.assertIn("Use KPI-first weekly report structure", block)
+        self.assertIn("Do not call unavailable legacy weekly-report tools", block)

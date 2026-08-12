@@ -22,15 +22,12 @@ import { LayoutGrid, Table2, Play, Pause, Loader2, Clock, Calendar, Sparkles, Pe
 import MonthCalendar from '@/components/automation/MonthCalendar';
 import ProjectSelector from '@/components/automation/ProjectSelector';
 
-function fmtTime(v) {
-  if (!v) return '—';
-  return new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
+import { formatShortDateTime } from '@/lib/time';
 
 // "Run now" hands off to the shared runAutomationTask helper (see
-// lib/runAutomationTask.js) — ensure-session -> POST /run -> toast ->
-// navigate to the dedicated chat. No prefill/autorun (the old LLM-
-// dependent deep-link flow silently no-op'd for custom agents).
+// lib/runAutomationTask.js) — ensure-session -> POST /run -> navigate
+// to /chat?session=<sid>. The dispatcher's _notify_chat streams the
+// result into the task's owning session; no LLM-mediated handoff.
 
 export default function AutomationTasks() {
   const { t, lang } = useLanguage();
@@ -170,7 +167,7 @@ export default function AutomationTasks() {
               <div className="mb-4 space-y-1 text-xs text-muted-foreground">
                 <div className="flex items-center gap-1.5"><FolderOpen className="h-3 w-3" /> {item.project && item.project !== 'global' ? item.project : t.automation.ungrouped}</div>
                 <div className="flex items-center gap-1.5"><Clock className="h-3 w-3" /> {item.schedule ? translate(item.schedule) : t.automation.manual}</div>
-                <div>{t.automation.lastRun}：{fmtTime(item.last_run)}</div>
+                <div>{t.automation.lastRun}：{formatShortDateTime(item.last_run)}</div>
               </div>
               <div className="flex flex-wrap gap-2">
                 <button
@@ -229,7 +226,7 @@ export default function AutomationTasks() {
                   <td className="break-words px-4 py-3 text-muted-foreground">{t.automation.types[item.type]}</td>
                   <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${statusStyle(item.status)}`}>{t.automation.statuses[item.status]}</span></td>
                   <td className="break-words px-4 py-3 text-muted-foreground">{item.schedule ? translate(item.schedule) : t.automation.manualShort}</td>
-                  <td className="px-4 py-3 text-muted-foreground">{fmtTime(item.last_run)}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{formatShortDateTime(item.last_run)}</td>
                   <td className="px-4 py-3 text-right">
                     <button
                       type="button"

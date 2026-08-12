@@ -52,7 +52,7 @@ DEFAULT_SKILLS: dict[str, dict] = {
         "format": "html",
     },
     "dashboard": {
-        "skill_name": "artifacts-builder",
+        "skill_name": "dashboard-generation",
         "triggers": ["dashboard", "kpi", "metrics", "chart"],
         "format": "dashboard",
     },
@@ -144,13 +144,17 @@ def pick_default_skill(
        skill chip), return ``None`` — the caller must use the user-picked
        skill exclusively. Defaults are skipped.
 
-    2. **Explicit format**: If ``detect_file_intent`` returns a format whose
-       key exists in ``DEFAULT_SKILLS``, return that default skill.
+     2. **Explicit format**: If ``detect_file_intent`` returns a format whose
+         key exists in ``DEFAULT_SKILLS``, return that default skill.
 
-    3. **Soft intent**: Run the heuristic over the message text. If a soft
+     3. **Strong skill match**: Consult the full skill catalog. If a custom or
+         marketplace skill strongly matches the request, return it as a forced
+         skill before applying generic soft-intent defaults.
+
+     4. **Soft intent**: Run the heuristic over the message text. If a soft
        signal maps to a default-skill key, return that default.
 
-    4. **No signal**: Return ``None`` — no deterministic default applies.
+     5. **No signal**: Return ``None`` — no deterministic default applies.
        The caller (task_spec_parser / plan_dag) interprets ``None`` as
        "let the LLM pick from the full skill catalog via the Skill
        meta-tool". This replaces the former forced-``docx`` fallback,
@@ -176,17 +180,10 @@ def pick_default_skill(
     if fmt and fmt in DEFAULT_SKILLS:
         return DEFAULT_SKILLS[fmt]
 
-    # 3. Soft-intent heuristic (e.g. "make a sales report" → docx)
-    soft_key = detect_soft_intent(user_message)
-    if soft_key and soft_key in DEFAULT_SKILLS:
-        return DEFAULT_SKILLS[soft_key]
-
-    # 4. Post-router hook: consult the full ~500-skill catalog via
-    #    ``unified_search`` + scoring. If a strong match is found, return
-    #    the forced-skill dict (carries ``"forced": True``) so downstream
-    #    code can build a HARD directive instead of a soft hint. If no
-    #    strong match, fall through to ``None`` (let the LLM pick freely
-    #    from the catalog or answer raw).
+    # 3. Strong skill match. This must run before generic report/docx soft
+    # intent so enabled custom skills like weekly-report-generation can win
+    # over the broad "report" → docx default, while explicit .docx/.pptx
+    # requests still keep deterministic format priority.
     try:
         forced = post_router_pick(user_message)
     except Exception:
@@ -194,6 +191,11 @@ def pick_default_skill(
         forced = None
     if forced:
         return forced
+
+    # 4. Soft-intent heuristic (e.g. "make a sales report" → docx)
+    soft_key = detect_soft_intent(user_message)
+    if soft_key and soft_key in DEFAULT_SKILLS:
+        return DEFAULT_SKILLS[soft_key]
 
     # 5. No deterministic signal AND no strong skill match — let the LLM
     #    pick from the catalog. Returning ``None`` signals task_spec_parser

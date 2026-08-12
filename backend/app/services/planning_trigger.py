@@ -251,6 +251,11 @@ def should_trigger_planning(
 # Combined with task_spec_parser._REFINEMENT_VERBS (dark, theme, better, redo…)
 # to form the full cue set. Matched on word boundaries for precision.
 _FOLLOWUP_PRONOUNS = ("it", "this", "that", "these", "those")
+_DASHBOARD_REFINEMENT_CUES = (
+    "breakdown", "split by", "by customer", "by product", "by region",
+    "by location", "drilldown", "drill down", "margin", "weekly view",
+    "monthly view", "add tab", "filter", "segment",
+)
 _followup_cue_re_cache: Optional[re.Pattern] = None
 
 
@@ -302,6 +307,10 @@ def is_followup_refinement(user_message: str, conv_ctx: Optional[dict]) -> bool:
         msg = (user_message or "").strip()
         if not msg or len(msg) > 300:
             return False
+        if conv_ctx.get("dashboard_id"):
+            lower = msg.lower()
+            if any(cue in lower for cue in _DASHBOARD_REFINEMENT_CUES):
+                return True
         return bool(_followup_cue_regex().search(msg))
     except Exception as exc:
         logger.debug("is_followup_refinement failed (non-fatal): %s", exc)

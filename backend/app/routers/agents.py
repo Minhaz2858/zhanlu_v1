@@ -21,6 +21,7 @@ import asyncio
 import json
 import os
 import re
+import time
 import unicodedata
 import uuid
 import httpx
@@ -38,7 +39,7 @@ from app.models.agent_conversation import AgentConversation
 from app.models.user import User
 from app.services.tracing import TraceContext
 from app.services.llm_service import llm_headers, llm_url, get_model
-from app.services.llm_router import resolve_effective_llm, EffectiveLLM
+from app.services.llm_router import resolve_effective_llm, resolve_message_project_id, EffectiveLLM
 from app.services.agent_prompts import (
     get_system_prompt,
     get_tools,
@@ -59,6 +60,11 @@ from app.services.tool_loop_guardrails import (
     synthetic_blocked_result as _guardrail_synthetic_result,
 )
 from app.services.iteration_budget import IterationBudget
+from app.services.dashboard_turn_guard import (
+    is_live_dashboard_request,
+    should_force_create_dashboard,
+    dashboard_guard_blocked_tools,
+)
 from app.services.tool_result_persistence import (
     persist_tool_result,
     apply_turn_budget,
@@ -144,7 +150,7 @@ def _run_db_sync(func, *args, **kwargs):
         return func(*args, **kwargs)
     return asyncio.to_thread(_wrapped, context=ctx)
 
-MAX_TOOL_ITERATIONS = 10
+MAX_TOOL_ITERATIONS = 25
 
 # Per-tool-name hard cap for tool-call loops. If the LLM calls the same
 # tool N or more times within a single conversation (across all
@@ -153,7 +159,7 @@ MAX_TOOL_ITERATIONS = 10
 # `skills` / `skills_hub` lookups). Set conservatively above 2 to
 # tolerate legitimate "list → pick → retry" patterns but well below
 # MAX_TOOL_ITERATIONS so a single bad tool cannot eat the whole budget.
-TOOL_CALL_HARD_CAP = 6
+TOOL_CALL_HARD_CAP = 10
 
 # Canned final answer emitted when the LLM loop ends with NO content at
 # all (historically tuned for the Agent Builder flow). Single source of
@@ -165,21 +171,71 @@ _EMPTY_CONTENT_FALLBACK = (
     "Please review the agent configuration above."
 )
 
+_GENERIC_EMPTY_CONTENT_FALLBACK = (
+    "I gathered some information but had trouble putting it all together. "
+    "Could you try again with a more specific request? "
+    "If you asked me to build a dashboard, please say 'create dashboard' and I'll try again."
+)
+
+
+def _is_dashboard_request(user_content: str) -> bool:
+    """Heuristic: does the user's message ask for a dashboard?"""
+    if not user_content:
+        return False
+    low = user_content.lower()
+    return any(kw in low for kw in ("dashboard", "看板", "仪表盘", "数据面板"))
+
+
+def _tool_was_called(tool_calls_for_frontend: list[dict], tool_name: str) -> bool:
+    """Check whether a specific tool was called during this turn."""
+    return any(tc.get("name") == tool_name for tc in tool_calls_for_frontend)
+
+
+def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None, selected_skill_id: str | None) -> str:
+    """Build a hard runtime instruction block for a chat-selected skill."""
+    if not selected_skill and not selected_skill_id:
+        return ""
+    skill_id = selected_skill_id or (selected_skill or {}).get("id")
+    skill_name = (selected_skill or {}).get("name") or "selected skill"
+    description = (selected_skill or {}).get("description") or ""
+    trigger = (selected_skill or {}).get("trigger") or ""
+    skill_md = ""
+    try:
+        from app.models.tool import Tool
+        query = db.query(Tool).filter(Tool.is_deleted == False, Tool.enabled == True)  # noqa: E712
+        tool = query.filter(Tool.id == skill_id).first() if skill_id else query.filter(Tool.name == skill_name).first()
+        if tool:
+            skill_name = tool.name or skill_name
+            description = tool.description or description
+            trigger = tool.trigger or trigger
+            skill_md = tool.skill_md or ""
+    except Exception as exc:
+        logger.debug("selected skill runtime lookup failed (non-fatal): %s", exc)
+
+    body = skill_md[:8000]
+    return (
+        "\n\n<selected_runtime_skill>\n"
+        "The user explicitly selected this skill in the chat composer. This selection has highest priority.\n"
+        f"Skill id: {skill_id or 'n/a'}\n"
+        f"Skill name: {skill_name}\n"
+        f"Trigger: {trigger}\n"
+        f"Description: {description}\n"
+        "Rules:\n"
+        "- Follow this skill's SKILL.md methodology, output structure, tone, and validation expectations.\n"
+        "- Do not substitute a generic report flow when this selected skill is relevant.\n"
+        "- Use bound data tools only to gather facts required by the skill; then produce the final output in the skill's format.\n"
+        "- Do not call unavailable legacy weekly-report tools.\n"
+        + (f"\nSKILL.md:\n{body}\n" if body else "\nSKILL.md: not available; use the metadata above.\n")
+        + "</selected_runtime_skill>\n"
+    )
+
 # Per-tool overrides for the loop guard. ``memory`` is idempotent-write —
-# one identical call is already a loop. ``ask_data_agent`` is capped at 3
-# per UNIQUE question (canonicalized arguments) — the guard must NOT count
-# all calls together because the LLM legitimately asks multiple different
-# questions to explore a database (schema overview, then drill-down on a
-# specific table, then verify a number, …). The cap is 3 (not 2) to
-# tolerate one accidental re-query — the LLM sometimes re-asks the same
-# question to re-read a result it lost track of, and we don't want to
-# abort mid-answer for that. True loops (4+ identical calls) still trip.
-# Previously this tool was in ``_NAME_ONLY_KEYED_TOOLS`` which meant any
-# 2 calls in a conversation tripped the guard and aborted mid-answer —
-# the "Sales agent says build the agent" symptom. Keying by arguments
-# instead restores normal multi-question data exploration.
-TOOL_CALL_CAPS: dict[str, int] = {"memory": 1, "ask_data_agent": 3}
-_NAME_ONLY_KEYED_TOOLS: set[str] = set()
+# one identical call is already a loop. ``ask_data_agent`` is capped per turn
+# by name. For report creation, repeated serial data-agent calls are the
+# dominant latency source; one comprehensive query should gather the full
+# dataset, and a second call is the hard stop.
+TOOL_CALL_CAPS: dict[str, int] = {"memory": 1, "ask_data_agent": 2}
+_NAME_ONLY_KEYED_TOOLS: set[str] = {"ask_data_agent"}
 
 # Stream-then-buffer kill-switch (Gap 1). When True, the v3 agentic loop
 # streams LLM tokens to the client as they arrive via ``_stream_llm_with_tools``
@@ -547,6 +603,8 @@ ACTIVITY_STEP_DESCRIPTIONS = {
 
     # Data tools
     "ask_data_agent":       "Querying the bound data source",
+    "describe_schema":      "Inspecting the database schema",
+    "list_data_sources":    "Listing available data sources",
     "web_search":           "Searching the web for relevant information",
     "web_extract":          "Extracting content from web pages",
     "read_file":            "Reading the {path} file",
@@ -636,13 +694,19 @@ def _emit_activity_step(step_num: int, description: str, status: str,
                         detail: str | None = None,
                         command: str | None = None,
                         output_preview: str | None = None,
-                        artifact_id: str | None = None) -> str:
+                        artifact_id: str | None = None,
+                        duration_ms: int | None = None) -> str:
     """Return an SSE ``activity_step`` payload as a formatted SSE string.
 
     The optional ``command`` / ``output_preview`` fields power the
     Claude-style expandable step detail in the frontend: clicking a step
     reveals WHAT the tool was invoked with (command/code/query) and a
     short preview of what came back (output/error).
+
+    ``duration_ms`` is the wall-clock time in milliseconds for this step,
+    from the start of the LLM call or tool execution to the point where
+    the step result is emitted. It is rendered in the frontend as a
+    small "X.Xs" label next to the step status icon.
     """
     step = {
         "number": step_num,
@@ -659,6 +723,8 @@ def _emit_activity_step(step_num: int, description: str, status: str,
         step["output_preview"] = output_preview
     if artifact_id:
         step["artifact_id"] = artifact_id
+    if duration_ms is not None:
+        step["duration_ms"] = duration_ms
     return f'data: {json.dumps({"type": "activity_step", "step": step})}\n\n'
 
 
@@ -2229,9 +2295,24 @@ async def add_message(
     user_model_v2: str | None = body.get("model")
 
     # ── Hierarchical LLM resolution ─────────────────────────────────
+    # Honor the per-message body project_id (the frontend sends the
+    # live-URL selection on every message). A conv created without a
+    # project (legacy rows, main-chat entry) must still follow the
+    # selected project's configured LLM — otherwise the agent reads
+    # the project's data sources but thinks with the default model.
+    _llm_pid_v2 = resolve_message_project_id(
+        db,
+        conv_project_id=getattr(conv, "project_id", None),
+        body_project_id=body.get("project_id"),
+        body_project_name=body.get("project_name"),
+    )
+    if _llm_pid_v2 and not getattr(conv, "project_id", None):
+        # One-time heal: persist the binding so later turns and the
+        # project's Recent Chats list see this conversation.
+        conv.project_id = _llm_pid_v2
     _eff_llm_v2 = resolve_effective_llm(
         db,
-        project_id=conv.project_id,
+        project_id=_llm_pid_v2,
         agent_name=conv.agent_name,
         user_model=user_model_v2,
         user_is_admin=(user.role == "admin"),
@@ -2701,9 +2782,43 @@ async def add_message(
                 user_content, data_ctx_extras, iteration,
                 tool_names=_tool_names_from_schemas(tools),
             )
+
+            # Dashboard guard: same logic as the v3 stream — if the user
+            # asked for a live dashboard and we've already done the
+            # schema/design pass, force the next LLM turn to call
+            # `create_dashboard`. Without this, the agent dumps markdown
+            # tables instead of producing an interactive dashboard artifact.
+            # Also fires in dashboard-capable projects (Ecisco BI /
+            # `ecisco_bi_assistant`) when the agent speculatively loads
+            # dashboard skills before being asked — the user just said "hi"
+            # but the agent is in a BI project with a bound datasource.
+            _tool_names = _tool_names_from_schemas(tools)
+            _is_dash_project = bool(agent_name and (
+                "ecisco_bi" in agent_name.lower()
+                or "bi_assistant" in agent_name.lower()
+            ))
+            if (
+                "create_dashboard" in _tool_names
+                and should_force_create_dashboard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    has_dashboard_tool=True,
+                    is_dashboard_project=_is_dash_project,
+                )
+            ):
+                logger.info(
+                    "v2 stream: forcing create_dashboard after schema/design "
+                    "pass (conv=%s, iter=%d, prior_tool_count=%d, dash_project=%s)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                    _is_dash_project,
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_dashboard"},
+                }
             try:
                 # P1.3: Pre-API deterministic tool result pruning (no LLM call)
-                prune_tool_results_only(llm_messages)
+                prune_tool_results_only(llm_messages, model=get_model())
                 sanitize_messages(llm_messages)
                 llm_response = await _call_llm_with_tools(
                     llm_messages, tools, tool_choice=tool_choice,
@@ -2737,7 +2852,7 @@ async def add_message(
                                 llm_messages.insert(0, {"role": "system", "content": system_prompt})
                             logger.info("Reactive compaction done, retrying LLM call with %d messages", len(llm_messages))
                             # Retry the LLM call
-                            prune_tool_results_only(llm_messages)
+                            prune_tool_results_only(llm_messages, model=get_model())
                             sanitize_messages(llm_messages)
                             llm_response = await _call_llm_with_tools(
                                 llm_messages, tools, tool_choice=tool_choice,
@@ -2777,7 +2892,7 @@ async def add_message(
                     # (status-code classified, Retry-After honored) instead
                     # of failing the whole turn on a single 429/503.
                     async def _retry_llm_call():
-                        prune_tool_results_only(llm_messages)
+                        prune_tool_results_only(llm_messages, model=get_model())
                         sanitize_messages(llm_messages)
                         return await _call_llm_with_tools(
                             llm_messages, tools, tool_choice=tool_choice,
@@ -2866,6 +2981,70 @@ async def add_message(
                     "args_str": args_str,
                     "tool_call_id": tool_call_id,
                 })
+
+            # ── Dashboard guard interception ──────────────────────────
+            # Same logic as the v3 stream: if the guard fired but the LLM
+            # ignored tool_choice and returned execute_query, block it and
+            # inject a synthetic tool result forcing a create_dashboard retry.
+            if parsed_calls:
+                _dash_guard_names = {p["tool_name"] for p in parsed_calls}
+                _v2_tool_names = _tool_names_from_schemas(tools)
+                if (
+                    "create_dashboard" in _dash_guard_names
+                    or "create_dashboard" in _v2_tool_names
+                ) and any(
+                    n in dashboard_guard_blocked_tools()
+                    for n in _dash_guard_names
+                ):
+                    _blocked_names = [
+                        p["tool_name"]
+                        for p in parsed_calls
+                        if p["tool_name"] in dashboard_guard_blocked_tools()
+                    ]
+                    logger.warning(
+                        "v2 stream: dashboard guard intercepted %s after "
+                        "schema/design pass (conv=%s, iter=%d).",
+                        _blocked_names, conversation_id, iteration,
+                    )
+                    _blocked = [p for p in parsed_calls if p["tool_name"] in dashboard_guard_blocked_tools()]
+                    _allowed = [p for p in parsed_calls if p["tool_name"] not in dashboard_guard_blocked_tools()]
+                    _blocked_summary = ", ".join(sorted({p["tool_name"] for p in _blocked}))
+                    for _blk in _blocked:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _blk["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _blk["tool_name"],
+                                    "arguments": _blk["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _blk["tool_call_id"],
+                            "content": (
+                                "BLOCKED by dashboard guard: the user asked "
+                                "for a live dashboard. Schema + design pass "
+                                "is done. STOP more "
+                                f"{_blk['tool_name']} calls. Call "
+                                "create_dashboard NOW with your widgets."
+                            ),
+                        })
+                    if not _allowed:
+                        tool_calls_for_frontend.append({
+                            "id": f"guard_blocked_{uuid.uuid4()}",
+                            "name": "dashboard_guard_intercept",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _blocked_summary,
+                                "reason": "guard: schema/design pass done; only create_dashboard allowed",
+                            },
+                        })
+                        continue
+                    parsed_calls = _allowed
 
             # Intercept path (R5): if the LLM wants to call `create_agent`
             # in this batch, intercept the call BEFORE execution, use its
@@ -3902,7 +4081,7 @@ async def resume_conversation(
         )
         try:
             # P1.3: Pre-API deterministic tool result pruning
-            prune_tool_results_only(llm_messages)
+            prune_tool_results_only(llm_messages, model=get_model())
             sanitize_messages(llm_messages)
             llm_response = await _call_llm_with_tools(
                 llm_messages, tools, tool_choice=tool_choice,
@@ -5373,14 +5552,39 @@ async def add_message_stream(
     messages = conv.messages or []
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
+    selected_skill = body.get("selected_skill") if isinstance(body.get("selected_skill"), dict) else None
+    selected_skill_id = body.get("selected_skill_id") or (selected_skill or {}).get("id")
+    if selected_skill and selected_skill_id and not selected_skill.get("id"):
+        selected_skill["id"] = selected_skill_id
+    # Automation-run tagging (2026-08-11): when the executor drives this
+    # stream, it tags the body with phase=automation so the frontend can
+    # render the prompt as an automation card instead of a user bubble.
+    _auto_phase = body.get("phase")
+    _auto_task_id = body.get("automation_task_id")
+    _auto_exec_id = body.get("automation_execution_id")
     # Per-message model override from the ModelSwitcher (P4 UI).
     # Falls back to settings.LLM_MODEL when absent.
     user_model: str | None = body.get("model")
 
     # ── Hierarchical LLM resolution ─────────────────────────────────
+    # Honor the per-message body project_id (the frontend sends the
+    # live-URL selection on every message). A conv created without a
+    # project (legacy rows, main-chat entry) must still follow the
+    # selected project's configured LLM — otherwise the agent reads
+    # the project's data sources but thinks with the default model.
+    _llm_eff_pid = resolve_message_project_id(
+        db,
+        conv_project_id=getattr(conv, "project_id", None),
+        body_project_id=body.get("project_id"),
+        body_project_name=body.get("project_name"),
+    )
+    if _llm_eff_pid and not getattr(conv, "project_id", None):
+        # One-time heal: persist the binding so later turns and the
+        # project's Recent Chats list see this conversation.
+        conv.project_id = _llm_eff_pid
     effective_llm = resolve_effective_llm(
         db,
-        project_id=conv.project_id,
+        project_id=_llm_eff_pid,
         agent_name=conv.agent_name,
         user_model=user_model,
         user_is_admin=(user.role == "admin"),
@@ -5423,6 +5627,10 @@ async def add_message_stream(
     }
     if file_urls:
         user_msg["file_urls"] = file_urls
+    if selected_skill:
+        user_msg["selected_skill"] = selected_skill
+    elif selected_skill_id:
+        user_msg["selected_skill_id"] = selected_skill_id
     messages.append(user_msg)
 
     # --- Persist the user message immediately ---
@@ -5742,6 +5950,7 @@ async def add_message_stream(
                     org_id=_v3_org_id,
                     app_id=_v3_app_id,
                     conversation_context=_v3_conv_ctx,
+                    selected_skill=selected_skill,
                     # Forward project-scoped data sources to the FSM so
                     # tool calls inside the FSM (ask_data_agent,
                     # list_data_sources, execute_query) see the same
@@ -5848,18 +6057,20 @@ async def add_message_stream(
                 # Persist the assistant message and emit done.
                 try:
                     from app.models.chat_message import ChatMessage as Message
-                    msg = Message(
-                        id=str(uuid4()),
-                        conversation_id=conversation_id,
-                        role="assistant",
-                        content=assistant_content,
-                        agent_name=_v3_agent_name,
-                        trace=fsm_result.plan_summary or {},
-                        reasoning=None,
-                    )
-                    db.add(msg)
-                    db.commit()
-                    db.refresh(msg)
+                    if chat_session_id:
+                        msg = Message(
+                            id=str(uuid4()),
+                            conversation_id=conversation_id,
+                            session_id=chat_session_id,
+                            role="assistant",
+                            content=assistant_content,
+                            agent_name=_v3_agent_name,
+                            trace=fsm_result.plan_summary or {},
+                            reasoning=None,
+                        )
+                        db.add(msg)
+                        db.commit()
+                        db.refresh(msg)
                 except Exception as _persist_err:
                     logger.warning("v3 FSM route: assistant persist failed (non-fatal): %s", _persist_err)
 
@@ -6292,6 +6503,8 @@ async def add_message_stream(
 
         # Emit "Understanding your request" step (running → done)
         _step_counter[0] += 1
+        _step_start_times: dict[int, float] = {}  # step_num → monotonic start time
+        _step_start_times[_step_counter[0]] = time.monotonic()
         yield _emit_activity_step(
             _step_counter[0], "Understanding your request", "running",
         )
@@ -6300,10 +6513,13 @@ async def add_message_stream(
             "description": "Understanding your request",
             "status": "running",
         })
+        _step_dur = int((time.monotonic() - _step_start_times[_step_counter[0]]) * 1000)
         yield _emit_activity_step(
             _step_counter[0], "Understanding your request", "done",
+            duration_ms=_step_dur,
         )
         _activity_steps[-1]["status"] = "done"
+        _activity_steps[-1]["duration_ms"] = _step_dur
 
         # P0 reliability: per-turn guardrail controller + per-conversation iteration budget
         guard_ctrl = ToolLoopGuardController(_loop_guard_config_for(agent_app))
@@ -6419,6 +6635,39 @@ async def add_message_stream(
                 tool_names=_tool_names_from_schemas(tools),
             )
 
+            # Dashboard guard: if the user asked for a live dashboard and
+            # we've already done the schema/design pass, force the next LLM
+            # turn to call `create_dashboard` so the dashboard renders inline
+            # in the chat. Without this, the agent often keeps running
+            # `execute_query` and dumps markdown tables instead of producing
+            # an interactive dashboard artifact.
+            # Also fires in dashboard-capable projects (Ecisco BI) when the
+            # agent speculatively loads dashboard skills before being asked.
+            _tool_names = _tool_names_from_schemas(tools)
+            _is_dash_project = bool(conv.agent_name and (
+                "ecisco_bi" in conv.agent_name.lower()
+                or "bi_assistant" in conv.agent_name.lower()
+            ))
+            if (
+                "create_dashboard" in _tool_names
+                and should_force_create_dashboard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    has_dashboard_tool=True,
+                    is_dashboard_project=_is_dash_project,
+                )
+            ):
+                logger.info(
+                    "v3 stream: forcing create_dashboard after schema/design "
+                    "pass (conv=%s, iter=%d, prior_tool_count=%d, dash_project=%s)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                    _is_dash_project,
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_dashboard"},
+                }
+
             # ── Gap 1: true token streaming ───────────────────────────
             # When STREAM_TOKEN_DELTAS is on, drive the streaming generator
             # (_stream_llm_with_tools) so tokens are yielded to the client
@@ -6433,7 +6682,7 @@ async def add_message_stream(
 
             try:
                 # P1.3: Pre-API deterministic tool result pruning
-                prune_tool_results_only(llm_messages)
+                prune_tool_results_only(llm_messages, model=get_model())
                 sanitize_messages(llm_messages)
                 if STREAM_TOKEN_DELTAS:
                     # ── Streaming path ────────────────────────────────
@@ -6656,6 +6905,84 @@ async def add_message_stream(
                     "args_str": args_str, "tool_call_id": tool_call_id,
                 })
 
+            # ── Dashboard guard interception ──────────────────────────
+            # The guard above set tool_choice to force create_dashboard, but
+            # weaker models (e.g. qwen3.5-27b) often ignore that and return
+            # execute_query instead. Block those calls AND inject a synthetic
+            # tool result so the LLM sees why its call was rejected and
+            # retries with create_dashboard. Only `create_dashboard` and
+            # harmless side-effect tools are allowed through.
+            if parsed_calls:
+                _dash_guard_names = {p["tool_name"] for p in parsed_calls}
+                if (
+                    "create_dashboard" in _dash_guard_names
+                    or "create_dashboard" in _tool_names
+                ) and any(
+                    n in dashboard_guard_blocked_tools()
+                    for n in _dash_guard_names
+                ):
+                    # Strip the blocked tool calls; keep only create_dashboard
+                    # and harmless tools.
+                    _blocked_names = [
+                        p["tool_name"]
+                        for p in parsed_calls
+                        if p["tool_name"] in dashboard_guard_blocked_tools()
+                    ]
+                    logger.warning(
+                        "v3 stream: dashboard guard intercepted %s after "
+                        "schema/design pass (conv=%s, iter=%d). Blocking "
+                        "those calls; will retry with create_dashboard.",
+                        _blocked_names, conversation_id, iteration,
+                    )
+                    # Inject synthetic tool results for the blocked calls so
+                    # the LLM has a complete turn to reason about. Then
+                    # retry: keep only the allowed calls for this iteration.
+                    _blocked = [p for p in parsed_calls if p["tool_name"] in dashboard_guard_blocked_tools()]
+                    _allowed = [p for p in parsed_calls if p["tool_name"] not in dashboard_guard_blocked_tools()]
+                    _blocked_summary = ", ".join(sorted({p["tool_name"] for p in _blocked}))
+                    for _blk in _blocked:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _blk["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _blk["tool_name"],
+                                    "arguments": _blk["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _blk["tool_call_id"],
+                            "content": (
+                                "BLOCKED by dashboard guard: the user asked "
+                                "for a live dashboard. You already have the "
+                                "schema + design pass done. STOP running "
+                                f"more {_blk['tool_name']} calls. Call "
+                                "create_dashboard NOW with the widgets "
+                                "you've planned, even if you only have a "
+                                "few columns. The dashboard will render "
+                                "inline in the chat."
+                            ),
+                        })
+                    if not _allowed:
+                        # Nothing else to execute — force a retry that
+                        # should land on create_dashboard.
+                        tool_calls_for_frontend.append({
+                            "id": f"guard_blocked_{uuid.uuid4()}",
+                            "name": "dashboard_guard_intercept",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _blocked_summary,
+                                "reason": "guard: schema/design pass done; only create_dashboard allowed",
+                            },
+                        })
+                        yield f'data: {json.dumps({"type": "tool_call", "name": "dashboard_guard_intercept", "args": {"blocked": _blocked_summary}})}\n\n'
+                        continue
+                    parsed_calls = _allowed
+
             # Intercept path (R5): if the LLM's batch includes a
             # `create_agent` call, intercept it BEFORE execution, drop the
             # entry from the parallel-execute set, and pause for the
@@ -6818,6 +7145,7 @@ async def add_message_stream(
                     desc = f"{desc} ({idx}/{total})"
                 cmd = _summarize_tool_command(tn, pc.get("args"))
                 yield _emit_activity_step(_step_counter[0], desc, "running", tool_name=tn, command=cmd)
+                _step_start_times[_step_counter[0]] = time.monotonic()
                 _activity_steps.append({
                     "number": _step_counter[0],
                     "description": desc,
@@ -7084,6 +7412,7 @@ async def add_message_stream(
                         step_num, step_desc, new_status, tool_name=tool_name,
                         command=_step_cmd, output_preview=_step_out,
                         artifact_id=_step_art,
+                        duration_ms=int((time.monotonic() - _step_start_times.get(step_num, time.monotonic())) * 1000),
                     )
 
                 llm_messages.append({
@@ -7311,8 +7640,11 @@ async def add_message_stream(
         # the Agent Builder. The non-streaming ``add_message`` v2 path
         # already does this correctly (uses the content the main loop
         # produced with no second LLM call), so we mirror that here.
-        if not assistant_content:
-            assistant_content = _EMPTY_CONTENT_FALLBACK
+        # BUGFIX: skip fallback if deltas were already streamed — otherwise
+        # the user sees "detailed report" + "I gathered some information..."
+        # as a confusing double-message.
+        if not assistant_content and not locals().get("content_streamed"):
+            assistant_content = _EMPTY_CONTENT_FALLBACK if agent_name == "agent_builder" else _GENERIC_EMPTY_CONTENT_FALLBACK
 
         # Decision-summary pause (R4): if the assistant text contains a
         # `:::decision-summary` block, persist the pending payload to
@@ -7351,13 +7683,16 @@ async def add_message_stream(
 
         # ── Activity step: "Generating response" done ──
         _step_counter[0] += 1
+        _gen_dur = int((time.monotonic() - _step_start_times.get(_step_counter[0] - 1, time.monotonic())) * 1000)
         yield _emit_activity_step(
             _step_counter[0], "Generating response", "done",
+            duration_ms=_gen_dur,
         )
         _activity_steps.append({
             "number": _step_counter[0],
             "description": "Generating response",
             "status": "done",
+            "duration_ms": _gen_dur,
         })
 
         # ── Marker contract: ◤MD_DOCX◤ / ◤HTML_DOCX◤ / ◤PPTX◤ ──
@@ -7487,16 +7822,127 @@ async def add_message_stream(
         # across the tool iterations.
         if not (assistant_content or "").strip():
             try:
-                if locals().get("_loop_guard_user_facing"):
-                    assistant_content = _loop_guard_user_facing
-                else:
-                    # Generic fallback for any other empty-content path
-                    # (e.g. MAX_TOOL_ITERATIONS exhausted with no
-                    # assistant text). Localized via simple heuristic.
-                    assistant_content = (
-                        "I gathered some information but had trouble putting it all together. "
-                        "Please try rephrasing your question."
+                # Dashboard-specific rescue: if the user asked for a
+                # dashboard but create_dashboard was never called, inject
+                # a final nudge forcing the LLM to call create_dashboard
+                # with whatever schema info it has. This prevents the
+                # common "budget exhausted during exploration" failure.
+                if (
+                    _is_dashboard_request(user_content)
+                    and not _tool_was_called(tool_calls_for_frontend, "create_dashboard")
+                    and not _tool_was_called(tool_calls_for_frontend, "update_dashboard")
+                ):
+                    logger.info(
+                        "Dashboard rescue: user asked for dashboard but "
+                        "create_dashboard never called (conv=%s). Injecting "
+                        "rescue nudge.",
+                        conversation_id,
                     )
+                    rescue_nudge = (
+                        "CRITICAL: The user asked for a dashboard but you ran "
+                        "out of tool iterations before calling create_dashboard. "
+                        "You MUST call create_dashboard NOW with the schema "
+                        "information you already have. Use the column names you "
+                        "discovered from describe_schema/execute_query. Do NOT "
+                        "explore further — build the dashboard with what you know."
+                    )
+                    llm_messages.append({"role": "user", "content": rescue_nudge})
+                    # One final LLM call to force create_dashboard
+                    try:
+                        _rescue_stream = _stream_llm_with_tools(
+                            llm_messages, tools,
+                            tool_choice={"type": "function", "function": {"name": "create_dashboard"}},
+                            model_override=user_model,
+                            endpoint=effective_llm.endpoint,
+                            temperature=llm_overrides.get("temperature"),
+                            max_tokens=llm_overrides.get("max_tokens"),
+                        )
+                        async for _ev_type, _ev_data in _rescue_stream:
+                            if _ev_type == "delta":
+                                assistant_content += _ev_data
+                                content_streamed = True
+                                yield f'data: {json.dumps({"type": "delta", "content": _ev_data})}\n\n'
+                            elif _ev_type == "tool_calls":
+                                raw_tool_calls = _ev_data or []
+                        # If the rescue produced a create_dashboard call, execute it
+                        if raw_tool_calls:
+                            for _tc in raw_tool_calls:
+                                _fn = _tc.get("function", {})
+                                _tname = _fn.get("name", "")
+                                if _tname == "create_dashboard":
+                                    _targs = _fn.get("arguments", "{}")
+                                    if isinstance(_targs, str):
+                                        import json as _json
+                                        try:
+                                            _targs = _json.loads(_targs)
+                                        except Exception:
+                                            _targs = {}
+                                    _tool_result = await execute_tool(
+                                        _tname, _targs, db,
+                                        user_id,
+                                        context={
+                                            "conversation_id": conversation_id,
+                                            "agent_app_id": agent_app_id,
+                                            "agent_name": agent_name,
+                                            "conversation_metadata": conv.metadata_ or {},
+                                            "chat_session_id": chat_session_id,
+                                            **(data_ctx_extras or {}),
+                                        },
+                                    )
+                                    tc_id = _tc.get("id", str(uuid.uuid4()))
+                                    tool_calls_for_frontend.append({
+                                        "id": tc_id,
+                                        "name": "create_dashboard",
+                                        "arguments_string": _fn.get("arguments", "{}") if isinstance(_fn.get("arguments"), str) else json.dumps(_fn.get("arguments", {})),
+                                        "status": "completed" if isinstance(_tool_result, dict) and _tool_result.get("success") else "failed",
+                                        "results": _tool_result,
+                                    })
+                                    if isinstance(_tool_result, dict):
+                                        _dash_id = _tool_result.get("dashboard_id") or _tool_result.get("artifact_id")
+                                        if _dash_id and _dash_id not in artifact_ids:
+                                            artifact_ids.append(_dash_id)
+                                    # Append tool result to messages for persistence
+                                    llm_messages.append({"role": "assistant", "content": None, "tool_calls": [_tc]})
+                                    llm_messages.append({"role": "tool", "tool_call_id": tc_id, "content": json.dumps(_tool_result)})
+                                    logger.info(
+                                        "Dashboard rescue: create_dashboard executed "
+                                        "(success=%s, conv=%s)",
+                                        isinstance(_tool_result, dict) and _tool_result.get("success"),
+                                        conversation_id,
+                                    )
+                    except Exception as _rescue_err:
+                        logger.warning(
+                            "Dashboard rescue LLM call failed: %s (conv=%s)",
+                            _rescue_err, conversation_id,
+                        )
+                # After rescue attempt (or if no rescue needed), check
+                # if we still have empty content.
+                if not (assistant_content or "").strip():
+                    # BUGFIX: If the streaming loop already emitted deltas
+                    # to the user (content_streamed=True), the user has
+                    # already seen the answer. Do NOT append a second
+                    # fallback message on top — it creates a confusing
+                    # "detailed report + I gathered some information but
+                    # had trouble..." double-message. Just leave
+                    # assistant_content empty; the streamed deltas are the
+                    # authoritative answer.
+                    if locals().get("content_streamed"):
+                        logger.info(
+                            "Post-loop: content was already streamed; "
+                            "skipping fallback append (conv=%s)",
+                            conversation_id,
+                        )
+                    elif locals().get("_loop_guard_user_facing"):
+                        assistant_content = _loop_guard_user_facing
+                    else:
+                        # Dashboard-specific fallback message
+                        if _is_dashboard_request(user_content) and not _tool_was_called(tool_calls_for_frontend, "create_dashboard"):
+                            assistant_content = (
+                                "I ran out of steps while exploring the data for your dashboard. "
+                                "Please try again — I'll create the dashboard more quickly this time."
+                            )
+                        else:
+                            assistant_content = _GENERIC_EMPTY_CONTENT_FALLBACK
                 logger.info(
                     "Post-loop fallback: empty assistant_content, using fallback message "
                     "(conv=%s, len=%d)",
@@ -7504,10 +7950,7 @@ async def add_message_stream(
                 )
             except Exception as _fallback_err:
                 logger.warning("Post-loop fallback failed: %s", _fallback_err)
-                assistant_content = (
-                    "I gathered some information but had trouble putting it all together. "
-                    "Please try rephrasing your question."
-                )
+                assistant_content = _GENERIC_EMPTY_CONTENT_FALLBACK
         if _orch_created:
             for _art in _orch_created:
                 tool_calls_for_frontend.append({

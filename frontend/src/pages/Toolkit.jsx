@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { formatAbsoluteTime } from '@/lib/time';
 import { getAnonymousId } from '@/lib/anonymousId';
 import SkillCardGrid from '@/components/toolkit/SkillCardGrid';
 import MySkillsModal from '@/components/toolkit/MySkillsModal';
@@ -545,7 +546,7 @@ export default function Toolkit() {
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-foreground">{r.url}</div>
                         <div className="text-[10px] text-muted-foreground">
-                          Removed {r.removed_at ? new Date(r.removed_at).toLocaleString() : 'recently'}
+                          Removed {r.removed_at ? formatAbsoluteTime(r.removed_at) : 'recently'}
                         </div>
                       </div>
                       <button

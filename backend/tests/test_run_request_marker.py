@@ -1,13 +1,15 @@
 """Run-request marker tests: every run posts a visible "Run Automation
-Task：" user bubble (5-bullet summary) into the task's dedicated chat
-session, even when the run fails fast at the data_sync preflight.
+Task：" user bubble (5-bullet summary) AND an empty assistant bubble
+into the task's dedicated chat session, even when the run fails fast
+at the data_sync preflight.
 
 Covers:
 1. ``_post_run_request_marker`` writes EXACTLY ONE ``role="user"``
    ChatMessage with all 5 bullets (Name / Type / Output format /
    Project / Description, full-width colons) incl. the
    ``Output format：Word document (docx)`` label, and a ``phase`` that
-   deep-links the execution.
+   deep-links the execution.  Also writes ONE empty ``role="assistant"``
+   ChatMessage for the live-progress / final-reply slot.
 2. Idempotent: calling twice for the same execution does not double-write.
 3. Never raises — a marker failure must not block the run.
 4. Wired into ``execute_automation`` BEFORE the data_sync preflight gate
@@ -138,11 +140,11 @@ def test_post_run_request_marker_writes_visible_user_bubble():
         msgs = db.query(ChatMessage).filter(
             ChatMessage.session_id == task.session_id,
         ).all()
-        assert len(msgs) == 1, "exactly one marker per execution"
-        m = msgs[0]
-        assert m.role == "user", "marker is a user-style request bubble"
-        body = m.content
-        # All 5 bullets present (full-width colons), incl. the format label.
+        assert len(msgs) == 2, "exactly two markers per execution (user + assistant)"
+        user_msg = [m for m in msgs if m.role == "user"][0]
+        asst_msg = [m for m in msgs if m.role == "assistant"][0]
+        # User bubble: 5-bullet summary
+        body = user_msg.content
         assert "Run Automation Task：" in body
         assert "Name：Weekly Sales Brief" in body
         assert "Type：report" in body
@@ -150,9 +152,12 @@ def test_post_run_request_marker_writes_visible_user_bubble():
         assert "Project：" in body and "Q3 Sales" in body
         assert "Description：Summarize weekly sales performance" in body
         # phase deep-links the execution + task.
-        phase = m.phase or {}
+        phase = user_msg.phase or {}
         assert phase.get("execution_id") == ex.id
         assert phase.get("automation_task_id") == task.id
+        # Assistant bubble: empty (populated later by _persist_run_to_chat)
+        assert asst_msg.content == ""
+        assert asst_msg.phase.get("live") is True
     finally:
         _teardown_marker_test(db, task, ex)
         db.close()

@@ -24,11 +24,70 @@ from sqlalchemy.orm import Session
 from app.services.datasources import DatasourceAdapter, QueryResult
 from app.services.datasources.sqlite_adapter import SQLiteAdapter
 from app.services.datasources.postgres_adapter import PostgresAdapter
+from app.services.datasources.mysql_adapter import MySQLAdapter
 from app.services.nl2sql.semantic_resolver import resolve, ResolvedIntent
 from app.services.nl2sql.validator import validate, ValidationResult
 from app.services.nl2sql.policy import evaluate, PolicyConfig, PolicyDecision
 
 logger = logging.getLogger(__name__)
+
+
+# ── lightweight validation facade (shadow mode / recipe checks) ──────────
+
+
+def validate_sql(
+    sql: str,
+    *,
+    dialect: str | None = None,
+    datasource_id: str | None = None,
+    allowed_tables: list[str] | None = None,
+    allowed_columns: list[str] | None = None,
+    block_tables: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run governance validation + default policy on a SQL statement.
+
+    This is the single entry point for callers that already have SQL
+    (shadow-mode wiring, report-recipe checks) and only need a verdict —
+    no adapter, no EXPLAIN, no execution. Never raises; on unexpected
+    internal errors returns ``{"is_valid": False, "error": ...}`` so the
+    caller can treat the statement as unverifiable.
+    """
+    try:
+        v = validate(
+            sql,
+            allowed_tables=allowed_tables,
+            allowed_columns=allowed_columns,
+            block_tables=block_tables,
+        )
+        p = evaluate(
+            v.tables_referenced,
+            0.0,  # no EXPLAIN in this path — allow/block lists + row limit only
+            policy_config=PolicyConfig(
+                allowed_tables=allowed_tables or [],
+                allowed_columns=allowed_columns or [],
+                block_tables=block_tables or [],
+            ),
+        )
+        return {
+            "is_valid": v.is_valid,
+            "errors": list(v.errors),
+            "warnings": list(v.warnings),
+            "tables_referenced": list(v.tables_referenced),
+            "sql_hash": v.sql_hash,
+            "policy_allowed": p.allowed,
+            "policy_reason": p.reason,
+        }
+    except Exception as e:  # never raise into the served path
+        logger.debug("validate_sql failed (treated as unverifiable): %s", e)
+        return {
+            "is_valid": False,
+            "errors": [f"validation error: {e}"],
+            "warnings": [],
+            "tables_referenced": [],
+            "sql_hash": "",
+            "policy_allowed": False,
+            "policy_reason": "validation error",
+        }
 
 
 @dataclass
@@ -59,6 +118,11 @@ def _build_adapter(ds_config: dict[str, Any]) -> DatasourceAdapter:
             dbname=ds_config.get("database", ds_config.get("dbname", "zhanlu")),
             user=ds_config.get("username", ds_config.get("user", "zhanlu")),
             password=ds_config.get("password", ""),
+            timeout_ms=int(ds_config.get("timeout_ms", 5000)),
+        )
+    if dialect == "mysql":
+        return MySQLAdapter(
+            kb=ds_config.get("kb"),
             timeout_ms=int(ds_config.get("timeout_ms", 5000)),
         )
     # Default: SQLite

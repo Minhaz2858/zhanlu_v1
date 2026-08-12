@@ -458,6 +458,13 @@ class Settings(BaseSettings):
     ECISCO_BI_PERCEPTION_ENABLED: bool = False        # 5C
     ECISCO_BI_INTEL_ENHANCED_ENABLED: bool = False    # 5D
     ECISCO_BI_ERP_WRITEBACK_ENABLED: bool = False     # 5F
+    ECISCO_BI_ALERTS_ENABLED: bool = False           # 5G — proactive market alert detection + UI
+
+    # ── CEO Morning Digest (built on top of 5G alerts) ────────────────
+    ALERT_DIGEST_ENABLED: bool = False              # Master gate for CEO morning digest
+    ALERT_DIGEST_LLM_ENABLED: bool = True           # LLM narrator (default ON, template is fallback)
+    ALERT_DIGEST_HOUR_UTC: int = 0                  # Digest generation hour (0 = 08:00 CST)
+    ALERT_DIGEST_TOP_N: int = 5                     # Top-N items in digest
 
     # ── Experience layer (self-learning agent) ──────────────────────────
     # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):
@@ -475,6 +482,7 @@ class Settings(BaseSettings):
     ECISCO_BI_USER_PROFILE_ENABLED: bool = False      # Layer 3
     ECISCO_BI_RESPONSE_CACHE_ENABLED: bool = False    # Layer 2
     ECISCO_BI_FEEDBACK_ENABLED: bool = False          # Phase C wiring
+    ECISCO_BI_AUTOMATION_FASTPATH_ENABLED: bool = False  # DISABLED — automation only via UI "New Automation Task" button
 
     # ── Project Knowledge Graph / Semantic Catalog ───────────────────────
     # Phase 1 flags (default OFF — roll out after catalog indexer + schema
@@ -483,8 +491,29 @@ class Settings(BaseSettings):
     #   FK, LLM descriptions, Chroma embeddings).
     # SCHEMA_LINKING_ENABLED: query-time RRF retrieval + join-path expansion
     #   into a curated ~800-token DDL slice for NLAnswerService/Data Agent.
-    SEMANTIC_CATALOG_ENABLED: bool = False
+    SEMANTIC_CATALOG_ENABLED: bool = True
     SCHEMA_LINKING_ENABLED: bool = False
+    # NL2SQL_SHADOW_MODE_ENABLED: run the governed nl2sql validator/policy
+    #   alongside the live agent data path (NLAnswerService), logging
+    #   divergence to nl2sql_query_logs. The served result is NEVER altered
+    #   in shadow mode; the serving switch happens only on eval evidence.
+    NL2SQL_SHADOW_MODE_ENABLED: bool = False
+    # KG_RESOURCE_ROUTER_ENABLED: deterministic per-question resource routing
+    #   (database / document / memory / report / multi_resource) consumed by
+    #   delegation tools. Fallback decisions = behave exactly as today.
+    KG_RESOURCE_ROUTER_ENABLED: bool = False
+    # KG_RESOURCE_REGISTRY_ENABLED: unified project resource registry
+    #   (visibility-tiered) + registry indexers + read API.
+    KG_RESOURCE_REGISTRY_ENABLED: bool = False
+    # ENTITY_GRAPH_ENABLED: generic entity extraction from project memory +
+    #   entity-aware retrieval + "Project Data Map" prompt section.
+    ENTITY_GRAPH_ENABLED: bool = False
+    # REPORT_RECIPES_ENABLED: first-class report recipes (SQL bundles direct
+    #   via QueryService, charts via sandbox, validation rules enforced).
+    REPORT_RECIPES_ENABLED: bool = False
+    # DEPTH_ANALYSIS_LOOP_ENABLED: bounded hypothesis->query->validate loop
+    #   for "why" questions; evidence packs; LLM explains, never decides.
+    DEPTH_ANALYSIS_LOOP_ENABLED: bool = False
 
     # ── Data Agent latency optimizations ───────────────────────────────
     # DATA_AGENT_FASTPATH_ENABLED: when the call targets a single bound

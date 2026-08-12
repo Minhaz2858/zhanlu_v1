@@ -10,6 +10,7 @@
  */
 
 import { useState, useEffect, useRef, useCallback } from 'react';
+import { formatTimeOfDay } from '@/lib/time';
 import {
   Loader2, CheckCircle2, AlertCircle, Clock, Terminal,
   FilePlus, FileText, PlayCircle, StopCircle, RefreshCw,
@@ -191,7 +192,7 @@ export default function SandboxTimeline({ jobId, onComplete }) {
                     <span className="font-medium text-foreground">{event.event_type}</span>
                     {event.timestamp && (
                       <span className="ml-auto text-[10px] text-muted-foreground">
-                        {new Date(event.timestamp).toLocaleTimeString()}
+                        {formatTimeOfDay(event.timestamp)}
                       </span>
                     )}
                   </div>

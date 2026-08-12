@@ -9,6 +9,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { formatAbsoluteTime } from '@/lib/time';
 import {
   Shield, DollarSign, FileText, CheckCircle2, XCircle, Clock,
   Loader2, AlertCircle, ChevronDown, ChevronRight,
@@ -224,7 +225,7 @@ export default function AdminConsole() {
                   log.result === 'success' ? 'bg-green-500' : log.result === 'denied' ? 'bg-red-500' : 'bg-amber-500'
                 }`} />
                 <span className="shrink-0 font-mono text-muted-foreground">
-                  {log.occurred_at ? new Date(log.occurred_at).toLocaleString() : '—'}
+                  {log.occurred_at ? formatAbsoluteTime(log.occurred_at) : '—'}
                 </span>
                 <span className="shrink-0 font-medium text-foreground">{log.action}</span>
                 <span className="shrink-0 text-muted-foreground">{log.resource_type}</span>

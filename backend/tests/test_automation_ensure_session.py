@@ -60,8 +60,10 @@ def test_ensure_session_creates_new_when_none():
         db.close()
 
 
-def test_ensure_session_adopts_when_title_is_placeholder():
-    """A task whose session is titled 'test' (placeholder) gets a fresh one."""
+def test_ensure_session_reuses_origin_session():
+    """Origin-session binding (2026-08-12): a task whose session is an
+    origin-chat session (agent_name=None) is REUSED — run output goes to
+    the same chat where the task was created. No new dedicated session."""
     db = SessionLocal()
     task = _make_task(db, name="Sync Test B")
     try:
@@ -86,14 +88,15 @@ def test_ensure_session_adopts_when_title_is_placeholder():
         db.refresh(task)
 
         from app.routers.automation_api import _ensure_task_chat_session
-        new_session_id, created = _ensure_task_chat_session(db, task)
-        assert created is True
-        assert new_session_id != legacy_chat.id
+        same_session_id, created = _ensure_task_chat_session(db, task)
+        assert created is False, (
+            "Must reuse the origin session, not create a new one"
+        )
+        assert same_session_id == legacy_chat.id, (
+            "Must return the origin session id"
+        )
         db.refresh(task)
-        assert task.session_id == new_session_id
-        new_chat = db.query(ChatSession).filter(ChatSession.id == new_session_id).first()
-        assert new_chat is not None
-        assert new_chat.title == "Sync Test B"
+        assert task.session_id == legacy_chat.id
         still_there = db.query(ChatSession).filter(ChatSession.id == legacy_chat.id).first()
         assert still_there is not None
         assert still_there.title == "test"
@@ -154,6 +157,7 @@ def test_ensure_session_backfills_created_by_on_matching_session():
             conversation_id=conv.id,
             project="global",
             created_by_id=None,  # orphaned — the bug's signature
+            agent_name="automation_agent",
         )
         db.add(chat)
         db.flush()
@@ -194,6 +198,7 @@ def test_ensure_session_noop_when_title_already_matches():
             title="Sync Test C",
             conversation_id=conv.id,
             project="global",
+            agent_name="automation_agent",
         )
         db.add(chat)
         db.flush()
@@ -212,24 +217,25 @@ def test_ensure_session_noop_when_title_already_matches():
 
 
 def test_ensure_session_reuses_old_conversation_for_history():
-    """Adopting a session must reuse the OLD AgentConversation so past
-    run results stay visible in the per-task chat (Manus UX).
+    """A task whose existing session has ``agent_name='automation_agent'``
+    must reuse the OLD AgentConversation so past run results stay visible
+    in the per-task chat (Manus UX).
 
-    Pre-condition: a task whose existing session is titled "test"
-    and whose underlying AgentConversation has some messages in it
-    (simulating past _notify_chat writes). After ensure-session,
-    the new task-named ChatSession must point to the SAME
-    AgentConversation so those past messages are still visible.
+    Pre-condition: a task whose existing dedicated session already links
+    to an AgentConversation with some messages in it (simulating prior
+    runs). After ensure-session with ``agent_name='automation_agent'``,
+    the same ChatSession must point to the SAME AgentConversation so
+    those past messages are still visible.
     """
     db = SessionLocal()
     task = _make_task(db, name="Daily Sales Data Sync")
     try:
         from app.models.agent_conversation import AgentConversation
-        # Pre-create a legacy session + conversation with a fake
-        # past-run message already in it.
-        legacy_conv = AgentConversation(
+        # Pre-create a dedicated automation session + conversation
+        # with a fake past-run message already in it.
+        dedicated_conv = AgentConversation(
             agent_name=None,
-            title="test",
+            title="Daily Sales Data Sync",
             messages=[
                 {
                     "role": "assistant",
@@ -239,34 +245,36 @@ def test_ensure_session_reuses_old_conversation_for_history():
             ],
             status="active",
         )
-        db.add(legacy_conv)
+        db.add(dedicated_conv)
         db.flush()
-        legacy_chat = ChatSession(
-            title="test",
-            conversation_id=legacy_conv.id,
+        dedicated_chat = ChatSession(
+            title="Daily Sales Data Sync",
+            conversation_id=dedicated_conv.id,
             project="global",
+            agent_name="automation_agent",
         )
-        db.add(legacy_chat)
+        db.add(dedicated_chat)
         db.flush()
-        task.session_id = legacy_chat.id
+        task.session_id = dedicated_chat.id
         db.commit()
         db.refresh(task)
-        old_conv_id = legacy_conv.id
+        old_conv_id = dedicated_conv.id
 
         from app.routers.automation_api import _ensure_task_chat_session
-        new_session_id, created = _ensure_task_chat_session(db, task)
-        assert created is True
-        assert new_session_id != legacy_chat.id
+        same_session_id, created = _ensure_task_chat_session(db, task)
+        assert created is False  # already dedicated — no-op
+        assert same_session_id == dedicated_chat.id
 
-        # The new ChatSession must reuse the OLD conversation so the
-        # past run message is still visible.
-        new_chat = db.query(ChatSession).filter(ChatSession.id == new_session_id).first()
-        assert new_chat is not None
-        assert new_chat.title == "Daily Sales Data Sync"
-        assert new_chat.conversation_id == old_conv_id, (
-            "New ChatSession should link to the OLD AgentConversation "
+        # The ChatSession must still point to the old conversation so
+        # past run messages remain visible.
+        chat = db.query(ChatSession).filter(ChatSession.id == same_session_id).first()
+        assert chat is not None
+        assert chat.title == "Daily Sales Data Sync"
+        assert chat.conversation_id == old_conv_id, (
+            "ChatSession should link to the same AgentConversation "
             "so the past run history stays visible."
         )
+        assert chat.agent_name == "automation_agent"
 
         # Verify the conversation still has the past message.
         conv = db.query(AgentConversation).filter(
@@ -275,14 +283,6 @@ def test_ensure_session_reuses_old_conversation_for_history():
         assert conv is not None
         assert len(conv.messages) == 1
         assert "abc12345" in conv.messages[0]["content"]
-
-        # The legacy "test" ChatSession is left in place (other tasks
-        # may still use it as an alias for the same conversation).
-        still_there = db.query(ChatSession).filter(
-            ChatSession.id == legacy_chat.id,
-        ).first()
-        assert still_there is not None
-        assert still_there.conversation_id == old_conv_id
     finally:
         db.refresh(task)
         _cleanup_task(db, task)

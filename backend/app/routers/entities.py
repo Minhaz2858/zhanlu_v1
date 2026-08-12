@@ -4,6 +4,7 @@ This is the core of the Base44 API compatibility layer. A single call to
 register_entity_router() creates all 10 endpoints that the Base44 SDK expects.
 """
 
+import logging
 from typing import Type
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session, joinedload
@@ -11,6 +12,51 @@ from sqlalchemy.orm import Session, joinedload
 from app.database import Base
 from app.deps import get_db, get_current_user_required
 from app.services import entity_service
+
+logger = logging.getLogger(__name__)
+
+# KnowledgeBase connection fields whose change triggers catalog reindex.
+# Changing name/description/status should NOT reindex.
+_KB_CONNECTION_FIELDS = frozenset({
+    "db_type", "host", "port", "database_name", "username", "password", "api_url",
+})
+
+
+def _maybe_fire_catalog_index(record) -> None:
+    """Auto-trigger catalog discovery for a newly created database KnowledgeBase."""
+    try:
+        from app.config import settings
+        if not settings.SEMANTIC_CATALOG_ENABLED:
+            return
+        db_type = (getattr(record, "db_type", "") or "").lower()
+        if db_type not in ("mysql", "postgres", "postgresql"):
+            return
+        from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog_bg
+        maybe_reindex_catalog_bg(record)
+    except Exception:
+        logger.warning("catalog auto-index on create failed", exc_info=True)
+
+
+def _maybe_fire_catalog_index_on_update(prev, payload: dict, record) -> None:
+    """Auto-trigger catalog discovery if KnowledgeBase connection fields changed."""
+    try:
+        from app.config import settings
+        if not settings.SEMANTIC_CATALOG_ENABLED:
+            return
+        db_type = (getattr(record, "db_type", "") or "").lower()
+        if db_type not in ("mysql", "postgres", "postgresql"):
+            return
+        if prev is not None:
+            changed = any(
+                f in payload and payload.get(f) != getattr(prev, f, None)
+                for f in _KB_CONNECTION_FIELDS
+            )
+            if not changed:
+                return
+        from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog_bg
+        maybe_reindex_catalog_bg(record)
+    except Exception:
+        logger.warning("catalog auto-index on update failed", exc_info=True)
 
 
 # Entities whose rows are owned by a single user and must be isolated per
@@ -184,10 +230,14 @@ def register_entity_router(
         extra = {}
         if _include_shared(entity_name) and user:
             extra["resource_type"] = _resource_type_for_creator(user)
-        return entity_service.create_record(
+        result = entity_service.create_record(
             model_class, data, db, created_by,
             extra_fields=extra if extra else None,
         )
+        # Auto-trigger catalog discovery for database KnowledgeBases
+        if entity_name == "KnowledgeBase":
+            _maybe_fire_catalog_index(result)
+        return result
 
     # --- DELETE / (delete many by query) ---
     @router.delete("")
@@ -277,9 +327,16 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         _check_shareable_write(model_class, entity_name, record_id, user, db)
+        # Snapshot pre-update record for connection-field diff (KnowledgeBase only)
+        prev = None
+        if entity_name == "KnowledgeBase":
+            prev = entity_service.get_record(model_class, record_id, db)
         result = entity_service.update_record(model_class, record_id, data, db, owner_id=_owner_id(entity_name, user))
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
+        # Auto-trigger catalog discovery if connection fields changed
+        if entity_name == "KnowledgeBase":
+            _maybe_fire_catalog_index_on_update(prev, data, result)
         return result
 
     # --- DELETE /{id} ---

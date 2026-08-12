@@ -51,31 +51,7 @@ import {
 // surfaces a picker. If a row does have a ``color``, it's simply
 // ignored here.
 
-function formatRelativeTime(iso, lang) {
-  if (!iso) return '';
-  const now = Date.now();
-  const t = new Date(iso).getTime();
-  if (Number.isNaN(t)) return '';
-  const deltaSec = Math.max(0, Math.floor((now - t) / 1000));
-  const minutes = Math.floor(deltaSec / 60);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-  const isEn = lang === 'en';
-  if (minutes < 1) return isEn ? 'just now' : '刚刚';
-  if (minutes < 60) return isEn ? `${minutes}m ago` : `${minutes} 分钟前`;
-  if (hours < 24) return isEn ? `${hours}h ago` : `${hours} 小时前`;
-  if (days < 7) return isEn ? `${days}d ago` : `${days} 天前`;
-  if (days < 30) {
-    const w = Math.floor(days / 7);
-    return isEn ? `${w}w ago` : `${w} 周前`;
-  }
-  if (days < 365) {
-    const mo = Math.floor(days / 30);
-    return isEn ? `${mo}mo ago` : `${mo} 个月前`;
-  }
-  const y = Math.floor(days / 365);
-  return isEn ? `${y}y ago` : `${y} 年前`;
-}
+import { formatRelativeTime } from '@/lib/time';
 
 export default function ProjectsView({ scope = null }) {
   const { t, lang } = useLanguage();

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useLocation } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { appParams } from '@/lib/app-params';
 import { authFetch } from '@/api/authFetch';
@@ -13,13 +13,13 @@ import RelatedContent from '@/components/chat/RelatedContent';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
 import TracePanel from '@/components/chat/TracePanel';
-import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock } from 'lucide-react';
+import ActivityRail from '@/components/chat/ActivityRail';
+import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock, Activity } from 'lucide-react';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import ChatFilesModal from '@/components/chat/ChatFilesModal';
 import ScheduledPanel from '@/components/chat/ScheduledPanel';
 import ChatThinkingIndicator from '@/components/chat/ChatThinkingIndicator';
 import AutomationDraftCard from '@/components/chat/AutomationDraftCard';
-import DashboardDockPanel from '@/components/dashboard/DashboardDockPanel';
 import { buildSkillContext, buildDefaultSkillContext } from '@/lib/skillContext';
 import { watchForDashboardEdits } from '@/lib/dashboardStreamWatcher';
 import {
@@ -37,6 +37,7 @@ import { detectFileFormatRequest } from '@/lib/fileFormatRequest';
 import { saveDraft, clearDraft } from '@/lib/draftManager';
 import { decideRefresh, isRunInFlight } from '@/lib/chatPoll';
 import { pickCreateProject } from '@/lib/createResourceProject';
+import { cancelAutomationExecution } from '@/lib/cancelAutomationExecution';
 
 const CATEGORIES = [
   { key: 'production', icon: Factory },
@@ -82,6 +83,9 @@ export default function Chat() {
     selectSession,
     chatGeneration,
   } = useChatSession();
+
+  const location = useLocation();
+  const isAutomationSession = location.pathname === '/automation/chat';
 
   const [messages, setMessages] = useState([]);
 
@@ -220,6 +224,7 @@ export default function Chat() {
   // Scheduled automation panel (Manus-style). Only shown when the current
   // session has an AutomationTask linked to it (session_id == task.session_id).
   const [scheduledOpen, setScheduledOpen] = useState(false);
+  const [activityRailOpen, setActivityRailOpen] = useState(false);
   // Number of KnowledgeBases the project's data_source_runtime will
   // inject into whichever agent is selected (see
   // _extend_with_project_kbs in data_source_runtime.py). Surfaced as
@@ -248,6 +253,10 @@ export default function Chat() {
   // effect only depends on activeId, so it would otherwise freeze streamingId.
   const streamingIdRef = useRef(null);
   useEffect(() => { streamingIdRef.current = streamingId; }, [streamingId]);
+  // Track which session loadMessages is currently fetching for, so the
+  // merge inside the functional updater can reject stale messages from a
+  // previous session. Set synchronously before every loadMessages call.
+  const loadSessionRef = useRef(null);
   const [steerMarkers, setSteerMarkers] = useState([]);  // P2: inline markers rendered next to the messages
   // Experience layer (Phase C): per-message feedback state for the
   // thumbs up/down buttons on assistant bubbles. Optimistic — set
@@ -279,8 +288,6 @@ export default function Chat() {
   // mount/unmount of the panel; `viewerRef` lets the stream watcher tell the
   // DashboardViewer to refetch without prop-drilling. `seenRef` dedupes the
   // watcher per message id so the panel doesn't re-open on every chunk.
-  const [dashboardOpen, setDashboardOpen] = useState(false);
-  const dashboardViewerRef = useRef(null);
   const dashboardSeenRef = useRef(new Map());
   const [loadStatus, setLoadStatus] = useState('idle'); // 'idle' | 'loading' | 'loaded' | 'error'
   // P3: pending automation draft — shown as an editable card right after
@@ -303,6 +310,18 @@ export default function Chat() {
   // duplicate the user message. Reset on URL change (the effect
   // itself checks the URL on every run).
   const autorunProcessedRef = useRef(false);
+
+  // Poll re-attach nonce: bumped by the ``automation:run-started``
+  // listener (defined alongside the by-session poller) whenever an
+  // external Run Now signal lands. The poller normally stops once
+  // ``decideRefresh`` sees a stable-terminal execution — a subsequent
+  // Run Now on the same task would otherwise stay invisible until the
+  // user manually refreshes, because the dep array (`[activeId]`)
+  // doesn't change for a same-session event. The ref mirror exists so
+  // imperative code (or future debugging tools) can read the latest
+  // value without subscribing to a re-render.
+  const tickPollReattachRef = useRef(0);
+  const [pollAttachNonce, setPollAttachNonce] = useState(0);
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
@@ -336,10 +355,10 @@ export default function Chat() {
         // not whatever project the sidebar happens to have selected.
         const sessionOpts = newTask
           ? {
-              newSessionTitle: t.sessionList.newTask,
-              newSessionProject: dialogProjectName,
-              newSessionProjectId: dialogProjectId,
-            }
+            newSessionTitle: t.sessionList.newTask,
+            newSessionProject: dialogProjectName,
+            newSessionProjectId: dialogProjectId,
+          }
           : {};
         handleSend(prefill, sessionOpts);
         // Strip the newTask/project params from the URL so a refresh
@@ -377,10 +396,12 @@ export default function Chat() {
     // ``general_assistant`` and needs this context to scope the
     // data-source runtime.
     if (projectId) {
-      try { sessionStorage.setItem('zhanlu:lastProjectContext', JSON.stringify({
-        projectId,
-        projectName: projectName ? decodeURIComponent(projectName) : '',
-      })); } catch { /* noop */ }
+      try {
+        sessionStorage.setItem('zhanlu:lastProjectContext', JSON.stringify({
+          projectId,
+          projectName: projectName ? decodeURIComponent(projectName) : '',
+        }));
+      } catch { /* noop */ }
     }
     const agentId = params.get('agent');
     if (agentId) {
@@ -391,7 +412,7 @@ export default function Chat() {
         // binding is still consumed by the data-source runtime at
         // execution time. We deliberately don't resolve the bound
         // Kbs here to keep this code path minimal.
-      }).catch(() => {});
+      }).catch(() => { });
     }
     // Open an existing agent conversation: the user clicked a row
     // in the Project Detail "Recent Chats" list. We rehydrate the
@@ -440,6 +461,12 @@ export default function Chat() {
     }
     const convAgentName = params.get('agentName') || null;
     if (convId) {
+      // Mark this load so the activeId effect can detect the race.
+      // The activeId effect overwrites loadSessionRef with the chat
+      // session id — if that happens before this .then() fires, we
+      // bail to avoid overwriting correctly-loaded chat_messages
+      // with raw conv messages that lack session_id.
+      loadSessionRef.current = `conv:${convId}`;
       base44.entities.AgentConversation.get(convId).then(async (conv) => {
         if (!conv) return;
         // Hydrate the message list from the conversation record.
@@ -454,9 +481,17 @@ export default function Chat() {
         // different uuids with different created_date values. Apply
         // the content-fingerprint dedup here so this direct set call
         // does not leak cross-store duplicates into state.
-        setMessages(dedupeMessagesByFingerprint(
-          Array.isArray(conv.messages) ? conv.messages : [],
-        ));
+        //
+        // SESSION GUARD (2026-08-12 fix): use a functional updater
+        // and bail if the active session has already been set to a
+        // different chat session — prevents conv messages from
+        // overwriting correctly-loaded chat_messages.
+        setMessages((prev) => {
+          if (loadSessionRef.current !== `conv:${convId}`) return prev;
+          return dedupeMessagesByFingerprint(
+            Array.isArray(conv.messages) ? conv.messages : [],
+          );
+        });
         setLoadStatus('loaded');
         // Resolve the agent by name (the conv record stores
         // ``agent_name`` but not the AgentApp id). We do a
@@ -551,6 +586,30 @@ export default function Chat() {
       window.history.replaceState({}, '', '/');
     }
   }, []);
+  // Alert "Investigate" button: when the user clicks "Investigate" on
+  // a proactive alert in the sidebar, Sidebar.jsx dispatches an
+  // 'alerts:investigate' CustomEvent with the question and project
+  // context.  We create a new chat session (so the alert investigation
+  // gets its own thread) and prefill the input — the user presses
+  // Enter to send when ready.
+  useEffect(() => {
+    const handler = (e) => {
+      const { question, projectId, projectName } = e.detail || {};
+      if (!question) return;
+      // Create a fresh session scoped to the alert's project (Ecisco BI).
+      contextNewChat(projectName || null);
+      // Stage the project context so the chat input renders the chip
+      // and the next send auto-selects ecisco_bi_assistant.
+      if (projectName || projectId) {
+        setPendingProject(projectName || null, projectId || null);
+      }
+      // Prefill the input — do NOT auto-send (screenshot shows the
+      // question in the input box, user decides when to submit).
+      setInputValue(question);
+    };
+    window.addEventListener('alerts:investigate', handler);
+    return () => window.removeEventListener('alerts:investigate', handler);
+  }, []);
   // P3-bis: ?autorun=1 deep-link from /automation's "Run Now" button.
   // The button builds a structured "Run Automation Task: ..." prompt
   // and navigates here. We:
@@ -616,12 +675,19 @@ export default function Chat() {
     const _isNewSession = activeId && (!_s || !_s.conversation_id);
     setOpenArtifact(null);
     setPreviewResult(null);
+    setActivityRailOpen(false);
     setChips([]);
     setActiveSkill(null);
     if (!_isNewSession) setActiveAgent(null);
     setAttachments([]);
-    if (activeId) loadMessages(activeId);
-    else setMessages([]);
+    if (activeId) {
+      loadSessionRef.current = activeId;
+      setMessages([]);
+      loadMessages(activeId);
+    } else {
+      loadSessionRef.current = null;
+      setMessages([]);
+    }
     // Watch ``chatGeneration`` (NOT just ``activeId``) so this effect
     // also re-fires when the user clicks "+ New Task" in a state
     // where ``activeId`` was already null — e.g. when the chat was
@@ -664,6 +730,37 @@ export default function Chat() {
       }
     } catch { /* SSR / test env */ }
   }, [activeId]);
+
+  // Derive live execution state from the latest assistant message's
+  // FSM metadata (set by the SSE handler: fsm_state, plan_summary,
+  // tool_calls). Used by ActivityRail to show the execution timeline.
+  const liveExecution = useMemo(() => {
+    if (!messages.length) return null;
+    // Walk backwards to find the latest assistant message with FSM data
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i];
+      if (m.role !== 'assistant') continue;
+      const hasFsm = m.fsm_state || m.plan_summary || (m.tool_calls && m.tool_calls.length);
+      if (!hasFsm) continue;
+      // Derive observations from tool_calls
+      const observations = (m.tool_calls || []).map((tc) => ({
+        id: tc.id || tc.name,
+        tool: tc.name || tc.function?.name || 'unknown',
+        input: tc.arguments || tc.function?.arguments,
+        output: tc.result || tc.output || '',
+        status: tc.status || (tc.result ? 'done' : 'running'),
+        timestamp: tc.timestamp || tc.created_at,
+      }));
+      return {
+        current_state: m.fsm_state || 'init',
+        plan: m.plan_summary || null,
+        observations,
+        confidence_score: m.confidence_score ?? null,
+        confidence_factors: m.confidence_factors || null,
+      };
+    }
+    return null;
+  }, [messages]);
 
   // Deep-link restore: when the URL has ``?conv=<conversation_id>``
   // (typical after a page refresh on a chat deep link, or a shared
@@ -826,6 +923,7 @@ export default function Chat() {
         // empty-state spinner on a poll that has messages already.
         const decision = decideRefresh(prevPayload, data);
         if (decision.reload) {
+          loadSessionRef.current = activeId;
           loadMessages(activeId, { silent: true });
         }
         prevPayload = data;
@@ -849,6 +947,56 @@ export default function Chat() {
       cancelled = true;
       if (timer) clearTimeout(timer);
     };
+    // The poll effect depends on ``activeId`` for the basic mount/swap
+    // case AND on ``pollAttachNonce`` so the
+    // ``automation:run-started`` listener can re-arm the poller when a
+    // same-session Run Now lands after a previous stable-terminal
+    // stop. Without the nonce dep, the listener's
+    // ``setPollAttachNonce`` bump wouldn't cause this effect to
+    // re-fire, leaving new runs invisible on a warm session.
+  }, [activeId, pollAttachNonce]);
+
+  // External run-started signal: ``runAutomationTask`` dispatches
+  // ``automation:run-started`` after POST /api/automations/{id}/run
+  // returns, BEFORE its navigate() call. This effect picks it up,
+  // matches the session, and forces two things the existing reactive
+  // plumbing can't reliably produce across a warm-then-cold mount:
+  //   1. ``loadMessages`` immediately, so the user bubble + empty
+  //      assistant bubble written by ``_post_run_request_marker``
+  //      surface without waiting ~2.5s for the next poll cycle.
+  //   2. Re-arms the by-session poller. The poll effect below stops
+  //      once ``decideRefresh`` sees a stable-terminal execution — a
+  //      subsequent Run Now on the same task would otherwise stay
+  //      invisible until the user manually refreshes. We bump a
+  //      dedicated ``pollAttachNonce`` to break the dep equality and
+  //      re-fire the poll effect on demand.
+  // The listener soft-fails silently so a missed signal (mobile, no
+  // window, pre-fix build) doesn't break Run Now.
+  useEffect(() => {
+    if (!activeId) return undefined;
+    const onRunStarted = (ev) => {
+      const detail = ev && ev.detail;
+      if (!detail || detail.sessionId !== activeId) return;
+      // 1) Pull the freshly-written marker bubbles into state
+      //    immediately (silent = no loading flash).
+      loadSessionRef.current = activeId;
+      loadMessages(activeId, { silent: true });
+      // 2a) Mirror the latest attach count for any imperative readers
+      //     that want the value without subscribing to a re-render.
+      tickPollReattachRef.current = (tickPollReattachRef.current || 0) + 1;
+      // 2b) Force the polling useEffect to re-fire. React uses shallow
+      //     dep equality so bumping the ref alone won't re-evaluate
+      //     the effect; the ``pollAttachNonce`` state IS the actual
+      //     trigger.
+      setPollAttachNonce((n) => n + 1);
+    };
+    window.addEventListener('automation:run-started', onRunStarted);
+    return () => window.removeEventListener('automation:run-started', onRunStarted);
+    // ``loadMessages`` is captured via closure — re-subscribing on
+    // every setMessages churn is unnecessary because loadMessages
+    // reads its own latest state through setMessages internally.
+    // activeId-only is sufficient.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
   async function loadMessages(sid, opts) {
@@ -881,11 +1029,11 @@ export default function Chat() {
       await new Promise((r) => setTimeout(r, 500));
       try {
         // Sort by created_date (server clock), NOT `order`: the order column
-      // mixes tiny sequential indexes (chat turns, ``current.length``) with
-      // epoch timestamps (scheduled-run updates from ``_notify_chat``), so
-      // sorting by it grouped user inputs and agent activity into separate
-      // regions instead of interleaving them chronologically.
-      msgs = await base44.entities.ChatMessage.filter({ session_id: sid }, 'created_date', 200);
+        // mixes tiny sequential indexes (chat turns, ``current.length``) with
+        // epoch timestamps (scheduled-run updates from ``_notify_chat``), so
+        // sorting by it grouped user inputs and agent activity into separate
+        // regions instead of interleaving them chronologically.
+        msgs = await base44.entities.ChatMessage.filter({ session_id: sid }, 'created_date', 200);
         try {
           localStorage.setItem(cacheKey, JSON.stringify(msgs.slice(0, 200)));
         } catch { /* best-effort */ }
@@ -918,10 +1066,27 @@ export default function Chat() {
     // streamingId clears). De-dup by id, then sort chronologically.
     setMessages((prev) => {
       const fetched = Array.isArray(msgs) ? msgs.filter(Boolean) : [];
-      const fetchedIds = new Set(fetched.map((m) => m.id));
       const streamId = streamingIdRef.current;
+
+      // When switching sessions the backend may return an empty list
+      // (e.g. chat_messages table is not yet populated for this
+      // session). Don't keep stale messages from the previous session.
+      if (fetched.length === 0 && !streamId) {
+        return [];
+      }
+
+      const fetchedIds = new Set(fetched.map((m) => m.id));
+      const currentSession = loadSessionRef.current;
       const preserved = (prev || []).filter((m) => {
         if (!m || !m.id) return false;
+        // If the session changed since this fetch started, reject ALL
+        // messages from the previous session — they don't belong here.
+        if (currentSession !== sid) return false;
+        // If a prev message carries a session_id, it must match the
+        // current session. Messages from conv rehydration (raw LLM
+        // format) lack session_id and rely on the loadSessionRef guard
+        // above + the conv-rehydration functional-updater guard.
+        if (m.session_id && m.session_id !== sid) return false;
         if (!fetchedIds.has(m.id)) return true;   // in-flight, not committed
         if (m.id === streamId) return true;        // streaming, local fresher
         return false;
@@ -1155,17 +1320,41 @@ export default function Chat() {
         }
       } catch { /* fall through to generic path */ }
     }
-    // --- CREATE-automation requests must go through the structured
-    // path. The agent (general_assistant or any custom agent) has
-    // native tools like file-writing and code-execution that always
-    // fail for creating resources — and the structured
-    // ``create_resource`` field only exists in the non-agent path.
-    // Force the non-agent route for CREATE so the dialog → draft card
-    // → ``[[RESULT]]`` pipeline works. RUN requests are deliberately
-    // left in the agent path so the LLM can call ``execute_automation``
-    // with the task name (the agent has the proper tool for that).
-    if (effectiveAgent && isCreateAutomationRequest(fullText)) {
-      effectiveAgent = null;
+    // --- Automation-origin chats: bind to the dedicated
+    // ``automation_agent`` instead of the legacy non-agent path. The
+    // automation_agent has the focused toolset (create_automation,
+    // update_automation, execute_automation, clarify, list_data_sources)
+    // and a strict system prompt that (a) mandates [[CLARIFY]]
+    // single-select option cards for disambiguation, and (b) treats a
+    // data-source answer as a configuration binding — never as a report
+    // request. This fixes the bug where selecting a data source in an
+    // automation chat triggered report generation instead of binding
+    // the source to the task.
+    //
+    // This applies to:
+    //   1. New chats started from the Automation dialog — the prefill
+    //      matches ``isCreateAutomationRequest``.
+    //   2. Existing automation-bound chats — ``activeAgent`` is already
+    //      ``automation_agent`` (set by conv rehydration).
+    // Other chats (general, Ecisco BI, custom agents) keep their
+    // current agent. We do NOT ``setActiveAgent`` here — the binding
+    // persists via the conversation's ``agent_name`` field, which the
+    // rehydration effect reads on reload.
+    const isAutomationOrigin = isCreateAutomationRequest(fullText)
+      || (activeAgent && activeAgent.name === 'automation_agent');
+    if (isAutomationOrigin && (!effectiveAgent || effectiveAgent.name !== 'automation_agent')) {
+      try {
+        const _autoAgents = await base44.entities.AgentApp.list();
+        const autoAgent = _autoAgents.find((a) => a.name === 'automation_agent');
+        if (autoAgent) {
+          effectiveAgent = autoAgent;
+        } else {
+          // Fallback: minimal agent object — the backend resolves
+          // AgentApp by name, so name is sufficient for the v3 runtime
+          // to load the correct system prompt + tools.
+          effectiveAgent = { name: 'automation_agent' };
+        }
+      } catch { /* keep whatever agent was resolved */ }
     }
     // --- P2 mid-turn steer: if a v3 agent stream is already in flight,
     // route the message through the steer endpoint instead of starting a
@@ -1223,6 +1412,7 @@ export default function Chat() {
         }
         await handleAgentSend(fullText, {
           activeAgent: effectiveAgent,
+          activeSkill: skill,
           sid,
           gen,
           sessionId: resumeConvId,
@@ -1356,6 +1546,15 @@ export default function Chat() {
       const intentHint = formatHint(intent);
 
       let automationContext = '';
+      // NOTE: automation-origin chats now bind to the real
+      // ``automation_agent`` (see the isAutomationOrigin block above)
+      // and route through the agent path — they never reach this
+      // legacy non-agent branch. The ``AUTOMATION_AGENT_PROMPT`` overlay
+      // below is kept for backward compatibility only (any chat that
+      // still falls into the non-agent path with a create-automation
+      // intent). The backend automation_agent has its own system prompt
+      // with the [[CLARIFY]] protocol + answer-binding rules, so the
+      // overlay is no longer the primary automation prompt.
       if (!activeAgent) {
         // The ``AUTOMATION_AGENT_PROMPT`` data-source list is only
         // useful for CREATE flows (the LLM needs to know which DBs are
@@ -1533,9 +1732,16 @@ export default function Chat() {
             // explicit dialog selection isn't silently overwritten with
             // "Ungrouped" when no chip is set. See lib/createResourceProject.js.
             const projectFallback = pickCreateProject(parsedFields, pendingProject, t.sessionList.ungrouped);
+            // BUGFIX (project binding): pass `project_id` (UUID FK) in addition
+            // to the legacy `project` string so the executor's
+            // `_resolve_task_project` finds the right project (and binds the
+            // project's data sources) when the task runs. Without this, data
+            // sources bound to project "Ecisco BI" silently fall back to a
+            // different project and the report comes back empty.
+            const projectIdFk = pendingProjectId || null;
             const payload = cr.type === 'report'
-              ? { title: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback, agent_name: effectiveAgent?.name || null } : {}) }
-              : { name: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback } : {}) };
+              ? { title: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback, ...(projectIdFk ? { project_id: projectIdFk } : {}), agent_name: effectiveAgent?.name || null } : {}) }
+              : { name: cr.name, ...parsedFields, ...(sid ? { session_id: sid, project: projectFallback, ...(projectIdFk ? { project_id: projectIdFk } : {}) } : {}) };
             const created = await base44.entities[entityName].create(payload);
             // Manus-style: when an automation is created from a chat, rename
             // the current session to the automation's name so the sidebar
@@ -1603,6 +1809,13 @@ export default function Chat() {
       // applies to CREATE flows — RUN flows use the agent's
       // ``execute_automation`` tool and have no ``create_resource``
       // requirement.
+      //
+      // NOTE: automation-origin chats that bind to the real
+      // ``automation_agent`` (see the isAutomationOrigin block above)
+      // route through the agent path and never reach this legacy
+      // non-agent retry guard — the agent's ``create_automation`` tool
+      // handles creation server-side. This guard only fires for chats
+      // that still fall into the non-agent path.
       const askedForAutomation = isCreateAutomationRequest(fullText)
         || (Array.isArray(current) && current.some((m) => m?.role === 'user' && isCreateAutomationRequest(m?.content)));
       const resourceCreated = !!(data.create_resource && data.create_resource.type);
@@ -1682,7 +1895,12 @@ export default function Chat() {
               const e2 = ENTITY_MAP[cr2.type];
               if (e2) {
                 const projectFallback2 = pickCreateProject(pf, pendingProject, t.sessionList.ungrouped);
-                const payload2 = cr2.type === 'report' ? { title: cr2.name, ...pf, ...(sid ? { session_id: sid, project: projectFallback2, agent_name: effectiveAgent?.name || null } : {}) } : { name: cr2.name, ...pf, ...(sid ? { session_id: sid, project: projectFallback2 } : {}) };
+                // BUGFIX (project binding): mirror the main path — include
+                // `project_id` (UUID FK) alongside the legacy `project` string
+                // so the executor can resolve the task's project and bind the
+                // project's data sources on run.
+                const projectIdFk2 = pendingProjectId || null;
+                const payload2 = cr2.type === 'report' ? { title: cr2.name, ...pf, ...(sid ? { session_id: sid, project: projectFallback2, ...(projectIdFk2 ? { project_id: projectIdFk2 } : {}), agent_name: effectiveAgent?.name || null } : {}) } : { name: cr2.name, ...pf, ...(sid ? { session_id: sid, project: projectFallback2, ...(projectIdFk2 ? { project_id: projectIdFk2 } : {}) } : {}) };
                 const created2 = await base44.entities[e2].create(payload2);
                 // Same bulletproof rename as the main create_resource path
                 // (see comment there). The retry fires when the agent's
@@ -1775,7 +1993,22 @@ export default function Chat() {
   // proxy with no tools — that's why the Industry Research Analyst agent
   // couldn't query the database even though it had ``db_zhanlu_no2`` bound.
   // -------------------------------------------------------------------------
-  async function handleAgentSend(text, { activeAgent, sid, gen, sessionId, aiMsg, fileUrls, lang }) {
+  function compactSelectedSkill(skill) {
+    if (!skill || typeof skill !== 'object') return null;
+    return {
+      id: skill.id || null,
+      name: skill.name || '',
+      description: skill.description || '',
+      trigger: skill.trigger || '',
+      category: skill.category || '',
+      kind: skill.kind || '',
+      source: skill.source || '',
+      version: skill.version || '',
+      is_default: !!skill.is_default,
+    };
+  }
+
+  async function handleAgentSend(text, { activeAgent, activeSkill, sid, gen, sessionId, aiMsg, fileUrls, lang }) {
     // Lazily create a backend conversation bound to this agent. The
     // v3 endpoint keys off ``conv.agent_name`` and runs the data-source
     // runtime against the matching AgentApp.
@@ -1817,28 +2050,31 @@ export default function Chat() {
         agent_app_id: activeAgent.id,
         // Tag the conversation with the project so the data-source
         // runtime inherits the project's KBs and the conversation
-        // shows up in the project's "Recent Chats" list.
-        ...(projectCtx.projectId ? { project_id: projectCtx.projectId } : {}),
-        ...(projectCtx.projectName ? { project_name: projectCtx.projectName } : {}),
-        ...(projectCtx.projectName ? { project: projectCtx.projectName } : {}),
+        // shows up in the project's "Recent Chats" list. URL param
+        // wins; fall back to the chip selection (pendingProject) the
+        // user explicitly picked from the + menu — otherwise a
+        // chip-selected project silently chats with the default LLM.
+        ...(projectCtx.projectId ? { project_id: projectCtx.projectId } : (pendingProjectId ? { project_id: pendingProjectId } : {})),
+        ...(projectCtx.projectName ? { project_name: projectCtx.projectName } : (pendingProject ? { project_name: pendingProject } : {})),
+        ...(projectCtx.projectName ? { project: projectCtx.projectName } : (pendingProject ? { project: pendingProject } : {})),
       },
-      // Derive the conversation title from the first user message
-      // (trimmed, whitespace-normalized, truncated to 60 chars).
-      //
-      // Previously the metadata object carried the agent's name as
-      // a ``name`` field, which the backend (``agents.py`` line
-      // 1854-1855) silently treated as the title — so every
-      // conversation inherited the agent's name (e.g.
-      // "general_assistant") and the Project Detail "Recent Chats"
-      // list became unreadable. The top-level ``title`` field is
-      // the backend's documented contract for the conversation
-      // name; pass it explicitly so the metadata object is free to
-      // carry other fields (or nothing).
-      //
-      // We don't pass a title for empty messages so the backend's
-      // default "New Conversation" kicks in (passing "" would store
-      // an empty title).
-      text ? text.trim().replace(/\s+/g, ' ').slice(0, 60) : undefined);
+        // Derive the conversation title from the first user message
+        // (trimmed, whitespace-normalized, truncated to 60 chars).
+        //
+        // Previously the metadata object carried the agent's name as
+        // a ``name`` field, which the backend (``agents.py`` line
+        // 1854-1855) silently treated as the title — so every
+        // conversation inherited the agent's name (e.g.
+        // "general_assistant") and the Project Detail "Recent Chats"
+        // list became unreadable. The top-level ``title`` field is
+        // the backend's documented contract for the conversation
+        // name; pass it explicitly so the metadata object is free to
+        // carry other fields (or nothing).
+        //
+        // We don't pass a title for empty messages so the backend's
+        // default "New Conversation" kicks in (passing "" would store
+        // an empty title).
+        text ? text.trim().replace(/\s+/g, ' ').slice(0, 60) : undefined);
       convId = conv.id;
       // Link the AgentConversation to the ChatSession so the agent can be
       // auto-restored when this session is reopened from the sidebar.
@@ -1898,6 +2134,7 @@ export default function Chat() {
     let aborted = false;
     try {
       stream.startSending();
+      const selectedSkill = compactSelectedSkill(activeSkill);
       // Rename the inner stream variable to `streamGen` — the outer
       // `stream` (from usePersistentStream()) is shadowed by `const stream`
       // here, which creates a Temporal Dead Zone on the line above
@@ -1912,6 +2149,7 @@ export default function Chat() {
           content: text,
           ...(fileUrls && fileUrls.length ? { file_urls: fileUrls } : {}),
           ...(lang ? { lang } : {}),
+          ...(selectedSkill ? { selected_skill: selectedSkill, selected_skill_id: selectedSkill.id } : {}),
           // Forward the current project context in the stream body
           // so the backend's prepare_data_source_runtime can extend
           // the agent's bound KBs with the project's KBs — even when
@@ -1932,9 +2170,16 @@ export default function Chat() {
               const urlProjectId = url.searchParams.get('project');
               const urlProjectName = url.searchParams.get('projectName');
               const out = {};
+              // URL param wins; fall back to the chip selection
+              // (pendingProject) so a project picked from the + menu
+              // still routes the message — and its LLM resolution —
+              // through that project's configuration.
               if (urlProjectId) out.project_id = urlProjectId;
+              else if (pendingProjectId) out.project_id = pendingProjectId;
               if (urlProjectName) {
                 try { out.project_name = decodeURIComponent(urlProjectName); } catch { out.project_name = urlProjectName; }
+              } else if (pendingProject) {
+                out.project_name = pendingProject;
               }
               return out;
             } catch { return {}; }
@@ -2096,23 +2341,33 @@ export default function Chat() {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id
                 ? {
-                    ...m,
-                    content: fullContent,
-                    tool_calls: toolCalls,
-                    ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
-                  }
+                  ...m,
+                  content: fullContent,
+                  tool_calls: toolCalls,
+                  ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
+                }
                 : m
             ));
             // Persist final content so it survives page navigation
             stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, toolCalls, loading: false });
             // P2 (conversational dashboards): scan the freshly-pushed
-            // tool_calls for a completed dashboard tool. When one is
-            // detected, auto-open the dock panel and ask the viewer to
-            // refetch so the user sees the new chart live.
+            // tool_calls for a completed dashboard tool. Completed live
+            // dashboards are surfaced as first-class artifacts, sharing the
+            // same right-side preview pane as files/reports instead of the
+            // old dashboard-only dock panel.
             const seen = dashboardSeenRef.current.get(aiMsg.id) || 0;
             const nextSeen = watchForDashboardEdits(toolCalls, seen, {
-              onOpen: () => setDashboardOpen(true),
-              onRefresh: () => dashboardViewerRef.current?.refresh?.(),
+              onArtifact: (artifact) => {
+                const artId = artifact.artifact_id || artifact.id;
+                if (artId && !finalArtifacts.some((a) => (a.artifact_id || a.id) === artId)) {
+                  finalArtifacts = [...finalArtifacts, artifact];
+                }
+                setMessages((prev) => prev.map((m) => (
+                  m.id === aiMsg.id ? { ...m, artifacts: [...finalArtifacts] } : m
+                )));
+                setOpenArtifact((cur) => cur || artifact);
+              },
+              onRefresh: () => { },
             });
             if (nextSeen !== seen) dashboardSeenRef.current.set(aiMsg.id, nextSeen);
           }
@@ -2121,6 +2376,23 @@ export default function Chat() {
           // stayed visible. Drain the state here so the input flips back
           // to Send.
           if (gen === genRef.current) stream.complete();
+          // Automation-bound chat: dismiss the editable draft card when
+          // the agent successfully created the automation task via the
+          // ``create_automation`` tool. The draft card is a pre-creation
+          // editable summary; once the task exists server-side, it has
+          // served its purpose. Also dispatch ``zhanlu:automation-created``
+          // so other mount points (SessionList clock badge) refresh.
+          if (gen === genRef.current && Array.isArray(toolCalls) && toolCalls.some((tc) => {
+            const name = tc.name || (tc.function && tc.function.name) || '';
+            return name === 'create_automation';
+          })) {
+            setPendingDraft(null);
+            try {
+              window.dispatchEvent(new CustomEvent('zhanlu:automation-created', {
+                detail: { session_id: sid },
+              }));
+            } catch { /* non-fatal */ }
+          }
         }
       }
       // Defensive: if the stream ended without emitting `done` (e.g. the
@@ -2246,6 +2518,55 @@ export default function Chat() {
     await deleteSession(s);
   }
 
+  // Stop button handler for automation runs. The "response" the user
+  // is watching in the chat surface is actually a background executor
+  // spawned by ``runAutomationTask`` — there is no SSE stream to abort
+  // here, so the Stop button calls the dedicated cancel API. The
+  // existing by-session poll will pick up the new status (cancelled)
+  // on its next tick and clear the streaming UI; we don't have to do
+  // that ourselves.
+  async function handleStopAutomation() {
+    const exe = latestExecution;
+    if (!exe || !exe.id) {
+      return;
+    }
+    if (exe.status !== 'queued' && exe.status !== 'running') {
+      return;
+    }
+    const r = await cancelAutomationExecution(exe.id, { authFetch });
+    if (!r.ok) {
+      // Soft failure: log but don't throw — the user can click Stop
+      // again, and the next by-session tick will still surface the
+      // terminal state if the call DID land.
+      console.warn('[Chat] automation cancel failed:', r.error);
+    }
+  }
+
+  // Combined busy flag for the chat input: true while either the SSE
+  // chat stream is active OR an automation run is in flight. Used to
+  // swap Send → Stop, disable typing, and route the Stop click.
+  const chatInputBusy = stream.isActive || isRunInFlight(latestExecution);
+
+  // For an in-flight automation run, the executor pre-creates an empty
+  // assistant bubble (phase.execution_id = latestExecution.id) which
+  // ``MessageBubble`` then populates with real activity steps. As soon
+  // as that bubble exists in ``messages``, hide the 3 generic
+  // placeholders so the user sees the real "✨ Fabricating" /
+  // "Crystallizing" ActivitySteps component — no visual double-up.
+  // When the bubble is missing (the very first ~100ms after Run Now
+  // before the marker lands), keep the generic placeholders so the
+  // user has visual confirmation the run actually started.
+  const inFlightExecutionId = (latestExecution && isRunInFlight(latestExecution))
+    ? latestExecution.id
+    : null;
+  const hasAssistantBubbleForRun = inFlightExecutionId
+    ? messages.some((m) => {
+        if (!m || m.role !== 'assistant') return false;
+        const phase = m.phase && typeof m.phase === 'object' ? m.phase : null;
+        return phase && phase.execution_id === inFlightExecutionId;
+      })
+    : false;
+
   function handleSelectSession(id) {
     // Route selection through the context so the SessionList in the
     // sidebar highlights the new active row. Previously this lived
@@ -2321,6 +2642,24 @@ export default function Chat() {
     // treat it as a hidden synthetic message (auto-collect flow).
     if (label.startsWith('【系统提示】')) {
       handleSend(label, { hidden: true });
+      return;
+    }
+    // Automation-bound chats: send the option selection as a hidden
+    // system hint so the automation_agent binds it to the task (not as
+    // a report request). The agent's ANSWER-BINDING RULE (in its system
+    // prompt) then turns the named source into a
+    // create_automation/update_automation call with data_source_id set.
+    //
+    // We detect automation-bound chats via three signals:
+    //   1. The latest assistant message contains a [[CLARIFY]] block
+    //      (the automation_agent's disambiguation format).
+    //   2. activeAgent is already automation_agent (conv rehydration).
+    //   3. pendingDraft is set (Automation dialog origin).
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant');
+    const isAutomationClarify = !!(lastAssistant && (lastAssistant.content || '').includes('[[CLARIFY]]'));
+    if (isAutomationClarify || (activeAgent && activeAgent.name === 'automation_agent') || pendingDraft) {
+      const hint = `【系统提示】用户选择了：${label}。请将其作为配置答案处理——如果是数据源，调用 create_automation 或 update_automation 绑定 data_source_id（用 list_knowledge_bases 查到的匹配 id），然后继续设置或确认创建。绝不要将其当作报告或数据分析请求。`;
+      handleSend(hint, { hidden: true });
     } else {
       handleSend(label);
     }
@@ -2426,160 +2765,182 @@ export default function Chat() {
     <div className="flex h-full">
       <PanelGroup direction="horizontal" className="flex-1 min-w-0">
         <Panel id="chat-panel" order={1} defaultSize={panels.chat.defaultSize} minSize={panels.chat.minSize}>
-        <div className="flex h-full flex-col">
-        {activeId || messages.length > 0 ? (
-          <>
-            <div className="flex items-center justify-between border-b border-border px-6 py-2">
-              {/* Project context banner — shown when the user entered
+          <div className="flex h-full flex-col">
+            {activeId || messages.length > 0 ? (
+              <>
+                <div className="flex items-center justify-between border-b border-border px-6 py-2">
+                  {/* Project context banner — shown when the user entered
                   chat from a project page (via the "chat with agent"
                   shortcut). Clicking the breadcrumb returns to the
                   project. Hidden when the chat is not project-scoped. */}
-              {pendingProject ? (
-                <button
-                  type="button"
-                  onClick={() => { if (pendingProjectId) navigate(`/my-space/project/${pendingProjectId}`); }}
-                  className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                  title={isEn ? 'Back to project' : '返回项目'}
-                >
-                  <FolderKanban className="h-3.5 w-3.5 shrink-0 text-primary" />
-                  <span className="min-w-0 flex-1 truncate font-medium text-foreground">{pendingProject}</span>
-                  <ArrowLeft className="h-3 w-3 shrink-0" />
-                </button>
-              ) : <span />}
-              <div className="flex items-center gap-1.5">
-                {/* Manus-style Scheduled button — only rendered when the
+                  {pendingProject ? (
+                    <button
+                      type="button"
+                      onClick={() => { if (pendingProjectId) navigate(`/my-space/project/${pendingProjectId}`); }}
+                      className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                      title={isEn ? 'Back to project' : '返回项目'}
+                    >
+                      <FolderKanban className="h-3.5 w-3.5 shrink-0 text-primary" />
+                      <span className="min-w-0 flex-1 truncate font-medium text-foreground">{pendingProject}</span>
+                      <ArrowLeft className="h-3 w-3 shrink-0" />
+                    </button>
+                  ) : <span />}
+                  <div className="flex items-center gap-1.5">
+                    {/* Manus-style Scheduled button — only rendered when the
                     current session is the origin of an automation. */}
-                {sessionAutomation && (
-                  <button
-                    onClick={() => setScheduledOpen(true)}
-                    className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
-                    title={isEn ? 'Scheduled automation' : '定时任务'}
-                  >
-                    <Clock className="h-3.5 w-3.5" />
-                    {isEn ? 'Scheduled' : '定时任务'}
-                  </button>
-                )}
-                <button onClick={() => setFilesOpen(true)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground">
-                  <FolderOpen className="h-3.5 w-3.5" /> {t.chat.chatFiles.title}
-                </button>
-              </div>
-            </div>
-            <div ref={scrollRef} className="relative flex-1 space-y-6 overflow-y-auto px-6 py-6">
-              <div className="mx-auto max-w-5xl space-y-6">
-                {loadStatus === 'loading' && messages.length === 0 ? (
-                  <div className="animate-pulse space-y-6 py-8">
-                    {[1, 2, 3].map((i) => (
-                      <div key={i} className={`flex gap-3 ${i % 2 === 0 ? 'flex-row-reverse' : ''}`}>
-                        <div className="h-8 w-8 shrink-0 rounded-full bg-secondary" />
-                        <div className={`flex flex-col gap-2 ${i % 2 === 0 ? 'items-end' : 'items-start'}`}>
-                          <div className="h-14 rounded-2xl bg-secondary" style={{ width: `${180 + i * 70}px` }} />
-                          <div className="h-3 rounded-full bg-secondary" style={{ width: `${100 + i * 30}px` }} />
-                        </div>
+                    {sessionAutomation && !isAutomationSession && (
+                      <button
+                        onClick={() => setScheduledOpen(true)}
+                        className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium text-primary transition-colors hover:bg-primary/10"
+                        title={isEn ? 'Scheduled automation' : '定时任务'}
+                      >
+                        <Clock className="h-3.5 w-3.5" />
+                        {isEn ? 'Scheduled' : '定时任务'}
+                      </button>
+                    )}
+                    {/* Activity Rail toggle — shows execution timeline from FSM state */}
+                    {liveExecution && (
+                      <button
+                        onClick={() => setActivityRailOpen((v) => !v)}
+                        className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors ${activityRailOpen
+                          ? 'bg-primary/10 text-primary'
+                          : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                          }`}
+                        title={isEn ? 'Execution timeline' : '执行时间线'}
+                      >
+                        <Activity className="h-3.5 w-3.5" />
+                        {isEn ? 'Activity' : '活动'}
+                      </button>
+                    )}
+                    <button onClick={() => setFilesOpen(true)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground">
+                      <FolderOpen className="h-3.5 w-3.5" /> {t.chat.chatFiles.title}
+                    </button>
+                  </div>
+                </div>
+                <div ref={scrollRef} className="relative flex-1 space-y-6 overflow-y-auto px-6 py-6">
+                  <div className="mx-auto max-w-5xl space-y-6">
+                    {loadStatus === 'loading' && messages.length === 0 ? (
+                      <div className="animate-pulse space-y-6 py-8">
+                        {[1, 2, 3].map((i) => (
+                          <div key={i} className={`flex gap-3 ${i % 2 === 0 ? 'flex-row-reverse' : ''}`}>
+                            <div className="h-8 w-8 shrink-0 rounded-full bg-secondary" />
+                            <div className={`flex flex-col gap-2 ${i % 2 === 0 ? 'items-end' : 'items-start'}`}>
+                              <div className="h-14 rounded-2xl bg-secondary" style={{ width: `${180 + i * 70}px` }} />
+                              <div className="h-3 rounded-full bg-secondary" style={{ width: `${100 + i * 30}px` }} />
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
-                  </div>
-                ) : (
-                  <div className="space-y-6">
-                  {pendingDraft && (
-                    <AutomationDraftCard
-                      prefill={pendingDraft.prefill}
-                      lang={pendingDraft.lang}
-                      error={pendingDraft.error}
-                      onAppendToInput={(text) => {
-                        setInputValue((cur) => (cur ? `${cur}\n${text}` : text));
-                        // Focus the input so the user can review and send
-                        requestAnimationFrame(() => {
-                          try { inputRef.current?.focus(); } catch {}
-                        });
-                      }}
-                      onDismiss={() => setPendingDraft(null)}
-                      onRetry={() => {
-                        // Clear the error and re-send the prefill as a
-                        // fresh user message so the LLM gets another
-                        // chance to create the task.
-                        setPendingDraft((d) => d ? { ...d, error: null } : d);
-                        const fresh = pendingDraft.prefill;
-                        if (fresh) {
-                          setInputValue(fresh);
-                          requestAnimationFrame(() => {
-                            try { inputRef.current?.focus(); } catch {}
-                          });
-                        }
-                      }}
-                    />
-                  )}
-                  {messages.filter((m) => !m.hidden && (m.id === streamingId || !(m.role === 'assistant' && !m.content))).map((m) => {
-                    const isStreaming = m.id === streamingId;
-                    const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
-                    return (
-                      <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={openRun} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} />
-                    );
-                  })}
-                  </div>
-                )}
-                {loading && <ChatThinkingIndicator />}
-                {/* "Agent is working" indicator for an in-flight automation
+                    ) : (
+                      <div className="space-y-6">
+                        {pendingDraft && (
+                          <AutomationDraftCard
+                            prefill={pendingDraft.prefill}
+                            lang={pendingDraft.lang}
+                            error={pendingDraft.error}
+                            onAppendToInput={(text) => {
+                              setInputValue((cur) => (cur ? `${cur}\n${text}` : text));
+                              // Focus the input so the user can review and send
+                              requestAnimationFrame(() => {
+                                try { inputRef.current?.focus(); } catch { }
+                              });
+                            }}
+                            onDismiss={() => setPendingDraft(null)}
+                            onRetry={() => {
+                              // Clear the error and re-send the prefill as a
+                              // fresh user message so the LLM gets another
+                              // chance to create the task.
+                              setPendingDraft((d) => d ? { ...d, error: null } : d);
+                              const fresh = pendingDraft.prefill;
+                              if (fresh) {
+                                setInputValue(fresh);
+                                requestAnimationFrame(() => {
+                                  try { inputRef.current?.focus(); } catch { }
+                                });
+                              }
+                            }}
+                          />
+                        )}
+                        {messages.filter((m) => !m.hidden && (m.id === streamingId || !(m.role === 'assistant' && !m.content))).map((m) => {
+                          const isStreaming = m.id === streamingId;
+                          const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
+                          return (
+                            <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} />
+                          );
+                        })}
+                      </div>
+                    )}
+                    {loading && <ChatThinkingIndicator />}
+                    {/* "Agent is working" indicator for an in-flight automation
                     run. The executor runs async (trigger_now returns
                     immediately), so without this the user clicks Run Now, sees
                     the request bubble, then silence until the result lands —
-                    which read as "not responding". Show the SAME thinking
-                    indicator a normal LLM chat uses while the latest execution
-                    of this session's task is non-terminal. */}
-                {!loading && isRunInFlight(latestExecution) && (
-                  <ChatThinkingIndicator />
-                )}
-                {steerMarkers.length > 0 && (
-                  <div className="flex flex-col items-center gap-1 pt-2">
-                    {steerMarkers.map((sm) => {
-                      const prefix = lang === 'en' ? '→ steer' : '→ 引导';
-                      const statusText = sm.status === 'pending'
-                        ? (lang === 'en' ? 'sending…' : '发送中…')
-                        : sm.status === 'error'
-                          ? (lang === 'en' ? 'failed' : '失败')
-                          : '';
-                      const tone = sm.status === 'error'
-                        ? 'text-red-500'
-                        : sm.status === 'pending'
-                          ? 'text-amber-600 dark:text-amber-400'
-                          : 'text-muted-foreground';
-                      return (
-                        <div
-                          key={sm.id}
-                          className={`inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/40 px-2.5 py-0.5 text-xs ${tone}`}
-                          title={sm.status === 'error' ? sm.error : undefined}
-                        >
-                          <span className="italic">{prefix}: {sm.text}</span>
-                          {statusText && <span className="text-[10px] opacity-75">· {statusText}</span>}
-                        </div>
-                      );
-                    })}
+                    which read as "not responding".
+
+                    We show the SAME 3-placeholder indicator a normal LLM chat
+                    uses ONLY while the executor hasn't yet written the empty
+                    assistant bubble + first activity step. As soon as the
+                    assistant bubble for this execution has content or
+                    activity_steps, ``MessageBubble`` renders the real
+                    ``<ActivitySteps>`` ("✨ Fabricating — Building your
+                    deliverable" / "Crystallizing — Wrapping everything up"),
+                    so we hide the generic placeholders to avoid the visual
+                    double-up. */}
+                    {!loading && isRunInFlight(latestExecution) && !hasAssistantBubbleForRun && (
+                      <ChatThinkingIndicator />
+                    )}
+                    {steerMarkers.length > 0 && (
+                      <div className="flex flex-col items-center gap-1 pt-2">
+                        {steerMarkers.map((sm) => {
+                          const prefix = lang === 'en' ? '→ steer' : '→ 引导';
+                          const statusText = sm.status === 'pending'
+                            ? (lang === 'en' ? 'sending…' : '发送中…')
+                            : sm.status === 'error'
+                              ? (lang === 'en' ? 'failed' : '失败')
+                              : '';
+                          const tone = sm.status === 'error'
+                            ? 'text-red-500'
+                            : sm.status === 'pending'
+                              ? 'text-amber-600 dark:text-amber-400'
+                              : 'text-muted-foreground';
+                          return (
+                            <div
+                              key={sm.id}
+                              className={`inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/40 px-2.5 py-0.5 text-xs ${tone}`}
+                              title={sm.status === 'error' ? sm.error : undefined}
+                            >
+                              <span className="italic">{prefix}: {sm.text}</span>
+                              {statusText && <span className="text-[10px] opacity-75">· {statusText}</span>}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
-                )}
+                </div>
+                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} />
+              </>
+            ) : (
+              <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
+                <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
+                  <Bot className="h-6 w-6 text-primary" />
+                </div>
+                <h1 className="break-words px-4 text-center font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
+                <div className="mt-8 w-full max-w-4xl">
+                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} />
+                  {chips.length > 0 && (
+                    <RelatedContent
+                      chips={chips}
+                      related={t.chat.related}
+                      categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})}
+                      onRemoveChip={handleRemoveChip}
+                      onSelectItem={handleSelectItem}
+                    />
+                  )}
+                </div>
               </div>
-            </div>
-            <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={stream.isActive} onStop={stream.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} />
-          </>
-        ) : (
-          <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
-            <div className="mb-5 flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
-              <Bot className="h-6 w-6 text-primary" />
-            </div>
-            <h1 className="break-words px-4 text-center font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
-            <div className="mt-8 w-full max-w-4xl">
-              <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading} isStreaming={stream.isActive} onStop={stream.abort} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name) => setPendingProject(name, null)} centered inheritedKbCount={inheritedKbCount} />
-              {chips.length > 0 && (
-                <RelatedContent
-                  chips={chips}
-                  related={t.chat.related}
-                  categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})}
-                  onRemoveChip={handleRemoveChip}
-                  onSelectItem={handleSelectItem}
-                />
-              )}
-            </div>
+            )}
           </div>
-        )}
-        </div>
         </Panel>
         {scheduledOpen && (
           <>
@@ -2611,26 +2972,22 @@ export default function Chat() {
             </Panel>
           </>
         )}
-        {dashboardOpen && (
+        {activityRailOpen && liveExecution && (
           <>
             <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
-            <Panel id="dashboard-panel" order={5} defaultSize={panels.dashboard.defaultSize} minSize={panels.dashboard.minSize} maxSize={panels.dashboard.maxSize}>
-              <div className="h-full overflow-hidden">
-                <DashboardDockPanel
-                  conversationId={activeId}
-                  viewerRef={dashboardViewerRef}
-                  onClose={() => setDashboardOpen(false)}
-                />
+            <Panel id="activity-rail-panel" order={6} defaultSize={28} minSize={18} maxSize={45}>
+              <div className="h-full overflow-y-auto p-3">
+                <ActivityRail execution={liveExecution} />
               </div>
             </Panel>
           </>
         )}
       </PanelGroup>
-        {traceMsg && <TracePanel message={traceMsg} onClose={() => setTraceMsg(null)} />}
-        <ChatFilesModal sessionId={activeId} open={filesOpen} onOpenChange={setFilesOpen} />
-        </div>
-        );
-        }
+      {traceMsg && <TracePanel message={traceMsg} onClose={() => setTraceMsg(null)} />}
+      <ChatFilesModal sessionId={activeId} open={filesOpen} onOpenChange={setFilesOpen} />
+    </div>
+  );
+}
 
 function streamText(text, onChunk, isCancelled) {
   return new Promise((resolve) => {

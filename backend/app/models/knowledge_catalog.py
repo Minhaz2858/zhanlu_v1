@@ -83,3 +83,77 @@ class KBTableRelation(TimestampedBase):
             name="uq_kb_table_relation",
         ),
     )
+
+
+class ProjectEntity(TimestampedBase):
+    """A named entity in a project's own vocabulary (fully generic).
+
+    Entity types are universal categories only (``product`` / ``customer`` /
+    ``metric`` / ``concept`` / ``organization`` / ``location``); names and
+    descriptions always come from the project's own data — never from
+    hardcoded domain examples.
+    """
+
+    __tablename__ = "project_entity"
+
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String(191), nullable=False)
+    aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    entity_type: Mapped[str] = mapped_column(String(50), nullable=False, default="concept")
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="memory")
+    # memory / chat / file / schema
+    source_ref: Mapped[str | None] = mapped_column(
+        String(36), nullable=True, index=True,
+        comment="ID of the source memory/conversation that produced this entity (idempotency)",
+    )
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_project_entity"),
+    )
+
+
+class ProjectEntityLink(TimestampedBase):
+    """Link from a project entity to a catalog/file/memory target."""
+
+    __tablename__ = "project_entity_link"
+
+    entity_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("project_entity.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    target_type: Mapped[str] = mapped_column(String(30), nullable=False)
+    # table / column / file / memory / conversation
+    target_id: Mapped[str] = mapped_column(String(191), nullable=False)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    source: Mapped[str] = mapped_column(String(50), nullable=False, default="llm")
+    # llm / embedding / overlay
+
+    __table_args__ = (
+        UniqueConstraint(
+            "entity_id", "target_type", "target_id",
+            name="uq_project_entity_link",
+        ),
+    )
+
+
+class ProjectCatalogOverlay(TimestampedBase):
+    """Human-curated per-project overrides for catalog entries."""
+
+    __tablename__ = "project_catalog_overlay"
+
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    kb_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    table_name: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    alias: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metric_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    scope: Mapped[str] = mapped_column(String(20), nullable=False, default="table")
+    # table / kb
+
+    __table_args__ = (
+        UniqueConstraint(
+            "project_id", "kb_id", "table_name",
+            name="uq_project_catalog_overlay",
+        ),
+    )

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { formatDate } from '@/lib/time';
 import { authFetch } from '@/api/authFetch';
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { FileText, Image as ImageIcon, Code2, Download, Loader2, Eye } from 'lucide-react';
@@ -22,14 +23,6 @@ function FileIcon({ file }) {
   return <FileText className="h-4 w-4 text-primary" />;
 }
 
-function formatDate(iso) {
-  try {
-    const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
-  } catch {
-    return '';
-  }
-}
 
 export default function ChatFilesModal({ sessionId, open, onOpenChange }) {
   const { t } = useLanguage();

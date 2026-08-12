@@ -14,6 +14,7 @@ import pytest
 from app.services.synexia.quality_eval import (
     QualityEvalResult,
     evaluate_quality,
+    validate_selected_skill_payload,
     regenerate_with_feedback,
     run_quality_loop,
 )
@@ -193,6 +194,39 @@ def test_evaluate_quality_clamps_scores():
     )
     assert 0.0 <= out.completeness_score <= 1.0
     assert 0.0 <= out.confidence <= 1.0
+
+
+def test_validate_selected_skill_payload_flags_missing_required_elements():
+    out = validate_selected_skill_payload(
+        skill_name="weekly-sales-report",
+        skill_body="# Weekly Sales Report\n\n## Executive Summary\n## KPI Section\n## Recommendations\n## Chart",
+        artifact_type="docx",
+        payload={"title": "Weekly Sales", "summary": "Done."},
+    )
+    assert out["verdict"] == "revise"
+    assert out["is_ok"] is False
+    assert "kpis" in out["missing_elements"]
+    assert "recommendations" in out["missing_elements"]
+
+
+def test_validate_selected_skill_payload_accepts_matching_payload():
+    out = validate_selected_skill_payload(
+        skill_name="weekly-sales-report",
+        skill_body="# Weekly Sales Report\n\n## Executive Summary\n## KPI Section\n## Recommendations\n## Chart",
+        artifact_type="docx",
+        payload={
+            "title": "Weekly Sales",
+            "summary": "Done.",
+            "methodology": "Data source and scope.",
+            "kpis": [{"label": "Revenue", "value": "10"}],
+            "chart": {"type": "bar"},
+            "recommendations": [{"icon": "arrow-right", "text": "Act"}],
+            "insights": [{"icon": "info", "text": "Insight"}],
+            "sections": [{"title": "Body"}],
+        },
+    )
+    assert out["missing_elements"] == []
+    assert out["is_ok"] is True
 
 
 # ── regenerate_with_feedback ──────────────────────────────────────────────

@@ -46,6 +46,11 @@ class DatasourceAdapter(Protocol):
     when running inside an async FastAPI handler).
     """
 
+    @property
+    def quote_char(self) -> str:
+        """Identifier quoting character for this dialect (e.g. ``"`` for Postgres/SQLite, ```` `` `` for MySQL)."""
+        ...
+
     def test_connection(self) -> bool:
         """Return ``True`` if the datasource can be reached."""
         ...

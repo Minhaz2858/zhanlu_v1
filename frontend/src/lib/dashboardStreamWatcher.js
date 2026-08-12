@@ -6,6 +6,33 @@ const DASHBOARD_TOOLS = new Set([
   'undo_dashboard_edit',
 ]);
 
+export function dashboardArtifactFromToolCall(toolCall) {
+  if (!toolCall) return null;
+  const name = toolCall.name || toolCall.tool_name || '';
+  if (!DASHBOARD_TOOLS.has(name)) return null;
+
+  const result = toolCall.results || toolCall.result || {};
+  const artifact = result.artifact || {};
+  const dashboard = result.dashboard || {};
+  const dashboardId = artifact.dashboard_id || dashboard.id || result.dashboard_id || result.id;
+  if (!dashboardId) return null;
+
+  const title = artifact.title || dashboard.name || result.title || 'Dashboard';
+  return {
+    type: 'dashboard',
+    source: 'dashboard',
+    id: dashboardId,
+    artifact_id: dashboardId,
+    dashboard_id: dashboardId,
+    title,
+    file_name: title,
+    datasource_name: artifact.datasource_name || result.datasource_name,
+    widget_count: artifact.widget_count ?? result.widget_count,
+    live: true,
+    has_preview: true,
+  };
+}
+
 /**
  * Inspect an in-flight or finalised message's tool_calls and trigger the
  * dashboard dock panel when a dashboard edit is detected.
@@ -31,8 +58,8 @@ const DASHBOARD_TOOLS = new Set([
  */
 export function watchForDashboardEdits(toolCalls, seenCount, handlers) {
   if (!Array.isArray(toolCalls) || toolCalls.length === 0) return seenCount;
-  const { onOpen, onRefresh } = handlers || {};
-  if (!onOpen || !onRefresh) return seenCount;
+  const { onOpen, onArtifact, onRefresh } = handlers || {};
+  if ((!onOpen && !onArtifact) || !onRefresh) return seenCount;
 
   // Only count tool calls that have a result — `tool_progress` events emit
   // partial entries while the tool is still running. We want the moment the
@@ -46,7 +73,12 @@ export function watchForDashboardEdits(toolCalls, seenCount, handlers) {
 
   if (completedDashboardCalls.length <= seenCount) return seenCount;
 
-  onOpen();
+  const newCalls = completedDashboardCalls.slice(seenCount);
+  if (onArtifact) {
+    newCalls.map(dashboardArtifactFromToolCall).filter(Boolean).forEach((artifact) => onArtifact(artifact));
+  } else {
+    onOpen();
+  }
   // Defer the refresh so the panel mounts + DashboardViewer can attach its
   // forwardRef before we call refresh(). Without this, the first refresh
   // after a stream-final 'done' event can race the mount and silently no-op.

@@ -161,6 +161,24 @@ def test_doc_format_mapping():
         assert action.doc_format == fmt
 
 
+def test_live_dashboard_intent_is_not_forced_to_create_artifact():
+    action = resolve_turn_action(
+        "make a weekly sales dashboard from the connected database",
+        ALL_TOOLS, NO_BOUND, is_data_question=False, iteration=0,
+    )
+    assert action.forced_tool is None
+    assert action.doc_format is None
+
+
+def test_live_dashboard_intent_with_bound_data_is_not_forced_to_ask_data_agent():
+    action = resolve_turn_action(
+        "build a live sales dashboard from the connected database, not HTML",
+        ALL_TOOLS, BOUND, is_data_question=True, iteration=0,
+    )
+    assert action.forced_tool is None
+    assert action.doc_format is None
+
+
 # ---------------------------------------------------------------------------
 # grounding_block_for_message (soft nudge, no tool-presence guard)
 # ---------------------------------------------------------------------------
@@ -170,5 +188,6 @@ def test_grounding_block_precedence_doc_over_url_over_time():
     assert grounding_block_for_message("make a pptx from https://x.com") == GROUNDING_DOC_BLOCK
     assert grounding_block_for_message("latest news on https://x.com") == GROUNDING_URL_BLOCK
     assert grounding_block_for_message("latest news about AI") == GROUNDING_REQUIRED_BLOCK
+    assert grounding_block_for_message("build a live sales dashboard, not HTML") == ""
     assert grounding_block_for_message("hello there") == ""
     assert grounding_block_for_message(None) == ""

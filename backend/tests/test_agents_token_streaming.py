@@ -390,6 +390,22 @@ class _FakeAsyncClient:
                                   self._error_body)
 
 
+class _RejectToolsThenSuccessClient:
+    """Fake client that rejects tool payloads like local text-only models."""
+    def __init__(self, success_lines):
+        self._success_lines = list(success_lines)
+        self.payloads = []
+
+    def stream(self, method, url, **kwargs):
+        payload = kwargs.get("json") or {}
+        self.payloads.append(payload)
+        if payload.get("tools"):
+            return _FakeStreamContext(
+                [], 400, b"tools/function calling is not supported"
+            )
+        return _FakeStreamContext(self._success_lines, 200, b"")
+
+
 @pytest.mark.asyncio
 async def test_stream_emits_delta_then_done_for_text_only_response():
     """Plain text response: generator must yield ('delta', token) per
@@ -594,6 +610,33 @@ async def test_stream_does_not_surface_response_not_read_on_5xx():
     assert "ResponseNotRead" not in msg
     # And the real provider body must come through.
     assert "service unavailable" in msg, f"got {msg!r}"
+
+
+@pytest.mark.asyncio
+async def test_stream_retries_without_tools_when_provider_rejects_tools():
+    """Local OpenAI-compatible servers may expose chat completions but not
+    function calling. A 400/422 on a tool-bearing payload should fall back to a
+    plain streamed chat request instead of surfacing a broken connection.
+    """
+    agents = _import_stream_generator()
+
+    canned = _make_sse_lines({"content": "local answer"})
+    client = _RejectToolsThenSuccessClient(canned)
+    events = []
+    async for ev in agents._stream_llm_with_tools(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "search"}}],
+        client=client,
+    ):
+        events.append(ev)
+
+    assert [p.get("tools") for p in client.payloads] == [
+        [{"type": "function", "function": {"name": "search"}}],
+        None,
+    ]
+    assert ("delta", "local answer") in events
+    assert ("done", "local answer") in events
+    assert not [e for e in events if e[0] == "error"]
 
 
 @pytest.mark.asyncio

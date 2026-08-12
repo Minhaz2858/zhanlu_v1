@@ -37,6 +37,17 @@ def _proc(stdout: str = "", stderr: str = "", returncode: int = 0):
     return p
 
 
+def _pretend_cli_present(monkeypatch, t):
+    original = t.Path.is_file
+
+    def fake_is_file(path):
+        if path == t._SEARCH_PY:
+            return True
+        return original(path)
+
+    monkeypatch.setattr(t.Path, "is_file", fake_is_file)
+
+
 # ── uiux_search ─────────────────────────────────────────────────────────
 
 
@@ -51,6 +62,7 @@ def test_search_calls_cli_with_query_and_domain(monkeypatch):
         captured["timeout"] = kwargs.get("timeout")
         return _proc(stdout="## UI Pro Max\nResult 1")
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     result = _run(t._uiux_search({
@@ -84,6 +96,7 @@ def test_search_omits_optional_flags_when_not_provided(monkeypatch):
         captured["cmd"] = cmd
         return _proc(stdout="ok")
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     result = _run(t._uiux_search({"query": "dashboard palette"}))
@@ -125,6 +138,7 @@ def test_search_handles_timeout(monkeypatch):
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 30))
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     result = _run(t._uiux_search({"query": "x"}))
@@ -139,6 +153,7 @@ def test_search_handles_nonzero_exit(monkeypatch):
     def fake_run(cmd, **kwargs):
         return _proc(stdout="partial", stderr="bad arg", returncode=2)
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     result = _run(t._uiux_search({"query": "x"}))
@@ -157,6 +172,7 @@ def test_search_clamps_max_results(monkeypatch):
         captured.append(cmd)
         return _proc(stdout="ok")
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     # Above max → "5"
@@ -183,6 +199,7 @@ def test_design_system_calls_with_flag(monkeypatch):
         captured["cmd"] = cmd
         return _proc(stdout="# Design System Spec\nPalette: ...")
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     result = _run(t._uiux_design_system({
@@ -215,6 +232,7 @@ def test_design_system_omits_unset_dials(monkeypatch):
         captured["cmd"] = cmd
         return _proc(stdout="ok")
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     result = _run(t._uiux_design_system({"query": "x"}))
@@ -236,6 +254,7 @@ def test_design_system_clamps_dials(monkeypatch):
         captured["cmd"] = cmd
         return _proc(stdout="ok")
 
+    _pretend_cli_present(monkeypatch, t)
     monkeypatch.setattr("subprocess.run", fake_run)
 
     _run(t._uiux_design_system({"query": "x", "density": 999}))
@@ -250,6 +269,30 @@ def test_design_system_rejects_empty_query():
 
     result = _run(t._uiux_design_system({"query": ""}))
     assert result["success"] is False
+
+
+def test_search_uses_builtin_fallback_when_cli_missing(monkeypatch):
+    from app.services.tool_handlers import ui_ux_pro_max_tool as t
+
+    monkeypatch.setattr(t, "_SEARCH_PY", t.Path("/nonexistent/search.py"))
+
+    result = _run(t._uiux_search({"query": "sales dashboard", "domain": "chart"}))
+
+    assert result["success"] is True
+    assert result["fallback_used"] is True
+    assert "dashboard" in result["result"].lower()
+
+
+def test_design_system_uses_builtin_fallback_when_cli_missing(monkeypatch):
+    from app.services.tool_handlers import ui_ux_pro_max_tool as t
+
+    monkeypatch.setattr(t, "_SEARCH_PY", t.Path("/nonexistent/search.py"))
+
+    result = _run(t._uiux_design_system({"query": "sales dashboard", "density": 8}))
+
+    assert result["success"] is True
+    assert result["fallback_used"] is True
+    assert "kpi" in result["result"].lower()
 
 
 # ── Registration / check_fn ────────────────────────────────────────────
@@ -267,11 +310,11 @@ def test_both_tools_registered():
     assert "uiux_design_system" in available, f"uiux_design_system not in: {sorted(available)[:20]}"
 
 
-def test_check_fn_passes_when_cli_present():
+def test_check_fn_passes_when_cli_present(monkeypatch):
     """_uiux_check returns True when search.py exists."""
     from app.services.tool_handlers import ui_ux_pro_max_tool as t
 
-    # search.py is shipped with the skill
+    _pretend_cli_present(monkeypatch, t)
     assert t._uiux_check() is True
 
 

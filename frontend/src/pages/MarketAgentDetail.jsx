@@ -9,7 +9,7 @@ import { Star, Users, Loader2, ArrowRight, Tag, Lock, Copy, Check } from 'lucide
 import { toast } from '@/components/ui/use-toast';
 import { generateAgentPrompts, recommendSkills } from '@/lib/generateAgentPrompts';
 
-function fmtTime(v) { if (!v) return '—'; return new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+import { formatShortDateTime } from '@/lib/time';
 
 export default function MarketAgentDetail() {
   const { id } = useParams();
@@ -130,7 +130,7 @@ export default function MarketAgentDetail() {
 
           <Section title={t.detail.metadata}>
             <div className="space-y-3 text-sm">
-              <Row label={t.detail.createdDate} value={fmtTime(agent.created_date)} />
+              <Row label={t.detail.createdDate} value={formatShortDateTime(agent.created_date)} />
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <span className="text-muted-foreground">ID</span>
                 <span className="font-mono text-xs text-muted-foreground">{agent.id.slice(-8)}</span>

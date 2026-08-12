@@ -65,6 +65,11 @@ URL_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+LIVE_DASHBOARD_PATTERN = re.compile(
+    r"\b(dashboard|仪表盘)\b",
+    re.IGNORECASE,
+)
+
 
 # ---------------------------------------------------------------------------
 # Grounding blocks (mirrors GROUNDING_REQUIRED_BLOCK in agent_prompts.py)
@@ -164,6 +169,10 @@ def resolve_turn_action(
     tool_set = set(tool_names or [])
     ctx = data_ctx_extras or {}
 
+    if user_message and LIVE_DASHBOARD_PATTERN.search(user_message):
+        logger.info("turn_action: live dashboard intent detected; leaving tool_choice on auto")
+        return TurnAction()
+
     # 1) Bound KB + data question → ask_data_agent
     bound_kb_ids = ctx.get("bound_kb_ids") or []
     if bound_kb_ids and is_data_question and "ask_data_agent" in tool_set:
@@ -237,6 +246,8 @@ def grounding_block_for_message(user_message: Optional[str]) -> str:
         required.
     """
     if not user_message:
+        return ""
+    if LIVE_DASHBOARD_PATTERN.search(user_message):
         return ""
     if detect_file_intent(user_message):
         return GROUNDING_DOC_BLOCK

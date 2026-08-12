@@ -96,6 +96,8 @@ def seed():
             "web_search", "web_extract", "memory", "todo",
             "read_file", "write_file", "image_generation",
             "execute_code", "delegate_task",
+            "create_dashboard", "update_dashboard", "undo_dashboard_edit",
+            "uiux_search", "uiux_design_system",
         ],
     }
     agent_builder_config = {

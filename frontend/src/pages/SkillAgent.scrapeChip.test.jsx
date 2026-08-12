@@ -37,7 +37,7 @@ describe('SkillAgent.jsx — scrape chip and dialog wiring', () => {
 
   it('renders a "Scrape from URL" chip in the empty state chips array', () => {
     // The chip is defined with action: 'scrape' and a Globe icon
-    expect(SOURCE).toMatch(/Scrape from URL/);
+    expect(SOURCE).toMatch(/t\.skillAgent\.scrape\.chip/);
     expect(SOURCE).toMatch(/action:\s*['"]scrape['"]/);
     expect(SOURCE).toMatch(/icon:\s*Globe/);
   });

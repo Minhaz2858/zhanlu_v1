@@ -186,6 +186,7 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
           onCommit={(v) => commitEdit('name', v)}
           changed={Boolean(changes.name)}
           placeholder={t.createDialog.namePh}
+          lang={lang}
         />
         <Field
           icon={Tag}
@@ -197,6 +198,7 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
           onCommit={(v) => commitEdit('type', v)}
           changed={Boolean(changes.type)}
           placeholder={isEn ? 'data_sync / report_generation / …' : 'data_sync / report_generation / …'}
+          lang={lang}
         />
         <div className="flex items-start gap-2" data-field="output-format">
           <Tag className="mt-1 h-3.5 w-3.5 text-muted-foreground" />
@@ -235,6 +237,7 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
             </div>
           ) : null}
           placeholder="—"
+          lang={lang}
         />
         {/* Next-runs preview — sits on its own row under the schedule
             field so the user can see what the rule will fire on. Hidden
@@ -260,6 +263,7 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
           onCommit={(v) => commitEdit('project', v)}
           changed={Boolean(changes.project)}
           placeholder="—"
+          lang={lang}
         />
         <div className="sm:col-span-2">
           <Field
@@ -273,6 +277,7 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
             changed={Boolean(changes.dataSources)}
             placeholder={t.createDialog.dataSourcesEmpty}
             multiline
+            lang={lang}
           />
         </div>
         <div className="sm:col-span-2">
@@ -287,6 +292,7 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
             changed={Boolean(changes.description)}
             placeholder={t.createDialog.descPh}
             multiline
+            lang={lang}
           />
         </div>
       </div>
@@ -311,7 +317,8 @@ export default function AutomationDraftCard({ prefill, lang: langProp, onAppendT
   );
 }
 
-function Field({ icon: Icon, label, value, editing, onStartEdit, onCancel, onCommit, changed, placeholder, multiline, extra }) {
+function Field({ icon: Icon, label, value, editing, onStartEdit, onCancel, onCommit, changed, placeholder, multiline, extra, lang }) {
+  const isEn = lang === 'en';
   return (
     <div className="min-w-0">
       <div className="mb-0.5 flex items-center gap-1 text-[11px] uppercase tracking-wide text-muted-foreground">

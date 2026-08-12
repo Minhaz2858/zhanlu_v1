@@ -58,6 +58,8 @@ _STOPWORDS: frozenset[str] = frozenset({
 # many skill names ("doc", "x", etc.) and produce false positives.
 _MIN_NAME_TOKEN_LEN: int = 3
 
+_DASHBOARD_INTENT_RE = re.compile(r"\b(?:dashboard|dash-board|kpi\s*dashboard|仪表盘)\b", re.IGNORECASE)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -204,6 +206,18 @@ def post_router_pick(
 
     if not candidates:
         return None
+
+    if _DASHBOARD_INTENT_RE.search(str(user_message or "")):
+        for cand in candidates:
+            if (cand.get("name") or "").strip().lower() == "dashboard-generation":
+                return {
+                    "skill_name": "dashboard-generation",
+                    "triggers": [],
+                    "format": "dashboard",
+                    "forced": True,
+                    "score": 1.0,
+                    "source": cand.get("source", "filesystem"),
+                }
 
     best: Optional[dict[str, Any]] = None
     best_score: float = 0.0

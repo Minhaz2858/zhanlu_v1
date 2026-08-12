@@ -20,6 +20,8 @@ logger = logging.getLogger(__name__)
 class SQLiteAdapter:
     """SQLite adapter satisfying the ``DatasourceAdapter`` Protocol."""
 
+    quote_char = '"'
+
     def __init__(self, db_path: str = ":memory:", *, timeout_ms: int = 5000):
         self._db_path = db_path
         self._timeout_ms = timeout_ms

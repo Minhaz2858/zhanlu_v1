@@ -335,7 +335,7 @@ def _execute_single_node(
     if node_type == "tool":
         return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
     elif node_type == "nl2sql":
-        return _execute_nl2sql_node(db, execution, node)
+        return _execute_nl2sql_node(db, execution, node, data_ctx_extras=data_ctx_extras)
     elif node_type == "synthesize":
         return _execute_synthesize_node(db, execution, node)
     elif node_type == "sandbox":
@@ -432,16 +432,89 @@ def _execute_tool_node(db, execution, node, user_id, data_ctx_extras=None) -> Ob
         )
 
 
-def _execute_nl2sql_node(db, execution, node) -> ObservationRecord:
-    """Execute an NL2SQL node — generate SQL and create a DataSnapshot."""
+def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None) -> ObservationRecord:
+    """Execute an NL2SQL node — query a real data source when bound KBs exist.
+
+    When ``data_ctx_extras`` carries ``bound_kb_ids`` (injected by
+    ``prepare_data_source_runtime`` in the v3 streaming path), the node
+    routes through the live ``NLAnswerService`` pipeline: schema linker
+    (if enabled) → SQL generation → execution → narration.  The
+    observation ``result_data`` carries both ``sql`` and ``data`` (rows)
+    so the synthesize node downstream can consume them.
+
+    When no bound KBs are available, falls back to the legacy
+    ``DataSnapshotService.nl2sql()`` which generates SQL without executing
+    it against a real database.
+    """
     from app.services.data_snapshot.snapshot_service import DataSnapshotService
 
-    service = DataSnapshotService(db)
     question = (node.inputs or {}).get("question", node.description or node.name)
-    schema_desc = (node.inputs or {}).get("schema_description", "No schema available")
+    bound_kb_ids: list[str] = list((data_ctx_extras or {}).get("bound_kb_ids") or [])
 
+    # ── Live data-source path: bound KBs exist ─────────────────────────
+    if bound_kb_ids:
+        from app.services.db import NLAnswerService
+        from app.services.db.connector_factory import DriverUnavailable
+
+        kb_id = bound_kb_ids[0]
+        try:
+            svc = NLAnswerService(db)
+            result = _run_coro_sync(svc.answer(kb_id, question))
+
+            # Defensive: NLAnswerService may return an error dict on some failures
+            if isinstance(result, dict) and result.get("success") is False:
+                return _record_observation(
+                    db, execution, node,
+                    observation_type="nl2sql",
+                    tool_name="nl2sql",
+                    request_args={"question": question, "kb_id": kb_id},
+                    success=False,
+                    error_message=result.get("error", "Data source query failed"),
+                )
+
+            rows = result.get("rows", []) if isinstance(result, dict) else []
+            sql = (result.get("sql") or "") if isinstance(result, dict) else ""
+            answer = (result.get("answer") or "") if isinstance(result, dict) else ""
+
+            return _record_observation(
+                db, execution, node,
+                observation_type="nl2sql",
+                tool_name="nl2sql",
+                request_args={"question": question, "kb_id": kb_id, "sql": sql},
+                result_data={
+                    "sql": sql,
+                    "data": rows,
+                    "source_id": result.get("source_id") if isinstance(result, dict) else None,
+                    "source_name": result.get("source_name") if isinstance(result, dict) else None,
+                    "answer": answer,
+                    "citations": result.get("citations") if isinstance(result, dict) else None,
+                },
+                result_text=answer or f"Generated SQL: {sql}",
+                success=True,
+            )
+        except DriverUnavailable as e:
+            return _record_observation(
+                db, execution, node,
+                observation_type="nl2sql",
+                tool_name="nl2sql",
+                request_args={"question": question, "kb_id": kb_id},
+                success=False,
+                error_message=f"Database driver unavailable: {e}",
+            )
+        except Exception as e:
+            return _record_observation(
+                db, execution, node,
+                observation_type="nl2sql",
+                tool_name="nl2sql",
+                request_args={"question": question, "kb_id": kb_id},
+                success=False,
+                error_message=f"Data source query failed: {e}",
+            )
+
+    # ── Fallback: no bound KBs → schema-only SQL generation ────────────
+    service = DataSnapshotService(db)
+    schema_desc = (node.inputs or {}).get("schema_description", "No schema available")
     try:
-        # Generate SQL
         nl2sql_result = service.nl2sql(question=question, schema_description=schema_desc)
 
         if not nl2sql_result["valid"]:
@@ -454,8 +527,6 @@ def _execute_nl2sql_node(db, execution, node) -> ObservationRecord:
                 error_message=f"SQL validation failed: {nl2sql_result['errors']}",
             )
 
-        # In a real system, we'd execute the SQL against the datasource here
-        # For now, record the generated SQL as the observation
         return _record_observation(
             db, execution, node,
             observation_type="nl2sql",
@@ -508,6 +579,20 @@ def _get_all_data_observations(db, execution) -> list:
         )
         .order_by(ObservationRecord.seq.asc())
         .all()
+    )
+
+
+def _get_latest_skill_observation(db, execution) -> Optional[ObservationRecord]:
+    """Get the latest successful skill-load observation for this execution."""
+    return (
+        db.query(ObservationRecord)
+        .filter(
+            ObservationRecord.execution_id == execution.id,
+            ObservationRecord.observation_type == "skill_call",
+            ObservationRecord.success == True,
+        )
+        .order_by(ObservationRecord.seq.desc())
+        .first()
     )
 
 
@@ -601,6 +686,10 @@ def _execute_synthesize_node(db, execution, node) -> ObservationRecord:
     entities = task_spec.get("entities", {}) or {}
     source_name = entities.get("source_name") or entities.get("data_source")
     source_id = entities.get("source_id")
+    skill_obs = _get_latest_skill_observation(db, execution)
+    skill_result = skill_obs.result_data if skill_obs and isinstance(skill_obs.result_data, dict) else {}
+    skill_name = skill_result.get("name") or ((skill_obs.request_args or {}).get("name") if skill_obs else None)
+    skill_methodology = skill_result.get("body") if isinstance(skill_result, dict) else None
 
     try:
         finalize_result = _run_coro_sync(report_synthesis.synthesize_report(
@@ -610,6 +699,8 @@ def _execute_synthesize_node(db, execution, node) -> ObservationRecord:
             source_name=source_name,
             source_id=source_id,
             call_llm_fn=_synth_call_llm,
+            skill_name=skill_name,
+            skill_methodology=skill_methodology,
         ))
         result_data = _finalize_result_to_result_data(finalize_result)
         summary_text = result_data.get("summary", "")
@@ -617,7 +708,10 @@ def _execute_synthesize_node(db, execution, node) -> ObservationRecord:
             db, execution, node,
             observation_type="synthesize",
             tool_name="synthesizer",
-            request_args={"user_message": user_message},
+            request_args={
+                "user_message": user_message,
+                **({"skill_name": skill_name} if skill_name else {}),
+            },
             result_data=result_data,
             result_text=summary_text,
             success=True,
@@ -811,10 +905,50 @@ def _execute_skill_node(
     user_id: Optional[str] = None,
     data_ctx_extras: Optional[dict] = None,
 ) -> ObservationRecord:
-    """Execute a skill node."""
-    # Skills are executed via sandbox or in-process
-    # For now, route through the tool executor
-    return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
+    """Execute a skill node by loading its full methodology body."""
+    from app.services.agent_tools import execute_tool_with_retry
+
+    args = dict(node.inputs or {})
+    skill_name = args.get("skill_name") or args.get("name") or node.name
+    skill_id = args.get("skill_id")
+    tool_context = {
+        "conversation_id": getattr(execution, "conversation_id", None),
+        "agent_app_id": getattr(execution, "app_id", None) or getattr(execution, "agent_name", None),
+        "agent_name": getattr(execution, "agent_name", None),
+        **(data_ctx_extras or {}),
+    }
+    request_args = {
+        **({"skill_id": skill_id} if skill_id else {}),
+        **({"name": skill_name} if skill_name else {}),
+    }
+
+    try:
+        result = _run_coro_sync(
+            execute_tool_with_retry("load_skill_body", request_args, db, user_id, context=tool_context)
+        )
+        result_data = result if isinstance(result, dict) else {"result": str(result)}
+        result_text = result_data.get("body") or result_data.get("response") or str(result_data)
+        ok = bool(result_data.get("success", True))
+
+        return _record_observation(
+            db, execution, node,
+            observation_type="skill_call",
+            tool_name=skill_name or "load_skill_body",
+            request_args=request_args,
+            result_data=result_data,
+            result_text=result_text,
+            success=ok,
+            error_message=None if ok else str(result_data.get("error", "skill load failed")),
+        )
+    except Exception as e:
+        return _record_observation(
+            db, execution, node,
+            observation_type="skill_call",
+            tool_name=skill_name or "load_skill_body",
+            request_args=request_args,
+            success=False,
+            error_message=str(e),
+        )
 
 
 def _record_observation(

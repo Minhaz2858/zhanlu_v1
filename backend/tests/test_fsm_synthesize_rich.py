@@ -91,12 +91,15 @@ class TestSynthesizeNodeRichPath:
         captured = {}
 
         async def fake_synthesize(*, user_message, rows, sql, source_name,
-                                  source_id, call_llm_fn, user_signal=None):
+                                  source_id, call_llm_fn, user_signal=None,
+                                  skill_name=None, skill_methodology=None):
             captured.update(rows=rows, sql=sql, source_name=source_name,
-                            source_id=source_id, user_message=user_message)
+                            source_id=source_id, user_message=user_message,
+                            skill_name=skill_name, skill_methodology=skill_methodology)
             return _finalize_result()
 
         monkeypatch.setattr(cr, "_get_all_data_observations", lambda db, ex: [_nl2sql_prev_obs()])
+        monkeypatch.setattr(cr, "_get_latest_skill_observation", lambda db, ex: None)
         monkeypatch.setattr("app.services.synexia.report_synthesis.synthesize_report", fake_synthesize)
         recorded = {}
         def fake_record(db, ex, node, **kw):
@@ -110,6 +113,7 @@ class TestSynthesizeNodeRichPath:
         assert captured["rows"] == [{"material": "Steel", "revenue": 120}]
         assert captured["sql"].startswith("SELECT material")
         assert captured["source_name"] == "sales_db"
+        assert captured["skill_name"] is None
         # recorded result_data is the converted shape (rich, with report_card_payload)
         assert recorded["result_data"]["report_card_payload"] is not None
         assert recorded["result_data"]["synth_data"]["chart"]["data"] == [{"material": "Steel", "revenue": 120}]
@@ -119,10 +123,12 @@ class TestSynthesizeNodeRichPath:
     def test_no_previous_observation_passes_empty_rows(self, monkeypatch):
         captured = {}
         async def fake_synthesize(*, user_message, rows, sql, source_name,
-                                  source_id, call_llm_fn, user_signal=None):
+                                  source_id, call_llm_fn, user_signal=None,
+                                  skill_name=None, skill_methodology=None):
             captured.update(rows=rows, sql=sql)
             return _finalize_result()
         monkeypatch.setattr(cr, "_get_all_data_observations", lambda db, ex: [])
+        monkeypatch.setattr(cr, "_get_latest_skill_observation", lambda db, ex: None)
         monkeypatch.setattr("app.services.synexia.report_synthesis.synthesize_report", fake_synthesize)
         monkeypatch.setattr(cr, "_record_observation", lambda db, ex, node, **kw: SimpleNamespace(**kw))
         cr._execute_synthesize_node(MagicMock(), _execution(), _node())

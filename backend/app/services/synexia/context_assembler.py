@@ -255,13 +255,17 @@ def build_conversation_context(
         recent_artifacts = _get_recent_artifacts(db, conversation_id)
         prior_entities = _get_prior_entities(db, conversation_id)
 
-        if not transcript and not recent_artifacts and not prior_entities:
+        dashboard_id = _get_conversation_dashboard_id(db, conversation_id)
+
+        if not transcript and not recent_artifacts and not prior_entities and not dashboard_id:
             return {}
         result: dict = {
             "transcript": transcript,
             "recent_artifacts": recent_artifacts,
             "prior_entities": prior_entities,
         }
+        if dashboard_id:
+            result["dashboard_id"] = dashboard_id
         # Phase 4: carry forward artifact type of the most recent artifact
         if recent_artifacts:
             result["previous_artifact_type"] = recent_artifacts[0].get("artifact_type", "")
@@ -307,6 +311,21 @@ def _build_transcript(db: Session, conversation_id: str) -> str:
     except Exception as e:
         logger.debug("_build_transcript failed (non-fatal): %s", e)
         return ""
+
+
+def _get_conversation_dashboard_id(db: Session, conversation_id: str) -> str | None:
+    """Return the live dashboard bound to this conversation, if any."""
+    try:
+        from app.models.agent_conversation import AgentConversation
+
+        row = db.query(AgentConversation.dashboard_id).filter(
+            AgentConversation.id == conversation_id,
+            AgentConversation.is_deleted == False,  # noqa: E712
+        ).first()
+        return row[0] if row and row[0] else None
+    except Exception as e:
+        logger.debug("_get_conversation_dashboard_id failed (non-fatal): %s", e)
+        return None
 
 
 def _get_recent_artifacts(db: Session, conversation_id: str) -> list:

@@ -37,6 +37,7 @@ from typing import Any
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.agent_app import AgentApp
 from app.models.knowledge_base import KnowledgeBase
 from app.models.project import Project
@@ -65,8 +66,10 @@ def get_bound_data_source_ids(agent_app: AgentApp | None) -> list[str]:
 # (BEFORE the base content) so it's the first thing the LLM reads. This is
 # the top-level guardrail — the detailed "Bound Data Sources" section is still
 # appended at the end for reference.
-def _build_anti_hallucination_directive() -> str:
-    return (
+#
+# When `has_weekly_report` is True, an exception clause is appended so
+def _build_anti_hallucination_directive(has_weekly_report: bool = False) -> str:
+    directive = (
         "CRITICAL RULE: You have bound data sources (database and/or document). "
         "For ANY data question, you MUST call the `ask_data_agent` tool FIRST. "
         "Do NOT fabricate data, invent customer names, or generate data tables "
@@ -77,6 +80,7 @@ def _build_anti_hallucination_directive() -> str:
         "result — but you SHOULD produce a substantive narrative, not just a "
         "one-line handoff."
     )
+    return directive
 
 
 # Keep the legacy constant for backward compatibility with any external
@@ -118,7 +122,9 @@ def _load_bound_kb_meta(db: Session, kb_ids: list[str]) -> list[dict]:
     ]
 
 
-def _build_data_source_prompt_section(bound_meta: list[dict]) -> str:
+def _build_data_source_prompt_section(
+    bound_meta: list[dict], has_weekly_report: bool = False,
+) -> str:
     """Compose the 'Bound Data Sources' section appended to the system prompt.
 
     Describes both database and document (file) sources. Always names the
@@ -127,6 +133,10 @@ def _build_data_source_prompt_section(bound_meta: list[dict]) -> str:
     alternative path to the data — the Data Agent picks the right internal
     tool (SQL for databases, vector retrieval for documents) based on each
     source's ``source_kind``.
+
+    When ``has_weekly_report`` is True, an exception bullet is added to the
+    "When to call" list so the LLM knows weekly-report requests bypass
+    `ask_data_agent`.
     """
     if not bound_meta:
         return ""
@@ -179,6 +189,7 @@ def _build_data_source_prompt_section(bound_meta: list[dict]) -> str:
         "- Any time you need to know what tables/columns exist (the Data Agent can introspect the schema for you).",
         "- Any time a downstream step (report, chart, summary) requires real numbers — fetch them via `ask_data_agent` first.",
         "- Any time the user asks about content in an uploaded document (PDF, DOCX, CSV, etc.).",
+        "- For monthly/weekly/quarterly report requests, make ONE consolidated `ask_data_agent` call that asks for the full reporting dataset: current period totals, comparison period totals, product/customer breakdowns, available margin/cost fields, and any inventory snapshot needed. Do NOT split one report into serial data-agent calls unless the first call fails.",
     ])
     lines.extend([
         "",
@@ -333,6 +344,67 @@ def _extend_with_project_kbs(
 _PROJECT_MEMORY_INJECT_LIMIT = 50
 
 
+def _build_entity_map_block(db: Session, project_id: str) -> str:
+    """Build a ~300-400 token 'Project Data Map' prompt section.
+
+    Lists the project's entities (universal types only) and their linked
+    data sources so the LLM knows the project's vocabulary. Returns an
+    empty string when no entities exist. Flag-gated by ENTITY_GRAPH_ENABLED.
+    """
+    try:
+        from app.models.knowledge_catalog import (
+            ProjectEntity,
+            ProjectEntityLink,
+        )
+
+        entities = (
+            db.query(ProjectEntity)
+            .filter(
+                ProjectEntity.project_id == project_id,
+                ProjectEntity.is_deleted == False,  # noqa: E712
+            )
+            .order_by(ProjectEntity.entity_type, ProjectEntity.name)
+            .limit(30)
+            .all()
+        )
+        if not entities:
+            return ""
+
+        entity_ids = [e.id for e in entities]
+        links = (
+            db.query(ProjectEntityLink)
+            .filter(
+                ProjectEntityLink.entity_id.in_(entity_ids),
+                ProjectEntityLink.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        links_by_entity: dict[str, list] = {}
+        for link in links:
+            links_by_entity.setdefault(link.entity_id, []).append(link)
+
+        lines = ["## Project Data Map (entities and their data sources)"]
+        for e in entities:
+            elinks = links_by_entity.get(e.id, [])
+            link_str = ", ".join(
+                f"{l.target_type}:{l.target_id}" for l in elinks[:3]
+            )
+            aliases_str = ""
+            if e.aliases:
+                aliases_str = f" (aliases: {', '.join(e.aliases[:3])})"
+            lines.append(
+                f"- [{e.entity_type}] {e.name}{aliases_str}"
+                f" → {link_str or 'no linked data yet'}"
+            )
+        lines.append("")
+        lines.append(
+            "Use these entity names when formulating queries about project data."
+        )
+        return "\n".join(lines)
+    except Exception:
+        return ""
+
+
 def _build_project_context_block(
     db: Session,
     project_id: str,
@@ -418,6 +490,7 @@ def prepare_data_source_runtime(
     base_system_prompt: str,
     selected_project_id: str | None = None,
     selected_project_name: str | None = None,
+    pinned_data_source_id: str | None = None,
 ) -> tuple[list[dict], str, dict]:
     """Augment the agent's tool list + system prompt for data source support.
 
@@ -455,6 +528,10 @@ def prepare_data_source_runtime(
             db, agent_app, bound_ids, selected_project_id,
             project_name=selected_project_name,
         )
+    if pinned_data_source_id and pinned_data_source_id not in bound_ids:
+        pinned = db.get(KnowledgeBase, pinned_data_source_id)
+        if pinned is not None and not pinned.is_deleted:
+            bound_ids = list(bound_ids) + [pinned_data_source_id]
 
     # Guard: general_assistant must have zero data source access when no
     # project is selected. This prevents cross-project data leakage in
@@ -473,11 +550,16 @@ def prepare_data_source_runtime(
             db, selected_project_id, agent_app
         )
 
+    # ── Project Data Map (entity graph, flag-gated) ──
+    entity_block = ""
+    if selected_project_id and getattr(settings, "ENTITY_GRAPH_ENABLED", False):
+        entity_block = _build_entity_map_block(db, selected_project_id)
+
     if not bound_ids:
         # No data sources, but still surface project context if selected.
         new_prompt = base_system_prompt + (
             "\n\n" + project_block if project_block else ""
-        )
+        ) + ("\n\n" + entity_block if entity_block else "")
         return base_tools, new_prompt, {}
 
     # Idempotent injection: don't add `ask_data_agent` if it's already in
@@ -492,17 +574,18 @@ def prepare_data_source_runtime(
             augmented_tools.append(entry.schema)
 
     bound_meta = _load_bound_kb_meta(db, bound_ids)
-    section = _build_data_source_prompt_section(bound_meta)
+    section = _build_data_source_prompt_section(bound_meta, has_weekly_report=False)
 
     # PREPEND the critical anti-hallucination directive so it's the first
     # thing the LLM reads. The detailed "Bound Data Sources" section and
     # the optional "Project Context" block are appended at the end.
     new_prompt = (
-        _build_anti_hallucination_directive()
+        _build_anti_hallucination_directive(has_weekly_report=False)
         + "\n\n"
         + base_system_prompt
         + ("\n\n" + section if section else "")
         + ("\n\n" + project_block if project_block else "")
+        + ("\n\n" + entity_block if entity_block else "")
     )
 
     # Carry `project_id` into the tool context so handlers (create_automation,

@@ -112,6 +112,40 @@ class TestTaskSpecParserFileIntent(unittest.TestCase):
         self.assertTrue(result["requires_data"])
         self.assertEqual(result["task_kind"], "create_artifact")
 
+    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    def test_selected_skill_sets_override_metadata(self, mock_call_llm):
+        """A runtime-selected custom skill must be preserved on TaskSpec
+        and must suppress default-skill auto-pick metadata."""
+        mock_call_llm.return_value = {
+            "response": json.dumps({
+                "task_kind": "create_artifact",
+                "artifact_intents": [],
+                "entities": {},
+                "kpis": [],
+                "complexity": "moderate",
+                "requires_data": True,
+                "user_signal": "default",
+            })
+        }
+        from app.services.synexia.task_spec_parser import parse_task_spec
+
+        selected_skill = {
+            "id": "tool-weekly-sales",
+            "name": "weekly-sales-report",
+            "trigger": "/weekly-sales-report",
+        }
+        result = parse_task_spec(
+            "make a pptx weekly sales report",
+            agent_name="test_agent",
+            active_skill=selected_skill,
+        )
+
+        self.assertTrue(result["skill_override"])
+        self.assertIsNone(result["auto_picked_default"])
+        self.assertEqual(result["selected_skill_id"], "tool-weekly-sales")
+        self.assertEqual(result["selected_skill_name"], "weekly-sales-report")
+        self.assertEqual(result["selected_skill"], selected_skill)
+
 
 # ---------------------------------------------------------------------------
 # Layer 2 — Planning Engine: plan_dag._build_default_plan
@@ -257,38 +291,27 @@ class TestExecuteSynthesizeNode(unittest.TestCase):
         }
         return execution
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
-    def test_synthesize_node_returns_observation(self, mock_call_llm):
-        mock_call_llm.return_value = {
-            "response": json.dumps({
-                "title": "Q2 2026 Revenue Report",
-                "summary": "Revenue grew 15% YoY driven by top-3 materials.",
-                "instructions": "Generate a professional DOCX report with title page, executive summary, and KPI table.",
-                "kpis": [
-                    {"label": "Total Revenue", "value": "189.3M CNY", "caption": "Top 7 materials"},
-                    {"label": "YoY Growth", "value": "15%", "caption": "vs Q2 2025"},
-                ],
-                "chart": {
-                    "type": "bar",
-                    "title": "Revenue by Material",
-                    "x_key": "material_name",
-                    "y_keys": ["total_revenue"],
-                    "data": [],
-                    "unit": "CNY",
-                },
-                "insights": [
-                    {"icon": "trending-up", "text": "Top 3 materials account for 76% of revenue."},
-                ],
-            })
-        }
-
+    def test_synthesize_node_returns_observation(self):
         from app.services.synexia.capability_router import _execute_synthesize_node
+        from app.services.synexia.contracts import FinalizeResult, ReportCardPayload
 
         db = MagicMock()
         execution = self._make_mock_execution()
         node = self._make_mock_node()
 
-        obs = _execute_synthesize_node(db, execution, node)
+        async def fake_synthesize(**kwargs):
+            return FinalizeResult(
+                task_kind="report",
+                assistant_content="Revenue grew 15% YoY driven by top-3 materials.",
+                report_card_payload=ReportCardPayload(
+                    title="Q2 2026 Revenue Report",
+                    summary="Revenue grew 15% YoY driven by top-3 materials.",
+                ),
+                user_signal="export_docx",
+            )
+
+        with patch("app.services.synexia.report_synthesis.synthesize_report", fake_synthesize):
+            obs = _execute_synthesize_node(db, execution, node)
 
         self.assertTrue(obs.success)
         self.assertEqual(obs.observation_type, "synthesize")

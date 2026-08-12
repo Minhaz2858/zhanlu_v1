@@ -1,7 +1,7 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, ThumbsUp, ThumbsDown } from 'lucide-react';
+import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
 import ClarifyBatchForm from './ClarifyBatchForm';
@@ -16,7 +16,7 @@ import InlineArtifactPreview from './InlineArtifactPreview';
 import PlanEditor from './PlanEditor';
 import { partitionArtifacts } from './partitionArtifacts';
 import DashboardCard from '@/components/dashboard/DashboardCard';
-import DashboardPopup from '@/components/dashboard/DashboardPopup';
+import MessageActions from './MessageActions';
 
 /**
  * Pre-process markdown content to fix common LLM formatting issues.
@@ -86,7 +86,7 @@ function CopyButton({ text }) {
     navigator.clipboard.writeText(text).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
-    }).catch(() => {});
+    }).catch(() => { });
   }, [text]);
   return (
     <button
@@ -242,23 +242,23 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
   // Detect ask_data_agent tool calls with rows in message.tool_calls
   const dataToolResult = !isUser && Array.isArray(message.tool_calls)
     ? message.tool_calls.find((tc) => {
-        if (!tc || !tc.results) return false;
-        const name = tc.name || tc.tool_name || '';
-        const isDataTool = name === 'ask_data_agent' || name === 'Database Query';
-        const hasRows = Array.isArray(tc.results.rows) && tc.results.rows.length > 0;
-        return isDataTool && hasRows;
-      })
+      if (!tc || !tc.results) return false;
+      const name = tc.name || tc.tool_name || '';
+      const isDataTool = name === 'ask_data_agent' || name === 'Database Query';
+      const hasRows = Array.isArray(tc.results.rows) && tc.results.rows.length > 0;
+      return isDataTool && hasRows;
+    })
     : null;
 
   // Detect Synexia report-card payload (preferred over DataTableCard for reports)
   const reportToolResult = !isUser && Array.isArray(message.tool_calls)
     ? message.tool_calls.find((tc) => {
-        if (!tc || !tc.results) return false;
-        const payload = tc.results.report_card_payload;
-        if (!payload || typeof payload !== 'object') return false;
-        // Either explicitly typed by the backend, or has the rich payload shape
-        return tc.results.type === 'report_card' || (payload.title && (payload.kpis || payload.chart || payload.insights));
-      })
+      if (!tc || !tc.results) return false;
+      const payload = tc.results.report_card_payload;
+      if (!payload || typeof payload !== 'object') return false;
+      // Either explicitly typed by the backend, or has the rich payload shape
+      return tc.results.type === 'report_card' || (payload.title && (payload.kpis || payload.chart || payload.insights));
+    })
     : null;
 
   // ── Early open side panel when user_signal starts with `export_` ──
@@ -346,8 +346,8 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
   const rawContent = message.content || '';
   const oneLine = rawContent.replace(/\s+/g, ' ').trim();
   const [userExpanded, setUserExpanded] = useState(false);
-  // Live dashboard popup (right-side) opened from a dashboard artifact card.
-  const [openDashboardId, setOpenDashboardId] = useState(null);
+  // Ref for the assistant message content — used by html2canvas in MessageActions
+  const contentRef = useRef(null);
   // 120 chars matches the typical "one line" feel on a max-w-[90%] bubble
   // at desktop widths without being so short that the truncation is jarring.
   const USER_PREVIEW_LIMIT = 120;
@@ -360,18 +360,17 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
   const attachmentList = Array.isArray(message.attachments) ? message.attachments : [];
   const attachmentBadge = attachmentList.length > 0
     ? (lang === 'en'
-        ? `📎 ${attachmentList.length} file${attachmentList.length === 1 ? '' : 's'}`
-        : `📎 ${attachmentList.length} 个附件`)
+      ? `📎 ${attachmentList.length} file${attachmentList.length === 1 ? '' : 's'}`
+      : `📎 ${attachmentList.length} 个附件`)
     : null;
 
   return (
     <div className={`flex animate-slide-up gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
       <div
-        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${
-          isUser
+        className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${isUser
             ? 'bg-primary text-primary-foreground'
             : 'border border-border bg-secondary text-muted-foreground'
-        }`}
+          }`}
       >
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
@@ -428,7 +427,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
             </div>
           </div>
         ) : (
-          <div className="min-w-0 break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
+          <div ref={contentRef} className="min-w-0 break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
             {/* Inline Claude-style numbered activity steps (+ phase headline).
                 The reasoning panel (model chain-of-thought) is rendered
                 INSIDE ActivitySteps — at the bottom of the expanded step
@@ -542,7 +541,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                     <DashboardCard
                       key={artifact.dashboard_id || artifact.id}
                       artifact={artifact}
-                      onOpen={() => setOpenDashboardId(artifact.dashboard_id)}
+                      onOpen={() => onArtifactPreview?.(artifact)}
                     />
                   ) : (
                     <InlineArtifactPreview
@@ -554,38 +553,15 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 )}
               </div>
             )}
-            {openDashboardId && (
-              <DashboardPopup
-                dashboardId={openDashboardId}
-                variant="chat"
-                onClose={() => setOpenDashboardId(null)}
+            {/* Message actions: copy, share, like, dislike */}
+            {!isStreaming && message.id && (
+              <MessageActions
+                message={message}
+                messageRef={contentRef}
+                onFeedback={onFeedback}
+                feedbackRating={feedbackRating}
+                isStreaming={isStreaming}
               />
-            )}
-            {/* Experience layer (Phase C): thumbs up/down feedback on
-                finalized assistant messages. Feeding the learning loop:
-                the backend records an ExperienceEntry and adjusts the
-                recipe / semantic cache / user profile accordingly. */}
-            {!isStreaming && onFeedback && message.id && (
-              <div className="mt-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
-                <button
-                  type="button"
-                  aria-label={lang === 'en' ? 'Good answer' : '回答有用'}
-                  title={lang === 'en' ? 'Good answer' : '回答有用'}
-                  onClick={() => onFeedback(message.id, 1)}
-                  className={`chat-feedback-up inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${feedbackRating === 1 ? 'bg-green-50 text-green-600' : 'text-gray-400 hover:bg-gray-100 hover:text-green-600'}`}
-                >
-                  <ThumbsUp className="h-3.5 w-3.5" />
-                </button>
-                <button
-                  type="button"
-                  aria-label={lang === 'en' ? 'Poor answer' : '回答不佳'}
-                  title={lang === 'en' ? 'Poor answer' : '回答不佳'}
-                  onClick={() => onFeedback(message.id, -1)}
-                  className={`chat-feedback-down inline-flex h-6 w-6 items-center justify-center rounded-md transition-colors ${feedbackRating === -1 ? 'bg-red-50 text-red-600' : 'text-gray-400 hover:bg-gray-100 hover:text-red-600'}`}
-                >
-                  <ThumbsDown className="h-3.5 w-3.5" />
-                </button>
-              </div>
             )}
           </div>
         )}

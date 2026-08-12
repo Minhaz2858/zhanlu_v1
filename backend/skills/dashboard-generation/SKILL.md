@@ -94,14 +94,22 @@ above into zhanlu-specific tokens:
    Only when all five are resolved (explicitly stated or unambiguous) proceed.
 2. Optionally call `uiux_design_system(query="analytics dashboard")` and/or
    `uiux_search(domain="chart", query="<request>")` to gather general palette
-   and chart-type recommendations.
+  and chart-type recommendations. If those tools fail or are unavailable,
+  continue with the built-in professional dashboard rules below instead of
+  stopping.
 3. Load the four implementation companions via `load_skill_body`, then design
    3–6 widgets covering the request — at least one KPI + one trend chart —
    translating the recommendations into zhanlu tokens (`hsl(var(--chart-N))`,
    `bg-card`, `text-muted-foreground`).
-4. Call `create_dashboard` with `datasource_id`, `title`, `widgets[]`, and
+4. Do not call `ask_data_agent` for dashboard creation. Use direct datasource
+  and schema tools (`list_data_sources`, `describe_schema`). At most two exploratory `execute_query` calls to verify column names or date ranges.
+  Do not exhaust the tool loop validating every widget query. If the schema is
+  sufficient, proceed with read-only SQL widgets and let the dashboard viewer
+  isolate any per-widget query errors.
+5. Call `create_dashboard` with `datasource_id`, `title`, `widgets[]`, and
    `refresh_interval_seconds` (default 30; clamped to 10..300).
-5. Tell the user the dashboard is live, can be reopened from My Space, and
+  You must call `create_dashboard` before the tool loop budget is exhausted.
+6. Tell the user the dashboard is live, can be reopened from My Space, and
    will refresh automatically while open.
 
 ## Safety rules

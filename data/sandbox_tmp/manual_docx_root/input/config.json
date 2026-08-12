@@ -1,0 +1,22 @@
+{
+  "format": "docx",
+  "title": "Manual DOCX Root",
+  "instructions": "Generate test",
+  "summary": "Summary",
+  "kpis": [
+    {
+      "label": "Revenue",
+      "value": "150"
+    }
+  ],
+  "insights": [
+    {
+      "text": "Insight"
+    }
+  ],
+  "recommendations": [
+    {
+      "text": "Recommendation"
+    }
+  ]
+}

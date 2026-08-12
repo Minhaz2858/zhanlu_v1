@@ -172,6 +172,15 @@ def execute_job(job_id: str, skill_name: str):
             host_workspace = host_root + workspace[len(tmp_root):]
             host_input_dir = os.path.join(host_workspace, "input")
             host_output_dir = os.path.join(host_workspace, "output")
+            # The spawned sandbox container is created by the HOST Docker
+            # daemon, so bind-mount permissions are evaluated on the host-side
+            # paths, not just the worker container paths. Make both sides
+            # traversable/writable so non-root sandbox users can write outputs.
+            for _path, _mode in ((workspace, 0o755), (input_dir, 0o755), (output_dir, 0o777), (host_workspace, 0o755), (host_input_dir, 0o755), (host_output_dir, 0o777)):
+                try:
+                    os.chmod(_path, _mode)
+                except OSError as chmod_err:
+                    logger.warning("Could not chmod sandbox path %s to %o: %s", _path, _mode, chmod_err)
 
             # Prepare input package
             if job.input_package:

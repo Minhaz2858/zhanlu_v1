@@ -112,6 +112,7 @@ describe('Sidebar (unified)', () => {
   it('renders brand + new-task CTA + nav on the chat route (/)', async () => {
     renderAtRoute(['/']);
     expect(screen.getByText(LABELS.brand)).toBeInTheDocument();
+    expect(screen.getByAltText('Ecisco AI logo')).toBeInTheDocument();
     // "Cognitive Hub" was removed — the primary CTA at the top is
     // now "+ New Task", and the other nav items follow.
     expect(screen.getByText(LABELS.newTask)).toBeInTheDocument();
@@ -184,14 +185,12 @@ describe('Sidebar (unified)', () => {
     expect(newTaskBtn.className).toMatch(/bg-sidebar-accent/);
   });
 
-  it('New Task button is not highlighted (primary treatment) on other routes', () => {
+  it('New Task button keeps neutral treatment on other routes', () => {
     renderAtRoute(['/automation']);
     const newTaskBtn = screen.getByText(LABELS.newTask).closest('button');
     expect(newTaskBtn).not.toBeNull();
-    // on other routes it's the primary CTA (orange/accent), not the
-    // muted active state
-    expect(newTaskBtn.className).not.toMatch(/bg-sidebar-accent/);
-    expect(newTaskBtn.className).toMatch(/bg-primary/);
+    expect(newTaskBtn.className).toMatch(/border-border/);
+    expect(newTaskBtn.className).toMatch(/hover:bg-sidebar-accent\/50/);
   });
 
   it('New Task button has the press-down scale utility for tactile feedback', () => {
@@ -226,15 +225,13 @@ describe('Sidebar (unified)', () => {
   it('New Task button on / has a hover utility for color shift', () => {
     renderAtRoute(['/']);
     const newTaskBtn = screen.getByText(LABELS.newTask).closest('button');
-    // Active route uses `hover:bg-sidebar-accent/80` to darken on hover
-    expect(newTaskBtn.className).toMatch(/hover:bg-sidebar-accent\/80/);
+    expect(newTaskBtn.className).toMatch(/hover:bg-sidebar-accent\/50/);
   });
 
-  it('New Task button on other routes has a primary hover utility', () => {
+  it('New Task button on other routes has a hover utility for color shift', () => {
     renderAtRoute(['/my-space']);
     const newTaskBtn = screen.getByText(LABELS.newTask).closest('button');
-    // Primary CTA uses `hover:bg-primary/90` to darken on hover
-    expect(newTaskBtn.className).toMatch(/hover:bg-primary\/90/);
+    expect(newTaskBtn.className).toMatch(/hover:bg-sidebar-accent\/50/);
   });
 
   it('clicking New Task adds a ripple element at the click point', () => {

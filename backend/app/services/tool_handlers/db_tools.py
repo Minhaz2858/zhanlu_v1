@@ -139,7 +139,7 @@ async def _describe_schema(
     max_tables = int(args.get("max_tables", 30))
 
     # ── Schema linker path (flag-gated) — runs before _do_work ──
-    if full and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+    if settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
         try:
             from app.services.knowledge_graph.schema_linker import link_schema
             question = args.get("question", "") or (context or {}).get("user_query", "") or ""
@@ -149,8 +149,13 @@ async def _describe_schema(
                 db=db,
                 top_k=8,
             )
-            if linker_result and linker_result.get("slice_text"):
-                return {"success": True, "schema": linker_result["slice_text"], "source": "catalog"}
+            slice_text = (linker_result or {}).get("slice_text") or ""
+            useful_lines = [
+                line for line in slice_text.splitlines()
+                if line.strip() and not line.strip().startswith("-- Semantic catalog")
+            ]
+            if useful_lines:
+                return {"success": True, "schema": slice_text, "source": "catalog"}
         except Exception:
             pass  # fall through to describe_all
 

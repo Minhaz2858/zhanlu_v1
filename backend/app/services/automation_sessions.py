@@ -1,9 +1,14 @@
-"""Automation session service — one-task-one-session adoption + project lock.
+"""Automation session service — origin-session binding + project lock.
 
 Extracted from ``routers/automation_api.py`` so the executor can call it
 without importing from the router layer (which would invert the
 dependency). Lives in the services layer alongside the executor and
 dispatcher.
+
+Origin-session binding (2026-08-12): run output lives in the SAME
+origin project chat session where the task was created — NO dedicated
+per-task chat, NO separate ?conv= URL.  This overrides the earlier
+"Manus-style one-chat-per-task" design.
 
 Two responsibilities beyond the original helper:
 
@@ -109,22 +114,21 @@ def _reconcile_session_project(
 def ensure_task_chat_session(
     db: Session, task: AutomationTask
 ) -> Tuple[str, bool]:
-    """Return ``(session_id, created)`` for a dedicated per-task chat.
+    """Return ``(session_id, created)`` for the task's chat session.
 
-    Manus-style UX: every automation has its own chat session (named
-    after the task) so run history accumulates in one place.
+    Origin-session binding (2026-08-12): run output lives in the SAME
+    origin project chat session where the task was created — NO dedicated
+    per-task chat, NO separate ?conv= URL.  This overrides the earlier
+    "Manus-style one-chat-per-task" design.
 
     1. Resolve the task's project identity ONCE (adopts+persists the FK
        when only the legacy name is present).
-    2. If the task has no ``session_id`` → create a new ChatSession +
-       AgentConversation pair tagged from the resolved project, link the
-       task to it.
-    3. If the task has a ``session_id`` whose title is a placeholder or
-       otherwise doesn't match the task's name → adopt a fresh
-       ChatSession LINKED TO THE EXISTING AgentConversation (so past run
-       results stay visible), tagged from the resolved project.
-    4. Otherwise (title matches) → reconcile the session's project tags
-       in place if they drifted, then return the existing id (no-op).
+    2. If the task has a ``session_id`` and the session exists → reconcile
+       the session's project tags in place if they drifted, then return it.
+       This works for both origin sessions and any legacy dedicated sessions.
+    3. If the task has no ``session_id`` or the session was deleted → create
+       a new ChatSession + AgentConversation pair tagged from the resolved
+       project, link the task to it.
 
     Returns ``(session_id, created)`` where ``created`` is True iff a
     new ChatSession was allocated.
@@ -136,16 +140,17 @@ def ensure_task_chat_session(
     # written it) so any new session/conversation is tagged consistently.
     task_project_id = task.project_id or resolved_project_id
 
-    old_conv_id: str | None = None
+    # Origin-session binding (2026-08-12): use the task's existing session
+    # (the one where the task was created) instead of creating a dedicated
+    # automation session.  Run output goes to the same chat the user is
+    # having the conversation in.
     if task.session_id:
         existing = db.query(ChatSession).filter(
             ChatSession.id == task.session_id,
             ChatSession.is_deleted == False,  # noqa: E712
         ).first()
-        if existing is not None and _session_title_matches(existing, task_name):
-            # Happy path — but still reconcile drifted project tags, and heal
-            # an orphaned (NULL-owner) dedicated session by stamping the
-            # task's creator so it shows in their sidebar.
+        if existing is not None:
+            # Reconcile project tags and return the existing session.
             _reconcile_session_project(
                 db, existing, resolved_project_id, resolved_project_name,
             )
@@ -154,68 +159,52 @@ def ensure_task_chat_session(
                 db.commit()
                 logger.info(
                     "ensure_task_chat_session: backfilled created_by_id=%s on "
-                    "session %s (was NULL owner)",
+                    "session %s",
                     task.created_by_id, existing.id,
                 )
             return existing.id, False
-        if existing is not None:
-            old_conv_id = existing.conversation_id
-            # Reconcile the legacy session too (it may still be opened
-            # by other tasks aliasing the same conversation).
-            _reconcile_session_project(
-                db, existing, resolved_project_id, resolved_project_name,
-            )
+        # Session was deleted — fall through to create a new one.
 
-    # Reuse the OLD AgentConversation if we have one — that's where all
-    # the past run results live (Manus UX requires the per-task chat to
-    # show them). Fall back to a fresh AgentConversation only when the
-    # task has no prior conversation.
-    if old_conv_id:
-        conv = db.query(AgentConversation).filter(
-            AgentConversation.id == old_conv_id,
-        ).first()
-    else:
-        conv = None
-    if conv is None:
-        conv = AgentConversation(
-            agent_name=None,
-            title=task_name,
-            messages=[],
-            status="active",
-            created_by_id=getattr(task, "created_by_id", None),
-            project_id=task_project_id,
-        )
-        conv.metadata_ = {
-            "source": "ensure_session",
-            "task_id": task.id,
-        }
-        db.add(conv)
-        db.flush()
+    # ---- Create a new session (fallback for deleted or missing sessions) ----
+    conv = AgentConversation(
+        agent_name=None,
+        title=task_name,
+        messages=[],
+        status="active",
+        created_by_id=getattr(task, "created_by_id", None),
+        project_id=task_project_id,
+    )
+    conv.metadata_ = {
+        "source": "ensure_session",
+        "task_id": task.id,
+    }
+    db.add(conv)
+    db.flush()
 
-    # Create a fresh ChatSession named after the task, pointing at the
-    # (possibly reused) conversation, tagged from the resolved project.
-    # ``created_by_id`` MUST be stamped: ChatSession is a USER_SCOPED entity
-    # (sidebar list + GET filter by ``created_by_id == current_user``), so a
-    # NULL owner makes the session invisible in the sidebar and unloadable —
-    # the "task chat not showing / can't open another chat" report.
     chat = ChatSession(
         title=task_name,
         project_id=resolved_project_id,
         project=resolved_project_name,
         conversation_id=conv.id,
-        agent_name=None,
+        agent_name="automation_agent",
         starred=False,
         created_by_id=getattr(task, "created_by_id", None),
         last_message_at=_dt.utcnow().isoformat(),
     )
     db.add(chat)
     db.flush()
-    task.session_id = chat.id
+    old_sid = task.session_id
+    # Merge task into this session before modifying (task may be detached
+    # if the caller obtained it from a different DB session).
+    _task = db.merge(task)
+    _task.session_id = chat.id
     db.commit()
     logger.info(
-        "ensure_task_chat_session: adopted session %s (conv %s, reused=%s) "
-        "for task %s (%s) project=%s",
-        chat.id, conv.id, old_conv_id is not None, task.id, task_name,
+        "ensure_task_chat_session: %s session %s (conv %s) "
+        "for task %s (%s) project=%s%s",
+        "replaced deleted" if old_sid else "created",
+        chat.id, conv.id, task.id, task_name,
         resolved_project_name,
+        f" (was {old_sid})" if old_sid else "",
     )
     return chat.id, True

@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 MEMORY_CONSOLIDATION_INTERVAL = 30 * 60  # 30 minutes
 SKILL_CURATION_INTERVAL = 6 * 60 * 60   # 6 hours
 ALERT_CHECK_INTERVAL = 5 * 60            # 5 minutes
+MARKET_ALERT_SCAN_INTERVAL = 5 * 60      # 5 minutes (Ecisco BI market alert scan)
 NEWS_INGESTION_INTERVAL = 60 * 60        # 1 hour (intelligence layer)
 DAILY_EVAL_INTERVAL = 24 * 60 * 60       # 24 hours (LLM quality eval pipeline)
 
@@ -145,6 +146,17 @@ async def _run_news_ingestion_cycle() -> None:
             await db.commit()
     except Exception as e:
         logger.warning("News ingestion cycle failed: %s", e)
+
+
+# ---- Ecisco BI Market Alert Scan ----------------------------------------
+
+async def _run_market_alert_scan_cycle() -> None:
+    """Run one market alert scan cycle — snapshot → detect → persist."""
+    try:
+        from app.services.perception.worker import run_alert_scan_cycle
+        await run_alert_scan_cycle()
+    except Exception as e:
+        logger.warning("Market alert scan cycle failed: %s", e)
 
 
 # ---- Daily LLM Quality Eval Pipeline -------------------------------------------
@@ -443,6 +455,69 @@ async def _nightly_forecast_loop() -> None:
         await asyncio.sleep(5)
 
 
+# ---- CEO Morning Digest Loop (daily at ALERT_DIGEST_HOUR_UTC) ---------
+
+def _calculate_seconds_until_digest_hour() -> float:
+    """Return seconds from now until the next ALERT_DIGEST_HOUR_UTC occurrence."""
+    from app.config import settings
+    target_hour = settings.ALERT_DIGEST_HOUR_UTC
+    now = datetime.datetime.now(datetime.timezone.utc)
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    if now >= target:
+        target += datetime.timedelta(days=1)
+    return (target - now).total_seconds()
+
+
+async def _run_digest_cycle() -> None:
+    """Run one CEO morning digest build cycle."""
+    from app.config import settings
+    if not settings.ALERT_DIGEST_ENABLED:
+        return
+    try:
+        from app.database import SessionLocal
+        from app.services.perception.digest_service import DigestService
+
+        db = SessionLocal()
+        try:
+            org_id = settings.ORG_ID if hasattr(settings, "ORG_ID") else None
+            svc = DigestService(db=db, org_id=org_id)
+            result = await svc.build_and_persist()
+            if result:
+                logger.info("[digest] Morning digest persisted: %s", result.title)
+            else:
+                logger.info("[digest] No digest today (quiet day or already exists)")
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("[digest] Unhandled exception in digest cycle")
+
+
+async def _digest_loop() -> None:
+    """Infinite loop: sleep until next ALERT_DIGEST_HOUR_UTC, run cycle, repeat."""
+    from app.config import settings
+    if not settings.ALERT_DIGEST_ENABLED:
+        logger.info("[digest] ALERT_DIGEST_ENABLED is off — digest loop not started")
+        return
+
+    while True:
+        delay = _calculate_seconds_until_digest_hour()
+        next_run = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            seconds=delay
+        )
+        logger.info(
+            "[digest] Next run in %.1f hours (%s UTC)",
+            delay / 3600,
+            next_run.isoformat(),
+        )
+        await asyncio.sleep(delay)
+        try:
+            await _run_digest_cycle()
+        except Exception:
+            logger.exception("[digest] Unhandled exception in digest loop")
+        # Brief cooldown to prevent tight retry on persistent errors
+        await asyncio.sleep(5)
+
+
 async def _periodic_task(
     name: str,
     interval: int,
@@ -514,6 +589,14 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("daily_eval", DAILY_EVAL_INTERVAL, _run_daily_eval_cycle),
             name="sched-daily-eval",
+        ),
+        loop.create_task(
+            _periodic_task("market_alert_scan", MARKET_ALERT_SCAN_INTERVAL, _run_market_alert_scan_cycle),
+            name="sched-market-alert-scan",
+        ),
+        loop.create_task(
+            _digest_loop(),
+            name="sched-digest",
         ),
     ]
 

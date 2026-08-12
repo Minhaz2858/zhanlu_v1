@@ -40,6 +40,7 @@ export default function EffectiveModelBadge({ projectId, agentName }) {
   // Legacy fallback: project + catalog + global all unset → show global default
   const label = data?.model_name || "Global default";
   const isLocked = data?.locked;
+  const isSystemDefault = data?.source === "system_default";
 
   return (
     <span
@@ -48,10 +49,17 @@ export default function EffectiveModelBadge({ projectId, agentName }) {
           ? "border-amber-200 bg-amber-50 text-amber-800 dark:border-amber-800 dark:bg-amber-900/30 dark:text-amber-200"
           : "border-border bg-secondary/40 text-foreground"
       }`}
-      title={data?.locked_reason || (data?.legacy_fallback ? "Inheriting global default" : "Effective model from project / agent binding")}
+      title={
+        isSystemDefault
+          ? "System agent — always uses catalog default"
+          : data?.locked_reason || (data?.legacy_fallback ? "Inheriting global default" : "Effective model from project / agent binding")
+      }
     >
       {isLocked ? <Lock className="h-3 w-3 shrink-0" /> : <Cpu className="h-3 w-3 shrink-0" />}
       <span className="truncate">{label}</span>
+      {isSystemDefault && (
+        <span className="ml-0.5 text-[9px] text-muted-foreground">System</span>
+      )}
     </span>
   );
 }

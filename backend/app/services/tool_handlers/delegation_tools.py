@@ -83,6 +83,39 @@ async def _ask_data_agent(
 
     preferred_kb = args.get("data_source_id")
     bound_kb_ids: list[str] = list((context or {}).get("bound_kb_ids") or [])
+
+    # ── Resource router (flag-gated): a confident non-database route
+    # short-circuits the data sub-agent so the caller picks the right
+    # resource instead of burning 3-5 LLM calls in the loop. Fallback
+    # decisions (used_fallback=True) are ignored — behave as today.
+    if getattr(settings, "KG_RESOURCE_ROUTER_ENABLED", False):
+        try:
+            from app.services.knowledge_graph.resource_router import (
+                ResourceRoute,
+                available_resources_from_context,
+                route_question,
+            )
+
+            _avail = available_resources_from_context(context or {}, db)
+            _decision = route_question(question, available_resources=_avail)
+            if (
+                not _decision.used_fallback
+                and _decision.route
+                not in (ResourceRoute.DATABASE, ResourceRoute.MULTI_RESOURCE)
+            ):
+                return {
+                    "success": False,
+                    "error_kind": "wrong_resource_route",
+                    "route": _decision.route.value,
+                    "error": (
+                        f"This question was routed to '{_decision.route.value}' "
+                        "resources, not a database. Use the appropriate "
+                        "document/memory/report path instead of the Data Agent."
+                    ),
+                }
+        except Exception as e:
+            logger.debug("ask_data_agent: resource router skipped (non-fatal): %s", e)
+
     if preferred_kb and bound_kb_ids and preferred_kb not in bound_kb_ids:
         return {
             "success": False,
@@ -120,7 +153,11 @@ async def _ask_data_agent(
         sub_context["data_source_id"] = preferred_kb
 
     iterations = 0
-    max_iterations = min(args.get("max_iterations", 4), 10)
+    # P0.5: default 2 iterations (was 4). Most data questions need only
+    # 1 LLM turn + 1 synthesis turn. Schema exploration is now handled
+    # by the parallel-fix in the outer sub-agent loop. The cap of 10 is
+    # preserved for complex multi-table queries.
+    max_iterations = min(args.get("max_iterations", 2), 10)
     final_text = ""
     # Distinguish two failure modes:
     #   _initial_llm_failure: set ONLY when the FIRST _call_llm in the
@@ -196,6 +233,17 @@ async def _ask_data_agent(
         # P0: per-tool guardrail + per-result persistence
         batch_ids: list[str] = []
         batch_names: list[str] = []
+
+        # --- Parallel execution for independent schema-discovery tools ---
+        # When the LLM emits multiple tool calls in a single turn (e.g.
+        # list_data_sources + describe_schema), run them concurrently via
+        # asyncio.gather instead of sequentially. This cuts 1-2 turns of
+        # latency for schema-discovery questions. Only read-only tools
+        # that don't depend on each other's results are parallelized.
+        _PARALLEL_SAFE_TOOLS = {"list_data_sources", "describe_schema", "search_documents"}
+
+        # Pre-parse all tool calls for this batch
+        _parsed_calls: list[tuple[str, dict, str]] = []
         for tc in raw_tool_calls:
             tool_name = tc.get("function", {}).get("name", "")
             raw_args = tc.get("function", {}).get("arguments", "{}")
@@ -204,36 +252,80 @@ async def _ask_data_agent(
                 tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
             except json.JSONDecodeError:
                 tool_args = {}
-            batch_ids.append(tool_call_id)
-            batch_names.append(tool_name)
+            _parsed_calls.append((tool_name, tool_args, tool_call_id))
 
-            # P0: guardrail before_call — block looping tools
-            _gd = guard_ctrl.before_call(tool_name, tool_args)
-            if not _gd.allows_execution:
-                result = json.loads(synthetic_blocked_result(_gd))
-            elif tool_name not in _DATA_AGENT_TOOLS:
-                result = {
-                    "success": False,
-                    "error": f"Tool {tool_name!r} is not available to the Data Agent.",
-                }
-            else:
-                # Route through the same execute_tool path the runtime uses
-                # — so permissions, hooks, and logging all work uniformly.
+        # Check if ALL calls in this batch are parallel-safe and independent
+        _all_parallel_safe = all(
+            name in _PARALLEL_SAFE_TOOLS for name, _, _ in _parsed_calls
+        ) and len(_parsed_calls) > 1
+
+        if _all_parallel_safe:
+            # Run all tool calls concurrently
+            async def _run_one(tn: str, ta: dict, db: Session, uid: str | None, ctx: dict):
+                _gd = guard_ctrl.before_call(tn, ta)
+                if not _gd.allows_execution:
+                    return json.loads(synthetic_blocked_result(_gd))
+                if tn not in _DATA_AGENT_TOOLS:
+                    return {"success": False, "error": f"Tool {tn!r} is not available to the Data Agent."}
                 from app.services.agent_tools import execute_tool
-                result = await execute_tool(
-                    tool_name, tool_args, db, user_id, context=sub_context
-                )
-                _maybe_capture_execute_result(tool_name, result, state)
+                return await execute_tool(tn, ta, db, uid, context=ctx)
 
-            # P0: Layer 2 per-result persistence (large results → disk preview)
-            _result_str = persist_result_str(tool_name, result, None)
-            messages.append({
-                "role": "tool",
-                "tool_call_id": tool_call_id,
-                "content": _result_str,
-            })
-            # P0: guardrail after_call records outcome for loop detection
-            guard_ctrl.after_call(tool_name, tool_args, _result_str)
+            _coros = [_run_one(tn, ta, db, user_id, sub_context) for tn, ta, _ in _parsed_calls]
+            _results = await asyncio.gather(*_coros, return_exceptions=True)
+
+            for (tn, ta, tcid), result in zip(_parsed_calls, _results):
+                batch_ids.append(tcid)
+                batch_names.append(tn)
+                if isinstance(result, Exception):
+                    result = {"success": False, "error": str(result)}
+                _maybe_capture_execute_result(tn, result, state)
+                _result_str = persist_result_str(tn, result, None)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tcid,
+                    "content": _result_str,
+                })
+                guard_ctrl.after_call(tn, ta, _result_str)
+        else:
+            # Sequential execution (original path)
+            for tc in raw_tool_calls:
+                tool_name = tc.get("function", {}).get("name", "")
+                raw_args = tc.get("function", {}).get("arguments", "{}")
+                tool_call_id = tc.get("id", str(uuid.uuid4()))
+                try:
+                    tool_args = json.loads(raw_args) if isinstance(raw_args, str) else raw_args
+                except json.JSONDecodeError:
+                    tool_args = {}
+                batch_ids.append(tool_call_id)
+                batch_names.append(tool_name)
+
+                # P0: guardrail before_call — block looping tools
+                _gd = guard_ctrl.before_call(tool_name, tool_args)
+                if not _gd.allows_execution:
+                    result = json.loads(synthetic_blocked_result(_gd))
+                elif tool_name not in _DATA_AGENT_TOOLS:
+                    result = {
+                        "success": False,
+                        "error": f"Tool {tool_name!r} is not available to the Data Agent.",
+                    }
+                else:
+                    # Route through the same execute_tool path the runtime uses
+                    # — so permissions, hooks, and logging all work uniformly.
+                    from app.services.agent_tools import execute_tool
+                    result = await execute_tool(
+                        tool_name, tool_args, db, user_id, context=sub_context
+                    )
+                    _maybe_capture_execute_result(tool_name, result, state)
+
+                # P0: Layer 2 per-result persistence (large results → disk preview)
+                _result_str = persist_result_str(tool_name, result, None)
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": _result_str,
+                })
+                # P0: guardrail after_call records outcome for loop detection
+                guard_ctrl.after_call(tool_name, tool_args, _result_str)
 
         # P0: Layer 3 — apply per-turn aggregate budget to this batch's results
         apply_turn_budget_to_batch(messages, batch_ids, batch_names, None)
@@ -322,6 +414,11 @@ async def _ask_data_agent(
             final_text = (
                 f"The Data Agent could not reach the language model "
                 f"({short_err}). No data was retrieved. Please retry in a moment."
+            )
+        elif state.get("last_metadata_rows"):
+            final_text = (
+                "The Data Agent discovered table schemas but did not fetch any "
+                "business data. Please retry or rephrase your question."
             )
         else:
             final_text = "The Data Agent did not return a final answer."
@@ -436,22 +533,64 @@ def _build_sub_agent_tool_schemas() -> list[dict]:
     return out
 
 
+def _is_metadata_query(sql: str | None) -> bool:
+    """Return True if `sql` looks like a catalog/schema/metadata query."""
+    if not sql:
+        return False
+    s = sql.strip().lower()
+    # Use regex word boundaries for schema names to avoid matching
+    # table names like `information_schema_mock`.
+    metadata_re_patterns = [
+        r"\binformation_schema\b",
+        r"\bpg_catalog\b",
+        r"\bpg_tables\b",
+        r"\bpg_class\b",
+        r"\bpg_namespace\b",
+        r"\bmysql\.",
+        r"\bsys\.",
+        r"\bshow\s+full\s+tables\b",
+        r"\bshow\s+tables\b",
+        r"\bshow\s+full\s+columns\b",
+        r"\bshow\s+columns\b",
+        r"\bdescribe\s+",
+        r"\bdesc\s+",
+        r"\bexplain\s+",
+    ]
+    for pat in metadata_re_patterns:
+        if re.search(pat, s):
+            return True
+    return False
+
+
 def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> None:
-    """If this tool produced rows, remember them for the caller."""
+    """If this tool produced rows, remember them for the caller.
+
+    Metadata/schema queries are stored separately so they do NOT poison
+    `last_rows` and trigger the empty-answer synthesis fallback.
+    """
     if not isinstance(result, dict) or not result.get("success"):
         return
+    sql = result.get("sql")
+    is_meta = _is_metadata_query(sql)
     if tool_name == "execute_query":
-        state["last_rows"] = result.get("rows")
-        state["last_sql"] = result.get("sql")
+        if is_meta:
+            state["last_metadata_rows"] = result.get("rows")
+            state["last_metadata_sql"] = sql
+        else:
+            state["last_rows"] = result.get("rows")
+            state["last_sql"] = sql
         src = result.get("source") or {}
         if src.get("id"):
             state["source_id"] = src["id"]
         if src.get("name"):
             state["source_name"] = src["name"]
     elif tool_name == "answer_from_database":
-        # answer_from_database already returns rows/sql/source_id
-        state["last_rows"] = result.get("rows")
-        state["last_sql"] = result.get("sql")
+        if is_meta:
+            state["last_metadata_rows"] = result.get("rows")
+            state["last_metadata_sql"] = sql
+        else:
+            state["last_rows"] = result.get("rows")
+            state["last_sql"] = sql
         if result.get("source_id"):
             state["source_id"] = result["source_id"]
         if result.get("source_name"):

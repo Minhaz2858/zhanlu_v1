@@ -153,4 +153,70 @@ describe('dedupeMessagesByFingerprint', () => {
     expect(out).toHaveLength(1);
     expect(out[0].id).toBe('first');
   });
+
+  // -------- Second-Run-Now dedup regression (2026-08-12) --------
+  // The "Run Automation Task" synthetic user card has identical content
+  // on every click (5-bullet summary: Name / Type / Schedule / Output
+  // format / Project / Description). Without execution_id in the
+  // fingerprint, the second click's bubble was being collapsed and the
+  // user saw the prompt disappear.
+
+  it('keeps two Run Now user bubbles with identical content but different phase.execution_id', () => {
+    const run1 = {
+      id: 'm1',
+      role: 'user',
+      content: 'Run Automation Task：\n- Name：Daily Sync\n- Type：Data Sync\n- Schedule：Daily 08:00\n- Output format：HTML report\n- Project：Ecisco BI',
+      phase: { execution_id: 'exe-A', kind: 'run_request' },
+    };
+    const run2 = {
+      id: 'm2',
+      role: 'user',
+      content: 'Run Automation Task：\n- Name：Daily Sync\n- Type：Data Sync\n- Schedule：Daily 08:00\n- Output format：HTML report\n- Project：Ecisco BI',
+      phase: { execution_id: 'exe-B', kind: 'run_request' },
+    };
+    const out = dedupeMessagesByFingerprint([run1, run2]);
+    expect(out).toHaveLength(2);
+    expect(out.map((m) => m.phase.execution_id)).toEqual(['exe-A', 'exe-B']);
+  });
+
+  it('keeps the empty assistant bubble of each execution distinct', () => {
+    // `_post_run_request_marker` writes an empty assistant bubble per
+    // execution to receive the activity_steps mirror. They start with
+    // empty content, so without execution_id they'd be one row total.
+    const a1 = { id: 'a1', role: 'assistant', content: '', phase: { execution_id: 'exe-A' } };
+    const a2 = { id: 'a2', role: 'assistant', content: '', phase: { execution_id: 'exe-B' } };
+    const out = dedupeMessagesByFingerprint([a1, a2]);
+    expect(out).toHaveLength(2);
+  });
+
+  it('still dedupes a chat_messages row and an agent_conversations mirror of the same execution', () => {
+    // Cross-store mirror: same role+content+execution_id → one survives.
+    const mirror1 = {
+      id: 'cm-1',
+      role: 'user',
+      content: 'Run Automation Task：\n- Name：X',
+      phase: { execution_id: 'exe-A' },
+    };
+    const mirror2 = {
+      id: 'ac-1',
+      role: 'user',
+      content: 'Run Automation Task：\n- Name：X',
+      phase: { execution_id: 'exe-A' },
+    };
+    const out = dedupeMessagesByFingerprint([mirror1, mirror2]);
+    expect(out).toHaveLength(1);
+    expect(out[0].id).toBe('cm-1');
+  });
+
+  it('treats missing/non-object phase as no execution_id (back-compat)', () => {
+    // A regular chat message has no phase at all → identical to the
+    // old fingerprint. A phase that is a string (defensive) → also
+    // treated as no execution_id.
+    const a = { id: 'a', role: 'user', content: 'hi' };
+    const b = { id: 'b', role: 'user', content: 'hi' };
+    const c = { id: 'c', role: 'user', content: 'hi', phase: 'oops' };
+    const d = { id: 'd', role: 'user', content: 'hi', phase: null };
+    const out = dedupeMessagesByFingerprint([a, b, c, d]);
+    expect(out).toHaveLength(1);
+  });
 });

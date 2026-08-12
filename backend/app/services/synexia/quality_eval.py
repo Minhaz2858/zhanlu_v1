@@ -723,11 +723,96 @@ def _heuristic_doc_verdict(payload: dict, artifact_type: str) -> DocQualityResul
     )
 
 
+def _derive_skill_required_elements(skill_body: str) -> list[str]:
+    """Heuristically infer required output elements from a skill body."""
+    lower = (skill_body or "").lower()
+    requirements: list[str] = []
+    checks = [
+        ("summary", ("executive summary", "summary")),
+        ("methodology", ("methodology", "data source", "how the data was gathered")),
+        ("kpis", ("kpi", "metric", "metrics")),
+        ("chart", ("chart", "graph", "visual")),
+        ("insights", ("insight", "finding", "findings")),
+        ("recommendations", ("recommendation", "next step", "action item")),
+        ("sections", ("section", "outline", "structure")),
+    ]
+    for key, tokens in checks:
+        if any(token in lower for token in tokens):
+            requirements.append(key)
+    return requirements
+
+
+def validate_selected_skill_payload(
+    *,
+    skill_name: str,
+    skill_body: str,
+    artifact_type: str,
+    payload: dict,
+) -> dict:
+    """Heuristically validate whether a payload matches the selected skill.
+
+    Runs the generic document-quality heuristic, then overlays hard checks
+    inferred from the selected skill's methodology body.
+    """
+    doc = evaluate_document_quality(
+        user_message=skill_name,
+        artifact_type=artifact_type,
+        payload=payload,
+        llm_call=None,
+        template_name=skill_name or "selected-skill",
+    )
+
+    required = _derive_skill_required_elements(skill_body)
+    missing: list[str] = []
+
+    field_checks = {
+        "summary": bool(payload.get("summary")),
+        "methodology": bool(payload.get("methodology")),
+        "kpis": bool(payload.get("kpis")),
+        "chart": bool(payload.get("chart")),
+        "insights": bool(payload.get("insights") or payload.get("key_findings")),
+        "recommendations": bool(payload.get("recommendations") or payload.get("next_step")),
+        "sections": bool(payload.get("sections") or payload.get("slides")),
+    }
+    for req in required:
+        if not field_checks.get(req, False):
+            missing.append(req)
+
+    issues = list(doc.issues)
+    suggestions = list(doc.suggestions)
+    if missing:
+        issues.append("Missing selected-skill requirements: " + ", ".join(missing))
+        suggestions.append("Populate the fields required by the selected skill: " + ", ".join(missing))
+
+    overall = doc.overall_score
+    if missing:
+        overall = min(overall, 0.45)
+
+    verdict = doc.verdict
+    if missing and verdict == "accept":
+        verdict = "revise"
+
+    is_ok = verdict == "accept" and overall >= 0.6 and not missing
+    return {
+        "skill_name": skill_name,
+        "artifact_type": artifact_type,
+        "required_elements": required,
+        "missing_elements": missing,
+        "issues": issues,
+        "suggestions": suggestions,
+        "overall_score": overall,
+        "verdict": verdict,
+        "is_ok": is_ok,
+        "doc_quality": doc.to_dict(),
+    }
+
+
 __all__ = [
     "QualityEvalResult",
     "DocQualityResult",
     "evaluate_quality",
     "evaluate_document_quality",
+    "validate_selected_skill_payload",
     "regenerate_with_feedback",
     "run_quality_loop",
 ]

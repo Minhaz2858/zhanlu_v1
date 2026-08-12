@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { RefreshCw, Globe, Trash2, EyeOff, Search, AlertCircle } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { formatDate } from '@/lib/time';
 import { listSourceSkills, syncSource } from '@/api/marketplace';
 import SkillCard from './SkillCard';
 
@@ -79,7 +80,7 @@ export default function MarketplaceTab({
           <span className="text-muted-foreground/50">·</span>
           <span className="shrink-0">
             {source.last_sync_status === 'success'
-              ? `synced ${new Date(source.last_synced_at || Date.now()).toLocaleDateString()}`
+              ? `synced ${formatDate(source.last_synced_at || Date.now())}`
               : source.last_sync_status}
           </span>
         </div>

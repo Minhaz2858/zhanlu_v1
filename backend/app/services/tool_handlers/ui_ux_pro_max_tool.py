@@ -82,6 +82,48 @@ def _build_cli_argv(args: list[str], design_system: bool = False) -> list[str]:
     return cmd
 
 
+def _builtin_fallback(query: str, *, domain: str | None = None, design_system: bool = False) -> dict:
+    """Deterministic local fallback when the optional ui-ux-pro-max CLI is absent.
+
+    Keeps dashboard generation moving in production images where the skill's
+    Python search package is not installed. The guidance is intentionally
+    conservative and aligned with the dashboard viewer's token system.
+    """
+    if design_system:
+        result = f"""# Built-in Dashboard Design System
+
+Query: {query}
+
+- Layout: KPI row first, trend charts second, breakdown charts third, detail table last.
+- Density: compact enterprise BI spacing with restrained borders and 8px card radius.
+- Palette: use zhanlu tokens `hsl(var(--primary))`, `hsl(var(--chart-2))`, `hsl(var(--chart-3))`, `bg-card`, and `text-muted-foreground`.
+- Typography: clear numeric hierarchy; KPI values use the largest type, chart labels stay small and readable.
+- Charts: line or area for time trends, bar for product/customer comparison, table for detail and auditability.
+- States: show skeleton loading, per-widget query errors, empty states, and live refresh time.
+- Interaction: prefer dashboard filters/drilldowns over static explanatory text.
+""".strip()
+    else:
+        topic = domain or "dashboard"
+        result = f"""# Built-in UI UX Guidance
+
+Query: {query}
+Domain: {topic}
+
+- Use KPI cards for headline revenue, volume, and count metrics.
+- Use line/area charts for weekly trends and bar charts for ranked breakdowns.
+- Keep chart color count low; use primary plus chart tokens for contrast.
+- Put customer/product breakdowns below trend context, with a table for exact values.
+- Avoid decorative hero layouts; this is an operational BI dashboard.
+""".strip()
+    return {
+        "success": True,
+        "result": result,
+        "fallback_used": True,
+        "query": query,
+        "domain": domain or ("design-system" if design_system else "auto"),
+    }
+
+
 def _run_cli(cmd: list[str]) -> dict:
     """Run the CLI with a hard timeout. Never raises."""
     try:
@@ -182,7 +224,12 @@ async def _uiux_search(
     try:
         cmd = _build_cli_argv(argv_extra, design_system=False)
     except FileNotFoundError as exc:
-        return {"success": False, "error": str(exc), "fallback": ""}
+        logger.warning("ui-ux-pro-max CLI missing; using built-in search fallback: %s", exc)
+        result = _builtin_fallback(query, domain=domain, design_system=False)
+        result["error"] = str(exc)
+        result["stack"] = stack
+        result["max_results"] = max_results
+        return result
 
     result = _run_cli(cmd)
     if result["success"]:
@@ -233,7 +280,15 @@ async def _uiux_design_system(
     try:
         cmd = _build_cli_argv(argv_extra, design_system=True)
     except FileNotFoundError as exc:
-        return {"success": False, "error": str(exc), "fallback": ""}
+        logger.warning("ui-ux-pro-max CLI missing; using built-in design-system fallback: %s", exc)
+        result = _builtin_fallback(query, design_system=True)
+        result["error"] = str(exc)
+        result["project"] = project
+        result["dials"] = {
+            k: v for k, v in {"variance": variance, "motion": motion, "density": density}.items()
+            if v is not None
+        }
+        return result
 
     result = _run_cli(cmd)
     if result["success"]:

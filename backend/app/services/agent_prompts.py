@@ -9,6 +9,8 @@ import re
 from datetime import datetime, timezone
 from typing import Optional
 
+from app.config import settings
+
 # ---------------------------------------------------------------------------
 # Hidden system skills — always-on for the Agent Builder, never registered as
 # user-selectable runtime skills. Read once at import time from
@@ -88,6 +90,20 @@ def _build_default_skills_block() -> str:
             "instructions=...)` to run in an isolated Docker sandbox. Use "
             "this only when `create_artifact` cannot produce what the user "
             "asked for.\n\n",
+            "Dashboard workflow (HARD RULE): Dashboard is NOT part of the generic create_artifact file path. "
+            "When the user asks for a dashboard, build a live database-backed dashboard. "
+            "First use `skill_view(\"dashboard-generation\")` to load the dashboard methodology. "
+            "Before creating the dashboard, use `uiux_design_system` (and `uiux_search(domain=\"chart\")` "
+            "when chart choice is unclear) to make the dashboard professional. Query or inspect the "
+            "connected database/data source, then call `create_dashboard` with read-only SQL widgets. "
+            "Do not call `ask_data_agent` for dashboard creation; use direct datasource/schema tools and "
+            "at most two exploratory `execute_query` calls, then call `create_dashboard` before the tool loop budget is exhausted. "
+            "When a dashboard is already bound to the conversation and the user asks to add, change, "
+            "remove, restyle, or break down a metric, call `update_dashboard` instead of answering only in chat.\n"
+            "Common schema pitfall: the `erp_product_sales_details` table uses `FNAME` for product name "
+            "(NOT `material_name`), `material_id` / `FMATERIALID` for product IDs, `shipment_date`, "
+            "`shipment_quantity`, `contract_price`, `partner_name`, `shipment_grade`. "
+            "Always use `describe_schema` to confirm column names before writing SQL.\n\n",
         ]
         for fmt_key, entry in DEFAULT_SKILLS.items():
             skill_name = entry["skill_name"]
@@ -525,10 +541,10 @@ When a user wants to create a new skill:
 1. **Scope the request.** If the user provides a complete spec
    (audience, format, sections, examples, cadence, etc. are all
    explicit), skip to step 3. If the request is bare — just a label
-   like "Weekly report", "PDF summarizer", "Code reviewer", or anything
-   you couldn't build a real skill from on the first try — **ask 2-3
-   targeted clarifying questions first**. See "Bare-Request Handling"
-   below for what to ask.
+    like "Weekly report", "PDF summarizer", "Code reviewer", or anything
+    you couldn't build a real skill from on the first try — follow
+    "Bare-Request Handling" below and emit one multi-select `:::options`
+    block before creating anything.
 2. If the user provides examples, reference files, or descriptions, use
    them to build the skill methodology.
 3. Generate a complete `skill_md` — this is the SKILL.md body that will
@@ -697,9 +713,34 @@ The user's platform already has data connections configured. NEVER ask about dat
 DATA-SOURCE RESOLUTION (no extra questions when the answer is obvious)
 - The `list_knowledge_bases` tool is already scoped to the user's current project — the list it returns is the data sources for THIS project, not the whole workspace. Treat that list as authoritative.
 - If the project has exactly ONE bound knowledge base, use it directly. Pass its `id` as `data_source_id` and do NOT ask the user which one to use.
-- If the project has MULTIPLE bound sources, surface them as clickable `:::options` (one question) and create the task as soon as the user picks.
+- If the project has MULTIPLE bound sources, surface them as a `[[CLARIFY]]` single-select option block (ONE question) and create/update the task as soon as the user picks.
 - If the project has ZERO bound sources, do not ask — create the task without `data_source_id`; the runtime agent will discover sources via the standard project context at execution time.
 - Always set `project_id` to the current project's id (use `TOOL_CONTEXT.project_id` if you don't already have it).
+
+CLARIFY PROTOCOL (HARD RULE — how to ask a disambiguation question)
+When you need the user to pick between options (e.g. which data source, which trigger type), you MUST emit a `[[CLARIFY]]` block — NOT free text, NOT `:::options`. The `[[CLARIFY]]` block is the ONLY format the chat UI renders as clickable option cards. Format:
+[[CLARIFY]]
+{"prompt": "<one short question>", "subtext": "<optional hint>", "options": [{"label": "<choice A>", "desc": "<optional detail>"}, {"label": "<choice B>", "desc": "<optional detail>"}]}
+[[END]]
+Rules:
+- 2-4 options per block. Each option has a `label` (the value to bind) and an optional `desc`.
+- The label MUST be the exact value you will pass to the tool (e.g. the knowledge base name or id), not a paraphrase.
+- Ask ONE question at a time. After the user answers, immediately proceed — do NOT re-ask.
+- Never use `:::options`, numbered lists, or free-text questions for disambiguation. The `[[CLARIFY]]` block is the only sanctioned path.
+
+ANSWER-BINDING RULE (HARD RULE — what to do when the user answers a clarify question)
+When the user's message is an answer to a pending clarify question (e.g. they named a data source, picked a trigger type, or confirmed a schedule), you MUST treat it as a CONFIGURATION ANSWER — never as a report request, data query, or deliverable instruction. Concretely:
+- If the answer names a data source, call `create_automation` (if the task does not exist yet) or `update_automation` (if it does) with `data_source_id` set to the matching knowledge base id, then continue setup or confirm creation.
+- If the answer picks a trigger/schedule/destination, bind it to the task via `create_automation` / `update_automation` `fields`.
+- NEVER interpret a clarify answer as a request to generate a report, analyze data, build a deliverable, run a SQL query, or fabricate content. Those are OUT OF SCOPE (see boundary below).
+
+NO-REPORT BOUNDARY (HARD RULE — what this agent does NOT do)
+You are the Automation Agent. Your scope is: create tasks, fix/update existing tasks, trigger runs, and report run status. You do NOT:
+- Generate reports, dashboards, charts, or data analyses.
+- Query databases for business data (you may call `list_knowledge_bases` / `list_data_sources` to discover sources for binding, but never to answer a business question).
+- Fabricate, build, or ship deliverables of any kind.
+- Call `ask_data_agent`, `execute_query`, `answer_from_database`, `describe_schema`, or any data/report tool.
+If the user asks for a report or data analysis, redirect: "That's outside the automation agent's scope. I'll finish setting up the automation task — once it's created, the runtime agent will handle the data work."
 
 FILE-FORMAT INTENT (HARD RULE — when the user asks for a downloadable file)
 - If the user message mentions a file format keyword — `docx`, `pptx`, `xlsx`, `pdf`, `md` (or natural variants like "Word file", "PowerPoint", "Excel", "PDF", "markdown") — the user wants a downloadable file, NOT an HTML preview. The default `output_format` is `html`; override it when the user specifies.
@@ -717,10 +758,10 @@ Ask only these high-value questions, skipping anything already answered:
 3. TRIGGER CONDITION: Ask only if it is genuinely unclear (cron vs webhook vs record_created).
 
 QUESTION RULES
-- Ask ONE question at a time with 2-4 concise, clickable options.
-- For data source questions, use the project-scoped list returned by `list_knowledge_bases`.
-- After the critical answers, immediately create the AutomationTask.
-- Never list a batch of numbered questions.
+- Ask ONE question at a time using a `[[CLARIFY]]` block with 2-4 concise options.
+- For data source questions, use the project-scoped list returned by `list_knowledge_bases`; each option label MUST be the knowledge base name (the exact value you will bind).
+- After the critical answers, immediately create (or update) the AutomationTask.
+- Never list a batch of numbered questions. Never use `:::options` or free-text questions for disambiguation — only `[[CLARIFY]]` blocks.
 
 CREATION STANDARD
 - Populate name, type, description, schedule, project, and status consistently.
@@ -743,7 +784,7 @@ EVENT-DRIVEN TRIGGERS
 - When proposing a new automation, surface the trigger type alongside the
   schedule. If the user's wording implies an event ("whenever a new customer
   signs up", "if the order count drops below X"), choose the event trigger
-  and confirm with one short :::options block.
+  and confirm with one short `[[CLARIFY]]` block.
 
 CONDITIONAL LOGIC
 - For non-trivial automations, add if/then branches and filters:
@@ -780,11 +821,10 @@ Before calling `create_automation` or `update_automation`, verify:
 After calling the tool, re-read the returned record and confirm in the
 user-facing message.
 
-Use :::options blocks for clickable options:
-:::options
-Option one
-Option two
-:::"""
+Use [[CLARIFY]] blocks for clickable options. Example:
+[[CLARIFY]]
+{"prompt": "Which data source contains the ERP sales data?", "options": [{"label": "test3 (MySQL)", "desc": "test3"}, {"label": "aipdp_data_warehouse_prod (MySQL)", "desc": "aipdp_data_warehouse_prod"}]}
+[[END]]"""
 
 
 # ---------------------------------------------------------------------------
@@ -1339,6 +1379,16 @@ def get_system_prompt(
 
     if prompt is None:
         prompt = GENERIC_AGENT_SYSTEM_PROMPT + _DEFAULT_SKILLS_BLOCK
+
+    # 0. AUTOMATION FAST-PATH — DISABLED.
+    #    Automation creation should ONLY happen when the user explicitly
+    #    clicks "New Automation Task" in the UI, not when keywords like
+    #    "sync" or "自动" appear in a chat message. The keyword-based
+    #    fast-path misrouted ordinary data queries (e.g. "Sync ERP sales
+    #    data and give last month sales data") to create_automation.
+    #    The flag is kept for future use but defaults to False now.
+    # if user_message and getattr(settings, "ECISCO_BI_AUTOMATION_FASTPATH_ENABLED", False):
+    #     ... (disabled)
 
     # Append the shared conversation tone + initiative blocks to EVERY agent
     # path so all agents (system, user-created, generic) feel warm, natural,

@@ -283,6 +283,41 @@ def ingest_kb(db: Session, kb_id: str) -> bool:
         kb.last_indexed_at = datetime.now(timezone.utc)
         db.commit()
         logger.info("ingest_kb: kb %s ready, %d chunks", kb_id, n)
+
+        # Unified Resource Registry (flag-gated, best-effort): register the
+        # ingested document store as a `file` resource for its projects.
+        try:
+            from app.config import settings as _settings
+
+            if getattr(_settings, "KG_RESOURCE_REGISTRY_ENABLED", False):
+                from app.models.project import Project
+                from app.services.knowledge_graph.registry_indexer import index_document
+
+                pids = {kb.project_id} if getattr(kb, "project_id", None) else set()
+                legacy = getattr(kb, "project", None)
+                if legacy:
+                    for p in (
+                        db.query(Project)
+                        .filter(Project.name == legacy, Project.is_deleted == False)  # noqa: E712
+                        .all()
+                    ):
+                        pids.add(p.id)
+                for pid in pids:
+                    if pid:
+                        index_document(
+                            db,
+                            project_id=pid,
+                            document_id=kb.id,
+                            name=kb.name,
+                            summary=(
+                                f"Document store '{kb.name}' — {n} chunks indexed."
+                            ),
+                            owner_user_id=getattr(kb, "created_by_id", None),
+                        )
+                if pids:
+                    db.commit()
+        except Exception:
+            logger.debug("ingest_kb: registry sync failed (non-fatal)", exc_info=True)
         return True
 
     except Exception as e:

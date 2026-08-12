@@ -6,6 +6,7 @@ import { useTranslate } from '@/lib/useTranslate';
 import PageHeader from '@/components/PageHeader';
 import KbSetupDialog from '@/components/kb/KbSetupDialog';
 import KbSourceDetail from '@/components/kb/KbSourceDetail';
+import KbCatalogTables from '@/components/kb/KbCatalogTables';
 import { Loader2, Trash2, Tag, FileText, Database, Workflow, BarChart3, Bot, Download } from 'lucide-react';
 
 const TYPE_MAP = {
@@ -16,7 +17,7 @@ const TYPE_MAP = {
   report: { entity: 'Report', icon: BarChart3, statusKey: 'reportStatuses' },
 };
 
-function fmtTime(v) { if (!v) return '—'; return new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+import { formatShortDateTime } from '@/lib/time';
 
 export default function ResourceDetail() {
   const { type, id } = useParams();
@@ -85,7 +86,12 @@ export default function ResourceDetail() {
           )}
 
           {type === 'kb' && (
-            <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
+            <>
+              <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
+              {(item.source_kind === 'database' || ['mysql','postgres','postgresql'].includes((item.db_type||'').toLowerCase())) && (
+                <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
+              )}
+            </>
           )}
 
           {type === 'file' && (
@@ -111,8 +117,8 @@ export default function ResourceDetail() {
         <div className="space-y-6">
           <Section title={t.detail.metadata}>
             <div className="space-y-3 text-sm">
-              <Row label={t.detail.createdDate} value={fmtTime(item.created_date)} />
-              <Row label={t.detail.updatedDate} value={fmtTime(item.updated_date)} />
+              <Row label={t.detail.createdDate} value={formatShortDateTime(item.created_date)} />
+              <Row label={t.detail.updatedDate} value={formatShortDateTime(item.updated_date)} />
               {item.model && <Row label={t.detail.model} value={item.model} />}
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <span className="text-muted-foreground">ID</span>

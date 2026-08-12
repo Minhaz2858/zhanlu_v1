@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.project_memory import ProjectMemory
 
 logger = logging.getLogger(__name__)
@@ -73,6 +74,37 @@ class ProjectMemoryService:
         )
         self.db.add(entry)
         self.db.flush()
+
+        # Unified Resource Registry sync (best-effort, flag-gated).
+        # Keeps project Knowledge Map aligned with newly written memory.
+        try:
+            if getattr(settings, "KG_RESOURCE_REGISTRY_ENABLED", False):
+                from app.services.knowledge_graph.registry_indexer import (
+                    index_decision,
+                    index_memory_entry,
+                )
+
+                index_memory_entry(
+                    self.db,
+                    project_id=project_id,
+                    memory_id=entry.id,
+                    summary=content,
+                    owner_user_id=user_id,
+                    visibility="project",
+                )
+                if (entry_type or "").strip().lower() == "decision":
+                    index_decision(
+                        self.db,
+                        project_id=project_id,
+                        decision_id=entry.id,
+                        name=(content or "decision")[:80],
+                        summary=content,
+                        owner_user_id=user_id,
+                        visibility="project",
+                    )
+        except Exception:
+            logger.debug("ProjectMemory registry sync failed (non-fatal)", exc_info=True)
+
         logger.info(
             "ProjectMemory written | project=%s type=%s agent=%s",
             project_id, entry_type, agent_app_id,

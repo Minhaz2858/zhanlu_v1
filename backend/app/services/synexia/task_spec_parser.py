@@ -273,6 +273,10 @@ Respond with ONLY a JSON object, no explanation."""
         task_spec["forced_skill"] = forced_skill
         task_spec["forced_skill_name"] = forced_skill_name
         task_spec["forced_skill_score"] = forced_skill_score
+        if active_skill:
+            task_spec["selected_skill"] = active_skill
+            task_spec["selected_skill_id"] = active_skill.get("id")
+            task_spec["selected_skill_name"] = active_skill.get("name")
 
         # ── Follow-up entity inheritance ──────────────────────────────
         # On a follow-up turn, merge prior entities so refinement
@@ -341,5 +345,8 @@ Respond with ONLY a JSON object, no explanation."""
             "forced_skill": forced_skill,
             "forced_skill_name": forced_skill_name,
             "forced_skill_score": forced_skill_score,
+            "selected_skill": active_skill,
+            "selected_skill_id": active_skill.get("id") if active_skill else None,
+            "selected_skill_name": active_skill.get("name") if active_skill else None,
         }
         return default

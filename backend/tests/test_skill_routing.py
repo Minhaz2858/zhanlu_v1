@@ -513,14 +513,14 @@ class TestRoutingIntegration(unittest.TestCase):
         self.assertEqual(decision.reason, "llm_catalog_pick")
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
-    def test_dashboard_request_routes_to_artifacts_builder(self, mock_detect):
-        """Explicit dashboard format → artifacts-builder (Claude skill)."""
+    def test_dashboard_request_routes_to_dashboard_generation(self, mock_detect):
+        """Explicit dashboard format → live dashboard-generation skill."""
         mock_detect.return_value = "dashboard"
         decision = self.resolver.resolve(
             user_message="Create a dashboard",
             picked_skill=None,
         )
-        self.assertEqual(decision.chosen_skill, "artifacts-builder")
+        self.assertEqual(decision.chosen_skill, "dashboard-generation")
 
 
 # ==========================================================================

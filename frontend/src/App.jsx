@@ -105,6 +105,7 @@ const AuthenticatedApp = () => {
         <Route element={<MobileLayout />}>
           <Route path="/" element={<MobileChatPage />} />
           <Route path="/chat" element={<MobileChatPage />} />
+          <Route path="/automation/chat" element={<MobileChatPage />} />
           <Route path="/my-space" element={<MobileMySpacePage />} />
           <Route path="/my-files" element={<MobileMyFilesPage />} />
           {/* Deep-linked detail routes — reuse the desktop pages inside a
@@ -146,6 +147,7 @@ const AuthenticatedApp = () => {
         <Route path="/" element={<Chat />} />
         <Route path="/chat" element={<Chat />} />
         <Route path="/automation" element={<AutomationTasks />} />
+        <Route path="/automation/chat" element={<Chat />} />
         <Route path="/automation/:id" element={<AutomationTaskDetail />} />
         <Route path="/my-space" element={<MySpace />} />
         <Route path="/my-space/project/:id" element={<ProjectDetail />} />

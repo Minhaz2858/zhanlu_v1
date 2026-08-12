@@ -7,6 +7,7 @@ import PlusMenu from './PlusMenu';
 import VoiceInput from './VoiceInput';
 import AgentSuggestions from './AgentSuggestions';
 import FilePreviewModal from './FilePreviewModal';
+import EffectiveModelBadge from './EffectiveModelBadge';
 
 // Pick an icon for an attachment chip based on its extension. Falls back
 // to a generic File icon. Used by the chip-strip below so each queued
@@ -56,13 +57,32 @@ export default function ChatInput({
   onRemoveSkill, onRemoveAgent, activeSkill, activeAgent,
   disabled, centered, inputRef, onUploadFile,
   attachments = [], onRemoveAttachment,
-  isStreaming, onStop, pendingProject, onClearProject,
+  isStreaming, onStop,
+  // Automation-specific stop path. Set by Chat.jsx when the in-flight
+  // "response" is actually a background automation run rather than an
+  // SSE chat stream. When provided AND ``isStreaming`` is true, the
+  // Stop button calls this instead of ``onStop``. The parent is
+  // expected to fire ``POST /api/automations/executions/{id}/cancel``
+  // and the UI state (loading / latestExecution) will refresh via the
+  // existing by-session poll.
+  onStopAutomation,
+  pendingProject, onClearProject,
   inheritedKbCount = 0,
+  pendingProjectId = null,
 }) {
   const { t, lang } = useLanguage();
   const [dragCounter, setDragCounter] = useState(0);
   const [rejectedFile, setRejectedFile] = useState(null);
   const [previewIdx, setPreviewIdx] = useState(null);
+  // Track an in-flight cancel click so the Stop button briefly shows
+  // "Cancelling…" instead of re-firing the cancel. The actual state
+  // transition (running → cancelled) lands in the by-session poll a
+  // tick later.
+  const [cancelInFlight, setCancelInFlight] = useState(false);
+  const stopHandler = onStopAutomation || onStop;
+  const stopTitleKey = onStopAutomation
+    ? (lang === 'en' ? 'Stop run' : '停止运行')
+    : (lang === 'en' ? 'Stop generating' : '停止生成');
 
   function handleSend() {
     if (!value.trim() || disabled) return;
@@ -248,6 +268,10 @@ export default function ChatInput({
                   </button>
                 </span>
               )}
+              <EffectiveModelBadge
+                projectId={pendingProjectId}
+                agentName={activeAgent?.name}
+              />
               {activeSkill && (
                 <span className="inline-flex max-w-[10rem] items-center gap-1.5 rounded-full border border-primary/40 bg-primary/5 px-2.5 py-1 text-xs font-medium text-primary">
                   <Wrench className="h-3 w-3 shrink-0" />
@@ -294,13 +318,44 @@ export default function ChatInput({
                 // visible. The mic (VoiceInput) and the mid-turn Steer
                 // button are both hidden — three icons in the corner
                 // was visually loud and the user asked for just Stop
-                // during the response.
+                // during the response. For automation runs the Stop
+                // button routes through ``onStopAutomation`` so the
+                // background executor gets a cooperative cancel signal
+                // (the existing by-session poll picks up the new state
+                // on the next tick and exits the streaming UI).
                 <button
                   type="button"
-                  onClick={onStop}
-                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 text-zinc-700 transition-colors hover:bg-zinc-200 hover:border-zinc-300"
-                  title={lang === 'en' ? 'Stop generating' : '停止生成'}
-                  aria-label={lang === 'en' ? 'Stop generating' : '停止生成'}
+                  onClick={() => {
+                    if (cancelInFlight) return;
+                    if (onStopAutomation) {
+                      setCancelInFlight(true);
+                      try {
+                        const r = onStopAutomation();
+                        // onStopAutomation may return a promise (the
+                        // cancel API call). If it doesn't, clear the
+                        // in-flight flag immediately. Either way the
+                        // polling loop will exit the streaming UI when
+                        // the DB row transitions to cancelled.
+                        if (r && typeof r.then === 'function') {
+                          r.catch(() => {}).finally(() => setCancelInFlight(false));
+                        } else {
+                          setCancelInFlight(false);
+                        }
+                      } catch (e) {
+                        setCancelInFlight(false);
+                      }
+                    } else if (onStop) {
+                      onStop();
+                    }
+                  }}
+                  disabled={cancelInFlight}
+                  className="inline-flex h-8 w-8 items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 text-zinc-700 transition-colors hover:bg-zinc-200 hover:border-zinc-300 disabled:cursor-not-allowed disabled:opacity-60"
+                  title={cancelInFlight
+                    ? (lang === 'en' ? 'Cancelling…' : '取消中…')
+                    : stopTitleKey}
+                  aria-label={cancelInFlight
+                    ? (lang === 'en' ? 'Cancelling…' : '取消中…')
+                    : stopTitleKey}
                 >
                   <Square className="h-3.5 w-3.5 fill-current" />
                 </button>

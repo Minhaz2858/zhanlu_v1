@@ -145,7 +145,11 @@ export default function MySpace() {
   }
   async function reindexKb(item) {
     try {
-      await authFetch(`/api/apps/${item.app_id || 'default-app'}/knowledge_bases/${item.id}/reindex`, { method: 'POST' });
+      const isDbKb = item.source_kind === 'database' && ['mysql','postgres','postgresql'].includes((item.db_type||'').toLowerCase());
+      const endpoint = isDbKb
+        ? `/api/apps/${item.app_id || 'default-app'}/knowledge_bases/${item.id}/catalog/reindex`
+        : `/api/apps/${item.app_id || 'default-app'}/knowledge_bases/${item.id}/reindex`;
+      await authFetch(endpoint, { method: 'POST' });
       const updated = await base44.entities.KnowledgeBase.get(item.id);
       setItems((prev) => prev.map((entry) => entry.id === item.id ? updated : entry));
     } catch { /* non-fatal */ }

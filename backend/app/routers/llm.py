@@ -80,6 +80,7 @@ class LlmModelOut(BaseModel):
 class EffectiveLLMOut(BaseModel):
     model_name: str
     model_id: str
+    source: str = ""  # "project" | "agent" | "default" | "system_default" | "legacy"
     provider: str = ""
     base_url: str = ""
     is_private: bool = False
@@ -342,8 +343,9 @@ def get_effective_llm(
     return EffectiveLLMOut(
         model_name=eff.model_name,
         model_id=eff.model_id,
+        source=eff.source,
         provider="",
-        base_url=eff.endpoint.base_url if eff.endpoint else (settings.LLM_BASE_URL or ""),
+        base_url=eff.endpoint.base_url if eff.endpoint else (settings.OPENAI_BASE_URL or ""),
         is_private=eff.endpoint.is_private if eff.endpoint else False,
         locked=eff.locked,
         locked_reason=eff.locked_reason,

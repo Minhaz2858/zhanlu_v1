@@ -14,15 +14,12 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 
-function fmtTime(v) {
-  if (!v) return '—';
-  return new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
-}
+import { formatShortDateTime } from '@/lib/time';
 
 // "Run now" hands off to the shared runAutomationTask helper (see
-// lib/runAutomationTask.js) — ensure-session -> POST /run -> toast ->
-// navigate to the dedicated chat. No prefill/autorun (the old LLM-
-// dependent deep-link flow silently no-op'd for custom agents).
+// lib/runAutomationTask.js) — ensure-session -> POST /run -> navigate
+// to /chat?session=<sid>. The dispatcher's _notify_chat streams the
+// result into the task's owning session; no LLM-mediated handoff.
 
 // Curated set of common IANA timezones for the selector. The cron schedule is
 // interpreted in the chosen tz (P0-6: "daily 08:00" fires at 08:00 user-local,
@@ -90,7 +87,7 @@ export default function AutomationTaskDetail() {
       toast({
         title: next === 'paused' ? t.automation.pause : t.automation.start,
         description: data.next_run_at
-          ? `${lang === 'en' ? 'Next run:' : '下次运行:'} ${fmtTime(data.next_run_at)}`
+          ? `${lang === 'en' ? 'Next run:' : '下次运行:'} ${formatShortDateTime(data.next_run_at)}`
           : (t.detail.saved || 'OK'),
       });
       await load();
@@ -154,7 +151,7 @@ export default function AutomationTaskDetail() {
           if (data.success && data.next_run_at) {
             toast({
               title: lang === 'en' ? 'Schedule parsed' : '计划已解析',
-              description: `${lang === 'en' ? 'Next run:' : '下次运行:'} ${fmtTime(data.next_run_at)} (${data.description})`,
+              description: `${lang === 'en' ? 'Next run:' : '下次运行:'} ${formatShortDateTime(data.next_run_at)} (${data.description})`,
             });
           }
         }
@@ -188,7 +185,7 @@ export default function AutomationTaskDetail() {
   const currentIdx = task.status === 'failed' ? 2 : task.status === 'completed' ? 2 : (task.status === 'active' || task.status === 'running') ? 1 : 0;
 
   const nextRunLabel = task.next_run_at
-    ? fmtTime(task.next_run_at)
+    ? formatShortDateTime(task.next_run_at)
     : (task.cron_expression ? (lang === 'en' ? 'computing…' : '计算中…') : t.automation.manual);
 
   return (
@@ -342,10 +339,10 @@ export default function AutomationTaskDetail() {
                   </Field>
                   <Field label={t.automation.lastRun}>
                     <span className="inline-flex items-center gap-1 text-sm">
-                      <Clock className="h-3.5 w-3.5 text-muted-foreground" /> {fmtTime(task.last_run)}
+                      <Clock className="h-3.5 w-3.5 text-muted-foreground" /> {formatShortDateTime(task.last_run)}
                     </span>
                   </Field>
-                  <Field label={t.detail.createdDate}><span className="text-sm">{fmtTime(task.created_date)}</span></Field>
+                  <Field label={t.detail.createdDate}><span className="text-sm">{formatShortDateTime(task.created_date)}</span></Field>
                 </div>
                 {task.cron_expression && (
                   <div className="mt-4 border-t border-border pt-3 text-xs text-muted-foreground">
@@ -401,8 +398,8 @@ export default function AutomationTaskDetail() {
         <div className="space-y-6">
           <Section title={t.detail.metadata}>
             <div className="space-y-3 text-sm">
-              <Row label={t.detail.createdDate} value={fmtTime(task.created_date)} />
-              <Row label={t.detail.updatedDate} value={fmtTime(task.updated_date)} />
+              <Row label={t.detail.createdDate} value={formatShortDateTime(task.created_date)} />
+              <Row label={t.detail.updatedDate} value={formatShortDateTime(task.updated_date)} />
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <span className="text-muted-foreground">ID</span>
                 <span className="font-mono text-xs text-muted-foreground">{task.id.slice(-8)}</span>

@@ -1,8 +1,10 @@
 import { useEffect, useState } from 'react';
-import { FileText, Presentation, Code, Download, FileType, AlertTriangle, Loader2, BookOpen, X } from 'lucide-react';
+import { FileText, Presentation, Code, Download, FileType, AlertTriangle, Loader2, BookOpen, X, LayoutDashboard } from 'lucide-react';
 import DOMPurify from 'dompurify';
 import { authFetch } from '@/api/authFetch';
+import { getDashboard } from '@/api/dashboards';
 import { needsPreviewToken } from '@/lib/previewToken';
+import DashboardViewer from '@/components/dashboard/DashboardViewer';
 import DocxArtifactPreview from './DocxArtifactPreview';
 import PptxArtifactPreview from './PptxArtifactPreview';
 import PdfFaithfulPreview from './PdfFaithfulPreview';
@@ -125,6 +127,7 @@ const TYPE_ICON = {
   pptx: Presentation,
   html: Code,
   html_report: FileText,
+  dashboard: LayoutDashboard,
 };
 
 const TYPE_LABEL = {
@@ -133,6 +136,7 @@ const TYPE_LABEL = {
   pptx: 'PowerPoint',
   html: 'HTML Page',
   html_report: 'Report',
+  dashboard: 'Live Dashboard',
 };
 
 function formatSize(bytes) {
@@ -140,6 +144,55 @@ function formatSize(bytes) {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(0)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function LiveDashboardArtifactPreview({ dashboardId }) {
+  const [dashboard, setDashboard] = useState(null);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    if (!dashboardId) return undefined;
+    let cancelled = false;
+    setDashboard(null);
+    setError(null);
+    getDashboard(dashboardId)
+      .then((data) => {
+        if (!cancelled) setDashboard(data);
+      })
+      .catch((e) => {
+        if (!cancelled) setError(e.message || 'Failed to load dashboard');
+      });
+    return () => { cancelled = true; };
+  }, [dashboardId]);
+
+  if (!dashboardId) {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+        <AlertTriangle className="mr-2 h-4 w-4 text-destructive" />
+        Dashboard id is missing.
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+        <AlertTriangle className="mr-2 h-4 w-4 text-destructive" />
+        Could not load dashboard: {error}
+      </div>
+    );
+  }
+
+  if (!dashboard) {
+    return (
+      <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
+        <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+        Loading dashboard…
+      </div>
+    );
+  }
+
+  return <DashboardViewer dashboard={dashboard} canEdit={!!dashboard.can_edit} />;
 }
 
 /**
@@ -219,6 +272,7 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
   // would no-op, and the pane would spin on "Loading document…"
   // forever (the exact bug the user reported).
   const artifactId = artifact.id || artifact.artifact_id;
+  const dashboardId = artifact.dashboard_id || artifact.dashboardId || (artifact.type === 'dashboard' ? artifactId : null);
   const previewUrl = artifact.preview_url || artifact.previewUrl;
   const fileUrl = artifact.file_url || artifact.download_url;
   const hasPreview = (artifact.has_preview ?? artifact.hasPreview) && !!previewUrl;
@@ -278,32 +332,29 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
             <div className="flex items-center rounded-md border border-border bg-secondary/40 p-0.5">
               <button
                 onClick={() => setViewMode('html')}
-                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-                  viewMode === 'html'
+                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${viewMode === 'html'
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
-                }`}
+                  }`}
               >
                 HTML
               </button>
               <button
                 onClick={() => setViewMode('document')}
-                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-                  viewMode === 'document'
+                className={`rounded px-2 py-1 text-xs font-medium transition-colors ${viewMode === 'document'
                     ? 'bg-background text-foreground shadow-sm'
                     : 'text-muted-foreground hover:text-foreground'
-                }`}
+                  }`}
               >
                 PDF
               </button>
               {sidecarPreviewUrl && (
                 <button
                   onClick={() => setViewMode('summary')}
-                  className={`rounded px-2 py-1 text-xs font-medium transition-colors ${
-                    viewMode === 'summary'
+                  className={`rounded px-2 py-1 text-xs font-medium transition-colors ${viewMode === 'summary'
                       ? 'bg-background text-foreground shadow-sm'
                       : 'text-muted-foreground hover:text-foreground'
-                  }`}
+                    }`}
                 >
                   Summary
                 </button>
@@ -366,7 +417,9 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
             scrollbar is invisible on Linux/Chromium once the preview
             panel is dragged wider, which made the content look frozen
             — see the regression the user filed. */}
-        {isOfficeDoc ? (
+        {artifact.type === 'dashboard' ? (
+          <LiveDashboardArtifactPreview dashboardId={dashboardId} />
+        ) : isOfficeDoc ? (
           /* Office-file artifacts (docx/pptx/xlsx): three view modes.
              'html' is the default (matches Files in this task modal).
              'document' is a faithful PDF render via LibreOffice.

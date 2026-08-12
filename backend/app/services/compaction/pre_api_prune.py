@@ -176,6 +176,26 @@ def _truncate_oversized_args(
     return truncated
 
 
+def _effective_trigger_tokens(trigger_tokens: int, model: str) -> int:
+    """Scale the prune trigger to the model's real context window.
+
+    The flat ``DEFAULT_PRUNE_TRIGGER_TOKENS`` (16k) assumes a large cloud
+    context. On a small local model (Ollama ``num_ctx=8192``) the trigger
+    sits ABOVE the whole window, so pruning never ran and the report-
+    synthesis LLM call overflowed (empty automation report). For small
+    windows, trigger pruning once we cross ~50% of the window so the
+    next call still fits.
+    """
+    try:
+        from app.services.compaction import get_context_window
+        window = get_context_window(model)
+    except Exception:
+        return trigger_tokens
+    if window >= DEFAULT_PRUNE_TRIGGER_TOKENS * 2:
+        return trigger_tokens
+    return max(2_000, int(window * 0.5))
+
+
 def prune_tool_results_only(
     messages: list[dict[str, Any]],
     *,
@@ -184,6 +204,7 @@ def prune_tool_results_only(
     min_prune_chars: int = DEFAULT_MIN_PRUNE_CHARS,
     max_args_chars: int = DEFAULT_MAX_ARGS_CHARS,
     trigger_tokens: int = DEFAULT_PRUNE_TRIGGER_TOKENS,
+    model: str = "",
 ) -> tuple[list[dict[str, Any]], int]:
     """Deterministically prune old tool results without an LLM call.
 
@@ -205,8 +226,11 @@ def prune_tool_results_only(
         ``(messages, n_pruned)`` -- messages are mutated in place.
         ``n_pruned`` is the total count of items pruned across all 3 passes.
     """
-    # Skip if below trigger
-    if current_tokens is not None and current_tokens < trigger_tokens:
+    # Scale trigger to the model's real context window
+    effective_trigger = _effective_trigger_tokens(trigger_tokens, model)
+
+    # Skip if below effective trigger
+    if current_tokens is not None and current_tokens < effective_trigger:
         return messages, 0
 
     # Estimate tokens if not provided
@@ -220,7 +244,7 @@ def prune_tool_results_only(
         # token, with padding) to avoid the TypeError: 'int' has no len().
         from app.services.compaction.token_estimator import TOKEN_ESTIMATION_PADDING
         current_tokens = max(1, int(total_chars * TOKEN_ESTIMATION_PADDING / 4))
-        if current_tokens < trigger_tokens:
+        if current_tokens < effective_trigger:
             return messages, 0
 
     n_deduped = _dedup_tool_results(messages)

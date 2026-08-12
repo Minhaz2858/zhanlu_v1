@@ -65,6 +65,8 @@ ALL_TOOL_NAMES = [
     "create_artifact", "edit_artifact", "load_skill_body",
     # Dashboards (Phase 11 — live DB dashboards)
     "create_dashboard", "update_dashboard", "undo_dashboard_edit",
+    # Companion design intelligence for professional dashboards / visual artifacts
+    "uiux_search", "uiux_design_system",
     # Security
     "osv_check", "tirith_security",
     # Communication
@@ -238,7 +240,9 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
             "tool_config": {
                 "enabled_tools": _tools_in_registry(registry, [
                     "create_automation", "update_automation",
-                    "list_knowledge_bases", "cronjob", "send_message",
+                    "execute_automation", "list_knowledge_bases",
+                    "list_data_sources", "clarify",
+                    "cronjob", "send_message",
                     # Web collection + dynamic skill discovery
                     "web_search", "web_extract", "Skill",
                     "create_artifact",
@@ -247,12 +251,19 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
             **_BASE_HARNESS,
             "manifest_json": {
                 "agent_name": "automation_agent",
-                "version": "1.0.0",
-                "mission": "Build scheduled automation tasks connecting data sources to actions",
-                "task_scope": ["automation_creation", "schedule_management", "data_source_binding"],
+                "version": "1.1.0",
+                "mission": "Own the full automation lifecycle in chat: create tasks, fix/update existing ones (bind data sources, adjust schedule/prompt), trigger runs, and report run status",
+                "task_scope": [
+                    "automation_creation", "automation_fix", "automation_run",
+                    "schedule_management", "data_source_binding",
+                ],
                 "boundaries": {
-                    "allowed": ["create_automation", "update_automation", "list_knowledge_bases", "cronjob", "create_artifact"],
-                    "forbidden": ["delete_automation", "execute_automation", "access_user_data"],
+                    "allowed": [
+                        "create_automation", "update_automation", "execute_automation",
+                        "list_knowledge_bases", "list_data_sources", "clarify",
+                        "cronjob", "create_artifact",
+                    ],
+                    "forbidden": ["delete_automation", "access_user_data", "report_generation", "data_analysis"],
                 },
                 "risk_tier": "medium",
                 "created_by": "system",
@@ -265,6 +276,12 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "allowed_domains": [],
                 "retention_days": 30,
             },
+            # Hidden from the agent picker, My Space, and the active-
+            # agent chip — same as ecisco_bi_assistant. Chats that
+            # originate from the Automation dialog / draft card auto-
+            # bind to this agent via Chat.jsx's isAutomationOrigin
+            # check; other chats keep their current agent.
+            "is_system": True,
         },
         {
             "name": "general_assistant",
@@ -408,7 +425,6 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                         "ask_forecast_agent", "ask_pricing", "ask_data_agent",
                         "ask_report_agent", "ask_intelligence",
                         "ask_knowledge_graph", "ask_decision", "ask_macro_override",
-                        # "ask_weekly_report" — not yet registered; will be added when weekly_report module is ported
                         "ask_erp_kpi", "ask_erp_writeback",
                         # Direct forecast read path
                         "forecast_brief",

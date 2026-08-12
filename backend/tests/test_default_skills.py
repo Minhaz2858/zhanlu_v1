@@ -16,6 +16,7 @@ Covers:
 """
 
 import unittest
+from unittest.mock import patch
 
 from app.services.synexia.default_skills import (
     DEFAULT_SKILLS,
@@ -72,10 +73,11 @@ class TestDefaultSkillsManifest(unittest.TestCase):
     def test_default_skill_names_frozenset(self):
         expected_names = {entry["skill_name"] for entry in DEFAULT_SKILLS.values()}
         self.assertEqual(set(DEFAULT_SKILL_NAMES), expected_names)
-        # html + dashboard both alias to artifacts-builder, so the unique
-        # skill-name set is {docx, pptx, pdf, artifacts-builder} = 4.
-        self.assertEqual(len(DEFAULT_SKILL_NAMES), 4)
+        # dashboard now maps to the live dashboard-generation skill, so the
+        # unique set is {docx, pptx, pdf, artifacts-builder, dashboard-generation}.
+        self.assertEqual(len(DEFAULT_SKILL_NAMES), 5)
         self.assertIn("artifacts-builder", DEFAULT_SKILL_NAMES)
+        self.assertIn("dashboard-generation", DEFAULT_SKILL_NAMES)
 
 
 # ---------------------------------------------------------------------------
@@ -104,6 +106,21 @@ class TestOverridePrecedence(unittest.TestCase):
         self.assertEqual(result["skill_name"], "docx")
         self.assertEqual(result["format"], "docx")
 
+    def test_strong_custom_skill_beats_generic_report_default(self):
+        """A strong weekly-report skill match must beat broad report→docx routing."""
+        forced = {
+            "skill_name": "weekly-report-generation",
+            "triggers": [],
+            "format": None,
+            "forced": True,
+            "score": 0.92,
+            "source": "db",
+        }
+        with patch("app.services.synexia.default_skills.post_router_pick", return_value=forced):
+            result = pick_default_skill("make a weekly sales report", active_skill=None)
+        self.assertEqual(result["skill_name"], "weekly-report-generation")
+        self.assertTrue(result["forced"])
+
 
 # ---------------------------------------------------------------------------
 # 3. Format-hint detection
@@ -130,7 +147,7 @@ class TestPickDefaultSkillWithFormatHint(unittest.TestCase):
 
     def test_dashboard_explicit(self):
         result = pick_default_skill("build a dashboard")
-        self.assertEqual(result["skill_name"], "artifacts-builder")
+        self.assertEqual(result["skill_name"], "dashboard-generation")
 
     def test_md_is_no_longer_a_default(self):
         # md was dropped from DEFAULT_SKILLS — markdown requests fall

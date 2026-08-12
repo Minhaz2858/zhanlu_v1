@@ -57,10 +57,10 @@ class NLAnswerService:
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
 
-        # 1. Pull schema — try semantic catalog first, fall back to raw DDL.
+        # 1. Pull schema — try semantic catalog first, fall back to M-Schema.
         # `schema_info` keeps the describe_all-shaped dict (used for db_type
         # and citations); `schema_text` is the pre-rendered prompt context
-        # (the linker slice when available, else rendered from schema_info).
+        # (the linker slice when available, else M-Schema with value sampling).
         schema_info: dict | None = None
         schema_text: str | None = None
         if settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
@@ -83,18 +83,18 @@ class NLAnswerService:
                     )
             except Exception as e:
                 logger.warning(
-                    "NLAnswer: schema linker failed (falling back to describe_all): %s", e,
+                    "NLAnswer: schema linker failed (falling back to M-Schema): %s", e,
                 )
                 schema_info = None
                 schema_text = None
 
         if schema_info is None:
             try:
-                schema_info = await asyncio.to_thread(
-                    schema_svc.describe_all, kb_id, 30
+                schema_info, schema_text = await self._build_m_schema_fallback(
+                    kb_id, question
                 )
             except Exception as e:
-                logger.warning("NLAnswer: schema introspection failed: %s", e)
+                logger.warning("NLAnswer: M-Schema fallback failed: %s", e)
                 return {
                     "success": False,
                     "error": f"Failed to read schema: {e}",
@@ -124,12 +124,17 @@ class NLAnswerService:
             exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
         except Exception as e:
             logger.warning("NLAnswer: execute failed: %s", e)
+            _shadow_validate_and_log(
+                kb_id, question, sql, live_success=False, live_error=str(e)
+            )
             return {
                 "success": False,
                 "error": f"Query failed: {e}",
                 "sql": sql,
                 "source_id": kb_id,
             }
+
+        _shadow_validate_and_log(kb_id, question, sql, live_success=True)
 
         # 4. Narrate
         try:
@@ -204,6 +209,64 @@ class NLAnswerService:
         ]
         return await _chat(messages, temperature=0.2)
 
+    # ------------------------------------------------------------------
+    # M-Schema fallback (replaces describe_all)
+    # ------------------------------------------------------------------
+
+    async def _build_m_schema_fallback(
+        self, kb_id: str, question: str
+    ) -> tuple[dict, str]:
+        """Build schema_info + schema_text via M-Schema (cached).
+
+        When the schema linker is unavailable (e.g. catalog still indexing),
+        this replaces the old describe_all(30) fallback with the richer
+        M-Schema format that includes value sampling for TEXT-like columns.
+
+        Returns:
+            (schema_info, schema_text) — schema_info is the describe_all-
+            shaped dict used by downstream code; schema_text is the M-Schema
+            rendered string with value examples.
+        """
+        from app.services.datasources.mysql_adapter import MySQLAdapter
+        from app.services.datasources.m_schema import render_m_schema
+        from app.services.db.schema_service import _cache_get, _cache_put
+
+        # Check cache first
+        cache_key = (kb_id, "m_schema")
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            logger.debug("NLAnswer: M-Schema cache hit for %s", kb_id)
+            return cached["schema_info"], cached["schema_text"]
+
+        # Load KB and build adapter
+        schema_svc = SchemaService(self._db)
+        kb = schema_svc._load_kb(kb_id)
+
+        adapter = MySQLAdapter(kb)
+        try:
+            # Build M-Schema text (with value sampling)
+            schema_text = await asyncio.to_thread(
+                render_m_schema, adapter, sample_rows=3
+            )
+
+            # Build schema_info from adapter's refresh_schema (for db_type + citations)
+            schema_info = await asyncio.to_thread(
+                _schema_info_from_adapter, kb, adapter
+            )
+
+            # Cache both
+            _cache_put(cache_key, {
+                "schema_info": schema_info,
+                "schema_text": schema_text,
+            })
+            logger.info(
+                "NLAnswer: M-Schema built for %s (%d tables)",
+                kb_id, len(schema_info.get("tables", [])),
+            )
+            return schema_info, schema_text
+        finally:
+            adapter.close()
+
 
 # ---------------------------------------------------------------------------
 # Prompt helpers
@@ -236,6 +299,36 @@ def _schema_info_from_linker(
         })
     return {
         "source": {"id": kb.id, "name": kb.name, "db_type": kb.db_type},
+        "tables": tables,
+    }
+
+
+def _schema_info_from_adapter(kb: Any, adapter: Any) -> dict:
+    """Build a describe_all-shaped dict from an adapter's refresh_schema().
+
+    This produces the same structure as SchemaService.describe_all() so
+    that downstream code (db_type lookup, _extract_citations) works
+    unchanged.
+    """
+    schema = adapter.refresh_schema()
+    tables = []
+    for table_name, columns in schema.items():
+        cols = []
+        for c in columns:
+            cols.append({
+                "name": c.name,
+                "type": c.dtype,
+                "nullable": c.nullable,
+                "pk": c.is_pk,
+                "default": c.default,
+            })
+        tables.append({"table": table_name, "columns": cols})
+    return {
+        "source": {
+            "id": str(kb.id),
+            "name": kb.name,
+            "db_type": kb.db_type,
+        },
         "tables": tables,
     }
 
@@ -273,6 +366,79 @@ def _format_schema_for_prompt(schema_info: dict) -> str:
             col_lines.append(f"  {c['name']} {c['type']}{nullable}{default}{pk}")
         parts.append(f"TABLE {t} (\n" + ",\n".join(col_lines) + "\n)")
     return "\n\n".join(parts) or "(no tables found)"
+
+
+def _shadow_validate_and_log(
+    kb_id: str,
+    question: str,
+    sql: str,
+    *,
+    live_success: bool,
+    live_error: str = "",
+) -> None:
+    """NL2SQL shadow mode: validate the generated SQL with the governed
+    nl2sql pipeline and log divergence to ``nl2sql_query_logs``.
+
+    NEVER alters the served result — this is observe-only. Runs after the
+    live path produced its outcome so divergence can be classified:
+      agree_pass            — shadow valid, live succeeded
+      shadow_pass_live_fail — shadow valid, live failed
+      shadow_fail_live_pass — shadow rejected, live succeeded (over-rejection risk)
+      agree_fail            — both failed
+    """
+    if not getattr(settings, "NL2SQL_SHADOW_MODE_ENABLED", False):
+        return
+    try:
+        from app.services.nl2sql import validate_sql
+
+        res = validate_sql(sql)
+    except Exception as e:
+        logger.debug("nl2sql shadow validation failed (non-fatal): %s", e)
+        return
+
+    try:
+        import uuid as _uuid
+
+        from app.database import SessionLocal
+        from app.models.nl2sql_query_log import Nl2sqlQueryLog
+
+        shadow_ok = bool(res.get("is_valid")) and bool(res.get("policy_allowed", True))
+        if shadow_ok and live_success:
+            cls = "agree_pass"
+        elif shadow_ok:
+            cls = "shadow_pass_live_fail"
+        elif live_success:
+            cls = "shadow_fail_live_pass"
+        else:
+            cls = "agree_fail"
+
+        session = SessionLocal()
+        try:
+            session.add(
+                Nl2sqlQueryLog(
+                    id=str(_uuid.uuid4()),
+                    datasource_id=kb_id,
+                    question=question,
+                    generated_sql=sql or None,
+                    sql_hash=res.get("sql_hash") or None,
+                    validation_errors=(
+                        {"errors": res.get("errors")} if res.get("errors") else None
+                    ),
+                    policy_decision=(
+                        "allowed" if res.get("policy_allowed", True) else "denied"
+                    ),
+                    outcome="shadow",
+                    explanation=(
+                        f"shadow_class={cls}; live_success={live_success}; "
+                        f"live_error={live_error[:200]}"
+                    ),
+                )
+            )
+            session.commit()
+        finally:
+            session.close()
+    except Exception as e:
+        logger.debug("nl2sql shadow log failed (non-fatal): %s", e)
 
 
 def _strip_sql_fences(text: str) -> str:

@@ -747,6 +747,8 @@ async def synthesize_report(
     source_id: str | None,
     call_llm_fn,
     user_signal: Optional[str] = None,
+    skill_name: Optional[str] = None,
+    skill_methodology: Optional[str] = None,
 ) -> FinalizeResult:
     """Run the synthesis LLM turn and return a FinalizeResult.
 
@@ -829,6 +831,15 @@ async def synthesize_report(
     # inventory / customer / time_series / financial / general) provides
     # all the per-task-type structural hints we need.
     system_prompt = _SYNTHESIS_SYSTEM_PROMPT
+    if skill_methodology:
+        clipped = skill_methodology[:5000]
+        system_prompt += (
+            "\n\nRUNTIME SELECTED SKILL METHODOLOGY:\n"
+            f"The user explicitly selected the skill '{skill_name or 'selected-skill'}'. "
+            "Follow this skill's methodology, output structure, tone, naming, and formatting conventions whenever they are compatible with the real data snapshot. "
+            "Do not invent facts; adapt the methodology to the available data.\n\n"
+            f"{clipped}"
+        )
 
     user_payload = (
         f"User message: {user_message}\n\n"
@@ -836,6 +847,11 @@ async def synthesize_report(
         f"SQL run: {sql or '(not provided)'}\n"
         f"Row count: {len(rows)}\n\n"
         f"Rows (JSON):\n```json\n{json.dumps(rows_for_llm, default=str, ensure_ascii=False)}\n```\n\n"
+        + (
+            f"Selected skill: {skill_name}\n"
+            "Honor the selected skill's methodology when composing the summary, methodology, KPIs, key findings, recommendations, and final instructions.\n\n"
+            if skill_name else ""
+        )
         + (
             "─── DATA SHAPE NOTES (embed these caveats in your response) ───\n"
             + "\n".join(shape_warnings) + "\n\n"

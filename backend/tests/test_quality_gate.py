@@ -168,6 +168,41 @@ class TestFinalizeQualityGate:
         assert "Quality gate" in fsm.execution.assistant_content
         fsm.db.commit.assert_called()
 
+    def test_selected_skill_validation_is_stored_and_can_lower_confidence(self, fsm, exec_request, monkeypatch):
+        self._patch_confidence(monkeypatch, 0.9)
+        fsm.execution.task_spec = {
+            "user_signal": "export_docx",
+            "artifact_intents": ["docx"],
+            "selected_skill_name": "weekly-sales-report",
+        }
+        fsm.execution.observations = [
+            SimpleNamespace(
+                observation_type="skill_call",
+                tool_name="weekly-sales-report",
+                request_args={"name": "weekly-sales-report"},
+                result_data={"body": "# Weekly Sales Report\n\n## KPI Section\n## Recommendations"},
+                success=True,
+                artifact_ids=None,
+            ),
+            SimpleNamespace(
+                observation_type="synthesize",
+                tool_name="synthesizer",
+                request_args={},
+                result_data={"report_card_payload": {"title": "Weekly Sales", "summary": "Only summary"}},
+                success=True,
+                artifact_ids=["art-1"],
+            ),
+        ]
+        monkeypatch.setattr(
+            "app.services.synexia.capability_router._select_finalize_report_card_payload",
+            lambda observations, artifact_payload: {"title": "Weekly Sales", "summary": "Only summary"},
+        )
+
+        result = fsm._run_finalize(exec_request)
+        assert result.confidence_factors["selected_skill_validation"]["is_ok"] is False
+        assert "Selected skill validation" in result.assistant_content
+        assert result.confidence <= 0.55
+
 
 # ── 3. grade_quality_gate ────────────────────────────────────────────────
 

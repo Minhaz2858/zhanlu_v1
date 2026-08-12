@@ -7,12 +7,14 @@ import { useLanguage } from '@/lib/LanguageProvider';
 import { useAuth } from '@/lib/AuthContext';
 import { useTranslate } from '@/lib/useTranslate';
 import { useChatSession } from '@/lib/ChatSessionContext';
+import { formatRelativeTime } from '@/lib/time';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import AddAgentToProjectDialog from '@/components/project/AddAgentToProjectDialog';
 import AddKbToProjectDialog from '@/components/project/AddKbToProjectDialog';
+import DataMapSection from '@/components/data-map/DataMapSection';
 import LlmModelSelector from '@/components/chat/LlmModelSelector';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
 import ResourceAccessDialog from '@/components/ResourceAccessDialog';
@@ -22,11 +24,12 @@ import {
   Sparkles, Check, X, Trash2, Plus, Loader2, Folder,
   ArrowUpRight, Zap, Settings2, ListChecks,
   Pencil, Save, MoreVertical, FileStack, Layers,
-  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users, Cpu,
+  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users, Cpu, Lock,
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet';
+import brandLogo from '../../logo/logo.png';
 
 // Color presets removed: the user asked for a simple, color-free
 // project detail view. The ``color`` field on the Project model is
@@ -41,6 +44,7 @@ import {
 // in their face; it's one click away via the sidebar.
 const SECTIONS = [
   { key: 'agents', icon: Bot, scrollable: true },
+  { key: 'data_map', icon: Database, scrollable: true },
   { key: 'resources', icon: Layers, scrollable: false },
   { key: 'chats', icon: MessageSquare, scrollable: true },
 ];
@@ -492,10 +496,12 @@ export default function ProjectDetail() {
           </button>
 
           <div className="flex items-start gap-4">
-            <div
-              className="flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-secondary text-muted-foreground"
-            >
-              <Folder className="h-7 w-7" />
+            <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-border">
+              {(project.name || '').toLowerCase().includes('ecisco') || (project.name || '').includes('伊斯科') ? (
+                <img src={brandLogo} alt="Ecisco AI logo" className="h-full w-full object-contain p-2" />
+              ) : (
+                <Folder className="h-7 w-7 text-muted-foreground" />
+              )}
             </div>
             <div className="min-w-0 flex-1">
               {editing ? (
@@ -643,9 +649,8 @@ export default function ProjectDetail() {
                 <button
                   key={s.key}
                   onClick={onClick}
-                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${
-                    active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                  }`}
+                  className={`flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-1.5 text-left text-xs transition-colors ${active ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                    }`}
                   aria-label={label}
                 >
                   <span className="inline-flex items-center gap-2">
@@ -845,6 +850,30 @@ export default function ProjectDetail() {
               onCreateClick={() => setCreateAutoOpen(true)}
             />
           </section>
+
+          {/* ── Data Map (catalog browser + registry + entities) ── */}
+          <section
+            id="project-section-data_map"
+            ref={setRef('data_map')}
+            className="scroll-mt-20 rounded-xl border border-border bg-card p-5 shadow-sm"
+          >
+            <header className="mb-4 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Database className="h-4 w-4" />
+                </span>
+                <h2 className="font-display text-base font-semibold text-foreground">
+                  {isEn ? 'Catalog' : '目录'}
+                </h2>
+              </div>
+            </header>
+            <DataMapSection
+              projectId={projectId}
+              canEdit={canEditProject}
+              lang={lang}
+              T={T}
+            />
+          </section>
         </main>
       </div>
 
@@ -987,10 +1016,10 @@ export default function ProjectDetail() {
             {(() => {
               const history = Array.isArray(historyTask?.execution_history)
                 ? historyTask.execution_history.slice().sort((a, b) => {
-                    const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-                    const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-                    return tb - ta;
-                  })
+                  const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+                  const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+                  return tb - ta;
+                })
                 : [];
               if (history.length === 0) {
                 return (
@@ -1011,7 +1040,7 @@ export default function ProjectDetail() {
                         <RunStatusIcon status={run.status} />
                         <StatusPill status={run.status || 'unknown'} small />
                         <span className="ml-auto text-[11px] text-muted-foreground">
-                          {run.timestamp ? formatTime(run.timestamp) : ''}
+                          {run.timestamp ? formatRelativeTime(run.timestamp, lang) : ''}
                         </span>
                       </div>
                       {run.result && (
@@ -1051,14 +1080,14 @@ function StatusPill({ status, small }) {
   // here cover agent statuses (active/archived/disabled) as well as
   // automation run/task statuses (success/failed/running/skipped/etc).
   const STYLES = {
-    active:    { dot: 'bg-emerald-500',  bg: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
-    success:   { dot: 'bg-emerald-500',  bg: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
-    running:   { dot: 'bg-blue-500',     bg: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
-    failed:    { dot: 'bg-red-500',      bg: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
-    skipped:   { dot: 'bg-amber-500',    bg: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-    paused:    { dot: 'bg-amber-500',    bg: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
-    disabled:  { dot: 'bg-muted-foreground', bg: 'bg-secondary text-muted-foreground' },
-    archived:  { dot: 'bg-muted-foreground', bg: 'bg-secondary text-muted-foreground' },
+    active: { dot: 'bg-emerald-500', bg: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
+    success: { dot: 'bg-emerald-500', bg: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300' },
+    running: { dot: 'bg-blue-500', bg: 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' },
+    failed: { dot: 'bg-red-500', bg: 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' },
+    skipped: { dot: 'bg-amber-500', bg: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+    paused: { dot: 'bg-amber-500', bg: 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300' },
+    disabled: { dot: 'bg-muted-foreground', bg: 'bg-secondary text-muted-foreground' },
+    archived: { dot: 'bg-muted-foreground', bg: 'bg-secondary text-muted-foreground' },
   };
   const s = (status || 'idle').toLowerCase();
   const style = STYLES[s] || { dot: 'bg-muted-foreground', bg: 'bg-secondary text-muted-foreground' };
@@ -1087,6 +1116,7 @@ function countFor(key, s) {
     case 'agents': return s.agents.length;
     case 'resources': return s.kbs.length;
     case 'chats': return s.conversations.length;
+    case 'data_map': return 0;  // count surfaced inside the section
     default: return 0;
   }
 }
@@ -1107,20 +1137,6 @@ async function mergeFbk(primary, fallbackPromise) {
   const ids = new Set(primary.map((r) => r.id));
   const extras = (Array.isArray(fallback) ? fallback : []).filter((r) => !ids.has(r.id));
   return [...primary, ...extras];
-}
-
-function formatTime(iso) {
-  if (!iso) return '—';
-  try {
-    const d = new Date(iso);
-    const now = new Date();
-    const diff = now - d;
-    if (diff < 60000) return 'just now';
-    if (diff < 3600000) return `${Math.floor(diff / 60000)}m`;
-    if (diff < 86400000) return `${Math.floor(diff / 3600000)}h`;
-    if (diff < 604800000) return `${Math.floor(diff / 86400000)}d`;
-    return d.toLocaleDateString();
-  } catch { return iso; }
 }
 
 // ───────────────────────────────────────────────────────────────────
@@ -1167,8 +1183,18 @@ function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, proj
               </Badge>
               {/* Per-agent LLM chip — shows current binding (own or
                   inherited from project). Inherited = project has the
-                  model and agent doesn't have its own. */}
+                  model and agent doesn't have its own.
+                  System agents always use catalog default, so we
+                  show a locked badge instead of per-agent bindings. */}
               {(() => {
+                if (a.is_system) {
+                  return (
+                    <Badge variant="outline" className="border-muted-foreground/30 text-[10px] text-muted-foreground" title={isEn ? 'System agent — always uses catalog default' : '系统智能体 — 始终使用目录默认模型'}>
+                      <Lock className="mr-1 h-2.5 w-2.5" />
+                      {isEn ? 'Default (locked)' : '默认（已锁定）'}
+                    </Badge>
+                  );
+                }
                 const ownModel = a.llm_model_id ? llmModels.find((m) => m.id === a.llm_model_id) : null;
                 const projModel = project?.llm_model_id ? llmModels.find((m) => m.id === project.llm_model_id) : null;
                 if (ownModel) {
@@ -1189,7 +1215,7 @@ function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, proj
                 }
                 return null;
               })()}
-              <span className="text-[10px] text-muted-foreground">· {formatTime(a.updated_date)}</span>
+              <span className="text-[10px] text-muted-foreground">· {formatRelativeTime(a.updated_date, lang)}</span>
             </div>
           </div>
           <div className="absolute right-1.5 top-1.5 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -1242,11 +1268,10 @@ function KbSection({ kbs, onRemove, lang, navigate, T, canEdit = true }) {
             className="group relative flex items-start gap-3 rounded-lg border border-border bg-background p-3 transition-colors hover:border-primary/40"
           >
             <div
-              className={`flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg ${
-                isDb
+              className={`flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg ${isDb
                   ? 'bg-blue-100 text-blue-600 dark:bg-blue-900/30 dark:text-blue-300'
                   : 'bg-amber-100 text-amber-600 dark:bg-amber-900/30 dark:text-amber-300'
-              }`}
+                }`}
               onClick={() => navigate(`/my-space/kb/${k.id}`)}
             >
               <Database className="h-4 w-4" />
@@ -1263,7 +1288,7 @@ function KbSection({ kbs, onRemove, lang, navigate, T, canEdit = true }) {
               </p>
               <div className="mt-1.5 flex items-center gap-1.5">
                 <Badge variant="secondary" className="text-[10px]">{k.status || 'active'}</Badge>
-                <span className="text-[10px] text-muted-foreground">· {formatTime(k.updated_date)}</span>
+                <span className="text-[10px] text-muted-foreground">· {formatRelativeTime(k.updated_date, lang)}</span>
               </div>
             </div>
             <div className="absolute right-1.5 top-1.5 z-20 flex gap-1 opacity-0 transition-opacity group-hover:opacity-100">
@@ -1311,7 +1336,7 @@ function ConversationsSection({ conversations, lang, T, onOpenConv }) {
     <div className="space-y-1">
       {conversations.map((c) => {
         const title = c.title || T('未命名对话', 'Untitled');
-        const time = formatTime(c.updated_date || c.created_date);
+        const time = formatRelativeTime(c.updated_date || c.created_date, lang);
         return (
           <button
             key={c.id}
@@ -1402,10 +1427,10 @@ function TaskCard({ task, isEn, T, onClick }) {
   const history = Array.isArray(task.execution_history) ? task.execution_history : [];
   const lastRun = history.length > 0
     ? history.slice().sort((a, b) => {
-        const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
-        const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
-        return tb - ta;
-      })[0]
+      const ta = a.timestamp ? new Date(a.timestamp).getTime() : 0;
+      const tb = b.timestamp ? new Date(b.timestamp).getTime() : 0;
+      return tb - ta;
+    })[0]
     : null;
 
   const status = task.status || 'idle';
@@ -1470,7 +1495,7 @@ function TaskCard({ task, isEn, T, onClick }) {
         <span className="inline-flex items-center gap-1">
           <Calendar className="h-3 w-3" />
           {task.last_run || lastRun?.timestamp
-            ? formatTime(task.last_run || lastRun.timestamp)
+            ? formatRelativeTime(task.last_run || lastRun.timestamp, lang)
             : T('尚未运行', 'Never run')}
         </span>
         {history.length > 1 && (
@@ -1489,7 +1514,7 @@ function TaskCard({ task, isEn, T, onClick }) {
    pause, etc. Used in the history sheet's run items. */
 function RunStatusIcon({ status }) {
   if (status === 'success') return <Check className="h-3.5 w-3.5 text-emerald-600" />;
-  if (status === 'failed')  return <AlertCircle className="h-3.5 w-3.5 text-red-600" />;
+  if (status === 'failed') return <AlertCircle className="h-3.5 w-3.5 text-red-600" />;
   if (status === 'running') return <Loader2 className="h-3.5 w-3.5 animate-spin text-blue-600" />;
   if (status === 'skipped' || status === 'paused') {
     return <Clock className="h-3.5 w-3.5 text-amber-600" />;

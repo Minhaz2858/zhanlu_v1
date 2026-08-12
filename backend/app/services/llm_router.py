@@ -1,14 +1,20 @@
 """Hierarchical LLM endpoint resolution.
 
 Resolution precedence (highest wins):
+  0. System-agent short-circuit → catalog default (ignores project/agent bindings)
   1. Project.llm_model_id  →  lookup in llm_models
   2. AgentApp.llm_model_id →  lookup in llm_models  (skipped if project resolved)
   3. llm_models.is_default = True →  catalog default  (skipped if above resolved)
-  4. Global fallback: settings.LLM_BASE_URL + settings.LLM_API_KEY
+  4. Global fallback: settings.OPENAI_BASE_URL + settings.OPENAI_API_KEY
 
 Note: when BOTH project and agent are bound, **project always wins** —
 the agent's own binding is ignored. This keeps the chat experience
 consistent across all agents inside a single project.
+
+Rule 0: System meta-agents (agent_builder, skill_agent, automation_agent)
+ALWAYS use the catalog default, regardless of project/agent bindings.
+This prevents infrastructure agents from being influenced by project-level
+model changes.
 
 Admin-lock: when bound at project/agent level (scope=company & current user
 is NOT an admin), the resolved model is *locked* — the chat header renders
@@ -32,6 +38,15 @@ from app.services.crypto_utils import decrypt_value
 
 logger = logging.getLogger(__name__)
 
+# System meta-agents that always use the catalog default, ignoring
+# project/agent-level LLM bindings.  These are infrastructure agents
+# whose behaviour must be stable regardless of project context.
+_SYSTEM_META_AGENTS = frozenset({
+    "agent_builder",    # Agent creation wizard
+    "skill_agent",      # Skill execution agent
+    "automation_agent", # Automation run agent
+})
+
 
 @dataclass
 class EffectiveLLM:
@@ -45,6 +60,9 @@ class EffectiveLLM:
 
     model_id: str = ""
     """The ``model`` field to send in the OpenAI payload."""
+
+    source: str = ""
+    """Origin of the resolved model: project | agent | default | system_default | legacy."""
 
     locked: bool = False
     """If True, the frontend must render a read-only badge (no dropdown swap)."""
@@ -63,6 +81,59 @@ class LLMEndpoint:
     is_private: bool = False
 
 
+def resolve_message_project_id(
+    db: Session,
+    *,
+    conv_project_id: Optional[str],
+    body_project_id: Optional[str],
+    body_project_name: Optional[str] = None,
+) -> Optional[str]:
+    """Effective project scope for a chat message.
+
+    The frontend sends the live-URL ``project_id`` on every message. A
+    conversation may have been created without one (legacy rows, chats
+    first opened from the main page), so ``conv.project_id`` alone can
+    miss the currently-selected project — the agent would then think
+    with the catalog-default model while reading the project's data
+    sources.
+
+    Precedence mirrors the data-source runtime in ``agents.py``:
+    ``body_project_id`` (validated against the live projects table)
+    wins, then ``body_project_name`` (resolved case-insensitively),
+    then ``conv_project_id``. A stale or soft-deleted body id/name is
+    dropped and the conv value is returned instead.
+    """
+    from app.models.project import Project
+
+    if body_project_id and body_project_id != conv_project_id:
+        row = (
+            db.query(Project)
+            .filter(Project.id == body_project_id, Project.is_deleted.is_(False))
+            .first()
+        )
+        if row is not None:
+            return row.id
+        logger.debug(
+            "resolve_message_project_id: dropping stale body project_id %s "
+            "(project not found or soft-deleted)",
+            body_project_id,
+        )
+    if body_project_name:
+        from sqlalchemy import func
+
+        row = (
+            db.query(Project)
+            .filter(
+                func.lower(Project.name) == body_project_name.lower(),
+                Project.is_deleted.is_(False),
+            )
+            .first()
+        )
+        if row is not None and row.id != conv_project_id:
+            return row.id
+    return conv_project_id
+
+
 def resolve_effective_llm(
     db: Session,
     *,
@@ -76,14 +147,52 @@ def resolve_effective_llm(
 ) -> EffectiveLLM:
     """Resolve which LLM model + endpoint to use for this request.
 
-    Precedence: Project > Agent > user model picker > catalog default > legacy global.
+    Precedence: System-agent short-circuit > Project > Agent > catalog default > legacy global.
 
     Admin-lock: when ``user_is_admin`` is False and the resolved model comes
     from a project or agent that has ``resource_type='company'``, the result
     is locked.
     """
     if not settings.HIERARCHICAL_LLM_ENABLED:
-        return EffectiveLLM()  # endpoint=None → legacy path
+        return EffectiveLLM(source="legacy")  # endpoint=None → legacy path
+
+    # Rule 0: System-agent short-circuit — always use catalog default
+    if agent_name and agent_name in _SYSTEM_META_AGENTS:
+        default = (
+            db.query(LlmModel)
+            .filter(
+                LlmModel.is_default.is_(True),
+                LlmModel.enabled.is_(True),
+                LlmModel.is_deleted.is_(False),
+                LlmModel.org_id == org_id,
+                LlmModel.app_id == app_id,
+            )
+            .first()
+        )
+        if default:
+            api_key = decrypt_value(default.api_key) or settings.OPENAI_API_KEY
+            endpoint = LLMEndpoint(
+                base_url=default.base_url,
+                api_key=api_key,
+                model_id=default.model_id,
+                is_private=default.is_private,
+            )
+            logger.debug(
+                "System-agent short-circuit: agent=%s → default model=%s",
+                agent_name, default.name,
+            )
+            return EffectiveLLM(
+                endpoint=endpoint,
+                model_name=default.name,
+                model_id=default.model_id,
+                source="system_default",
+            )
+        # No catalog default → fall through to legacy
+        logger.debug(
+            "System-agent short-circuit: agent=%s → no default, legacy fallback",
+            agent_name,
+        )
+        return EffectiveLLM(source="system_default")
 
     def _lookup(llm_model_id: str | None) -> LlmModel | None:
         if not llm_model_id:
@@ -164,9 +273,9 @@ def resolve_effective_llm(
     # 5) Legacy fallback — caller handles endpoint=None
     if resolved is None:
         logger.debug("No catalog match → falling back to legacy LLM_BASE_URL / LLM_API_KEY")
-        return EffectiveLLM()
+        return EffectiveLLM(source="legacy")
 
-    api_key = decrypt_value(resolved.api_key) or settings.LLM_API_KEY
+    api_key = decrypt_value(resolved.api_key) or settings.OPENAI_API_KEY
     endpoint = LLMEndpoint(
         base_url=resolved.base_url,
         api_key=api_key,
@@ -182,6 +291,7 @@ def resolve_effective_llm(
         endpoint=endpoint,
         model_name=resolved.name,
         model_id=resolved.model_id,
+        source=source,
         locked=locked,
         locked_reason=locked_reason,
     )

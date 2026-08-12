@@ -1,8 +1,17 @@
 # Project Knowledge Graph & Semantic Catalog — Design Spec
 
 **Date:** 2026-08-10
-**Status:** Draft (pending user review)
+**Status:** Revised (comprehensive 5-phase version; supersedes the 3-phase draft)
 **Author:** Brainstormed with user (scope, data model, phases, flags all resolved)
+
+**Revision notes (2026-08-10, comprehensive plan):**
+1. Phase structure expanded from 3 to 5 phases: Phase 3 entity graph is **folded into Phase 2** (Unified Resource Registry) as derived entity resources; new phases for Multi-Resource Router (3), Report Recipes (4), Depth Analysis Loop (5).
+2. Phase 1 is **built, pending eval gate** (catalog indexer + schema linker + catalog tables shipped; 139 tables indexed).
+3. Execution rule: **SQL runs through the direct read-only QueryService runner; Python/charts/artifacts run in the sandbox.** Never the reverse.
+4. "User-facing agents are Harness Agents" remains an **interface/manifest principle only** — no agent-runtime migration in this program.
+5. **Entity enrichment is fully generic**: extraction prompts, entity types, seed data, and tests must not contain domain-specific examples (no product names, no industry vocabulary). Entity types are universal categories; all vocabulary comes from the project's own data.
+6. Every new behavior is flag-gated (default OFF): flags off = zero behavioral impact; coded fallbacks preserved.
+7. Migration discipline (hard rule, the 047 lesson): **any new table AND any new column on an existing model ships with an alembic migration in the same task** — `create_all()` creates tables only, not columns.
 
 ## Problem
 
@@ -14,7 +23,10 @@ Two diagnosed pains in today's data-answer path, both in the database KB flow:
 **2. Missed tables + guessed joins — raw DDL dumps with no semantics.**
 `backend/app/services/db/schema_service.py:73-96` — `describe_all` returns raw column DDL capped at `max_tables` (default 50, called with 30). Concretely, against the EDIA warehouse `aipdp_data_warehouse_prod` (139 tables), ~109 tables are **invisible to the model by construction**. Cryptic names like `erp_t_stk_instockentry` carry no business meaning. No foreign-key relationships are extracted, so joins are guesswork. The result: the Data Agent misses tables it should use and answers slowly.
 
-**Root cause:** schema understanding is reconstructed from scratch per query instead of being **built once, silently, in the background** and reused.
+**3. (Added in revision) No cross-resource awareness.**
+The agent cannot tell whether a question should hit a database, an uploaded file, project memory, a past decision, or a report recipe — it guesses per-tool. And the validated `nl2sql` pipeline (`backend/app/services/nl2sql/`) is orphaned: consumed only by the standalone `POST /nl2sql/ask`, never by the agent path.
+
+**Root cause:** schema understanding is reconstructed from scratch per query instead of being **built once, silently, in the background** and reused; and there is no deterministic routing layer over project resources.
 
 **User requirements (from brainstorm, verbatim intent):**
 
@@ -30,7 +42,10 @@ Two diagnosed pains in today's data-answer path, both in the database KB flow:
 - Silent background indexing: KB connect/update and file uploads build the catalog with zero user effort.
 - Faster data answers: schema linking replaces per-query live introspection with retrieval over a pre-built catalog (no more 30-table DDL dumps).
 - More accurate data answers: tables discovered even when the question's vocabulary doesn't match table names; join paths derived from real FK relationships + inferred edges.
-- Per-project semantic layer: entities (products, customers, metrics, concepts) extracted from memory/chats/decisions and linked to catalog tables/columns/files, plus human-curated aliases/descriptions.
+- A Unified Resource Registry over all project resources (databases, files, reports, memories, decisions, derived entities) with visibility tiers.
+- Deterministic routing of each question to the right resource(s), with conservative fallback to current behavior.
+- Wire the orphaned `nl2sql` validation pipeline into the agent data path (shadow mode first, serving switch on evidence).
+- Report recipes as first-class reusable objects; depth analysis loop for multi-step "why" questions grounded in evidence packs.
 - Each phase independently useful and flag-gated (safe rollout, matching the `ECISCO_BI_*` / `FORECAST_*` pattern).
 
 **Non-goals (explicitly out of scope):**
@@ -38,8 +53,9 @@ Two diagnosed pains in today's data-answer path, both in the database KB flow:
 - Dedicated graph database (Neo4j / JanusGraph). Postgres + ChromaDB is sufficient; no new infra.
 - Real-time schema sync (change-data-capture). Catalog is refreshed by a refresh policy (on-connect, on-upload, manual re-index, periodic sweep) — eventual consistency is fine.
 - Auto-changing how SQL is executed. The linker only changes what schema context the LLM sees; `QueryService` execution stays untouched.
-- Entity extraction from raw file contents. Documents get summary-level catalog entries (Phase 2); entity extraction reads ProjectMemory and conversation summaries (Phase 3), not arbitrary files.
+- Entity extraction from raw file contents. Documents get summary-level registry entries; entity extraction reads ProjectMemory and conversation summaries, not arbitrary files.
 - General-purpose ontology modeling (SKOS/OWL inference). We store lightweight typed entities + links with confidence scores.
+- Agent-runtime migration to the Agent Harness (AgentRunOrchestrator). Harness-agent metadata remains manifest/config only.
 
 ## Architecture
 
@@ -50,296 +66,348 @@ flowchart LR
     subgraph Ingestion["Ingestion plane (background, silent)"]
         KB[KB connect / update] --> CI[Catalog Indexer]
         UP[File upload] --> DS[Doc Summarizer]
-        CHAT[Chats / ProjectMemory / decisions] --> EE[Entity Extractor]
+        CHAT[Chats / ProjectMemory / decisions] --> EE[Entity Extractor - fully generic]
         CI --> CT[(Catalog tables<br/>kb_table_meta / kb_column_meta / kb_table_relation)]
-        DS --> CT
-        EE --> ET[(Entity tables<br/>project_entity / project_entity_link)]
         CI --> CH[(ChromaDB<br/>catalog embeddings)]
-        DS --> CH
+        CI --> REG
+        DS --> REG
+        EE --> REG
+        EE --> ET[(project_entity / project_entity_link)]
+        DS --> REG[(resource_registry<br/>visibility-tiered)]
     end
 
     subgraph Query["Query plane (per question)"]
-        Q[User question] --> SL[Schema Linker]
+        Q[User question] --> RR[Resource Router<br/>deterministic RouteDecision]
+        RR -->|database| SL[Schema Linker]
+        RR -->|document| RAG[Hybrid RAG]
+        RR -->|memory| MEM[ProjectMemory / decisions]
+        RR -->|report| RRUN[Report Recipe Runner]
+        RR -->|multi_resource| DL[Depth Analysis Loop]
         SL --> CH
         SL --> CT
         SL --> ET
         SL --> NS[NLAnswerService / Data Agent]
-        NS --> DB[(Warehouse)]
+        NS --> NL2[nl2sql validator/policy<br/>shadow then serving]
+        NL2 --> DB[(Warehouse<br/>read-only, direct)]
+        RRUN --> DB
+        RRUN --> SB[Sandbox - charts/artifacts]
+        DL --> SL
+        DL --> SB
+        DL --> CR[self_critic + evidence pack]
         NS --> A[Grounded answer]
     end
 
     subgraph Curation["Curation plane (optional, human)"]
         UI[Data Map UI] --> OV[(project_catalog_overlay)]
+        UI --> REG
         OV --> SL
     end
 ```
 
-```mermaid
-sequenceDiagram
-    participant U as User
-    participant KBs as KnowledgeBase service
-    participant CI as Catalog Indexer (bg job)
-    participant PG as Postgres catalog tables
-    participant CH as ChromaDB
-    participant SL as Schema Linker
-    participant LLM as LLM
-    participant DB as Warehouse
-
-    U->>KBs: connect / update DB source
-    KBs->>CI: trigger index (async, silent)
-    CI->>DB: introspect tables/columns/PK/FK + row counts
-    CI->>LLM: one description pass (en/zh per table/column)
-    CI->>PG: upsert kb_table_meta / kb_column_meta / kb_table_relation
-    CI->>CH: embed table/column/relation text → catalog collection
-
-    U->>SL: question ("what is stock instockentry...?")
-    SL->>CH: RRF search (table + column + entity embeddings)
-    SL->>PG: fetch top-N table meta + 1-2 hop join paths + aliases
-    SL->>SL: build curated schema slice (~800 tokens)
-    SL->>LLM: prompt(slice, question)
-    LLM->>SL: one SQL with correct tables + joins
-    SL->>DB: execute via QueryService
-    DB->>SL: rows
-    SL->>U: grounded answer + citations
-```
-
 **Key design principles:**
 
-- **Catalog is keyed by KnowledgeBase** (shared across projects/agents that bind the same DB). Entities and overlays are keyed by project.
+- **Catalog is keyed by KnowledgeBase** (shared across projects/agents that bind the same DB). Registry entries, entities, and overlays are keyed by project with visibility tiers (`project` / `user_private` / `org`).
 - **Postgres is the system of record** for structured metadata; **ChromaDB holds embeddings** for retrieval, following the existing per-org hybrid-RAG pattern (`domain_{org_id}_{name}` collections, RRF k=60).
-- **Fallback preserved**: if a KB has no catalog yet, the current live-introspection path runs unchanged, and a background job is kicked off to build the catalog.
+- **SQL → direct read-only runner; Python/charts/artifacts → sandbox.** Report recipes and the depth loop execute SQL bundles via `QueryService` directly (never through the sandbox); chart/statistics code runs in the existing sandbox tool (never as raw SQL).
+- **Harness agents = interface principle only.** No runtime migration; the main chat FSM in `agents.py` is untouched by this program.
+- **Entity enrichment is fully generic.** The extractor knows only universal entity categories (`product` / `customer` / `metric` / `concept` / `organization` / `location`); all names, aliases, and descriptions come from the project's own memory/conversations. Prompts, seeds, and tests contain no industry-specific examples.
+- **Fallback preserved everywhere**: no catalog → live `describe_all`; shadow disagreement → serve current result; router uncertain → current routing; recipe missing → generic report path; depth loop failure → normal answer.
+- **Raw conversations are never dumped into prompts** — only permission-filtered summaries/entities.
 
 ## Data Model
 
-New tables follow the existing metadata/`create_all` convention (like migrations 036/038): plain SQLAlchemy models registered in `Base.metadata`, created by `Base.metadata.create_all()`. (Alembic head is `040_report_session_project_agent`; migration 026 crashes, so no new alembic migration is required — schema is managed by metadata.)
+New tables are plain SQLAlchemy models **plus an alembic migration in the same task** (hard rule; `create_all()` does not add columns to existing tables). Next migration numbers: 048 `resource_registry`, 049 `project_entity`/`project_entity_link`/`project_catalog_overlay`, 050 `report_recipes`.
 
-### Layer 1 — catalog tables (KB-keyed, shared across projects)
+### Layer 1 — catalog tables (KB-keyed, shared across projects) — BUILT
 
-**`kb_table_meta`** — one row per (KB, table).
+`kb_table_meta`, `kb_column_meta`, `kb_table_relation` exist in `backend/app/models/knowledge_catalog.py` (note: `kb_column_meta` links via `table_meta_id`; the `kb_table_relation` UniqueConstraint must not include JSON columns — no default btree opclass for JSON in Postgres).
 
-| Column | Type | Notes |
-|---|---|---|
-| `id` | String(32) | PK |
-| `kb_id` | String(36) FK `knowledge_bases.id` | catalog owner |
-| `table_name` | String(190) | physical table name |
-| `description_en` | Text | LLM business description (English) |
-| `description_zh` | Text | LLM business description (中文) |
-| `row_count` | BigInteger | latest known cardinality |
-| `entity_guess` | String(100) | e.g. `product`, `inventory`, `order`, `contract` |
-| `last_introspected_at` | DateTime | freshness |
-| `last_described_at` | DateTime | when LLM description was generated |
-| `created_at` / `updated_at` | DateTime | timestamps (TimestampedBase) |
+### Layer 2 — Unified Resource Registry (project-keyed, visibility-tiered) — Phase 2
 
-**`kb_column_meta`** — one row per (KB, table, column).
+**`resource_registry`** — one row per indexed resource.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | String(32) | PK |
-| `kb_id` | String(36) FK | catalog owner |
-| `table_name` | String(190) | |
-| `column_name` | String(190) | |
-| `data_type` | String(100) | raw DDL type |
-| `description` | Text | LLM business description |
-| `sample_values` | JSON | 3-5 sample values from introspection |
-| `is_primary_key` | Boolean | |
-| `is_foreign_key` | Boolean | |
-| `semantic_type` | String(50) | `date` / `money` / `id` / `enum` / `text` / `number` / `other` |
-
-**`kb_table_relation`** — FK edges from introspection + LLM-inferred edges.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | String(32) | PK |
-| `kb_id` | String(36) FK | catalog owner |
-| `from_table` | String(190) | |
-| `from_column` | String(190) | nullable (table-level edge) |
-| `to_table` | String(190) | |
-| `to_column` | String(190) | nullable |
-| `kind` | String(20) | `fk` (from introspection) / `inferred` (LLM) |
-| `confidence` | Float | 0.0-1.0; `fk` edges = 1.0 |
-| `origin` | String(50) | `introspection` / `llm` / `overlay` |
-
-### Layer 2/3 — project tables (project-keyed)
-
-**`project_entity`** — per project.
-
-| Column | Type | Notes |
-|---|---|---|
-| `id` | String(32) | PK |
+| `id` | String(36) | PK |
 | `project_id` | String(36) FK `projects.id` | project owner |
-| `name` | String(190) | canonical name |
+| `resource_type` | String(30) | `database` / `file` / `report` / `memory` / `decision` / `entity` |
+| `resource_id` | String(191) | source id (kb id, document id, memory id, ...) nullable for derived |
+| `name` | String(256) | display name |
+| `summary` | Text | one-paragraph "what's in this resource" (indexer-generated) |
+| `entities` | JSON | list of entity names mentioned (derived) |
+| `owner_user_id` | String(36) | nullable; set for `user_private` |
+| `visibility` | String(20) | `project` / `user_private` / `org` |
+| `status` | String(20) | `pending` / `indexing` / `ready` / `error` |
+| `last_indexed_at` | DateTime | freshness |
+
+Unique on (`project_id`, `resource_type`, `resource_id`). Visibility enforced at query time via existing RBAC (`resource_shares`, `USER_SCOPED_ENTITIES`, `canEditProject`, admin implicit edit).
+
+### Layer 3 — Entity tables + overlay (project-keyed) — Phase 2 (folded in)
+
+**`project_entity`** — per project, fully generic.
+
+| Column | Type | Notes |
+|---|---|---|
+| `id` | String(36) | PK |
+| `project_id` | String(36) FK `projects.id` | project owner |
+| `name` | String(191) | canonical name as it appears in project data |
 | `aliases` | JSON | list of strings |
-| `entity_type` | String(50) | `product` / `customer` / `metric` / `concept` |
-| `description` | Text | |
+| `entity_type` | String(50) | universal category: `product` / `customer` / `metric` / `concept` / `organization` / `location` |
+| `description` | Text | from project context only |
 | `source` | String(50) | `memory` / `chat` / `file` / `schema` |
 
 **`project_entity_link`** — entity → {table, column, file, memory, conversation}.
 
 | Column | Type | Notes |
 |---|---|---|
-| `id` | String(32) | PK |
-| `entity_id` | String(32) FK `project_entity.id` | |
+| `id` | String(36) | PK |
+| `entity_id` | String(36) FK `project_entity.id` | |
 | `target_type` | String(30) | `table` / `column` / `file` / `memory` / `conversation` |
-| `target_id` | String(190) | table name / column name / document id / memory id / conversation id |
-| `confidence` | Float | only links ≥ threshold used at query time |
+| `target_id` | String(191) | table name / column name / document id / memory id / conversation id |
+| `confidence` | Float | only links ≥ 0.7 used at query time |
 | `source` | String(50) | `llm` / `embedding` / `overlay` |
 
 **`project_catalog_overlay`** — per (project, table): user-written overrides.
 
-> A possible 7th table `kb_doc_meta` (per-file catalog entries) is anticipated in Phase 2; exact shape (dedicated table vs. a `kind` discriminator on `kb_table_meta`) is deferred to the Phase 2 implementation plan.
-
 | Column | Type | Notes |
 |---|---|---|
-| `id` | String(32) | PK |
+| `id` | String(36) | PK |
 | `project_id` | String(36) FK | |
 | `kb_id` | String(36) FK | nullable |
-| `table_name` | String(190) | nullable |
-| `alias` | String(190) | user-provided alias |
+| `table_name` | String(191) | nullable |
+| `alias` | String(191) | user-provided alias |
 | `description` | Text | overrides auto description |
 | `metric_definition` | Text | e.g. "GMV means net of refunds here" |
 | `scope` | String(20) | `table` / `kb` |
 
-### KnowledgeBase lifecycle field
+### Layer 4 — Report Recipes — Phase 4
 
-Add `catalog_status` to `KnowledgeBase`, mirroring the existing `indexing_status` lifecycle (`None -> "pending" -> "indexing" -> "ready" | "failed"`):
+**`report_recipes`** — data-defined reports; the runner executes, never the LLM.
 
-| Field | Type | Notes |
+| Column | Type | Notes |
 |---|---|---|
-| `catalog_status` | String(50), nullable, default None | catalog lifecycle |
-| `catalog_error` | Text, nullable | last index error |
-| `catalog_last_indexed_at` | DateTime, nullable | freshness |
+| `id` | String(36) | PK |
+| `name` | String(100) | unique per scope |
+| `project_id` | String(36) | nullable (null = global recipe) |
+| `required_metrics` | JSON[list[str]] | metric names resolvable via `metric_definition` |
+| `optional_dimensions` | JSON[list[str]] | |
+| `sql_bundle` | JSON[list] | `[{key, sql, params}]` — executed read-only via QueryService (direct) |
+| `charts` | JSON[list] | `[{type, source_key, x, y}]` — rendered via sandbox |
+| `sections` | JSON[list] | `[{title, source_key|template}]` |
+| `validation_rules` | JSON[list] | `[{rule, params}]` — enforced post-execution |
+| `output_format` | String(20) | `markdown` / `pptx` / `xlsx` |
+| `is_enabled` | Boolean | |
 
-## Phase 1 — Schema Catalog + Schema Linking (DBs only)
+### KnowledgeBase lifecycle field — BUILT
 
-Fix the stated pain first. This phase alone delivers: no per-query live introspection, all 139 tables discoverable, join paths from real FKs.
+`catalog_status` on `KnowledgeBase` (migration 047) mirrors the `indexing_status` lifecycle (`pending -> indexing -> ready | failed`), with `catalog_error` / `catalog_last_indexed_at` on the model.
 
-### 1.1 Catalog Indexer — `backend/app/services/knowledge_graph/catalog_indexer.py`
+## Phase 1 — Schema Catalog + Schema Linking (DBs only) — BUILT, pending eval gate
 
-Background job, silent, triggered by KB connect/update (mirrors the document ingestion trigger). Steps:
+Shipped: `catalog_indexer.py`, `schema_linker.py`, `resolver.py`, `graph.py`, `tool.py` under `backend/app/services/knowledge_graph/`; 139 tables / 2551 columns indexed from `aipdp_data_warehouse_prod`; Chroma `catalog_{kb_id}` with RRF; `describe_all` fallback preserved; `_safe_list_tables` re-raises connection-level failures (status truthfully `error`).
 
-1. **Introspect** via existing `get_connector(kb)` context manager: all table names, per-table columns + PK/FK flags, FK edges, row counts, 3-5 sample values per column.
-2. **LLM description pass** — one pass per KB, cheap model (reuse `llm_headers` / `llm_url` / `get_model`; a `SEMANTIC_CATALOG_MODEL` override optional). For each table + its columns, generate `description_en`, `description_zh`, `entity_guess`; infer table-level relations the FK scan misses (confidence < 1.0). **Cost guardrail:** descriptions are generated once, stored, and only regenerated on manual re-index or schema-diff detection — never per query.
-3. **Persist** to `kb_table_meta` / `kb_column_meta` / `kb_table_relation` (upsert, keyed by kb + table + column).
-4. **Embed** table text (name + description_en/zh + entity_guess) and column text (name + data_type + description + sample values) into a per-KB Chroma collection.
-5. Set `catalog_status = "ready"` (+ `catalog_last_indexed_at`); on failure `"failed"` + `catalog_error`.
+**Acceptance gate (must pass before declaring Phase 1 done):**
 
-**Chroma collection naming:** `catalog_{kb_id}` per KB (mirrors the per-org `domain_{org_id}_{name}` hybrid-RAG pattern).
+- Expand `backend/tests/test_knowledge_graph/eval_questions.py` from 8 to **15 questions** with ground-truth tables (from the warehouse discovery report).
+- **Table recall ≥ 90%** (from the ~22% implied by the 30-of-139 cap).
+- Record **per-query latency** vs the live `describe_all(30)` path (expect: seconds → sub-second).
+- Eval is a manual-run report (`test_eval_table_recall.py`), not CI.
 
-### 1.2 Schema Linker — `backend/app/services/knowledge_graph/schema_linker.py`
+Linker/indexer gaps found by the eval are fixed until the gate passes (e.g. description coverage, embedding quality, join-path expansion).
 
-Query-time retrieval. Algorithm:
+## Phase 2 — Unified Resource Registry (+ Documents, Overlay, Entity Graph)
 
-1. Embed the user question (reuse the existing embedding path used by Hybrid RAG).
-2. **RRF search** over the KB's catalog collection — three sub-queries: table-embedding similarity, column-embedding similarity, entity-embedding similarity (entity pool available from Phase 3; in Phase 1 just table+column). RRF k=60 to match existing RAG.
-3. Take **top 5-10 tables**; expand each by **1-2 hop join paths** over `kb_table_relation` edges (FK edges first, then inferred edges above confidence threshold).
-4. Fetch full meta rows for selected tables + columns; apply any `project_catalog_overlay` overrides (aliases/descriptions/metric definitions win over auto text).
-5. **Build a curated schema slice (~800 tokens)** — table name + business description + key columns with semantic types + join path hints — replacing the raw 30-table DDL dump.
-6. Return the slice to the caller.
+One registry over all project resources. The entity graph (spec'd as Phase 3 in the original draft) is folded in here as **derived entity resources**.
 
-**Fallback:** if `catalog_status` is not `ready` for the KB, return a "no catalog" marker so the caller falls back to the current `describe_all` path, and kick off the indexer job.
+### 2.1 Registry indexers — `backend/app/services/knowledge_graph/registry_indexer.py`
 
-### 1.3 Integration points
+Lightweight upsert indexers (no new ingestion system):
 
-- `NLAnswerService.answer()` (`nl_answer_service.py:59-68`): replace step 1's `describe_all(max_tables=30)` with `SchemaLinker.retrieve(kb_id, question)` when `SCHEMA_LINKING_ENABLED` and catalog is ready; keep the current path as fallback.
-- Data Agent tool handlers in `backend/app/services/tool_handlers/db_tools.py`: the `describe_schema` / `answer_from_database` handlers route through the same linker when enabled.
-- LLM call sites continue to use `llm_url()` / `llm_headers()` / `get_model()` unchanged.
+- **Databases**: hook catalog indexer completion → `database` rows (summary = table count + top descriptions).
+- **Documents**: hook `document_ingestion` lifecycle → per-file summary (one LLM call, ~1 paragraph) → `file` rows + embed summary into the catalog Chroma collection.
+- **Reports / memories / decisions**: upsert on creation events → `report` / `memory` / `decision` rows.
+- **Entities** (from 2.3): upsert `entity` rows pointing at `project_entity`.
 
-### 1.4 Guardrails
+Idempotent upserts keyed by (`project_id`, `resource_type`, `resource_id`); status transitions `pending → indexing → ready | error`; visibility set at write time and enforced at read time.
 
-- Description generation: one LLM pass per KB; token-bounded (chunked by table groups); cheap model; `catalog_status` shows progress/failure.
-- Linking: top-N capped (5-10), slice capped (~800 tokens) so prompt cost stays flat regardless of warehouse size.
-- No catalog → exact current behavior (zero blast radius when flags off).
-
-## Phase 2 — Documents + Project Overlay
-
-### 2.1 Doc Summarizer — `backend/app/services/knowledge_graph/doc_summarizer.py`
-
-Hooks the existing `document_ingestion` lifecycle (`service.py`): after a file's vector chunks are built, run a background summarizer that:
-
-1. Produces a **per-file summary** (what's in this file, key entities, ~1 paragraph) via one LLM call.
-2. Stores a catalog entry: a summary row in a new `kb_doc_meta` table (or reused `kb_table_meta`-style shape with `doc` variant) + optional extracted key entities into `project_entity` (source = `file`).
-3. Embeds the summary text into the catalog Chroma collection so file summaries surface in schema-linking retrieval (complementing vector-chunk RAG).
-
-### 2.2 Overlay API — project curation
-
-New REST endpoints under the project resources API (pattern follows existing project-scoped routes):
+### 2.2 Overlay + registry API — `backend/app/routers/project_catalog.py`
 
 ```
-GET    /projects/{project_id}/catalog/tables          # catalog view (tables + auto descriptions + overlay status)
-PUT    /projects/{project_id}/catalog/overlay         # upsert project_catalog_overlay (alias / description / metric_definition)
-GET    /projects/{project_id}/catalog/entities        # entity list (Phase 3 fills)
+GET    /projects/{project_id}/catalog/tables      # catalog view (auto descriptions + overlay status)
+PUT    /projects/{project_id}/catalog/overlay     # upsert overlay (alias / description / metric_definition)
+GET    /projects/{project_id}/catalog/entities    # entity list
+GET    /projects/{project_id}/registry/resources  # registry list (type/visibility filters)
 ```
 
-RBAC: catalog reads respect existing access control (KnowledgeBase is in `USER_SCOPED_ENTITIES`); overlay writes require `canEditProject` (admin implicit edit applies as today).
+RBAC: reads respect existing access control (KnowledgeBase in `USER_SCOPED_ENTITIES`); overlay writes require `canEditProject` (admin implicit edit applies).
 
-### 2.3 "Data Map" tab in project UI
-
-New tab in the project page: lists catalog tables with business descriptions (auto + overlay-indicator), search box over table/column names + descriptions, inline edit for alias/description/metric definition (writes `project_catalog_overlay`). Read-only for viewers.
-
-## Phase 3 — Entity Graph
-
-### 3.1 Entity Extractor — `backend/app/services/knowledge_graph/entity_extractor.py`
+### 2.3 Entity Extractor — `backend/app/services/knowledge_graph/entity_extractor.py` (FULLY GENERIC)
 
 Flag-gated (`ENTITY_GRAPH_ENABLED`) background job:
 
 1. Reads new `ProjectMemory` entries and conversation summaries for the project.
-2. Cheap-model extraction of named entities → `project_entity` (type: product/customer/metric/concept, aliases, description, source).
-3. Links entities to catalog tables/columns by embedding similarity + LLM confirmation → `project_entity_link` with confidence; only links ≥ threshold (default 0.7) used at query time.
-4. Idempotent: re-runs only process new/unseen memory entries.
+2. Cheap-model extraction of named entities → `project_entity`. **The prompt is domain-agnostic**: it instructs extraction of "named entities that appear in this text (products, customers, metrics, concepts, organizations, locations)" with **no example values**. Entity names come only from the text itself.
+3. Links entities to catalog tables/columns by embedding similarity + LLM confirmation → `project_entity_link` with confidence; only links ≥ 0.7 used at query time.
+4. Idempotent: re-runs only process new/unseen memory entries (track processed ids).
+5. Upserts `entity` rows into `resource_registry`.
 
-### 3.2 Entity-aware retrieval
+### 2.4 Entity-aware retrieval
 
-Schema Linker adds entity-embedding sub-query to the RRF mix (entity names + aliases + linked table names), so questions phrased in project vocabulary ("our stock levels for C5") surface the right tables even when table names are cryptic.
+Schema Linker adds entity-embedding sub-query to the RRF mix (entity names + aliases + linked table names), so questions phrased in project vocabulary surface the right tables even when table names are cryptic.
 
-### 3.3 "Project Data Map" prompt section
+### 2.5 "Project Data Map" prompt section
 
-`prepare_data_source_runtime()` (`data_source_runtime.py:396`) appends a compact "Project Data Map" block when a project is selected and the catalog is ready: available entity types, key tables + one-line business descriptions, notable aliases. Kept short (~300-400 tokens) so the main agent always knows what data exists in the project, on top of the per-question schema slice.
+`prepare_data_source_runtime()` (`data_source_runtime.py`) appends a compact "Project Data Map" block when a project is selected and the catalog is ready: available entity types, key tables + one-line business descriptions, notable aliases. Kept short (~300-400 tokens) so the main agent always knows what data exists in the project.
+
+### 2.6 "Data Map" tab in project UI
+
+New tab in the project page: catalog table browser (auto + overlay-indicator descriptions, search, inline edit for editors), registry resource list (type/visibility badges), entity chips. Read-only for viewers. Entity block hidden when `ENTITY_GRAPH_ENABLED` is off.
+
+**Acceptance metrics:**
+
+- Registry covers 100% of connected KBs + uploaded files within one indexer pass (status `ready` or truthful `error`).
+- Visibility filter: `user_private` entries invisible to other project members (API test).
+- Entity extractor: precision on a labeled fixture ≥ 0.8 with the generic prompt; zero domain vocabulary in prompt/tests (lint-checked fixture review).
+- Data Map prompt block ≤ 400 tokens.
+
+## Phase 3 — Multi-Resource Router
+
+### 3.1 Contract — `backend/app/services/knowledge_graph/resource_router.py`
+
+Deterministic rule engine producing a typed decision; never raises; rules over question text + `bound_kb_ids` + registry resource types; optional LLM assist via `intent_classifier` extension. Zero LLM cost on rule hit.
+
+```python
+class ResourceRoute(str, Enum):
+    DATABASE = "database"
+    DOCUMENT = "document"
+    MEMORY = "memory"
+    REPORT = "report"
+    MULTI_RESOURCE = "multi_resource"
+
+@dataclass
+class RouteDecision:
+    route: ResourceRoute
+    resource_ids: list[str]
+    confidence: float       # rules emit 1.0 or 0.0; LLM assist in between
+    used_fallback: bool     # True = conservative default, behave exactly as today
+```
+
+### 3.2 Integration
+
+- `intent_classifier.py` gains the resource-route taxonomy (preserving never-raise + per-session cache contract).
+- `tool_handlers/delegation_tools.py` consumes `RouteDecision` when `KG_RESOURCE_ROUTER_ENABLED`; ambiguous → `used_fallback=True` → current behavior.
+- `tool_handlers/db_tools.py` route-aware tool gating behind the flag (database route gets DB tools; others excluded). **No change when flag off. Router must not touch `agents.py` chat FSM.**
+
+**Acceptance metrics:**
+
+- Route accuracy ≥ 90% on a 20-question fixture set covering all 5 routes.
+- `classify` never raises (fuzz test); fallback path byte-identical behavior with flag off.
+
+## Phase 4 — Report Recipes
+
+### 4.1 Runner — `backend/app/services/report_recipes/runner.py`
+
+Execution order (deterministic):
+
+1. Resolve `required_metrics` via `metric_definition` (exists: base_sql, synonyms, aggregations).
+2. Execute `sql_bundle` via QueryService — **direct, read-only, never through sandbox**.
+3. Render `charts`/artifacts via the existing sandbox tool.
+4. Enforce `validation_rules` (incl. nl2sql validator on generated SQL) post-execution.
+5. Assemble `sections` into `output_format`.
+
+### 4.2 Seeds — `backend/app/services/report_recipes/seed_recipes.py`
+
+Five generic recipe templates (sales / weekly / monthly / inventory / customer) defined as data (JSON), with metric placeholders resolved per project — **no hardcoded schema or product names**. The EDIA weekly-report module later plugs into this foundation.
+
+### 4.3 Learning hooks
+
+Connect to the experience layer: recipe selection/success feeds `.recipes.json` (`ECISCO_BI_RECIPE_LEARNING_ENABLED`), and `/feedback` adjusts recipe rankings (`adjust_recipe_feedback`).
+
+**Acceptance metrics:**
+
+- Each seed recipe executes end-to-end against a fixture datasource with validation passing.
+- Sandbox failure degrades to markdown-without-charts (soft-fail test).
+- Validation-rule violation blocks output with a clear error.
+
+## Phase 5 — Depth Analysis Loop
+
+### 5.1 Loop — `backend/app/services/depth_analysis/loop.py`
+
+For multi-step "why" questions. Modeled on the proven forecast analyst pattern (`forecasting/analyst/`: evidence_pack → brief_writer; **LLM explains, NEVER decides**) plus `self_critic.py` for validation.
+
+```python
+async def run_depth_loop(
+    question: str, project_id: str, db: Session, *,
+    max_iterations: int = 3,
+) -> DepthAnalysisResult  # {answer, evidence_pack, iterations, confidence, degraded}
+```
+
+Per iteration: hypothesis → catalog/nl2sql query (direct SQL) → validate (self_critic) → refine; optional sandbox statistics; final answer carries an **evidence pack** (queries run, rows examined, charts, confidence, citations). Soft-fail: any loop failure degrades to the normal single-pass answer (`degraded=True`).
+
+**Acceptance metrics:**
+
+- Iteration cap enforced (test: never exceeds `max_iterations`).
+- Evidence pack present and well-formed on success; `degraded=True` with normal answer on induced failure.
+- Termination + correctness on fixture questions; the LLM never emits a decision without a supporting query in the evidence pack.
+
+## nl2sql Shadow-Mode Wiring (cross-cutting, lands with Phase 1 gate)
+
+The validated `nl2sql` pipeline (`semantic_resolver`, `context_builder`, `validator`, `policy`, `row_filter`, `dialect_rules`) is consumed ONLY by `POST /nl2sql/ask` today. Wire it into the agent path behind `NL2SQL_SHADOW_MODE_ENABLED`:
+
+- `nl_answer_service.py` + `delegation_tools.py` `ask_data_agent` paths: after text-to-SQL, shadow-run the nl2sql validator/policy on the generated SQL; log divergences to `nl2sql_query_logs`; **still serve the current result**.
+- Facade: single `validate_sql(sql, dialect, datasource_id)` entry in `nl2sql/__init__.py`; existing pipeline untouched.
+- Serving switch only after divergence eval passes (evidence-based, recorded numbers).
 
 ## Flags & Rollout
 
-Three new flags in `backend/app/config.py` (Settings fields, following the `ECISCO_BI_*` / `FORECAST_*` comment style at config.py:447-501):
+New flags in `backend/app/config.py` (Settings fields, `ECISCO_BI_*` / `FORECAST_*` comment style), all default `False`:
 
-| Flag | Default | Gates |
-|---|---|---|
-| `SEMANTIC_CATALOG_ENABLED` | `False` | Catalog indexer + doc summarizer + entity extractor background jobs |
-| `SCHEMA_LINKING_ENABLED` | `False` | Schema Linker integration in `NLAnswerService` / Data Agent tools |
-| `ENTITY_GRAPH_ENABLED` | `False` | Entity extraction + entity-aware retrieval + Data Map prompt section |
+| Flag | Gates |
+|---|---|
+| `SEMANTIC_CATALOG_ENABLED` | Catalog indexer + doc summarizer background jobs (exists) |
+| `SCHEMA_LINKING_ENABLED` | Schema Linker integration in NLAnswerService / Data Agent tools (exists) |
+| `NL2SQL_SHADOW_MODE_ENABLED` | Shadow validation + divergence logging in agent data path |
+| `KG_RESOURCE_REGISTRY_ENABLED` | Registry indexers + registry read API |
+| `ENTITY_GRAPH_ENABLED` | Entity extraction + entity-aware retrieval + Data Map prompt section |
+| `KG_RESOURCE_ROUTER_ENABLED` | RouteDecision consumption in delegation/db tools |
+| `REPORT_RECIPES_ENABLED` | Recipe runner + seed loading |
+| `DEPTH_ANALYSIS_LOOP_ENABLED` | Depth loop route + execution |
 
 Rollout:
 
-- `.env` flag changes require `docker compose up -d --force-recreate backend` (env_file is baked at container creation).
-- Service code changes require `docker restart zhanlu-backend` (no `--reload`).
-- Suggested enable order: Phase 1 (`SEMANTIC_CATALOG_ENABLED` + `SCHEMA_LINKING_ENABLED`) → measure eval recall/latency → Phase 2 (doc summaries + overlay UI) → Phase 3 (`ENTITY_GRAPH_ENABLED`).
+- `.env` flag changes require `docker compose up -d --force-recreate backend`; service code changes require `docker restart zhanlu-backend`.
+- Enable order: Phase 1 gate → `NL2SQL_SHADOW_MODE_ENABLED` (observe divergence) → `KG_RESOURCE_REGISTRY_ENABLED` → `ENTITY_GRAPH_ENABLED` → `KG_RESOURCE_ROUTER_ENABLED` → `REPORT_RECIPES_ENABLED` → `DEPTH_ANALYSIS_LOOP_ENABLED` → shadow serving switch (evidence-based).
 
 ## Testing & Eval
 
-**Unit tests** (SQLite fixtures; run via `backend/venv/bin/python`, individually — SSH RAM is limited; avoid broken suites `tests/test_intelligence/` and `tests/test_document_ingestion`):
+**Unit tests** (SQLite fixtures; `backend/venv/bin/python`, individually — SSH RAM limited; avoid broken suites `tests/test_intelligence/` and `tests/test_document_ingestion`). TDD: failing test first for router decisions, shadow logging, registry visibility filtering, entity extraction, recipe validation, depth-loop termination.
 
-- Indexer: introspect fixtures → catalog tables populated correctly; upsert idempotency; FK edge extraction; LLM-description pass mocked.
-- Linker: RRF over fixture embeddings returns expected top tables; join-path expansion (1-hop, 2-hop); overlay override wins; fallback marker when no catalog.
-- Entity extractor: memory fixture → entities + links with confidence; threshold filtering.
-- Overlay API: write/read/override semantics; RBAC gating.
+- Indexer/linker: existing `tests/test_knowledge_graph/` suites stay green.
+- Shadow mode: divergence records written; served result invariant.
+- Router: route decisions per fixture; fallback contract; never-raise fuzz.
+- Registry: upsert idempotency, visibility tiers, status transitions.
+- Entity extractor: generic-prompt extraction, threshold filtering, idempotency; **test fixtures use invented neutral names only** (e.g. "Item Alpha", "Acme Corp") — no industry vocabulary.
+- Recipes: bundle execution order, validation-rule enforcement, sandbox failure fallback.
+- Depth loop: iteration cap, critic gate, evidence pack shape, soft-fail.
+- Overlay/registry API: write/read semantics, RBAC gating.
 
-**Integration test** (one, against the real warehouse):
+**Integration test** (one, against the real warehouse `aipdp_data_warehouse_prod` @ 10.10.10.49:3306): indexer completes, 139 tables present, catalog_status ready, linker returns a slice.
 
-- `aipdp_data_warehouse_prod` @ 10.10.10.49:3306 (`EDIA_MYSQL_URL`), 139 tables. Verify: indexer completes, all 139 tables present in `kb_table_meta`, FK edges found, catalog_status = ready, linker returns a slice for a sample question.
-
-**Eval set** (the acceptance criterion for "fixes missed tables"):
-
-- 10-15 real NL questions per project, chosen from actual chat history.
-- Metric: **table recall before/after** — does the schema slice contain the table(s) the ground-truth SQL uses? Target: recall on the EDIA warehouse jumps from ~22% (30-of-139-tables cap) toward ≥90%.
-- Also record per-query latency before (live 30-table introspection) vs after (RRF retrieval + slice).
+**Eval set** (the Phase 1 acceptance criterion): 15 real NL questions with ground-truth tables; **table recall ≥ 90%**; per-query latency recorded before/after.
 
 ## Risks & Open Questions
 
 | Risk | Mitigation |
 |---|---|
-| LLM description quality varies | Overlay UI lets users correct; descriptions stored once and reused; cheap-model pass is a best-effort first version, regenerable |
-| Catalog staleness after schema changes | Refresh on connect/update + manual re-index + periodic sweep; `catalog_last_indexed_at` shown in UI; fallback to live introspection if catalog is stale/absent |
-| Multi-tenant / RBAC leaks | Catalog tables are internal to services, exposed only through overlay API gated by existing access checks (KnowledgeBase in `USER_SCOPED_ENTITIES`; admin implicit edit) |
-| Entity extraction false positives | Confidence threshold (0.7) on links; only high-confidence links enter the query path; source tagging (`llm`/`embedding`) for auditability |
-| Chroma collection growth | Per-KB collections, small payloads (descriptions, not chunk texts); cleanup on KB delete |
-| Prompt budget | Slice capped ~800 tokens, Data Map ~300-400 tokens; flat cost regardless of warehouse size |
-| Open: catalog refresh policy details | Decide in Phase 1 implementation plan: on-connect trigger + manual re-index button + optional nightly sweep |
-| Open: `kb_doc_meta` exact shape | Decide in Phase 2 implementation plan (reuse `kb_table_meta` with a `kind` discriminator vs a dedicated table) |
-| Open: which LLM model for descriptions/extraction | Reuse global config by default; `SEMANTIC_CATALOG_MODEL` env override for a cheaper model if desired |
+| LLM description quality varies | Overlay UI lets users correct; descriptions stored once and reused; regenerable |
+| Catalog staleness after schema changes | Refresh on connect/update + manual re-index + periodic sweep; `catalog_last_indexed_at` shown in UI; fallback to live introspection |
+| Multi-tenant / RBAC leaks | Registry visibility tiers enforced at query time; catalog exposed only through RBAC-gated API; raw conversations never enter prompts (permission-filtered summaries only) |
+| Entity extraction false positives | Confidence threshold (0.7); source tagging for auditability; generic prompt reduces domain bias |
+| Entity extractor drifts domain-specific | Hard constraint: prompt/fixtures contain no example values; fixture review in PR checklist |
+| nl2sql validator rejects SQL that works today | Shadow mode first: run both, log divergence, serve current result; serving switch only on eval evidence |
+| Router misclassification | Conservative defaults; `used_fallback=True` = byte-identical current behavior; never-raise contract |
+| Shadow mode doubles validation compute | Log-only, cheap relative to LLM calls; temporary until serving switch |
+| Chroma collection growth | Per-KB collections, small payloads; cleanup on KB delete |
+| Prompt budget | Slice ~800 tokens, Data Map ~300-400 tokens; flat cost regardless of warehouse size |
+| Open: catalog refresh policy details | On-connect trigger + manual re-index + optional nightly sweep (decide at rollout) |
+| Open: which LLM model for descriptions/extraction | Reuse global config by default; `SEMANTIC_CATALOG_MODEL` env override for a cheaper model |

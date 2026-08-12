@@ -24,10 +24,11 @@ import asyncio
 import contextvars
 import logging
 import os
+import threading
 import traceback
 import uuid
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 from sqlalchemy import func, update
 from sqlalchemy.orm import Session
@@ -39,6 +40,7 @@ from app.models.chat_message import ChatMessage
 from app.models.agent_app import AgentApp
 from app.models.agent_conversation import AgentConversation
 from app.models.user import User
+from app.lib.timezone import format_cst
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +71,14 @@ def _worker_id() -> str:
     return f"{host}:{os.getpid()}"
 
 
+def _as_aware_utc(dt: datetime | None) -> datetime | None:
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 class _AutomationPaused(Exception):
     """Raised when the agent runtime pauses for confirmation mid-run.
 
@@ -89,6 +99,71 @@ class _TaskCreatorMissingError(Exception):
     ownership via ``conv.created_by_id != user.id``, so a missing creator
     otherwise crashes the run with an opaque
     ``'NoneType' object has no attribute 'id'``.
+    """
+
+
+# ---------------------------------------------------------------------------
+# Cancellation: ``POST /api/automations/executions/{id}/cancel``
+#
+# Cancellation is cooperative — the cancel endpoint flips the DB row to
+# status="cancelled" (CAS on queued/running) AND sets a threading.Event
+# keyed by execution id. The in-flight agent loop polls the event between
+# SSE chunks and bails out with ``_AutomationCancelled`` at the next safe
+# checkpoint.
+#
+# Threading.Event (not asyncio.Event) because the event is set from one
+# thread (the cancel HTTP handler) and read from another (the executor's
+# worker thread which runs its own asyncio loop inside).
+# ---------------------------------------------------------------------------
+
+# execution_id -> threading.Event
+_CANCEL_EVENTS: Dict[str, threading.Event] = {}
+_CANCEL_LOCK = threading.Lock()
+
+
+def request_cancel(execution_id: str) -> bool:
+    """Signal an in-flight agent loop to bail out. Returns True when the
+    cancel was delivered to a live event (i.e. an executor is currently
+    polling it); False when the run already finished or was never
+    registered (the endpoint should still flip the DB row to "cancelled"
+    in either case — this just reports whether the in-process signal
+    landed).
+    """
+    with _CANCEL_LOCK:
+        ev = _CANCEL_EVENTS.get(execution_id)
+    if ev is None:
+        return False
+    ev.set()
+    return True
+
+
+def _register_cancel_event(execution_id: str) -> threading.Event:
+    """Get-or-create the cancel event for an execution. Idempotent — if
+    the executor is retried after a crash, the old event is reset so a
+    stale set() can't fire on the new run.
+    """
+    with _CANCEL_LOCK:
+        ev = _CANCEL_EVENTS.get(execution_id)
+        if ev is None:
+            ev = threading.Event()
+            _CANCEL_EVENTS[execution_id] = ev
+        else:
+            ev.clear()
+        return ev
+
+
+def _clear_cancel_event(execution_id: str) -> None:
+    with _CANCEL_LOCK:
+        _CANCEL_EVENTS.pop(execution_id, None)
+
+
+class _AutomationCancelled(Exception):
+    """Raised by the agent loop when the cancel event is set.
+
+    The executor catches this and marks the run ``status="cancelled"``
+    with ``error="Cancelled by user"`` and writes a brief "⏹ Run
+    cancelled by user" line into the assistant bubble so the user can
+    see why the run stopped.
     """
 
 
@@ -113,8 +188,15 @@ def _resolve_task_user(db, task: AutomationTask) -> User:
 
 _HONESTY_GUARDRAIL = (
     "Report only what tools actually returned. If a data source is "
-    "missing, empty, or unreachable, say so explicitly and stop — never "
-    "fabricate rows, totals, or 'successful sync' claims."
+    "missing, empty, or unreachable, state the issue concisely — never "
+    "fabricate rows, totals, or claims."
+)
+
+_NO_PREAMBLE = (
+    "Produce the deliverable directly — start with your analysis steps "
+    "immediately. Do not narrate your boundaries, do not hedge, do not "
+    "explain what you can or cannot do, and do not echo guardrail rules. "
+    "If the task cannot be completed, state the issue concisely and stop."
 )
 
 _FORMAT_GUIDANCE = {
@@ -252,6 +334,7 @@ def _resolve_bound_data_source_ids(
     project_id,
     project_name: str | None = None,
     pinned_data_source_id: str | None = None,
+    include_workspace_auto_bind: bool = True,
 ) -> list:
     """Effective bound data-source ids for a run — the SAME resolution
     chain the chat tool runtime uses, so the preflight can never disagree
@@ -267,7 +350,8 @@ def _resolve_bound_data_source_ids(
     # __init__ only re-exports get_bound_data_source_ids.
     from app.services.data_source_runtime import data_source_runtime as _dsrt
     bound = _dsrt.get_bound_data_source_ids(agent)
-    bound = _dsrt._maybe_extend_with_workspace_auto_bind(db, agent, bound)
+    if include_workspace_auto_bind:
+        bound = _dsrt._maybe_extend_with_workspace_auto_bind(db, agent, bound)
     bound = _dsrt._extend_with_project_kbs(
         db, agent, bound, project_id, project_name=project_name
     )
@@ -630,7 +714,7 @@ def _previous_run_context(
     summary = _extract_structured_summary(text)
 
     ran_at_str = (
-        prev.completed_at.strftime("%Y-%m-%d %H:%M UTC")
+        format_cst(prev.completed_at)
         if prev.completed_at else "unknown"
     )
 
@@ -750,6 +834,23 @@ def execute_automation(execution_id: str) -> None:
             return
         db.refresh(execution)
 
+        # Auto-prompt injection (per spec): every run immediately drops a
+        # "Run Automation Task: ..." user bubble into the task's dedicated
+        # chat session, BEFORE the agent starts processing. Without this,
+        # the user has no visible signal that the run was triggered — the
+        # only "agent is thinking" indicator is the generic activity-steps
+        # stream from the v3 stream, which doesn't show WHAT was sent.
+        # Idempotent per execution: re-running for the same execution id
+        # is a no-op (the marker is matched on phase.execution_id).
+        try:
+            _post_run_request_marker(db, task, execution, trigger="run")
+        except Exception:
+            logger.exception(
+                "execute_automation: _post_run_request_marker failed (non-fatal) "
+                "for execution %s",
+                execution_id,
+            )
+
         agent, agent_reason = _resolve_agent(db, task)
         if not agent:
             _mark_failed(db, execution, f"No agent available: {agent_reason}")
@@ -760,23 +861,20 @@ def execute_automation(execution_id: str) -> None:
         # either column, so the run must recognize the same bindings.
         project_id, project_name = _resolve_task_project(db, task)
 
-        # Post the visible "Run Automation Task：" request bubble into the
-        # task's dedicated chat session BEFORE the preflight gate so a run
-        # that fails fast (no bound data source) still leaves the request
-        # record. Idempotent per execution; never raises.
-        _post_run_request_marker(
-            db, task, execution,
-            trigger="retry" if execution.attempt > 0 else "run",
-        )
-
         # data_sync preflight: with zero bound data sources the run can
         # only fabricate content. Fail fast (retryable — a binding may be
         # added later) instead of spending an LLM run on fiction.
         if (task.type or "").strip().lower() == "data_sync":
+            _has_task_scope = bool(
+                project_id
+                or project_name
+                or getattr(task, "data_source_id", None)
+            )
             _bound_ids = _resolve_bound_data_source_ids(
                 db, agent, project_id,
                 project_name=project_name,
                 pinned_data_source_id=getattr(task, "data_source_id", None),
+                include_workspace_auto_bind=not _has_task_scope,
             )
             if not _bound_ids:
                 _mark_failed(
@@ -856,6 +954,8 @@ def execute_automation(execution_id: str) -> None:
             f"You are running as part of the scheduled automation '{task.name}' "
             f"({task.id}). Produce a complete, well-structured response — the "
             f"system will save your output as a deliverable for the user.\n\n"
+            + _NO_PREAMBLE
+            + "\n\n"
             + _format_guidance(getattr(task, "output_format", None))
             + "\n\n"
             + _HONESTY_GUARDRAIL
@@ -870,91 +970,173 @@ def execute_automation(execution_id: str) -> None:
         from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeout
         pool = ThreadPoolExecutor(max_workers=1)
         fut = pool.submit(_run_agent_in_conversation, task, agent, agent_prompt, execution.id, None, project_id)
+        # Persist-state: EVERY exit path (success, timeout, paused, creator
+        # missing, generic exception, tool-failure gate) MUST drop a visible
+        # assistant bubble into the task's chat session. The chat frontend
+        # loads from chat_messages (not agent_conversations.messages JSON), so
+        # without this the user sees the auto-prompt user bubble followed by
+        # silence on any non-happy-path. The finally block below fires on
+        # every return (including the post-success path that may be reaped
+        # by the janitor before the assistant text is written back).
+        _persist_state: dict = {"user_prompt": None, "assistant_text": None}
+        _timeout_s = settings.AUTOMATION_RUN_TIMEOUT_SECONDS
         try:
-            assistant_text, conv_id, fsm_meta, tool_outcome = fut.result(
-                timeout=settings.AUTOMATION_RUN_TIMEOUT_SECONDS
-            )
-        except FuturesTimeout:
-            pool.shutdown(wait=False, cancel_futures=True)
-            # Refresh so we pick up the partial output the sub-thread
-            # persisted via _persist_run_progress before the hang.
-            db.refresh(execution)
-            _mark_failed(
-                db, execution,
-                f"Run timed out after {settings.AUTOMATION_RUN_TIMEOUT_SECONDS}s",
-            )
-            return
-        except _AutomationPaused as e:
-            # Pauses are terminal in unattended mode — don't retry (would
-            # just reproduce the pause). Use the no-retry path so the run
-            # fails fast with the flag-aware message from the stream.
-            pool.shutdown(wait=False, cancel_futures=True)
-            logger.warning("execute_automation: %s paused: %s", execution_id, e)
-            _mark_failed_no_retry(db, execution, str(e))
-            return
-        except _TaskCreatorMissingError as e:
-            pool.shutdown(wait=False, cancel_futures=True)
-            logger.warning("execute_automation: %s %s", execution_id, e)
-            _mark_failed_no_retry(
-                db, execution,
-                "Task creator account no longer exists — re-save the "
-                "automation to reassign ownership.",
-            )
-            return
-        except Exception as e:
-            pool.shutdown(wait=False, cancel_futures=True)
-            logger.exception("execute_automation: agent run failed: %s", e)
-            err_msg = f"Agent run failed: {e}"
-            if _is_transient_error(e):
-                _mark_failed(db, execution, err_msg)  # schedules a retry
-            else:
-                _mark_failed_no_retry(db, execution, err_msg)  # fail fast
-            return
-        else:
-            pool.shutdown(wait=False)
-            # Truthfulness gate (item 5): if EVERY tool call failed and the
-            # agent produced nothing real (empty / canned fallback text),
-            # the run did not do its work — mark it failed with the actual
-            # tool errors (retryable: the data source may recover) instead
-            # of shipping boilerplate as a success. Preserves the output so
-            # operators can see what the agent tried.
-            if _should_fail_for_total_tool_failure(assistant_text, tool_outcome):
-                _errs = "; ".join((tool_outcome.get("errors") or [])[:3]) or "no error detail returned"
-                execution.output_text = (assistant_text or "")[:200_000]
-                logger.warning(
-                    "execute_automation: %s failing run — all %d tool call(s) failed: %s",
-                    execution_id, tool_outcome["calls"], _errs,
+            try:
+                assistant_text, conv_id, fsm_meta, tool_outcome = fut.result(
+                    timeout=_timeout_s
                 )
+            except FuturesTimeout:
+                pool.shutdown(wait=False, cancel_futures=True)
+                # Refresh so we pick up the partial output the sub-thread
+                # persisted via _persist_run_progress before the hang.
+                db.refresh(execution)
                 _mark_failed(
                     db, execution,
-                    f"All {tool_outcome['calls']} tool call(s) failed — the run could not "
-                    f"do its work. First errors: {_errs}",
+                    f"Run timed out after {_timeout_s}s",
+                )
+                _persist_state["assistant_text"] = (
+                    f"⏱ The run exceeded the {_timeout_s}s time limit "
+                    f"and was stopped. The agent may have hit a slow tool "
+                    f"call or a network issue. Try again, or simplify the "
+                    f"task description to lower the cost."
                 )
                 return
-            # Append a ledger entry to the per-project memory conversation.
-            try:
-                from app.services.automation_runtime import (
-                    get_or_create_project_conversation, append_run_summary,
+            except _AutomationPaused as e:
+                # Pauses are terminal in unattended mode — don't retry (would
+                # just reproduce the pause). Use the no-retry path so the run
+                # fails fast with the flag-aware message from the stream.
+                pool.shutdown(wait=False, cancel_futures=True)
+                logger.warning("execute_automation: %s paused: %s", execution_id, e)
+                _mark_failed_no_retry(db, execution, str(e) or "Automation paused for approval")
+                _persist_state["assistant_text"] = (
+                    f"⏸ The run was paused for approval: "
+                    f"{e or 'awaiting operator review'}. "
+                    f"Resume it from the task detail page to continue."
                 )
-                if getattr(agent, "role", None) == "automation_runtime":
-                    _mem_conv = get_or_create_project_conversation(
-                        db, agent, project_id,
+                return
+            except _AutomationCancelled:
+                # User clicked Stop (POST /api/automations/executions/{id}/cancel).
+                # The cancel endpoint already CAS-flipped the DB row to
+                # "cancelled" before signalling the in-flight thread; we just
+                # shut down the pool, drop the running flag, and write a
+                # short "⏹ Run cancelled by user" line into the assistant
+                # bubble so the user can see why the run stopped.
+                pool.shutdown(wait=False, cancel_futures=True)
+                logger.info("execute_automation: %s cancelled by user", execution_id)
+                _mark_cancelled(db, execution)
+                _persist_cancellation_to_chat(db, task, execution)
+                _persist_state["assistant_text"] = (
+                    "⏹ Run cancelled by user."
+                )
+                return
+            except _TaskCreatorMissingError as e:
+                pool.shutdown(wait=False, cancel_futures=True)
+                logger.warning("execute_automation: %s %s", execution_id, e)
+                _mark_failed_no_retry(
+                    db, execution,
+                    "Task creator account no longer exists — re-save the "
+                    "automation to reassign ownership.",
+                )
+                _persist_state["assistant_text"] = (
+                    "👤 The task creator's account is no longer in the "
+                    "system. Re-save the task to assign a new creator, "
+                    "then run again."
+                )
+                return
+            except Exception as e:
+                pool.shutdown(wait=False, cancel_futures=True)
+                logger.exception("execute_automation: agent run failed: %s", e)
+                err_msg = f"Agent run failed: {e}"
+                _is_transient = _is_transient_error(e)
+                if _is_transient:
+                    _mark_failed(db, execution, err_msg)  # schedules a retry
+                else:
+                    _mark_failed_no_retry(db, execution, err_msg)  # fail fast
+                _persist_state["assistant_text"] = (
+                    f"❌ The agent run failed: {e}\n\n"
+                    f"Check the execution logs for full detail. "
+                    + (
+                        "A retry has been scheduled."
+                        if _is_transient
+                        else "Please fix the issue and try again."
                     )
-                    append_run_summary(
-                        db, _mem_conv, execution.id, "ok",
-                        (assistant_text or "")[:300],
+                )
+                return
+            else:
+                pool.shutdown(wait=False)
+                _persist_state["user_prompt"] = agent_prompt
+                _persist_state["assistant_text"] = assistant_text or ""
+                # Truthfulness gate (item 5): if EVERY tool call failed and
+                # the agent produced nothing real (empty / canned fallback
+                # text), the run did not do its work — mark it failed with
+                # the actual tool errors (retryable: the data source may
+                # recover) instead of shipping boilerplate as a success.
+                if _should_fail_for_total_tool_failure(assistant_text, tool_outcome):
+                    _errs = "; ".join((tool_outcome.get("errors") or [])[:3]) or "no error detail returned"
+                    execution.output_text = (assistant_text or "")[:200_000]
+                    logger.warning(
+                        "execute_automation: %s failing run — all %d tool call(s) failed: %s",
+                        execution_id, tool_outcome["calls"], _errs,
                     )
-            except Exception as _mem_err:
-                logger.debug("execute_automation: memory write failed (non-fatal): %s", _mem_err)
+                    _mark_failed(
+                        db, execution,
+                        f"All {tool_outcome['calls']} tool call(s) failed — the run could not "
+                        f"do its work. First errors: {_errs}",
+                    )
+                    _persist_state["assistant_text"] = (
+                        f"⚠ The run could not complete its work — all "
+                        f"{tool_outcome['calls']} tool call(s) failed.\n\n"
+                        f"First errors: {_errs}\n\n"
+                        f"The data source may be unreachable, or the task "
+                        f"description may need adjusting. A retry has been "
+                        f"scheduled."
+                    )
+                    return
+                # Append a ledger entry to the per-project memory conversation.
+                try:
+                    from app.services.automation_runtime import (
+                        get_or_create_project_conversation, append_run_summary,
+                    )
+                    if getattr(agent, "role", None) == "automation_runtime":
+                        _mem_conv = get_or_create_project_conversation(
+                            db, agent, project_id,
+                        )
+                        append_run_summary(
+                            db, _mem_conv, execution.id, "ok",
+                            (assistant_text or "")[:300],
+                        )
+                except Exception as _mem_err:
+                    logger.debug("execute_automation: memory write failed (non-fatal): %s", _mem_err)
 
-        # Abort if the janitor reaped us while we were running.
-        db.refresh(execution)
-        if execution.status != "running":
-            logger.info(
-                "execute_automation: %s was reaped (status=%s) - discarding result",
-                execution_id, execution.status,
-            )
-            return
+            # Abort if the janitor reaped us while we were running.
+            db.refresh(execution)
+            if execution.status != "running":
+                logger.info(
+                    "execute_automation: %s was reaped (status=%s) - discarding result",
+                    execution_id, execution.status,
+                )
+                return
+        finally:
+            # ALWAYS persist the assistant bubble so the chat timeline shows
+            # the run's outcome — even on every failure path. The chat
+            # frontend polls chat_messages and will replace its optimistic
+            # 3-step skeleton with the real assistant bubble as soon as it
+            # lands. Idempotent: _persist_run_to_chat skips re-writes for
+            # the same execution_id.
+            _at = _persist_state.get("assistant_text")
+            if _at is not None:
+                try:
+                    _persist_run_to_chat(
+                        db, task, execution,
+                        user_prompt=_persist_state.get("user_prompt"),
+                        assistant_text=_at,
+                    )
+                except Exception:
+                    logger.exception(
+                        "execute_automation: _persist_run_to_chat failed "
+                        "(non-fatal) for execution %s",
+                        execution_id,
+                    )
 
         # Persist the textual output on the execution row.
         execution.output_text = (assistant_text or "")[:200_000]  # cap at 200KB
@@ -1020,32 +1202,14 @@ def execute_automation(execution_id: str) -> None:
         except Exception as _summary_err:
             logger.debug("cross_run_delta persist failed (non-fatal): %s", _summary_err)
 
-        # Send the result to chat if requested.
-        if str(task.notify_chat).lower() in ("1", "true", "yes") and conv_id:
-            # Tier A #2: when the quality gate held the deliverable back,
-            # append a clear notice to the chat notification so the user
-            # isn't left wondering why no file link appeared.
-            notify_text = assistant_text
-            if quality_gate and not quality_gate.get("passed", True):
-                notify_text = (assistant_text or "") + (
-                    "\n\n---\n*⚠️ Quality gate: the generated file was held "
-                    f"back because execution confidence "
-                    f"({quality_gate.get('confidence', 0):.2f}) is below the "
-                    f"shipping threshold ({quality_gate.get('threshold', 0):.2f}). "
-                    "Trigger the run manually to retry or refine the task.*"
-                )
-            try:
-                _notify_chat(db, task, execution, notify_text, files, tool_outcome)
-            except Exception as e:
-                logger.warning("execute_automation: chat notify failed: %s", e)
-
         # Final CAS: running -> completed. Only succeeds if the janitor
         # hasn't reaped us in the meantime (prevents overwriting a reaped
         # "failed" status with "completed").
         completed_at = datetime.now(timezone.utc)
+        started_at = _as_aware_utc(execution.started_at)
         duration = (
-            int((completed_at - execution.started_at).total_seconds())
-            if execution.started_at else None
+            int((completed_at - started_at).total_seconds())
+            if started_at else None
         )
         # Truthfulness: don't report "completed" when the run effectively
         # failed. If every tool call failed (or there were failures and no
@@ -1176,6 +1340,91 @@ def _mark_failed(db: Session, execution: AutomationExecution, error: str) -> Non
                 logger.warning("_mark_failed: failure notify failed: %s", ne)
 
 
+def _mark_cancelled(db: Session, execution: AutomationExecution) -> bool:
+    """CAS transition queued/running -> cancelled. Returns True when the
+    row was actually flipped (idempotent — second caller / racing cancel
+    + janitor gets ``False`` and bails).
+
+    Unlike :func:`_mark_failed`, a cancelled run NEVER schedules a retry:
+    the user explicitly asked to stop, so a re-run would be a surprising
+    surprise. The frontend can re-run by clicking Run Now again.
+    """
+    rc = db.execute(
+        update(AutomationExecution)
+        .where(
+            AutomationExecution.id == execution.id,
+            AutomationExecution.status.in_(["queued", "running"]),
+        )
+        .values(
+            status="cancelled",
+            error="Cancelled by user",
+            completed_at=datetime.now(timezone.utc),
+        )
+    )
+    db.commit()
+    return rc.rowcount == 1
+
+
+def _persist_cancellation_to_chat(
+    db: Session,
+    task: AutomationTask,
+    execution: AutomationExecution,
+) -> None:
+    """Write a short "⏹ Run cancelled by user" line into the assistant
+    bubble that ``_post_run_request_marker`` pre-created for this
+    execution. Idempotent: if the marker didn't run (no empty assistant
+    bubble exists), appends a fresh one.
+
+    Best-effort: never raises. The cancel endpoint must remain fast.
+    """
+    try:
+        from app.services.automation_sessions import ensure_task_chat_session
+        session_id, _ = ensure_task_chat_session(db, task)
+        if not session_id:
+            return
+        # Locate the pre-created empty assistant bubble for this exec.
+        existing_asst = None
+        for _m in db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id,
+        ).all():
+            _ph = _m.phase or {}
+            if not (isinstance(_ph, dict) and _ph.get("execution_id") == execution.id):
+                continue
+            if _m.role == "assistant":
+                existing_asst = _m
+                break
+        cancel_line = "⏹ Run cancelled by user."
+        if existing_asst is not None:
+            existing_asst.content = cancel_line
+            existing_asst.phase = {
+                **(existing_asst.phase or {}),
+                "execution_id": execution.id,
+                "automation_task_id": task.id,
+                "status": "cancelled",
+            }
+            db.commit()
+            return
+        # Fallback: no marker was written, append a new assistant message.
+        _max_order = db.query(func.coalesce(func.max(ChatMessage.order), 0)).filter(
+            ChatMessage.session_id == session_id,
+        ).scalar() or 0
+        db.add(ChatMessage(
+            id=str(uuid.uuid4()),
+            session_id=session_id,
+            role="assistant",
+            content=cancel_line,
+            order=int(_max_order) + 1,
+            phase={
+                "execution_id": execution.id,
+                "automation_task_id": task.id,
+                "status": "cancelled",
+            },
+        ))
+        db.commit()
+    except Exception as e:
+        logger.warning("_persist_cancellation_to_chat failed (non-fatal): %s", e)
+
+
 # ---------------------------------------------------------------------------
 # Agent invocation
 # ---------------------------------------------------------------------------
@@ -1203,6 +1452,15 @@ def _persist_run_progress(
 ) -> None:
     """Write the current activity_steps + phase to the execution row so the
     Scheduled panel can poll live progress (Manus-style activity feed).
+
+    Also mirrors ``activity_steps`` onto the run's chat message (the user
+    bubble carrying the auto-prompt marker, matched by
+    ``phase.execution_id``) so the user sees live per-step tool progress
+    in their chat timeline. Without this mirror, the chat frontend
+    (which polls chat_messages) keeps showing its optimistic
+    "Understanding / Analyzing / Preparing" 3-step skeleton because no
+    SSE events flow from the automation executor — the executor runs
+    in a background thread, not a streaming request handler.
 
     When ``partial_text`` is supplied, also persist it to ``output_text`` so a
     hung-LLM timeout retains whatever the agent produced before it stalled —
@@ -1232,6 +1490,44 @@ def _persist_run_progress(
                 .values(**values)
             )
             pdb.commit()
+            # ── Mirror live progress to the chat timeline ──
+            # The run's ASSISTANT bubble (pre-created as empty by
+            # _post_run_request_marker) is the natural anchor for live
+            # activity steps. The chat frontend only renders
+            # ActivitySteps on assistant bubbles, so updating the
+            # assistant bubble (not the user bubble) is what makes the
+            # chat timeline show the real tool-step progress instead
+            # of its optimistic 3-placeholders skeleton ("Understanding
+            # / Analyzing / Preparing"). The assistant bubble is matched
+            # by phase.execution_id; the user bubble carries the same
+            # execution_id but we explicitly filter role=assistant.
+            # Done in Python (not SQL JSON operator) so it works on both
+            # PostgreSQL and SQLite (the test backend).
+            try:
+                _asst_bubbles = (
+                    pdb.query(ChatMessage)
+                    .filter(
+                        ChatMessage.role == "assistant",
+                        ChatMessage.is_deleted == False,  # noqa: E712
+                    )
+                    .all()
+                )
+                for _m in _asst_bubbles:
+                    _ph = _m.phase or {}
+                    if not isinstance(_ph, dict):
+                        continue
+                    if _ph.get("execution_id") != execution_id:
+                        continue
+                    # SQLAlchemy JSON column accepts a Python list directly
+                    # on both PostgreSQL (native JSON) and SQLite (text
+                    # serialization handled by the dialect).
+                    _m.activity_steps = list(steps)
+                pdb.commit()
+            except Exception as _mirror_err:
+                logger.debug(
+                    "_persist_run_progress: chat mirror failed (non-fatal): %s",
+                    _mirror_err,
+                )
         finally:
             pdb.close()
     except Exception as e:
@@ -1437,32 +1733,133 @@ def _run_agent_in_conversation(
     # never retry it. Threaded into conv.metadata_ so a future runtime
     # auto-skip can read it.
     skip_conf = str(getattr(task, "skip_confirmation", "") or "").lower() in ("1", "true", "yes")
+    # Cancel event: ``POST /api/automations/executions/{id}/cancel`` sets it
+    # and the agent loop polls it between SSE chunks. Registered here (not
+    # inside the try) so the cancel endpoint can find the event even when
+    # the run was cancelled BEFORE _consume was reached (e.g. while
+    # building the conversation). Cleared in the outer finally below.
+    cancel_event = _register_cancel_event(execution_id) if execution_id else None
     try:
-        # Build a dedicated conversation. Title: <Automation Name> · <date>
-        title = f"🤖 {task.name} · {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')}"
-        conv = AgentConversation(
-            id=str(uuid.uuid4()),
-            agent_name=agent.name,
-            title=title,
-            messages=[],
-            status="active",
-            org_id=task.org_id,
-            app_id=task.app_id,
-            created_by_id=task.created_by_id,
-            # Carry the resolved project so the v3 stream's data-source
-            # runtime (agents.py: prepare_data_source_runtime reads
-            # conv.project_id) wires the project's bound KBs —
-            # ask_data_agent + "Bound Data Sources" prompt section.
-            project_id=project_id,
-            metadata_={
-                "agent_app_id": agent.id,
-                "automation_task_id": task.id,
-                "skip_confirmation": skip_conf,
-            },
-        )
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
+        # BUGFIX (one-chat-per-task): reuse the dedicated AgentConversation
+        # already created by ``ensure_task_chat_session`` (one per task, all
+        # run history accumulates in a single Recent Chat). The previous
+        # implementation created a NEW AgentConversation every run, which
+        # manifested as N duplicate chat entries per task in Recent Chats.
+        # Fall back to a fresh AgentConversation ONLY when
+        # ``ensure_task_chat_session`` didn't yield one — should not happen
+        # in practice since the helper is also called from
+        # ``_post_run_request_marker`` before any run, but the guard keeps
+        # us safe against legacy tasks with broken task.session_id links.
+        from app.services.automation_sessions import ensure_task_chat_session
+        from app.models.chat_session import ChatSession
+
+        try:
+            session_id, _created = ensure_task_chat_session(db, task)
+        except Exception:
+            logger.exception(
+                "_run_agent_in_conversation: ensure_task_chat_session failed "
+                "for task %s — falling back to fresh conversation", task.id,
+            )
+            session_id, _created = None, False
+
+        conv: Optional[AgentConversation] = None
+        chat: Optional[ChatSession] = None
+        if session_id:
+            chat = db.query(ChatSession).filter(
+                ChatSession.id == session_id,
+            ).first()
+            if chat is not None and chat.conversation_id:
+                conv = db.query(AgentConversation).filter(
+                    AgentConversation.id == chat.conversation_id,
+                ).first()
+
+        if conv is None:
+            # Adoption path: the dedicated chat exists but its
+            # ``conversation_id`` was never linked (legacy rows pre-dating
+            # the link, or a session created by the frontend without a
+            # conversation). Find the most recent AgentConversation already
+            # tagged with this task's id and adopt it, so all runs keep
+            # accumulating in ONE conversation instead of spawning a fresh
+            # one per run. Without this the executor created a new
+            # conversation every run — the Recent-Chats duplication the
+            # user reported. Ordered newest-first so the latest run's
+            # thread becomes the canonical one going forward.
+            _recent = (
+                db.query(AgentConversation)
+                .filter(AgentConversation.org_id == task.org_id)
+                .order_by(AgentConversation.created_date.desc())
+                .limit(200)
+                .all()
+            )
+            for _c in _recent:
+                if (_c.metadata_ or {}).get("automation_task_id") == task.id:
+                    conv = _c
+                    break
+
+        if conv is None:
+            # Fallback path: allocate a fresh AgentConversation tagged with
+            # the task's resolved project. Title is the task name (not a
+            # per-run title) since this conversation will accumulate all
+            # future runs of the same task.
+            title = task.name
+            conv = AgentConversation(
+                id=str(uuid.uuid4()),
+                agent_name=agent.name,
+                title=title,
+                messages=[],
+                status="active",
+                org_id=task.org_id,
+                app_id=task.app_id,
+                created_by_id=task.created_by_id,
+                # Carry the resolved project so the v3 stream's data-source
+                # runtime (agents.py: prepare_data_source_runtime reads
+                # conv.project_id) wires the project's bound KBs —
+                # ask_data_agent + "Bound Data Sources" prompt section.
+                project_id=project_id,
+                metadata_={
+                    "agent_app_id": agent.id,
+                    "automation_task_id": task.id,
+                    "data_source_id": getattr(task, "data_source_id", None),
+                    "skip_confirmation": skip_conf,
+                },
+            )
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+        else:
+            # Reused/adopted conversation: keep its existing messages
+            # (Manus UX requires the per-task chat to show prior run
+            # results) but make sure the metadata carries the current
+            # task + agent identity and the project_id matches the
+            # resolved one.
+            merged_meta = dict(conv.metadata_ or {})
+            merged_meta["agent_app_id"] = agent.id
+            merged_meta["automation_task_id"] = task.id
+            merged_meta["data_source_id"] = getattr(task, "data_source_id", None)
+            merged_meta["skip_confirmation"] = skip_conf
+            conv.metadata_ = merged_meta
+            if conv.project_id != project_id:
+                conv.project_id = project_id
+            # Touch updated_date so Recent Chats re-sorts this entry to
+            # the top (it had previously been pushed off the page by the
+            # per-run duplicates).
+            db.commit()
+
+        # Heal the chat ↔ conversation link — ONLY for dedicated automation
+        # sessions (agent_name='automation_agent'). For origin sessions
+        # (agent_name=None or other), we must NOT overwrite the
+        # conversation_id because it belongs to the user's original chat.
+        # The agent runtime creates its own conversation for the run, and
+        # the ChatMessage rows are written to the origin session via
+        # _persist_run_to_chat — the user sees the run output in the same
+        # chat without the session's conversation being hijacked.
+        if (
+            chat is not None
+            and chat.conversation_id != conv.id
+            and getattr(chat, "agent_name", None) == "automation_agent"
+        ):
+            chat.conversation_id = conv.id
+            db.commit()
         conv_id = conv.id
 
         # Lazy import to avoid a circular import at module load time.
@@ -1492,6 +1889,16 @@ def _run_agent_in_conversation(
 
             async def _consume():
                 nonlocal final_text, current_phase, partial_text, fsm_meta
+                # ``cancel_event`` is the threading.Event registered by the
+                # outer scope. We poll it between SSE chunks; if set, we
+                # bail out at the next safe checkpoint. Falls back to a
+                # no-op event when execution_id is empty (interactive
+                # path, never cancelled here).
+                nonlocal_cancel_event = cancel_event
+                if nonlocal_cancel_event is None:
+                    class _NeverSet:
+                        def is_set(self): return False
+                    nonlocal_cancel_event = _NeverSet()
                 # `add_message_stream` is a FastAPI route handler (async def) so
                 # calling it returns a coroutine that resolves to a
                 # `StreamingResponse`. Iterate the response's body_iterator
@@ -1507,11 +1914,27 @@ def _run_agent_in_conversation(
                         # SynexiaFSM, bypassing the should_trigger_planning
                         # classifier. No effect on normal chat turns.
                         "force_planning": _force_planning,
+                        # Tag the user message as an automation phase so the
+                        # frontend can render it as an automation card instead of
+                        # a standard user bubble.  Execution id is used by the
+                        # reactor for run-linking (Tier A #2).
+                        "phase": "automation",
+                        "automation_task_id": task.id,
+                        "automation_execution_id": execution_id,
                     },
                     db=db,
                     user=user,  # task creator — the stream enforces ownership
                 )
                 async for chunk in _resp.body_iterator:
+                    # Cooperative cancel: bail out at the next safe checkpoint
+                    # (between SSE chunks). Cheap when not set (one bool read
+                    # under a Lock-free Event).
+                    if nonlocal_cancel_event.is_set():
+                        logger.info(
+                            "execute_automation: %s cancelled by user mid-stream",
+                            execution_id,
+                        )
+                        raise _AutomationCancelled()
                     evt = _parse_sse_chunk(chunk)
                     if not evt:
                         continue
@@ -1657,6 +2080,13 @@ def _run_agent_in_conversation(
                     break  # only the last assistant message
         except _AutomationPaused:
             raise
+        except _AutomationCancelled:
+            # Let the outer executor translate this into a status flip;
+            # we still need to return SOMETHING (final_text) so the
+            # downstream file-generation / chat-persist steps can run
+            # with a sensible (empty) value.
+            final_text = ""
+            current_phase = "cancelled"
         except Exception as e:
             logger.warning("add_message_stream failed: %s\n%s", e, traceback.format_exc())
             raise
@@ -1707,6 +2137,12 @@ def _run_agent_in_conversation(
             reset_conversation_loop_state(_loop_state_token)
         except Exception:
             pass
+        # Always release the cancel event registry slot, even on error.
+        # The slot key (execution_id) is per-run, so leaking it would
+        # accumulate over time and let stale set() calls fire on future
+        # runs that happen to reuse the same uuid.
+        if execution_id:
+            _clear_cancel_event(execution_id)
         try:
             db.close()
         except Exception:
@@ -1915,22 +2351,43 @@ def _format_label(fmt: str | None) -> tuple[str, str]:
     return _FORMAT_LABELS.get(raw.lower(), raw), raw
 
 
-def _post_run_request_marker(
+def _persist_run_to_chat(
     db: Session,
     task: AutomationTask,
     execution: AutomationExecution,
     *,
-    trigger: str,  # "run" | "retry" | "scheduled"
+    user_prompt: str,
+    assistant_text: str,
 ) -> None:
-    """Write the visible 'Run Automation Task：' user bubble (one per
-    execution) into the task's dedicated chat session.
+    """Save the run's assistant reply into the task's origin chat session
+    (ChatMessage rows).
 
-    The 5-bullet summary (Name / Type / Output format / Project /
-    Description, full-width colons) is posted at the START of every
-    execution so the run's request record is visible in the task's chat
-    timeline — independent of which agent is active or whether the LLM
-    call succeeds. Idempotent per execution; never raises — a marker
-    failure must not block the run.
+    The chat frontend loads its timeline from ``chat_messages`` (not from
+    ``agent_conversations.messages``), so without this persist step the run
+    output lives only in the conversation JSON and the user sees an empty
+    timeline after "Run now". We write both sides:
+
+    * a user bubble carrying the auto-prompt marker (the "Run Automation
+      Task: ..." record posted by ``_post_run_request_marker`` at the start
+      of the run) — already in the DB by the time we get here, so this
+      function only writes it if the marker is missing (defensive fallback
+      for the pre-marker call path).
+    * an assistant bubble carrying the run's final reply — written on
+      EVERY run that produced output, even if the marker already exists.
+
+    The assistant bubble is paired with the one pre-created by
+    ``_post_run_request_marker`` (``phase.execution_id = execution.id``,
+    role=assistant, content=empty). When the run finishes, this function
+    UPDATES that bubble's content in place — the chat frontend shows
+    live activity_steps on the assistant bubble (mirrored by
+    ``_persist_run_progress``) followed by the final reply in the same
+    bubble. The 3-placeholders skeleton the user was seeing gets replaced
+    with a real card as soon as the run starts.
+
+    Idempotent per execution for the user side (skip if the marker is
+    there); the assistant side UPDATES the existing bubble in place
+    rather than creating a new one. Never raises — a persist failure
+    must not block the run.
     """
     try:
         from app.services.automation_sessions import ensure_task_chat_session
@@ -1938,52 +2395,240 @@ def _post_run_request_marker(
         if not session_id:
             return
 
-        # Idempotent: skip if a marker already exists for this execution.
+        # Discover what's already been written for this execution.
+        _existing_user_msg = None
+        _existing_asst_msg = None
         for _m in db.query(ChatMessage).filter(
             ChatMessage.session_id == session_id,
-            ChatMessage.role == "user",
         ).all():
             _ph = _m.phase or {}
-            if isinstance(_ph, dict) and _ph.get("execution_id") == execution.id:
-                return
+            if not (isinstance(_ph, dict) and _ph.get("execution_id") == execution.id):
+                continue
+            if _m.role == "user":
+                _existing_user_msg = _m
+            elif _m.role == "assistant":
+                _existing_asst_msg = _m
 
-        label, raw = _format_label(getattr(task, "output_format", None))
-        # Resolve the project display name via the same resolver the run
-        # uses (adopts+persists the FK when only the legacy name is present).
-        _pid, project_name = _resolve_task_project(db, task)
-        proj_display = project_name or getattr(task, "project", None) or "Global"
-        desc = (getattr(task, "description", None) or "").strip() or "—"
-        if len(desc) > 200:
-            desc = desc[:200].rstrip() + "…"
-        body = (
-            "Run Automation Task：\n"
-            f"Name：{task.name or 'Untitled'}\n"
-            f"Type：{task.type or '—'}\n"
-            f"Output format：{label} ({raw})\n"
-            f"Project：{proj_display}\n"
-            f"Description：{desc}"
+        # Pick a monotonically increasing order number based on the
+        # existing max order in this session (matches the convention the
+        # frontend chat uses — small int sequence, NOT a millisecond
+        # timestamp which would overflow Integer).
+        _max_order = db.query(func.coalesce(func.max(ChatMessage.order), 0)).filter(
+            ChatMessage.session_id == session_id,
+        ).scalar() or 0
+        _base_order = int(_max_order) + 1
+
+        common_phase = {
+            "execution_id": execution.id,
+            "automation_task_id": task.id,
+        }
+
+        # NOTE: The user bubble is now created by _post_run_request_marker
+        # at the start of the run. This function only writes a defensive
+        # fallback user bubble if the marker is missing (e.g. the marker
+        # call failed or was skipped). The assistant bubble is always
+        # updated in place (the pre-created empty one from the marker).
+
+        # Defensive fallback: create user bubble if marker didn't run.
+        if not _existing_user_msg and user_prompt:
+            _label, _raw = _format_label(task.output_format)
+            _user_lines = [
+                f"Run Automation Task：",
+                f"- Name：{task.name or '(untitled)'}",
+                f"- Type：{task.type or 'general'}",
+                f"- Output format：{_label} ({_raw})",
+                f"- Project：{task.project or '(none)'}",
+            ]
+            if task.description:
+                _user_lines.append(f"- Description：{task.description}")
+            _user_content = "\n".join(_user_lines)
+            db.add(ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="user",
+                content=_user_content,
+                order=_base_order,
+                tool_calls=None,
+                activity_steps=None,
+                artifacts=None,
+                phase={
+                    **common_phase,
+                    "verb": "▶",
+                    "title": "Run Automation Task",
+                    "trigger": "run",
+                },
+                org_id=task.org_id,
+                app_id=task.app_id,
+                created_by_id=task.created_by_id,
+            ))
+            _base_order += 1
+
+        if assistant_text:
+            if _existing_asst_msg is not None:
+                # Update the empty pre-created assistant bubble in place:
+                # this is the slot the 3-placeholders skeleton was
+                # occupying. Mirroring the final reply into the same row
+                # (not creating a new bubble) keeps the run as a single
+                # timeline entry: marker → live steps → final reply.
+                _existing_asst_msg.content = assistant_text
+                _ph = dict(_existing_asst_msg.phase or {})
+                _ph["verb"] = "🤖"
+                _ph["title"] = task.name or "Run result"
+                _ph["live"] = False  # mark finalized so the frontend
+                # can stop showing "running" affordances.
+                _existing_asst_msg.phase = _ph
+            else:
+                # Defensive fallback: no pre-created assistant bubble
+                # (e.g., the marker was written by an older code path
+                # that didn't pre-create). Write a fresh one.
+                db.add(ChatMessage(
+                    id=str(uuid.uuid4()),
+                    session_id=session_id,
+                    role="assistant",
+                    content=assistant_text,
+                    order=_base_order,
+                    tool_calls=None,
+                    activity_steps=None,
+                    artifacts=None,
+                    phase={
+                        **common_phase,
+                        "verb": "🤖",
+                        "title": task.name or "Run result",
+                    },
+                    org_id=task.org_id,
+                    app_id=task.app_id,
+                    created_by_id=task.created_by_id,
+                ))
+
+        db.commit()
+    except Exception as _persist_err:
+        logger.warning(
+            "_persist_run_to_chat: chat persist failed (non-fatal): %s",
+            _persist_err,
         )
-        msg = ChatMessage(
-            id=str(uuid.uuid4()),
-            session_id=session_id,
-            role="user",
-            content=body,
-            order=int(datetime.now(timezone.utc).timestamp()),
-            tool_calls=None,
-            activity_steps=None,
-            artifacts=None,
-            phase={
-                "verb": "▶",
-                "title": f"Run Automation Task: {task.name}",
-                "execution_id": execution.id,
-                "automation_task_id": task.id,
-                "trigger": trigger,
-            },
-            org_id=task.org_id,
-            app_id=task.app_id,
-            created_by_id=task.created_by_id,
-        )
-        db.add(msg)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _post_run_request_marker(
+    db: Session,
+    task: AutomationTask,
+    execution: AutomationExecution,
+    *,
+    trigger: str,  # "run" | "retry" | "scheduled"
+) -> None:
+    """Pre-create a user bubble + an empty assistant bubble for the run.
+
+    The user bubble is a synthetic "Run Automation Task: …" card that
+    shows the task's 5-bullet summary (Name, Type, Output format,
+    Project, Description) so the user sees WHAT was triggered before
+    the agent starts responding.
+
+    The empty assistant bubble is needed so that:
+      * ``_persist_run_progress`` mirrors live activity_steps onto it
+        (so the chat frontend — which only renders ActivitySteps on
+        assistant bubbles — shows the real tool-step progress instead
+        of its 3-placeholder optimistic skeleton)
+      * ``_persist_run_to_chat`` sets the final content (success reply
+        or failure message) on it
+
+    Both bubbles are tagged with ``phase.execution_id = execution.id``
+    so retries / reaper-cleaned replays can find them again.
+    Idempotent per execution; never raises — a marker failure must
+    not block the run.
+    """
+    try:
+        from app.services.automation_sessions import ensure_task_chat_session
+        session_id, _ = ensure_task_chat_session(db, task)
+        if not session_id:
+            return
+
+        # Idempotent: skip user bubble if already exists for this execution.
+        _have_user = False
+        _have_asst = False
+        for _m in db.query(ChatMessage).filter(
+            ChatMessage.session_id == session_id,
+        ).all():
+            _ph = _m.phase or {}
+            if not isinstance(_ph, dict):
+                continue
+            if _ph.get("execution_id") != execution.id:
+                continue
+            if _m.role == "user":
+                _have_user = True
+            elif _m.role == "assistant":
+                _have_asst = True
+
+        now_ts = int(datetime.now(timezone.utc).timestamp())
+
+        # User bubble: synthetic "Run Automation Task: …" card showing
+        # the task's 5-bullet summary so the user sees WHAT was triggered
+        # before the agent starts responding.
+        if not _have_user:
+            _label, _raw = _format_label(task.output_format)
+            _user_lines = [
+                f"Run Automation Task：",
+                f"- Name：{task.name or '(untitled)'}",
+                f"- Type：{task.type or 'general'}",
+                f"- Output format：{_label} ({_raw})",
+                f"- Project：{task.project or '(none)'}",
+            ]
+            if task.description:
+                _user_lines.append(f"- Description：{task.description}")
+            _user_content = "\n".join(_user_lines)
+            user_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="user",
+                content=_user_content,
+                order=now_ts,
+                tool_calls=None,
+                activity_steps=None,
+                artifacts=None,
+                phase={
+                    "verb": "▶",
+                    "title": "Run Automation Task",
+                    "execution_id": execution.id,
+                    "automation_task_id": task.id,
+                    "trigger": trigger,
+                },
+                org_id=task.org_id,
+                app_id=task.app_id,
+                created_by_id=task.created_by_id,
+            )
+            db.add(user_msg)
+
+        if not _have_asst:
+            # Empty assistant bubble — becomes the run's live-progress
+            # card and final response carrier. order = user_bubble_order + 1
+            # so it sorts directly below the user bubble. The chat frontend
+            # only renders ActivitySteps on assistant bubbles, so this is
+            # the slot the 3-placeholders skeleton was occupying.
+            asst_msg = ChatMessage(
+                id=str(uuid.uuid4()),
+                session_id=session_id,
+                role="assistant",
+                content="",
+                order=now_ts + 1,
+                tool_calls=None,
+                activity_steps=[],
+                artifacts=None,
+                phase={
+                    "verb": "🤖",
+                    "title": task.name or "Automation Run",
+                    "execution_id": execution.id,
+                    "automation_task_id": task.id,
+                    "trigger": trigger,
+                    "live": True,
+                },
+                org_id=task.org_id,
+                app_id=task.app_id,
+                created_by_id=task.created_by_id,
+            )
+            db.add(asst_msg)
+
         db.commit()
     except Exception:
         logger.exception(
@@ -2030,7 +2675,7 @@ def _notify_chat(
         f"{preview}\n\n"
         + _tool_warnings_line(tool_outcome)
         + (f"**Generated files:**\n{file_links}\n\n" if file_links else "")
-        + f"_Ran at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
+        + f"_Ran at {format_cst(datetime.now(timezone.utc))} · "
         f"execution id `{execution.id[:8]}`_"
     )
 
@@ -2111,7 +2756,7 @@ def _notify_chat_failure(
         f"**⚠️ Scheduled run failed: {task.name}**\n\n"
         f"**Error:** {err}\n\n"
         + (f"**Partial output:**\n{preview}\n\n" if preview else "")
-        + f"_Failed at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')} · "
+        + f"_Failed at {format_cst(datetime.now(timezone.utc))} · "
         f"execution id `{execution.id[:8]}`_"
     )
 

@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 
 from app.services.tool_registry import (
     DEFAULT_USER_AGENT_TOOLS,
+    DEFAULT_TOOLS_BY_AGENT,
     resolve_tools_from_skills,
 )
 
@@ -34,7 +35,11 @@ def test_default_user_agent_tools_contains_expected_baselines():
     assert DEFAULT_USER_AGENT_TOOLS[0] == "web_search", (
         f"web_search must be first; got {DEFAULT_USER_AGENT_TOOLS!r}"
     )
-    for required in ("web_search", "web_extract", "memory", "todo"):
+    for required in (
+        "web_search", "web_extract", "memory", "todo",
+        "create_dashboard", "update_dashboard", "undo_dashboard_edit",
+        "uiux_search", "uiux_design_system",
+    ):
         assert required in DEFAULT_USER_AGENT_TOOLS, (
             f"Baseline must include {required!r}; got {DEFAULT_USER_AGENT_TOOLS!r}"
         )
@@ -42,6 +47,29 @@ def test_default_user_agent_tools_contains_expected_baselines():
 
 def test_default_user_agent_tools_has_no_duplicates():
     assert len(DEFAULT_USER_AGENT_TOOLS) == len(set(DEFAULT_USER_AGENT_TOOLS))
+
+
+def test_general_assistant_fallback_has_live_dashboard_and_uiux_tools():
+    enabled = DEFAULT_TOOLS_BY_AGENT["general_assistant"]
+    for required in (
+        "create_dashboard", "update_dashboard", "undo_dashboard_edit",
+        "uiux_search", "uiux_design_system",
+    ):
+        assert required in enabled, (
+            f"general_assistant fallback must include {required!r}; got {enabled!r}"
+        )
+
+
+def test_system_agent_full_tool_catalog_has_live_dashboard_and_uiux_tools():
+    from app.services.system_agents import ALL_TOOL_NAMES
+
+    for required in (
+        "create_dashboard", "update_dashboard", "undo_dashboard_edit",
+        "uiux_search", "uiux_design_system",
+    ):
+        assert required in ALL_TOOL_NAMES, (
+            f"system agent tool catalog must include {required!r}; got missing from ALL_TOOL_NAMES"
+        )
 
 
 def test_default_user_agent_tools_contains_only_underscore_names():

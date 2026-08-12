@@ -51,6 +51,17 @@ class TestDefaultPlanInputs:
         skill = next(s for s in steps if s["node_type"] == "skill")
         assert skill["inputs"]["skill_name"] == "sales-analyzer"
 
+    def test_selected_skill_step_carries_skill_id_and_name(self):
+        steps = _build_default_plan(
+            {"task_kind": "general", "user_signal": "default",
+             "selected_skill": {"id": "tool-1", "name": "board-report"},
+             "selected_skill_id": "tool-1", "selected_skill_name": "board-report"},
+            "general_assistant",
+        )
+        skill = next(s for s in steps if s["node_type"] == "skill")
+        assert skill["inputs"]["skill_name"] == "board-report"
+        assert skill["inputs"]["skill_id"] == "tool-1"
+
     def test_every_step_has_inputs_key(self):
         steps = _build_default_plan(
             {"task_kind": "general", "requires_data": False,

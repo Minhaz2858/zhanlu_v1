@@ -1,0 +1,84 @@
+"""Background worker that periodically scans for new market alerts.
+
+Ported from EDIA 5.1.2 PerceptionWorker (threading.Thread).
+Adapted to Zhanlu's async FastAPI — runs via asyncio.to_thread + SessionLocal.
+"""
+
+from __future__ import annotations
+
+import logging
+from datetime import datetime, timezone
+
+from app.config import settings
+from app.services.perception.service import build_perception_snapshot
+from app.services.perception.alert_service import AlertService
+
+logger = logging.getLogger(__name__)
+
+
+async def run_alert_scan_cycle() -> dict:
+    """One scan cycle: snapshot → detect → persist.
+
+    Returns dict with {scanned_at, new_alerts, total_scanned, error}.
+
+    Called by the periodic scheduled task in scheduled_tasks.py,
+    gated by ``ECISCO_BI_ALERTS_ENABLED``.
+    """
+    if not settings.ECISCO_BI_ALERTS_ENABLED:
+        return {"skipped": True, "reason": "flag disabled"}
+
+    result: dict = {
+        "scanned_at": datetime.now(timezone.utc).isoformat(),
+        "new_alerts": 0,
+        "total_scanned": 0,
+        "error": None,
+    }
+
+    from app.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        # 1. Build snapshot WITH db session so _get_product_price can query
+        snapshot = build_perception_snapshot(db=db)
+
+        # 2. Extract products dict from snapshot, map to list with correct keys
+        #    (build_perception_snapshot returns {products: {id: {...}}, ...} but
+        #    detect_and_persist expects list[dict] with keys: product_id, current_price, ...)
+        products_raw = snapshot.get("products", {})
+        product_list = []
+        for v in products_raw.values():
+            if v.get("latest_price") is None:
+                continue
+            product_list.append({
+                "product_id": v["id"],
+                "product_name": v.get("name_cn") or v.get("name_en") or v["id"],
+                "current_price": v["latest_price"],
+                "change_7d_pct": v.get("change_7d_pct", 0.0),
+                "region": v.get("region"),
+                "freight_cost": v.get("freight_cost"),
+            })
+
+        result["total_scanned"] = len(product_list)
+
+        if not product_list:
+            logger.debug("AlertScannerWorker: snapshot returned 0 products with prices — nothing to scan")
+            return result
+
+        # 3. Detect and persist
+        org_id = settings.ORG_ID if hasattr(settings, "ORG_ID") else None
+        new_alerts = AlertService.detect_and_persist(db, org_id, product_list)
+        result["new_alerts"] = len(new_alerts)
+
+        if new_alerts:
+            logger.info(
+                "AlertScannerWorker: persisted %d new alerts (scanned %d products)",
+                len(new_alerts), result["total_scanned"],
+            )
+
+    except Exception as e:
+        logger.exception("AlertScannerWorker: scan failed — %s", e)
+        result["error"] = str(e)
+    finally:
+        db.close()
+
+    return result

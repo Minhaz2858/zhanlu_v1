@@ -100,7 +100,7 @@ export default function SkillAgent() {
 
   useEffect(() => {
     if (!activeId) { setMessages([]); setActiveConv(null); return; }
-    let unsub = () => {};
+    let unsub = () => { };
     (async () => {
       try {
         const conv = await base44.agents.getConversation(activeId);
@@ -412,7 +412,7 @@ export default function SkillAgent() {
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {[
-                    { key: 'scrape', text: 'Scrape from URL', icon: Globe, action: 'scrape' },
+                    { key: 'scrape', text: t.skillAgent.scrape.chip, icon: Globe, action: 'scrape' },
                     { key: 'weekly', text: t.skillAgent.chips.weekly },
                     { key: 'pdf', text: t.skillAgent.chips.pdf },
                     { key: 'code', text: t.skillAgent.chips.code },

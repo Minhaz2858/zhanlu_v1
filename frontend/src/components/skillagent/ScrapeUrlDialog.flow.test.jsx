@@ -19,7 +19,18 @@ vi.mock('@/api/skillStudio', () => ({
 vi.mock('@/lib/LanguageProvider', () => ({
   useLanguage: () => ({
     t: {
-      skillAgent: { title: 'Skill Agent', subtitle: '', placeholder: '', tryOne: '', chips: {} },
+      skillAgent: {
+        title: 'Skill Agent', subtitle: '', placeholder: '', tryOne: '', chips: {},
+        scrape: {
+          chip: 'Scrape from URL', title: 'Scrape Skill from URL',
+          urlLabel: 'Website URL', urlPlaceholder: 'https://example.com/skill-docs',
+          skillNameLabel: 'Skill Name', skillNamePlaceholder: 'my-collected-skill', optional: '(optional)',
+          collect: 'Collect', collecting: 'Collecting...', cancel: 'Cancel', done: 'Done',
+          success: 'Skill collected successfully!', descriptionLabel: 'Description', securityScanLabel: 'Security Scan',
+          urlRequired: 'Please enter a URL', collectionFailed: 'Collection failed',
+          stages: { navigate: 'Navigating', extract: 'Extracting', structure: 'Structuring', save: 'Saving' },
+        },
+      },
       common: { send: 'Send' },
     },
   }),
@@ -193,7 +204,7 @@ describe('ScrapeUrlDialog — full interaction flow', () => {
   it('disables the Collect button while loading', async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     // Never resolves — keeps loading state
-    collectSkill.mockReturnValueOnce(new Promise(() => {}));
+    collectSkill.mockReturnValueOnce(new Promise(() => { }));
 
     render(<ScrapeUrlDialog open={true} onClose={vi.fn()} onCollected={vi.fn()} />);
 

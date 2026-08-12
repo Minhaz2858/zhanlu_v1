@@ -25,6 +25,7 @@ from app.models import (
     AgentRun,
     AgentRunStep,
     LlmModel,
+    AlertLog,
 )
 
 # Import tool_handlers to register all 8 new capability tools in the registry
@@ -60,6 +61,7 @@ from app.routers.resource_shares import router as resource_shares_router
 from app.routers.reports import router as reports_router
 from app.routers.llm import router as llm_router
 from app.routers.app_logs import router as app_logs_router
+from app.routers.alerts import router as alerts_router
 
 
 ENTITY_MODELS = {
@@ -609,9 +611,34 @@ async def lifespan(app: FastAPI):
             "Automation startup reaper error (non-fatal): %s", e
         )
 
+    # Start the catalog indexing watchdog (recovers from stuck indexing status)
+    catalog_watchdog_stop = asyncio.Event()
+    catalog_watchdog_task = None
+    try:
+        from app.services.knowledge_graph.catalog_watchdog import run_catalog_watchdog
+        catalog_watchdog_task = asyncio.create_task(
+            run_catalog_watchdog(catalog_watchdog_stop),
+            name="catalog-watchdog",
+        )
+        # Use the catalog_watchdog module logger (INFO level) so it shows up.
+        from app.services.knowledge_graph import catalog_watchdog as _cw
+        _cw.logger.info("Catalog watchdog started (poll=%ds, stuck_after=%ds)",
+                         _cw.POLL_INTERVAL_SECONDS, _cw.STUCK_AFTER_SECONDS)
+    except Exception as e:
+        startup_logger.warning("Catalog watchdog startup error (non-fatal): %s", e)
+
     yield
 
     # ── Shutdown ──
+    catalog_watchdog_stop.set()
+    if catalog_watchdog_task is not None:
+        try:
+            await asyncio.wait_for(catalog_watchdog_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception as e:
+            startup_logger.warning("Catalog watchdog shutdown error: %s", e)
+
     try:
         from app.services.automation_dispatcher import stop_dispatcher
         await stop_dispatcher()
@@ -655,6 +682,11 @@ def create_app() -> FastAPI:
     # (including admin-created ones for shared project recipients)
     app.include_router(register_project_kb_router())
 
+    # Project Data Map: catalog browser, overlays, entities, resource registry
+    from app.routers.project_catalog import register_project_catalog_router
+
+    app.include_router(register_project_catalog_router())
+
     app.include_router(functions_router, prefix="/api")
     app.include_router(integrations_router, prefix="/api")
     app.include_router(agents_router, prefix="/api")
@@ -682,6 +714,7 @@ def create_app() -> FastAPI:
     app.include_router(reports_router, prefix="/api")
     app.include_router(llm_router)
     app.include_router(app_logs_router, prefix="/api")
+    app.include_router(alerts_router, prefix="/api")
     # NB: app_logs_router already declares its full path including ``/api/app-logs/...``
     # internally so it ignores the extra ``/api`` prefix and lives at
     # ``/api/app-logs/...`` — matching the @base44 plugin's expected URL.

@@ -17,6 +17,7 @@ import re
 import time as _time
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.agent_app import AgentApp
 from app.models.automation_task import AutomationTask
 from app.models.knowledge_base import KnowledgeBase
@@ -1436,6 +1437,49 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
         except Exception:
             pass
 
+    # ---- Project-persistence guard (2026-08-11) ----------------------------------
+    # A task created from a project-scoped chat MUST never silently persist as
+    # "global" / NULL project_id — that would orphan the run's data-source
+    # bindings (only global-scoped KBs would be visible at runtime).  When the
+    # chat carries a project but the resolved project_id is None, re-derive
+    # from the linked session row and log a loud warning so the divergence is
+    # auditable.
+    _ctx_project_id = TOOL_CONTEXT.get("project_id")
+    _ctx_project_name = TOOL_CONTEXT.get("project_name", "").strip()
+    if (_ctx_project_id or _ctx_project_name) and not project_id:
+        # Agent claimed a project context but resolution failed.
+        # Try to recover from the linked session's project_id.
+        if session_id:
+            try:
+                from app.models.chat_session import ChatSession
+                _sess = db.query(ChatSession).filter(
+                    ChatSession.id == session_id,
+                    ChatSession.is_deleted == False,  # noqa: E712
+                ).first()
+                if _sess is not None and _sess.project_id:
+                    project_id = _sess.project_id
+                    project = _sess.project or project
+                    logger.warning(
+                        "create_automation: PROJECT GUARD — project_id was "
+                        "None despite chat context (%r / %r); recovered "
+                        "project_id=%s from linked session %s",
+                        _ctx_project_id, _ctx_project_name, project_id,
+                        session_id,
+                    )
+                    # Also correct the TOOL_CONTEXT so future resolution
+                    # (e.g. by the caller's next tool call) is consistent.
+                    TOOL_CONTEXT["project_id"] = project_id
+            except Exception:
+                pass
+        if not project_id:
+            logger.error(
+                "create_automation: PROJECT GUARD — task %r claimed project "
+                "context (%r / %r) but will persist with project=global / "
+                "project_id=NULL. Calls to this task may have wrong data-"
+                "source bindings!",
+                task_name, _ctx_project_id, _ctx_project_name,
+            )
+
     # P0: Adopt the Manus UX — every automation gets a dedicated chat
     # session, even when the task wasn't created from inside a chat. The
     # dispatcher's ``_notify_chat`` writes the run result to
@@ -1556,6 +1600,24 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
     db.commit()
     db.refresh(task)
 
+    # Unified Resource Registry sync (best-effort, flag-gated).
+    try:
+        if getattr(settings, "KG_RESOURCE_REGISTRY_ENABLED", False) and task.project_id:
+            from app.services.knowledge_graph.registry_indexer import index_automation
+
+            index_automation(
+                db,
+                project_id=task.project_id,
+                automation_id=task.id,
+                name=task.name,
+                summary=(task.description or task.prompt or "").strip(),
+                owner_user_id=user_id,
+                visibility="project",
+            )
+            db.commit()
+    except Exception:
+        logger.debug("create_automation: registry sync failed (non-fatal)", exc_info=True)
+
     # ---- Adopt the chat session: rename + tag as an automation session -----
     # After the task is created we propagate the automation name back to the
     # originating chat session so the user can find it in the sidebar. The
@@ -1670,6 +1732,24 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
     task.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(task)
+
+    # Keep registry row in sync after updates (best-effort, flag-gated).
+    try:
+        if getattr(settings, "KG_RESOURCE_REGISTRY_ENABLED", False) and task.project_id:
+            from app.services.knowledge_graph.registry_indexer import index_automation
+
+            index_automation(
+                db,
+                project_id=task.project_id,
+                automation_id=task.id,
+                name=task.name,
+                summary=(task.description or task.prompt or "").strip(),
+                owner_user_id=task.created_by_id,
+                visibility="project",
+            )
+            db.commit()
+    except Exception:
+        logger.debug("update_automation: registry sync failed (non-fatal)", exc_info=True)
 
     # If the name changed and this task is linked to a chat session,
     # propagate the new name to the session title so the sidebar stays

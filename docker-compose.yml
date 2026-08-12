@@ -25,6 +25,7 @@ services:
     volumes:
       - ./backend:/app:cached
       - ./scripts:/app/scripts:cached
+      - ~/.cache/chroma:/home/zhanlu/.cache/chroma:cached  # Persist ChromaDB model cache across restarts
     depends_on:
       postgres:
         condition: service_healthy
@@ -52,7 +53,15 @@ services:
       dockerfile: docker/sandbox-worker.Dockerfile
     image: zhanlu-sandbox-worker:latest
     container_name: zhanlu-sandbox-worker
+    # Host docker.sock group id on this server is 994. Add it at runtime so
+    # the non-root worker can access Docker without switching to root.
+    group_add:
+      - "994"
     env_file: .env
+    environment:
+      PYTHONPATH: ""
+      SANDBOX_LLM_PROXY_SOCKET: "/tmp/zhanlu_sandbox/llm-proxy/zhanlu-llm-proxy.sock"
+      SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER: "/var/run/llm-proxy.sock"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       # Live backend code (bind-mounted, same as the backend service) so

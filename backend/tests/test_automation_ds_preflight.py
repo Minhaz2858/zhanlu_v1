@@ -34,6 +34,37 @@ def test_resolve_composes_all_three_binding_sources(monkeypatch):
     assert set(out) == {"kb-own", "kb-ws", "kb-proj"}
 
 
+def test_resolve_can_skip_workspace_auto_bind_for_scoped_automation(monkeypatch):
+    from app.services import automation_executor as ax
+    calls = []
+
+    def _own(agent):
+        calls.append("own")
+        return set()
+
+    def _ws(db, agent, bound):
+        calls.append("ws")
+        return bound | {"kb-global"}
+
+    def _proj(db, agent, bound, project_id, project_name=None):
+        calls.append("proj")
+        return bound | {"kb-project"}
+
+    _MOD = "app.services.data_source_runtime.data_source_runtime"
+    monkeypatch.setattr(f"{_MOD}.get_bound_data_source_ids", _own)
+    monkeypatch.setattr(f"{_MOD}._maybe_extend_with_workspace_auto_bind", _ws)
+    monkeypatch.setattr(f"{_MOD}._extend_with_project_kbs", _proj)
+
+    out = ax._resolve_bound_data_source_ids(
+        db=None,
+        agent=object(),
+        project_id="proj-1",
+        include_workspace_auto_bind=False,
+    )
+    assert calls == ["own", "proj"]
+    assert set(out) == {"kb-project"}
+
+
 def test_gate_blocks_data_sync_without_sources_and_allows_others():
     """Source-level: the preflight gate sits before the agent invocation,
     applies only to data_sync, and the no-binding path fails retryably."""
@@ -216,3 +247,52 @@ def test_resolve_includes_pinned_data_source(monkeypatch):
         db.commit()
     finally:
         db.close()
+
+
+def test_prepare_runtime_includes_pinned_data_source(monkeypatch):
+    """The executor's data_source_id pin must reach the actual tool context,
+    not only the preflight gate; otherwise list_data_sources/ask_data_agent
+    see no source while preflight succeeds."""
+    from types import SimpleNamespace
+    from app.services.data_source_runtime import data_source_runtime as dsrt
+
+    pinned = SimpleNamespace(
+        id="kb-pinned",
+        name="warehouse",
+        db_type="mysql",
+        database_name="aipdp_data_warehouse_prod",
+        source_kind="database",
+        file_type="",
+        indexing_status=None,
+        chunk_count=0,
+        is_deleted=False,
+    )
+
+    class _Query:
+        def filter(self, *args, **kwargs):
+            return self
+
+        def all(self):
+            return [pinned]
+
+    class _DB:
+        def get(self, model, row_id):
+            return pinned if row_id == pinned.id else None
+
+        def query(self, model):
+            return _Query()
+
+    monkeypatch.setattr(dsrt, "get_bound_data_source_ids", lambda agent: [])
+    monkeypatch.setattr(dsrt, "_maybe_extend_with_workspace_auto_bind", lambda db, agent, bound: bound)
+    monkeypatch.setattr(dsrt, "_extend_with_project_kbs", lambda db, agent, bound, project_id, project_name=None: bound)
+
+    _, prompt, extras = dsrt.prepare_data_source_runtime(
+        _DB(),
+        SimpleNamespace(name="automation_runtime_agent", org_id="default-org", app_id="default-app"),
+        [],
+        "base prompt",
+        pinned_data_source_id=pinned.id,
+    )
+
+    assert extras["bound_kb_ids"] == [pinned.id]
+    assert "warehouse" in prompt

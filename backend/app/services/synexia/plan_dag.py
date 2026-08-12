@@ -78,7 +78,9 @@ def generate_plan(
     #     When ``forced_skill`` is set (from the post-router hook), upgrade
     #     the hint to a HARD directive so the planner MUST emit a skill
     #     step rather than merely including one. ────────────────────────
-    if task_spec.get("forced_skill"):
+    if task_spec.get("selected_skill") or task_spec.get("selected_skill_id") or task_spec.get("selected_skill_name"):
+        default_skill_hint = _build_selected_skill_directive_block(task_spec)
+    elif task_spec.get("forced_skill"):
         default_skill_hint = _build_skill_directive_block(task_spec)
     else:
         default_skill_hint = ""
@@ -296,6 +298,23 @@ def _build_skill_directive_block(task_spec: dict) -> str:
     )
 
 
+def _build_selected_skill_directive_block(task_spec: dict) -> str:
+    """Return a hard-directive prompt block for an explicit user-selected skill."""
+    selected = task_spec.get("selected_skill") or {}
+    skill_name = task_spec.get("selected_skill_name") or selected.get("name")
+    skill_id = task_spec.get("selected_skill_id") or selected.get("id")
+    if not skill_name and not skill_id:
+        return ""
+    id_hint = f" (id={skill_id})" if skill_id else ""
+    return (
+        "\n[HARD DIRECTIVE — EXPLICIT USER SELECTION]\n"
+        f"The user explicitly selected the runtime skill '{skill_name or skill_id}'{id_hint}. "
+        "You MUST begin the plan with a `node_type: \"skill\"` step that loads this exact skill. "
+        "Preserve the selected skill id/name in the step inputs so execution can load the exact skill body. "
+        "Do NOT substitute a default skill, post-router skill, or generic format skill.\n"
+    )
+
+
 def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
     """Build a default plan based on task kind (fallback).
 
@@ -370,10 +389,28 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
         })
         return steps
 
+    # ── Explicitly selected runtime skill ────────────────────────────────
+    selected_skill = task_spec.get("selected_skill") or {}
+    selected_skill_name = task_spec.get("selected_skill_name") or selected_skill.get("name")
+    selected_skill_id = task_spec.get("selected_skill_id") or selected_skill.get("id")
+    if selected_skill_name or selected_skill_id:
+        steps.append({
+            "node_type": "skill",
+            "name": f"Load selected skill: {selected_skill_name or selected_skill_id}",
+            "description": "Load the exact runtime-selected skill before synthesis or artifact generation.",
+            "skill": selected_skill_name or selected_skill_id,
+            "dependencies": [],
+            "expected_output": "Skill activation context",
+            "inputs": {
+                "skill_name": selected_skill_name or "",
+                "skill_id": selected_skill_id or "",
+            },
+        })
+
     # ── Forced skill (post-router hook strong match) ──────────────────────
     # When the post-router hook fires, the plan MUST begin with a skill
     # node that invokes the forced skill. Subsequent steps depend on it.
-    if task_spec.get("forced_skill") and task_spec.get("forced_skill_name"):
+    if not steps and task_spec.get("forced_skill") and task_spec.get("forced_skill_name"):
         steps.append({
             "node_type": "skill",
             "name": f"Load skill: {task_spec['forced_skill_name']}",

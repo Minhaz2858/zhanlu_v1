@@ -7,7 +7,7 @@ import PageHeader from '@/components/PageHeader';
 import SkillFileExplorer from '@/components/toolkit/SkillFileExplorer';
 import { Loader2, Activity, Zap, Users, Clock, ToggleLeft, ToggleRight, Bot, ArrowRight, TrendingUp } from 'lucide-react';
 
-function fmtTime(v) { if (!v) return '—'; return new Date(v).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }); }
+import { formatShortDateTime } from '@/lib/time';
 
 export default function ToolDetail() {
   const { id } = useParams();
@@ -61,7 +61,7 @@ export default function ToolDetail() {
         <StatCard icon={Zap} label={t.detail.totalCalls} value={tool.call_count || 0} />
         <StatCard icon={Users} label={t.detail.agentsCount} value={agents.length} accent={inUse ? 'green' : 'muted'} />
         <StatCard icon={Activity} label={t.detail.toolKind} value={tool.kind === 'system_skill' ? t.toolkit.systemSkills : t.toolkit.customTools} small />
-        <StatCard icon={Clock} label={t.detail.lastUsed} value={tool.updated_date ? fmtTime(tool.updated_date) : '—'} small />
+        <StatCard icon={Clock} label={t.detail.lastUsed} value={tool.updated_date ? formatShortDateTime(tool.updated_date) : '—'} small />
       </div>
 
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
@@ -105,8 +105,8 @@ export default function ToolDetail() {
             <div className="space-y-3 text-sm">
               <Row label={t.toolkit.trigger} value={tool.trigger ? `/${translate(tool.trigger)}` : t.toolkit.manual} />
               <Row label={t.detail.toolKind} value={tool.kind === 'system_skill' ? t.toolkit.systemSkills : t.toolkit.customTools} />
-              <Row label={t.detail.createdDate} value={fmtTime(tool.created_date)} />
-              <Row label={t.detail.updatedDate} value={fmtTime(tool.updated_date)} />
+              <Row label={t.detail.createdDate} value={formatShortDateTime(tool.created_date)} />
+              <Row label={t.detail.updatedDate} value={formatShortDateTime(tool.updated_date)} />
               <div className="flex items-center justify-between border-t border-border pt-3">
                 <span className="text-muted-foreground">ID</span>
                 <span className="font-mono text-xs text-muted-foreground">{tool.id.slice(-8)}</span>

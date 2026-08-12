@@ -187,11 +187,15 @@ async def _forecast_run(
     """
     target_id = args.get("target_id")
     product_id = args.get("product_id")
-    horizons = args.get("horizons", [3, 7, 30])
+    horizons = [int(h) for h in (args.get("horizons") or [3, 7, 30])]
     seasonal_period = int(args.get("seasonal_period", 7))
     org_id, _app_id = _resolve_org_context(context)
 
     def _do_work() -> dict:
+        from app.services.forecasting.answer_format import (
+            format_run_answer,
+            select_headline_day,
+        )
         from app.services.forecasting.truth_gate import wrap_forecast_result
 
         engine = ForecastEngine(db)
@@ -210,17 +214,21 @@ async def _forecast_run(
             run = anchored["run"]
             raw_runs: list[dict] = []
             if run is not None:
-                horizon_key = str(max(horizons))
-                horizon_payload = (run.results or {}).get(horizon_key, {}) or {}
+                # Canonical per-horizon answers — same read-model the
+                # dashboard uses, so a chat re-run quotes the numbers the
+                # dashboard will show on next load.
+                per_horizon = {str(h): format_run_answer(run, day=h) for h in horizons}
+                headline_day = select_headline_day(horizons)
+                headline = per_horizon[str(headline_day)]
                 raw_runs = [
                     {
                         "target_id": run.target_id,
-                        "horizon_days": max(horizons),
-                        "point_estimate": (
-                            horizon_payload.get("base", [None])[0]
-                            if horizon_payload else None
-                        ),
-                        "scenarios": horizon_payload,
+                        "horizon_days": headline_day,
+                        "point_estimate": headline["point_estimate"],
+                        "scenarios": headline["scenarios"],
+                        "horizons": per_horizon,
+                        "headline": headline,
+                        "explanation": headline["explanation"],
                         "methodology": (run.model_detail or {}).get("metric", "ensemble"),
                         "confidence": run.confidence,
                         "below_naive_baseline": run.below_naive_baseline,
@@ -248,20 +256,21 @@ async def _forecast_run(
             if not sku_targets:
                 return {"success": False, "error": f"No SKU targets found for product '{product_id}'."}
             results = []
+            headline_day = select_headline_day(horizons)
             for tgt in sku_targets:
                 anchored = engine.compute_target_anchored(
                     str(tgt.id), horizons, seasonal_period
                 )
                 if anchored and anchored.get("run"):
                     run = anchored["run"]
-                    horizon_key = str(max(horizons))
-                    horizon_payload = (run.results or {}).get(horizon_key, {}) or {}
+                    headline = format_run_answer(run, day=headline_day)
                     results.append({
                         "target_id": run.target_id,
                         "product_key": tgt.product_key,
                         "material_code": tgt.product_key.split(".")[-1] if "." in tgt.product_key else None,
-                        "horizon_days": max(horizons),
-                        "point_estimate": horizon_payload.get("base", [None])[0] if horizon_payload else None,
+                        "horizon_days": headline_day,
+                        "point_estimate": headline["point_estimate"],
+                        "scenarios": headline["scenarios"],
                         "confidence": run.confidence,
                         "below_naive_baseline": run.below_naive_baseline,
                     })
@@ -299,8 +308,12 @@ FORECAST_RUN_SCHEMA = {
             "Execute the full forecasting pipeline (quality scoring → model "
             "fitting → ensemble blend → honesty gate → scenario generation) "
             "for one target or all active targets in the org. This is heavy "
-            "ML compute — invoke it during nightly automation, not on every "
-            "chat turn."
+            "ML compute — invoke it during nightly automation or when the "
+            "user explicitly asks to re-run, NOT to answer read questions "
+            "(use forecast_get / forecast_brief for those). The response "
+            "carries a per-horizon 'horizons' map plus a 'headline' answer "
+            "(7-day when requested) in the same canonical format the "
+            "dashboard shows."
         ),
         "parameters": {
             "type": "object",
@@ -423,18 +436,37 @@ async def _forecast_get(
 
     Required args:
         target_id  (str): The ForecastTarget id.
+    Optional args:
+        day        (int): Horizon for the canonical answer block (default 7,
+                          matching the dashboard's "next week" card).
     """
     target_id = args.get("target_id")
     if not target_id:
         return {"success": False, "error": "target_id is required."}
+    day = int(args.get("day", 7))
+
+    from app.services.forecasting.answer_format import format_run_answer
 
     engine = ForecastEngine(db)
-    forecast = engine.get_forecast(target_id)
+    run = engine.get_latest_run(target_id)
 
-    if not forecast:
+    if run is None:
         return {"success": False, "error": f"No forecast found for target {target_id!r}."}
 
-    return {"success": True, "forecast": forecast}
+    return {
+        "success": True,
+        # Legacy raw shape (full results dict, all horizons).
+        "forecast": {
+            "results": run.results,
+            "below_naive_baseline": run.below_naive_baseline,
+            "confidence": run.confidence,
+            "as_of_date": run.as_of_date.isoformat() if run.as_of_date else None,
+            "model_detail": run.model_detail,
+        },
+        # Canonical read-model for the requested horizon — the exact number
+        # and stored explanation the dashboard shows. Quote this verbatim.
+        "answer": format_run_answer(run, day=day),
+    }
 
 
 FORECAST_GET_SCHEMA = {
@@ -443,8 +475,12 @@ FORECAST_GET_SCHEMA = {
         "name": "forecast_get",
         "description": (
             "Read the most recent cached forecast for a target. Returns the "
-            "point-forecast results, honesty-gate flag (below_naive_baseline), "
-            "confidence level, and model detail. Safe for the user-facing agent."
+            "raw point-forecast results plus a canonical 'answer' block for "
+            "the requested horizon (default 7 days = 'next week'): "
+            "answer.point_estimate is the exact number the market dashboard "
+            "shows for this product + horizon, and answer.explanation is the "
+            "stored forecast rationale. Quote these verbatim — never round, "
+            "average horizons, or re-derive values. Safe for the user-facing agent."
         ),
         "parameters": {
             "type": "object",
@@ -452,6 +488,15 @@ FORECAST_GET_SCHEMA = {
                 "target_id": {
                     "type": "string",
                     "description": "The ForecastTarget id to read.",
+                },
+                "day": {
+                    "type": "integer",
+                    "description": (
+                        "Forecast horizon for the canonical answer block "
+                        "(default 7 = 'next week'; use 3 or 30 to match the "
+                        "user's requested period)."
+                    ),
+                    "default": 7,
                 },
             },
             "required": ["target_id"],

@@ -13,10 +13,13 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -27,11 +30,16 @@ from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta, KBTableRelat
 from app.services.db.connector_factory import get_connector
 
 logger = logging.getLogger(__name__)
+# Ensure INFO logs are visible even when the root logger is at WARNING.
+if logger.level == logging.NOTSET or logger.level > logging.INFO:
+    logger.setLevel(logging.INFO)
 
 # ── limits ────────────────────────────────────────────────────────────────
 MAX_TABLES = 300          # safety cap — real warehouse has ~139
 ROW_COUNT_TIMEOUT_S = 5   # skip row counts if the DB is slow
 LLM_BATCH_SIZE = 8        # tables per description call
+INTROSPECT_MAX_WORKERS = 8  # parallel table-introspection threads
+LLM_MAX_CONCURRENT = 4     # parallel LLM description calls
 LLM_TEMP = 0.1            # low temp for structured output
 
 # ── LLM batch prompt ──────────────────────────────────────────────────────
@@ -41,7 +49,8 @@ _TABLE_DESCRIPTION_SYSTEM = (
     "请为每张表和每个字段输出中文和英文的业务含义说明。"
     "说明应该简洁、可被其他大模型理解，用于后续的自然语言查询 (NL2SQL) 场景。"
     "如果字段含义无法从名称判断，标注为 '未知'。"
-    "输出严格的 JSON 数组，每张表一个对象。"
+    "输出严格的 JSON 对象，顶层必须是一个 `tables` 数组，每张表一个对象。"
+    '格式: {"tables": [{"table_name": ..., "description_zh": ..., "description_en": ..., "columns": [...]}]}'
 )
 
 _JSON_SCHEMA = {
@@ -101,14 +110,49 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
         await asyncio.to_thread(_embed_catalog, kb.id, tables)
 
         _set_status(db, kb, "ready")
+        kb.item_count = len(tables)
+        db.commit()
+        _sync_registry(db, kb, len(tables))
         elapsed = time.monotonic() - t0
         logger.info(
-            "catalog_indexer: kb=%s done — %d tables in %.1fs",
-            kb.id, len(tables), elapsed,
+            "catalog_indexer: kb=%s done — %d tables (item_count=%d) in %.1fs",
+            kb.id, len(tables), kb.item_count, elapsed,
         )
     except Exception:
         logger.exception("catalog_indexer: kb=%s failed", kb.id)
         _set_status(db, kb, "error")
+
+
+def _sync_registry(db: Session, kb: KnowledgeBase, table_count: int) -> None:
+    """Upsert the KB into the Unified Resource Registry for its bound projects.
+
+    Flag-gated (KG_RESOURCE_REGISTRY_ENABLED); best-effort — never fails
+    the catalog index itself.
+    """
+    if not getattr(settings, "KG_RESOURCE_REGISTRY_ENABLED", False):
+        return
+    try:
+        from app.services.knowledge_graph.registry_indexer import index_knowledge_base
+
+        project_ids: set[str] = set()
+        if getattr(kb, "project_id", None):
+            project_ids.add(kb.project_id)
+        legacy_name = getattr(kb, "project", None)
+        if legacy_name:
+            from app.models.project import Project
+
+            for p in (
+                db.query(Project)
+                .filter(Project.name == legacy_name, Project.is_deleted == False)  # noqa: E712
+                .all()
+            ):
+                project_ids.add(p.id)
+        for pid in project_ids:
+            if pid:
+                index_knowledge_base(db, kb, project_id=pid, table_count=table_count)
+        db.commit()
+    except Exception:
+        logger.debug("catalog_indexer: registry sync failed (non-fatal)", exc_info=True)
 
 
 # ── internals ──────────────────────────────────────────────────────────────
@@ -119,36 +163,74 @@ def _set_status(db: Session, kb: KnowledgeBase, status: str) -> None:
 
 
 def _introspect_tables_sync(kb: KnowledgeBase, db: Session) -> list[dict]:
-    """Sync wrapper: introspect full schema via connector (runs in thread)."""
+    """Sync wrapper: introspect full schema via connector (runs in thread).
+
+    Uses a ThreadPoolExecutor to introspect tables in parallel — each worker
+    gets its own connector (via context manager) so SQLAlchemy connections
+    are never shared across threads.
+    """
     with get_connector(kb) as conn:
         table_names = _safe_list_tables(conn)
-        if len(table_names) > MAX_TABLES:
-            logger.warning(
-                "catalog_indexer: kb=%s has %d tables, capping at %d",
-                kb.id, len(table_names), MAX_TABLES,
-            )
-            table_names = table_names[:MAX_TABLES]
+    if len(table_names) > MAX_TABLES:
+        logger.warning(
+            "catalog_indexer: kb=%s has %d tables, capping at %d",
+            kb.id, len(table_names), MAX_TABLES,
+        )
+        table_names = table_names[:MAX_TABLES]
 
-        tables: list[dict] = []
-        for name in table_names:
+    # Per-table worker — each opens its own connector.  Capped at
+    # INTROSPECT_MAX_WORKERS (default 8) to avoid overwhelming MySQL with
+    # parallel connections.
+    tables: list[dict] = []
+    with ThreadPoolExecutor(max_workers=INTROSPECT_MAX_WORKERS) as ex:
+        futures = {
+            ex.submit(_introspect_one_table, kb, name): name
+            for name in table_names
+        }
+        for fut in as_completed(futures):
+            name = futures[fut]
             try:
-                desc = conn.describe_table(name)
-                row_count = _safe_row_count(conn, name)
-                fks = _safe_foreign_keys(conn, name)
-                schema_name, table_type, columns = _normalize_desc(desc)
-                tables.append({
-                    "schema_name": schema_name,
-                    "table_name": name,
-                    "table_type": table_type,
-                    "row_count": row_count,
-                    "columns": columns,
-                    "foreign_keys": fks,
-                })
+                result = fut.result()
             except Exception:
                 logger.exception(
-                    "catalog_indexer: kb=%s failed to introspect table '%s' — skipping", kb.id, name,
+                    "catalog_indexer: kb=%s failed to introspect table '%s' — skipping",
+                    kb.id, name,
                 )
+                continue
+            if result is not None:
+                tables.append(result)
     return tables
+
+
+def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
+    """Introspect a single table in a worker thread.
+
+    Each worker creates its own connector (via context manager) so that
+    SQLAlchemy connections are never shared across threads.  Returns None
+    on failure (logged by caller).
+    """
+    try:
+        with get_connector(kb) as conn:
+            desc = conn.describe_table(table_name)
+            row_count = _safe_row_count(conn, table_name)
+            fks = _safe_foreign_keys(conn, table_name)
+            schema_name, table_type, columns = _normalize_desc(desc)
+            if row_count and columns:
+                _sample_column_values(conn, table_name, columns)
+        return {
+            "schema_name": schema_name,
+            "table_name": table_name,
+            "table_type": table_type,
+            "row_count": row_count,
+            "columns": columns,
+            "foreign_keys": fks,
+        }
+    except Exception:
+        logger.exception(
+            "catalog_indexer: kb=%s failed to introspect table '%s'",
+            kb.id, table_name,
+        )
+        return None
 
 
 def _normalize_desc(desc: Any) -> tuple[str, str, list[dict]]:
@@ -201,12 +283,81 @@ def _safe_list_tables(conn: Any) -> list[str]:
 
 def _safe_row_count(conn: Any, table: str) -> int | None:
     try:
-        rows = conn.execute(f"SELECT COUNT(*) FROM {_maybe_quote(conn, table)}", timeout=ROW_COUNT_TIMEOUT_S)
+        rows = conn.execute(
+            f"SELECT COUNT(*) FROM {_maybe_quote(conn, table)}",
+            timeout_s=ROW_COUNT_TIMEOUT_S,
+        )
         if rows:
-            return int(rows[0][0])
+            # connectors return list[dict] — take the first column value
+            return int(list(rows[0].values())[0])
     except Exception:
         pass
     return None
+
+
+# Name-like string columns whose distinct values carry the business
+# vocabulary users actually ask with (generic terms only).
+_SAMPLEABLE_RE = re.compile(
+    r"(name|product|region|area|spec|model|category|brand|grade|"
+    r"supplier|customer|variety|item|material|type)",
+    re.IGNORECASE,
+)
+_MAX_SAMPLE_COLS = 2
+_SAMPLE_LIMIT = 40
+_SAMPLE_VALUE_LEN = 20
+
+
+def _is_string_type(data_type: str) -> bool:
+    dt = (data_type or "").lower()
+    return any(k in dt for k in ("char", "text", "string", "enum"))
+
+
+def _samples_text(columns: list[dict]) -> str:
+    """Compact "Values: col: v1, v2; ..." suffix for embedded table docs."""
+    parts = []
+    for c in columns:
+        samples = c.get("value_samples")
+        if samples:
+            parts.append(f"{c.get('column_name')}: {', '.join(samples[:_SAMPLE_LIMIT])}")
+    return ("\nValues: " + "; ".join(parts)) if parts else ""
+
+
+def _sample_column_values(conn: Any, table: str, columns: list[dict]) -> None:
+    """Attach ``value_samples`` (distinct values) to name-like string columns.
+
+    These samples bridge the vocabulary gap between cryptic DDL names and
+    how users phrase questions; they feed the description prompt and the
+    embedded doc text only (never persisted, never shown raw in prompts).
+    """
+    candidates = [
+        c
+        for c in columns
+        if _is_string_type(c.get("data_type", ""))
+        and _SAMPLEABLE_RE.search(c.get("column_name", ""))
+    ]
+    for c in candidates[:_MAX_SAMPLE_COLS]:
+        col = c.get("column_name", "")
+        if not col:
+            continue
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT {_maybe_quote(conn, col)} "
+                f"FROM {_maybe_quote(conn, table)} LIMIT {_SAMPLE_LIMIT}",
+                max_rows=_SAMPLE_LIMIT,
+                timeout_s=ROW_COUNT_TIMEOUT_S,
+            )
+            values = []
+            for r in rows or []:
+                v = list(r.values())[0] if isinstance(r, dict) else r[0]
+                if v is None:
+                    continue
+                s = str(v).strip()[:_SAMPLE_VALUE_LEN]
+                if s:
+                    values.append(s)
+            if values:
+                c["value_samples"] = values
+        except Exception:
+            continue
 
 
 def _safe_foreign_keys(conn: Any, table: str) -> list[dict]:
@@ -226,32 +377,46 @@ def _maybe_quote(conn: Any, name: str) -> str:
 # ── LLM descriptions ───────────────────────────────────────────────────────
 
 async def _generate_descriptions(tables: list[dict]) -> None:
-    """Batch LLM description pass — mutates tables in-place with descriptions."""
+    """Batch LLM description pass — mutates tables in-place with descriptions.
+
+    Runs up to ``LLM_MAX_CONCURRENT`` LLM calls in parallel via
+    ``asyncio.gather`` (capped to avoid hitting upstream rate limits).
+    """
     if not tables:
         return
     from app.services.llm_service import call_llm
 
-    batch_count = 0
-    for i in range(0, len(tables), LLM_BATCH_SIZE):
-        batch = tables[i : i + LLM_BATCH_SIZE]
-        batch_count += 1
-        prompt_parts = _build_description_prompt(batch)
-        user_prompt = "\n\n".join(prompt_parts)
+    # Build (batch_index, batch) pairs
+    batches = [
+        tables[i : i + LLM_BATCH_SIZE]
+        for i in range(0, len(tables), LLM_BATCH_SIZE)
+    ]
 
-        try:
-            result = await call_llm(
-                prompt=user_prompt,
-                messages=[{"role": "system", "content": _TABLE_DESCRIPTION_SYSTEM}],
-                temperature=LLM_TEMP,
-                response_json_schema=_JSON_SCHEMA,
-                task_type="catalog_description",
-            )
-            _apply_descriptions(batch, result)
-        except Exception:
-            logger.exception(
-                "catalog_indexer: LLM batch %d/%d failed — leaving descriptions empty",
-                batch_count, (len(tables) + LLM_BATCH_SIZE - 1) // LLM_BATCH_SIZE,
-            )
+    sem = asyncio.Semaphore(LLM_MAX_CONCURRENT)
+
+    async def _run_one(idx: int, batch: list[dict]) -> None:
+        async with sem:
+            prompt_parts = _build_description_prompt(batch)
+            user_prompt = "\n\n".join(prompt_parts)
+            try:
+                result = await call_llm(
+                    messages=[
+                        {"role": "system", "content": _TABLE_DESCRIPTION_SYSTEM},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=LLM_TEMP,
+                    response_json_schema=_JSON_SCHEMA,
+                    task_type="catalog_description",
+                )
+                _apply_descriptions(batch, result)
+            except Exception:
+                logger.exception(
+                    "catalog_indexer: LLM batch %d/%d failed — leaving descriptions empty",
+                    idx + 1, len(batches),
+                )
+
+    # Fire all batches under the semaphore — gather runs them concurrently.
+    await asyncio.gather(*[_run_one(i, b) for i, b in enumerate(batches)])
 
 
 def _build_description_prompt(batch: list[dict]) -> list[str]:
@@ -259,6 +424,11 @@ def _build_description_prompt(batch: list[dict]) -> list[str]:
     for t in batch:
         cols = "\n".join(
             f"  - {c['column_name']} ({c['data_type']}{', PK' if c['is_primary_key'] else ''}{', nullable' if c['is_nullable'] else ''})"
+            + (
+                f" values: {', '.join(c['value_samples'][:12])}"
+                if c.get("value_samples")
+                else ""
+            )
             for c in t["columns"]
         )
         sample = ""
@@ -272,7 +442,11 @@ def _apply_descriptions(batch: list[dict], llm_result: dict) -> None:
     data = llm_result.get("data") if isinstance(llm_result, dict) else {}
     if data is None:
         data = {}
-    described = data.get("tables", [])
+    if isinstance(data, list):
+        # Tolerate models that emit a bare array despite the object schema.
+        described = data
+    else:
+        described = data.get("tables", [])
     if isinstance(described, list):
         desc_map = {d.get("table_name", ""): d for d in described}
         for t in batch:
@@ -445,6 +619,7 @@ def _embed_catalog(kb_id: str, tables: list[dict]) -> None:
             f"{t.get('description_en', '')}\n"
             f"Type: {t.get('table_type', 'TABLE')}  "
             f"Rows: {t.get('row_count', '?')}"
+            
         )
         table_ids.append(f"t:{mid}")
         table_texts.append(text)
@@ -497,3 +672,64 @@ def _embed_catalog(kb_id: str, tables: list[dict]) -> None:
         "catalog_indexer: Chroma collection '%s' — %d tables, %d columns embedded",
         collection_name, len(table_ids), len(col_ids),
     )
+
+
+# ── incremental updates ─────────────────────────────────────────────────────
+
+def update_table_embedding(
+    kb_id: str,
+    table_meta_id: str,
+    table_name: str,
+    description_zh: str | None,
+    description_en: str | None,
+    row_count: int | None,
+    table_type: str = "TABLE",
+) -> bool:
+    """Refresh a single table's ChromaDB embedding after a description edit.
+
+    Returns True if the embedding was updated, False if the collection does
+    not exist (caller can ignore).  Never raises — failures are logged and
+    swallowed so user edits don't break.
+    """
+    try:
+        from app.services.document_ingestion.store import _get_client
+        from app.services.document_ingestion.embedder import get_embedding_function
+
+        client = _get_client()
+        ef = get_embedding_function()
+        collection_name = f"catalog_{kb_id}"
+        try:
+            coll = client.get_collection(collection_name, embedding_function=ef)
+        except Exception:
+            logger.info(
+                "update_table_embedding: collection '%s' missing — skipping",
+                collection_name,
+            )
+            return False
+
+        text = (
+            f"[TABLE] {table_name}\n"
+            f"{description_zh or ''}\n"
+            f"{description_en or ''}\n"
+            f"Type: {table_type}  "
+            f"Rows: {row_count if row_count is not None else '?'}"
+        )
+        coll.update(
+            ids=[f"t:{table_meta_id}"],
+            documents=[text],
+            metadatas=[{
+                "kb_id": kb_id,
+                "table_meta_id": table_meta_id,
+                "table_name": table_name,
+                "row_count": row_count or 0,
+                "kind": "table",
+            }],
+        )
+        logger.info(
+            "update_table_embedding: kb=%s table=%s updated",
+            kb_id, table_name,
+        )
+        return True
+    except Exception:
+        logger.exception("update_table_embedding failed for kb=%s", kb_id)
+        return False
