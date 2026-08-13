@@ -30,6 +30,7 @@ from sqlalchemy.orm import sessionmaker
 from app.database import Base
 from app.models.agent_conversation import AgentConversation
 from app.models.automation_execution import AutomationExecution
+from app.models.automation_file import AutomationFile
 from app.models.automation_task import AutomationTask
 from app.models.chat_message import ChatMessage
 from app.models.chat_session import ChatSession
@@ -187,3 +188,111 @@ def test_persist_run_to_chat_never_raises_on_missing_session(db):
         user_prompt="x",
         assistant_text="y",
     )
+
+
+# --- Test 5: assistant bubble carries file artifacts ------------------------
+# The assistant bubble must carry the run's AutomationFile outputs as
+# artifacts (source == "automation_file") so the chat renders inline preview
+# cards. Deleted files are excluded; no files → artifacts stays None.
+
+
+def _make_file(
+    db,
+    execution: AutomationExecution,
+    *,
+    name: str,
+    file_type: str,
+    is_deleted: bool = False,
+) -> AutomationFile:
+    f = AutomationFile(
+        execution_id=execution.id,
+        automation_task_id=execution.automation_task_id,
+        name=name,
+        file_type=file_type,
+        size=1024,
+        is_deleted=is_deleted,
+    )
+    db.add(f)
+    db.commit()
+    db.refresh(f)
+    return f
+
+
+def test_persist_run_to_chat_attaches_automation_file_artifacts(db):
+    task = _make_task(db)
+    ex = _make_execution(db, task)
+    f1 = _make_file(db, ex, name="report.html", file_type="html")
+    f2 = _make_file(db, ex, name="data.csv", file_type="csv")
+    # A soft-deleted file must NOT be attached.
+    _make_file(db, ex, name="deleted.docx", file_type="docx", is_deleted=True)
+
+    ax._persist_run_to_chat(
+        db, task, ex,
+        user_prompt="run",
+        assistant_text="done",
+    )
+
+    asst_m = db.query(ChatMessage).filter(
+        ChatMessage.session_id == task.session_id,
+        ChatMessage.role == "assistant",
+    ).one()
+    assert asst_m.artifacts is not None, "assistant bubble must carry artifacts"
+    assert len(asst_m.artifacts) == 2, "soft-deleted files must be excluded"
+    assert {a["id"] for a in asst_m.artifacts} == {f1.id, f2.id}
+    for a in asst_m.artifacts:
+        assert a["source"] == "automation_file"
+        assert a.get("has_preview") is True
+
+
+def test_persist_run_to_chat_no_files_keeps_artifacts_none(db):
+    task = _make_task(db)
+    ex = _make_execution(db, task)
+
+    ax._persist_run_to_chat(
+        db, task, ex,
+        user_prompt="run",
+        assistant_text="done",
+    )
+
+    asst_m = db.query(ChatMessage).filter(
+        ChatMessage.session_id == task.session_id,
+        ChatMessage.role == "assistant",
+    ).one()
+    assert asst_m.artifacts is None
+
+
+def test_persist_run_to_chat_updates_existing_bubble_artifacts(db):
+    from app.services.automation_sessions import ensure_task_chat_session
+    task = _make_task(db)
+    ex = _make_execution(db, task)
+    f1 = _make_file(db, ex, name="report.html", file_type="html")
+
+    session_id, _ = ensure_task_chat_session(db, task)
+
+    # Simulate the empty assistant bubble pre-created by
+    # _post_run_request_marker (role=assistant, content="", phase carries the
+    # execution id). _persist_run_to_chat must update THIS bubble in place.
+    db.add(ChatMessage(
+        session_id=session_id,
+        role="assistant",
+        content="",
+        order=1,
+        artifacts=None,
+        phase={"execution_id": ex.id, "automation_task_id": task.id},
+    ))
+    db.commit()
+
+    ax._persist_run_to_chat(
+        db, task, ex,
+        user_prompt="run",
+        assistant_text="done",
+    )
+
+    asst_m = db.query(ChatMessage).filter(
+        ChatMessage.session_id == task.session_id,
+        ChatMessage.role == "assistant",
+    ).one()
+    assert asst_m.content == "done"
+    assert asst_m.artifacts is not None, "in-place update must also attach artifacts"
+    assert len(asst_m.artifacts) == 1
+    assert asst_m.artifacts[0]["source"] == "automation_file"

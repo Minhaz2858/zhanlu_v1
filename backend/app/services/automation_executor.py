@@ -2464,6 +2464,15 @@ def _persist_run_to_chat(
             _base_order += 1
 
         if assistant_text:
+            # Attach the run's file outputs so the chat renders inline
+            # preview cards (partitionArtifacts keys off
+            # source == "automation_file"). Soft-deleted files are skipped.
+            _files = db.query(AutomationFile).filter(
+                AutomationFile.execution_id == execution.id,
+                AutomationFile.is_deleted == False,
+            ).all()
+            _artifacts = _chat_message_artifacts_for_files(_files) if _files else None
+
             if _existing_asst_msg is not None:
                 # Update the empty pre-created assistant bubble in place:
                 # this is the slot the 3-placeholders skeleton was
@@ -2477,6 +2486,7 @@ def _persist_run_to_chat(
                 _ph["live"] = False  # mark finalized so the frontend
                 # can stop showing "running" affordances.
                 _existing_asst_msg.phase = _ph
+                _existing_asst_msg.artifacts = _artifacts
             else:
                 # Defensive fallback: no pre-created assistant bubble
                 # (e.g., the marker was written by an older code path
@@ -2489,7 +2499,7 @@ def _persist_run_to_chat(
                     order=_base_order,
                     tool_calls=None,
                     activity_steps=None,
-                    artifacts=None,
+                    artifacts=_artifacts,
                     phase={
                         **common_phase,
                         "verb": "🤖",
