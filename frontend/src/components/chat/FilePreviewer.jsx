@@ -64,6 +64,9 @@ function toPreviewUrl(url) {
 const AUTOMATION_FILE_RE = /\/api\/automations\/files\/([^/?#]+)/i;
 function getAutomationFileId(url) {
   if (typeof url !== 'string') return null;
+  // Only same-origin relative paths are automation-file URLs; an absolute
+  // external URL must never be routed to the signed-token mint.
+  if (/^https?:\/\//i.test(url)) return null;
   const m = AUTOMATION_FILE_RE.exec(url);
   return m ? m[1] : null;
 }

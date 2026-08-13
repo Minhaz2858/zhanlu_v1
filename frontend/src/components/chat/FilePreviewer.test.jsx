@@ -92,4 +92,19 @@ describe('FilePreviewer — automation files', () => {
     expect(screen.getByTestId('docx-renderer')).toBeTruthy();
     expect(authFetch).not.toHaveBeenCalled();
   });
+
+  it('does not treat an external office URL as an automation file (stays on MS Live)', () => {
+    render(
+      <FilePreviewer
+        url="https://example.com/report.docx"
+        name="report.docx"
+        fileType="docx"
+      />,
+    );
+
+    expect(authFetch).not.toHaveBeenCalled();
+    const iframe = document.querySelector('iframe');
+    expect(iframe).toBeTruthy();
+    expect(iframe.getAttribute('src')).toContain('view.officeapps.live.com');
+  });
 });
