@@ -1575,6 +1575,15 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
     if not output_format:
         output_format = "html"
 
+    # Normalize skills (list of skill names) — the LLM may pass a JSON array
+    # or a comma-separated string. Stored on automation_tasks.skills and used
+    # by the executor for progressive-disclosure metadata injection.
+    skills = args.get("skills") or []
+    if isinstance(skills, str):
+        skills = [s.strip() for s in skills.split(",") if s.strip()]
+    elif not isinstance(skills, (list, tuple)):
+        skills = []
+
     task = AutomationTask(
         name=args.get("name", "Untitled Automation"),
         type=args.get("type", "custom"),
@@ -1588,6 +1597,7 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
         project_id=project_id,
         session_id=session_id,
         data_source_id=args.get("data_source_id"),
+        skills=skills or None,
         agent_id=_resolve_task_executor_agent(db, args),
         org_id=args.get("org_id") or TOOL_CONTEXT.get("org_id") or "default-org",
         app_id=args.get("app_id") or TOOL_CONTEXT.get("app_id") or "default-app",
@@ -1696,7 +1706,7 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
     allowed_fields = {
         "name", "type", "description", "schedule", "project", "project_id",
         "status", "prompt", "output_format", "notify_chat", "max_retries",
-        "skip_confirmation", "agent_id", "session_id", "data_source_id",
+        "skip_confirmation", "agent_id", "session_id", "data_source_id", "skills",
     }
 
     schedule_changed = False
@@ -1704,6 +1714,13 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
         if key in allowed_fields:
             if key == "schedule" and value != task.schedule:
                 schedule_changed = True
+            if key == "skills":
+                # Normalize: comma-separated string -> list; non-list -> [].
+                if isinstance(value, str):
+                    value = [s.strip() for s in value.split(",") if s.strip()]
+                elif not isinstance(value, (list, tuple)):
+                    value = []
+                value = value or None
             setattr(task, key, value)
 
     # When the schedule changes, re-parse and recompute next_run_at.

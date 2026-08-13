@@ -48,22 +48,54 @@ describe('InlineArtifactPreview', () => {
     expect(onOpen).toHaveBeenCalledWith(baseArtifact);
   });
 
-  it('hides the inline Preview toggle when an onOpen (right-pane) handler is provided', () => {
-    // The user can preview in the right-side pane (opened by the Open button),
-    // so the inline expand-preview toggle is redundant in that context and is
-    // hidden. Open + Download remain.
+  it('shows the inline Preview toggle even when an onOpen (right-pane) handler is provided', () => {
+    // The user can preview inline in the chat bubble AND in the right-side pane
+    // (opened by the Open button). Both paths coexist — Preview, Open, and
+    // Download all remain available.
     const onOpen = vi.fn();
     render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
-    expect(screen.queryByRole('button', { name: /Open preview|Hide preview/i })).toBeNull();
+    expect(screen.getByRole('button', { name: /Open preview/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Open deliverable in side preview/i })).toBeTruthy();
     expect(screen.getByRole('button', { name: /Download deliverable/i })).toBeTruthy();
   });
 
-  it('still shows the inline Preview toggle when no onOpen handler is given (e.g. run logs)', () => {
+  it('shows the inline Preview toggle when no onOpen handler is given (e.g. run logs)', () => {
     // ExecutionLogsList renders this card WITHOUT onOpen — there the inline
     // preview is the ONLY way to preview (no right pane), so the toggle stays.
     render(<InlineArtifactPreview artifact={baseArtifact} />);
     expect(screen.getByRole('button', { name: /Open preview/i })).toBeTruthy();
+  });
+
+  it('keeps the card collapsed by default even when onOpen is provided', () => {
+    const onOpen = vi.fn();
+    render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
+    // Toggle shows "Preview" (collapsed) — no iframe mounted until clicked.
+    expect(screen.getByRole('button', { name: /Open preview/i })).toBeTruthy();
+    expect(document.querySelector('iframe')).toBeNull();
+  });
+
+  it('mints a signed token and mounts the iframe when Preview is clicked with onOpen present', async () => {
+    authFetch.mockResolvedValue({
+      ok: true,
+      json: () => Promise.resolve({
+        token: 'signed-token',
+        url: '/api/automations/files/file-1/preview?token=signed-token',
+      }),
+    });
+    const onOpen = vi.fn();
+    render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
+    fireEvent.click(screen.getByRole('button', { name: /Open preview/i }));
+    await waitFor(() => {
+      expect(authFetch).toHaveBeenCalledWith(
+        '/api/automations/files/file-1/preview-token',
+        { method: 'POST' },
+      );
+      const iframe = document.querySelector('iframe');
+      expect(iframe).toBeTruthy();
+      expect(iframe.getAttribute('src')).toBe(
+        '/api/automations/files/file-1/preview?token=signed-token',
+      );
+    });
   });
 
   it('downloads through authFetch as a blob (authenticated route)', async () => {

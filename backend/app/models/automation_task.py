@@ -85,3 +85,9 @@ class AutomationTask(TimestampedBase):
     data_source_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("knowledge_bases.id"), nullable=True, index=True
     )
+    # Skills enabled for this automation (ordered JSON array of skill names).
+    # The executor injects a compact metadata index (progressive disclosure)
+    # and the agent loads full SKILL.md bodies on demand via the `skills` /
+    # `load_skill_body` tool. Nullable to match agent_apps.skills; read paths
+    # normalize None -> [] so legacy rows behave like "no skills enabled".
+    skills: Mapped[list | None] = mapped_column(JSON, nullable=True)

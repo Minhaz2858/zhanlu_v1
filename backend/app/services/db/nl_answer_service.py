@@ -30,6 +30,28 @@ from app.services.llm_service import llm_headers, llm_url, get_model
 logger = logging.getLogger(__name__)
 
 
+def _connection_context(schema_svc: SchemaService, kb_id: str) -> str:
+    """Return a secret-free connection description for a KB, for error hints.
+
+    Includes only db_type/host/port/database_name/schema so the Data Agent LLM
+    can see *why* a schema read failed without exposing credentials.
+    """
+    try:
+        kb = schema_svc._load_kb(kb_id)
+    except Exception:
+        return "(data source context unavailable)"
+    parts = [f"db_type={kb.db_type or 'unknown'}"]
+    if getattr(kb, "host", None):
+        parts.append(f"host={kb.host}")
+    if getattr(kb, "port", None):
+        parts.append(f"port={kb.port}")
+    if getattr(kb, "database_name", None):
+        parts.append(f"database={kb.database_name}")
+    if getattr(kb, "schema", None):
+        parts.append(f"schema={kb.schema}")
+    return f"Data source ({', '.join(parts)})."
+
+
 class NLAnswerService:
     """Orchestrate text→SQL→execute→narrate for a KnowledgeBase."""
 
@@ -97,7 +119,8 @@ class NLAnswerService:
                 logger.warning("NLAnswer: M-Schema fallback failed: %s", e)
                 return {
                     "success": False,
-                    "error": f"Failed to read schema: {e}",
+                    "error": f"Failed to read schema: {e}. "
+                    f"{_connection_context(schema_svc, kb_id)}",
                     "source_id": kb_id,
                 }
 
@@ -227,7 +250,7 @@ class NLAnswerService:
             shaped dict used by downstream code; schema_text is the M-Schema
             rendered string with value examples.
         """
-        from app.services.datasources.mysql_adapter import MySQLAdapter
+        from app.services.datasources import build_adapter
         from app.services.datasources.m_schema import render_m_schema
         from app.services.db.schema_service import _cache_get, _cache_put
 
@@ -242,7 +265,7 @@ class NLAnswerService:
         schema_svc = SchemaService(self._db)
         kb = schema_svc._load_kb(kb_id)
 
-        adapter = MySQLAdapter(kb)
+        adapter = build_adapter(kb)
         try:
             # Build M-Schema text (with value sampling)
             schema_text = await asyncio.to_thread(

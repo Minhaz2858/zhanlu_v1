@@ -32,6 +32,7 @@ class PostgresAdapter:
         dbname: str = "zhanlu",
         user: str = "zhanlu",
         password: str = "",
+        schema: str = "public",
         timeout_ms: int = 5000,
     ):
         self._config: dict[str, Any] = {
@@ -45,6 +46,12 @@ class PostgresAdapter:
         if dsn:
             self._config = {"dsn": dsn, **self._config}
         self._timeout_ms = timeout_ms
+        self._schema = schema or "public"
+        # Pin search_path for non-default schemas so unqualified table names
+        # in value-sampling queries resolve to the right schema.
+        if self._schema != "public":
+            safe = self._schema.replace('"', '""')
+            self._config["options"] = f'-csearch_path="{safe}"'
         self._conn: psycopg.Connection | None = None
 
     # ── helpers ───────────────────────────────────────────────────────
@@ -73,7 +80,8 @@ class PostgresAdapter:
         conn = self._get_conn()
         rows = conn.execute(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = 'public' ORDER BY table_name"
+            "WHERE table_schema = %s ORDER BY table_name",
+            (self._schema,),
         ).fetchall()
         return [r[0] for r in rows]
 
@@ -94,12 +102,14 @@ class PostgresAdapter:
                 JOIN information_schema.key_column_usage ku
                   ON tc.constraint_name = ku.constraint_name
                 WHERE tc.constraint_type = 'PRIMARY KEY'
+                  AND tc.table_schema = %s
                   AND tc.table_name = %s
             ) pk ON c.column_name = pk.column_name
-            WHERE c.table_name = %s
+            WHERE c.table_schema = %s
+              AND c.table_name = %s
             ORDER BY c.ordinal_position
             """,
-            (table, table),
+            (self._schema, table, self._schema, table),
         ).fetchall()
         result: list[ColumnInfo] = []
         for r in rows:

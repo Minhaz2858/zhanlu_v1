@@ -10,7 +10,7 @@ import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
@@ -32,10 +32,16 @@ router = APIRouter(prefix="/apps/{app_id}/knowledge_bases", tags=["KnowledgeBase
 class TestConnectionRequest(BaseModel):
     """Form fields the user typed in the Connectors wizard. No KB id yet."""
 
+    model_config = ConfigDict(populate_by_name=True)
+
     db_type: str | None = None
     host: str | None = None
     port: int | None = None
     database_name: str | None = None
+    # ``schema`` collides with BaseModel.schema (deprecated method), so the
+    # Python attribute is named ``schema_name`` while the wire alias stays
+    # ``schema`` to keep the API contract and avoid a Pydantic shadow warning.
+    schema_name: str | None = Field(default=None, alias="schema")
     username: str | None = None
     password: str | None = None
     api_url: str | None = None
@@ -113,6 +119,7 @@ async def test_connection(
         host=payload.host,
         port=payload.port or 0,
         database_name=payload.database_name,
+        schema=payload.schema_name or "public",
         username=payload.username,
         password=payload.password or "",
     )

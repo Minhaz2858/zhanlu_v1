@@ -929,6 +929,26 @@ def execute_automation(execution_id: str) -> None:
         except Exception as _mem_err:
             logger.debug("execute_automation: memory read failed (non-fatal): %s", _mem_err)
 
+        # Enabled skills (progressive disclosure): inject a compact metadata
+        # index (name + one-line summary) so the agent knows which skills are
+        # available without blowing up the context window. The agent loads the
+        # full SKILL.md body on demand via the `skills`/`load_skill_body` tool.
+        # Legacy tasks with no `skills` fall through to the original
+        # output_format-only prompt (backward compatible).
+        _skills_context = ""
+        try:
+            from app.services.skills_loader import get_skill_metadata_for_agent
+            _skills = list(task.skills or []) if getattr(task, "skills", None) else []
+            if _skills:
+                _skills_md = get_skill_metadata_for_agent(_skills, db=db)
+                if _skills_md:
+                    _skills_context = _skills_md
+        except Exception as _skills_err:
+            logger.debug(
+                "execute_automation: skills metadata build failed (non-fatal): %s",
+                _skills_err,
+            )
+
         # Build a prompt: the task's own prompt + a small note telling the
         # agent what to produce (so the output is structured for the
         # document generator).
@@ -961,6 +981,7 @@ def execute_automation(execution_id: str) -> None:
             + _HONESTY_GUARDRAIL
             + (f"\n\n{prev_context}" if prev_context else "")
             + (_memory_context or "")
+            + (f"\n\n{_skills_context}" if _skills_context else "")
         )
 
         # Run the agent in a sub-thread with its OWN session and a hard

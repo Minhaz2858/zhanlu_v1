@@ -39,6 +39,7 @@ class SkillExecutionRecorder:
         status: str,
         conversation_id: Optional[str] = None,
         agent_name: Optional[str] = None,
+        execution_id: Optional[str] = None,
         duration_ms: Optional[int] = None,
         error_message: Optional[str] = None,
         input_json: Optional[dict] = None,
@@ -52,6 +53,7 @@ class SkillExecutionRecorder:
             status: "completed" or "failed".
             conversation_id: The conversation where the invocation occurred.
             agent_name: The agent that invoked the skill.
+            execution_id: The automation execution id (when run inside a task).
             duration_ms: How long the operation took.
             error_message: Error details if status == "failed".
             input_json: The input arguments (optional, for debugging).
@@ -69,6 +71,7 @@ class SkillExecutionRecorder:
                     id=str(uuid4()),
                     skill_profile_id=None,  # We track by name; profile link is optional
                     conversation_id=conversation_id,
+                    execution_id=execution_id,
                     status=status,
                     input_json={"action": action, **(input_json or {})} if input_json else {"action": action},
                     output_json=output_json,
@@ -111,14 +114,28 @@ class SkillExecutionRecorder:
         input_json: Optional[dict] = None,
         output_json: Optional[dict] = None,
     ) -> None:
-        """Convenience wrapper: extract conversation_id/agent_name from context."""
+        """Convenience wrapper: extract conversation_id/agent_name/execution_id
+        from context (with a contextvar fallback for automation runs)."""
         ctx = context or {}
+
+        # execution_id may be present in the tool context directly, or we can
+        # read it from the automation executor's contextvar (set while a task
+        # is running). Lazy import avoids a circular dependency at load time.
+        execution_id = ctx.get("execution_id")
+        if not execution_id:
+            try:
+                from app.services.automation_executor import get_current_execution_id
+                execution_id = get_current_execution_id()
+            except Exception:
+                execution_id = None
+
         SkillExecutionRecorder.record(
             skill_name=skill_name,
             action=action,
             status=status,
             conversation_id=ctx.get("conversation_id"),
             agent_name=ctx.get("agent_name"),
+            execution_id=execution_id,
             duration_ms=duration_ms,
             error_message=error_message,
             input_json=input_json,

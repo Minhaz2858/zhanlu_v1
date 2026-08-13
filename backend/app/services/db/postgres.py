@@ -20,6 +20,7 @@ class PostgresConnector:
         self.kb = kb
         self.dialect = "postgres"
         self._engine: Engine | None = None
+        self._schema = getattr(kb, "schema", None) or "public"
 
     def _build_url(self) -> str:
         from urllib.parse import quote_plus
@@ -34,12 +35,30 @@ class PostgresConnector:
         pwd_enc = quote_plus(pwd)
         return f"postgresql+psycopg2://{user_enc}:{pwd_enc}@{host}:{port}/{db}"
 
+    def _search_path_option(self) -> str | None:
+        """Return a libpq ``options`` value pinning ``search_path`` to the KB
+        schema, or ``None`` when the default (``public``) is in effect.
+
+        Quoting the identifier defensively (doubling embedded quotes) prevents
+        the schema name from being interpreted as an injection vector while
+        still allowing schema names with mixed case or special characters.
+        """
+        if not self._schema or self._schema == "public":
+            return None
+        safe = self._schema.replace('"', '""')
+        return f'-csearch_path="{safe}"'
+
     def __enter__(self) -> "PostgresConnector":
+        connect_args: dict[str, Any] = {}
+        opt = self._search_path_option()
+        if opt:
+            connect_args["options"] = opt
         self._engine = create_engine(
             self._build_url(),
             pool_pre_ping=True,
             pool_recycle=1800,
             future=True,
+            connect_args=connect_args,
         )
         return self
 
@@ -58,30 +77,32 @@ class PostgresConnector:
         assert self._engine is not None
         sql = text(
             "SELECT table_name FROM information_schema.tables "
-            "WHERE table_schema = current_schema() "
+            "WHERE table_schema = :schema "
             "AND table_type = 'BASE TABLE' ORDER BY table_name"
         )
         with self._engine.connect() as conn:
-            return [r[0] for r in conn.execute(sql).fetchall()]
+            return [r[0] for r in conn.execute(sql, {"schema": self._schema}).fetchall()]
 
     def describe_table(self, table: str) -> list[dict]:
         assert self._engine is not None
         sql = text(
             "SELECT column_name, data_type, is_nullable, column_default "
             "FROM information_schema.columns "
-            "WHERE table_schema = current_schema() AND table_name = :t "
+            "WHERE table_schema = :schema AND table_name = :t "
             "ORDER BY ordinal_position"
         )
         with self._engine.connect() as conn:
-            rows = conn.execute(sql, {"t": table}).fetchall()
-        # Pull PKs separately
+            rows = conn.execute(sql, {"schema": self._schema, "t": table}).fetchall()
+        # Pull PKs separately. Qualify with the schema so the regclass lookup
+        # doesn't rely on search_path (a table in a non-default schema would
+        # otherwise be missed or resolve to a same-named table elsewhere).
         pk_sql = text(
             "SELECT a.attname FROM pg_index i "
             "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
-            "WHERE i.indrelid = (:t)::regclass AND i.indisprimary"
+            "WHERE i.indrelid = (:schema || '.' || :t)::regclass AND i.indisprimary"
         )
         with self._engine.connect() as conn:
-            pks = {r[0] for r in conn.execute(pk_sql, {"t": table}).fetchall()}
+            pks = {r[0] for r in conn.execute(pk_sql, {"schema": self._schema, "t": table}).fetchall()}
         return [
             {
                 "name": r[0],

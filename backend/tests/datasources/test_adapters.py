@@ -3,9 +3,27 @@
 import os
 import pytest
 from pathlib import Path
+from types import SimpleNamespace
 
-from app.services.datasources import DatasourceAdapter
+from app.services.datasources import DatasourceAdapter, build_adapter
 from app.services.datasources.sqlite_adapter import SQLiteAdapter
+
+
+def _kb(**overrides):
+    """Build a fake KnowledgeBase-shaped object for dispatch tests."""
+    base = dict(
+        id="kb-1",
+        name="test",
+        db_type="postgres",
+        host="localhost",
+        port=5432,
+        database_name="zhanlu",
+        schema=None,
+        username="zhanlu",
+        password="secret",
+    )
+    base.update(overrides)
+    return SimpleNamespace(**base)
 
 
 @pytest.fixture
@@ -114,3 +132,84 @@ class TestPostgresAdapter:
     def test_list_tables_non_empty(self, pg_adapter):
         tables = pg_adapter.list_tables()
         assert isinstance(tables, list)
+
+
+class TestBuildAdapterDispatch:
+    """build_adapter must select the correct adapter by db_type (no DB I/O)."""
+
+    def test_mysql_dispatches_to_mysql_adapter(self):
+        from app.services.datasources.mysql_adapter import MySQLAdapter
+        adapter = build_adapter(_kb(db_type="mysql"))
+        assert isinstance(adapter, MySQLAdapter)
+
+    def test_mariadb_dispatches_to_mysql_adapter(self):
+        from app.services.datasources.mysql_adapter import MySQLAdapter
+        adapter = build_adapter(_kb(db_type="mariadb"))
+        assert isinstance(adapter, MySQLAdapter)
+
+    def test_postgres_dispatches_to_postgres_adapter(self):
+        from app.services.datasources.postgres_adapter import PostgresAdapter
+        adapter = build_adapter(_kb(db_type="postgres"))
+        assert isinstance(adapter, PostgresAdapter)
+
+    def test_postgresql_alias_dispatches_to_postgres_adapter(self):
+        from app.services.datasources.postgres_adapter import PostgresAdapter
+        adapter = build_adapter(_kb(db_type="postgresql"))
+        assert isinstance(adapter, PostgresAdapter)
+
+    def test_postgres_schema_is_threaded(self):
+        from app.services.datasources.postgres_adapter import PostgresAdapter
+        adapter = build_adapter(_kb(db_type="postgres", schema="analytics"))
+        assert isinstance(adapter, PostgresAdapter)
+        assert adapter._schema == "analytics"
+
+    def test_sqlite_dispatches_to_sqlite_adapter(self):
+        adapter = build_adapter(_kb(db_type="sqlite", database_name=":memory:"))
+        assert isinstance(adapter, SQLiteAdapter)
+
+    def test_unknown_db_type_raises_value_error(self):
+        with pytest.raises(ValueError):
+            build_adapter(_kb(db_type="oracle"))
+
+    def test_empty_db_type_raises_value_error(self):
+        with pytest.raises(ValueError):
+            build_adapter(_kb(db_type=None))
+
+
+class TestPostgresSchemaFiltering:
+    """PostgresAdapter/PostgresConnector must scope introspection by schema."""
+
+    def test_adapter_defaults_to_public(self):
+        from app.services.datasources.postgres_adapter import PostgresAdapter
+        adapter = PostgresAdapter(host="localhost")
+        assert adapter._schema == "public"
+
+    def test_adapter_stores_non_default_schema(self):
+        from app.services.datasources.postgres_adapter import PostgresAdapter
+        adapter = PostgresAdapter(host="localhost", schema="dw_prod")
+        assert adapter._schema == "dw_prod"
+
+    def test_adapter_schema_blank_falls_back_to_public(self):
+        from app.services.datasources.postgres_adapter import PostgresAdapter
+        adapter = PostgresAdapter(host="localhost", schema="")
+        assert adapter._schema == "public"
+
+    def test_connector_search_path_defaults_to_none(self):
+        from app.services.db.postgres import PostgresConnector
+        conn = PostgresConnector(_kb(db_type="postgres", schema=None))
+        assert conn._search_path_option() is None
+
+    def test_connector_search_path_for_public_is_none(self):
+        from app.services.db.postgres import PostgresConnector
+        conn = PostgresConnector(_kb(db_type="postgres", schema="public"))
+        assert conn._search_path_option() is None
+
+    def test_connector_search_path_for_custom_schema(self):
+        from app.services.db.postgres import PostgresConnector
+        conn = PostgresConnector(_kb(db_type="postgres", schema="dw_prod"))
+        assert conn._search_path_option() == '-csearch_path="dw_prod"'
+
+    def test_connector_search_path_escapes_quotes(self):
+        from app.services.db.postgres import PostgresConnector
+        conn = PostgresConnector(_kb(db_type="postgres", schema='a"b'))
+        assert conn._search_path_option() == '-csearch_path="a""b"'

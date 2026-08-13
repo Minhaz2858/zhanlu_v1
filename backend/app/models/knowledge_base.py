@@ -27,6 +27,7 @@ class KnowledgeBase(TimestampedBase):
     host: Mapped[str | None] = mapped_column(String(255), nullable=True)
     port: Mapped[int | None] = mapped_column(Integer, nullable=True)
     database_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    schema: Mapped[str | None] = mapped_column(String(255), nullable=True)
     username: Mapped[str | None] = mapped_column(String(255), nullable=True)
     password: Mapped[str | None] = mapped_column(String(255), nullable=True)
     api_url: Mapped[str | None] = mapped_column(String(500), nullable=True)

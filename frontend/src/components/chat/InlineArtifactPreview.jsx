@@ -172,12 +172,11 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* Inline expand-preview toggle. Hidden when an ``onOpen`` handler
-              is provided (chat): there the Open button launches the right-side
-              preview pane, so an inline toggle is redundant (the user asked to
-              keep just Open + Download). Shown when no handler exists (run
-              logs), where this inline preview is the ONLY preview path. */}
-          {hasPreview && !onOpen && (
+          {/* Inline expand-preview toggle. Shown whenever the file is
+              previewable — in both chat (where the Open button also launches
+              the right-side pane) and run logs (where this inline preview is
+              the only preview path). Default stays collapsed via ``open``. */}
+          {hasPreview && (
             <button
               type="button"
               onClick={() => setOpen((prev) => !prev)}
@@ -210,7 +209,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           )}
         </div>
       </div>
-      {hasPreview && !onOpen && open && (
+      {hasPreview && open && (
         <div className="border-t border-border bg-background">
           {previewFailed ? (
             <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
@@ -221,7 +220,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
             <iframe
               title={`Preview of ${title}`}
               src={signedPreviewUrl}
-              className="h-[360px] w-full border-0"
+              className="h-[560px] w-full border-0"
               sandbox={sandboxValue}
               loading="lazy"
             />
