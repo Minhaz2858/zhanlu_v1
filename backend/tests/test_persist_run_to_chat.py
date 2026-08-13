@@ -296,3 +296,46 @@ def test_persist_run_to_chat_updates_existing_bubble_artifacts(db):
     assert asst_m.artifacts is not None, "in-place update must also attach artifacts"
     assert len(asst_m.artifacts) == 1
     assert asst_m.artifacts[0]["source"] == "automation_file"
+
+
+# --- Test 6: production ordering (persist before files, then re-persist) ---
+# The real execute_automation flow calls _persist_run_to_chat in the inner
+# `finally` BEFORE _render_and_save_files creates the AutomationFile rows,
+# so the first call must write artifacts=None. A second call AFTER file
+# generation must attach the now-existing files onto the SAME bubble. This
+# is the regression guard for the "still no file showing" bug.
+
+
+def test_persist_run_to_chat_second_call_attaches_late_files(db):
+    task = _make_task(db)
+    ex = _make_execution(db, task)
+
+    # Mirror production: persist when NO files exist yet (the inner finally).
+    ax._persist_run_to_chat(
+        db, task, ex,
+        user_prompt="run",
+        assistant_text="done",
+    )
+
+    asst_m = db.query(ChatMessage).filter(
+        ChatMessage.session_id == task.session_id,
+        ChatMessage.role == "assistant",
+    ).one()
+    assert asst_m.artifacts is None, "first persist (pre-render) sees zero files"
+
+    # Now files are created (mirrors _render_and_save_files ordering).
+    f1 = _make_file(db, ex, name="report.html", file_type="html")
+    f2 = _make_file(db, ex, name="data.csv", file_type="csv")
+
+    # Second persist attaches the freshly-committed artifacts in place.
+    ax._persist_run_to_chat(
+        db, task, ex,
+        user_prompt="run",
+        assistant_text="done",
+    )
+
+    db.refresh(asst_m)
+    assert asst_m.artifacts is not None, "second persist must attach late files"
+    assert {a["id"] for a in asst_m.artifacts} == {f1.id, f2.id}
+    for a in asst_m.artifacts:
+        assert a["source"] == "automation_file"

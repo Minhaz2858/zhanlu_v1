@@ -263,6 +263,33 @@ def _format_guidance(output_format: str) -> str:
     return base
 
 
+def _build_skills_context(task: AutomationTask, db: Session) -> str:
+    """Build the progressive-disclosure skills metadata index for a task.
+
+    Returns a compact markdown block (skill name + one-line summary for each
+    enabled skill) that gets appended to the agent prompt, or ``""`` when the
+    task has no ``skills`` (legacy behavior). The agent is expected to load
+    the full ``SKILL.md`` body on demand via the ``skills``/``load_skill_body``
+    tool — this index only advertises availability, it does NOT inline the
+    bodies, so the context window is preserved.
+
+    This is intentionally non-fatal: any loader failure degrades to ``""``
+    (the run continues with the original output_format-only prompt).
+    """
+    skills = list(task.skills or []) if getattr(task, "skills", None) else []
+    if not skills:
+        return ""
+    try:
+        from app.services.skills_loader import get_skill_metadata_for_agent
+        return get_skill_metadata_for_agent(skills, db=db) or ""
+    except Exception as exc:  # noqa: BLE001
+        logger.debug(
+            "execute_automation: skills metadata build failed (non-fatal): %s",
+            exc,
+        )
+        return ""
+
+
 def _resolve_task_project(db: Session, task: AutomationTask) -> Tuple[Optional[str], Optional[str]]:
     """Resolve the task's effective ``(project_id, project_name)``.
 
@@ -935,19 +962,7 @@ def execute_automation(execution_id: str) -> None:
         # full SKILL.md body on demand via the `skills`/`load_skill_body` tool.
         # Legacy tasks with no `skills` fall through to the original
         # output_format-only prompt (backward compatible).
-        _skills_context = ""
-        try:
-            from app.services.skills_loader import get_skill_metadata_for_agent
-            _skills = list(task.skills or []) if getattr(task, "skills", None) else []
-            if _skills:
-                _skills_md = get_skill_metadata_for_agent(_skills, db=db)
-                if _skills_md:
-                    _skills_context = _skills_md
-        except Exception as _skills_err:
-            logger.debug(
-                "execute_automation: skills metadata build failed (non-fatal): %s",
-                _skills_err,
-            )
+        _skills_context = _build_skills_context(task, db)
 
         # Build a prompt: the task's own prompt + a small note telling the
         # agent what to produce (so the output is structured for the
@@ -1206,6 +1221,30 @@ def execute_automation(execution_id: str) -> None:
             logger.exception("execute_automation: file generation failed: %s", e)
             # Don't fail the whole run — the text output is still useful.
             files, quality_gate = [], None
+
+        # Bug fix (2026-08-13): the assistant bubble was persisted in the
+        # inner `finally` above BEFORE any AutomationFile rows existed, so
+        # its `artifacts` column was always written as None and the chat
+        # never rendered inline preview cards. The file rows are only
+        # created here, in `_render_and_save_files`, so re-run
+        # `_persist_run_to_chat` to attach the freshly-committed artifacts
+        # onto the SAME bubble. The function is idempotent — it finds the
+        # existing assistant bubble by execution_id and updates its
+        # `artifacts` in place. Guarded on `files` so the failure path
+        # (which produces no files) skips the redundant roundtrip.
+        if files:
+            try:
+                _persist_run_to_chat(
+                    db, task, execution,
+                    user_prompt=_persist_state.get("user_prompt"),
+                    assistant_text=_persist_state.get("assistant_text") or assistant_text,
+                )
+            except Exception:
+                logger.exception(
+                    "execute_automation: post-render _persist_run_to_chat "
+                    "failed (non-fatal) for execution %s",
+                    execution_id,
+                )
 
         # Tier B #4: compute the structured summary of THIS run's output and
         # persist it on output_data for the next run's cross-run delta. Done
