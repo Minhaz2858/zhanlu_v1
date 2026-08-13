@@ -1,5 +1,7 @@
+import { useEffect, useState } from 'react';
 import { Download, FileText, Eye, ExternalLink } from 'lucide-react';
 import DocxBrowserRenderer from './DocxBrowserRenderer';
+import { authFetch } from '@/api/authFetch';
 
 const IMG = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'];
 const OFFICE = ['doc', 'docx', 'ppt', 'pptx', 'pps', 'ppsx', 'xls', 'xlsx', 'odt', 'ods', 'odp'];
@@ -52,6 +54,78 @@ function toPreviewUrl(url) {
   const p = pathOf(url);
   if (!p.startsWith('/api/uploads/')) return null;
   return `/api/files/preview?url=${encodeURIComponent(p)}`;
+}
+
+/**
+ * Extract an AutomationFile id from an automation-file URL
+ * (e.g. "/api/automations/files/<id>/download" or ".../preview").
+ * Returns null when the URL is not an automation-file URL.
+ */
+const AUTOMATION_FILE_RE = /\/api\/automations\/files\/([^/?#]+)/i;
+function getAutomationFileId(url) {
+  if (typeof url !== 'string') return null;
+  const m = AUTOMATION_FILE_RE.exec(url);
+  return m ? m[1] : null;
+}
+
+/**
+ * Render an automation file via the signed preview-token flow. Iframe
+ * navigation cannot send the Authorization header, so we mint a short-lived
+ * token and point the iframe at /preview?token=... (mirrors
+ * InlineArtifactPreview.jsx). Shows a loading state while minting and a
+ * graceful fallback if minting fails.
+ */
+function SignedPreviewFrame({ fileId, title, className }) {
+  const [src, setSrc] = useState(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSrc(null);
+    setFailed(false);
+    authFetch(`/api/automations/files/${fileId}/preview-token`, { method: 'POST' })
+      .then((res) => {
+        if (!res || !res.ok) {
+          throw new Error(`preview-token failed (${res && res.status})`);
+        }
+        return res.json();
+      })
+      .then((data) => {
+        if (cancelled) return;
+        if (data && data.url) setSrc(data.url);
+        else setFailed(true);
+      })
+      .catch(() => {
+        if (!cancelled) setFailed(true);
+      });
+    return () => { cancelled = true; };
+  }, [fileId]);
+
+  if (failed) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-12 text-center">
+        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
+          <FileText className="h-6 w-6 text-muted-foreground" />
+        </div>
+        <p className="text-sm text-muted-foreground">Could not load preview. Download the file to view it.</p>
+      </div>
+    );
+  }
+  if (!src) {
+    return (
+      <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+        Loading preview…
+      </div>
+    );
+  }
+  return (
+    <iframe
+      src={src}
+      title={title || 'preview'}
+      className={className}
+      sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
+    />
+  );
 }
 
 export default function FilePreviewer({ url, name, kind, fileType, className }) {
@@ -149,6 +223,19 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
   //   (mammoth / python-pptx / openpyxl / markdown lib).
   // External URLs → legacy view.officeapps.live.com viewer.
   if (OFFICE.includes(ext) || ['md', 'markdown'].includes(ext)) {
+    // Automation files → signed preview-token flow. Iframe navigation cannot
+    // send the Authorization header and the MS Office Online viewer cannot
+    // reach our auth-protected backend, so short-circuit before either.
+    const automationFileId = getAutomationFileId(url);
+    if (automationFileId) {
+      return (
+        <SignedPreviewFrame
+          fileId={automationFileId}
+          title={name}
+          className={iframeCls}
+        />
+      );
+    }
     // .docx with local upload → browser-native renderer
     if (ext === 'docx' && isLocalUpload(url)) {
       return (
