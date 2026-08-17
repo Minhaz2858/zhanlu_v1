@@ -139,18 +139,18 @@ def _audit_bytes(data: bytes) -> dict[str, Any]:
 
 def _audit_enabled() -> bool:
     try:
-        from app.services.config import get_settings
+        from app.config import settings
 
-        return bool(getattr(get_settings(), "PPT_AUDIT_ENABLED", False))
+        return bool(getattr(settings, "PPT_AUDIT_ENABLED", False))
     except Exception:
         return False
 
 
 def _polish_enabled() -> bool:
     try:
-        from app.services.config import get_settings
+        from app.config import settings
 
-        return bool(getattr(get_settings(), "PPT_LLM_POLISH_ENABLED", False))
+        return bool(getattr(settings, "PPT_LLM_POLISH_ENABLED", False))
     except Exception:
         return False
 

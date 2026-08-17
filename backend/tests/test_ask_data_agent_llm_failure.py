@@ -62,7 +62,7 @@ class TestAskDataAgentLLMFailure(unittest.TestCase):
         from app.services.tool_handlers import delegation_tools
         from app.services import agent_tools
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             raise RuntimeError("LLM upstream 502")
 
         async def fake_execute_tool(tool_name, args, db, user_id, context=None):
@@ -87,7 +87,7 @@ class TestAskDataAgentLLMFailure(unittest.TestCase):
         from app.services.tool_handlers import delegation_tools
         from app.services import agent_tools
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             raise RuntimeError("LLM upstream 502")
 
         async def fake_execute_tool(tool_name, args, db, user_id, context=None):
@@ -126,7 +126,7 @@ class TestAskDataAgentLLMFailure(unittest.TestCase):
         # 2nd (synthesis) call: raises
         counter = {"n": 0}
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             counter["n"] += 1
             if counter["n"] == 1:
                 return {
@@ -171,7 +171,7 @@ class TestAskDataAgentLLMFailure(unittest.TestCase):
         attempts = []
         single_call = AsyncMock()
 
-        async def fake_single_call(messages, tools=None):
+        async def fake_single_call(messages, tools=None, endpoint=None):
             attempts.append(1)
             if len(attempts) == 1:
                 raise httpx.TimeoutException("timed out")
@@ -193,7 +193,7 @@ class TestAskDataAgentLLMFailure(unittest.TestCase):
 
         attempts = []
 
-        async def fake_single_call(messages, tools=None):
+        async def fake_single_call(messages, tools=None, endpoint=None):
             attempts.append(1)
             raise httpx.TimeoutException("timed out")
 
@@ -220,7 +220,7 @@ class TestAskDataAgentLLMFailure(unittest.TestCase):
             {"content": "Top material is X.", "tool_calls": []},
         ]
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             return llm_responses.pop(0)
 
         async def fake_execute_tool(tool_name, args, db, user_id, context=None):

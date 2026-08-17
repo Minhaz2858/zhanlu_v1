@@ -338,13 +338,8 @@ def test_deck_chrome_slides_present():
     assert any("本报告由 AI 自动生成" in t for t in texts)
 
 
-def test_product_slide_has_table_and_range_bars():
-    from pptx.enum.shapes import MSO_SHAPE_TYPE
-    prs = _build(_FakeDB({
-        "WeeklyReportCard": [_card()],
-        "WeeklyReportProduct": [_product()],
-    }))
-    target = None
+def _product_slide(prs):
+    """Return the product slide (the one carrying the KPI chip label 现价)."""
     for slide in prs.slides:
         texts = []
         for sh in slide.shapes:
@@ -355,14 +350,88 @@ def test_product_slide_has_table_and_range_bars():
         # The Agenda slide also mentions "石脑油"; the product slide is the one
         # that additionally carries the KPI chip label "现价".
         if "石脑油" in joined and "现价" in joined:
-            target = slide
-            break
+            return slide
+    return None
+
+
+def test_product_slide_has_table():
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product()],
+    }))
+    target = _product_slide(prs)
     assert target is not None
     assert any(sh.has_table for sh in target.shapes)
     rects = [sh for sh in target.shapes
              if sh.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE]
-    # KPI chips + chart accents + range-bar track/segments
-    assert len(rects) >= 6
+    # Only the KPI chips (plus the title accent) remain — range bars removed.
+    assert len(rects) >= 3
+
+
+def test_analysis_column_no_range_bars():
+    """The 7天/30天 scenario range bars are gone from the product slide."""
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    from pptx.util import Inches
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product()],
+    }))
+    target = _product_slide(prs)
+    assert target is not None
+    thin_wide = []
+    for sh in target.shapes:
+        if sh.shape_type != MSO_SHAPE_TYPE.AUTO_SHAPE:
+            continue
+        if sh.width is None or sh.height is None:
+            continue
+        # Range-bar tracks/segments were ~0.14" tall and up to ~4.15" wide;
+        # KPI chips (0.85" tall) and the title accent (1.2" wide) never match.
+        if sh.height <= Inches(0.2) and sh.width >= Inches(1.5):
+            thin_wide.append(sh)
+    assert len(thin_wide) == 0, "range-bar thin/wide rects should be removed"
+
+
+def test_long_ai_decision_text_preserved():
+    """Full AI 决策 text survives (no truncation) — font auto-shrinks instead."""
+    long_decision = (
+        "销售方以9900元/吨现价优先出货获利，采购方暂缓追高，等待7日预测基准8917元/吨"
+        "或看跌下限8075元/吨附近分批采购。依据：当前价格9900元/吨，7日预测基准8917元/吨"
+        "较现价明显回落，看跌下限8075元/吨。关键风险：原油价格反弹可能推高成本。"
+    )
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(ai_decision=long_decision)],
+    }))
+    target = _product_slide(prs)
+    assert target is not None
+    # The tail marker "关键风险" must be present in the slide (no clipping) and
+    # the text must NOT carry a "…" hard-truncation marker.
+    decision_text = ""
+    for sh in target.shapes:
+        if not sh.has_text_frame:
+            continue
+        txt = "".join(r.text for p in sh.text_frame.paragraphs for r in p.runs)
+        if "销售方" in txt:
+            decision_text = txt
+            break
+    assert decision_text, "AI 决策 body not found"
+    assert "关键风险" in decision_text, "AI 决策 tail text was truncated/clipped"
+    assert "…" not in decision_text, "AI 决策 was hard-truncated with ellipsis"
+
+
+def test_fit_text_size_never_truncates():
+    """_fit_text_size returns the full text and shrinks the font to fit."""
+    builder = WeeklyDigestPptxBuilder(_FakeDB({}))
+    short = "建议逢低买入。"
+    text, size = builder._fit_text_size(short, 5.0, 1.0, start=11, floor=7)
+    assert text == short and size == 11  # fits → no shrink
+
+    long_text = "销售方优先出货。" * 60  # ~480 chars
+    text, size = builder._fit_text_size(long_text, 5.0, 1.7, start=11, floor=7)
+    assert text == long_text, "full text must be preserved (no truncation)"
+    assert "…" not in text
+    assert size < 11, "font must shrink to fit the long text"
 
 
 def test_chart_value_axis_fitted_and_formatted():

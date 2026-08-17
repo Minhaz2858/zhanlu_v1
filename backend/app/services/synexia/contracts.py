@@ -307,6 +307,13 @@ class SlidePlan(BaseModel):
     headline_style: str = "topic"  # topic | assertion
     max_bullets: int = 5
     max_words_per_bullet: int = 12
+    # --- Materialized data (optional) -------------------------------------
+    # The planner normally carries only column keys (``chart_spec``), and the
+    # renderer pulls rows from the payload at build time.  Explicit rows set
+    # here (e.g. by the sandbox runner) win over the projection.
+    chart_rows: list[dict[str, Any]] = Field(default_factory=list)
+    table_rows: list[dict[str, Any]] = Field(default_factory=list)
+    table_cols: list[str] = Field(default_factory=list)
 
 
 class DeckPlan(BaseModel):

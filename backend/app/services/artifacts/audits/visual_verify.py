@@ -27,9 +27,9 @@ def _libreoffice_available() -> bool:
 
 def _enabled() -> bool:
     try:
-        from app.services.config import get_settings
+        from app.config import settings
 
-        return bool(getattr(get_settings(), "PPTX_VISUAL_VERIFY_ENABLED", False))
+        return bool(getattr(settings, "PPTX_VISUAL_VERIFY_ENABLED", False))
     except Exception:
         return False
 

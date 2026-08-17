@@ -10,6 +10,8 @@ Verifies:
 
 from __future__ import annotations
 
+import re
+import zipfile
 from io import BytesIO
 
 from pptx import Presentation
@@ -22,6 +24,17 @@ from app.services.synexia.contracts import (
     SlidePlan,
 )
 from app.services.artifacts.layout_engine import render
+
+
+def _chart_xml(data: bytes, slide_idx: int = 2) -> str:
+    """Return the chart XML for slide ``slide_idx`` (0-based) of a rendered deck."""
+    with zipfile.ZipFile(BytesIO(data)) as z:
+        rels = [n for n in z.namelist() if f"ppt/slides/_rels/slide{slide_idx + 1}.xml.rels" == n]
+        assert rels, "slide rels not found"
+        rel_xml = z.read(rels[0]).decode("utf-8")
+        m = re.search(r'Target="\.\./charts/(chart\d+\.xml)"', rel_xml)
+        assert m, "no chart relationship on slide"
+        return z.read(f"ppt/charts/{m.group(1)}").decode("utf-8")
 
 
 def _plan():
@@ -112,3 +125,40 @@ def test_body_font_floor():
     assert min_overall >= 9.0, f"min font {min_overall} below 9pt caption floor"
     # The real assertion: actual body text must not drop below 14pt.
     assert min_body >= BODY_PT, f"body font {min_body} below 14pt floor"
+
+
+def test_fallback_plan_chart_data_enriched_from_rows():
+    """Regression: a plan that only carries chart_spec (column keys, no rows)
+    must still render a chart with the payload values — the planner fallback
+    path emits x_key/y_keys but never materializes chart_rows, and previously
+    produced "No chart data available" slides.
+
+    render() projects the payload rows into chart_rows at build time.
+    """
+    plan = DeckPlan(
+        title="Fallback Data Wiring",
+        deck_type="data_report",
+        slides=[
+            SlidePlan(layout="cover", title="Fallback Data Wiring"),
+            SlidePlan(layout="chart_full", title="Revenue by Month",
+                      chart_spec=ChartSpecInSlide(chart_type="bar", x_key="m",
+                                                  y_keys=["v"], title="Revenue by Month")),
+        ],
+    )
+    rows = [{"m": "Jan", "v": 1200}, {"m": "Feb", "v": 1500}, {"m": "Mar", "v": 1100}]
+
+    data = render(plan, rows, {"theme_tokens": {"name": "zhanlu-blue"},
+                               "style_recipe": "sharp"})
+
+    # Chart slide must NOT contain the empty-data placeholder.
+    prs = Presentation(BytesIO(data))
+    assert len(prs.slides) == 2
+
+    chart_xml = _chart_xml(data, slide_idx=1)
+    assert "No chart data available" not in chart_xml
+    # The projected values must be baked into the numeric cache (floats).
+    for v in (1200, 1500, 1100):
+        assert f"<c:v>{float(v)}</c:v>" in chart_xml, f"value {v} missing from chart XML"
+    # Category labels present too.
+    for label in ("Jan", "Feb", "Mar"):
+        assert f"<c:v>{label}</c:v>" in chart_xml, f"category {label} missing"

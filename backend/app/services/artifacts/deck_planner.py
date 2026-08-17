@@ -338,6 +338,27 @@ def _fallback_plan(
                 narrative_role="evidence",
             )
         )
+    elif rows:
+        # No chart-worthy numeric column (e.g. messy text-only data):
+        # degrade gracefully to a data table instead of an empty chart.
+        slides.append(
+            SlidePlan(
+                layout="data_table",
+                title="Data Sample",
+                narrative_role="evidence",
+            )
+        )
+
+    # Big datasets get a top-8 table so the deck shows actual rows
+    # alongside the chart (layout engine truncates to 8).
+    if len(rows) > 15:
+        slides.append(
+            SlidePlan(
+                layout="data_table",
+                title="Top Data Rows",
+                narrative_role="evidence",
+            )
+        )
 
     slides.append(
         SlidePlan(

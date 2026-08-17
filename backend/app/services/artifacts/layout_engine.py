@@ -131,6 +131,66 @@ def _assertify_headline(title: str, layout: str) -> str:
 
 
 # ----------------------------------------------------------------------------
+# Data enrichment — project payload rows into chart/data-table slides
+# ----------------------------------------------------------------------------
+
+# Cap chart categories so big datasets (200+ rows) stay readable.
+_MAX_CHART_POINTS = 24
+# Cap table columns so wide datasets (10+ cols) fit the slide.
+_MAX_TABLE_COLS = 8
+
+
+def _enrich_slide_data(plan_dict: dict, rows: list[dict]) -> dict:
+    """Materialize chart_rows / table_rows from the payload at build time.
+
+    The planner's ``chart_spec`` carries column keys (x_key / y_keys), not
+    the data itself.  Slides that already carry explicit rows (e.g. from the
+    sandbox path) are left untouched.
+    """
+    if not rows:
+        return plan_dict
+    for sp in plan_dict.get("slides", []):
+        layout = sp.get("layout")
+        if layout in ("chart_full", "chart_with_bullets"):
+            cs = sp.get("chart_spec") or {}
+            x_key = cs.get("x_key") or "label"
+            y_keys = cs.get("y_keys") or ["value"]
+            if not sp.get("chart_rows") and x_key and y_keys:
+                sp["chart_rows"] = _project_chart_rows(rows, x_key, y_keys)
+        elif layout == "data_table":
+            if not sp.get("table_cols") and rows:
+                sp["table_cols"] = _project_table_cols(rows)
+            if not sp.get("table_rows"):
+                sp["table_rows"] = rows
+    return plan_dict
+
+
+def _project_chart_rows(
+    rows: list[dict], x_key: str, y_keys: list[str],
+) -> list[dict]:
+    """Project raw rows down to ``{x_key, *y_keys}`` dicts, capped at
+    ``_MAX_CHART_POINTS`` (evenly sampled so big datasets stay readable)."""
+    projected = [
+        {k: (r.get(k) if isinstance(r, dict) else None) for k in [x_key, *y_keys]}
+        for r in rows
+        if isinstance(r, dict)
+    ]
+    n = len(projected)
+    if n <= _MAX_CHART_POINTS:
+        return projected
+    step = n / _MAX_CHART_POINTS
+    return [projected[int(i * step)] for i in range(_MAX_CHART_POINTS)]
+
+
+def _project_table_cols(rows: list[dict]) -> list[str]:
+    """Pick up to ``_MAX_TABLE_COLS`` column names from the first row,
+    skipping a ``metadata`` key if present."""
+    first = next((r for r in rows if isinstance(r, dict) and r), {})
+    cols = [k for k in first.keys() if k != "metadata"]
+    return cols[:_MAX_TABLE_COLS]
+
+
+# ----------------------------------------------------------------------------
 # Public entry — render a DeckPlan to .pptx bytes
 # ----------------------------------------------------------------------------
 
@@ -153,6 +213,12 @@ def render(plan, rows: list[dict], ctx: Optional[dict] = None) -> bytes:
         plan_dict = plan.model_dump()
     else:
         plan_dict = dict(plan or {})
+
+    # Phase-1 contract: the planner emits column keys (chart_spec.x_key /
+    # y_keys) instead of materialized rows.  Project the payload rows into
+    # each chart/data-table slide at build time so the deck renders even
+    # when the plan never filled chart_rows / table_rows.
+    plan_dict = _enrich_slide_data(plan_dict, rows)
 
     ctx = ctx or {}
     theme = ctx.get("theme_tokens") or {}

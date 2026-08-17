@@ -585,27 +585,30 @@ class WeeklyDigestPptxBuilder:
 
     def _add_analysis_column(self, s, p: WeeklyReportProduct, x, width) -> None:
         t = self.theme
+        w_in = width / Inches(1)
+        # (label, text, label_top_in, body_height_in)
         sections = [
-            ("市场分析", p.market_analysis, 1.55, 1.4),
-            ("AI 决策", p.ai_decision, 3.3, 0.9),
+            ("市场分析", p.market_analysis, 1.55, 1.70),
+            ("AI 决策", p.ai_decision, 3.65, 1.70),
         ]
         for label, text, top_in, max_h in sections:
             _add_textbox(s, x, Inches(top_in), width, Inches(0.28),
                          text=label, size=13, bold=True, color=t.primary_dark,
                          font_name=t.font_heading)
             if text:
-                fitted = self._fit_text(text, 11, width_in=width / Inches(1),
-                                        max_height_in=max_h)
+                # Never truncate: auto-shrink the font so the full text fits
+                # (falling back to TEXT_TO_FIT_SHAPE for the last few points).
+                fitted, size = self._fit_text_size(text, w_in, max_h,
+                                                   start=11, floor=7)
                 self._add_markdown_box(
                     s, x, Inches(top_in + 0.3), width, Inches(max_h),
-                    fitted, size=11, color=t.text, font_name=t.font_body,
+                    fitted, size=size, color=t.text, font_name=t.font_body,
                 )
-        # Forecast table + range bars.
-        _add_textbox(s, x, Inches(4.75), width, Inches(0.28),
+        # Forecast table (ends just above the 7.05" footer).
+        _add_textbox(s, x, Inches(5.72), width, Inches(0.28),
                      text="预测", size=13, bold=True, color=t.primary_dark,
                      font_name=t.font_heading)
-        self._add_forecast_table(s, p, x, Inches(5.05), width)
-        self._add_range_bars(s, p, x, Inches(6.25), width)
+        self._add_forecast_table(s, p, x, Inches(6.02), width)
 
     def _add_forecast_table(self, s, p: WeeklyReportProduct, left, top, width) -> None:
         t = self.theme
@@ -654,38 +657,6 @@ class WeeklyDigestPptxBuilder:
                             run.font.color.rgb = t.delta_down    # 看跌 = red
                         else:
                             run.font.color.rgb = t.text
-
-    def _add_range_bars(self, s, p: WeeklyReportProduct, x, top, width) -> None:
-        t = self.theme
-        horizons = [("7 天", p.forecast_7d or {}), ("30 天", p.forecast_30d or {})]
-        y = top
-        for label, payload in horizons:
-            base = payload.get("base")
-            bull = payload.get("bull")
-            bear = payload.get("bear")
-            if base is None or bull is None or bear is None:
-                continue
-            _add_textbox(s, x, y, Inches(0.75), Inches(0.28), text=label,
-                         size=11, bold=True, color=t.text, font_name=t.font_body)
-            bar_x = x + Inches(0.85)
-            bar_w = width - Inches(0.85)
-            bar_h = Inches(0.14)
-            cy = y + Inches(0.07)
-            _add_rect(s, bar_x, cy, bar_w, bar_h, fill=t.border)
-            span = (bull - bear) or 1.0
-
-            def _px(v: float):
-                ratio = max(0.0, min(1.0, (v - bear) / span))
-                return bar_x + int(ratio * bar_w)
-
-            bx = _px(base)
-            _add_rect(s, bx - Inches(0.02), cy - Inches(0.05), Inches(0.04),
-                      bar_h + Inches(0.1), fill=t.primary_dark)
-            gx = min(bx, _px(bull))
-            _add_rect(s, gx, cy, abs(_px(bull) - bx), bar_h, fill=t.delta_up)
-            rx2 = min(bx, _px(bear))
-            _add_rect(s, rx2, cy, abs(_px(bear) - bx), bar_h, fill=t.delta_down)
-            y += Inches(0.34)
 
     def _add_price_chart(self, s, title, points, max_points, left, top, width,
                          height, date_mode: str) -> None:
@@ -857,3 +828,20 @@ class WeeklyDigestPptxBuilder:
                 break
             result = candidate
         return (result.rstrip() + "…") if result else text[:40] + "…"
+
+    def _fit_text_size(self, text: str, width_in: float, max_height_in: float,
+                       start: int = 11, floor: int = 7):
+        """Return ``(full_text, font_size)`` with the largest size in
+        ``[floor, start]`` whose estimated height fits ``max_height_in``.
+
+        Unlike :meth:`_fit_text`, this never truncates the text — the full
+        string is always returned, so the LLM analysis is never cut off
+        mid-sentence.  If even ``floor`` overflows, return it at ``floor`` and
+        let ``MSO_AUTO_SIZE.TEXT_TO_FIT_SHAPE`` shrink the last few points.
+        """
+        if not text:
+            return text, start
+        size = start
+        while size > floor and self._est_text_height(text, size, width_in) > max_height_in:
+            size -= 1
+        return text, size

@@ -316,6 +316,9 @@ def check_overflow(prs: Any) -> Finding:
                 continue
             if not (shape.width and shape.height):
                 continue
+            # Skip decorative shapes: an empty text frame can never overflow.
+            if not (shape.text_frame.text or "").strip():
+                continue
             box_w_in = _in(shape.width) or 0.0
             box_h_in = _in(shape.height) or 0.0
             if box_w_in <= 0 or box_h_in <= 0:

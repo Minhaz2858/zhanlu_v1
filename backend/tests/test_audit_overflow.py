@@ -57,6 +57,27 @@ def test_check_overflow_passes_normal_box():
     assert finding.level == "PASS"
 
 
+def test_check_overflow_skips_decorative_empty_frames():
+    """Regression: decorative rectangles with empty text frames (common accent
+    bars in generated decks) must NOT be flagged as overflow. An empty text
+    frame can never render overflowing text.
+    """
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    s = prs.slides.add_slide(prs.slide_layouts[6])
+    # A tiny 0.05" tall decorative rectangle with an empty text frame.
+    tb = s.shapes.add_textbox(Inches(0.5), Inches(6.0), Inches(12.0), Inches(0.05))
+    tf = tb.text_frame
+    # Ensure it has an empty paragraph (like real decorative rects).
+    tf.paragraphs[0].add_run().text = ""
+    # Also a real text box that should still be checked.
+    tb2 = s.shapes.add_textbox(Inches(0.5), Inches(1.0), Inches(2.0), Inches(0.5))
+    tb2.text_frame.paragraphs[0].add_run().text = "Decorative"
+    finding = check_overflow(prs)
+    assert finding.level == "PASS", finding.detail
+
+
 def test_check_assertion_headline_flags_topic_labels():
     prs = _deck_with_textboxes([(0.6, 0.4, 11.0, 1.0, "Key Findings", 28)])
     # Force the title shape to be the textbox so check_assertion_headline sees it.

@@ -626,5 +626,127 @@ class TestRouterRegistration(unittest.TestCase):
         )
 
 
+class TestChatPathPptxSmoke(unittest.TestCase):
+    """Item 4: chat-path smoke test.
+
+    Exercises the exact entry point the chat agent uses (FINALIZE →
+    ``ExportService.get_or_render(artifact, "pptx", user_message=...)`` →
+    ``_render_and_store`` → ``_render_deck_pipeline``) with all four PPT_*
+    flags enabled, and asserts the deck renders, audits clean, and (when
+    LibreOffice is available) thumbnails are stored.
+    """
+
+    FLAGS = {
+        "PPT_DECK_PLANNER_ENABLED": True,
+        "PPT_SMART_ROUTER_ENABLED": True,
+        "PPT_LLM_POLISH_ENABLED": True,
+        "PPT_AUDIT_ENABLED": True,
+    }
+
+    def _payload(self):
+        return _sample_payload()
+
+    def setUp(self):
+        from app.config import settings
+        self._saved = {}
+        for flag, value in self.FLAGS.items():
+            self._saved[flag] = getattr(settings, flag, False)
+            setattr(settings, flag, value)
+        # Use inline Postgres-style blob storage (no MinIO in CI/test env).
+        self._saved["ARTIFACT_STORAGE_BACKEND"] = settings.ARTIFACT_STORAGE_BACKEND
+        settings.ARTIFACT_STORAGE_BACKEND = "postgres_bytea"
+
+    def tearDown(self):
+        from app.config import settings
+        for flag, value in self._saved.items():
+            setattr(settings, flag, value)
+
+    def test_chat_path_renders_pptx_with_all_flags(self):
+        from app.services.artifacts.exporters.service import (
+            BLOB_TYPE_FORMAT_EXPORT,
+            ExportService,
+        )
+        from app.models.artifact import Artifact, ArtifactBlob, ArtifactVersion
+
+        # In-memory SQLite DB mirroring the app's table set.
+        import sqlalchemy as sa
+        from app.database import Base
+        engine = sa.create_engine("sqlite:///:memory:")
+        Base.metadata.create_all(engine)
+        from sqlalchemy.orm import sessionmaker
+        Session = sessionmaker(bind=engine)
+        db = Session()
+
+        artifact = _make_artifact_with_payload(db, self._payload())
+
+        svc = ExportService(db)
+        data, mime, ext = svc.get_or_render(
+            artifact, "pptx",
+            user_message="Build me a revenue deck",
+            sql="SELECT month, revenue FROM sales",
+        )
+        self.assertTrue(ext.endswith(".pptx"), f"expected pptx filename, got {ext!r}")
+        self.assertTrue(len(data) > 1000, "deck bytes suspiciously small")
+
+        # Valid OOXML container with real slides (no placeholder-only deck).
+        import zipfile, io, re
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            names = z.namelist()
+            self.assertTrue(any(n.startswith("ppt/slides/slide") for n in names))
+            self.assertTrue("ppt/presentation.xml" in names)
+            # No "No chart data available" placeholder anywhere in the package.
+            for n in names:
+                if n.endswith(".xml"):
+                    if b"No chart data available" in z.read(n):
+                        self.fail(f"placeholder chart slide in {n}")
+
+        # Audit report recorded on the artifact metadata (no FAIL).
+        meta = artifact.metadata_json or {}
+        reports = meta.get("audit_reports") or {}
+        self.assertIn("pptx", reports, "expected audit report for pptx format")
+        report = reports["pptx"]
+        summary = report.get("summary") or {}
+        self.assertEqual(summary.get("fail", 0), 0, f"audit FAILs: {summary}")
+        self.assertGreater(summary.get("total", 0), 0, "audit ran no rules")
+        self.assertIn(report.get("status"), ("PASS", "WARN"), report.get("status"))
+
+        # Deck bytes persisted as an ArtifactBlob (source of truth for downloads).
+        blob = (
+            db.query(ArtifactBlob)
+            .join(ArtifactVersion, ArtifactVersion.id == ArtifactBlob.version_id)
+            .filter(
+                ArtifactVersion.artifact_id == artifact.id,
+                ArtifactBlob.blob_type == BLOB_TYPE_FORMAT_EXPORT,
+            )
+            .order_by(ArtifactBlob.created_date.desc())
+            .first()
+        )
+        self.assertIsNotNone(blob, "deck blob not persisted")
+        self.assertEqual(blob.blob_type, BLOB_TYPE_FORMAT_EXPORT)
+        self.assertGreater(len(blob.data or b""), 1000, "stored blob too small")
+
+        # Thumbnails stored for the deck when LibreOffice is available.
+        thumbs = (
+            db.query(ArtifactBlob)
+            .join(ArtifactVersion, ArtifactVersion.id == ArtifactBlob.version_id)
+            .filter(
+                ArtifactVersion.artifact_id == artifact.id,
+                ArtifactBlob.blob_type == "thumbnail",
+            )
+            .count()
+        )
+        self.assertGreater(thumbs, 0, "expected thumbnails for the deck")
+
+    def test_chat_path_flags_default_off(self):
+        """Global constraint check: all PPT_* flags default to False."""
+        from app.config import Settings
+        fields = Settings.model_fields if hasattr(Settings, "model_fields") else getattr(Settings, "__fields__", {})
+        for flag in self.FLAGS:
+            self.assertEqual(
+                fields[flag].default, False,
+                f"{flag} must default to False",
+            )
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
