@@ -83,6 +83,7 @@ async def _ask_data_agent(
 
     preferred_kb = args.get("data_source_id")
     bound_kb_ids: list[str] = list((context or {}).get("bound_kb_ids") or [])
+    endpoint = (context or {}).get("endpoint")
 
     # ── Resource router (flag-gated): a confident non-database route
     # short-circuits the data sub-agent so the caller picks the right
@@ -131,7 +132,7 @@ async def _ask_data_agent(
     # so the loop below runs as fallback.
     if settings.DATA_AGENT_FASTPATH_ENABLED:
         fastpath_result = await _try_nl_fastpath(
-            question, preferred_kb, bound_kb_ids, db
+            question, preferred_kb, bound_kb_ids, db, endpoint=endpoint
         )
         if fastpath_result is not None:
             return fastpath_result
@@ -194,7 +195,7 @@ async def _ask_data_agent(
         pre_call_prep(messages)
 
         try:
-            llm_response = await _call_llm_with_retry(messages, tool_schemas)
+            llm_response = await _call_llm_with_retry(messages, tool_schemas, endpoint=endpoint)
         except Exception as e:
             logger.warning("ask_data_agent LLM call failed on iter %d: %s", iteration, e)
             # First-iteration failure is a HARD failure: no rows
@@ -385,7 +386,7 @@ async def _ask_data_agent(
             ]
             # P1.3/P2: sanitize before the synthesis call too
             pre_call_prep(synthesis_messages)
-            synthesis_response = await _call_llm_with_retry(synthesis_messages, tools=[])
+            synthesis_response = await _call_llm_with_retry(synthesis_messages, tools=[], endpoint=endpoint)
             final_text = (synthesis_response.get("content", "") or "").strip()
             iterations += 1
         except Exception as e:
@@ -455,6 +456,7 @@ async def _try_nl_fastpath(
     preferred_kb: str | None,
     bound_kb_ids: list[str],
     db: Session,
+    endpoint=None,
 ) -> dict | None:
     """One-shot NL2SQL fast path for a single bound database source.
 
@@ -480,7 +482,7 @@ async def _try_nl_fastpath(
 
     try:
         from app.services.db import NLAnswerService
-        result = await NLAnswerService(db).answer(kb_id, question)
+        result = await NLAnswerService(db).answer(kb_id, question, endpoint=endpoint)
     except Exception as e:
         logger.warning("ask_data_agent fast path raised (falling back to loop): %s", e)
         return None

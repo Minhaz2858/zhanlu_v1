@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.services.db.query_service import QueryService
 from app.services.db.schema_service import SchemaService
+from app.services.llm_router import LLMEndpoint
 from app.services.llm_service import llm_headers, llm_url, get_model
 
 logger = logging.getLogger(__name__)
@@ -59,7 +60,12 @@ class NLAnswerService:
         self._db = db
 
     async def answer(
-        self, kb_id: str, question: str, resolved_policy=None, project_id: str | None = None
+        self,
+        kb_id: str,
+        question: str,
+        resolved_policy=None,
+        project_id: str | None = None,
+        endpoint: LLMEndpoint | None = None,
     ) -> dict:
         """Return a structured + prose answer for a user question.
 
@@ -211,7 +217,8 @@ class NLAnswerService:
         # 2. Text → SQL
         try:
             sql = await self._text_to_sql(
-                question, schema_info, schema_text=schema_text, project_id=project_id
+                question, schema_info, schema_text=schema_text, project_id=project_id,
+                endpoint=endpoint,
             )
         except Exception as e:
             logger.warning("NLAnswer: text→SQL failed: %s", e)
@@ -263,6 +270,7 @@ class NLAnswerService:
                         project_id=project_id,
                         errors=vres.get("errors", []),
                         available_columns=vres.get("available_columns", {}),
+                        endpoint=endpoint,
                     )
                     if corrected and corrected != sql:
                         sql = corrected
@@ -288,7 +296,7 @@ class NLAnswerService:
 
         # 4. Narrate
         try:
-            answer_text = await self._narrate(question, exec_result)
+            answer_text = await self._narrate(question, exec_result, endpoint=endpoint)
         except Exception as e:
             logger.debug("NLAnswer: narrate failed (non-fatal): %s", e)
             # If narration fails, fall back to a tiny template so the
@@ -316,6 +324,7 @@ class NLAnswerService:
         schema_info: dict,
         schema_text: str | None = None,
         project_id: str | None = None,
+        endpoint: LLMEndpoint | None = None,
     ) -> str:
         """Ask the LLM to produce a single SQL statement.
 
@@ -358,7 +367,7 @@ class NLAnswerService:
             {"role": "system", "content": _SQL_GEN_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        text = await _chat(messages, temperature=0.0)
+        text = await _chat(messages, temperature=0.0, endpoint=endpoint)
         return _strip_sql_fences(text)
 
     async def _text_to_sql_with_correction(
@@ -369,6 +378,7 @@ class NLAnswerService:
         project_id: str | None = None,
         errors: list[str] | None = None,
         available_columns: dict | None = None,
+        endpoint: LLMEndpoint | None = None,
     ) -> str | None:
         """One self-correct retry: re-generate SQL with validator feedback.
 
@@ -387,13 +397,16 @@ class NLAnswerService:
         augmented = f"{schema_text}\n\n{note}" if schema_text else note
         try:
             return await self._text_to_sql(
-                question, schema_info, schema_text=augmented, project_id=project_id
+                question, schema_info, schema_text=augmented, project_id=project_id,
+                endpoint=endpoint,
             )
         except Exception as e:
             logger.debug("NLAnswer: correction retry failed: %s", e)
             return None
 
-    async def _narrate(self, question: str, exec_result: dict) -> str:
+    async def _narrate(
+        self, question: str, exec_result: dict, endpoint: LLMEndpoint | None = None
+    ) -> str:
         """Ask the LLM to narrate the rows into a natural-language answer."""
         rows = exec_result.get("rows", [])
         sql = exec_result.get("sql", "")
@@ -412,7 +425,7 @@ class NLAnswerService:
                 ),
             },
         ]
-        return await _chat(messages, temperature=0.2)
+        return await _chat(messages, temperature=0.2, endpoint=endpoint)
 
     # ------------------------------------------------------------------
     # M-Schema fallback (replaces describe_all)
@@ -734,15 +747,33 @@ def _fallback_narrative(question: str, exec_result: dict) -> str:
     return f"Found {len(rows)} row(s). First: {head}{more}."
 
 
-async def _chat(messages: list[dict], temperature: float = 0.0) -> str:
-    """Single-turn chat call to the configured LLM."""
+async def _chat(
+    messages: list[dict],
+    temperature: float = 0.0,
+    endpoint: LLMEndpoint | None = None,
+) -> str:
+    """Single-turn chat call to the configured LLM.
+
+    When ``endpoint`` is provided (project binding), targets the endpoint's
+    base_url / api_key / model_id. Otherwise falls back to the legacy global
+    provider (get_model / llm_url / llm_headers).
+    """
+    if endpoint is not None:
+        _model = endpoint.model_id
+        _url = endpoint.base_url.rstrip("/") + "/chat/completions"
+        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+    else:
+        _model = get_model()
+        _url = llm_url()
+        _headers = llm_headers()
+
     payload = {
-        "model": get_model(),
+        "model": _model,
         "messages": messages,
         "temperature": temperature,
     }
     async with httpx.AsyncClient(timeout=120.0) as client:
-        resp = await client.post(llm_url(), headers=llm_headers(), json=payload)
+        resp = await client.post(_url, headers=_headers, json=payload)
         resp.raise_for_status()
     data = resp.json()
     return (data["choices"][0]["message"].get("content") or "").strip()
