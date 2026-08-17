@@ -169,6 +169,14 @@ class Settings(BaseSettings):
     # Example: '[{"name":"backup","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","model":"deepseek-chat"}]'
     LLM_FALLBACK_PROVIDERS: str = ""
 
+    # Models that ignore or reject a caller-supplied ``temperature`` value.
+    # Reasoning models like Moonshot kimi-k2.6 only accept temperature=1, and
+    # OpenAI o1/o3 reject the field outright. For these, the temperature key is
+    # omitted from chat/completions requests so the provider's own default is
+    # used (otherwise a valid key surfaces as a misleading HTTP 400). Comma-
+    # separated substrings matched case-insensitively against the model id.
+    LLM_FIXED_TEMPERATURE_MODELS: str = "kimi-k2,o1,o3"
+
     # ── Document ingestion — audio / image / video ────────────────────────
     # Audio: transcribe uploads via an OpenAI-compatible Whisper endpoint
     # (OPENAI_BASE_URL/audio/transcriptions) using the existing OPENAI_API_KEY.
@@ -216,7 +224,7 @@ class Settings(BaseSettings):
     # Per-conversation total iteration budget across all turns (including
     # resumes). Bounds runaway multi-turn sessions. Per-agent overrides via
     # AgentApp.max_call_count take precedence when set.
-    AGENT_MAX_ITERATIONS: int = 50
+    AGENT_MAX_ITERATIONS: int = 100
 
     # Tool output limits
     TOOL_MAX_OUTPUT_CHARS: int = 8000

@@ -153,8 +153,11 @@ class DeckTheme:
 
     # fonts (names, not colors).  Default to Inter (bundled in Docker); the
     # rendering environment falls back to Arial when Inter is unavailable.
+    # ``font_cjk`` is the East Asian typeface used for Chinese runs — Inter
+    # has no CJK glyphs, so without it PowerPoint falls back to SimSun/DengXian.
     font_heading: str = "Inter"
     font_body: str = "Inter"
+    font_cjk: str = "Microsoft YaHei"
 
     # 6-step hex palette for charts
     chart_palette: list[str] = field(
@@ -390,6 +393,7 @@ def load_theme(name: Optional[str], mode: str = DEFAULT_MODE) -> DeckTheme:
         delta_down=_to_rgbcolor(error),
         font_heading=fonts.get("heading", "Inter"),
         font_body=fonts.get("body", "Inter"),
+        font_cjk=fonts.get("cjk", "Microsoft YaHei"),
         chart_palette=chart_palette,
     )
 
@@ -441,6 +445,7 @@ def theme_from_hex_dict(tokens: dict) -> DeckTheme:
         delta_down=_to_rgbcolor(g("delta_down", "#dc2626")),
         font_heading=(fonts.get("heading") or "Inter") if isinstance(fonts, dict) else "Inter",
         font_body=(fonts.get("body") or "Inter") if isinstance(fonts, dict) else "Inter",
+        font_cjk=(fonts.get("cjk") or "Microsoft YaHei") if isinstance(fonts, dict) else "Microsoft YaHei",
         chart_palette=list(g("chart_palette") or _derive_chart_palette("#2563eb", "#1d4ed8", "#0ea5e9")),
     )
 

@@ -1,4 +1,4 @@
-"""R4 regression test — TOOL_CALL_HARD_CAP is now 6.
+"""R4 regression test — TOOL_CALL_HARD_CAP is now 10.
 
 R3 set the cap to 3 to fix the `skills` `load_skill` ImportError loop.
 But legitimate skill discovery (1 `list_tools` + 2-3 `skills(load, X)`
@@ -6,9 +6,11 @@ for different candidates) trips the cap at 3, so the agent never
 reaches `create_agent`. The system prompt now mandates a bounded
 discovery budget (1 list_tools, 1 list_market_agents, 3 skills(load))
 plus 1-2 iterations of decision-summary negotiation. TOOL_CALL_HARD_CAP
-= 6 is a comfortable ceiling: smart detection (name + canonicalized
+= 10 is a comfortable ceiling: smart detection (name + canonicalized
 arguments key) still blocks exact-repeat loops while permitting the
-expected investigation pattern.
+expected investigation pattern, and it stays well below the raised
+per-turn MAX_TOOL_ITERATIONS=40 so a single bad tool cannot eat the
+whole budget.
 """
 import os
 import re
@@ -23,16 +25,17 @@ def _load_source():
         return f.read()
 
 
-def test_tool_call_hard_cap_is_six():
-    """TOOL_CALL_HARD_CAP must be 6 (R4 fix) — not 3 (R3) or 1."""
+def test_tool_call_hard_cap_is_ten():
+    """TOOL_CALL_HARD_CAP must be 10 (R4 fix) — not 3 (R3) or 1."""
     src = _load_source()
     m = re.search(r"^TOOL_CALL_HARD_CAP\s*=\s*(\d+)\s*$", src, re.MULTILINE)
     assert m, "TOOL_CALL_HARD_CAP constant not found in agents.py"
     value = int(m.group(1))
-    assert value == 6, (
-        f"TOOL_CALL_HARD_CAP must be 6 (R4), got {value}. The system "
+    assert value == 10, (
+        f"TOOL_CALL_HARD_CAP must be 10 (R4), got {value}. The system "
         f"prompt's bounded skill discovery needs headroom above 3, but "
-        f"the smart (name+args) detection still blocks exact-repeat loops."
+        f"the smart (name+args) detection still blocks exact-repeat loops, "
+        f"and it must stay well below MAX_TOOL_ITERATIONS (40)."
     )
 
 

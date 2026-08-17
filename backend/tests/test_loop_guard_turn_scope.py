@@ -57,30 +57,30 @@ def _run_automation_turn(msgs: list, turn: int) -> None:
 def test_history_wide_scan_still_trips_by_default():
     """Default behavior is unchanged: with no ``start_idx`` the guard
     scans the whole history and trips after cap successful identical
-    calls (cap = 6)."""
+    calls (cap = 10)."""
     from app.routers.agents import _detect_tool_call_loop
 
     msgs = []
-    for t in range(6):
+    for t in range(10):
         _run_automation_turn(msgs, t)
     assert _detect_tool_call_loop(msgs) is not None, (
-        "History-wide default scan should still trip on 6 identical "
+        "History-wide default scan should still trip on 10 identical "
         "successful calls."
     )
 
 
 def test_turn_scoped_scan_ignores_prior_turns():
     """With ``start_idx`` pointing at the current turn's user message,
-    6 identical successful calls from PRIOR turns must NOT trip the
+    10 identical successful calls from PRIOR turns must NOT trip the
     guard — the user legitimately re-ran the same automation once per
     turn."""
     from app.routers.agents import _detect_tool_call_loop
 
     msgs = []
-    for t in range(6):
+    for t in range(10):
         _run_automation_turn(msgs, t)
     # Current turn begins: the user's fresh "Run Now" message.
-    msgs.append({"role": "user", "content": "Run Automation Task (turn 7)"})
+    msgs.append({"role": "user", "content": "Run Automation Task (turn 11)"})
     turn_start = len(msgs) - 1
     assert _detect_tool_call_loop(msgs, start_idx=turn_start) is None, (
         "Turn-scoped guard must not trip on prior-turn repetitions — "
@@ -89,14 +89,14 @@ def test_turn_scoped_scan_ignores_prior_turns():
 
 
 def test_turn_scoped_scan_still_catches_in_turn_loop():
-    """Within the CURRENT turn, 7 identical FAILED calls (cap+1 for
+    """Within the CURRENT turn, 11 identical FAILED calls (cap+1 for
     failures) must still trip the guard — in-turn retry loops are the
     guard's actual purpose."""
     from app.routers.agents import _detect_tool_call_loop
 
     msgs = [{"role": "user", "content": "do the thing"}]
     turn_start = len(msgs) - 1
-    for i in range(7):
+    for i in range(11):
         call_id = f"c{i}"
         msgs.append({
             "role": "assistant",

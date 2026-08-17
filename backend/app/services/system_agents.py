@@ -44,7 +44,12 @@ ALL_TOOL_NAMES = [
     "web_search", "web_extract", "x_search", "url_safety",
     # Memory / planning
     "memory", "todo", "kanban", "session_search", "checkpoint_manager",
-    "interrupt", "clarify", "slash_confirm", "approval",
+    # NOTE: "interrupt" is deliberately omitted. The interrupt flag is not
+    # polled by the v3 loop (nothing calls is_interrupted()); the LLM-facing
+    # tool is dead code that weak models poll every step ("interrupt(action=
+    # check)"), burning the tool budget. See interrupt_tool.py (registered
+    # enabled_by_default=False, kept callable for explicit re-enable).
+    "clarify", "slash_confirm", "approval",
     # Files / code
     "read_file", "write_file", "execute_code", "run_sandbox_skill",
     "fuzzy_match", "path_security", "patch_parser",
@@ -255,7 +260,7 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                     "run_sandbox_skill", "fuzzy_match", "patch_parser",
                     "process_registry_list", "process_registry_tail",
                     "process_registry_kill",
-                    "slash_confirm", "approval", "interrupt",
+                    "slash_confirm", "approval",
                     "checkpoint_manager", "osv_check", "tirith_security",
                     "skills", "skills_hub", "skills_guard",
                     "skill_provenance", "skill_usage", "load_skill_body",
@@ -326,7 +331,7 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                     "run_sandbox_skill", "fuzzy_match", "patch_parser",
                     "process_registry_list", "process_registry_tail",
                     "process_registry_kill",
-                    "clarify", "slash_confirm", "approval", "interrupt",
+                    "clarify", "slash_confirm", "approval",
                     "checkpoint_manager", "osv_check", "tirith_security",
                     "skills", "skills_hub", "skills_guard",
                     "skill_provenance", "skill_usage", "Skill", "load_skill_body",

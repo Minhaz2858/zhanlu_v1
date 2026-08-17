@@ -74,31 +74,35 @@ def test_loop_when_same_tool_same_args_repeated():
     """True loop: same tool called with the same arguments, repeated.
     The guard must trip. Since these calls all FAILED, the success-aware
     guard (Phase B) grants one extra reformulation chance — failures trip
-    at cap+1 = 7, not cap = 6."""
+    at cap+1 = 11, not cap = 10."""
     from app.routers.agents import _detect_tool_call_loop
-    # 7 repeated failed calls with the same args — should trip (cap+1).
-    tcs = [_tc("skills", {"action": "load", "name": "agent-development"}) for _ in range(7)]
+    # 11 repeated failed calls with the same args — should trip (cap+1).
+    tcs = [_tc("skills", {"action": "load", "name": "agent-development"}) for _ in range(11)]
     messages = [_msg("system", "You are agent_builder."), _msg("user", "load it")]
     for i, tc in enumerate(tcs, 1):
         messages.append(_msg("assistant", "", tool_calls=[tc]))
         messages.append(_msg("tool", json.dumps({"success": False, "error": "not found"}), tool_call_id=f"c{i}"))
     info = _detect_tool_call_loop(messages)
-    assert info is not None, "Guard should trip on 7x same-arg failed retry (cap+1)"
+    assert info is not None, "Guard should trip on 11x same-arg failed retry (cap+1)"
     name, count = info
     assert name == "skills"
-    assert count >= 7
+    assert count >= 11
 
 
 def test_no_loop_when_arg_order_differs_but_meaning_same():
     """The same effective arguments, just with different key order in
     the JSON string, must still be treated as a loop. JSON
     canonicalization is needed. These calls all FAILED, so the
-    success-aware guard (Phase B) trips at cap+1 = 7."""
+    success-aware guard (Phase B) trips at cap+1 = 11."""
     from app.routers.agents import _detect_tool_call_loop
     messages = [
         _msg("user", "load foo"),
     ]
     args_variants = [
+        '{"action": "load", "name": "foo"}',
+        '{"name": "foo", "action": "load"}',
+        '{"action": "load", "name": "foo"}',
+        '{"name": "foo", "action": "load"}',
         '{"action": "load", "name": "foo"}',
         '{"name": "foo", "action": "load"}',
         '{"action": "load", "name": "foo"}',

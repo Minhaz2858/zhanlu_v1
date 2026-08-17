@@ -203,18 +203,16 @@ function LlmModelDialog({ editing, initialForm, providerKey, onProviderChange, o
             </div>
           </div>
 
-          {/* Base URL — only for Custom */}
-          {isCustom && (
-            <div>
-              <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Base URL</label>
-              <input
-                value={form.base_url}
-                onChange={(e) => setForm({ ...form, base_url: e.target.value })}
-                placeholder="https://api.example.com/v1"
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
-              />
-            </div>
-          )}
+          {/* Base URL — pre-filled from provider preset, always editable */}
+          <div>
+            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Base URL</label>
+            <input
+              value={form.base_url}
+              onChange={(e) => setForm({ ...form, base_url: e.target.value })}
+              placeholder="https://api.example.com/v1"
+              className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+            />
+          </div>
 
           {/* API Key — optional; hidden when Private Deployment is checked */}
           {!form.is_private && (

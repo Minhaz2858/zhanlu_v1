@@ -31,7 +31,7 @@ FILE_MUTATING_TOOL_NAMES: frozenset[str] = frozenset({
 NO_EFFECT_TOOL_NAMES: frozenset[str] = frozenset({
     "read_file", "web_search", "web_extract", "list_tools",
     "list_market_agents", "list_knowledge_bases", "search_skills",
-    "skills", "skills_hub", "session_search",
+    "skills", "skills_hub", "session_search", "interrupt",
 })
 
 # Tools that mutate state but aren't file writes (agents, skills, automations,

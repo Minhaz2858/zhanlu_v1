@@ -79,7 +79,14 @@ def test_safe_to_discard_execute_code():
 def test_no_effect_tools_set():
     assert "read_file" in NO_EFFECT_TOOL_NAMES
     assert "web_search" in NO_EFFECT_TOOL_NAMES
+    assert "interrupt" in NO_EFFECT_TOOL_NAMES
     assert "write_file" not in NO_EFFECT_TOOL_NAMES
+
+
+def test_safe_to_discard_interrupt():
+    """The LLM-facing interrupt tool is pure no-effect (the flag is not
+    polled by the v3 loop), so its result is safe to discard on interrupt."""
+    assert is_safe_to_discard_on_interrupt("interrupt") is True
 
 
 def test_file_mutating_tools_set():

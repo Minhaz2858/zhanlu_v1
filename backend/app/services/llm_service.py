@@ -42,8 +42,9 @@ def build_llm_payload(body: dict, model: str) -> tuple[dict, list[dict], bool]:
     payload = {
         "model": model,
         "messages": messages,
-        "temperature": temperature,
     }
+    if not model_has_fixed_temperature(model):
+        payload["temperature"] = temperature
     if json_schema:
         payload["response_format"] = {"type": "json_object"}
 
@@ -108,6 +109,28 @@ def supports_json_schema(provider_name: str) -> bool:
     """
     native_providers = {"openai", "gpt-4o", "gpt-4o-mini", "gpt-4", "gpt-3.5-turbo"}
     return provider_name.lower() in native_providers
+
+
+def model_has_fixed_temperature(model: str) -> bool:
+    """Return True for models that reject a caller-supplied ``temperature``.
+
+    Reasoning models such as Moonshot ``kimi-k2.6`` only accept ``temperature=1``
+    and OpenAI ``o1``/``o3`` reject the field entirely. For these models we omit
+    the temperature key so the provider's own default is used — otherwise a
+    perfectly valid key surfaces as a misleading HTTP 400
+    (``invalid temperature: only 1 is allowed for this model``).
+
+    Matched case-insensitively as a substring against ``LLM_FIXED_TEMPERATURE_MODELS``.
+    """
+    if not model:
+        return False
+    m = model.lower()
+    patterns = [
+        p.strip().lower()
+        for p in settings.LLM_FIXED_TEMPERATURE_MODELS.split(",")
+        if p.strip()
+    ]
+    return any(p in m for p in patterns)
 
 
 @dataclass
@@ -481,7 +504,9 @@ def test_llm_endpoint(
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": max_tokens,
-        "temperature": 0,
+        # Omit temperature so we honor each provider's default. Some models
+        # (e.g. Moonshot kimi-k2.6) reject any temperature other than 1, which
+        # would turn a valid key into a misleading HTTP 400 on the probe.
     }
     started = _time.monotonic()
     try:

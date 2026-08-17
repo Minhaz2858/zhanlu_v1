@@ -38,7 +38,7 @@ from app.models.agent_app import AgentApp
 from app.models.agent_conversation import AgentConversation
 from app.models.user import User
 from app.services.tracing import TraceContext
-from app.services.llm_service import llm_headers, llm_url, get_model
+from app.services.llm_service import llm_headers, llm_url, get_model, model_has_fixed_temperature
 from app.services.llm_router import resolve_effective_llm, resolve_message_project_id, EffectiveLLM
 from app.services.agent_prompts import (
     get_system_prompt,
@@ -150,7 +150,7 @@ def _run_db_sync(func, *args, **kwargs):
         return func(*args, **kwargs)
     return asyncio.to_thread(_wrapped, context=ctx)
 
-MAX_TOOL_ITERATIONS = 25
+MAX_TOOL_ITERATIONS = 40
 
 # Per-tool-name hard cap for tool-call loops. If the LLM calls the same
 # tool N or more times within a single conversation (across all
@@ -285,7 +285,16 @@ def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None
 # by name. For report creation, repeated serial data-agent calls are the
 # dominant latency source; one comprehensive query should gather the full
 # dataset, and a second call is the hard stop.
-TOOL_CALL_CAPS: dict[str, int] = {"memory": 1, "ask_data_agent": 2}
+TOOL_CALL_CAPS: dict[str, int] = {
+    "memory": 1,
+    "ask_data_agent": 2,
+    # Defense-in-depth against the interrupt leak: if an agent re-enables the
+    # interrupt tool via tool_config, cap it at 2 calls/turn so it can never
+    # eat the budget the way `interrupt(action=check)` polling did.
+    "interrupt": 2,
+    # clarify is a UX handoff tool; repeated calls signal a stuck agent.
+    "clarify": 3,
+}
 _NAME_ONLY_KEYED_TOOLS: set[str] = {"ask_data_agent"}
 
 # Stream-then-buffer kill-switch (Gap 1). When True, the v3 agentic loop
@@ -2079,6 +2088,51 @@ def _compute_tool_choice(
     return {"type": "function", "function": {"name": action.forced_tool}}
 
 
+def _finish_line_tool_choice(
+    iteration: int,
+    final_iteration: int,
+    dashboard_forced: bool,
+    tool_choice: dict | None,
+) -> dict | str | None:
+    """Final-iteration override: force ``tool_choice="none"`` so the LLM must
+    produce a text answer instead of issuing yet another tool call.
+
+    This is the "guaranteed final answer" finish line. When the loop reaches
+    its last iteration, the LLM has gathered everything it is going to gather;
+    telling it ``tool_choice="none"`` forces it to synthesize a prose answer
+    from whatever tool results are already in the message history, instead of
+    one more exploratory call that would exhaust the budget and dump us into
+    the generic empty-content fallback.
+
+    Precedence (highest first):
+
+      1. Dashboard-guard forcing — calling ``create_dashboard`` IS the finish
+         line for dashboard requests; it always wins over ``"none"`` so a
+         dashboard turn ends by producing the artifact, not prose.
+      2. Existing ``tool_choice`` — a forced tool (``ask_data_agent`` /
+         ``create_artifact`` / ``web_extract`` / ``web_search``) computed for
+         this iteration is preserved on non-final iterations.
+      3. Forced ``"none"`` — only on the FINAL iteration, and only when the
+         dashboard guard did not already force ``create_dashboard``.
+
+    Args:
+        iteration: Current (0-based) loop variable.
+        final_iteration: Last value the loop variable will take (exclusive
+            bound minus one).
+        dashboard_forced: True when the dashboard guard forced
+            ``create_dashboard`` this iteration.
+        tool_choice: The ``tool_choice`` computed so far this iteration
+            (``None`` means "auto", a dict means a forced function).
+
+    Returns:
+        ``"none"`` on the final iteration (unless dashboard-forced), else the
+        incoming ``tool_choice`` unchanged.
+    """
+    if iteration >= final_iteration and not dashboard_forced:
+        return "none"
+    return tool_choice
+
+
 @router.get("/agents/runtime")
 async def list_runtime_agents(
     db: Session = Depends(get_db),
@@ -2783,6 +2837,12 @@ async def add_message(
         _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
+        # Finish-line state (UnboundLocalError discipline: initialized BEFORE
+        # the loop so any post-loop read is safe). ``dashboard_forced`` tracks
+        # whether the dashboard guard forced ``create_dashboard`` this turn;
+        # ``_wrapup_nudged`` ensures the T-3 wrap-up message is injected once.
+        dashboard_forced = False
+        _wrapup_nudged = False
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -2825,15 +2885,26 @@ async def add_message(
                 )
                 llm_messages.append({"role": "user", "content": nudge})
                 break
-            # Compute tool_choice for this iteration.  On iteration 0 the
-            # server enforces the matching tool (ask_data_agent /
-            # create_artifact / web_extract / web_search) so a weak
-            # function-calling model cannot simply answer from training
-            # memory.  See ``_compute_tool_choice`` for the precedence.
-            tool_choice = _compute_tool_choice(
-                user_content, data_ctx_extras, iteration,
-                tool_names=_tool_names_from_schemas(tools),
-            )
+                # Finish line: with 3 iterations left, tell the model to stop
+                # exploring and assemble its final answer (injected exactly once).
+                if iteration == MAX_TOOL_ITERATIONS - 3 and not _wrapup_nudged:
+                    _wrapup_nudged = True
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have 3 steps left. Stop exploring and produce "
+                            "your final answer with what you have."
+                        ),
+                    })
+                # Compute tool_choice for this iteration.  On iteration 0 the
+                # server enforces the matching tool (ask_data_agent /
+                # create_artifact / web_extract / web_search) so a weak
+                # function-calling model cannot simply answer from training
+                # memory.  See ``_compute_tool_choice`` for the precedence.
+                tool_choice = _compute_tool_choice(
+                    user_content, data_ctx_extras, iteration,
+                    tool_names=_tool_names_from_schemas(tools),
+                )
 
             # Dashboard guard: same logic as the v3 stream — if the user
             # asked for a live dashboard and we've already done the
@@ -2868,6 +2939,12 @@ async def add_message(
                     "type": "function",
                     "function": {"name": "create_dashboard"},
                 }
+                dashboard_forced = True
+            # Finish line: on the final iteration force tool_choice="none" so
+            # the LLM must answer in text. Dashboard-guard forcing wins.
+            tool_choice = _finish_line_tool_choice(
+                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced, tool_choice,
+            )
             try:
                 # P1.3: Pre-API deterministic tool result pruning (no LLM call)
                 prune_tool_results_only(llm_messages, model=get_model())
@@ -4092,6 +4169,11 @@ async def resume_conversation(
     _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
     conv_budget = IterationBudget(max_total=_max_iters)
     _verify_attempts = 0
+    # Finish-line state (UnboundLocalError discipline). The loop variable
+    # shadows the outer ``iteration``, so capture the final value it will take
+    # BEFORE the loop rebinds it.
+    _final_iteration = iteration + MAX_TOOL_ITERATIONS
+    _wrapup_nudged = False
     for iteration in range(iteration + 1, iteration + 1 + MAX_TOOL_ITERATIONS):
         # P0: consume one iteration from the conversation-level budget
         if not conv_budget.consume():
@@ -4127,9 +4209,25 @@ async def resume_conversation(
             )
             llm_messages.append({"role": "user", "content": nudge})
             break
+        # Finish line: with 3 iterations left, tell the model to stop
+        # exploring and assemble its final answer (injected exactly once).
+        if iteration == _final_iteration - 3 and not _wrapup_nudged:
+            _wrapup_nudged = True
+            llm_messages.append({
+                "role": "user",
+                "content": (
+                    "You have 3 steps left. Stop exploring and produce "
+                    "your final answer with what you have."
+                ),
+            })
         tool_choice = _compute_tool_choice(
             user_content, data_ctx_extras, iteration,
             tool_names=_tool_names_from_schemas(tools),
+        )
+        # Finish line: force tool_choice="none" on the final iteration so the
+        # LLM must answer in text. No dashboard guard in this loop.
+        tool_choice = _finish_line_tool_choice(
+            iteration, _final_iteration, False, tool_choice,
         )
         try:
             # P1.3: Pre-API deterministic tool result pruning
@@ -4695,11 +4793,13 @@ async def _call_synthesis_llm(system_prompt: str, messages: list[dict]) -> dict:
     returns ``{"content": "..."}``.
     """
     full_messages = [{"role": "system", "content": system_prompt}] + messages
+    _model = get_model()
     payload = {
-        "model": get_model(),
+        "model": _model,
         "messages": full_messages,
-        "temperature": 0.7,
     }
+    if not model_has_fixed_temperature(_model):
+        payload["temperature"] = 0.7
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(llm_url(), headers=llm_headers(), json=payload)
@@ -4767,8 +4867,9 @@ async def _call_llm_with_tools(
             enabled=getattr(settings, "PROMPT_CACHE_ENABLED", False),
             cache_ttl=getattr(settings, "PROMPT_CACHE_TTL", "5m"),
         ),
-        "temperature": temperature if temperature is not None else 0.7,
     }
+    if not model_has_fixed_temperature(_model):
+        payload["temperature"] = temperature if temperature is not None else 0.7
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
     if tools:
@@ -4998,9 +5099,10 @@ async def _stream_llm_with_tools(
     base_payload: dict = {
         "model": _model,
         "messages": messages,
-        "temperature": temperature if temperature is not None else 0.7,
         "stream": True,
     }
+    if not model_has_fixed_temperature(_model):
+        base_payload["temperature"] = temperature if temperature is not None else 0.7
     if max_tokens is not None:
         base_payload["max_tokens"] = max_tokens
     if tools:
@@ -6685,6 +6787,12 @@ async def add_message_stream(
         # cross-turn repetitions (e.g. re-running the same automation via
         # "Run Now" every day) trip the in-turn guard on iteration 0.
         _turn_start_idx = max(0, len(llm_messages) - 1)
+        # Finish-line state (UnboundLocalError discipline: initialized BEFORE
+        # the loop). ``dashboard_forced`` tracks whether the dashboard guard
+        # forced ``create_dashboard`` this turn; ``_wrapup_nudged`` ensures
+        # the T-3 wrap-up message is injected exactly once.
+        dashboard_forced = False
+        _wrapup_nudged = False
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -6777,6 +6885,17 @@ async def add_message_stream(
                 # "I gathered some information" message for other agents).
                 _loop_guard_user_facing = user_facing
                 break
+            # Finish line: with 3 iterations left, tell the model to stop
+            # exploring and assemble its final answer (injected exactly once).
+            if iteration == MAX_TOOL_ITERATIONS - 3 and not _wrapup_nudged:
+                _wrapup_nudged = True
+                llm_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have 3 steps left. Stop exploring and produce "
+                        "your final answer with what you have."
+                    ),
+                })
             tool_choice = _compute_tool_choice(
                 user_content, data_ctx_extras, iteration,
                 tool_names=_tool_names_from_schemas(tools),
@@ -6814,6 +6933,13 @@ async def add_message_stream(
                     "type": "function",
                     "function": {"name": "create_dashboard"},
                 }
+                dashboard_forced = True
+
+            # Finish line: on the final iteration force tool_choice="none" so
+            # the LLM must answer in text. Dashboard-guard forcing wins.
+            tool_choice = _finish_line_tool_choice(
+                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced, tool_choice,
+            )
 
             # ── Gap 1: true token streaming ───────────────────────────
             # When STREAM_TOKEN_DELTAS is on, drive the streaming generator

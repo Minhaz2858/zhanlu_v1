@@ -86,4 +86,11 @@ registry.register(
     toolset="ux",
     description="Set/clear/check the per-conversation interrupt flag.",
     emoji="⏸️",
+    # The interrupt flag is set by the UI via an SSE-side command and polled
+    # by the runtime between tool calls (`is_interrupted`). Exposing the tool
+    # to the LLM is pure waste: weak function-calling models poll it every
+    # step ("interrupt(action=check)") and burn the whole tool budget. The
+    # tool stays registered/callable for agents that explicitly enable it via
+    # tool_config, but is off the default LLM tool list.
+    enabled_by_default=False,
 )
