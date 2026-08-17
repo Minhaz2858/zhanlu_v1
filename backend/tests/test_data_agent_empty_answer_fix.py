@@ -64,7 +64,7 @@ class TestDataAgentEmptyAnswerFix(unittest.TestCase):
 
         call_log: list[dict] = []
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             call_log.append({"n": len(call_log), "tools": tools, "messages": list(messages)})
             if not llm_responses:
                 raise RuntimeError("no more LLM responses mocked")
@@ -168,7 +168,7 @@ class TestDataAgentEmptyAnswerFix(unittest.TestCase):
             RuntimeError("synthesis LLM down"),
         ]
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             call_log.append({"n": len(call_log), "tools": tools})
             nxt = responses.pop(0)
             if isinstance(nxt, Exception):

@@ -53,7 +53,7 @@ def _nl_payload(**over):
     return payload
 
 
-async def _prose_llm(messages, tools=None):
+async def _prose_llm(messages, tools=None, endpoint=None):
     """Loop LLM that immediately writes prose (no tool calls)."""
     return {"content": "Loop answer.", "tool_calls": []}
 
@@ -209,7 +209,7 @@ class TestNLAnswerLinkerPath(unittest.TestCase):
         ])
         seen_prompts: list = []
 
-        async def fake_chat(messages, temperature=0.0):
+        async def fake_chat(messages, temperature=0.0, endpoint=None):
             seen_prompts.append(messages)
             return next(chat_outputs)
 

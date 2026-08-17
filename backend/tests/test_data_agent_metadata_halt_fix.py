@@ -169,7 +169,7 @@ class TestMetadataHaltSubLoop(unittest.TestCase):
 
         call_log: list[dict] = []
 
-        async def fake_call_llm(messages, tools=None):
+        async def fake_call_llm(messages, tools=None, endpoint=None):
             call_log.append({"n": len(call_log), "tools": tools, "messages": list(messages)})
             if not llm_responses:
                 raise RuntimeError("no more LLM responses mocked")
