@@ -13,6 +13,8 @@ import { runAutomationTask } from '@/lib/runAutomationTask';
 import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
+import SkillsSection from '@/components/agent/SkillsSection';
+import { coerceStringArray } from '@/lib/jsonArray';
 
 import { formatShortDateTime } from '@/lib/time';
 
@@ -218,6 +220,7 @@ export default function AutomationTaskDetail() {
       />
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
         <div className="space-y-6 lg:col-span-2">
+          <TaskSkillsSection task={task} t={t} lang={lang} onSaved={load} />
           <Section title={t.detail.basicInfo} action={
             !editing && (
               <button type="button" onClick={startEdit} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-foreground hover:bg-secondary">
@@ -427,6 +430,84 @@ function Section({ title, action, children }) {
       </div>
       {children}
     </div>
+  );
+}
+
+// Shows the skills attached to this automation task as chips, with an inline
+// "edit skills" flow reusing the shared SkillsSection picker. Persists via
+// PATCH AutomationTask.update (the generic CRUD maps `skills` to the new
+// automation_tasks.skills column).
+function TaskSkillsSection({ task, t, lang, onSaved }) {
+  const [editing, setEditing] = useState(false);
+  const [skills, setSkills] = useState(() => coerceStringArray(task?.skills));
+  const [saving, setSaving] = useState(false);
+
+  const list = coerceStringArray(task?.skills);
+  const title = t.automation?.skills || (lang === 'en' ? 'Skills' : '技能');
+
+  async function save() {
+    setSaving(true);
+    try {
+      await base44.entities.AutomationTask.update(task.id, { skills });
+      toast({ title: t.detail.saveBasicInfo, description: t.detail.saved || 'OK' });
+      setEditing(false);
+      onSaved?.();
+    } catch (e) {
+      toast({ title: 'Error', description: e.message, variant: 'destructive' });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <Section
+      title={title}
+      action={
+        !editing && (
+          <button
+            type="button"
+            onClick={() => { setSkills(coerceStringArray(task?.skills)); setEditing(true); }}
+            className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-foreground hover:bg-secondary"
+          >
+            <Pencil className="h-3 w-3" /> {t.detail.editBasicInfo}
+          </button>
+        )
+      }
+    >
+      {editing ? (
+        <div className="space-y-3">
+          <SkillsSection
+            form={{ skills }}
+            update={(p) => { if ('skills' in p) setSkills(coerceStringArray(p.skills)); }}
+            t={t}
+          />
+          <div className="flex gap-2">
+            <Button onClick={save} disabled={saving} size="sm">
+              {saving ? t.common.saving : t.detail.saveBasicInfo}
+            </Button>
+            <Button
+              onClick={() => { setEditing(false); setSkills(coerceStringArray(task?.skills)); }}
+              variant="outline"
+              size="sm"
+            >
+              {t.detail.cancelEdit}
+            </Button>
+          </div>
+        </div>
+      ) : list.length ? (
+        <div className="flex flex-wrap gap-2">
+          {list.map((s) => (
+            <span key={s} className="rounded-md border border-border bg-secondary/50 px-2 py-0.5 text-xs text-foreground">
+              {s}
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="text-xs text-muted-foreground">
+          {t.automation?.noSkills || (lang === 'en' ? 'No skills enabled' : '未启用技能')}
+        </p>
+      )}
+    </Section>
   );
 }
 function Field({ label, children }) {

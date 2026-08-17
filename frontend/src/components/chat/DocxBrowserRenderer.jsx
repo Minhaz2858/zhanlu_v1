@@ -19,6 +19,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader2, AlertTriangle, Download, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { authFetch } from '@/api/authFetch';
 import DocxOutline from './DocxOutline';
 import '@/docx-preview.css';
 
@@ -74,8 +75,14 @@ export default function DocxBrowserRenderer({
         // 1. Dynamically import docx-preview (lazy chunk, tree-shaken).
         const { renderAsync } = await import('docx-preview');
 
-        // 2. Fetch the raw .docx bytes.
-        const res = await fetch(src);
+        // 2. Fetch the raw .docx bytes.  Automation-file artifacts are served
+        //    from `/api/automations/files/{id}/download`, a Bearer-authenticated
+        //    route a plain `fetch` can't reach (it returns 401), which previously
+        //    made the parent fall through to a mammoth fetch against the wrong
+        //    endpoint → "Preview unavailable (HTTP 404)".  authFetch attaches
+        //    the JWT (and refreshes on 401) so both the artifact and automation
+        //    download routes resolve.
+        const res = await authFetch(src);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const blob = await res.blob();
 

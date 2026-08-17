@@ -48,7 +48,10 @@ describe('DocxBrowserRenderer', () => {
     });
 
     expect(screen.getByText('Rendered')).toBeInTheDocument();
-    expect(global.fetch).toHaveBeenCalledWith(TEST_SRC);
+    // The renderer now fetches through authFetch, which forwards to the global
+    // fetch with an options object (headers); assert on the URL only.
+    expect(global.fetch).toHaveBeenCalled();
+    expect(global.fetch.mock.calls[0][0]).toBe(TEST_SRC);
   });
 
   it('shows an error banner when the blob fetch fails', async () => {

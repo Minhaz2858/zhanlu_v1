@@ -1,6 +1,5 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, cleanup } from '@testing-library/react';
-import { afterEach } from 'vitest';
 
 vi.mock('@/api/authFetch', () => ({
   authFetch: vi.fn(),
@@ -22,16 +21,23 @@ const baseArtifact = {
   source: 'automation_file',
 };
 
+const signedPreviewUrl =
+  '/api/automations/files/file-1/preview?token=signed-token';
+
 beforeEach(() => {
-  // jsdom has no createObjectURL — stub it so we can assert the blob flow.
+  // jsdom/happy-dom createObjectURL stub so we can assert the blob flow.
   URL.createObjectURL = vi.fn(() => 'blob:mock-preview-url');
   URL.revokeObjectURL = vi.fn();
   authFetch.mockReset();
+  // Default: successful signed-token mint.
+  authFetch.mockResolvedValue({
+    ok: true,
+    json: () => Promise.resolve({ url: signedPreviewUrl }),
+  });
 });
 
 afterEach(() => {
   cleanup();
-  vi.restoreAllMocks();
 });
 
 describe('InlineArtifactPreview', () => {
@@ -41,50 +47,36 @@ describe('InlineArtifactPreview', () => {
     expect(screen.getByText(/4\.0 KB/)).toBeTruthy();
   });
 
-  it('offers an Open action that calls the supplied handler', () => {
-    const onOpen = vi.fn();
-    render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
-    fireEvent.click(screen.getByRole('button', { name: /Open deliverable in side preview/i }));
-    expect(onOpen).toHaveBeenCalledWith(baseArtifact);
-  });
-
-  it('shows the inline Preview toggle even when an onOpen (right-pane) handler is provided', () => {
-    // The user can preview inline in the chat bubble AND in the right-side pane
-    // (opened by the Open button). Both paths coexist — Preview, Open, and
-    // Download all remain available.
-    const onOpen = vi.fn();
-    render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
-    expect(screen.getByRole('button', { name: /Open preview/i })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Open deliverable in side preview/i })).toBeTruthy();
-    expect(screen.getByRole('button', { name: /Download deliverable/i })).toBeTruthy();
-  });
-
-  it('shows the inline Preview toggle when no onOpen handler is given (e.g. run logs)', () => {
-    // ExecutionLogsList renders this card WITHOUT onOpen — there the inline
-    // preview is the ONLY way to preview (no right pane), so the toggle stays.
+  it('hides the inline Preview button by default (modal mode)', () => {
     render(<InlineArtifactPreview artifact={baseArtifact} />);
-    expect(screen.getByRole('button', { name: /Open preview/i })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /open preview/i })).toBeNull();
   });
 
-  it('keeps the card collapsed by default even when onOpen is provided', () => {
+  it('does not call onOpen when openInModal is true (default)', async () => {
     const onOpen = vi.fn();
     render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
-    // Toggle shows "Preview" (collapsed) — no iframe mounted until clicked.
-    expect(screen.getByRole('button', { name: /Open preview/i })).toBeTruthy();
-    expect(document.querySelector('iframe')).toBeNull();
-  });
-
-  it('mints a signed token and mounts the iframe when Preview is clicked with onOpen present', async () => {
-    authFetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        token: 'signed-token',
-        url: '/api/automations/files/file-1/preview?token=signed-token',
-      }),
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
+    expect(onOpen).not.toHaveBeenCalled();
+    // The modal opens instead.
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeTruthy();
     });
-    const onOpen = vi.fn();
-    render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
-    fireEvent.click(screen.getByRole('button', { name: /Open preview/i }));
+  });
+
+  it('opens a Dialog with the file name as title and Download + Close in the footer', async () => {
+    render(<InlineArtifactPreview artifact={baseArtifact} />);
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
+    await waitFor(() => {
+      expect(screen.getByRole('dialog')).toBeTruthy();
+    });
+    expect(screen.getByRole('heading', { name: 'monthly-report.html' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Download' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Close preview popup' })).toBeTruthy();
+  });
+
+  it('mints a signed token and mounts the iframe when Open is clicked', async () => {
+    render(<InlineArtifactPreview artifact={baseArtifact} />);
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
     await waitFor(() => {
       expect(authFetch).toHaveBeenCalledWith(
         '/api/automations/files/file-1/preview-token',
@@ -92,13 +84,38 @@ describe('InlineArtifactPreview', () => {
       );
       const iframe = document.querySelector('iframe');
       expect(iframe).toBeTruthy();
-      expect(iframe.getAttribute('src')).toBe(
-        '/api/automations/files/file-1/preview?token=signed-token',
-      );
+      expect(iframe.getAttribute('src')).toBe(signedPreviewUrl);
     });
   });
 
-  it('downloads through authFetch as a blob (authenticated route)', async () => {
+  it('closes the dialog via the Close button and unmounts the iframe', async () => {
+    render(<InlineArtifactPreview artifact={baseArtifact} />);
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
+    await waitFor(() => {
+      expect(document.querySelector('iframe')).toBeTruthy();
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Close preview popup' }));
+    await waitFor(() => {
+      expect(document.querySelector('iframe')).toBeNull();
+    });
+  });
+
+  it('falls back to download (no empty modal) when the file has no preview', async () => {
+    const noPreview = { ...baseArtifact, has_preview: false, preview_url: null };
+    authFetch.mockResolvedValue({
+      ok: true,
+      blob: () => Promise.resolve(new Blob(['x'], { type: 'text/html' })),
+    });
+    render(<InlineArtifactPreview artifact={noPreview} />);
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
+    await waitFor(() => {
+      expect(authFetch).toHaveBeenCalledWith('/api/automations/files/file-1/download');
+      expect(URL.createObjectURL).toHaveBeenCalled();
+    });
+    expect(screen.queryByRole('dialog')).toBeNull();
+  });
+
+  it('downloads through authFetch as a blob via the card Download button', async () => {
     authFetch.mockResolvedValue({
       ok: true,
       blob: () => Promise.resolve(new Blob(['x'], { type: 'text/html' })),
@@ -111,40 +128,25 @@ describe('InlineArtifactPreview', () => {
     });
   });
 
-  it('mints a signed token and points the iframe at the signed url', async () => {
-    // iframes cannot send Authorization headers; the component mints a
-    // short-lived signed token and uses the returned ?token= url so the
-    // backend CSP sandbox headers still apply (unlike a blob: iframe).
-    authFetch.mockResolvedValue({
-      ok: true,
-      json: () => Promise.resolve({
-        token: 'signed-token',
-        url: '/api/automations/files/file-1/preview?token=signed-token',
-      }),
-    });
-    render(<InlineArtifactPreview artifact={baseArtifact} />);
-    fireEvent.click(screen.getByRole('button', { name: /Open preview/i }));
-    await waitFor(() => {
-      expect(authFetch).toHaveBeenCalledWith(
-        '/api/automations/files/file-1/preview-token',
-        { method: 'POST' },
-      );
-      const iframe = document.querySelector('iframe');
-      expect(iframe).toBeTruthy();
-      expect(iframe.getAttribute('src')).toBe(
-        '/api/automations/files/file-1/preview?token=signed-token',
-      );
-    });
-  });
-
   it('shows an error state (not a 401 iframe) when token minting fails', async () => {
     authFetch.mockResolvedValue({ ok: false, status: 401 });
     render(<InlineArtifactPreview artifact={baseArtifact} />);
-    fireEvent.click(screen.getByRole('button', { name: /Open preview/i }));
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
     await waitFor(() => {
       expect(authFetch).toHaveBeenCalled();
       expect(document.querySelector('iframe')).toBeNull();
       expect(screen.getByText(/could not load preview/i)).toBeTruthy();
     });
+  });
+
+  it('restores inline behavior when openInModal is false (opt-out)', () => {
+    const onOpen = vi.fn();
+    render(
+      <InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} openInModal={false} />,
+    );
+    // Inline Preview toggle is rendered again in the opt-out path.
+    expect(screen.getByRole('button', { name: /open preview/i })).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: /open deliverable in side preview/i }));
+    expect(onOpen).toHaveBeenCalledWith(baseArtifact);
   });
 });

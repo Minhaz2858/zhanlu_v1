@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,13 @@ from typing import Any
 import yaml
 
 logger = logging.getLogger(__name__)
+
+# Reference files must live under references/ and be markdown documents.
+_REFERENCE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*\.md$")
+
+# Asset paths may contain subdirectories (e.g. templates/report.docx) but each
+# path segment must be a safe token — no traversal, no absolute paths.
+_SAFE_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._ -]*$")
 
 
 def write_manifest(
@@ -138,6 +146,105 @@ def write_full_package(
     return results
 
 
+def _safe_reference_name(filename: str) -> str:
+    """Validate a reference filename; returns it unchanged or raises ValueError."""
+    if not _REFERENCE_NAME_RE.match(filename):
+        raise ValueError(
+            f"Invalid reference filename {filename!r}: must match "
+            f"{_REFERENCE_NAME_RE.pattern} (markdown file, no path separators)."
+        )
+    return filename
+
+
+def _safe_asset_path(rel_path: str) -> Path:
+    """Validate an asset relative path and return it as a Path.
+
+    Every path segment must be a safe token.  Rejects absolute paths, ``..``
+    traversal, empty segments, and hidden files.
+    """
+    if not rel_path or rel_path.startswith(("/", "\\")):
+        raise ValueError(f"Invalid asset path {rel_path!r}: must be relative.")
+    parts = Path(rel_path).parts
+    if not parts:
+        raise ValueError(f"Invalid asset path {rel_path!r}: empty.")
+    for seg in parts:
+        if seg in (".", ".."):
+            raise ValueError(f"Invalid asset path {rel_path!r}: no traversal allowed.")
+        if not _SAFE_SEGMENT_RE.match(seg):
+            raise ValueError(
+                f"Invalid asset path segment {seg!r}: must match {_SAFE_SEGMENT_RE.pattern}."
+            )
+    return Path(*parts)
+
+
+def write_reference(
+    package_dir: Path,
+    filename: str,
+    content: str,
+    *,
+    overwrite: bool = False,
+) -> Path:
+    """Atomically write ``references/{filename}`` (markdown) into a package.
+
+    Args:
+        package_dir: Target package directory.
+        filename: Reference filename (e.g. ``"output-formats.md"``).
+        content: Markdown text content.
+        overwrite: Overwrite existing file if ``True``.
+
+    Returns:
+        Path to the written reference file.
+
+    Raises:
+        ValueError: If the filename is unsafe.
+        FileExistsError: If ``overwrite=False`` and the file exists.
+    """
+    safe_name = _safe_reference_name(filename)
+    refs_dir = package_dir / "references"
+    refs_dir.mkdir(parents=True, exist_ok=True)
+    target = refs_dir / safe_name
+
+    if not overwrite and target.exists():
+        raise FileExistsError(f"references/{safe_name} already exists at {target}")
+
+    _atomic_write(target, content)
+    return target
+
+
+def write_asset(
+    package_dir: Path,
+    rel_path: str,
+    content: bytes,
+    *,
+    overwrite: bool = False,
+) -> Path:
+    """Atomically write ``assets/{rel_path}`` (binary or text) into a package.
+
+    Args:
+        package_dir: Target package directory.
+        rel_path: Asset relative path under ``assets/`` (e.g. ``"templates/report.docx"``).
+        content: Raw file bytes.
+        overwrite: Overwrite existing file if ``True``.
+
+    Returns:
+        Path to the written asset file.
+
+    Raises:
+        ValueError: If the path is unsafe.
+        FileExistsError: If ``overwrite=False`` and the file exists.
+    """
+    safe_rel = _safe_asset_path(rel_path)
+    assets_dir = package_dir / "assets"
+    target = assets_dir / safe_rel
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if not overwrite and target.exists():
+        raise FileExistsError(f"assets/{safe_rel.as_posix()} already exists at {target}")
+
+    _atomic_write_bytes(target, content)
+    return target
+
+
 # ── Internal helpers ──────────────────────────────────────────────────
 
 
@@ -150,6 +257,21 @@ def _atomic_write(target: Path, content: str) -> None:
     )
     try:
         os.write(fd, content.encode("utf-8"))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp_path, target)
+
+
+def _atomic_write_bytes(target: Path, content: bytes) -> None:
+    """Write raw bytes to a temp file, then os.rename for atomicity."""
+    fd, tmp_path = tempfile.mkstemp(
+        dir=target.parent,
+        prefix=f".{target.name}.",
+        suffix=".tmp",
+    )
+    try:
+        os.write(fd, content)
         os.fsync(fd)
     finally:
         os.close(fd)

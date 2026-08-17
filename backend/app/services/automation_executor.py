@@ -248,7 +248,11 @@ _REPORT_STRUCTURE_GUIDANCE = (
     "5. `## Recommended actions` — or 'None required'.\n"
     "Rules: if nothing changed since the previous run, ship a one-page summary, "
     "not a padded report. Never narrate tool calls, connection attempts, or "
-    "internal steps in the deliverable body."
+    "internal steps in the deliverable body. "
+    "This is a business-facing document: NEVER include execution IDs, run "
+    "hashes, database hostnames or connection strings, retry policies, raw SQL, "
+    "or internal pipeline/config details in the report body or footer. State "
+    "results in business terms the reader can act on."
 )
 
 
@@ -257,10 +261,52 @@ def _format_guidance(output_format: str) -> str:
     document_generator's parsers expect for each output_format. Prose
     formats also get the mandatory report-structure template."""
     fmt = (output_format or "html").strip().lower()
-    base = _FORMAT_GUIDANCE.get(fmt, _FORMAT_GUIDANCE["html"])
+    if fmt not in _FORMAT_GUIDANCE:
+        # Unknown formats fall back to the full HTML report guidance.
+        fmt = "html"
+    base = _FORMAT_GUIDANCE[fmt]
     if fmt in _REPORT_FORMATS:
         return f"{base}\n\n{_REPORT_STRUCTURE_GUIDANCE}"
     return base
+
+
+def _filter_skills_by_output_format(
+    skill_names: list[str],
+    output_format: str,
+    db: Optional[Session] = None,
+) -> Tuple[list[str], list[str]]:
+    """Split ``task.skills`` into ``(compatible, excluded)`` for a given
+    output_format.
+
+    Universal skills (no ``compatible_formats`` declared) are always kept.
+    Format-bound skills whose declared format matches ``output_format`` are
+    kept; the rest are excluded. Fail-safe: on any exception the original
+    list is returned unchanged so a transient loader error never drops a
+    legitimate skill.
+    """
+    fmt = (output_format or "html").strip().lower()
+    names = list(skill_names or [])
+    if not names:
+        return [], []
+
+    try:
+        from app.services.skills_loader import _resolve_skill_compatible_formats
+    except Exception:  # noqa: BLE001
+        return names, []
+
+    compatible: list[str] = []
+    excluded: list[str] = []
+    for name in names:
+        try:
+            cf = _resolve_skill_compatible_formats(name, db=db)
+        except Exception:  # noqa: BLE001
+            compatible.append(name)
+            continue
+        if not cf or fmt in cf:
+            compatible.append(name)
+        else:
+            excluded.append(name)
+    return compatible, excluded
 
 
 def _build_skills_context(task: AutomationTask, db: Session) -> str:
@@ -273,6 +319,12 @@ def _build_skills_context(task: AutomationTask, db: Session) -> str:
     tool — this index only advertises availability, it does NOT inline the
     bodies, so the context window is preserved.
 
+    Skills whose declared ``compatible_formats`` conflict with
+    ``task.output_format`` are silently excluded here (and logged at INFO) so
+    a format-bound skill (e.g. pptx) never pollutes the prompt when the user
+    requested a different deliverable (e.g. docx). Universal skills
+    (research/methodology — no ``compatible_formats``) are always kept.
+
     This is intentionally non-fatal: any loader failure degrades to ``""``
     (the run continues with the original output_format-only prompt).
     """
@@ -281,7 +333,21 @@ def _build_skills_context(task: AutomationTask, db: Session) -> str:
         return ""
     try:
         from app.services.skills_loader import get_skill_metadata_for_agent
-        return get_skill_metadata_for_agent(skills, db=db) or ""
+
+        output_format = getattr(task, "output_format", None) or "html"
+        compatible, excluded = _filter_skills_by_output_format(
+            skills, output_format, db=db
+        )
+        if excluded:
+            for name in excluded:
+                logger.info(
+                    "execute_automation: skipped skill '%s' — incompatible "
+                    "with task.output_format '%s' (task_id=%s)",
+                    name,
+                    output_format.strip().lower(),
+                    getattr(task, "id", "?"),
+                )
+        return get_skill_metadata_for_agent(compatible, db=db) or ""
     except Exception as exc:  # noqa: BLE001
         logger.debug(
             "execute_automation: skills metadata build failed (non-fatal): %s",

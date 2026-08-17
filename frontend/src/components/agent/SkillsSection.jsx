@@ -125,7 +125,7 @@ export default function SkillsSection({ form, update, t }) {
         </div>
 
         {showPicker ? (
-          <div className="rounded-lg border border-border bg-background p-2">
+          <div className="w-full min-w-0 overflow-hidden rounded-lg border border-border bg-background p-2">
             <div className="mb-2 flex items-center gap-2">
               <Search className="h-3.5 w-3.5 text-muted-foreground" />
               <input
@@ -152,7 +152,7 @@ export default function SkillsSection({ form, update, t }) {
               ))}
             </div>
 
-            <div className="max-h-56 space-y-1 overflow-y-auto">
+            <div className="max-h-56 space-y-1 overflow-x-hidden overflow-y-auto">
               {allResults.length === 0 && !searching ? (
                 <p className="px-2 py-3 text-center text-xs text-muted-foreground">
                   {query ? (t.agentConfig.noAvailableSkills || 'No skills found') : (t.agentConfig.searchSkill || 'Type to search marketplace skills...')}

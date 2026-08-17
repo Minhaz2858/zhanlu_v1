@@ -175,6 +175,88 @@ async def _skills_tool(
         )
         return result
 
+    if action == "read_reference":
+        # Folder-style progressive disclosure: load a references/*.md file
+        # on demand (never the full SKILL.md).
+        name = (args.get("name") or "").strip()
+        filename = (args.get("filename") or "").strip()
+        if not name or not filename:
+            return {"success": False, "error": "name and filename are required"}
+        try:
+            from app.services.skills_loader import get_skill_dir
+            skill_dir = get_skill_dir(name)
+            if not skill_dir:
+                return {"success": False, "error": f"Skill not found: {name}"}
+            ref_path = _resolve_reference_path(skill_dir, filename)
+            if ref_path is None:
+                return {"success": False, "error": f"Reference not found: {filename}"}
+            return {
+                "success": True,
+                "name": name,
+                "filename": filename,
+                "content": ref_path.read_text(encoding="utf-8"),
+            }
+        except Exception as exc:
+            return {"success": False, "error": f"read_reference failed: {exc}"}
+
+    if action == "list_assets":
+        # List asset files (assets/**) available for a skill, with sizes.
+        name = (args.get("name") or "").strip()
+        if not name:
+            return {"success": False, "error": "name is required"}
+        try:
+            from app.services.skills_loader import get_skill_dir
+            skill_dir = get_skill_dir(name)
+            if not skill_dir:
+                return {"success": False, "error": f"Skill not found: {name}"}
+            assets = _list_asset_files(skill_dir)
+            return {"success": True, "name": name, "assets": assets, "count": len(assets)}
+        except Exception as exc:
+            return {"success": False, "error": f"list_assets failed: {exc}"}
+
+    if action == "download_asset":
+        # Download a single asset file as base64 (for template reuse).
+        name = (args.get("name") or "").strip()
+        rel_path = (args.get("path") or "").strip()
+        if not name or not rel_path:
+            return {"success": False, "error": "name and path are required"}
+        try:
+            from app.services.skills_loader import get_skill_dir
+            skill_dir = get_skill_dir(name)
+            if not skill_dir:
+                return {"success": False, "error": f"Skill not found: {name}"}
+            asset_path = _resolve_asset_path(skill_dir, rel_path)
+            if asset_path is None:
+                return {"success": False, "error": f"Asset not found: {rel_path}"}
+            data = asset_path.read_bytes()
+            return {
+                "success": True,
+                "name": name,
+                "path": rel_path,
+                "size": len(data),
+                "data_base64": base64.b64encode(data).decode(),
+            }
+        except Exception as exc:
+            return {"success": False, "error": f"download_asset failed: {exc}"}
+
+    if action == "semantic_search":
+        # Embedding-based skill discovery with RRF fusion vs keyword search.
+        query = (args.get("query") or "").strip()
+        limit = min(int(args.get("limit", 10)), 50)
+        if not query:
+            return {"success": False, "error": "query is required"}
+        try:
+            from app.services.skill_studio.semantic_finder import semantic_search
+            results = semantic_search(query, db, user_id=user_id, limit=limit)
+            return {
+                "success": True,
+                "query": query,
+                "count": len(results),
+                "results": [r.__dict__ for r in results],
+            }
+        except Exception as exc:
+            return {"success": False, "error": f"semantic_search failed: {exc}"}
+
     return {"success": False, "error": f"Unknown action: {action!r}"}
 
 
@@ -193,11 +275,13 @@ SKILLS_SCHEMA = {
         "parameters": {
             "type": "object",
             "properties": {
-                "action": {"type": "string", "enum": ["search", "load", "execute", "run", "collect", "list_categories"]},
-                "query": {"type": "string", "description": "Search query (for action='search')."},
-                "limit": {"type": "integer", "description": "Max results (for action='search').", "default": 20},
-                "name": {"type": "string", "description": "Skill name (for action='load'/'execute'/'run'/'collect')."},
+                "action": {"type": "string", "enum": ["search", "load", "execute", "run", "collect", "list_categories", "read_reference", "list_assets", "download_asset", "semantic_search"]},
+                "query": {"type": "string", "description": "Search query (for action='search'/'semantic_search')."},
+                "limit": {"type": "integer", "description": "Max results (for action='search'/'semantic_search').", "default": 20},
+                "name": {"type": "string", "description": "Skill name (for action='load'/'execute'/'run'/'collect'/'read_reference'/'list_assets'/'download_asset')."},
                 "url": {"type": "string", "description": "Web URL to collect a skill from (for action='collect')."},
+                "filename": {"type": "string", "description": "Reference filename under references/ (for action='read_reference'), e.g. 'output-formats.md'."},
+                "path": {"type": "string", "description": "Asset relative path under assets/ (for action='download_asset'), e.g. 'templates/report.docx'."},
                 "inputs": {"type": "object", "description": "Skill-specific inputs (for action='execute'/'run')."},
                 "entry_point": {"type": "string", "description": "Bundled script to run, relative to the skill folder (e.g. 'scripts/build.sh'). Use action='load' first to see available 'scripts' (for action='run')."},
                 "args": {"type": "array", "items": {"type": "string"}, "description": "CLI args passed to the entry point (for action='run')."},
@@ -358,6 +442,56 @@ def _run_skill_script(
     except Exception as exc:
         logger.warning("skills run: failed to enqueue sandbox job for %s: %s", name, exc)
         return {"success": False, "error": f"Failed to enqueue sandbox job: {exc}"}
+
+
+# ── folder-package helpers (references/ + assets/) ───────────────────────
+#
+# The Kimi-style folder anatomy stores on-demand detail in references/*.md
+# and reusable templates in assets/** as real files. These helpers resolve
+# those files safely (no path traversal) for the read_reference /
+# list_assets / download_asset tool actions.
+
+
+def _resolve_reference_path(skill_dir: str, filename: str) -> Path | None:
+    """Resolve a references/*.md filename safely; None if missing/invalid."""
+    base = Path(skill_dir)
+    # Guard: filename must be a bare markdown name inside references/.
+    if filename != Path(filename).name or not filename.endswith(".md"):
+        return None
+    target = (base / "references" / filename).resolve()
+    refs_root = (base / "references").resolve()
+    if target.parent != refs_root or not target.is_file():
+        return None
+    return target
+
+
+def _resolve_asset_path(skill_dir: str, rel_path: str) -> Path | None:
+    """Resolve an assets/** relative path safely; None if missing/invalid."""
+    base = Path(skill_dir)
+    assets_root = (base / "assets").resolve()
+    candidate = (base / "assets" / rel_path).resolve()
+    # Ensure the resolved path stays within assets/ (no traversal).
+    if not str(candidate).startswith(str(assets_root) + os.sep):
+        return None
+    if not candidate.is_file():
+        return None
+    return candidate
+
+
+def _list_asset_files(skill_dir: str) -> list[dict]:
+    """List all files under a skill's assets/ directory with sizes."""
+    base = Path(skill_dir)
+    assets_dir = base / "assets"
+    if not assets_dir.is_dir():
+        return []
+    out: list[dict] = []
+    for p in sorted(assets_dir.rglob("*")):
+        if p.is_file():
+            out.append({
+                "path": p.relative_to(assets_dir).as_posix(),
+                "size": p.stat().st_size,
+            })
+    return out
 
 
 # ── list_default_skills tool — agent introspection ──────────────────────

@@ -256,6 +256,73 @@ class ReportCardPayload(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# DeckPlan / SlidePlan — the deck-planner output contract
+# ---------------------------------------------------------------------------
+
+
+class ChartSpecInSlide(BaseModel):
+    """Chart specification within a single slide plan.
+
+    Mirrors ``ChartSpec`` but scoped to a deck slide: it carries the
+    column keys the structured renderer should chart (bar / line / pie)
+    rather than a fully materialized ``data`` list (the renderer pulls
+    rows from the profile / payload at build time).
+    """
+
+    chart_type: str = "bar"  # bar | line | pie
+    x_key: str = ""
+    y_keys: list[str] = Field(default_factory=list)
+    title: str = ""
+
+
+class KPISpecInSlide(BaseModel):
+    """A single KPI tile the planner wants on a KPI-grid slide."""
+
+    label: str
+    value: str
+    delta: Optional[str] = None
+    caption: Optional[str] = None
+
+
+class SlidePlan(BaseModel):
+    """One slide in a DeckPlan — the planner's output contract.
+
+    ``layout`` selects the layout engine entry (cover | agenda |
+    kpi_grid | chart_full | chart_with_bullets | findings_cards |
+    insights_bullets | recommendations | data_table | methodology |
+    section_divider | closing).  ``narrative_role`` tags the slide's
+    position in the narrative arc so the router / polish pass can reason
+    about flow (hook | context | evidence | insight | action | closing).
+    """
+
+    layout: str  # see layout enum above
+    title: str
+    subtitle: str = ""
+    bullets: list[str] = Field(default_factory=list)
+    chart_spec: Optional[ChartSpecInSlide] = None
+    kpi_specs: list[KPISpecInSlide] = Field(default_factory=list)
+    notes: str = ""
+    narrative_role: str = "context"  # hook | context | evidence | insight | action | closing
+
+
+class DeckPlan(BaseModel):
+    """Structured content plan for a deck — output of deck_planner.
+
+    The planner turns raw data rows + user intent into this narrative
+    slide sequence.  ``deck_type`` drives the smart router (data_report
+    / investor_deck / marketing / executive_brief) and
+    ``theme_recommendation`` feeds the theme resolver.
+    """
+
+    title: str
+    deck_type: str = "data_report"  # data_report | investor_deck | marketing | executive_brief
+    theme_recommendation: str = "zhanlu-blue"
+    slides: list[SlidePlan] = Field(default_factory=list)
+    summary: str = ""
+    methodology: str = ""
+
+
+# ---------------------------------------------------------------------------
 # FinalizeResult — the chat-loop return value
 # ---------------------------------------------------------------------------
 

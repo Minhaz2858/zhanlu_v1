@@ -5,7 +5,7 @@ Replaces the previous 'Ask 2-3 focused questions' pattern (which
 produced 3 separate :::options blocks, one per dimension, requiring
 the user to send 3 times) with a single multi-select block: the agent
 commits to defaults in one sentence, then emits ONE :::options block
-with 8-12 dimension-prefixed chips the user can multi-select.
+with 3-5 dimension-prefixed chips the user can multi-select.
 
 These tests pin the new prompt contract.
 """
@@ -66,11 +66,11 @@ def test_bare_request_section_requires_single_options_block():
 
 
 def test_bare_request_section_mentions_chip_count_guidance():
-    """The new block should have 8-12 chips as guidance."""
+    """The new block should have 3-5 chips as guidance."""
     section = _bare_request_section(SKILL_AGENT_SYSTEM_PROMPT)
-    assert re.search(r"\b8-12\b|\b8\s*[–-]\s*12\b", section), (
+    assert re.search(r"\b3-5\b|\b3\s*[–-]\s*5\b", section), (
         "Bare-Request Handling must specify a chip-count guidance "
-        "(e.g. '8-12 chips'). Found section text:\n" + section[:800]
+        "(e.g. '3-5 chips'). Found section text:\n" + section[:800]
     )
 
 

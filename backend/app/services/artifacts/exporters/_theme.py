@@ -151,9 +151,10 @@ class DeckTheme:
     delta_up: RGBColor = field(default_factory=lambda: _to_rgbcolor("#059669"))
     delta_down: RGBColor = field(default_factory=lambda: _to_rgbcolor("#dc2626"))
 
-    # fonts (names, not colors)
-    font_heading: str = "Calibri"
-    font_body: str = "Calibri"
+    # fonts (names, not colors).  Default to Inter (bundled in Docker); the
+    # rendering environment falls back to Arial when Inter is unavailable.
+    font_heading: str = "Inter"
+    font_body: str = "Inter"
 
     # 6-step hex palette for charts
     chart_palette: list[str] = field(
@@ -387,8 +388,8 @@ def load_theme(name: Optional[str], mode: str = DEFAULT_MODE) -> DeckTheme:
         warn_accent=_to_rgbcolor(warn_accent),
         delta_up=_to_rgbcolor(success),
         delta_down=_to_rgbcolor(error),
-        font_heading=fonts.get("heading", "Calibri"),
-        font_body=fonts.get("body", "Calibri"),
+        font_heading=fonts.get("heading", "Inter"),
+        font_body=fonts.get("body", "Inter"),
         chart_palette=chart_palette,
     )
 
@@ -438,8 +439,8 @@ def theme_from_hex_dict(tokens: dict) -> DeckTheme:
         warn_accent=_to_rgbcolor(g("warn_accent", "#f59e0b")),
         delta_up=_to_rgbcolor(g("delta_up", "#059669")),
         delta_down=_to_rgbcolor(g("delta_down", "#dc2626")),
-        font_heading=(fonts.get("heading") or "Calibri") if isinstance(fonts, dict) else "Calibri",
-        font_body=(fonts.get("body") or "Calibri") if isinstance(fonts, dict) else "Calibri",
+        font_heading=(fonts.get("heading") or "Inter") if isinstance(fonts, dict) else "Inter",
+        font_body=(fonts.get("body") or "Inter") if isinstance(fonts, dict) else "Inter",
         chart_palette=list(g("chart_palette") or _derive_chart_palette("#2563eb", "#1d4ed8", "#0ea5e9")),
     )
 

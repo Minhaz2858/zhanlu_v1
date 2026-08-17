@@ -44,6 +44,10 @@ class LlmModel(TimestampedBase):
         Boolean, default=True, nullable=False,
         doc="Resolution skips disabled rows.",
     )
+    bypass_hallucination_guardrail: Mapped[bool] = mapped_column(
+        Boolean, default=False, nullable=False,
+        doc="When True, skip the hallucination guardrail (ask_data_agent force) for this model",
+    )
 
     __table_args__ = (
         Index("ix_llm_models_org_app", "org_id", "app_id"),

@@ -20,7 +20,28 @@ import { render, screen, within, fireEvent } from '@testing-library/react';
 // (which is hoisted to the top) and the test bodies (which need to override
 // its return value).
 const useLanguageMock = vi.hoisted(() =>
-  vi.fn(() => ({ lang: 'zh', setLang: () => {}, t: {} }))
+  vi.fn(() => ({
+    lang: 'zh',
+    setLang: () => {},
+    t: {
+      chat: {
+        phase: {
+          init:     { verb: '正在理解', title: '正在读取你的请求' },
+          goal:     { verb: '正在理解', title: '正在弄清你的需求' },
+          context:  { verb: '正在定位', title: '正在收集相关上下文' },
+          plan:     { verb: '正在编排', title: '正在制定执行方案' },
+          gate:     { verb: '正在校验', title: '正在执行策略检查' },
+          act:      { verb: '正在构建', title: '正在产出交付物' },
+          observe:  { verb: '正在观察', title: '正在记录执行结果' },
+          verify:   { verb: '正在核对', title: '正在检查输出结果' },
+          finalize: { verb: '正在收尾', title: '正在整合最终回复' },
+          done:     { verb: '已完成', title: '全部完成' },
+          fail:     { verb: '已中断', title: '执行过程出现问题' },
+          working:  { verb: '处理中', title: '正在处理' },
+        },
+      },
+    },
+  }))
 );
 
 vi.mock('@/lib/LanguageProvider', () => ({
@@ -296,7 +317,9 @@ describe('ActivitySteps — phase headline', () => {
     expect(screen.queryByTestId(PHASE_LABEL)).toBeNull();
   });
 
-  it('renders the verb + title when a phase is passed', () => {
+  it('renders the verb + title when a phase is passed (translated from state)', () => {
+    // The backend SSE ships English verb/title, but the component must
+    // IGNORE them and translate from phase.state using t.chat.phase.
     render(
       <ActivitySteps
         steps={[STEP_RUNNING(1)]}
@@ -304,8 +327,11 @@ describe('ActivitySteps — phase headline', () => {
       />
     );
     const headline = screen.getByTestId(PHASE_LABEL);
-    expect(headline.textContent).toMatch(/Fathoming/);
-    expect(headline.textContent).toMatch(/Understanding what you need/);
+    // Should show the zh translation from t.chat.phase.goal, NOT the English strings.
+    expect(headline.textContent).toMatch(/正在理解/);
+    expect(headline.textContent).toMatch(/正在弄清你的需求/);
+    expect(headline.textContent).not.toMatch(/Fathoming/);
+    expect(headline.textContent).not.toMatch(/Understanding what you need/);
   });
 
   it('renders the phase even when steps are finalized', () => {
@@ -316,11 +342,16 @@ describe('ActivitySteps — phase headline', () => {
       />
     );
     expect(screen.getByTestId(PHASE_LABEL)).toBeInTheDocument();
+    // Translated to zh: 已完成 · 全部完成
+    expect(screen.getByTestId(PHASE_LABEL).textContent).toMatch(/已完成/);
+    expect(screen.getByTestId(PHASE_LABEL).textContent).not.toMatch(/All finished/);
   });
 
-  it('does not render a headline for a phase missing the verb', () => {
+  it('does not render a headline when state is missing', () => {
+    // Without a state we have no key into t.chat.phase, so render nothing
+    // (the backend's English-only verb/title would leak through otherwise).
     render(
-      <ActivitySteps steps={[STEP_RUNNING(1)]} phase={{ state: 'goal' }} />
+      <ActivitySteps steps={[STEP_RUNNING(1)]} phase={{ verb: 'Working' }} />
     );
     expect(screen.queryByTestId(PHASE_LABEL)).toBeNull();
   });

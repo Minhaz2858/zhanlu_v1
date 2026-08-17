@@ -52,3 +52,17 @@ class Tool(TimestampedBase):
     # References and sources (JSON arrays)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     references: Mapped[list | None] = mapped_column(JSON, nullable=True)
+
+    # Kimi-style folder anatomy. references_manifest maps reference filename
+    # (e.g. "output-formats.md") -> one-line summary; assets_manifest maps
+    # asset relative path (e.g. "templates/report.docx") -> one-line
+    # description. The actual file bytes live on the filesystem under
+    # ~/.zhanlu/skills/<category>/<name>/references|assets/.
+    references_manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    assets_manifest: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
+    # Semantic embedding of the skill's description+body as a JSON float list.
+    # Stored as JSON (not pgvector) so it works on both SQLite and Postgres
+    # without requiring an extension, matching the convention used by
+    # agent_memory.embedding and response_cache_entry.question_embedding.
+    embedding: Mapped[list | None] = mapped_column(JSON, nullable=True)

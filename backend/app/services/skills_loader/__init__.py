@@ -65,6 +65,19 @@ class SkillMetadata:
     prerequisites: dict[str, Any] = field(default_factory=dict)
     source: str = "bundled"
     scan_findings: list[dict[str, Any]] = field(default_factory=list)
+    # Output formats this skill is compatible with (e.g. ["pptx"], ["docx"]).
+    # Empty/absent means "universal" — compatible with every output_format.
+    # Format-bound skills (pptx/docx/pdf/xlsx) declare their format here so the
+    # automation executor can silently drop them when the task requests a
+    # different deliverable format.
+    compatible_formats: list[str] = field(default_factory=list)
+    # Kimi-style folder anatomy. ``references`` maps reference filename
+    # (e.g. "output-formats.md") to its one-line summary; ``assets`` maps asset
+    # relative path (e.g. "templates/report.docx") to its one-line description.
+    # Both are derived from the on-disk references/ and assets/ directories,
+    # enriched with summaries from manifest.yaml / SKILL.md frontmatter.
+    references: dict[str, str] = field(default_factory=dict)
+    assets: dict[str, str] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -82,6 +95,9 @@ class SkillMetadata:
             "runtime": self.runtime,
             "user_invocable": self.user_invocable,
             "source": self.source,
+            "compatible_formats": self.compatible_formats,
+            "references": self.references,
+            "assets": self.assets,
         }
 
 
@@ -151,6 +167,46 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[bool, list[str]]:
         return False, [str(e)]
 
 
+# Well-known format-bound skill names → their output format. Used as a
+# defensive fallback only when a skill's manifest/frontmatter declares no
+# ``compatible_formats``. Universal skills (research, methodology, etc.) are
+# intentionally absent from this map.
+_FORMAT_BOUND_SKILL_NAMES: dict[str, list[str]] = {
+    "pptx": ["pptx"],
+    "ppt-deck-builder": ["pptx"],
+    "docx": ["docx"],
+    "pdf": ["pdf"],
+    "xlsx": ["xlsx"],
+}
+
+
+def _normalize_compatible_formats(raw: Any) -> list[str]:
+    """Normalize a ``compatible_formats`` / ``artifact_types`` value into a
+    sorted list of lowercase, de-duplicated format strings.
+
+    Accepts a list, a single string, or ``None``. Empty result means
+    "universal" — compatible with every output_format.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        items = [raw]
+    elif isinstance(raw, (list, tuple, set)):
+        items = list(raw)
+    else:
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        if item is None:
+            continue
+        fmt = str(item).strip().lower()
+        if fmt and fmt not in seen:
+            seen.add(fmt)
+            cleaned.append(fmt)
+    return cleaned
+
+
 def load_skill_package(package_dir: Path, source: str = "bundled") -> SkillMetadata | None:
     """Load a skill from a folder package with ``manifest.yaml``.
 
@@ -202,6 +258,8 @@ def load_skill_package(package_dir: Path, source: str = "bundled") -> SkillMetad
     if not isinstance(tags, list):
         tags = [tags] if tags else []
 
+    references, assets = _scan_folder_resources(package_dir, manifest)
+
     return SkillMetadata(
         name=name,
         description=manifest.get("description", ""),
@@ -219,6 +277,11 @@ def load_skill_package(package_dir: Path, source: str = "bundled") -> SkillMetad
         user_invocable=manifest.get("user_invocable", True),
         prerequisites=manifest.get("prerequisites", {}) or {},
         source=manifest.get("source", source),
+        compatible_formats=_normalize_compatible_formats(
+            manifest.get("compatible_formats") or manifest.get("artifact_types")
+        ),
+        references=references,
+        assets=assets,
     )
 
 
@@ -297,6 +360,65 @@ def _load_json_schema(path: Path) -> dict[str, Any] | None:
         return None
 
 
+def _scan_folder_resources(
+    package_dir: Path,
+    manifest: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Scan a skill package for ``references/*.md`` and ``assets/**`` files.
+
+    Returns ``(references, assets)`` dicts mapping relative path -> summary.
+    Summaries come from the manifest's ``references_manifest`` / ``assets_manifest``
+    when present; otherwise they are derived from the file (first line for
+    markdown references, file name for assets).
+
+    The scan is read-only and defensive: unreadable or binary files are skipped
+    without failing the whole load.
+    """
+    refs: dict[str, str] = {}
+    assets: dict[str, str] = {}
+
+    ref_manifest = (manifest or {}).get("references_manifest") or {}
+    asset_manifest = (manifest or {}).get("assets_manifest") or {}
+    if not isinstance(ref_manifest, dict):
+        ref_manifest = {}
+    if not isinstance(asset_manifest, dict):
+        asset_manifest = {}
+
+    refs_dir = package_dir / "references"
+    if refs_dir.is_dir():
+        for f in sorted(refs_dir.iterdir()):
+            if not f.is_file() or f.suffix.lower() != ".md":
+                continue
+            rel = f.name
+            refs[rel] = str(ref_manifest.get(rel) or _reference_summary(f))
+
+    assets_dir = package_dir / "assets"
+    if assets_dir.is_dir():
+        for f in sorted(assets_dir.rglob("*")):
+            if not f.is_file():
+                continue
+            rel = f.relative_to(assets_dir).as_posix()
+            assets[rel] = str(asset_manifest.get(rel) or rel)
+
+    return refs, assets
+
+
+def _reference_summary(path: Path) -> str:
+    """Derive a one-line summary from a markdown reference file.
+
+    Uses the first non-empty, non-heading line; falls back to the filename.
+    """
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            return stripped[:160]
+    except Exception:
+        pass
+    return path.name
+
+
 def parse_skill_file(filepath: Path, source: str = "bundled") -> SkillMetadata | None:
     """Parse a single skill .md file into SkillMetadata."""
     try:
@@ -325,6 +447,11 @@ def parse_skill_file(filepath: Path, source: str = "bundled") -> SkillMetadata |
     summary = str(frontmatter.get("summary", ""))
     runtime = str(frontmatter.get("runtime", ""))
 
+    # Enrich with folder-package resources: the frontmatter may carry
+    # references_manifest/assets_manifest, but we always scan the real
+    # references/ and assets/ directories on disk.
+    references, assets = _scan_folder_resources(filepath.parent, frontmatter)
+
     meta = SkillMetadata(
         name=name,
         description=str(description),
@@ -342,6 +469,11 @@ def parse_skill_file(filepath: Path, source: str = "bundled") -> SkillMetadata |
         user_invocable=bool(frontmatter.get("user_invocable", True)),
         prerequisites=frontmatter.get("prerequisites", {}) or {},
         source=source,
+        compatible_formats=_normalize_compatible_formats(
+            frontmatter.get("compatible_formats") or frontmatter.get("artifact_types")
+        ),
+        references=references,
+        assets=assets,
     )
 
     # B3: deterministic security scan (warn-only)
@@ -590,6 +722,43 @@ def _lookup_skill_summary(name: str, db=None) -> str | None:
         if skill.description:
             return skill.description[:200]
     return None
+
+
+def _resolve_skill_compatible_formats(name: str, db=None) -> list[str]:
+    """Resolve the output formats a skill is compatible with.
+
+    Lookup order: filesystem registry first (bundled skills carry
+    ``compatible_formats`` in their manifest/frontmatter), then DB ``tools``
+    table, then the ``_FORMAT_BOUND_SKILL_NAMES`` name fallback.
+
+    Returns a normalized lowercase list. Empty list means "universal" — the
+    skill is compatible with every output_format.
+    """
+    registry = get_skills_registry()
+    skill = registry.get(name)
+    if skill is not None:
+        cf = getattr(skill, "compatible_formats", None) or []
+        if cf:
+            return _normalize_compatible_formats(cf)
+
+    # DB fallback
+    if db is not None:
+        try:
+            from app.models.tool import Tool
+            tool = db.query(Tool).filter(
+                Tool.name == name,
+                Tool.is_deleted == False,
+                Tool.enabled == True,
+            ).first()
+            if tool is not None:
+                cf = getattr(tool, "compatible_formats", None) or getattr(tool, "artifact_types", None)
+                if cf:
+                    return _normalize_compatible_formats(cf)
+        except Exception as e:
+            logger.debug("DB compatible_formats lookup for '%s' failed (non-fatal): %s", name, e)
+
+    # Name-based fallback (defensive default for well-known format-bound skills)
+    return _normalize_compatible_formats(_FORMAT_BOUND_SKILL_NAMES.get(name, []))
 
 
 def get_skill_metadata_for_agent(skill_names: list[str], db=None) -> str:

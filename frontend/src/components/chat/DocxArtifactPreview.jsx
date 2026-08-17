@@ -15,6 +15,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { Loader2, FileText, AlertTriangle, Download } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { authFetch } from '@/api/authFetch';
 import DocxOutline from './DocxOutline';
 import DocxBrowserRenderer from './DocxBrowserRenderer';
 
@@ -44,13 +45,32 @@ export default function DocxArtifactPreview({
     setMode(MODE.MAMMOTH);
   }, []);
 
+  // ---- Derive the docx blob download URL ------------------------------
+  // Prefer the explicit downloadUrl prop (e.g. automation_file artifacts
+  // have file_url='/api/automations/files/{id}/download'). Fall back to
+  // constructing from the artifact ID.
+  const docxSrc = downloadUrl
+    || (artifactId ? `${API_BASE}/artifacts/${artifactId}/download` : null);
+
+  // Automation-run files are served from the automation router, not the
+  // artifacts router, so the mammoth fallback must target the right table.
+  const isAutomationFile = !!downloadUrl
+    && downloadUrl.includes('/api/automations/files/');
+
   // ---- Fetch mammoth HTML when in fallback mode -----------------------
   useEffect(() => {
     if (mode !== MODE.MAMMOTH || !artifactId) return;
     let active = true;
     setMammothError(null);
 
-    fetch(`${API_BASE}/artifacts/${artifactId}/preview?format=html`)
+    const url = isAutomationFile
+      ? `${API_BASE}/automations/files/${artifactId}/preview?format=html`
+      : `${API_BASE}/artifacts/${artifactId}/preview?format=html`;
+
+    // authFetch (not plain fetch): the automation preview route is
+    // Bearer-authenticated, and a raw fetch returns 401 → "HTTP 401"
+    // instead of the correct mammoth HTML.
+    authFetch(url)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.text();
@@ -59,7 +79,7 @@ export default function DocxArtifactPreview({
       .catch((e) => { if (active) setMammothError(e.message || 'Failed to load'); });
 
     return () => { active = false; };
-  }, [mode, artifactId]);
+  }, [mode, artifactId, isAutomationFile]);
 
   // ---- Anchor-jump handler --------------------------------------------
   const handleJump = useCallback((id) => {
@@ -69,13 +89,6 @@ export default function DocxArtifactPreview({
     const target = root.querySelector(`#${CSS.escape(id)}`);
     if (target) target.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }, [onAnchorJump]);
-
-  // ---- Derive the docx blob download URL ------------------------------
-  // Prefer the explicit downloadUrl prop (e.g. automation_file artifacts
-  // have file_url='/api/automations/files/{id}/download'). Fall back to
-  // constructing from the artifact ID.
-  const docxSrc = downloadUrl
-    || (artifactId ? `${API_BASE}/artifacts/${artifactId}/download` : null);
 
   // ---- Render ---------------------------------------------------------
   if (!artifactId) {

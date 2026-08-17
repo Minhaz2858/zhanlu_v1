@@ -81,6 +81,21 @@
       "items": {"type": "string"},
       "description": "Artifact types this skill can produce (pptx, docx, etc.)."
     },
+    "compatible_formats": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Output formats this skill is compatible with (pptx, docx, pdf, xlsx, html). Absent/empty means universal — compatible with every output_format."
+    },
+    "references_manifest": {
+      "type": "object",
+      "description": "Map of reference filename (e.g. 'output-formats.md') to a one-line summary. Reference files live under references/ and are loaded on-demand by the agent.",
+      "additionalProperties": {"type": "string"}
+    },
+    "assets_manifest": {
+      "type": "object",
+      "description": "Map of asset relative path (e.g. 'templates/default-report.docx') to a one-line description. Asset files live under assets/ and are downloaded on-demand.",
+      "additionalProperties": {"type": "string"}
+    },
     "requires_sandbox": {
       "type": "boolean",
       "default": false

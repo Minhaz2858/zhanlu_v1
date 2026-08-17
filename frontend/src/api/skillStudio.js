@@ -67,3 +67,51 @@ export async function triggerDryRun(skillName) {
   if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
   return resp.json();
 }
+
+/**
+ * Fetch the active SkillDraft for a conversation (live folder tree).
+ * Returns null when there is no draft in flight.
+ * @param {string} conversationId
+ * @returns {Promise<Object|null>} draft dict, or null when none exists
+ */
+export async function getSkillDraft(conversationId) {
+  const resp = await authFetch(`/api/skill-studio/drafts/${encodeURIComponent(conversationId)}`);
+  if (resp.status === 404) return null;
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  const data = await resp.json();
+  return data.draft || null;
+}
+
+/**
+ * Save back a single file (SKILL.md or references/*.md) in an active draft.
+ * @param {string} conversationId
+ * @param {string} path - "SKILL.md" or "references/<filename>"
+ * @param {string} content
+ * @returns {Promise<Object>} { draft } — the updated draft dict
+ */
+export async function updateSkillDraftFile(conversationId, path, content) {
+  const resp = await authFetch(`/api/skill-studio/drafts/${encodeURIComponent(conversationId)}/file`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path, content }),
+  });
+  if (!resp.ok) {
+    const detail = await resp.json().catch(() => ({ detail: 'Failed to save file' }));
+    throw new Error(detail.detail || `HTTP ${resp.status}`);
+  }
+  const data = await resp.json();
+  return data.draft;
+}
+
+/**
+ * Discard the active SkillDraft for a conversation.
+ * @param {string} conversationId
+ * @returns {Promise<Object>} { success }
+ */
+export async function discardSkillDraft(conversationId) {
+  const resp = await authFetch(`/api/skill-studio/drafts/${encodeURIComponent(conversationId)}`, {
+    method: 'DELETE',
+  });
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  return resp.json();
+}

@@ -341,3 +341,67 @@ def list_default_skills_api():
     except Exception as exc:
         logger.warning("Failed to list default skills: %s", exc)
         return {"success": False, "default_skills": [], "count": 0, "error": str(exc)}
+
+
+# ── Smart Skill Agent: draft state endpoints ─────────────────────────────
+#
+# The creation orchestrator keeps an in-flight ``SkillDraft`` per conversation.
+# These endpoints let the frontend (a) reload the live folder tree after a page
+# refresh, (b) save back edits from the inline markdown editor, and (c) discard
+# a draft the user no longer wants. The orchestrator itself persists the draft
+# through the module-level ``draft_store`` singleton, so these endpoints are
+# thin read/write wrappers over that same store.
+
+
+class DraftFileUpdateRequest(BaseModel):
+    path: str          # "SKILL.md" or "references/<filename>"
+    content: str
+
+
+@router.get("/skill-studio/drafts/{conversation_id}")
+def get_skill_draft(conversation_id: str):
+    """Return the active SkillDraft for a conversation (live folder tree)."""
+    from app.services.skill_studio.draft_store import draft_store
+
+    draft = draft_store.get(conversation_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="No active skill draft")
+    return {"draft": draft.to_dict()}
+
+
+@router.put("/skill-studio/drafts/{conversation_id}/file")
+def update_skill_draft_file(conversation_id: str, req: DraftFileUpdateRequest):
+    """Update a single file (SKILL.md or references/*.md) in an active draft.
+
+    This is the save-back endpoint for the inline markdown editor. It mutates
+    the draft in place and re-persists it, so the live folder tree and the
+    orchestrator (if it resumes later) both see the edited content.
+    """
+    from app.services.skill_studio.draft_store import draft_store
+
+    draft = draft_store.get(conversation_id)
+    if draft is None:
+        raise HTTPException(status_code=404, detail="No active skill draft")
+
+    path = (req.path or "").strip()
+    if path == "SKILL.md":
+        draft.skill_md = req.content
+    elif path.startswith("references/"):
+        filename = path[len("references/"):]
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid reference path")
+        draft.references[filename] = req.content
+    else:
+        raise HTTPException(status_code=400, detail="Unsupported file path")
+
+    draft_store.put(draft)
+    return {"draft": draft.to_dict()}
+
+
+@router.delete("/skill-studio/drafts/{conversation_id}")
+def discard_skill_draft(conversation_id: str):
+    """Discard the active SkillDraft for a conversation."""
+    from app.services.skill_studio.draft_store import draft_store
+
+    draft_store.delete(conversation_id)
+    return {"success": True}

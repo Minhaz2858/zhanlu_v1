@@ -18,6 +18,7 @@
  * manually.
  */
 import { authFetch } from '@/api/authFetch';
+import { registerExecution } from '@/lib/automationStatusBus';
 
 export async function runAutomationTask(task, { navigate, toast, lang = 'en' }) {
   const taskId = task?.id;
@@ -84,6 +85,22 @@ export async function runAutomationTask(task, { navigate, toast, lang = 'en' }) 
       variant: 'destructive',
     });
     return;
+  }
+
+  // Step 2b: register the execution on the global status bus so the pinned
+  // AutomationExecutionStatusDrawer surfaces immediately and starts its 2s
+  // polling. Best-effort — the drawer only needs the executionId to poll.
+  if (executionId) {
+    try {
+      registerExecution({
+        executionId,
+        taskId,
+        taskName: task?.name || task?.description || '',
+        sessionId,
+      });
+    } catch {
+      // Non-fatal — the toast below still informs the user a run started.
+    }
   }
 
   // Step 3: toast the execution id (truncated for readability) and

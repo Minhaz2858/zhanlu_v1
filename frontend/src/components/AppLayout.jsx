@@ -1,6 +1,7 @@
 import { Outlet } from 'react-router-dom';
 import Sidebar from './Sidebar';
 import PageErrorBoundary from './PageErrorBoundary';
+import AutomationExecutionStatusDrawer from './automation/AutomationExecutionStatusDrawer';
 import { ChatSessionProvider } from '@/lib/ChatSessionContext';
 import { PersistentStreamProvider } from '@/lib/PersistentStreamContext';
 import { useScreenSize } from '@/hooks/useScreenSize';
@@ -49,6 +50,7 @@ export default function AppLayout() {
               </PageErrorBoundary>
             </div>
           </main>
+          <AutomationExecutionStatusDrawer />
         </div>
       </ChatSessionProvider>
     </PersistentStreamProvider>

@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { base44 } from "@/api/base44Client";
+import { useLanguage } from "@/lib/LanguageProvider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,22 +10,8 @@ import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp
 import AuthLayout from "@/components/AuthLayout";
 import { toast } from "@/components/ui/use-toast";
 
-// Mirror of backend app/services/password_policy.py (plan 2026-07-27).
-function validatePassword(pw) {
-  const errs = [];
-  if (pw.length < 10) errs.push("at least 10 characters");
-  if (!/[A-Za-z]/.test(pw)) errs.push("a letter");
-  if (!/\d/.test(pw)) errs.push("a digit");
-  return errs;
-}
-
-const RULES = [
-  { label: "At least 10 characters", test: (pw) => pw.length >= 10 },
-  { label: "Contains a letter", test: (pw) => /[A-Za-z]/.test(pw) },
-  { label: "Contains a digit", test: (pw) => /\d/.test(pw) },
-];
-
 export default function Register() {
+  const { t } = useLanguage();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -33,18 +20,32 @@ export default function Register() {
   const [showOtp, setShowOtp] = useState(false);
   const [otpCode, setOtpCode] = useState("");
 
+  // Mirror of backend app/services/password_policy.py (plan 2026-07-27).
+  const validatePassword = (pw) => {
+    const errs = [];
+    if (pw.length < 10) errs.push(t.auth.pwMinLen);
+    if (!/[A-Za-z]/.test(pw)) errs.push(t.auth.pwHasLetter);
+    if (!/\d/.test(pw)) errs.push(t.auth.pwHasDigit);
+    return errs;
+  };
   const pwErrors = validatePassword(password);
   const passwordsMatch = password === confirmPassword;
+
+  const RULES = [
+    { label: t.auth.pwMinLen, test: (pw) => pw.length >= 10 },
+    { label: t.auth.pwHasLetter, test: (pw) => /[A-Za-z]/.test(pw) },
+    { label: t.auth.pwHasDigit, test: (pw) => /\d/.test(pw) },
+  ];
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setError("");
     if (pwErrors.length > 0) {
-      setError("Password must " + pwErrors.join(", ") + ".");
+      setError(t.auth.passwordMust + pwErrors.join(", ") + ".");
       return;
     }
     if (!passwordsMatch) {
-      setError("Passwords do not match");
+      setError(t.auth.pwNoMatch);
       return;
     }
     setLoading(true);
@@ -73,10 +74,10 @@ export default function Register() {
           await base44.auth.resendOtp(email);
           setShowOtp(true);
         } catch (e2) {
-          setError(e2.message || "Failed to send verification code");
+          setError(e2.message || t.auth.failedToSendCode);
         }
       } else {
-        setError(msg || "Registration failed");
+        setError(msg || t.auth.registrationFailed);
       }
     } finally {
       setLoading(false);
@@ -99,7 +100,7 @@ export default function Register() {
       }
       window.location.href = "/";
     } catch (err) {
-      setError(err.message || "Invalid verification code");
+      setError(err.message || t.auth.invalidVerificationCode);
     } finally {
       setLoading(false);
     }
@@ -110,11 +111,11 @@ export default function Register() {
     try {
       await base44.auth.resendOtp(email);
       toast({
-        title: "Code sent",
-        description: "Check your email for the new code.",
+        title: t.auth.codeSent,
+        description: t.auth.codeSentDesc,
       });
     } catch (err) {
-      setError(err.message || "Failed to resend code");
+      setError(err.message || t.auth.failedToResendCode);
     }
   };
 
@@ -122,8 +123,8 @@ export default function Register() {
     return (
       <AuthLayout
         icon={Mail}
-        title="Verify your email"
-        subtitle={`We sent a code to ${email}`}
+        title={t.auth.verifyEmail}
+        subtitle={t.auth.weSentCode.replace("{email}", email)}
       >
         {error && (
           <div className="mb-4 p-3 rounded-lg bg-destructive/10 text-destructive text-sm">
@@ -156,16 +157,16 @@ export default function Register() {
           {loading ? (
             <>
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Verifying...
+              {t.auth.verifying}
             </>
           ) : (
-            "Verify"
+            t.auth.verify
           )}
         </Button>
         <p className="text-center text-sm text-muted-foreground mt-4">
-          Didn't receive the code?{" "}
+          {t.auth.didntReceive}{" "}
           <button onClick={handleResend} className="text-primary font-medium hover:underline">
-            Resend
+            {t.auth.resend}
           </button>
         </p>
       </AuthLayout>
@@ -175,13 +176,13 @@ export default function Register() {
   return (
     <AuthLayout
       icon={UserPlus}
-      title="Create your account"
-      subtitle="Sign up to get started"
+      title={t.auth.createAccount}
+      subtitle={t.auth.signUpToStart}
       footer={
         <>
-          Already have an account?{" "}
+          {t.auth.alreadyHaveAccount}{" "}
           <Link to="/login" className="text-primary font-medium hover:underline">
-            Log in
+            {t.auth.logIn}
           </Link>
         </>
       }
@@ -194,7 +195,7 @@ export default function Register() {
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="email">Email</Label>
+          <Label htmlFor="email">{t.auth.email}</Label>
           <div className="relative">
             <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
             <Input
@@ -202,7 +203,7 @@ export default function Register() {
               type="email"
               autoComplete="email"
               autoFocus
-              placeholder="you@example.com"
+              placeholder={t.auth.emailPh}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="pl-10 h-12"
@@ -211,7 +212,7 @@ export default function Register() {
           </div>
         </div>
         <div className="space-y-2">
-          <Label htmlFor="password">Password</Label>
+          <Label htmlFor="password">{t.auth.password}</Label>
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
             <Input
@@ -247,7 +248,7 @@ export default function Register() {
           )}
         </div>
         <div className="space-y-2">
-          <Label htmlFor="confirm">Confirm Password</Label>
+          <Label htmlFor="confirm">{t.auth.confirmPassword}</Label>
           <div className="relative">
             <Lock className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
             <Input
@@ -262,7 +263,7 @@ export default function Register() {
             />
           </div>
           {confirmPassword.length > 0 && !passwordsMatch && (
-            <p className="text-xs text-destructive">Passwords do not match</p>
+            <p className="text-xs text-destructive">{t.auth.pwNoMatch}</p>
           )}
         </div>
         <Button
@@ -273,10 +274,10 @@ export default function Register() {
           {loading ? (
             <>
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Creating account...
+              {t.auth.creatingAccount}
             </>
           ) : (
-            "Create account"
+            t.auth.createAccount
           )}
         </Button>
       </form>

@@ -72,30 +72,45 @@ function getAutomationFileId(url) {
 }
 
 /**
- * Render an automation file via the signed preview-token flow. Iframe
- * navigation cannot send the Authorization header, so we mint a short-lived
- * token and point the iframe at /preview?token=... (mirrors
- * InlineArtifactPreview.jsx). Shows a loading state while minting and a
- * graceful fallback if minting fails.
+ * Mint a short-lived signed preview token so that iframe / img / audio /
+ * video tags — none of which can send the Authorization header — can
+ * render auth-protected AutomationFile URLs
+ * (e.g. "/api/automations/files/<id>/download") inline.
+ *
+ * The mint endpoint at POST /api/automations/files/<id>/preview-token
+ * returns { url: "/api/automations/files/<id>/preview?token=..." }
+ * which the backend /preview route serves with the correct Content-Type
+ * for inline display (image/png, application/pdf, text/html, …). Mirrors
+ * the same flow used by InlineArtifactPreview / ArtifactPreviewPane.
+ *
+ * Returns:
+ *   - tokenUrl: the signed URL once minted (null while minting or on error)
+ *   - failed:   true when minting failed or returned no url
+ *   - isAutomation: true when the input URL was recognised as an
+ *     automation-file URL (caller should fall back to tokenUrl-or-raw)
  */
-function SignedPreviewFrame({ fileId, title, className }) {
-  const [src, setSrc] = useState(null);
+function useAutomationFileToken(url) {
+  const fileId = getAutomationFileId(url);
+  const isAutomation = !!fileId;
+  const [tokenUrl, setTokenUrl] = useState(null);
   const [failed, setFailed] = useState(false);
-
   useEffect(() => {
+    if (!fileId) {
+      setTokenUrl(null);
+      setFailed(false);
+      return undefined;
+    }
     let cancelled = false;
-    setSrc(null);
+    setTokenUrl(null);
     setFailed(false);
     authFetch(`/api/automations/files/${fileId}/preview-token`, { method: 'POST' })
       .then((res) => {
-        if (!res || !res.ok) {
-          throw new Error(`preview-token failed (${res && res.status})`);
-        }
+        if (!res || !res.ok) throw new Error(`preview-token failed (${res && res.status})`);
         return res.json();
       })
       .then((data) => {
         if (cancelled) return;
-        if (data && data.url) setSrc(data.url);
+        if (data && data.url) setTokenUrl(data.url);
         else setFailed(true);
       })
       .catch(() => {
@@ -103,31 +118,25 @@ function SignedPreviewFrame({ fileId, title, className }) {
       });
     return () => { cancelled = true; };
   }, [fileId]);
+  return { tokenUrl, failed, isAutomation };
+}
 
-  if (failed) {
-    return (
-      <div className="flex flex-col items-center gap-3 py-12 text-center">
-        <div className="flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
-          <FileText className="h-6 w-6 text-muted-foreground" />
-        </div>
-        <p className="text-sm text-muted-foreground">Could not load preview. Download the file to view it.</p>
-      </div>
-    );
-  }
-  if (!src) {
-    return (
-      <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
-        Loading preview…
-      </div>
-    );
-  }
+function PreviewLoading() {
   return (
-    <iframe
-      src={src}
-      title={title || 'preview'}
-      className={className}
-      sandbox="allow-same-origin allow-scripts allow-popups allow-forms"
-    />
+    <div className="flex items-center justify-center py-12 text-sm text-muted-foreground">
+      Loading preview…
+    </div>
+  );
+}
+
+function PreviewFailed() {
+  return (
+    <div className="flex flex-col items-center gap-3 py-12 text-center">
+      <div className="flex h-12 w-12 items-center justify-center rounded-full bg-secondary">
+        <FileText className="h-6 w-6 text-muted-foreground" />
+      </div>
+      <p className="text-sm text-muted-foreground">Could not load preview. Download the file to view it.</p>
+    </div>
   );
 }
 
@@ -141,6 +150,18 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
     (fileType && fileType.toLowerCase()) ||
     extOf(name) ||
     extOf(url);
+
+  // AutomationFile URLs are auth-protected and can't be rendered by
+  // <iframe>/<img>/<audio>/<video> tags (which can't send the
+  // Authorization header). Mint a short-lived signed token once and
+  // route every media tag through the tokenized URL. Loading/failed
+  // state is handled up front for the simple branches; the OFFICE /
+  // Markdown branch falls through to the existing local-upload logic.
+  // The hook is called unconditionally (even when url is empty) so the
+  // hook order is stable across renders — the early-return below
+  // ignores its result.
+  const { tokenUrl, failed: tokenFailed, isAutomation } = useAutomationFileToken(url);
+  const effectiveUrl = isAutomation ? (tokenUrl || url) : url;
 
   // Empty URL: show a helpful "no preview available" empty state with
   // the file metadata + download button (was previously a blank modal).
@@ -176,24 +197,29 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
 
   const iframeCls = `block w-full ${className || 'h-[70vh] rounded-lg border border-border bg-card'}`;
 
+  if (isAutomation) {
+    if (tokenFailed) return <PreviewFailed />;
+    if (!tokenUrl) return <PreviewLoading />;
+  }
+
   if (IMG.includes(ext)) {
-    return <img src={url} alt={name || 'file'} className={className || 'max-h-[70vh] w-full rounded-lg border border-border bg-secondary/30 object-contain'} />;
+    return <img src={effectiveUrl} alt={name || 'file'} className={className || 'max-h-[70vh] w-full rounded-lg border border-border bg-secondary/30 object-contain'} />;
   }
 
   if (ext === 'pdf') {
-    return <iframe src={url} title={name || 'preview'} className={iframeCls} />;
+    return <iframe src={effectiveUrl} title={name || 'preview'} className={iframeCls} />;
   }
 
   // HTML, dashboards, web apps → render in sandboxed iframe
   if (['html', 'htm'].includes(ext) || ['dashboard', 'html_file', 'webapp'].includes(kind)) {
-    return <iframe src={url} title={name || 'preview'} className={iframeCls} sandbox="allow-same-origin allow-scripts allow-popups allow-forms" />;
+    return <iframe src={effectiveUrl} title={name || 'preview'} className={iframeCls} sandbox="allow-same-origin allow-scripts allow-popups allow-forms" />;
   }
 
   // Audio files → native <audio> element (browser-decodable formats only).
   if (AUDIO.includes(ext)) {
     return (
       <div className="flex items-center justify-center py-12">
-        <audio controls src={url} className="w-full max-w-md">
+        <audio controls src={effectiveUrl} className="w-full max-w-md">
           Your browser does not support audio playback.
         </audio>
       </div>
@@ -204,7 +230,7 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
   if (VIDEO.includes(ext)) {
     return (
       <div className="flex items-center justify-center py-4">
-        <video controls src={url} className="max-h-[70vh] w-full rounded-lg border border-border bg-black">
+        <video controls src={effectiveUrl} className="max-h-[70vh] w-full rounded-lg border border-border bg-black">
           Your browser does not support video playback.
         </video>
       </div>
@@ -214,10 +240,19 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
   // Plain text / data files → iframe (browser renders natively). Falls
   // back to the download link below if the iframe is blocked by CSP.
   if (TEXT.includes(ext)) {
-    return <iframe src={url} title={name || 'preview'} className={iframeCls} />;
+    return <iframe src={effectiveUrl} title={name || 'preview'} className={iframeCls} />;
   }
 
   // Office documents (docx, pptx, xlsx) and Markdown.
+  //
+  // NOTE: for automation files (isAutomation=true) we've already routed
+  // through effectiveUrl above and the iframe receives the tokenized URL
+  // directly, so this branch only handles non-automation OFFICE /
+  // Markdown files — typically local uploads under /api/uploads/ or
+  // /api/artifacts/. The MS Office Online viewer (view.officeapps.live.com)
+  // cannot reach the tokenized local URL, so it MUST stay out of the
+  // automation path; that is guaranteed by the top-level isAutomation
+  // short-circuit above.
   //
   // DOCX → use DocxBrowserRenderer (lazy-loaded docx-preview — true
   //   Word-like fidelity with page layout, headings, tables, images).
@@ -226,19 +261,6 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
   //   (mammoth / python-pptx / openpyxl / markdown lib).
   // External URLs → legacy view.officeapps.live.com viewer.
   if (OFFICE.includes(ext) || ['md', 'markdown'].includes(ext)) {
-    // Automation files → signed preview-token flow. Iframe navigation cannot
-    // send the Authorization header and the MS Office Online viewer cannot
-    // reach our auth-protected backend, so short-circuit before either.
-    const automationFileId = getAutomationFileId(url);
-    if (automationFileId) {
-      return (
-        <SignedPreviewFrame
-          fileId={automationFileId}
-          title={name}
-          className={iframeCls}
-        />
-      );
-    }
     // .docx with local upload → browser-native renderer
     if (ext === 'docx' && isLocalUpload(url)) {
       return (

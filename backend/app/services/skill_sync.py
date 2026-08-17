@@ -55,13 +55,22 @@ def write_skill_md(
     tags: list[str] | None = None,
     summary: str | None = None,
     runtime: str | None = None,
+    references: dict[str, str] | None = None,
+    assets: dict[str, bytes] | None = None,
+    *,
+    overwrite: bool = True,
 ) -> str:
     """Write a SKILL.md file to ``~/.zhanlu/skills/<category>/<name>/SKILL.md``.
 
     The YAML frontmatter follows the same schema used by bundled marketplace
     skills so the existing ``parse_skill_file`` loader picks them up.
 
-    Returns the absolute path of the written file.
+    Supports the Kimi-style folder anatomy: optional ``references``
+    (``{filename.md: markdown_content}``) are written under ``references/`` and
+    optional ``assets`` (``{relative_path: bytes}``) are written under
+    ``assets/`` — e.g. ``{"templates/report.docx": <bytes>}``.
+
+    Returns the absolute path of the written SKILL.md file.
     """
     safe_category = _sanitize(category) if category else "custom"
     safe_name = _sanitize(name)
@@ -85,6 +94,17 @@ def write_skill_md(
     if runtime:
         frontmatter["runtime"] = runtime
 
+    # Record the folder package inventory in the frontmatter so the loader can
+    # surface references/assets without a separate manifest.yaml file.
+    if references:
+        frontmatter["references_manifest"] = {
+            fn: "" for fn in references.keys()
+        }
+    if assets:
+        frontmatter["assets_manifest"] = {
+            rel: "" for rel in assets.keys()
+        }
+
     content = (
         "---\n"
         + yaml.safe_dump(frontmatter, default_flow_style=False, allow_unicode=True).strip()
@@ -95,6 +115,16 @@ def write_skill_md(
 
     md_path.write_text(content, encoding="utf-8")
     logger.info("Wrote skill .md to %s", md_path)
+
+    # Write references/ and assets/ via the atomic package writer.
+    from app.services.skills_loader import writer as _writer
+
+    if references:
+        for filename, ref_content in references.items():
+            _writer.write_reference(skill_dir, filename, ref_content, overwrite=overwrite)
+    if assets:
+        for rel_path, asset_bytes in assets.items():
+            _writer.write_asset(skill_dir, rel_path, asset_bytes, overwrite=overwrite)
 
     # Trigger dry-run validation gate (non-blocking — failure is a warning, not an error)
     try:

@@ -1144,6 +1144,7 @@ async function mergeFbk(primary, fallbackPromise) {
 // ───────────────────────────────────────────────────────────────────
 
 function AgentsSection({ agents, onRemove, onChat, lang, T, canEdit = true, project, llmModels = [] }) {
+  const isEn = lang === 'en';
   if (!agents.length) {
     return (
       <EmptyState
@@ -1403,6 +1404,7 @@ function AutomationSection({ automations, lang, isEn, T, onOpenTask, onCreateCli
           task={task}
           isEn={isEn}
           T={T}
+          lang={lang}
           onClick={() => onOpenTask(task)}
         />
       ))}
@@ -1423,7 +1425,7 @@ function AutomationSection({ automations, lang, isEn, T, onOpenTask, onCreateCli
  * the inline "show more" / "show less" toggle which has its own
  * click handler (with stopPropagation).
  * ──────────────────────────────────────────────────────────────── */
-function TaskCard({ task, isEn, T, onClick }) {
+function TaskCard({ task, isEn, T, lang, onClick }) {
   const history = Array.isArray(task.execution_history) ? task.execution_history : [];
   const lastRun = history.length > 0
     ? history.slice().sort((a, b) => {

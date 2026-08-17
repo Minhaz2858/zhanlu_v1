@@ -21,6 +21,7 @@
  */
 import { useEffect, useState } from 'react';
 import { Loader2, AlertTriangle, Download } from 'lucide-react';
+import { authFetch } from '@/api/authFetch';
 
 export default function PdfFaithfulPreview({
   artifactId,
@@ -44,7 +45,10 @@ export default function PdfFaithfulPreview({
 
     const url =
       previewUrl || `/api/artifacts/${artifactId}/preview?format=pdf`;
-    fetch(url)
+    // authFetch: automation-file previews live behind a Bearer-authenticated
+    // route; a plain fetch returns 401 → the component would silently fall
+    // back and show "PDF preview unavailable".
+    authFetch(url)
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const ct = r.headers.get('content-type') || '';

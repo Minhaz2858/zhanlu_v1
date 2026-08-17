@@ -30,6 +30,9 @@ vi.mock('@/api/base44Client', () => ({
                         KnowledgeBase: { filter: vi.fn().mockResolvedValue([]) } } },
 }));
 vi.mock('@/components/automation/SchedulePicker', () => ({ default: () => null }));
+// The automation branch now renders the shared skills picker; stub it out so
+// these output-format tests stay focused (skills are covered separately).
+vi.mock('@/components/agent/SkillsSection', () => ({ default: () => null }));
 
 const { default: CreateResourceDialog } = await import('@/components/CreateResourceDialog');
 

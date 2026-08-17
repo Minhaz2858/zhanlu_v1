@@ -10,7 +10,7 @@ const KIND_ICON = {
   data_file: Database,
 };
 
-export default function FileCard({ item, t, translate, timeLabel, onOpen, onPin, onRename, onDelete }) {
+export default function FileCard({ item, t, translate, dateLabel, timeLabel, onOpen, onPin, onRename, onDelete }) {
   const kind = item.resource_kind || 'document';
   const Icon = KIND_ICON[kind] || FileText;
   const unread = item.read === false;
@@ -46,7 +46,10 @@ export default function FileCard({ item, t, translate, timeLabel, onOpen, onPin,
         </div>
       </div>
 
-      <span className="hidden shrink-0 text-xs text-muted-foreground sm:block">{timeLabel}</span>
+      <div className="hidden shrink-0 flex-col items-end gap-0.5 text-right sm:flex">
+        <span className="font-mono text-xs text-foreground">{dateLabel}</span>
+        <span className="text-[10px] text-muted-foreground">{timeLabel}</span>
+      </div>
 
       <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
         <button onClick={() => onPin(item)} title={pinned ? t.myFiles.unpin : t.myFiles.pin} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground">

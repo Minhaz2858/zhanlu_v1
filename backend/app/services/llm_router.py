@@ -79,6 +79,8 @@ class LLMEndpoint:
     api_key: str
     model_id: str
     is_private: bool = False
+    bypass_hallucination_guardrail: bool = False
+    provider: str = ""
 
 
 def resolve_message_project_id(
@@ -176,6 +178,8 @@ def resolve_effective_llm(
                 api_key=api_key,
                 model_id=default.model_id,
                 is_private=default.is_private,
+                bypass_hallucination_guardrail=default.bypass_hallucination_guardrail,
+                provider=default.provider,
             )
             logger.debug(
                 "System-agent short-circuit: agent=%s → default model=%s",
@@ -281,6 +285,8 @@ def resolve_effective_llm(
         api_key=api_key,
         model_id=resolved.model_id,
         is_private=resolved.is_private,
+        bypass_hallucination_guardrail=resolved.bypass_hallucination_guardrail,
+        provider=resolved.provider,
     )
 
     logger.debug(

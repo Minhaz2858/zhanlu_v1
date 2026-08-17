@@ -206,6 +206,67 @@ class TestHallucinationGuardrail(unittest.TestCase):
         # web_search was called but not ask_data_agent — should still trigger
         self.assertEqual(result.action, "nudge")
 
+    # -- Per-model bypass flag (weak local model opt-out) -------------------
+
+    def test_bypass_flag_skips_guardrail(self):
+        """When bypass_guardrail=True, the guardrail must return action="none"
+        even for a data question with bound KBs and no tool call."""
+        from app.routers.agents import _check_hallucination_guardrail
+        result = _check_hallucination_guardrail(
+            user_message="who are my top 5 customers?",
+            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
+            tool_calls_made=[],
+            iteration=0,
+            guardrail_retries=0,
+            model_id="qwen3.5-27b-tools",
+            bypass_guardrail=True,
+        )
+        self.assertEqual(result.action, "none")
+        self.assertEqual(result.message, "")
+
+    def test_bypass_flag_default_false_keeps_guardrail(self):
+        """When bypass_guardrail is omitted (default False), the guardrail
+        behaves exactly as before (nudge on data question + bound KBs)."""
+        from app.routers.agents import _check_hallucination_guardrail
+        result = _check_hallucination_guardrail(
+            user_message="who are my top 5 customers?",
+            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
+            tool_calls_made=[],
+            iteration=0,
+            guardrail_retries=0,
+        )
+        self.assertEqual(result.action, "nudge")
+
+    def test_bypass_flag_explicit_false_keeps_guardrail(self):
+        """bypass_guardrail=False explicitly should behave identically to
+        the default (guardrail still triggers)."""
+        from app.routers.agents import _check_hallucination_guardrail
+        result = _check_hallucination_guardrail(
+            user_message="who are my top 5 customers?",
+            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
+            tool_calls_made=[],
+            iteration=0,
+            guardrail_retries=0,
+            model_id="deepseek-chat",
+            bypass_guardrail=False,
+        )
+        self.assertEqual(result.action, "nudge")
+
+    def test_bypass_flag_skips_even_when_retries_exhausted(self):
+        """bypass takes precedence over the fallback branch: even when
+        guardrail_retries >= max, bypass_guardrail=True returns action="none"."""
+        from app.routers.agents import _check_hallucination_guardrail
+        result = _check_hallucination_guardrail(
+            user_message="who are my top 5 customers?",
+            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
+            tool_calls_made=[],
+            iteration=0,
+            guardrail_retries=2,
+            model_id="llama3.2",
+            bypass_guardrail=True,
+        )
+        self.assertEqual(result.action, "none")
+
 
 # ---------------------------------------------------------------------------
 # Fix 2: tool_choice forcing

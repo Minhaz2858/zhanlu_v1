@@ -1,9 +1,14 @@
 import { useEffect, useState } from 'react';
+import PropTypes from 'prop-types';
 import { authFetch } from '@/api/authFetch';
 import {
   FileText, Presentation, FileSpreadsheet, FileCode, Image, Download, Eye,
   AlertTriangle, ExternalLink,
 } from 'lucide-react';
+import {
+  Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
+  DialogFooter, DialogClose,
+} from '@/components/ui/dialog';
 
 /**
  * InlineArtifactPreview — Manus-style deliverable card surfaced in the chat
@@ -74,21 +79,32 @@ function pickType(artifact) {
   return (artifact?.type || artifact?.file_type || '').toLowerCase();
 }
 
-export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = false }) {
+export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = false, openInModal = true }) {
   const [open, setOpen] = useState(defaultOpen);
+  const [modalOpen, setModalOpen] = useState(false);
   const [signedPreviewUrl, setSignedPreviewUrl] = useState(null);
   const [previewFailed, setPreviewFailed] = useState(false);
 
   // Null-safe derivations so hooks below run unconditionally (rules-of-hooks).
   const artifactId = artifact?.id;
   const artifactPreviewUrl = artifact?.preview_url;
-  const wantsPreview = open && (artifact?.has_preview ?? !!artifactPreviewUrl) && !!artifactPreviewUrl;
+  // Inline expand is only used when NOT in modal mode (opt-out path). In modal
+  // mode the signed token is minted when the Dialog opens instead.
+  const wantsPreview = !openInModal
+    && open
+    && (artifact?.has_preview ?? !!artifactPreviewUrl)
+    && !!artifactPreviewUrl;
+  const wantsModalPreview = openInModal
+    && modalOpen
+    && (artifact?.has_preview ?? !!artifactPreviewUrl)
+    && !!artifactPreviewUrl;
+  const needsSignedToken = wantsPreview || wantsModalPreview;
 
   // iframes cannot send Authorization headers — mint a short-lived signed
   // token and point the iframe at the returned ?token= url, so the backend
   // CSP sandbox headers still apply (a blob: iframe would drop them).
   useEffect(() => {
-    if (!wantsPreview || !artifactId) return undefined;
+    if (!needsSignedToken || !artifactId) return undefined;
     let cancelled = false;
     setPreviewFailed(false);
     setSignedPreviewUrl(null);
@@ -106,7 +122,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
         if (!cancelled) setPreviewFailed(true);
       });
     return () => { cancelled = true; };
-  }, [wantsPreview, artifactId]);
+  }, [needsSignedToken, artifactId]);
 
   if (!artifact) return null;
   const type = pickType(artifact);
@@ -141,6 +157,17 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
   }
 
   function handleOpen() {
+    // Modal mode (default): Open opens a popup preview when the file is
+    // previewable; otherwise fall back to download (no empty modal).
+    if (openInModal) {
+      if (hasPreview) {
+        setModalOpen(true);
+        return;
+      }
+      handleDownload();
+      return;
+    }
+    // Opt-out path (legacy): delegate to parent right pane or download.
     if (onOpen) {
       onOpen(artifact);
       return;
@@ -172,11 +199,10 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           </div>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {/* Inline expand-preview toggle. Shown whenever the file is
-              previewable — in both chat (where the Open button also launches
-              the right-side pane) and run logs (where this inline preview is
-              the only preview path). Default stays collapsed via ``open``. */}
-          {hasPreview && (
+          {/* Inline expand-preview toggle. Only rendered in the opt-out path
+              (openInModal=false); in modal mode the Open button opens the
+              popup preview instead. */}
+          {!openInModal && hasPreview && (
             <button
               type="button"
               onClick={() => setOpen((prev) => !prev)}
@@ -191,7 +217,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           <button
             type="button"
             onClick={handleOpen}
-            aria-label="Open deliverable in side preview"
+            aria-label={openInModal ? 'Open file in preview popup' : 'Open deliverable in side preview'}
             className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
           >
             <ExternalLink className="h-3.5 w-3.5" />
@@ -209,7 +235,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           )}
         </div>
       </div>
-      {hasPreview && open && (
+      {!openInModal && hasPreview && open && (
         <div className="border-t border-border bg-background">
           {previewFailed ? (
             <div className="flex items-center gap-2 px-4 py-3 text-xs text-muted-foreground">
@@ -231,6 +257,68 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           )}
         </div>
       )}
+
+      {/* Modal preview popup — the default UX. Open mounts this Dialog and
+          mints the signed token via the shared effect; the footer offers a
+          Download button for convenience and a Close button to dismiss. */}
+      {openInModal && (
+        <Dialog open={modalOpen} onOpenChange={setModalOpen}>
+          <DialogContent className="max-w-5xl w-[95vw] h-[85vh] flex flex-col p-0 gap-0 sm:rounded-xl overflow-hidden">
+            <DialogHeader className="px-5 py-4 border-b border-border">
+              <DialogTitle className="truncate pr-8 text-base">{title}</DialogTitle>
+              <DialogDescription className="sr-only">
+                Preview of {title}
+              </DialogDescription>
+            </DialogHeader>
+            <div className="flex-1 min-h-0 overflow-hidden bg-background">
+              {previewFailed ? (
+                <div className="flex h-full items-center justify-center gap-2 px-4 py-3 text-sm text-muted-foreground">
+                  <AlertTriangle className="h-4 w-4 text-amber-500" />
+                  Could not load preview. Use Download instead.
+                </div>
+              ) : signedPreviewUrl ? (
+                <iframe
+                  title={`Preview of ${title}`}
+                  src={signedPreviewUrl}
+                  className="h-full w-full border-0"
+                  sandbox={sandboxValue}
+                  loading="lazy"
+                />
+              ) : (
+                <div className="flex h-full items-center justify-center gap-2 px-4 py-3 text-sm text-muted-foreground">
+                  Loading preview…
+                </div>
+              )}
+            </div>
+            <DialogFooter className="px-5 py-3 border-t border-border flex-row justify-end gap-2">
+              <DialogClose asChild>
+                <button
+                  type="button"
+                  aria-label="Close preview popup"
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
+                >
+                  Close
+                </button>
+              </DialogClose>
+              <button
+                type="button"
+                onClick={handleDownload}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
+              >
+                <Download className="h-3.5 w-3.5" />
+                Download
+              </button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+      )}
     </div>
   );
 }
+
+InlineArtifactPreview.propTypes = {
+  artifact: PropTypes.object,
+  onOpen: PropTypes.func,
+  defaultOpen: PropTypes.bool,
+  openInModal: PropTypes.bool,
+};

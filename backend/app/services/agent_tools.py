@@ -1300,6 +1300,25 @@ def _resolve_user_timezone(db, user_id):
         return None
 
 
+def _normalize_skills(value) -> list | None:
+    """Normalize a skills value into an ordered list of skill names (or None).
+
+    Accepts a JSON array, a comma-separated string (the LLM sometimes emits a
+    string for a list-typed tool argument), or None/garbage. Returns None for
+    empty input so the column stays NULL (matching the agent_apps.skills
+    convention) rather than persisting a spurious ``[]``.
+    """
+    if value is None:
+        return None
+    if isinstance(value, str):
+        skills = [s.strip() for s in value.split(",") if s.strip()]
+    elif isinstance(value, (list, tuple)):
+        skills = [s.strip() for s in value if isinstance(s, str) and s.strip()]
+    else:
+        skills = []
+    return skills or None
+
+
 def _resolve_task_executor_agent(db: Session, args: dict) -> str:
     """Resolve the agent_id for a new AutomationTask.
 
@@ -1578,11 +1597,7 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
     # Normalize skills (list of skill names) — the LLM may pass a JSON array
     # or a comma-separated string. Stored on automation_tasks.skills and used
     # by the executor for progressive-disclosure metadata injection.
-    skills = args.get("skills") or []
-    if isinstance(skills, str):
-        skills = [s.strip() for s in skills.split(",") if s.strip()]
-    elif not isinstance(skills, (list, tuple)):
-        skills = []
+    skills = _normalize_skills(args.get("skills"))
 
     task = AutomationTask(
         name=args.get("name", "Untitled Automation"),
@@ -1715,12 +1730,7 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
             if key == "schedule" and value != task.schedule:
                 schedule_changed = True
             if key == "skills":
-                # Normalize: comma-separated string -> list; non-list -> [].
-                if isinstance(value, str):
-                    value = [s.strip() for s in value.split(",") if s.strip()]
-                elif not isinstance(value, (list, tuple)):
-                    value = []
-                value = value or None
+                value = _normalize_skills(value)
             setattr(task, key, value)
 
     # When the schedule changes, re-parse and recompute next_run_at.

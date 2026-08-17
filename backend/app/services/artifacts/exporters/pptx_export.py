@@ -36,7 +36,10 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION, XL_LABEL_POSITION
 
-from app.services.synexia.contracts import ReportCardPayload
+from app.services.synexia.contracts import (
+    ChartSpec, ChartSpecInSlide, DeckPlan, InsightSpec, KPISpec, KPISpecInSlide,
+    ReportCardPayload, SectionSpec, SlidePlan,
+)
 from app.services.artifacts.exporters._common import (
     ExportContext,
     chart_rows, chart_x_key, chart_y_keys, chart_x_value, coerce_number,
@@ -44,6 +47,7 @@ from app.services.artifacts.exporters._common import (
 )
 from app.services.artifacts.exporters._theme import (
     DeckTheme, RecipeTokens, load_theme, resolve_ctx_theme, resolve_recipe,
+    _to_rgbcolor,
 )
 
 
@@ -111,6 +115,212 @@ def render(payload: ReportCardPayload, ctx: Optional[ExportContext] = None) -> t
     )
 
 
+def render_deck(
+    plan: Optional[DeckPlan],
+    ctx: Optional[ExportContext] = None,
+    rows: Optional[list[dict[str, Any]]] = None,
+) -> tuple[bytes, str, str]:
+    """Render a DeckPlan through the layout engine (Phase 3).
+
+    Iterates ``plan.slides`` and dispatches each :class:`SlidePlan` to its
+    layout builder via :func:`_build_slide`.  When ``plan`` is ``None`` or
+    has no slides, falls back to the catalog renderer so callers can use a
+    single entry point.
+    """
+    ctx = ctx or ExportContext()
+    theme = resolve_ctx_theme(ctx)
+    recipe = resolve_recipe(ctx.style_recipe)
+
+    if not plan or not plan.slides:
+        return render(
+            ReportCardPayload(title=plan.title if plan else "Report"), ctx
+        )
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)   # 16:9
+    prs.slide_height = Inches(7.5)
+    blank_layout = prs.slide_layouts[6]
+
+    rows = rows or []
+    section_num = 0
+    for slide in plan.slides:
+        section_num = _build_slide(
+            prs, blank_layout, slide, rows, section_num, ctx, theme, recipe
+        )
+
+    _add_footers(prs, theme)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    return (
+        buf.getvalue(),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ".pptx",
+    )
+
+
+def _build_slide(
+    prs, layout, slide: SlidePlan, rows: list[dict[str, Any]],
+    section_num: int, ctx: ExportContext, theme: DeckTheme,
+    recipe: RecipeTokens,
+) -> int:
+    """Dispatch one SlidePlan to its layout builder.
+
+    Returns the (possibly incremented) section-number counter so section
+    dividers are numbered sequentially across the deck.
+    """
+    kind = (slide.layout or "").strip().lower().replace("-", "_").replace(" ", "")
+
+    if kind == "cover":
+        _add_cover_slide(
+            prs, layout, ReportCardPayload(title=slide.title, source=slide.subtitle),
+            ctx, theme, recipe,
+        )
+    elif kind == "agenda":
+        _add_agenda_slide(
+            prs, layout,
+            ReportCardPayload(
+                title=slide.title,
+                sections=[SectionSpec(title=b) for b in slide.bullets],
+            ),
+            theme, recipe,
+        )
+    elif kind == "kpi_grid":
+        _add_kpi_slide(
+            prs, layout,
+            ReportCardPayload(
+                title=slide.title,
+                kpis=[
+                    KPISpec(label=k.label, value=k.value, delta=k.delta, caption=k.caption)
+                    for k in slide.kpi_specs
+                ],
+            ),
+            theme, recipe,
+        )
+    elif kind in ("chart_full", "chart_with_bullets"):
+        cs = slide.chart_spec
+        chart = ChartSpec(
+            type=(cs.chart_type if cs else "bar"),
+            title=(cs.title if cs else slide.title),
+            x_key=(cs.x_key if cs else ""),
+            y_keys=(cs.y_keys if cs else []),
+            data=_project_chart_rows(
+                rows, cs.x_key if cs else "", cs.y_keys if cs else []
+            ),
+        )
+        _add_chart_slide(
+            prs, layout, ReportCardPayload(title=slide.title, chart=chart),
+            theme, recipe,
+        )
+        if kind == "chart_with_bullets" and slide.bullets:
+            _add_bullets_slide(prs, layout, slide.title, slide.bullets, theme, recipe)
+    elif kind == "findings_cards":
+        _add_key_findings_slide(
+            prs, layout,
+            ReportCardPayload(
+                title=slide.title,
+                key_findings=[InsightSpec(text=b) for b in slide.bullets],
+            ),
+            theme, recipe,
+        )
+    elif kind == "insights_bullets":
+        _add_insights_slide(
+            prs, layout,
+            ReportCardPayload(
+                title=slide.title,
+                insights=[InsightSpec(text=b) for b in slide.bullets],
+            ),
+            theme, recipe,
+        )
+    elif kind == "recommendations":
+        _add_recommendations_slide(
+            prs, layout,
+            ReportCardPayload(
+                title=slide.title,
+                recommendations=[InsightSpec(text=b) for b in slide.bullets],
+            ),
+            theme, recipe,
+        )
+    elif kind == "data_table":
+        _add_data_slide(
+            prs, layout,
+            ReportCardPayload(title=slide.title, chart=ChartSpec(data=rows)),
+            theme, recipe,
+        )
+    elif kind == "methodology":
+        _add_methodology_slide(
+            prs, layout,
+            ReportCardPayload(
+                title=slide.title,
+                methodology=" ".join(slide.bullets) or slide.subtitle,
+            ),
+            theme, recipe,
+        )
+    elif kind == "section_divider":
+        section_num += 1
+        _add_section_divider(prs, layout, section_num, slide.title, theme, recipe)
+    elif kind == "closing":
+        _add_closing_slide(prs, layout, slide.title, theme, recipe)
+    else:
+        # Unknown / future layout: render a generic bullet slide so the deck
+        # still renders rather than silently dropping the content.
+        _add_bullets_slide(prs, layout, slide.title, slide.bullets or [slide.title],
+                           theme, recipe)
+
+    return section_num
+
+
+def _project_chart_rows(
+    rows: list[dict[str, Any]], x_key: str, y_keys: list[str]
+) -> list[dict[str, Any]]:
+    """Project raw rows down to the chart's x/y columns."""
+    if not rows:
+        return []
+    if not x_key and not y_keys:
+        return list(rows)
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        point: dict[str, Any] = {}
+        if x_key:
+            point[x_key] = r.get(x_key)
+        for yk in y_keys:
+            point[yk] = r.get(yk)
+        if point:
+            out.append(point)
+    return out
+
+
+def _add_bullets_slide(prs, layout, title: str, bullets: list[str],
+                       theme: DeckTheme, recipe: RecipeTokens) -> None:
+    """A generic title + bullets slide (chart_with_bullets, unknown layouts)."""
+    s = prs.slides.add_slide(layout)
+    _set_bg(s, theme.slide_bg)
+    _add_section_title(s, title or "Details", theme)
+    top = Inches(1.5)
+    for b in bullets[:8]:
+        _add_textbox(
+            s, Inches(0.6), top, Inches(12.1), Inches(0.6),
+            text=f"\u2022  {b}", size=18, color=theme.text,
+            font_name=theme.font_body,
+        )
+        top += Inches(0.65)
+
+
+def _add_closing_slide(prs, layout, title: str,
+                       theme: DeckTheme, recipe: RecipeTokens) -> None:
+    """A closing / thank-you slide."""
+    s = prs.slides.add_slide(layout)
+    _set_bg(s, theme.slide_bg)
+    _add_rect(s, 0, 0, prs.slide_width, Inches(0.18), fill=theme.primary)
+    _add_textbox(
+        s, Inches(0.6), Inches(3.0), Inches(12.1), Inches(1.2),
+        text=title or "Thank you", size=48, bold=True, color=theme.text,
+        align=PP_ALIGN.CENTER, font_name=theme.font_heading,
+    )
+
+
 # --- Slide builders ----------------------------------------------------------
 
 
@@ -140,6 +350,7 @@ def _add_cover_slide(prs, layout, payload: ReportCardPayload, ctx: ExportContext
         s, Inches(0.6), Inches(2.3), Inches(12.1), Inches(1.4),
         text=payload.title or "Zhanlu report",
         size=44, bold=True, color=theme.text, align=PP_ALIGN.LEFT,
+        font_name=theme.font_heading,
     )
     # Subtitle (source)
     if payload.source:
@@ -147,6 +358,7 @@ def _add_cover_slide(prs, layout, payload: ReportCardPayload, ctx: ExportContext
             s, Inches(0.6), Inches(3.7), Inches(12.1), Inches(0.4),
             text=f"Source: {payload.source}",
             size=16, color=theme.muted, align=PP_ALIGN.LEFT,
+            font_name=theme.font_body,
         )
     # Meta strip at the bottom
     meta = f"Generated {short_generated_at(payload)}"
@@ -156,6 +368,7 @@ def _add_cover_slide(prs, layout, payload: ReportCardPayload, ctx: ExportContext
     _add_textbox(
         s, Inches(0.6), Inches(6.6), Inches(12.1), Inches(0.4),
         text=meta, size=11, color=theme.muted, align=PP_ALIGN.LEFT,
+        font_name=theme.font_body,
     )
 
 
@@ -173,7 +386,7 @@ def _add_agenda_slide(prs, layout, payload: ReportCardPayload,
             _add_textbox(
                 s, Inches(0.8), top, Inches(11.9), Inches(0.5),
                 text=f"{i}. {sec.title}",
-                size=18, color=theme.text,
+                size=18, color=theme.text, font_name=theme.font_body,
             )
             top += Inches(0.55)
     else:
@@ -189,7 +402,7 @@ def _add_agenda_slide(prs, layout, payload: ReportCardPayload,
             _add_textbox(
                 s, left, top, col_w, Inches(0.5),
                 text=f"{i + 1}. {sec.title}",
-                size=18, color=theme.text,
+                size=18, color=theme.text, font_name=theme.font_body,
             )
 
 
@@ -202,6 +415,7 @@ def _add_summary_slide(prs, layout, payload: ReportCardPayload,
         _add_textbox(
             s, Inches(0.6), Inches(1.5), Inches(12.1), Inches(2.5),
             text=payload.summary, size=18, color=theme.text,
+            font_name=theme.font_body,
         )
     if payload.warnings:
         box_top = Inches(4.4)
@@ -221,11 +435,13 @@ def _add_summary_slide(prs, layout, payload: ReportCardPayload,
         p.runs[0].font.size = Pt(16)
         p.runs[0].font.bold = True
         p.runs[0].font.color.rgb = theme.text
+        _apply_font(p.runs[0], theme.font_heading)
         for w in payload.warnings:
             p2 = tf.add_paragraph()
             p2.text = f"• {w}"
             p2.runs[0].font.size = Pt(14)
             p2.runs[0].font.color.rgb = theme.text
+            _apply_font(p2.runs[0], theme.font_body)
 
 
 def _add_kpi_slide(prs, layout, payload: ReportCardPayload,
@@ -242,10 +458,12 @@ def _add_kpi_slide(prs, layout, payload: ReportCardPayload,
         _add_textbox(
             s, Inches(0.6), Inches(2.1), Inches(12.1), Inches(2.2),
             text=k.value or "\u2014", size=96, bold=True, color=theme.primary,
+            font_name=theme.font_heading,
         )
         _add_textbox(
             s, Inches(0.6), Inches(4.4), Inches(12.1), Inches(0.5),
             text=(k.label or "").upper(), size=18, bold=True, color=theme.muted,
+            font_name=theme.font_body,
         )
         if k.delta:
             d = k.delta.strip()
@@ -255,11 +473,13 @@ def _add_kpi_slide(prs, layout, payload: ReportCardPayload,
             _add_textbox(
                 s, Inches(0.6), Inches(5.0), Inches(12.1), Inches(0.5),
                 text=k.delta, size=22, bold=True, color=dcolor,
+                font_name=theme.font_body,
             )
         if k.caption:
             _add_textbox(
                 s, Inches(0.6), Inches(5.6), Inches(12.1), Inches(0.5),
                 text=k.caption, size=14, color=theme.muted,
+                font_name=theme.font_body,
             )
         return
 
@@ -299,6 +519,7 @@ def _add_kpi_slide(prs, layout, payload: ReportCardPayload,
         p.runs[0].font.size = Pt(11)
         p.runs[0].font.bold = True
         p.runs[0].font.color.rgb = theme.muted
+        _apply_font(p.runs[0], theme.font_body)
 
         # Value
         p2 = tf.add_paragraph()
@@ -307,6 +528,7 @@ def _add_kpi_slide(prs, layout, payload: ReportCardPayload,
         run.font.size = Pt(36)
         run.font.bold = True
         run.font.color.rgb = theme.text
+        _apply_font(run, theme.font_heading)
 
         if k.delta:
             run2 = p2.add_run()
@@ -320,12 +542,14 @@ def _add_kpi_slide(prs, layout, payload: ReportCardPayload,
                 run2.font.color.rgb = theme.muted
             run2.font.size = Pt(18)
             run2.font.bold = True
+            _apply_font(run2, theme.font_body)
 
         if k.caption:
             p3 = tf.add_paragraph()
             p3.text = k.caption
             p3.runs[0].font.size = Pt(12)
             p3.runs[0].font.color.rgb = theme.muted
+            _apply_font(p3.runs[0], theme.font_body)
 
 
 def _add_chart_slide(prs, layout, payload: ReportCardPayload,
@@ -376,6 +600,19 @@ def _add_chart_slide(prs, layout, payload: ReportCardPayload,
     else:
         chart.has_legend = False
 
+    # Apply the theme chart palette to every series so the deck's brand
+    # colors flow through to the native chart (instead of default blue).
+    palette = theme.chart_palette or []
+    if palette:
+        for i, series in enumerate(chart.series):
+            try:
+                rgb = _to_rgbcolor(palette[i % len(palette)])
+                series.format.fill.solid()
+                series.format.fill.fore_color.rgb = rgb
+            except Exception:
+                # A single series we can't recolor shouldn't break the deck.
+                pass
+
     # Traceability footnote: cite the data source on the headline chart.
     _add_source_footnote(s, payload.source, theme)
 
@@ -393,10 +630,12 @@ def _add_key_findings_slide(prs, layout, payload: ReportCardPayload,
         _add_textbox(
             s, Inches(0.6), Inches(0.45), Inches(12.1), Inches(0.35),
             text="Key Findings", size=13, bold=True, color=theme.primary,
+            font_name=theme.font_heading,
         )
         _add_textbox(
             s, Inches(0.6), Inches(2.4), Inches(12.1), Inches(2.6),
             text=items[0].text, size=40, bold=True, color=theme.text,
+            font_name=theme.font_heading,
         )
         _add_rect(s, Inches(0.6), Inches(5.2), Inches(1.2), Inches(0.05),
                   fill=theme.primary)
@@ -426,11 +665,13 @@ def _add_key_findings_slide(prs, layout, payload: ReportCardPayload,
             r.font.size = Pt(36)
             r.font.bold = True
             r.font.color.rgb = theme.finding_accent
+            _apply_font(r, theme.font_heading)
             p2 = tf.add_paragraph()
             r2 = p2.add_run()
             r2.text = kf.text
             r2.font.size = Pt(18)
             r2.font.color.rgb = theme.text
+            _apply_font(r2, theme.font_body)
         return
 
     # Callout box: assertion headline + supporting bullets (4-6 findings).
@@ -453,6 +694,7 @@ def _add_key_findings_slide(prs, layout, payload: ReportCardPayload,
         run.text = f"{i}. {kf.text}"
         run.font.size = Pt(18)
         run.font.color.rgb = theme.text
+        _apply_font(run, theme.font_body)
 
 
 def _add_insights_slide(prs, layout, payload: ReportCardPayload,
@@ -469,7 +711,7 @@ def _add_insights_slide(prs, layout, payload: ReportCardPayload,
         _add_textbox(
             s, Inches(0.6), top, Inches(12.1), Inches(0.6),
             text=f"{emoji}  {ins.text}",
-            size=18, color=theme.text,
+            size=18, color=theme.text, font_name=theme.font_body,
         )
         top += Inches(0.7)
 
@@ -487,10 +729,12 @@ def _add_recommendations_slide(prs, layout, payload: ReportCardPayload,
         _add_textbox(
             s, Inches(0.6), Inches(0.45), Inches(12.1), Inches(0.35),
             text="Recommendations", size=13, bold=True, color=theme.primary,
+            font_name=theme.font_heading,
         )
         _add_textbox(
             s, Inches(0.6), Inches(2.4), Inches(12.1), Inches(2.6),
             text=items[0].text, size=40, bold=True, color=theme.text,
+            font_name=theme.font_heading,
         )
         _add_rect(s, Inches(0.6), Inches(5.2), Inches(1.2), Inches(0.05),
                   fill=theme.primary)
@@ -515,6 +759,7 @@ def _add_recommendations_slide(prs, layout, payload: ReportCardPayload,
         run.text = f"{i}. {rec.text}"
         run.font.size = Pt(18)
         run.font.color.rgb = theme.text
+        _apply_font(run, theme.font_body)
 
 
 def _add_data_slide(prs, layout, payload: ReportCardPayload,
@@ -543,6 +788,7 @@ def _add_data_slide(prs, layout, payload: ReportCardPayload,
                 r.font.size = Pt(11)
                 r.font.bold = True
                 r.font.color.rgb = theme.text
+                _apply_font(r, theme.font_heading)
         _set_cell_bg(cell, theme.band_bg)
 
     # Data rows (banded)
@@ -558,6 +804,7 @@ def _add_data_slide(prs, layout, payload: ReportCardPayload,
                 for r in p.runs:
                     r.font.size = Pt(10)
                     r.font.color.rgb = theme.text
+                    _apply_font(r, theme.font_body)
             if ri % 2 == 0:
                 _set_cell_bg(cell, theme.band_bg)
 
@@ -569,7 +816,7 @@ def _add_data_slide(prs, layout, payload: ReportCardPayload,
             note = f"Source: {payload.source}  \u00b7  {note}"
         _add_textbox(
             s, Inches(0.6), Inches(7.1), Inches(12.1), Inches(0.3),
-            text=note, size=10, color=theme.muted,
+            text=note, size=10, color=theme.muted, font_name=theme.font_body,
         )
     else:
         _add_source_footnote(s, payload.source, theme)
@@ -583,6 +830,7 @@ def _add_methodology_slide(prs, layout, payload: ReportCardPayload,
     _add_textbox(
         s, Inches(0.6), Inches(1.5), Inches(12.1), Inches(5.5),
         text=payload.methodology, size=18, color=theme.text,
+        font_name=theme.font_body,
     )
 
 
@@ -596,6 +844,7 @@ def _add_footers(prs, theme: DeckTheme) -> None:
             slide, Inches(9.0), Inches(7.05), Inches(4.0), Inches(0.3),
             text=f"{FOOTER_TEXT} · {i} / {total}",
             size=10, color=theme.muted, align=PP_ALIGN.RIGHT,
+            font_name=theme.font_body,
         )
 
 
@@ -607,6 +856,7 @@ def _add_section_title(slide, text: str, theme: DeckTheme) -> None:
     _add_textbox(
         slide, Inches(0.6), Inches(0.5), Inches(12.1), Inches(0.7),
         text=text, size=28, bold=True, color=theme.text,
+        font_name=theme.font_heading,
     )
     _add_rect(slide, Inches(0.6), Inches(1.25), Inches(1.2), Inches(0.05),
               fill=theme.primary)
@@ -647,6 +897,7 @@ def _title_block(slide, label: str, theme: DeckTheme,
         _add_textbox(
             slide, Inches(0.6), Inches(0.5), Inches(12.1), Inches(0.7),
             text=label, size=28, bold=True, color=theme.text,
+            font_name=theme.font_heading,
         )
         _add_rect(slide, Inches(0.6), Inches(1.25), Inches(1.2), Inches(0.05),
                   fill=theme.primary)
@@ -654,10 +905,12 @@ def _title_block(slide, label: str, theme: DeckTheme,
     _add_textbox(
         slide, Inches(0.6), Inches(0.45), Inches(12.1), Inches(0.35),
         text=label, size=13, bold=True, color=theme.primary,
+        font_name=theme.font_heading,
     )
     _add_textbox(
         slide, Inches(0.6), Inches(0.8), Inches(12.1), Inches(1.0),
         text=headline, size=30, bold=True, color=theme.text,
+        font_name=theme.font_heading,
     )
     _add_rect(slide, Inches(0.6), Inches(1.85), Inches(1.2), Inches(0.05),
               fill=theme.primary)
@@ -679,10 +932,12 @@ def _add_section_divider(prs, layout, number: int, title: str,
     _add_textbox(
         s, Inches(0.9), Inches(2.3), Inches(11.0), Inches(1.8),
         text=f"{number:02d}", size=96, bold=True, color=theme.primary,
+        font_name=theme.font_heading,
     )
     _add_textbox(
         s, Inches(0.9), Inches(4.2), Inches(11.0), Inches(1.2),
         text=title, size=40, bold=True, color=theme.text,
+        font_name=theme.font_heading,
     )
 
 
@@ -712,7 +967,8 @@ def _deck_is_long(payload: ReportCardPayload) -> bool:
 
 def _add_textbox(slide, left, top, width, height, *,
                  text: str, size: int, bold: bool = False,
-                 color=None, align=PP_ALIGN.LEFT) -> None:
+                 color=None, align=PP_ALIGN.LEFT,
+                 font_name: Optional[str] = None) -> None:
     tb = slide.shapes.add_textbox(left, top, width, height)
     tf = tb.text_frame
     tf.word_wrap = True
@@ -726,8 +982,19 @@ def _add_textbox(slide, left, top, width, height, *,
     run.text = text or ""
     run.font.size = Pt(size)
     run.font.bold = bold
+    if font_name is not None:
+        run.font.name = font_name
     if color is not None:
         run.font.color.rgb = color
+
+
+def _apply_font(run, font_name: Optional[str]) -> None:
+    """Set the run's typeface when a theme font name is supplied."""
+    if font_name:
+        try:
+            run.font.name = font_name
+        except Exception:
+            pass
 
 
 def _add_rect(slide, left, top, width, height, *,
@@ -823,4 +1090,5 @@ def _add_source_footnote(slide, source: str, theme: DeckTheme) -> None:
     _add_textbox(
         slide, Inches(0.6), Inches(7.1), Inches(8.0), Inches(0.3),
         text=f"Source: {source}", size=10, color=theme.muted,
+        font_name=theme.font_body,
     )

@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { CheckCircle2, XCircle, Loader2, MinusCircle, FileText, Download, Calendar, Clock, AlertTriangle, MessageSquare } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, MinusCircle, Calendar, Clock, AlertTriangle, MessageSquare } from 'lucide-react';
 import { useTranslate } from '@/lib/useTranslate';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { Button } from '@/components/ui/button';
@@ -182,34 +182,16 @@ export default function ExecutionLogsList({ task, noLogsText, refreshKey }) {
                     {outputIdx >= 0 ? translate(entry.output_text) : entry.output_text}
                   </p>
                 )}
-                {/* File attachments — the heart of the Manus-style "auto-send to chat" UX */}
-                {entry.files && entry.files.length > 0 && (
-                  <div className="mt-2 flex flex-wrap gap-1.5">
-                    {entry.files.map((f) => (
-                      <a
-                        key={f.id}
-                        href={f.file_url}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground transition-colors hover:bg-secondary"
-                      >
-                        <FileText className="h-3 w-3" />
-                        <span className="max-w-[180px] truncate">{f.name}</span>
-                        <Download className="h-3 w-3 text-muted-foreground" />
-                      </a>
-                    ))}
-                  </div>
-                )}
                 {/*
                  * Inline deliverable previews — same Manus-style cards the chat
-                 * surface uses. We surface them below the file list so the
-                 * execution card stays scannable while the user can expand
-                 * previews for the artifacts they care about.
+                 * surface uses. We surface one card per file below so the
+                 * execution card stays scannable. Files without a preview URL
+                 * still render as cards (Open falls back to download).
                  */}
                 {entry.files && entry.files.length > 0 && (
                   <div className="mt-2 space-y-2">
                     {entry.files
-                      .filter((f) => f && (f.has_preview || f.preview_url))
+                      .filter((f) => f)
                       .map((f) => (
                         <InlineArtifactPreview key={f.id || f.automation_file_id} artifact={f} />
                       ))}

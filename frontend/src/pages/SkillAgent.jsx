@@ -5,6 +5,7 @@ import { useLanguage } from '@/lib/LanguageProvider';
 import SkillMessageBubble from '@/components/skillagent/SkillMessageBubble';
 import SkillUploadButton from '@/components/skillagent/SkillUploadButton';
 import SkillFilePanel from '@/components/skillagent/SkillFilePanel';
+import SkillDraftPanel from '@/components/skillagent/SkillDraftPanel';
 import ExistingSkillsChips from '@/components/skillagent/ExistingSkillsChips';
 import PrefilledHintPill from '@/components/common/PrefilledHintPill';
 import ChatThinkingIndicator from '@/components/chat/ChatThinkingIndicator';
@@ -27,12 +28,12 @@ export default function SkillAgent() {
   const [activeConv, setActiveConv] = useState(null);
   const [permissionMode, setPermissionModeState] = useState('default');
   const [messages, setMessages] = useState([]);
-  const [streamingContent, setStreamingContent] = useState('');
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
   const [initializing, setInitializing] = useState(false);
   const [pendingFiles, setPendingFiles] = useState([]);
   const [currentSkill, setCurrentSkill] = useState(null);
+  const [skillDraft, setSkillDraft] = useState(null);
   const [panelOpen, setPanelOpen] = useState(true);
   const [openArtifact, setOpenArtifact] = useState(null);
   const [prefilledHint, setPrefilledHint] = useState(false);
@@ -42,6 +43,7 @@ export default function SkillAgent() {
   const pollRef = useRef(null);
   const completionRef = useRef(null);
   const abortRef = useRef(null);
+  const streamingMsgIdRef = useRef(null);
 
   useEffect(() => { loadConversations(); }, []);
   useEffect(() => {
@@ -99,7 +101,7 @@ export default function SkillAgent() {
   }
 
   useEffect(() => {
-    if (!activeId) { setMessages([]); setActiveConv(null); return; }
+    if (!activeId) { setMessages([]); setActiveConv(null); setSkillDraft(null); return; }
     let unsub = () => { };
     (async () => {
       try {
@@ -154,6 +156,21 @@ export default function SkillAgent() {
     }
   }, [messages]);
 
+  // Reconstruct the in-flight SkillDraft from the most recent assistant
+  // message that carries a ``skill_draft`` payload (emitted by the creation
+  // orchestrator). This keeps the live folder tree correct after a page
+  // reload or when the SSE stream fell back to polling.
+  useEffect(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const draft = messages[i].skill_draft;
+      if (draft && typeof draft === 'object') {
+        setSkillDraft(draft);
+        return;
+      }
+    }
+    setSkillDraft(null);
+  }, [messages]);
+
   async function loadConversations() {
     try {
       const list = await base44.agents.listConversations({ agent_name: AGENT_NAME });
@@ -164,6 +181,7 @@ export default function SkillAgent() {
   async function startNewChat(prefillText, opts = {}) {
     setInitializing(true);
     setCurrentSkill(null);
+    setSkillDraft(null);
     try {
       const conv = await base44.agents.createConversation({
         agent_name: AGENT_NAME,
@@ -238,7 +256,17 @@ export default function SkillAgent() {
     setPrefilledHint(false);
     setPendingFiles([]);
     setLoading(true);
-    setStreamingContent('');
+    // Optimistic UI: render the user's message immediately (before the agent
+    // starts responding), plus an empty assistant stub that will be filled in
+    // by SSE delta / tool_progress events. This mirrors the general_assistant
+    // Chat flow where the user bubble appears right away instead of only after
+    // the agent finishes.
+    const userMsgId = `user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const assistantMsgId = `assistant-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    streamingMsgIdRef.current = assistantMsgId;
+    const optimisticUser = { id: userMsgId, role: 'user', content: content || t.skillAgent.attachedFiles.replace('{n}', urls.length) };
+    if (urls.length > 0) optimisticUser.file_urls = urls;
+    setMessages((prev) => [...prev, optimisticUser, { id: assistantMsgId, role: 'assistant', content: '' }]);
     let skillContext = '';
     if (skillCtx) {
       skillContext = `\n\n当前编辑的技能详情：\n名称: ${skillCtx.name}\n描述: ${skillCtx.description || ''}\n触发词: ${skillCtx.trigger || ''}\n分类: ${skillCtx.category || ''}\n版本: ${skillCtx.version || ''}\n许可证: ${skillCtx.license || ''}\n来源: ${(skillCtx.sources || []).join(', ')}\nSKILL.md 正文:\n${(skillCtx.skill_md || '').slice(0, 2000)}`;
@@ -257,7 +285,9 @@ export default function SkillAgent() {
       for await (const event of streamAgentResponse(conv.id, msg, controller.signal)) {
         usedSSE = true;
         if (event.type === 'delta') {
-          setStreamingContent((prev) => prev + event.content);
+          setMessages((prev) => prev.map((m) =>
+            m.id === streamingMsgIdRef.current ? { ...m, content: (m.content || '') + event.content } : m
+          ));
         } else if (event.type === 'tool_progress') {
           // Update messages to show tool execution progress
           setMessages((prev) => {
@@ -298,7 +328,21 @@ export default function SkillAgent() {
             });
           }
         } else if (event.type === 'done') {
-          setStreamingContent('');
+          streamingMsgIdRef.current = null;
+          // Live folder tree: the creation orchestrator attaches the latest
+          // SkillDraft to the done event. ``skill_draft: null`` means the draft
+          // was discarded or already saved, so clear the panel.
+          if ('skill_draft' in event) {
+            setSkillDraft(event.skill_draft || null);
+            if (event.skill_draft && event.skill_draft.status === 'saved') {
+              setCurrentSkill((prev) => prev || {
+                name: event.skill_draft.name,
+                description: event.skill_draft.description || '',
+                skill_md: event.skill_draft.skill_md || '',
+                category: event.skill_draft.category || 'custom',
+              });
+            }
+          }
           if (event.conversation) {
             handleIncomingMessages(event.conversation.messages || []);
             setActiveConv(event.conversation);
@@ -306,7 +350,10 @@ export default function SkillAgent() {
           setLoading(false);
           break;
         } else if (event.type === 'paused') {
-          setStreamingContent('');
+          streamingMsgIdRef.current = null;
+          if ('skill_draft' in event) {
+            setSkillDraft(event.skill_draft || null);
+          }
           if (event.conversation) {
             handleIncomingMessages(event.conversation.messages || []);
             setActiveConv(event.conversation);
@@ -322,7 +369,7 @@ export default function SkillAgent() {
     } catch (e) {
       if (e.name === 'AbortError') return;
       console.warn('SSE streaming failed, falling back to polling:', e);
-      setStreamingContent('');
+      streamingMsgIdRef.current = null;
       // Fallback: use the standard v2 endpoint + polling
       try {
         await base44.agents.addMessage(conv, msg);
@@ -350,12 +397,18 @@ export default function SkillAgent() {
 
   async function handleDeleteConv(id) {
     setConversations((prev) => prev.filter((c) => c.id !== id));
-    if (activeId === id) { setActiveId(null); setMessages([]); setCurrentSkill(null); }
+    if (activeId === id) { setActiveId(null); setMessages([]); setCurrentSkill(null); setSkillDraft(null); }
     try { await base44.agents.updateConversation(id, { metadata: { _deleted: true } }); } catch { /* noop */ }
     loadConversations();
   }
 
   const showEmpty = !activeId && messages.length === 0;
+
+  // The assistant stub we optimistically inserted is "empty" until the first
+  // delta / tool_progress event arrives. While it's empty, render the thinking
+  // indicator instead of a blank assistant bubble.
+  const streamingStub = messages.find((m) => m.id === streamingMsgIdRef.current);
+  const streamingEmpty = loading && !!streamingStub && streamingStub.role === 'assistant' && !streamingStub.content && !(streamingStub.tool_calls || []).length && !streamingStub.reasoning && !(streamingStub.trace_steps || []).length;
 
   const renderInputArea = (isCompact) => (
     <div className="rounded-xl border border-border bg-card shadow-sm transition focus-within:ring-2 focus-within:ring-primary/30">
@@ -458,16 +511,8 @@ export default function SkillAgent() {
               </div>
               <div ref={scrollRef} className="flex-1 space-y-6 overflow-y-auto px-6 py-6">
                 <div className="mx-auto max-w-3xl space-y-6">
-                  {messages.map((m, i) => <SkillMessageBubble key={i} message={m} conversationId={activeId} onArtifactPreview={setOpenArtifact} onOptionSelect={applySuggestion} />)}
-                  {streamingContent && (
-                    <div className="flex justify-end">
-                      <div className="max-w-[80%] rounded-lg bg-primary px-4 py-2 text-sm text-primary-foreground">
-                        {streamingContent}
-                        <span className="ml-0.5 inline-block h-3 w-0.5 animate-pulse bg-primary-foreground align-middle" />
-                      </div>
-                    </div>
-                  )}
-                  {loading && !streamingContent && <ChatThinkingIndicator />}
+                  {messages.filter((m) => !(m.id === streamingMsgIdRef.current && streamingEmpty)).map((m, i) => <SkillMessageBubble key={i} message={m} conversationId={activeId} onArtifactPreview={setOpenArtifact} onOptionSelect={applySuggestion} />)}
+                  {streamingEmpty && <ChatThinkingIndicator />}
                 </div>
               </div>
               <div className="border-t border-border bg-card/50 px-6 py-4">
@@ -479,11 +524,20 @@ export default function SkillAgent() {
           )}
         </div>
 
-        {/* File panel */}
+        {/* File panel: live draft tree during creation, else saved-skill files */}
         {activeId && panelOpen && (
           <>
             <div className="absolute inset-0 z-30 lg:static lg:z-auto lg:w-[42%] lg:shrink-0 lg:border-l lg:border-border">
-              <SkillFilePanel skill={currentSkill} messages={messages} onClose={() => setPanelOpen(false)} />
+              {skillDraft ? (
+                <SkillDraftPanel
+                  draft={skillDraft}
+                  conversationId={activeId}
+                  onClose={() => setPanelOpen(false)}
+                  onDiscarded={() => setSkillDraft(null)}
+                />
+              ) : (
+                <SkillFilePanel skill={currentSkill} messages={messages} onClose={() => setPanelOpen(false)} />
+              )}
             </div>
             <div className="absolute inset-0 z-20 bg-black/30 lg:hidden" onClick={() => setPanelOpen(false)} />
           </>

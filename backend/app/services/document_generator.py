@@ -424,15 +424,74 @@ def _md_to_slides(md: str) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def _write_docx(directory: Path, title: str, content: Any, exec_id: str) -> Tuple[Path, str, str]:
-    # Reuse the existing document_service generator.
-    from app.services.document_service import generate_docx
+    """Generate a professional DOCX from markdown content.
+
+    Three-tier strategy (best quality first, graceful degradation):
+
+    1. **HTML → pandoc → DOCX** (preferred): the existing ``_md_to_html``
+       converter produces rich HTML (tables, headings, bold/italic), then
+       ``html_docx.render_html_to_docx`` pipes it through pandoc — which
+       handles CSS-styled tables and inline formatting best. When pandoc is
+       unavailable it falls back to a python-docx + BeautifulSoup renderer.
+    2. **Markdown → python-docx** via ``document_service._parse_markdown_to_docx``
+       which has native table + bold parsing and no external deps.
+    3. **Primitive line-by-line parser** (last resort) — headings, bullets and
+       plain paragraphs only.
+    """
     if isinstance(content, dict):
         body_md = content.get("markdown") or content.get("body") or json.dumps(content, indent=2, ensure_ascii=False)
+        meta = content.get("meta", {}) if isinstance(content, dict) else {}
     else:
         body_md = str(content or "")
+        meta = {}
 
-    # document_service writes to settings.upload_path with a uuid filename.
-    # We want it under our automation subdirectory, so re-implement minimally here.
+    path = directory / f"{_safe_filename(title)}.docx"
+    mime = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
+    # --- Tier 1: HTML → DOCX (pandoc, or python-docx+bs4 fallback) ---
+    try:
+        from app.services.artifacts.exporters.html_docx import render_html_to_docx
+
+        report_period = meta.get("report_period", datetime.now(timezone.utc).strftime("%B %d, %Y"))
+        date_of_report = meta.get("date_of_report", datetime.now(timezone.utc).strftime("%B %d, %Y"))
+        body_html = _md_to_html(body_md)
+        html = f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8"/>
+<title>{_safe_filename(title)}</title>
+<style>{_HTML_CSS}</style></head>
+<body><div class="container">
+<h1>{_safe_filename(title)}</h1>
+<div class="meta">Reporting Period: {report_period} · Date of Report: {date_of_report}</div>
+{body_html}
+</div></body></html>"""
+
+        docx_bytes = render_html_to_docx(html.encode("utf-8"))
+        if docx_bytes and len(docx_bytes) > 0:
+            path.write_bytes(docx_bytes)
+            logger.info("DOCX generated via HTML renderer (%d bytes)", len(docx_bytes))
+            return path, _make_url(path), mime
+    except Exception as exc:  # noqa: BLE001 — fall through to tier 2
+        logger.warning("Tier 1 (HTML→DOCX) failed: %s; falling back to markdown parser", exc)
+
+    # --- Tier 2: markdown → python-docx via document_service parser ---
+    try:
+        from docx import Document
+        from docx.shared import Pt
+        from app.services.document_service import parse_markdown_to_docx
+
+        doc = Document()
+        style = doc.styles["Normal"]
+        style.font.name = "Arial"
+        style.font.size = Pt(11)
+        doc.add_heading(title or "Automation Report", level=0)
+        parse_markdown_to_docx(doc, body_md)
+        doc.save(str(path))
+        logger.info("DOCX generated via document_service markdown parser")
+        return path, _make_url(path), mime
+    except Exception as exc:  # noqa: BLE001 — fall through to tier 3
+        logger.warning("Tier 2 (markdown parser) failed: %s; falling back to primitive parser", exc)
+
+    # --- Tier 3: primitive line-by-line parser (last resort) ---
     from docx import Document
     from docx.shared import Pt
 
@@ -457,9 +516,8 @@ def _write_docx(directory: Path, title: str, content: Any, exec_id: str) -> Tupl
         else:
             doc.add_paragraph(s)
 
-    path = directory / f"{_safe_filename(title)}.docx"
     doc.save(str(path))
-    return path, _make_url(path), "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    return path, _make_url(path), mime
 
 
 # ---------------------------------------------------------------------------

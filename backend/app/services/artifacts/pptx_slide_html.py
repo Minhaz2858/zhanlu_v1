@@ -220,6 +220,29 @@ def _pie_svg(cats, series, w, h, palette):
     return "".join(parts)
 
 
+def _extract_series_colors(chart, fallback_palette):
+    """Pull the actual series fill colors off the chart XML so the HTML
+    preview matches the downloaded .pptx (which now applies the theme
+    chart_palette per series in pptx_export).
+
+    Falls back to ``fallback_palette`` when a series has no explicit fill
+    (e.g. pie slices, which python-pptx colors per-point, not per-series).
+    """
+    colors: list[str] = []
+    try:
+        for s in chart.series:
+            try:
+                rgb = s.format.fill.fore_color.rgb
+                colors.append("#" + str(rgb))
+            except Exception:
+                colors.append(None)  # type: ignore[arg-type]
+    except Exception:
+        colors = []
+    # Backfill any missing series color from the fallback ramp.
+    fb = fallback_palette or ["#2563eb"]
+    return [c if c else fb[i % len(fb)] for i, c in enumerate(colors)] or list(fb)
+
+
 def _chart_to_svg(shape, w, h, palette):
     """Render a native python-pptx chart as inline SVG, or None on failure."""
     from pptx.enum.chart import XL_CHART_TYPE
@@ -241,12 +264,14 @@ def _chart_to_svg(shape, w, h, palette):
         return None
     if not cats or not series:
         return None
+    # Prefer the deck's real series colors so preview == download.
+    colors = _extract_series_colors(chart, palette)
     ct = chart.chart_type
     if ct == XL_CHART_TYPE.PIE:
-        return _pie_svg(cats, series, w, h, palette)
+        return _pie_svg(cats, series, w, h, colors)
     if ct == XL_CHART_TYPE.LINE:
-        return _line_svg(cats, series, w, h, palette)
-    return _bar_svg(cats, series, w, h, palette)
+        return _line_svg(cats, series, w, h, colors)
+    return _bar_svg(cats, series, w, h, colors)
 
 
 def render_pptx_to_slide_html(pptx_bytes: bytes) -> tuple[str, list[str]]:

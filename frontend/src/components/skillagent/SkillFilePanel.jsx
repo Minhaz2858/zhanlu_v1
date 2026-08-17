@@ -34,6 +34,34 @@ function buildTree(skill, uploads) {
       }));
       root.children.push(refs);
     }
+    // Folder-style package anatomy: references/*.md stored as a manifest of
+    // filename -> summary (the full body lives on the backend filesystem).
+    const refManifest = skill.references_manifest || skill.reference_manifest || {};
+    const refKeys = Object.keys(refManifest).sort();
+    if (refKeys.length) {
+      const refs = { name: 'references', type: 'folder', path: `${base}/references`, children: [] };
+      refKeys.forEach((fn) => refs.children.push({
+        name: fn, type: 'file', path: `${base}/references/${fn}`, ext: (fn.split('.').pop() || '').toLowerCase(),
+        content: refManifest[fn] ? `${refManifest[fn]}\n\n> Full content is stored with the skill package on disk.` : '',
+      }));
+      root.children.push(refs);
+    }
+    // assets/templates/* binary templates referenced for reuse on future runs.
+    const assetManifest = skill.assets_manifest || {};
+    const assetKeys = Object.keys(assetManifest).sort();
+    if (assetKeys.length) {
+      const assetsFolder = { name: 'assets', type: 'folder', path: `${base}/assets`, children: [] };
+      const templatesFolder = { name: 'templates', type: 'folder', path: `${base}/assets/templates`, children: [] };
+      assetKeys.forEach((rel) => {
+        const clean = rel.replace(/^templates\//, '');
+        templatesFolder.children.push({
+          name: clean, type: 'file', path: `${base}/assets/templates/${clean}`, ext: (clean.split('.').pop() || '').toLowerCase(),
+          content: assetManifest[rel] || '(binary template asset)', isAsset: true,
+        });
+      });
+      assetsFolder.children.push(templatesFolder);
+      root.children.push(assetsFolder);
+    }
   }
   if (uploads.length) {
     const up = { name: 'uploads', type: 'folder', path: `${base}/uploads`, children: [] };

@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { base44 } from "@/api/base44Client";
 import { appParams } from "@/lib/app-params";
+import { useLanguage } from "@/lib/LanguageProvider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -9,6 +10,7 @@ import { LogIn, Mail, Lock, Loader2 } from "lucide-react";
 import AuthLayout from "@/components/AuthLayout";
 
 export default function Login() {
+  const { t } = useLanguage();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
@@ -29,7 +31,7 @@ export default function Login() {
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
-        throw new Error(data.detail || "Invalid email or password");
+        throw new Error(data.detail || t.auth.invalidCredentials);
       }
       base44.auth.setToken(data.access_token);
       if (data.refresh_token) {
@@ -39,7 +41,7 @@ export default function Login() {
       const next = new URLSearchParams(window.location.search).get("next");
       window.location.href = next ? decodeURIComponent(next) : "/";
     } catch (err) {
-      setError(err.message || "Invalid email or password");
+      setError(err.message || t.auth.invalidCredentials);
     } finally {
       setLoading(false);
     }
@@ -48,13 +50,13 @@ export default function Login() {
   return (
     <AuthLayout
       icon={LogIn}
-      title="Welcome back"
-      subtitle="Log in to your account"
+      title={t.auth.welcomeBack}
+      subtitle={t.auth.logInToAccount}
       footer={
         <>
-          Don't have an account?{" "}
+          {t.auth.noAccount}{" "}
           <Link to="/register" className="text-primary font-medium hover:underline">
-            Create one
+            {t.auth.createOne}
           </Link>
         </>
       }
@@ -67,7 +69,7 @@ export default function Login() {
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">
-          <Label htmlFor="email">Email</Label>
+          <Label htmlFor="email">{t.auth.email}</Label>
           <div className="relative">
             <Mail className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" aria-hidden="true" />
             <Input
@@ -75,7 +77,7 @@ export default function Login() {
               type="email"
               autoComplete="email"
               autoFocus
-              placeholder="you@example.com"
+              placeholder={t.auth.emailPh}
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               className="pl-10 h-12"
@@ -85,9 +87,9 @@ export default function Login() {
         </div>
         <div className="space-y-2">
           <div className="flex items-center justify-between">
-            <Label htmlFor="password">Password</Label>
+            <Label htmlFor="password">{t.auth.password}</Label>
             <Link to="/forgot-password" className="text-xs text-primary hover:underline">
-              Forgot password?
+              {t.auth.forgotPassword}
             </Link>
           </div>
           <div className="relative">
@@ -108,10 +110,10 @@ export default function Login() {
           {loading ? (
             <>
               <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-              Logging in...
+              {t.auth.loggingIn}
             </>
           ) : (
-            "Log in"
+            t.auth.logIn
           )}
         </Button>
       </form>

@@ -485,6 +485,89 @@ def get_execution(execution_id: str, db: Session = Depends(get_db)):
     return d
 
 
+@router.get("/executions/{execution_id}/status")
+def get_execution_status(execution_id: str, db: Session = Depends(get_db)):
+    """Lightweight poll payload for the in-progress execution drawer.
+
+    Returns a compact snapshot — status, activity steps, current phase,
+    elapsed seconds, error, and the skill calls recorded against this run —
+    so the frontend can drive a 2s-polling drawer without pulling the full
+    ``/details`` payload each tick.
+
+    404-tolerant: the execution row may not be committed yet in the first
+    poll window after ``POST /run`` (the dispatcher creates the row
+    asynchronously). In that case we return ``{"status": "pending",
+    "exists": false}`` with HTTP 200 so the drawer keeps polling instead of
+    erroring out on a transient race.
+    """
+    row = db.query(AutomationExecution).filter(
+        AutomationExecution.id == execution_id,
+    ).first()
+    if not row:
+        return {
+            "status": "pending",
+            "exists": False,
+            "steps": [],
+            "skill_calls": [],
+        }
+
+    # Skill invocations recorded against this run (via SkillExecutionRecorder,
+    # which stamps SkillRun.execution_id using the executor's contextvar).
+    skill_calls: list[dict] = []
+    try:
+        from app.models.skill_run import SkillRun
+        runs = db.query(SkillRun).filter(
+            SkillRun.execution_id == execution_id,
+        ).order_by(SkillRun.created_date.asc()).all()
+        for r in runs:
+            _in = r.input_json if isinstance(r.input_json, dict) else {}
+            skill_calls.append({
+                "skill_name": _in.get("skill_name") or r.skill_profile_id,
+                "action": _in.get("action"),
+                "agent_name": _in.get("agent_name"),
+                "status": r.status,
+                "duration_ms": r.duration_ms,
+                "at": r.created_date.isoformat() if r.created_date else None,
+            })
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("get_execution_status: skill_calls lookup failed (non-fatal): %s", exc)
+
+    started_at = row.started_at
+    if started_at is not None and hasattr(started_at, "isoformat"):
+        started_at_iso = started_at.isoformat()
+        if row.completed_at is not None and hasattr(row.completed_at, "isoformat"):
+            elapsed = (row.completed_at - started_at).total_seconds()
+        else:
+            # DB DateTime columns are timezone-naive (UTC). Subtract a naive
+            # "now" so we don't hit "can't subtract offset-naive and
+            # offset-aware datetimes" on live (running) executions.
+            now = datetime.now(timezone.utc)
+            if started_at.tzinfo is None:
+                now = now.replace(tzinfo=None)
+            elapsed = (now - started_at).total_seconds()
+        elapsed = max(0.0, elapsed)
+    else:
+        started_at_iso = None
+        elapsed = None
+
+    conversation_id = (
+        (row.output_data or {}).get("conversation_id")
+        if isinstance(row.output_data, dict) else None
+    )
+
+    return {
+        "status": row.status,
+        "exists": True,
+        "steps": row.activity_steps or [],
+        "current_phase": row.current_phase,
+        "started_at": started_at_iso,
+        "elapsed_sec": elapsed,
+        "error": row.error,
+        "conversation_id": conversation_id,
+        "skill_calls": skill_calls,
+    }
+
+
 @router.get("/executions/{execution_id}/files")
 def list_execution_files(execution_id: str, db: Session = Depends(get_db)):
     files = db.query(AutomationFile).filter(
@@ -872,6 +955,7 @@ def mint_file_preview_token(
 def preview_automation_file(
     file_id: str,
     token: Optional[str] = Query(None),
+    format: Optional[str] = Query(None),
     db: Session = Depends(get_db),
     user: Optional[User] = Depends(get_current_user_optional),
 ):
@@ -879,6 +963,11 @@ def preview_automation_file(
 
     Accepts either the Bearer header (fetch/XHR) or a signed ``?token=``
     minted by ``POST /files/{id}/preview-token`` (iframe/img navigation).
+
+    ``?format=html`` (docx/pptx only) returns sanitized mammoth/pptx HTML so
+    the frontend's mammoth fallback reader can render automation files —
+    otherwise the default path returns the original bytes or a LibreOffice
+    PDF conversion.
     """
     from app.services.preview_tokens import verify_preview_token
 
@@ -906,6 +995,34 @@ def preview_automation_file(
     file_type = (file_row.file_type or path.suffix).lower().lstrip(".")
     if file_type not in _PREVIEWABLE_FILE_TYPES:
         raise HTTPException(status_code=415, detail="Preview is not available for this file type")
+
+    # HTML fallback for the frontend mammoth reader. Automation files live in
+    # the AutomationFile table, not Artifact, so the artifacts router's
+    # `?format=html` route 404s for them — this mirrors that route here.
+    fmt = (format or "").lower().strip()
+    if fmt == "html":
+        if file_type not in {"docx", "pptx"}:
+            raise HTTPException(
+                status_code=400,
+                detail="?format=html is only supported for DOCX and PPTX files",
+            )
+        from app.services.artifacts.preview_builder import (
+            convert_docx_to_html,
+            convert_pptx_to_html,
+        )
+
+        data = path.read_bytes()
+        if file_type == "docx":
+            html, _messages = convert_docx_to_html(data)
+        else:
+            html, _messages = convert_pptx_to_html(data)
+        if not html:
+            raise HTTPException(status_code=415, detail="HTML conversion is unavailable")
+        return Response(
+            content=html,
+            media_type="text/html; charset=utf-8",
+            headers={**_PREVIEW_RESPONSE_HEADERS, "Cache-Control": "no-store"},
+        )
 
     if file_type in {"docx", "pptx", "xlsx"}:
         from app.services.artifacts.preview_builder import convert_to_preview

@@ -8,6 +8,8 @@ import { Label } from '@/components/ui/label';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import SchedulePicker from '@/components/automation/SchedulePicker';
+import SkillsSection from '@/components/agent/SkillsSection';
+import { coerceStringArray } from '@/lib/jsonArray';
 import {
   Sparkles, ArrowRight, FolderOpen, Database, FileText, Info, Lock, AlertCircle,
 } from 'lucide-react';
@@ -99,6 +101,9 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
   // Automation deliverable format — emitted into the prefill so the
   // create_automation tool persists it as task.output_format.
   const [outputFormat, setOutputFormat] = useState('html');
+  // Skills enabled for the automation — persisted to automation_tasks.skills
+  // via the chat prefill (create_automation) as an ordered string array.
+  const [skills, setSkills] = useState([]);
   // Project data sources — fetched when a project is pre-selected so the
   // user can see what the Agent will inherit. Empty when no project.
   const [projectDataSources, setProjectDataSources] = useState([]);
@@ -109,6 +114,7 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
     setProject(defaultProjectName || 'global');
     setProjectDataSources([]);
     setOutputFormat('html');
+    setSkills([]);
     base44.entities.Project.filter({ status: 'active' })
       .then((projs) => setProjects(projs))
       .catch(() => setProjects([]));
@@ -181,6 +187,9 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
       // _detect_output_format resolve it without parsing the label.
       const opt = OUTPUT_FORMAT_OPTIONS.find((o) => o.value === outputFormat) || OUTPUT_FORMAT_OPTIONS[0];
       lines.push(`- ${isEn ? 'Output format' : '输出格式'}：${opt.label} (${opt.value})`);
+      // Skills chosen in the picker → emitted so create_automation persists
+      // them as automation_tasks.skills (progressive-disclosure at runtime).
+      if (skills.length) lines.push(`- ${isEn ? 'Skills' : '技能'}：${skills.join(', ')}`);
     }
     if (capabilities) lines.push(`- ${isEn ? 'Tools' : '工具'}：${capabilities}`);
     if (resourceType === 'agent' || resourceType === 'automation' || resourceType === 'kb') {
@@ -354,6 +363,15 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
                   ))}
                 </SelectContent>
               </Select>
+            </div>
+          )}
+          {resourceType === 'automation' && (
+            <div data-testid="automation-skills-section">
+              <SkillsSection
+                form={{ skills }}
+                update={(patch) => { if ('skills' in patch) setSkills(coerceStringArray(patch.skills)); }}
+                t={t}
+              />
             </div>
           )}
           {resourceType === 'agent' && (

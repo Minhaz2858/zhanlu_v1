@@ -63,6 +63,12 @@ def generate_docx(title: str, markdown: str) -> str:
     return f"/api/uploads/{filename}"
 
 
+def parse_markdown_to_docx(doc: Document, md: str):
+    """Public wrapper around :func:`_parse_markdown_to_docx` for reuse by other
+    services (e.g. the automation ``document_generator`` tier-2 fallback)."""
+    _parse_markdown_to_docx(doc, md)
+
+
 def _parse_markdown_to_docx(doc: Document, md: str):
     """Parse markdown text and add formatted paragraphs to the document."""
     lines = md.strip().split("\n")
@@ -73,6 +79,11 @@ def _parse_markdown_to_docx(doc: Document, md: str):
     while i < len(lines):
         line = lines[i]
         stripped = line.strip()
+
+        # Skip blank lines (must increment i, otherwise we loop forever).
+        if not stripped:
+            i += 1
+            continue
 
         # Detect table start (line with | and next line is separator)
         if "|" in stripped and i + 1 < len(lines) and re.match(r"^\s*\|?[\s\-:]+\|[\s\-:|]+\s*$", lines[i + 1]):
@@ -107,8 +118,6 @@ def _parse_markdown_to_docx(doc: Document, md: str):
         elif re.match(r"^\d+\.\s+", stripped):
             text = re.sub(r"^\d+\.\s+", "", stripped)
             doc.add_paragraph(_clean_md(text), style="List Number")
-        elif stripped == "":
-            continue
         else:
             # Check for bold-only line
             para = doc.add_paragraph()

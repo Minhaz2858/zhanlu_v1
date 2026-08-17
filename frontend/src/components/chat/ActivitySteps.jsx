@@ -75,7 +75,7 @@ function isExpandable(step) {
 }
 
 export default function ActivitySteps({ steps, phase, reasoning }) {
-  const { lang } = useLanguage();
+  const { lang, t } = useLanguage();
   const isEn = lang === 'en';
   const [isUserExpanded, setIsUserExpanded] = useState(false);
   // Per-step expanded state, keyed by step number. Local + ephemeral.
@@ -116,8 +116,11 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
   return (
     <div className="mb-3 space-y-1.5 animate-slide-up">
       {/* Phase headline — the "✳ Fathoming…" row. Shows the latest phase
-          streamed by the backend; sparkles pulse while the turn is live. */}
-      {phase && phase.verb && (
+          streamed by the backend; sparkles pulse while the turn is live.
+          NOTE: backend SSE ships English verb/title in phase.verb/title, but
+          we deliberately ignore them and translate from phase.state so the
+          headline always matches the user's UI language. */}
+      {phase && phase.state && (
         <div
           data-testid="activity-phase-headline"
           className="flex items-center gap-2 px-2 py-1"
@@ -126,10 +129,12 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
             className={`h-3.5 w-3.5 shrink-0 text-amber-500 ${isFinalized ? '' : 'animate-pulse'}`}
           />
           <span className={`text-xs font-medium ${isFinalized ? 'text-muted-foreground' : 'text-foreground'}`}>
-            {phase.verb}
+            {t.chat.phase[phase.state]?.verb || phase.verb || phase.state}
           </span>
-          {phase.title && (
-            <span className="text-xs text-muted-foreground truncate">{phase.title}</span>
+          {(t.chat.phase[phase.state]?.title || phase.title) && (
+            <span className="text-xs text-muted-foreground truncate">
+              {t.chat.phase[phase.state]?.title || phase.title}
+            </span>
           )}
         </div>
       )}

@@ -37,6 +37,7 @@ class LlmModelCreate(BaseModel):
     is_private: bool = False
     is_default: bool = False
     enabled: bool = True
+    bypass_hallucination_guardrail: bool = False
 
 
 class LlmModelUpdate(BaseModel):
@@ -48,6 +49,7 @@ class LlmModelUpdate(BaseModel):
     is_private: bool | None = None
     is_default: bool | None = None
     enabled: bool | None = None
+    bypass_hallucination_guardrail: bool | None = None
 
 
 class TestConnectionBody(BaseModel):
@@ -69,6 +71,7 @@ class LlmModelOut(BaseModel):
     is_private: bool
     is_default: bool
     enabled: bool
+    bypass_hallucination_guardrail: bool = False
     created_date: str | None = None
     updated_date: str | None = None
     created_by_id: str | None = None
@@ -125,6 +128,7 @@ def _to_out(row: LlmModel) -> LlmModelOut:
         is_private=row.is_private,
         is_default=row.is_default,
         enabled=row.enabled,
+        bypass_hallucination_guardrail=row.bypass_hallucination_guardrail,
         created_date=row.created_date.isoformat() if row.created_date else None,
         updated_date=row.updated_date.isoformat() if row.updated_date else None,
         created_by_id=row.created_by_id,
@@ -186,6 +190,7 @@ def create_model(
         is_private=body.is_private,
         is_default=body.is_default,
         enabled=body.enabled,
+        bypass_hallucination_guardrail=body.bypass_hallucination_guardrail,
     )
     db.add(row)
     db.commit()
@@ -225,6 +230,8 @@ def update_model(
         row.is_private = body.is_private
     if body.enabled is not None:
         row.enabled = body.enabled
+    if body.bypass_hallucination_guardrail is not None:
+        row.bypass_hallucination_guardrail = body.bypass_hallucination_guardrail
 
     # is_default singleton
     if body.is_default is True:

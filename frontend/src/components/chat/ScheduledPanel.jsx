@@ -34,28 +34,18 @@ const RRULE_BYDAY_REGEX = /BYDAY=([A-Z,]+)/;
 const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const RRULE_DAY_MAP = { SU: 0, MO: 1, TU: 2, WE: 3, TH: 4, FR: 5, SA: 6 };
 
-// Phase headline labels — mirrors the backend PHASE_HEADLINES map
-// (app/routers/agents.py). The polled execution row stores only the raw FSM
-// state (e.g. "act"); this maps it to a friendly verb + descriptive clause
-// for the live headline. When the SSE stream is active, the backend's own
-// verb/title are used directly (richer than the polled fallback).
-const PHASE_LABELS = {
-  init: { verb: 'Fathoming', title: 'Reading your request' },
-  goal: { verb: 'Fathoming', title: 'Understanding what you need' },
-  context: { verb: 'Orienting', title: 'Gathering the right context' },
-  plan: { verb: 'Orchestrating', title: 'Laying out the plan' },
-  gate: { verb: 'Checking', title: 'Running policy checks' },
-  act: { verb: 'Fabricating', title: 'Building your deliverable' },
-  observe: { verb: 'Watching', title: 'Recording the results' },
-  verify: { verb: 'Validating', title: 'Checking the outputs' },
-  finalize: { verb: 'Crystallizing', title: 'Wrapping everything up' },
-  done: { verb: 'Done', title: 'All finished' },
-  fail: { verb: 'Stopped', title: 'Something went wrong' },
-};
-
-function phaseHeadline(state) {
+// Phase headline labels — now sourced from translations.js (t.chat.phase)
+// so the polled fallback matches the user's UI language. The SSE stream
+// also ships English verb/title, but we always derive verb/title from the
+// language-neutral FSM `state` key at render time.
+function phaseHeadline(state, t) {
   if (!state) return null;
-  return PHASE_LABELS[state] || { verb: 'Working', title: state.replace(/_/g, ' ') };
+  const entry = t?.chat?.phase?.[state];
+  if (entry) return entry;
+  // Fall back to a generic "Working" label (also translated) when an
+  // unknown state slips through, instead of leaking English.
+  const working = t?.chat?.phase?.working || { verb: 'Working', title: state.replace(/_/g, ' ') };
+  return working;
 }
 
 function formatRrule(rrule) {
@@ -134,7 +124,7 @@ function statusMeta(status) {
 }
 
 export default function ScheduledPanel({ sessionId, focusExecutionId, onClose }) {
-  const { lang } = useLanguage();
+  const { lang, t } = useLanguage();
   const isEn = lang === 'en';
   const [loading, setLoading] = useState(false);
   const [task, setTask] = useState(null);
@@ -403,9 +393,11 @@ export default function ScheduledPanel({ sessionId, focusExecutionId, onClose })
                 const live = liveByExec[ex.id];
                 const isInProgress = ex.status === 'running' || ex.status === 'queued';
                 const effSteps = (live?.steps) || ex.activity_steps;
-                const headline = live?.phaseVerb
-                  ? { verb: live.phaseVerb, title: live.phaseTitle }
-                  : phaseHeadline(live?.phaseState || ex.current_phase);
+                // Always derive verb/title from the language-neutral FSM state,
+                // so the headline matches the user's UI language. Backend SSE
+                // also ships English verb/title — we ignore them here.
+                const state = live?.phaseState || ex.current_phase;
+                const headline = state ? phaseHeadline(state, t) : null;
                 return (
                   <li
                     key={ex.id}
