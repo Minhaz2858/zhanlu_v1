@@ -12,9 +12,10 @@ All routes gated by ``ECISCO_BI_ALERTS_ENABLED`` (returns 403 when off).
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -65,6 +66,21 @@ class AlertOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+    @field_validator("triggered_at", "read_at", "dismissed_at", mode="before")
+    @classmethod
+    def _dt_to_iso(cls, v):
+        """ORM columns are DateTime; expose as ISO-8601 strings to the frontend."""
+        if isinstance(v, datetime):
+            return v.isoformat()
+        return v
+
+    @field_validator("source", mode="before")
+    @classmethod
+    def _source_default(cls, v):
+        # ORM column default only applies at flush; NULL in-memory / legacy rows
+        # would otherwise fail the non-null ``str`` field.
+        return v or "perception"
 
 
 class AlertListResponse(BaseModel):

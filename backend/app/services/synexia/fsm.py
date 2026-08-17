@@ -599,14 +599,33 @@ class SynexiaFSM:
 
         # Bridge to the sync call_llm (which already has retry/backoff/
         # failover — P0 DONE 2026-07-29).  run_quality_loop injects this.
+        # run_quality_eval is invoked via asyncio.to_thread() in the
+        # streaming path (agents.py), so we are in a worker thread: a
+        # fresh event loop is always safe.  (Fixed 2026-08-17 — the
+        # previous version returned the coroutine object without awaiting,
+        # so every FSM quality eval silently fell back to the heuristic.)
         def _llm_call(prompt, messages, **kwargs):
+            import asyncio
             from app.services.llm_service import call_llm
 
-            return call_llm(
+            result = call_llm(
                 prompt=prompt,
                 messages=messages,
                 temperature=kwargs.get("temperature", 0),
             )
+            # Production call_llm is async → run it in a fresh loop (we are
+            # in a worker thread via asyncio.to_thread).  Tests may inject a
+            # plain sync stub returning a dict → pass it through untouched.
+            if not asyncio.iscoroutine(result):
+                return result
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(result)
+            finally:
+                try:
+                    loop.close()
+                except Exception:  # pragma: no cover — loop teardown best-effort
+                    pass
 
         try:
             qer = run_quality_loop(

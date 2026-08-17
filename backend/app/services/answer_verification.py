@@ -1,0 +1,561 @@
+"""Universal Self-Evaluation & Re-Planning verification gate.
+
+Pure, TOTAL module (never raises) that runs at the synthesis boundary of the
+agent loop. It combines:
+
+1. Deterministic detectors over summarized tool results + the draft answer
+   (metadata-only answers, empty results, degenerate values, lexical dimension
+   coverage, placeholder non-answers). Zero domain knowledge: everything is
+   lexical/structural — no hardcoded table or column names.
+2. A single optional LLM strict-inspector call (one per turn, at the synthesis
+   boundary only) that applies the 4-check rubric and returns JSON.
+
+Any LLM failure/timeout falls back to the deterministic verdict. When re-plan
+attempts are exhausted or the finish line is near, an INCOMPLETE verdict is
+escalated to IMPOSSIBLE so the loop discloses gaps instead of nudging again.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import re
+from dataclasses import dataclass, field
+from typing import Any
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+_VERIFICATION_PROMPT = """\
+You are a strict response inspector. Verify whether the assistant's draft answer
+completely satisfies the user's request using this 4-point checklist:
+
+1. Completeness — every dimension/measure the user asked for (prices, volumes,
+   counts, categories, dates, etc.) is actually present in the answer with real
+   values, not just mentioned.
+2. Quality — the answer contains real data (numbers, names, facts) rather than
+   metadata, schema listings, row counts, or placeholder boilerplate.
+3. Source coverage — the answer is grounded in the available tool results and
+   does not invent data the tools never returned.
+4. Plausibility — numbers are internally consistent and not obviously fabricated.
+
+User request:
+{user_message}
+
+Tool results (summarized):
+{tool_results_json}
+
+Draft answer:
+{assistant_text}
+
+Respond with STRICT JSON only, no prose, in exactly this shape:
+{{"status": "COMPLETE"|"INCOMPLETE"|"IMPOSSIBLE", "gaps": ["..."], "suggested_fix": "..."}}
+- COMPLETE: the answer fully satisfies the request.
+- INCOMPLETE: some requested dimension or quality bar is missing and it is worth
+  trying an alternative approach.
+- IMPOSSIBLE: the data cannot be obtained with any reasonable alternative
+  approach (use sparingly; only when no re-plan could possibly help).
+"""
+
+# Placeholder / non-answer phrasing. Matches the "I had trouble putting it
+# together" / "I found 42,993 materials across 6 tables" family of answers.
+_PLACEHOLDER_PATTERNS = [
+    re.compile(r"trouble putt\w+ it (all )?together", re.IGNORECASE),
+    re.compile(r"across\s+\d+[\d,]*\s+(tables|sources|databases|documents|columns)", re.IGNORECASE),
+    re.compile(r"found\s+\d+[\d,]*\s+(materials|records|rows|items|products|documents|entries)", re.IGNORECASE),
+    re.compile(r"i gathered some information", re.IGNORECASE),
+    re.compile(r"had difficulty (answering|finding|retrieving)", re.IGNORECASE),
+    re.compile(r"could not (find|locate|retrieve) (the )?(data|information|numbers)", re.IGNORECASE),
+    re.compile(r"no data (was|is|were) (found|returned|available)", re.IGNORECASE),
+]
+
+# Tokens that look like requested "aspects" but are generic query/quantifier
+# words — excluded from lexical dimension coverage to cut false positives.
+_ASPECT_STOPWORDS = frozenset({
+    "latest", "current", "average", "total", "overall", "summary", "daily",
+    "monthly", "weekly", "yearly", "annual", "first", "last", "top", "bottom",
+    "list", "show", "find", "give", "need", "want", "please", "tell", "answer",
+    "data", "info", "information", "query", "sql", "table", "database", "all",
+    "any", "every", "much", "many", "how", "what", "which", "when", "where",
+    "why", "who", "etc", "kind", "type", "value", "values", "number", "amount",
+    "count", "status", "detail", "details", "trend", "trends", "breakdown",
+    "split", "sample", "full", "new", "old", "please", "help", "result",
+    "results", "report", "reports", "metric", "metrics", "figure", "figures",
+})
+
+# Generic container/category words — not content dimensions. Excluded so a
+# request like "for each material" doesn't false-positive when the answer
+# enumerates materials by name without repeating the word "material".
+_CONTAINER_STOPWORDS = frozenset({
+    "material", "materials", "product", "products", "item", "items",
+    "record", "records", "entry", "entries", "row", "rows", "column",
+    "columns", "field", "fields", "doc", "docs", "document", "documents",
+    "file", "files", "source", "sources", "table", "tables", "category",
+    "categories", "group", "groups", "section", "sections", "name", "names",
+    "title", "titles", "label", "labels",
+})
+
+_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_]{2,}")
+_STOPWORDS = frozenset({
+    "the", "and", "for", "with", "this", "that", "from", "have", "has", "are",
+    "was", "were", "will", "would", "should", "could", "can", "you", "your",
+    "their", "them", "they", "there", "here", "these", "those", "what", "which",
+    "when", "where", "why", "who", "how", "not", "but", "our", "its", "also",
+    "into", "about", "each", "both", "more", "most", "than", "then", "upon",
+    "over", "under", "such", "only", "just", "out", "per", "via", "using",
+    "used", "based", "according", "across", "between", "through", "during",
+})
+
+
+def _normalize_token(tok: str) -> str:
+    t = tok.lower().strip("_")
+    if t.endswith("ies"):
+        t = t[:-3] + "y"
+    elif t.endswith("ss"):
+        pass
+    elif t.endswith("s"):
+        t = t[:-1]
+    return t
+
+
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class VerificationResult:
+    """Verdict of the verification gate."""
+
+    status: str = "COMPLETE"  # COMPLETE | INCOMPLETE | IMPOSSIBLE
+    gaps: list[str] = field(default_factory=list)
+    suggested_fix: str = ""
+    signals: list[str] = field(default_factory=list)  # detector names that fired
+    source: str = "deterministic"  # deterministic | llm | heuristic
+
+
+# ---------------------------------------------------------------------------
+# Summarizer (loop gate should pass summarized payloads, never raw dumps)
+# ---------------------------------------------------------------------------
+
+
+def summarize_tool_result(raw: dict | None, max_rows: int = 5, max_chars: int = 1200) -> dict:
+    """Compact a raw tool result dict into a detector-friendly summary."""
+    out: dict[str, Any] = {
+        "tool": "",
+        "columns": None,
+        "rows": [],
+        "row_count": 0,
+        "empty": False,
+        "text": "",
+        "sql": "",
+    }
+    if not isinstance(raw, dict):
+        return out
+    out["tool"] = str(
+        raw.get("tool") or raw.get("tool_name") or raw.get("name") or ""
+    )
+    rows = raw.get("rows")
+    if rows is None:
+        rows = raw.get("data")
+    if isinstance(rows, list):
+        out["row_count"] = len(rows)
+        out["empty"] = len(rows) == 0
+        out["rows"] = rows[:max_rows]
+    columns = raw.get("columns") or raw.get("column_names")
+    if columns is None and out["rows"] and isinstance(out["rows"][0], dict):
+        columns = list(out["rows"][0].keys())
+    if isinstance(columns, list):
+        out["columns"] = [str(c) for c in columns]
+    txt = raw.get("text") or raw.get("content") or raw.get("summary") or raw.get("result")
+    if isinstance(txt, str) and txt:
+        out["text"] = txt[:max_chars]
+    sql = raw.get("sql")
+    if isinstance(sql, str) and sql:
+        out["sql"] = sql[:500]
+    return out
+
+
+def summarize_tool_results(raw_list: list[dict] | None) -> list[dict]:
+    if not raw_list:
+        return []
+    return [summarize_tool_result(r) for r in raw_list]
+
+
+# ---------------------------------------------------------------------------
+# Deterministic detectors
+# ---------------------------------------------------------------------------
+
+
+def _detect_metadata_only(results: list[dict]) -> bool:
+    """Schema/catalog-shaped results (columns but zero data rows)."""
+    if not results:
+        return False
+    for r in results:
+        if r.get("columns") and r.get("row_count", 0) == 0:
+            return True
+    return False
+
+
+def _detect_empty_results(results: list[dict]) -> bool:
+    """Every tool result came back empty (0 rows, no text payload)."""
+    if not results:
+        return False
+    return all(r.get("empty") and not r.get("text") for r in results)
+
+
+def _iter_row_values(row: Any):
+    if isinstance(row, dict):
+        yield from row.values()
+    elif isinstance(row, (list, tuple)):
+        yield from row
+
+
+def _detect_degenerate_values(results: list[dict]) -> bool:
+    """Rows exist but every value is NULL/empty/zero."""
+    for r in results:
+        rows = r.get("rows") or []
+        if not rows:
+            continue
+        values = [v for row in rows for v in _iter_row_values(row)]
+        if not values:
+            continue
+        non_degenerate = [
+            v for v in values
+            if v is not None and v != "" and v != 0 and v != "0" and v != 0.0
+        ]
+        if not non_degenerate:
+            return True
+    return False
+
+
+def _detect_placeholder_text(assistant_text: str) -> bool:
+    if not assistant_text:
+        return False
+    return any(p.search(assistant_text) for p in _PLACEHOLDER_PATTERNS)
+
+
+def _payload_text(results: list[dict]) -> str:
+    parts: list[str] = []
+    for r in results:
+        if r.get("columns"):
+            parts.append(" ".join(r["columns"]))
+        for row in r.get("rows") or []:
+            if isinstance(row, dict):
+                parts.append(" ".join(f"{k} {v}" for k, v in row.items()))
+            elif isinstance(row, (list, tuple)):
+                parts.append(" ".join(str(v) for v in row))
+        if r.get("text"):
+            parts.append(r["text"])
+        if r.get("sql"):
+            parts.append(r["sql"])
+    return " ".join(parts)
+
+
+def _detect_dimension_coverage(
+    user_message: str, results: list[dict], assistant_text: str
+) -> list[str]:
+    """Return user-requested aspect tokens absent from tool results + answer."""
+    if not results or not user_message:
+        return []
+    requested = {
+        _normalize_token(tok)
+        for tok in _TOKEN_RE.findall(user_message)
+        if tok.lower() not in _STOPWORDS
+        and _normalize_token(tok) not in _ASPECT_STOPWORDS
+        and _normalize_token(tok) not in _CONTAINER_STOPWORDS
+    }
+    if not requested:
+        return []
+    corpus = _normalize_token(_payload_text(results) + " " + (assistant_text or ""))
+    missing = [tok for tok in sorted(requested) if tok not in corpus]
+    return missing
+
+
+# ---------------------------------------------------------------------------
+# LLM strict-inspector (one call max; TOTAL via try/except)
+# ---------------------------------------------------------------------------
+
+
+def _sync_llm_call(prompt: str) -> str:
+    """Run the configured LLM synchronously (safe to call inside to_thread)."""
+    from app.services.llm_service import call_llm
+
+    messages = [
+        {"role": "system", "content": "You are a strict response inspector. Reply with JSON only."},
+        {"role": "user", "content": prompt},
+    ]
+    result = call_llm(prompt=prompt, messages=messages, temperature=0, task_type="simple_chat")
+    if not asyncio.iscoroutine(result):
+        return result
+    loop = asyncio.new_event_loop()
+    try:
+        return loop.run_until_complete(result)
+    finally:
+        try:
+            loop.close()
+        except Exception:
+            pass
+
+
+def _parse_eval_json(raw: str) -> tuple[str, list[str], str] | None:
+    text = raw.strip()
+    if "{" not in text:
+        return None
+    text = text[text.index("{"):]
+    if "}" in text:
+        text = text[: text.rindex("}") + 1]
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status = str(payload.get("status", "")).upper()
+    if status not in {"COMPLETE", "INCOMPLETE", "IMPOSSIBLE"}:
+        return None
+    gaps_raw = payload.get("gaps") or []
+    gaps = [str(g) for g in gaps_raw if isinstance(g, str)][:6]
+    fix = str(payload.get("suggested_fix") or "")[:300]
+    return status, gaps, fix
+
+
+def _run_llm_eval(
+    user_message: str, results: list[dict], assistant_text: str
+) -> tuple[str, list[str], str]:
+    """One strict-inspector call. Raises on failure; caller falls back."""
+    compact = []
+    for r in results[:6]:
+        item: dict[str, Any] = {"tool": r.get("tool", "")}
+        if r.get("columns"):
+            item["columns"] = r["columns"]
+        if r.get("rows"):
+            item["rows"] = r["rows"]
+        if r.get("row_count") is not None:
+            item["row_count"] = r["row_count"]
+        if r.get("text"):
+            item["text"] = r["text"][:400]
+        compact.append(item)
+    prompt = _VERIFICATION_PROMPT.format(
+        user_message=user_message[:2000],
+        tool_results_json=json.dumps(compact, ensure_ascii=False)[:2000],
+        assistant_text=(assistant_text or "")[:4000],
+    )
+    result = _sync_llm_call(prompt)
+    if isinstance(result, dict):
+        raw = result.get("response", "") or ""
+    else:
+        raw = str(result or "")
+    parsed = _parse_eval_json(raw)
+    if parsed is None:
+        raise ValueError("unparseable evaluator JSON")
+    return parsed
+
+
+# ---------------------------------------------------------------------------
+# Hybrid entry point (TOTAL — never raises)
+# ---------------------------------------------------------------------------
+
+
+def evaluate_answer(
+    user_message: str,
+    tool_results: list[dict],
+    assistant_text: str,
+    *,
+    attempts: int = 0,
+    budget_remaining: int = 100,
+    endpoint: str | None = None,
+) -> VerificationResult:
+    """Run the verification gate.
+
+    Deterministic detectors first; if any signal fires the verdict is decided
+    locally (with attempts/budget escalation to IMPOSSIBLE) and the LLM call is
+    skipped. Otherwise one optional LLM strict-inspector call runs at the
+    synthesis boundary. Any failure falls back to the deterministic verdict.
+    """
+    try:
+        return _evaluate_answer_inner(
+            user_message or "",
+            tool_results or [],
+            assistant_text or "",
+            attempts=attempts,
+            budget_remaining=budget_remaining,
+            endpoint=endpoint,
+        )
+    except Exception as exc:  # TOTAL invariant
+        logger.exception("answer_verification gate raised (non-fatal): %s", exc)
+        return VerificationResult(status="COMPLETE", source="heuristic")
+
+
+def _evaluate_answer_inner(
+    user_message: str,
+    tool_results: list[dict],
+    assistant_text: str,
+    *,
+    attempts: int,
+    budget_remaining: int,
+    endpoint: str | None,
+) -> VerificationResult:
+    if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
+        return VerificationResult(status="COMPLETE", signals=["disabled"])
+
+    results = summarize_tool_results(tool_results) if tool_results else []
+    if not results:
+        return VerificationResult(status="COMPLETE")
+
+    signals: list[str] = []
+    gaps: list[str] = []
+
+    if _detect_metadata_only(results):
+        signals.append("metadata")
+        gaps.append("the query returned schema metadata but no data rows")
+    if _detect_empty_results(results):
+        signals.append("empty")
+        gaps.append("all data source queries returned zero results")
+    if _detect_degenerate_values(results):
+        signals.append("degenerate")
+        gaps.append("the returned values are all empty or zero")
+    if _detect_placeholder_text(assistant_text):
+        signals.append("placeholder")
+        gaps.append("the draft answer is placeholder text, not real data")
+
+    missing = _detect_dimension_coverage(user_message, results, assistant_text)
+    if missing:
+        signals.append("coverage")
+        gaps.append(
+            "requested dimensions not found in the data: " + ", ".join(missing[:5])
+        )
+
+    max_replans = int(getattr(settings, "SELF_EVAL_MAX_REPLANS", 3))
+
+    if signals:
+        # Re-plan is only possible if we still have attempts and budget.
+        if attempts >= max_replans or budget_remaining < 2:
+            result = VerificationResult(
+                status="IMPOSSIBLE",
+                gaps=gaps,
+                signals=signals,
+                suggested_fix=_suggested_fix(signals, results),
+                source="deterministic",
+            )
+        else:
+            result = VerificationResult(
+                status="INCOMPLETE",
+                gaps=gaps,
+                signals=signals,
+                suggested_fix=_suggested_fix(signals, results),
+                source="deterministic",
+            )
+        return result
+
+    # Deterministic verdict is clean → optional LLM strict-inspector at the
+    # synthesis boundary (one call per turn).
+    llm_enabled = getattr(settings, "SELF_EVAL_LLM_GATE_ENABLED", True)
+    if not llm_enabled:
+        return VerificationResult(status="COMPLETE", source="deterministic")
+    try:
+        status, llm_gaps, fix = _run_llm_eval(user_message, results, assistant_text)
+    except Exception as exc:
+        logger.warning("answer_verification: llm eval failed (non-fatal): %s", exc)
+        return VerificationResult(status="COMPLETE", source="deterministic")
+
+    if status == "COMPLETE":
+        return VerificationResult(status="COMPLETE", source="llm")
+
+    gaps = llm_gaps or ["the answer does not fully satisfy the request"]
+    if status == "IMPOSSIBLE" or attempts >= max_replans or budget_remaining < 2:
+        return VerificationResult(
+            status="IMPOSSIBLE", gaps=gaps, suggested_fix=fix,
+            signals=["llm"], source="llm",
+        )
+    return VerificationResult(
+        status="INCOMPLETE", gaps=gaps, suggested_fix=fix,
+        signals=["llm"], source="llm",
+    )
+
+
+# ---------------------------------------------------------------------------
+# "Try instead" guidance keyed by observed tool shape (never tool names)
+# ---------------------------------------------------------------------------
+
+
+def _suggested_fix(signals: list[str], results: list[dict]) -> str:
+    hint = _infer_source_hint(results)
+    if "empty" in signals:
+        return (
+            "Retry with a different data source or query shape (e.g. widen the "
+            f"date range, drop filters, or try a {hint} alternative); then answer with the actual result."
+        )
+    if "metadata" in signals:
+        return (
+            "The schema is not data. Run a real data query that returns rows "
+            f"of actual values from the {hint} source, then answer from those values."
+        )
+    if "degenerate" in signals:
+        return (
+            "The rows are empty/zero-filled. Re-plan with a different query "
+            f"(different filters, columns, or {hint} source) and return real values."
+        )
+    if "placeholder" in signals:
+        return (
+            "Do not summarize row counts or schemas as the answer. Extract the "
+            "requested values from the tool results and present them directly."
+        )
+    if "coverage" in signals:
+        return (
+            "Query the columns that actually contain the requested dimensions "
+            f"from the {hint} source, then answer with those values."
+        )
+    return "Try an alternative approach to obtain the missing information."
+
+
+def _infer_source_hint(results: list[dict]) -> str:
+    """Structural (not name-based) inference of the dominant source type."""
+    if any(r.get("columns") is not None or r.get("sql") for r in results):
+        return "SQL/database"
+    if any(r.get("text") for r in results):
+        return "document/search"
+    return "data source"
+
+
+# ---------------------------------------------------------------------------
+# Nudge / disclosure builders
+# ---------------------------------------------------------------------------
+
+
+def build_replan_nudge(result: VerificationResult) -> str:
+    """One-sentence gap + alternative guidance injected into the loop."""
+    if result.status == "COMPLETE":
+        return ""
+    gap_line = "; ".join(result.gaps) if result.gaps else (
+        "the draft answer does not answer the user's request"
+    )
+    fix = result.suggested_fix or (
+        "Try an alternative approach to obtain the missing information."
+    )
+    return (
+        "VERIFICATION GAP (self-evaluation): the draft answer has not fully "
+        f"addressed the request. Gap: {gap_line}. {fix} "
+        "Re-plan and try again with an alternative approach before answering."
+    )
+
+
+def build_gap_disclosure(result: VerificationResult) -> str:
+    """Suffix appended to best-effort answers when re-planning is impossible."""
+    if result.status == "COMPLETE":
+        return ""
+    gap_line = "; ".join(result.gaps) if result.gaps else (
+        "some requested information could not be retrieved"
+    )
+    fix = result.suggested_fix or (
+        "Please rephrase the request or provide additional details."
+    )
+    return (
+        "\n\n[Gap disclosure] I was unable to fully answer this request: "
+        f"{gap_line}. {fix}"
+    )

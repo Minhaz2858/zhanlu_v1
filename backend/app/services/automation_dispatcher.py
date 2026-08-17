@@ -40,7 +40,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from sqlalchemy import update
+from sqlalchemy import or_, update
 
 from app.models.automation_task import AutomationTask
 from app.models.automation_execution import AutomationExecution
@@ -243,6 +243,39 @@ def _ensure_schema() -> None:
                         col.name, ddl,
                     )
 
+            # --- status CHECK constraint (defense-in-depth, opt-in) ----------
+            # When AUTOMATION_STATUS_CHECK_CONSTRAINT_ENABLED is set, add a
+            # DB-level CHECK so a non-canonical status can never be persisted
+            # (the LLM create tool now validates too, but a future caller
+            # could bypass it). Idempotent: skipped if the named constraint
+            # already exists. Postgres only — SQLite cannot ADD CONSTRAINT
+            # without a table rebuild. NULL status remains allowed (matches
+            # the nullable column definition and the dispatcher self-heal).
+            if (
+                is_pg
+                and settings.AUTOMATION_STATUS_CHECK_CONSTRAINT_ENABLED
+            ):
+                _ck_name = "ck_automation_tasks_status_valid"
+                _existing_cks = {
+                    ck["name"]
+                    for ck in insp.get_check_constraints("automation_tasks")
+                }
+                if _ck_name not in _existing_cks:
+                    _status_vals = ", ".join(
+                        repr(v) for v in AutomationTask.VALID_STATUSES
+                    )
+                    with engine.begin() as conn:
+                        conn.execute(
+                            text(
+                                f"ALTER TABLE automation_tasks ADD CONSTRAINT "
+                                f"{_ck_name} CHECK (status IN ({_status_vals}) "
+                                f"OR status IS NULL)"
+                            )
+                        )
+                    logger.info(
+                        "automation schema: added CHECK constraint %s", _ck_name,
+                    )
+
         # --- chat_sessions (unread flag for automation-run notifications) -----
         # No alembic migration: matches the project convention of idempotent
         # raw SQL column sync at startup (see MEMORY.md "apply columns via
@@ -281,9 +314,42 @@ async def _tick() -> None:
     except Exception as e:
         logger.warning("automation_dispatcher: reaper error: %s", e)
 
-    # ── Due tasks. ──
+    # ── Session (shared by the self-heal sweep and the due query below). ──
     from app.database import SessionLocal
     db = SessionLocal()
+
+    # ── Self-heal: rescue tasks with unknown status values. ────────────
+    # The due query below filters strictly on status == "active", so any
+    # task carrying a non-canonical status (e.g. "running" written by the
+    # LLM create tool before validation landed) would be silently skipped
+    # on every tick — next_run_at advances forever and the task never
+    # fires. Rather than loosening the filter, promote these orphans back
+    # to "active" here (matches the always-on reap_on_startup precedent).
+    # Scope: scheduled tasks only (next_run_at set); manual-only tasks with
+    # a stray status are left alone.
+    try:
+        healed = db.query(AutomationTask).filter(
+            AutomationTask.is_deleted == False,  # noqa: E712
+            AutomationTask.next_run_at.isnot(None),
+            or_(
+                AutomationTask.status.is_(None),
+                ~AutomationTask.status.in_(AutomationTask.VALID_STATUSES),
+            ),
+        ).limit(20).all()
+        for t in healed:
+            logger.warning(
+                "automation_dispatcher: self-heal — task %s (%r) has invalid "
+                "status %r, promoting to 'active'",
+                t.id, t.name, t.status,
+            )
+            t.status = "active"
+        if healed:
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning("automation_dispatcher: self-heal sweep failed: %s", e)
+
+    # ── Due tasks. ──
     try:
         now = datetime.now(timezone.utc)
         due: list[AutomationTask] = db.query(AutomationTask).filter(

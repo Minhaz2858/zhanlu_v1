@@ -15,6 +15,11 @@ from app.models.base import TimestampedBase
 class AutomationTask(TimestampedBase):
     __tablename__ = "automation_tasks"
 
+    # Canonical status vocabulary — the single source of truth for the LLM
+    # create tool, the dispatcher self-heal sweep, the optional DB CHECK
+    # constraint, and tests. Never persist anything outside this set.
+    VALID_STATUSES = ("active", "paused", "failed", "completed")
+
     name: Mapped[str] = mapped_column(String(255), nullable=False)
     project: Mapped[str | None] = mapped_column(String(255), nullable=True, default="global")
     project_id: Mapped[str | None] = mapped_column(

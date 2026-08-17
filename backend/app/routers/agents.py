@@ -121,6 +121,11 @@ from app.services.memory_consolidation import consolidate_turn_memory  # noqa: E
 # _create_artifact_tool pipeline so they produce the same preview/links as
 # LLM-driven create_artifact tool calls. Stripped from visible text.
 from app.services.synexia.intent_router import detect_file_intent  # noqa: E402
+from app.services.answer_verification import (  # noqa: E402 — universal self-eval gate
+    build_gap_disclosure,
+    build_replan_nudge,
+    evaluate_answer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -2192,6 +2197,104 @@ def _check_hallucination_guardrail(
     ))
 
 
+class _AnswerGateResult(NamedTuple):
+    action: str  # "none" | "nudge" | "disclose"
+    message: str
+
+
+def _gate_tool_results_from_frontend(tool_calls_for_frontend: list[dict]) -> list[dict]:
+    """Extract summarized tool payloads from frontend tool-call records.
+
+    Each record carries the tool result under ``results``; we forward the raw
+    payload (with the tool name attached) so ``summarize_tool_results`` inside
+    ``evaluate_answer`` can normalize it. Never dumps full payloads anywhere.
+    """
+    out: list[dict] = []
+    for tc in tool_calls_for_frontend or []:
+        if not isinstance(tc, dict):
+            continue
+        name = tc.get("name") or tc.get("tool_name") or ""
+        results = tc.get("results")
+        if isinstance(results, dict):
+            raw = dict(results)
+            raw.setdefault("tool", name)
+            out.append(raw)
+        elif isinstance(results, list) and results:
+            out.append({"tool": name, "rows": results})
+        elif isinstance(results, str) and results.strip():
+            # Text payloads (web search / RAG summaries) feed the dimension
+            # coverage detector; never dump full content.
+            out.append({"tool": name, "text": results[:1200]})
+        elif name:
+            out.append({"tool": name})
+    return out
+
+
+async def _check_answer_verification_gate(
+    user_message: str,
+    tool_calls_for_frontend: list[dict],
+    assistant_content: str,
+    *,
+    attempts: int,
+    budget_remaining: int,
+) -> _AnswerGateResult:
+    """Universal Self-Evaluation & Re-Planning gate.
+
+    Invoked at the synthesis boundaries (v2 / resume / v3) AFTER the
+    hallucination guardrail, only when tools were actually called. Runs the
+    hybrid evaluator off-thread with a timeout; ``nudge`` means the caller
+    should append the message and continue the loop, ``disclose`` means the
+    caller should append the gap disclosure to the final answer and break.
+    Flag-off returns ``none`` immediately (byte-identical behavior).
+    """
+    if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
+        return _AnswerGateResult("none", "")
+    if not tool_calls_for_frontend:
+        return _AnswerGateResult("none", "")
+    tool_results = _gate_tool_results_from_frontend(tool_calls_for_frontend)
+    if not tool_results:
+        return _AnswerGateResult("none", "")
+    timeout_s = getattr(settings, "SELF_EVAL_LLM_GATE_TIMEOUT_S", 15.0)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                evaluate_answer,
+                user_message,
+                tool_results,
+                assistant_content,
+                attempts=attempts,
+                budget_remaining=budget_remaining,
+            ),
+            timeout=timeout_s,
+        )
+    except Exception as exc:
+        # Never block the stream on the gate: log and proceed.
+        logger.warning(
+            "answer-verification gate failed/timed out (non-fatal): %s", exc
+        )
+        return _AnswerGateResult("none", "")
+    if result.status == "COMPLETE":
+        logger.debug(
+            "answer-verification gate: action=none status=COMPLETE attempts=%s "
+            "budget=%s signals=%s",
+            attempts, budget_remaining, result.signals,
+        )
+        return _AnswerGateResult("none", "")
+    if result.status == "INCOMPLETE":
+        logger.info(
+            "answer-verification gate: action=nudge attempts=%s budget=%s "
+            "signals=%s gaps=%s",
+            attempts, budget_remaining, result.signals, result.gaps,
+        )
+        return _AnswerGateResult("nudge", build_replan_nudge(result))
+    logger.info(
+        "answer-verification gate: action=disclose attempts=%s budget=%s "
+        "signals=%s gaps=%s",
+        attempts, budget_remaining, result.signals, result.gaps,
+    )
+    return _AnswerGateResult("disclose", build_gap_disclosure(result))
+
+
 def _tool_names_from_schemas(tools: list | None) -> list[str]:
     """Extract the ``name`` field of each tool schema in OpenAI format.
 
@@ -3027,6 +3130,7 @@ async def add_message(
         _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
+        _gate_attempts = 0  # universal self-eval re-plan nudges this turn
         # Finish-line state (UnboundLocalError discipline: initialized BEFORE
         # the loop so any post-loop read is safe). ``dashboard_forced`` tracks
         # whether the dashboard guard forced ``create_dashboard`` this turn;
@@ -3075,26 +3179,27 @@ async def add_message(
                 )
                 llm_messages.append({"role": "user", "content": nudge})
                 break
-                # Finish line: with 3 iterations left, tell the model to stop
-                # exploring and assemble its final answer (injected exactly once).
-                if iteration == MAX_TOOL_ITERATIONS - 3 and not _wrapup_nudged:
-                    _wrapup_nudged = True
-                    llm_messages.append({
-                        "role": "user",
-                        "content": (
-                            "You have 3 steps left. Stop exploring and produce "
-                            "your final answer with what you have."
-                        ),
-                    })
-                # Compute tool_choice for this iteration.  On iteration 0 the
-                # server enforces the matching tool (ask_data_agent /
-                # create_artifact / web_extract / web_search) so a weak
-                # function-calling model cannot simply answer from training
-                # memory.  See ``_compute_tool_choice`` for the precedence.
-                tool_choice = _compute_tool_choice(
-                    user_content, data_ctx_extras, iteration,
-                    tool_names=_tool_names_from_schemas(tools),
-                )
+
+            # Finish line: with 3 iterations left, tell the model to stop
+            # exploring and assemble its final answer (injected exactly once).
+            if iteration == MAX_TOOL_ITERATIONS - 3 and not _wrapup_nudged:
+                _wrapup_nudged = True
+                llm_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have 3 steps left. Stop exploring and produce "
+                        "your final answer with what you have."
+                    ),
+                })
+            # Compute tool_choice for this iteration.  On iteration 0 the
+            # server enforces the matching tool (ask_data_agent /
+            # create_artifact / web_extract / web_search) so a weak
+            # function-calling model cannot simply answer from training
+            # memory.  See ``_compute_tool_choice`` for the precedence.
+            tool_choice = _compute_tool_choice(
+                user_content, data_ctx_extras, iteration,
+                tool_names=_tool_names_from_schemas(tools),
+            )
 
             # Dashboard guard: same logic as the v3 stream — if the user
             # asked for a live dashboard and we've already done the
@@ -3281,6 +3386,22 @@ async def add_message(
                     llm_messages.append({"role": "user", "content": _verify_nudge})
                     _verify_attempts += 1
                     continue
+                # P2.2: Universal Self-Evaluation & Re-Planning gate (re-plan
+                # up to SELF_EVAL_MAX_REPLANS times before best-effort answer).
+                _gate_result = await _check_answer_verification_gate(
+                    user_content,
+                    tool_calls_for_frontend,
+                    assistant_content,
+                    attempts=_gate_attempts,
+                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                )
+                if _gate_result.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _gate_result.message})
+                    _gate_attempts += 1
+                    continue
+                if _gate_result.action == "disclose":
+                    assistant_content = (assistant_content or "") + _gate_result.message
                 break
 
             # Parse all tool calls first so we can execute them in parallel
@@ -4503,6 +4624,21 @@ async def resume_conversation(
                 llm_messages.append({"role": "user", "content": _verify_nudge})
                 _verify_attempts += 1
                 continue
+            # P2.2: Universal Self-Evaluation & Re-Planning gate (resume loop)
+            _gate_result = await _check_answer_verification_gate(
+                user_content,
+                tool_calls_for_frontend,
+                assistant_content,
+                attempts=_gate_attempts,
+                budget_remaining=_final_iteration - iteration,
+            )
+            if _gate_result.action == "nudge":
+                llm_messages.append({"role": "assistant", "content": assistant_content})
+                llm_messages.append({"role": "user", "content": _gate_result.message})
+                _gate_attempts += 1
+                continue
+            if _gate_result.action == "disclose":
+                assistant_content = (assistant_content or "") + _gate_result.message
             break
 
         # Parse + execute tool calls (reuse the parallel execution logic)
@@ -7045,6 +7181,7 @@ async def add_message_stream(
         _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
+        _gate_attempts = 0  # universal self-eval re-plan nudges this turn
         # Initialize BEFORE the loop: the budget guard and the tool-call
         # loop guard can both ``break`` on the FIRST iteration, before the
         # in-loop assignment runs — the post-loop ``if not content_streamed``
@@ -7462,6 +7599,21 @@ async def add_message_stream(
                     llm_messages.append({"role": "user", "content": _verify_nudge})
                     _verify_attempts += 1
                     continue
+                # P2.2: Universal Self-Evaluation & Re-Planning gate (v3 loop)
+                _gate_result = await _check_answer_verification_gate(
+                    user_content,
+                    tool_calls_for_frontend,
+                    assistant_content,
+                    attempts=_gate_attempts,
+                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                )
+                if _gate_result.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _gate_result.message})
+                    _gate_attempts += 1
+                    continue
+                if _gate_result.action == "disclose":
+                    assistant_content = (assistant_content or "") + _gate_result.message
                 break
 
             # Parse and execute tool calls (parallel for multiple)
@@ -8685,17 +8837,33 @@ async def add_message_stream(
         # eval on the non-FSM v3 streaming path. Gated by
         # QUALITY_EVAL_ALL_PATHS.  When the text is revised, the done
         # event carries the updated assistant_content.
+        # (Fixed 2026-08-17): the previous version called
+        # evaluate_response_quality() synchronously INSIDE the async SSE
+        # generator.  That blocked the event loop for the whole LLM eval
+        # (up to 120s per call), so _sse_with_heartbeat couldn't emit its
+        # 5s pings and proxies/browsers timed out — the client saw
+        # "Sorry, the connection was interrupted."  Now offloaded to a
+        # worker thread with a 15s ceiling and eval-only (no re-gen).
         try:
             if getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
                 from app.services.synexia.quality_eval import evaluate_response_quality
-                _qe_result = evaluate_response_quality(
-                    user_message=user_content or "",
-                    assistant_text=assistant_content,
-                )
+
+                async def _run_qe() -> object:
+                    def _sync_qe() -> object:
+                        return evaluate_response_quality(
+                            user_message=user_content or "",
+                            assistant_text=assistant_content,
+                            max_iterations=0,  # eval-only, never re-generate
+                        )
+                    return await asyncio.to_thread(_sync_qe)
+
+                _qe_result = await asyncio.wait_for(_run_qe(), timeout=15.0)
                 if _qe_result.final_text and _qe_result.final_text != assistant_content:
                     assistant_content = _qe_result.final_text
                 # Emit quality eval verdict as SSE event
                 yield f'data: {json.dumps({"type": "quality_eval", "quality_eval": _qe_result.to_dict()})}\n\n'
+        except asyncio.TimeoutError:
+            logger.warning("v3 stream quality eval timed out after 15s (non-fatal)")
         except Exception as _qe_err:
             logger.warning("v3 stream quality eval failed (non-fatal): %s", _qe_err)
 

@@ -451,6 +451,49 @@ INITIATIVE
 - Default to action: a good-enough deliverable now beats a perfect one after three rounds of questions."""
 
 
+_ANSWER_VERIFICATION_BLOCK = """
+
+UNIVERSAL ANSWER VERIFICATION & RE-PLANNING PROTOCOL (HARD RULE)
+Before you finalize ANY answer that involved tools (queries, documents,
+files, APIs, or web search), verify your draft answer against the user's
+request with these FOUR checks:
+1. COMPLETENESS — did you cover every dimension the user asked for
+   (e.g. if they asked for price AND volume, do you have both)?
+2. QUALITY — is this a real answer, not a description of what exists?
+   Row counts, column lists, table names, and "here is the schema" are
+   NOT answers. Metadata is only a means to get to real data.
+3. SOURCE COVERAGE — does the evidence actually support every claim?
+4. PLAUSIBILITY — are the numbers/names plausible for the domain?
+
+RE-PLANNING PROTOCOL
+- If any check fails, DO NOT stop and DO NOT answer with the gap. Instead
+  re-plan: state the gap in ONE sentence, choose the most direct
+  alternative that would obtain the missing dimension, and call the
+  appropriate tool(s) again. You may re-plan up to 3 times per user turn.
+- Try-instead guidance by data source:
+  - Database queries: if you only got metadata or an empty result, run a
+    real data query targeting the missing fields; verify column names
+    first if the query failed validation.
+  - Documents / knowledge bases: if the retrieved passages lack the
+    requested facts, refine the retrieval (different query, broader
+    search, additional document) instead of summarizing what you have.
+  - Files: if the attached file's text did not cover the request, say
+    exactly which part is missing and what file content would be needed.
+  - APIs / web: if a source was empty or irrelevant, try another source,
+    a different endpoint, or a different search query before concluding.
+- When the evidence genuinely cannot answer part of the request, say so
+  explicitly: name the missing dimension and what would be required to
+  obtain it. Never paper over the gap with vague filler.
+
+FORBIDDEN BEHAVIORS
+- NEVER answer with metadata, schemas, or row counts as if they were data.
+- NEVER write "I had trouble putting it all together" or similar vague
+  failure text without first stating exactly what is missing and why.
+- NEVER report "0 results" without first attempting at least one
+  alternative query/source for the same request.
+- NEVER claim you retrieved data you did not actually retrieve."""
+
+
 # ---------------------------------------------------------------------------
 # Decision-summary block parser
 # ---------------------------------------------------------------------------
@@ -1641,6 +1684,16 @@ def get_system_prompt(
     # ("I do not have real-time data access") even though web_search is
     # available.
     prompt = prompt + _runtime_context_block()
+
+    # Universal Answer Verification & Re-Planning Protocol — appended to
+    # EVERY agent path (system, user-created, generic, Data Agent) when
+    # SELF_EVAL_REPLAN_ENABLED is on. Teaches the model to verify its draft
+    # answer against the user's request before final synthesis and to
+    # re-plan (up to 3 attempts) when requested dimensions are missing. The
+    # runtime gate in the agent loop enforces the same protocol
+    # deterministically; flag-gated for rollback.
+    if getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
+        prompt = prompt + _ANSWER_VERIFICATION_BLOCK
 
     # Ecisco BI schema deprecation hint — appended to the ecisco_bi_assistant
     # ONLY (regardless of which code path above resolved its prompt), so the

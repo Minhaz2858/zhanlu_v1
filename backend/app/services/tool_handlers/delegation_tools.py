@@ -33,6 +33,11 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.answer_verification import (  # universal self-eval gate
+    build_gap_disclosure,
+    build_replan_nudge,
+    evaluate_answer,
+)
 from app.services.tool_handlers import db_tools  # ensure DB tools registered
 from app.services.tool_registry import registry
 from app.services.sub_agent_reliability import (
@@ -154,6 +159,7 @@ async def _ask_data_agent(
         sub_context["data_source_id"] = preferred_kb
 
     iterations = 0
+    _gate_attempts = 0  # universal self-eval re-plan nudges this sub-loop turn
     # Default 4 iterations (was 2). The Data Agent now follows a
     # schema-discover -> query -> correct -> synthesize pattern: (1) call
     # `describe_schema`, (2) execute the query, (3) detect bad/null data and
@@ -215,6 +221,25 @@ async def _ask_data_agent(
 
         if not raw_tool_calls:
             final_text = content
+            # P2.2: Universal Self-Evaluation gate (sub-loop) — verify the
+            # draft answer against the question before accepting it. On
+            # INCOMPLETE (e.g. metadata-only answer), inject the gap nudge
+            # and continue so the agent re-plans with a real data query.
+            _g_action, _g_msg = await _sub_loop_answer_gate(
+                question,
+                state,
+                final_text,
+                attempts=_gate_attempts,
+                budget_remaining=max_iterations - iteration,
+                endpoint=endpoint,
+            )
+            if _g_action == "nudge":
+                messages.append({"role": "assistant", "content": final_text})
+                messages.append({"role": "user", "content": _g_msg})
+                _gate_attempts += 1
+                continue
+            if _g_action == "disclose":
+                final_text = (final_text or "") + _g_msg
             break
 
         # Append assistant message
@@ -600,6 +625,79 @@ def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> 
             state["source_id"] = result["source_id"]
         if result.get("source_name"):
             state["source_name"] = result["source_name"]
+
+
+async def _sub_loop_answer_gate(
+    question: str,
+    state: dict,
+    final_text: str,
+    *,
+    attempts: int,
+    budget_remaining: int,
+    endpoint: Optional[str] = None,
+) -> tuple[str, str]:
+    """Universal Self-Evaluation gate for the Data Agent sub-loop.
+
+    Runs the hybrid evaluator (deterministic-only unless both flags on) on
+    the draft answer plus the accumulated query state. Returns ``(action,
+    message)``:
+
+    - ``("", "")`` — skipped (flag off / no tool evidence) or COMPLETE
+    - ``("nudge", msg)`` — re-plan and continue the loop
+    - ``("disclose", msg)`` — append the gap disclosure and break
+
+    TOTAL: never raises and never blocks the loop on failure. Metadata-only
+    evidence (no business rows ever captured) is represented as a
+    schema-shaped payload so the metadata detector fires and the agent is
+    nudged to run a real data query.
+    """
+    if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
+        return "", ""
+    tool_results: list[dict] = []
+    rows = state.get("last_rows")
+    if rows is not None:
+        tool_results.append({
+            "tool": "execute_query",
+            "rows": rows,
+            "sql": state.get("last_sql"),
+        })
+    else:
+        meta_rows = state.get("last_metadata_rows")
+        if meta_rows is not None:
+            # Schema-shaped payload: columns known but ZERO business rows,
+            # so the metadata-only detector fires and nudges a real query.
+            first = meta_rows[0] if meta_rows and isinstance(meta_rows[0], dict) else {}
+            tool_results.append({
+                "tool": "execute_query",
+                "columns": list(first.keys()),
+                "row_count": 0,
+                "rows": [],
+            })
+    if not tool_results:
+        # No tool evidence accumulated — nothing to verify against.
+        return "", ""
+    timeout_s = getattr(settings, "SELF_EVAL_LLM_GATE_TIMEOUT_S", 15.0)
+    try:
+        result = await asyncio.wait_for(
+            asyncio.to_thread(
+                evaluate_answer,
+                question,
+                tool_results,
+                final_text,
+                attempts=attempts,
+                budget_remaining=budget_remaining,
+                endpoint=endpoint,
+            ),
+            timeout=timeout_s,
+        )
+    except Exception as exc:
+        logger.warning("sub-loop answer-verification failed (non-fatal): %s", exc)
+        return "", ""
+    if result.status == "COMPLETE":
+        return "", ""
+    if result.status == "INCOMPLETE":
+        return "nudge", build_replan_nudge(result)
+    return "disclose", build_gap_disclosure(result)
 
 
 async def _call_llm(

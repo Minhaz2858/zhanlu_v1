@@ -1387,10 +1387,20 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
             next_run_at = None
 
     # Default status to "active" when a valid cron is supplied so the new
-    # task actually runs. The frontend can still toggle to paused.
+    # task actually runs. The frontend can still toggle to paused. The LLM
+    # may pass a non-canonical value (e.g. "running") — coerce it to the
+    # canonical default instead of persisting garbage that the dispatcher
+    # would silently skip forever (see AutomationTask.VALID_STATUSES).
     status = args.get("status")
     if not status:
         status = "active" if cron_expression else "paused"
+    elif status not in AutomationTask.VALID_STATUSES:
+        _default_status = "active" if cron_expression else "paused"
+        logger.warning(
+            "create_automation: invalid status %r -> coerced to %r (task=%r)",
+            status, _default_status, args.get("name", "Untitled Automation"),
+        )
+        status = _default_status
 
     # Resolve session_id: explicit arg wins, else chat session from context.
     # The fallback is what makes the Manus-style "Scheduled" button appear

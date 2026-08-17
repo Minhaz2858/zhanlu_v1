@@ -498,23 +498,37 @@ def evaluate_response_quality(
 
     spec = task_spec or {}
 
-    # Build an async→sync llm_call bridge via asyncio
+    # Build an async→sync llm_call bridge via asyncio.
+    # Always spin a NEW event loop: this bridge is invoked from worker
+    # threads (via asyncio.to_thread in the v3 streaming paths), never
+    # from the running loop itself.  Using get_running_loop() here would
+    # raise "RuntimeError: This event loop is already running" whenever a
+    # loop IS running (the old bug), or create an unclosed loop otherwise.
+    # (Fixed 2026-08-17.)
     def _sync_llm_bridge(prompt="", messages=None, temperature=0.0):
         """Sync bridge for quality eval's `llm_call` parameter."""
         import asyncio
         from app.services.llm_service import call_llm
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            loop = asyncio.new_event_loop()
-        return loop.run_until_complete(
-            call_llm(
-                prompt=prompt,
-                messages=messages,
-                temperature=temperature,
-                task_type="simple_chat",
-            )
+
+        result = call_llm(
+            prompt=prompt,
+            messages=messages,
+            temperature=temperature,
+            task_type="simple_chat",
         )
+        # Production call_llm is async → run it in a fresh loop (we are in a
+        # worker thread via asyncio.to_thread).  Tests may inject a plain
+        # sync stub returning a dict → pass it through untouched.
+        if not asyncio.iscoroutine(result):
+            return result
+        loop = asyncio.new_event_loop()
+        try:
+            return loop.run_until_complete(result)
+        finally:
+            try:
+                loop.close()
+            except Exception:  # pragma: no cover — loop teardown best-effort
+                pass
 
     return run_quality_loop(
         user_message=user_message,
