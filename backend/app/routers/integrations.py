@@ -3,6 +3,7 @@
 import os
 import json
 import uuid
+import logging
 from datetime import datetime
 import httpx
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
@@ -17,6 +18,8 @@ from app.services.llm_service import (
 )
 
 router = APIRouter(tags=["integrations"])
+
+logger = logging.getLogger(__name__)
 
 
 @router.post("/apps/{app_id}/integration-endpoints/Core/InvokeLLM")
@@ -225,7 +228,15 @@ async def upload_file(
         )
 
     unique_name = f"{uuid.uuid4().hex}{ext}"
-    file_path = settings.upload_path / unique_name
+    try:
+        upload_dir = settings.upload_path
+    except Exception as e:
+        logger.exception("upload directory unavailable: %s", settings.UPLOAD_DIR)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Upload storage unavailable: {e}",
+        )
+    file_path = upload_dir / unique_name
 
     # ── Stream to disk with a size cap ─────────────────────────────────
     # Reading the whole body into memory first (the old `await
@@ -256,6 +267,7 @@ async def upload_file(
     except HTTPException:
         raise
     except Exception as e:
+        logger.exception("upload write failed: %s", file_path)
         try:
             file_path.unlink(missing_ok=True)
         except Exception:

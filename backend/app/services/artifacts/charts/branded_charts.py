@@ -69,14 +69,15 @@ def style_chart(chart, theme: dict, kind: str = "bar") -> None:
             logger.debug("style_chart: failed to color series %s", i, exc_info=True)
 
     # Hide major gridlines on the value axis (category axis has none).
+    # NOTE: accessing `val_axis.major_gridlines` *creates* the gridline object
+    # in python-pptx, so the only way to truly remove them is to set the
+    # `has_major_gridlines` flag to False. Setting the line fill to background
+    # is not enough (the object still exists and renders).
     try:
         val_axis = chart.value_axis
-        val_axis.major_gridlines.format.line.color.rgb = RGBColor.from_string(
-            _hex(theme, "border", "#E2E8F0"))
-        # Make gridlines invisible (no stroke).
-        val_axis.major_gridlines.format.line.fill.background()
+        val_axis.has_major_gridlines = False
     except Exception:
-        logger.debug("style_chart: gridline styling failed", exc_info=True)
+        logger.debug("style_chart: gridline hide failed", exc_info=True)
 
     # Data labels on, positioned above bars / outside-end pies.
     try:

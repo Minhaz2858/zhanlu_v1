@@ -155,6 +155,90 @@ for dashboards, forecasting, and decision-making in the Ecisco BI project):
 
 
 # ---------------------------------------------------------------------------
+# Schema-Aware Multi-Table Query Protocol — appended to ecisco_bi_assistant
+# (and, later, all db-bound agents) when SCHEMA_GRAPH_ENABLED is on. Fully
+# generic: it reasons purely over schema structure (tables, columns, keys,
+# join edges) — zero business keywords, zero domain-specific column names.
+# ---------------------------------------------------------------------------
+
+_SCHEMA_AWARE_PROTOCOL_BLOCK = """
+SCHEMA-AWARE QUERY PROTOCOL (follow this whenever the schema context lists
+tables with join edges)
+
+0. COMMAND CLASSIFICATION (FIRST DECISION). Before doing anything, classify the
+   user's intent:
+
+   EXECUTION COMMANDS — do NOT pause, do NOT ask permission, execute immediately:
+   - "pull", "retry", "run", "get", "show", "give me", "fetch", "retrieve",
+     "calculate", "make a report", "create dashboard", "generate analysis".
+   - Any request with a specific time range ("last 30 days", "this week").
+   - Any request with "retry" or "try again".
+
+   PLANNING/DIAGNOSTIC COMMANDS — analysis-first is OK:
+   - "what tables do we have?", "describe the schema", "is there data for...",
+     "can you check if...", "do we have...".
+
+   If the user uses an EXECUTION COMMAND:
+   - SKIP readiness checks. SKIP aggregate previews (COUNT/MIN/MAX).
+   - Build the final query immediately using the best available columns.
+   - Execute it. Return the result.
+   - Report data quality issues in the INSIGHTS section, not as blockers.
+   - This overrides any instinct to ask a clarifying question first.
+
+1. PICK THE BEST TABLE. Start from the table whose columns best match what the
+   question asks for. Read the listed columns and sample rows before writing SQL.
+   For EXECUTION commands, prefer schema context/describe over aggregate previews.
+2. CHECK THE EDGES BEFORE ANSWERING. Before you conclude "I only have one
+   table" or "there is no way to join these", inspect the JOIN EDGES section.
+   Each edge names the two tables, the join columns, and its kind/confidence:
+   - FK: a declared foreign key — join silently.
+   - VALUE_OVERLAP (confidence >= 0.8): the two columns share real values —
+     join silently.
+   - NAME_MATCH (confidence ~0.5): the columns are only name-similar — treat as
+     a HINT, not proof. Verify by inspecting sample rows before relying on it.
+3. AUTO-JOIN OR ASK.
+   - Join silently when an edge is FK or VALUE_OVERLAP with confidence >= 0.8.
+   - If the only available edge is low-confidence (NAME_MATCH) or ambiguous,
+     you MAY ask the user ONE short question to confirm the join columns.
+   - For EXECUTION commands, NEVER ask: join on the highest-confidence edge
+     available and state your assumption.
+   - In unattended/scheduled runs (no interactive user is waiting), NEVER ask:
+     join on the highest-confidence edge available and state your assumption.
+4. CITE THE EVIDENCE. Whenever you join tables, say which table you joined to
+   which and on which columns, with the edge kind (e.g. "joined X to Y on
+   X.col = Y.col via FK"). Never claim a relationship that no edge supports.
+5. DATA QUALITY REPORTER. If you detect data quality issues while building an
+   EXECUTION query:
+   - Automatically select the best alternative column (e.g. if FPRODUCEDATE is
+     null, use FUPDATETIME instead).
+   - Proceed with the query using the working column.
+   - Note the issue in the response insights: "⚠️ Used FUPDATETIME instead of
+     FPRODUCEDATE (null)".
+   - NEVER stop execution to ask permission on column substitutions.
+6. NEVER HALLUCINATE COLUMNS. Use only columns the schema context lists. If the
+   query is rejected for an unknown column, correct it using the available
+   columns the rejection reports — do not guess a new column name.
+7. FORBIDDEN BEHAVIORS:
+   ❌ NEVER say "Ready to run when you say go".
+   ❌ NEVER say "Just say the word and I'll fire the corrected pull".
+   ❌ NEVER say "I'll wait for your go-ahead".
+   ❌ NEVER run COUNT(*)/MIN/MAX as a separate step before the real query
+     (for EXECUTION commands).
+   ❌ NEVER ask "Should I proceed?" after identifying a fixable issue.
+   If you know the fix (wrong column, wrong filter), apply it and execute.
+
+8. EXAMPLE (few-shot):
+   User: "Retry the full 30-day inventory pull"
+   ❌ WRONG (current behavior): run a single aggregate row, report the row count,
+   then say "I'll wait for your go-ahead".
+   ✅ CORRECT (target behavior): pull the last 30 days using FUPDATETIME
+   (FPRODUCEDATE was null, so use the update timestamp instead), return the
+   results with metrics, then note "⚠️ Note: FPRODUCEDATE is 100% null in this
+   table, so I used FUPDATETIME for the date filter."
+"""
+
+
+# ---------------------------------------------------------------------------
 # Autonomy Contract — appended to every system + user agent prompt.
 # Prevents agents from pushing technical work (pip install, share schema,
 # export CSV) onto the user. ~250 tokens; concise enough for small models.
@@ -1429,6 +1513,14 @@ def get_system_prompt(
         settings, "ECISCO_BI_SCHEMA_DEPRECATION_ENABLED", True
     ):
         prompt = prompt + _ECISCO_BI_SCHEMA_HINT_BLOCK
+
+    # Schema-Aware Multi-Table Query Protocol — appended to ecisco_bi_assistant
+    # ONLY when SCHEMA_GRAPH_ENABLED, so the LLM reasons over join edges and
+    # self-corrects on structural validation feedback. Flag-gated for rollback.
+    if agent_name == "ecisco_bi_assistant" and getattr(
+        settings, "SCHEMA_GRAPH_ENABLED", False
+    ):
+        prompt = prompt + _SCHEMA_AWARE_PROTOCOL_BLOCK
 
     # 4. If the user message is time-sensitive, contains a URL, or asks for
     #    a file, append the matching [GROUNDING REQUIRED] / [FILE

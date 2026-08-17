@@ -457,8 +457,13 @@ def _layout_chart_full(slide, sp, theme, idx, total) -> None:
             Inches(SLIDE_W_IN - 2 * MARGIN_IN), Inches(5.3), cd,
         )
     cs.chart.has_title = False
-    # Defer import to avoid a circular dep at module load.
-    from app.services.artifacts.charts.branded_charts import style_chart
+    # Defer import to avoid a circular dep at module load.  Prefer the
+    # vendored flat module (sandbox container has no ``app`` package); fall
+    # back to the in-process dotted path.
+    try:
+        from branded_charts import style_chart
+    except Exception:
+        from app.services.artifacts.charts.branded_charts import style_chart
     style_chart(cs.chart, theme, chart_kind)
 
 
@@ -487,7 +492,10 @@ def _layout_chart_with_bullets(slide, sp, theme, idx, total) -> None:
             Inches(6.8), Inches(5.0), cd,
         )
         cs.chart.has_title = False
-        from app.services.artifacts.charts.branded_charts import style_chart
+        try:
+            from branded_charts import style_chart
+        except Exception:
+            from app.services.artifacts.charts.branded_charts import style_chart
         style_chart(cs.chart, theme, chart_kind)
     # Right: bullets (5.2" wide)
     right_left = MARGIN_IN + 7.1

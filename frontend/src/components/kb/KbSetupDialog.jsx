@@ -37,6 +37,10 @@ export default function KbSetupDialog({ open, onOpenChange, onSaved, editItem })
 
   async function handleSubmit() {
     if (!form.name.trim()) return;
+    if (form.source_kind === 'file' && !form.file_url) {
+      setError(t.kb.uploadFirst || 'Please upload a file before saving.');
+      return;
+    }
     setSaving(true);
     setError('');
     try {
@@ -77,7 +81,7 @@ export default function KbSetupDialog({ open, onOpenChange, onSaved, editItem })
     } finally { setSaving(false); }
   }
 
-  const canSubmit = form.name.trim().length > 0 && (form.source_kind === 'file' || form.db_type);
+  const canSubmit = form.name.trim().length > 0 && (form.source_kind === 'file' ? !!form.file_url : !!form.db_type);
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

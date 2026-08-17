@@ -142,10 +142,40 @@ class NLAnswerService:
                     top_k=8,
                 )
                 if linker_result and linker_result.get("slice_text"):
-                    schema_text = linker_result["slice_text"]
                     schema_info = _schema_info_from_linker(
                         linker_result, schema_svc, kb_id
                     )
+                    # ── SchemaGraph path (flag-gated): structural view + edges ──
+                    candidate_tables = [
+                        t.get("table_name")
+                        for t in linker_result.get("tables", [])
+                        if t.get("table_name")
+                    ]
+                    if settings.SCHEMA_GRAPH_ENABLED and candidate_tables:
+                        try:
+                            from app.services.db.schema_graph import SchemaGraph
+                            graph = await asyncio.to_thread(
+                                lambda: SchemaGraph(self._db, kb_id).build(
+                                    candidate_tables
+                                )
+                            )
+                            graph_text = graph.to_llm_context()
+                            if graph_text.strip():
+                                schema_text = graph_text
+                                logger.debug(
+                                    "NLAnswer: using schema graph (%d tables)",
+                                    len(candidate_tables),
+                                )
+                            else:
+                                schema_text = linker_result["slice_text"]
+                        except Exception as e:
+                            logger.warning(
+                                "NLAnswer: schema graph failed (falling back to "
+                                "catalog slice): %s", e,
+                            )
+                            schema_text = linker_result["slice_text"]
+                    else:
+                        schema_text = linker_result["slice_text"]
                     logger.debug(
                         "NLAnswer: using catalog slice (%d tables in context)",
                         len(linker_result.get("tables", [])),
@@ -215,6 +245,29 @@ class NLAnswerService:
                     "sql": sql,
                     "source_id": kb_id,
                 }
+
+        # 2c. Structural schema validation (flag-gated): one self-correct retry.
+        if settings.SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED:
+            try:
+                from app.services.nl2sql.schema_validator import validate_against_schema
+                vres = validate_against_schema(sql, kb_id, self._db)
+                if not vres.get("is_valid", True):
+                    logger.warning(
+                        "NLAnswer: generated SQL failed schema validation for KB %s: %s",
+                        kb_id, "; ".join(str(e) for e in vres.get("errors", [])),
+                    )
+                    corrected = await self._text_to_sql_with_correction(
+                        question,
+                        schema_info,
+                        schema_text=schema_text,
+                        project_id=project_id,
+                        errors=vres.get("errors", []),
+                        available_columns=vres.get("available_columns", {}),
+                    )
+                    if corrected and corrected != sql:
+                        sql = corrected
+            except Exception as e:
+                logger.debug("NLAnswer: schema validator error: %s", e)
 
         # 3. Execute
         try:
@@ -307,6 +360,38 @@ class NLAnswerService:
         ]
         text = await _chat(messages, temperature=0.0)
         return _strip_sql_fences(text)
+
+    async def _text_to_sql_with_correction(
+        self,
+        question: str,
+        schema_info: dict,
+        schema_text: str | None = None,
+        project_id: str | None = None,
+        errors: list[str] | None = None,
+        available_columns: dict | None = None,
+    ) -> str | None:
+        """One self-correct retry: re-generate SQL with validator feedback.
+
+        Appends the structural validator's error list + the real available
+        columns to the schema context so the LLM can fix hallucinated
+        table/column references in a single follow-up call.
+        """
+        correction = ["The previous SQL was rejected for these reasons:"]
+        for e in errors or []:
+            correction.append(f"- {e}")
+        if available_columns:
+            correction.append("Available columns (use only these):")
+            for table, cols in available_columns.items():
+                correction.append(f"- {table}: {', '.join(cols)}")
+        note = "\n".join(correction)
+        augmented = f"{schema_text}\n\n{note}" if schema_text else note
+        try:
+            return await self._text_to_sql(
+                question, schema_info, schema_text=augmented, project_id=project_id
+            )
+        except Exception as e:
+            logger.debug("NLAnswer: correction retry failed: %s", e)
+            return None
 
     async def _narrate(self, question: str, exec_result: dict) -> str:
         """Ask the LLM to narrate the rows into a natural-language answer."""

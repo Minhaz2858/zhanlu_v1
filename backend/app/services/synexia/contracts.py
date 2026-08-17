@@ -303,6 +303,10 @@ class SlidePlan(BaseModel):
     kpi_specs: list[KPISpecInSlide] = Field(default_factory=list)
     notes: str = ""
     narrative_role: str = "context"  # hook | context | evidence | insight | action | closing
+    # --- Phase 1B: assertion-style headline + body budgets (additive) ------
+    headline_style: str = "topic"  # topic | assertion
+    max_bullets: int = 5
+    max_words_per_bullet: int = 12
 
 
 class DeckPlan(BaseModel):
@@ -320,6 +324,7 @@ class DeckPlan(BaseModel):
     slides: list[SlidePlan] = Field(default_factory=list)
     summary: str = ""
     methodology: str = ""
+    headline_style: str = "topic"  # topic | assertion (deck-wide default)
 
 
 # ---------------------------------------------------------------------------

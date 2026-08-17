@@ -29,6 +29,7 @@ from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta, KBTableRelation
 from app.services.db.connector_factory import get_connector
+from app.services.knowledge_graph.join_edge_detector import detect_join_edges, type_bucket
 
 logger = logging.getLogger(__name__)
 # Ensure INFO logs are visible even when the root logger is at WARNING.
@@ -108,6 +109,8 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             await _generate_descriptions(tables)
             await asyncio.to_thread(_persist_catalog, db, kb.id, tables)
             await asyncio.to_thread(_persist_relations, db, kb.id, tables)
+            if settings.CATALOG_JOIN_EDGES_ENABLED:
+                await asyncio.to_thread(_persist_join_edges, db, kb.id, tables)
             await _bootstrap_metrics(db, kb, tables)
         await asyncio.to_thread(_embed_catalog, kb.id, tables)
 
@@ -254,6 +257,8 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
             schema_name, table_type, columns = _normalize_desc(desc)
             if row_count and columns:
                 _sample_column_values(conn, table_name, columns)
+                if settings.CATALOG_JOIN_EDGES_ENABLED:
+                    _sample_joinable_values(conn, table_name, columns)
             coverage = None
             if settings.KG_COVERAGE_PROBE_ENABLED and columns:
                 coverage = _probe_coverage(conn, table_name, columns)
@@ -385,6 +390,50 @@ def _sample_column_values(conn: Any, table: str, columns: list[dict]) -> None:
                 f"SELECT DISTINCT {_maybe_quote(conn, col)} "
                 f"FROM {_maybe_quote(conn, table)} LIMIT {_SAMPLE_LIMIT}",
                 max_rows=_SAMPLE_LIMIT,
+                timeout_s=ROW_COUNT_TIMEOUT_S,
+            )
+            values = []
+            for r in rows or []:
+                v = list(r.values())[0] if isinstance(r, dict) else r[0]
+                if v is None:
+                    continue
+                s = str(v).strip()[:_SAMPLE_VALUE_LEN]
+                if s:
+                    values.append(s)
+            if values:
+                c["value_samples"] = values
+        except Exception:
+            continue
+
+
+# Max joinable columns sampled per table for value-overlap inference.
+_MAX_JOINABLE_SAMPLE_COLS = 8
+
+
+def _sample_joinable_values(conn: Any, table: str, columns: list[dict]) -> None:
+    """Attach ``value_samples`` to joinable columns (int + short varchar).
+
+    These samples feed ``detect_join_edges`` for VALUE_OVERLAP inference.
+    Type-based selection only (no name keywords); columns already sampled by
+    ``_sample_column_values`` are skipped to avoid duplicate queries.
+    Best-effort: any failure is swallowed — join inference simply has fewer
+    samples.
+    """
+    candidates = [
+        c
+        for c in columns
+        if c.get("column_name")
+        and type_bucket(c.get("data_type")) is not None
+        and not c.get("value_samples")
+    ]
+    limit = settings.JOIN_EDGE_SAMPLE_LIMIT
+    for c in candidates[:_MAX_JOINABLE_SAMPLE_COLS]:
+        col = c.get("column_name", "")
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT {_maybe_quote(conn, col)} "
+                f"FROM {_maybe_quote(conn, table)} LIMIT {limit}",
+                max_rows=limit,
                 timeout_s=ROW_COUNT_TIMEOUT_S,
             )
             values = []
@@ -731,6 +780,84 @@ def _persist_relations(db: Session, kb_id: str, tables: list[dict]) -> None:
                 )
                 db.add(rel)
     db.commit()
+
+
+def _persist_join_edges(db: Session, kb_id: str, tables: list[dict]) -> None:
+    """Infer and persist VALUE_OVERLAP / NAME_MATCH edges into kb_table_relation.
+
+    Ranking guard (explicit requirement): an existing edge for the same
+    directed pair is only overwritten when the new edge has *strictly higher*
+    confidence. A declared FK (confidence 1.0) is never downgraded.
+    """
+    edges = detect_join_edges(tables)
+    if not edges:
+        logger.info("join_edge: kb=%s no inferred edges", kb_id)
+        return
+
+    name_to_id = {t["table_name"]: t.get("_meta_id") for t in tables}
+    added = 0
+    skipped = 0
+    for e in edges:
+        src_id = name_to_id.get(e["source_table"])
+        tgt_id = name_to_id.get(e["target_table"])
+        if not src_id or not tgt_id:
+            continue
+
+        existing = (
+            db.query(KBTableRelation)
+            .filter(
+                KBTableRelation.kb_id == kb_id,
+                KBTableRelation.source_table_meta_id == src_id,
+                KBTableRelation.target_table_meta_id == tgt_id,
+            )
+            .first()
+        )
+
+        if existing:
+            # Guard 1: a declared FK is ground truth — never downgrade.
+            if existing.relation_type == "FK":
+                logger.warning(
+                    "join_edge: skipping inferred %s edge for FK pair %s→%s",
+                    e["kind"], e["source_table"], e["target_table"],
+                )
+                skipped += 1
+                continue
+            # Guard 2: overwrite only on strictly higher confidence.
+            if (existing.confidence or 0.0) >= e["confidence"]:
+                logger.warning(
+                    "join_edge: skipping lower-confidence edge (%s %.3f) for "
+                    "existing pair %s→%s (%s %.3f)",
+                    e["kind"], e["confidence"], e["source_table"],
+                    e["target_table"], existing.relation_type,
+                    existing.confidence,
+                )
+                skipped += 1
+                continue
+            existing.relation_type = e["kind"]
+            existing.source_columns = e["source_columns"]
+            existing.target_columns = e["target_columns"]
+            existing.confidence = e["confidence"]
+            existing.description = json.dumps(e.get("evidence", {}), ensure_ascii=False)
+            added += 1
+        else:
+            db.add(KBTableRelation(
+                id=str(uuid.uuid4()),
+                kb_id=kb_id,
+                source_table_meta_id=src_id,
+                target_table_meta_id=tgt_id,
+                relation_type=e["kind"],
+                source_columns=e["source_columns"],
+                target_columns=e["target_columns"],
+                confidence=e["confidence"],
+                description=json.dumps(e.get("evidence", {}), ensure_ascii=False),
+            ))
+            added += 1
+
+    db.commit()
+    logger.info(
+        "join_edge: kb=%s persisted %d inferred edges (%d skipped)",
+        kb_id, added, skipped,
+    )
 
 
 # ── embeddings (ChromaDB) ──────────────────────────────────────────────────

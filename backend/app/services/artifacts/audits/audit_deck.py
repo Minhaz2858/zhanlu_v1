@@ -251,9 +251,12 @@ def check_placeholder(prs: Any) -> Finding:
     return Finding("placeholder_text", "No placeholder/lorem text", "PASS", "")
 
 
+MAX_BULLETS_PER_BLOCK = 5  # tightened per Phase 1B (≤ 5 bullets per block)
+
+
 def check_density(prs: Any) -> Finding:
     """Flag any single text block (callout, list, paragraph) exceeding the
-    6-line / 36-word budget.
+    6-line / 36-word budget OR more than 5 bullets.
 
     Counts PER text frame, not summed across the whole slide: a KPI tile
     grid or data table legitimately holds many short data labels, and the
@@ -269,20 +272,130 @@ def check_density(prs: Any) -> Finding:
                 continue
             words = 0
             lines = 0
+            bullet_paras = 0
             for p in shape.text_frame.paragraphs:
                 txt = (p.text or "").strip()
                 if txt:
                     lines += 1
                     words += len(txt.split())
+                    # A bullet paragraph starts with a bullet glyph or is a
+                    # short standalone line in a multi-paragraph block.
+                    if txt[0] in "•◦▪-*" or len(shape.text_frame.paragraphs) > 1:
+                        bullet_paras += 1
             if words > BODY_WORD_CEILING or lines > BODY_LINE_CEILING:
                 nm = getattr(shape, "name", "?")
                 over.append(f"slide {idx}: {words} words / {lines} lines in {nm}")
+            elif bullet_paras > MAX_BULLETS_PER_BLOCK:
+                nm = getattr(shape, "name", "?")
+                over.append(
+                    f"slide {idx}: {bullet_paras} bullets in {nm} "
+                    f"(max {MAX_BULLETS_PER_BLOCK})"
+                )
     if over:
         return Finding(
-            "density_6x6", f"&le; {BODY_WORD_CEILING} words / &le; {BODY_LINE_CEILING} lines per block",
+            "density_6x6",
+            f"&le; {BODY_WORD_CEILING} words / &le; {BODY_LINE_CEILING} lines / "
+            f"&le; {MAX_BULLETS_PER_BLOCK} bullets per block",
             "FAIL", f"{len(over)} block(s) over budget", over,
         )
     return Finding("density_6x6", "6&times;6 density rule", "PASS", "")
+
+
+def check_overflow(prs: Any) -> Finding:
+    """Flag text frames whose estimated rendered height exceeds the shape
+    height (with a 1.05x tolerance) — i.e. text that would overflow its box.
+
+    Height is estimated from per-run font size + line wrapping at the shape
+    width.  This is a cheap proxy for true layout overflow (no rendering
+    engine needed) and catches the "too much text in a small callout" class.
+    """
+    overflow: list[str] = []
+    for idx, slide in enumerate(prs.slides, start=1):
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            if not (shape.width and shape.height):
+                continue
+            box_w_in = _in(shape.width) or 0.0
+            box_h_in = _in(shape.height) or 0.0
+            if box_w_in <= 0 or box_h_in <= 0:
+                continue
+            # Estimate lines from text length vs wrap capacity.
+            est_lines = 0.0
+            for p in shape.text_frame.paragraphs:
+                txt = (p.text or "").strip()
+                if not txt:
+                    est_lines += 0.5
+                    continue
+                # largest run size in the paragraph drives line height
+                max_pt = 16.0
+                for r in p.runs:
+                    if r.font.size:
+                        max_pt = max(max_pt, r.font.size.pt)
+                # approx chars per line for a typical proportional font.
+                char_w_in = (max_pt * 0.0095)  # ~0.0095" per pt char
+                chars_per_line = max(1, int(box_w_in / char_w_in))
+                est_lines += max(1.0, len(txt) / chars_per_line)
+                # paragraph spacing
+                est_lines += 0.2
+            line_h_in = 0.20  # ~14.4pt line height
+            est_h_in = est_lines * line_h_in
+            if est_h_in > box_h_in * 1.05:
+                nm = getattr(shape, "name", "?")
+                overflow.append(
+                    f"slide {idx}: {nm} est {est_h_in:.2f}\" vs box {box_h_in:.2f}\""
+                )
+    if overflow:
+        return Finding(
+            "overflow", "No text overflows its container", "FAIL",
+            f"{len(overflow)} shape(s) with estimated overflow", overflow,
+        )
+    return Finding("overflow", "Text overflow", "PASS", "")
+
+
+# Topic-label titles that are NOT assertions (mirror deck_planner heuristic).
+_TOPIC_LABELS = {
+    "key findings", "findings", "insights", "summary", "overview", "analysis",
+    "recommendations", "conclusion", "conclusions", "introduction", "background",
+    "methodology", "data", "results", "next steps", "agenda", "highlights",
+    "takeaways", "discussion", "appendix", "thank you",
+}
+
+
+def check_assertion_headline(prs: Any) -> Finding:
+    """Cheap proxy: slide titles should be assertion sentences, not topic
+    labels.  We flag titles that are short noun phrases (<= 3 words, no
+    terminal punctuation, and either a known label or no takeaway verb).
+
+    This is intentionally cheap — the planner/polish already enforce
+    assertion headlines at content time; this rule is the safety net.
+    """
+    bad: list[str] = []
+    for idx, slide in enumerate(prs.slides, start=1):
+        title_shape = slide.shapes.title
+        if title_shape is None or not title_shape.has_text_frame:
+            continue
+        title = (title_shape.text_frame.text or "").strip()
+        if not title:
+            continue
+        t = title.strip().strip(".:").lower()
+        words = title.split()
+        if t in _TOPIC_LABELS:
+            bad.append(f"slide {idx}: topic-label title {title!r}")
+            continue
+        if len(words) <= 3 and not any(p in title for p in [".", "!", "?"]):
+            # short noun phrase with no takeaway verb
+            if not any(w in title.lower() for w in
+                       ["grew", "rose", "fell", "dropped", "increased", "decreased",
+                        "by", "to", "%", "vs", "versus", "led", "drove", "hit",
+                        "reached", "top", "lowest", "highest", "is", "are"]):
+                bad.append(f"slide {idx}: likely topic-label title {title!r}")
+    if bad:
+        return Finding(
+            "assertion_headline", "Slide titles are assertions, not topic labels", "WARN",
+            f"{len(bad)} topic-label title(s)", bad,
+        )
+    return Finding("assertion_headline", "Assertion headlines", "PASS", "")
 
 
 def check_font_floor(prs: Any) -> Finding:
@@ -501,6 +614,7 @@ def check_alt_text(prs: Any) -> Finding:
 CHECKS = (
     check_placeholder,
     check_density,
+    check_overflow,
     check_font_floor,
     check_typography,
     check_off_canvas,
@@ -509,6 +623,7 @@ CHECKS = (
     check_overlap,
     check_contrast,
     check_alt_text,
+    check_assertion_headline,
 )
 
 

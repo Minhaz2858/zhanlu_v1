@@ -39,6 +39,7 @@ _POLISH_SCHEMA: dict[str, Any] = {
                     "subtitle": {"type": "string"},
                     "bullets": {"type": "array", "items": {"type": "string"}},
                     "notes": {"type": "string"},
+                    "headline_style": {"type": "string", "enum": ["topic", "assertion"]},
                 },
                 "required": ["title"],
             },
@@ -67,6 +68,8 @@ def _build_polish_prompt(plan: DeckPlan, user_message: str) -> str:
         "- Return valid JSON matching the requested schema.\n"
         "- Return EXACTLY one slide object per input slide, in the same order.\n"
         "- Tighten each title to at most 8 words.\n"
+        "- Rewrite topic-label titles into assertion headlines (a full sentence "
+        "stating the takeaway), not a noun phrase.\n"
         "- Shorten each bullet to at most 12 words; drop filler and redundancies.\n"
         "- Write 1-2 sentence speaker notes per slide.\n"
         "- Do NOT add, remove, or reorder slides; do NOT change layouts.\n"
@@ -114,12 +117,20 @@ def _apply_polish(plan: DeckPlan, data: dict[str, Any]) -> DeckPlan:
                 kpi_specs=orig.kpi_specs,
                 notes=item.get("notes", orig.notes) or "",
                 narrative_role=orig.narrative_role,
+                headline_style=item.get("headline_style", orig.headline_style) or orig.headline_style,
+                max_bullets=orig.max_bullets,
+                max_words_per_bullet=orig.max_words_per_bullet,
             )
         )
 
-    return plan.model_copy(
+    polished_plan = plan.model_copy(
         update={"title": data.get("title") or plan.title, "slides": polished}
     )
+    # Guarantee assertion-style headlines after polish (deterministic; no extra
+    # LLM call beyond the polish itself).
+    from app.services.artifacts.deck_planner import _enforce_assertion_headlines
+
+    return _enforce_assertion_headlines(polished_plan)
 
 
 async def polish_deck(

@@ -182,3 +182,204 @@ def test_executive_summary_strips_markdown_bold():
     texts = _slide_texts(prs)
     # "**总结**" must render as "总结" (markers stripped)
     assert any("总结" in t and "**" not in t for t in texts)
+
+
+# ── Redesign assertions ────────────────────────────────────────────────────
+
+def _run_ea_typefaces(prs):
+    """Collect every East Asian typeface written via ``<a:ea>``."""
+    from pptx.oxml.ns import qn
+    found = set()
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                for run in para.runs:
+                    # <a:ea> sits inside <a:rPr>, so search descendants.
+                    for ea in run._r.findall(".//" + qn("a:ea")):
+                        found.add(ea.get("typeface"))
+    return found
+
+
+def test_cjk_typeface_applied_to_runs():
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product()],
+    }))
+    typefaces = _run_ea_typefaces(prs)
+    assert "Microsoft YaHei" in typefaces
+
+
+def test_markdown_bullets_render_structured():
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(
+            market_analysis="**供给**偏紧。\n- 开工率下降\n- 库存低位\n需求回暖。",
+        )],
+    }))
+    texts = _slide_texts(prs)
+    # bullets become "•", bold markers stripped, content preserved
+    assert any("• 开工率下降" in t for t in texts)
+    assert any("• 库存低位" in t for t in texts)
+    assert all("**" not in t for t in texts)
+
+
+def test_analysis_text_frame_has_autofit():
+    """Every markdown text frame on the product slide has normAutofit so
+    PowerPoint auto-shrinks text that exceeds the box height."""
+    body = "供给端偏紧叠加下游补库需求，价格重心逐步上移，短期支撑较强。" * 4
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(market_analysis=body)],
+    }))
+    from pptx.oxml.ns import qn
+    found_autofit = 0
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            bodyPr = shape.text_frame._txBody.find(qn("a:bodyPr"))
+            if bodyPr is not None and bodyPr.find(qn("a:normAutofit")) is not None:
+                found_autofit += 1
+    assert found_autofit >= 1, "no normAutofit found on any text frame"
+    # a substantial prefix survives (no aggressive [:N] hard cut)
+    texts = _slide_texts(prs)
+    assert any(body[:40] in t for t in texts)
+
+
+def test_cjk_height_estimate_accurate():
+    """CJK text height estimate is meaningfully larger than the old Latin
+    assumption (so overflow no longer goes undetected)."""
+    import math
+    body = "中文测试段落" * 20  # 120 CJK chars
+    builder = WeeklyDigestPptxBuilder(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(market_analysis=body)],
+    }))
+    est = builder._est_text_height(body, size=11, width_in=5.0)
+    # At 11pt, 5in wide, CJK chars are ~1.0em → ~120*11pt / (5*72/11/1.0) lines.
+    assert est >= 0.6, f"CJK estimate too low: {est:.2f}in (expected >= 0.6)"
+    assert est <= 2.0, f"CJK estimate too high: {est:.2f}in (expected <= 2.0)"
+    # Old estimate (0.52× Latin assumption) would yield ~0.5in — verify we're
+    # significantly above it so the overflow bug is actually fixed.
+    old_est = (math.ceil(120 / 62) * 11 * 1.35) / 72.0  # chars_per_line=62
+    assert est > old_est * 1.5, f"CJK estimate not improved: {est:.2f} vs old {old_est:.2f}"
+
+
+def test_very_long_cjk_analysis_has_autofit():
+    """A 600-char CJK analysis must render inside a text frame with normAutofit
+    so PowerPoint can shrink it rather than leaking it onto other sections."""
+    body = "供给端偏紧叠加下游补库需求，价格重心逐步上移，短期支撑较强。" * 20
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(market_analysis=body)],
+    }))
+    from pptx.oxml.ns import qn
+    found_autofit = 0
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            bodyPr = shape.text_frame._txBody.find(qn("a:bodyPr"))
+            if bodyPr is not None and bodyPr.find(qn("a:normAutofit")) is not None:
+                found_autofit += 1
+    assert found_autofit >= 1, "no normAutofit found on any text frame"
+
+
+def test_kpi_change_chip_red_for_up():
+    from pptx.dml.color import RGBColor
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(change_pct_7d=1.25)],
+    }))
+    red = RGBColor(0xDC, 0x26, 0x26)
+    green = RGBColor(0x05, 0x96, 0x69)
+    found_up_red = False
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                for run in para.runs:
+                    if run.text == "+1.25%" and run.font.color and run.font.color.rgb == red:
+                        found_up_red = True
+    assert found_up_red, "涨 must render red (Chinese convention)"
+
+
+def test_kpi_change_chip_green_for_down():
+    from pptx.dml.color import RGBColor
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product(change_pct_7d=-2.0)],
+    }))
+    green = RGBColor(0x05, 0x96, 0x69)
+    found_down_green = False
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            for para in shape.text_frame.paragraphs:
+                for run in para.runs:
+                    if run.text == "-2.00%" and run.font.color and run.font.color.rgb == green:
+                        found_down_green = True
+    assert found_down_green, "跌 must render green (Chinese convention)"
+
+
+def test_deck_chrome_slides_present():
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product()],
+    }))
+    texts = _slide_texts(prs)
+    assert any("目录" in t for t in texts)          # agenda
+    assert any("产品明细" in t for t in texts)      # section divider
+    assert any("免责声明" in t for t in texts)      # disclaimer
+    assert any("本报告由 AI 自动生成" in t for t in texts)
+
+
+def test_product_slide_has_table_and_range_bars():
+    from pptx.enum.shapes import MSO_SHAPE_TYPE
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product()],
+    }))
+    target = None
+    for slide in prs.slides:
+        texts = []
+        for sh in slide.shapes:
+            if sh.has_text_frame:
+                texts.append("".join(r.text for p in sh.text_frame.paragraphs
+                                     for r in p.runs))
+        joined = " ".join(texts)
+        # The Agenda slide also mentions "石脑油"; the product slide is the one
+        # that additionally carries the KPI chip label "现价".
+        if "石脑油" in joined and "现价" in joined:
+            target = slide
+            break
+    assert target is not None
+    assert any(sh.has_table for sh in target.shapes)
+    rects = [sh for sh in target.shapes
+             if sh.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE]
+    # KPI chips + chart accents + range-bar track/segments
+    assert len(rects) >= 6
+
+
+def test_chart_value_axis_fitted_and_formatted():
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card()],
+        "WeeklyReportProduct": [_product()],
+    }))
+    checked = 0
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_chart:
+                continue
+            va = shape.chart.value_axis
+            assert va.tick_labels.number_format == "#,##0"
+            assert va.minimum_scale is not None and va.maximum_scale is not None
+            # fitted to the data (30d data spans ~6450..6500)
+            assert va.minimum_scale <= 6450
+            assert va.maximum_scale >= 6500
+            checked += 1
+    assert checked >= 2  # 30d + 12mo charts

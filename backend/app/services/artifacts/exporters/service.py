@@ -371,11 +371,15 @@ class ExportService:
             # unchanged path unless a deployment opts into deck planning.
             if format == "pptx" and settings.PPT_DECK_PLANNER_ENABLED:
                 deck_rows = chart_rows(payload) if payload else []
-                data, mime, ext = self._render_deck_pipeline(
+                data, mime, ext, audit_report = self._render_deck_pipeline(
                     payload, ctx, deck_rows, user_message=user_message
                 )
+                # The dispatcher already ran audit + repair + polish; flag it so
+                # we don't double-run the quality loop / polish below.
+                deck_pipeline_owned = True
             else:
                 data, mime, ext = render(format, payload, ctx)
+                deck_pipeline_owned = False
             if not data:
                 raise ExportError(f"Renderer returned empty bytes for format {format!r}")
 
@@ -383,21 +387,15 @@ class ExportService:
         file_name = stamp_filename(title, ext)
 
         # ── P0.1 self-healing quality loop ──
-        data, audit_report, audit_history = self._quality_loop(format, data)
-
-        # ── One-shot LLM copy polish (runs ONCE, not inside the repair loop) ──
-        # The polish re-renders the deck, then the quality loop runs again on
-        # the polished output.  Only applies when the deck was actually planned.
-        if (
-            format == "pptx"
-            and settings.PPT_LLM_POLISH_ENABLED
-            and ctx is not None
-            and ctx.deck_plan is not None
-        ):
-            polished = self._run_deck_polish(ctx, deck_rows, user_message=user_message)
-            if polished is not None:
-                data = polished
-                data, audit_report, audit_history = self._quality_loop(format, data)
+        # When the deck pipeline already owns audit + repair + polish (planner
+        # on), reuse its report and skip the duplicate loop.  For every other
+        # path (legacy report-card renderer, non-pptx) the loop still runs.
+        if deck_pipeline_owned:
+            if audit_report is None:
+                audit_report = self._run_semantic_audit(format, data)
+            audit_history: list[dict[str, Any]] = []
+        else:
+            data, audit_report, audit_history = self._quality_loop(format, data)
 
         # Themed one-off renders are returned fresh without caching or
         # audit-record (the per-format cache key doesn't encode the theme yet,
@@ -499,7 +497,7 @@ class ExportService:
         rows: list[dict[str, Any]],
         *,
         user_message: str,
-    ) -> tuple[bytes, str, str]:
+    ) -> tuple[bytes, str, str, Optional[dict[str, Any]]]:
         """Run planner → router → layout-engine render for a PPT deck.
 
         Only reached when ``PPT_DECK_PLANNER_ENABLED`` is on.  The planner
@@ -508,10 +506,15 @@ class ExportService:
         "sandbox".  A full sandbox html2pptx render is an agent-side skill
         concern, so the deterministic export pipeline renders through the
         layout engine as a faithful fallback while recording the route.
+
+        Returns ``(bytes, mime, ext, audit_report)`` — the audit report comes
+        from the shared ``render_dispatcher`` (which already ran the audit +
+        deterministic repair + optional polish loop), so the caller does NOT
+        re-run the quality loop for this path.
         """
         from app.services.artifacts.deck_planner import build_deck_plan
         from app.services.artifacts.deck_router import route_deck
-        from app.services.artifacts.exporters.pptx_export import render_deck
+        from app.services.artifacts.render_dispatcher import render_pptx_from_plan_sync
 
         plan, _profile = self._run_coro(build_deck_plan(user_message, rows))
 
@@ -535,7 +538,10 @@ class ExportService:
             )
             ctx.cover_art = True
 
-        return render_deck(plan, ctx, rows)
+        # Render via the shared dispatcher (audit + repair + polish owned there)
+        # and capture its report so _render_and_store doesn't re-run the loop.
+        data, audit_report = render_pptx_from_plan_sync(plan, rows, ctx)
+        return data, "application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx", audit_report
 
     def _run_deck_polish(
         self,

@@ -120,40 +120,28 @@ def render_deck(
     ctx: Optional[ExportContext] = None,
     rows: Optional[list[dict[str, Any]]] = None,
 ) -> tuple[bytes, str, str]:
-    """Render a DeckPlan through the layout engine (Phase 3).
+    """Render a DeckPlan through the shared layout engine + quality pipeline.
 
-    Iterates ``plan.slides`` and dispatches each :class:`SlidePlan` to its
-    layout builder via :func:`_build_slide`.  When ``plan`` is ``None`` or
-    has no slides, falls back to the catalog renderer so callers can use a
-    single entry point.
+    This is now a thin wrapper over :func:`render_dispatcher.render_pptx_from_plan`
+    so the in-process exporter produces byte-identical decks to the sandbox
+    renderer (both delegate to ``layout_engine``).  The dispatcher owns the
+    audit + deterministic repair + (optional) polish loop.
+
+    When ``plan`` is ``None`` or has no slides, falls back to the catalog
+    renderer so callers can use a single entry point.
     """
     ctx = ctx or ExportContext()
-    theme = resolve_ctx_theme(ctx)
-    recipe = resolve_recipe(ctx.style_recipe)
 
     if not plan or not plan.slides:
         return render(
             ReportCardPayload(title=plan.title if plan else "Report"), ctx
         )
 
-    prs = Presentation()
-    prs.slide_width = Inches(13.333)   # 16:9
-    prs.slide_height = Inches(7.5)
-    blank_layout = prs.slide_layouts[6]
+    from app.services.artifacts.render_dispatcher import render_pptx_from_plan_sync
 
-    rows = rows or []
-    section_num = 0
-    for slide in plan.slides:
-        section_num = _build_slide(
-            prs, blank_layout, slide, rows, section_num, ctx, theme, recipe
-        )
-
-    _add_footers(prs, theme)
-
-    buf = io.BytesIO()
-    prs.save(buf)
+    data, _report = render_pptx_from_plan_sync(plan, rows or [], ctx)
     return (
-        buf.getvalue(),
+        data,
         "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ".pptx",
     )

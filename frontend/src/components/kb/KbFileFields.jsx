@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Label } from '@/components/ui/label';
 import { UploadCloud, File as FileIcon, Loader2 } from 'lucide-react';
 import { base44 } from '@/api/base44Client';
+import { toast } from 'sonner';
 
 function extOf(name) {
   const m = (name || '').toLowerCase().match(/\.([a-z0-9]+)$/);
@@ -19,8 +20,12 @@ export default function KbFileFields({ value, onChange, t }) {
     try {
       const { file_url } = await base44.integrations.Core.UploadFile({ file });
       onChange({ ...value, file_url, file_type: extOf(file.name), name: value.name || file.name.replace(/\.[^.]+$/, '') });
-    } catch { /* ignore */ }
-    finally { setUploading(false); }
+    } catch (err) {
+      console.error('[KbFileFields] upload failed:', err);
+      toast.error(err?.message || t.kb.uploadFailed || 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
   }
 
   return (

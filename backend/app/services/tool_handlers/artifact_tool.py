@@ -532,6 +532,18 @@ async def _create_artifact_tool(
         )
         args["payload"] = payload
 
+    # Phase 1B: persist the DeckPlan into source_json so PHASE 2 edit tools can
+    # round-trip through DeckPlan.model_validate.  The orchestrator ships the
+    # plan dict in args["deck_plan"] for pptx.
+    if artifact_type == "pptx":
+        deck_plan = args.get("deck_plan")
+        if isinstance(deck_plan, dict):
+            payload = dict(payload)
+            payload["deck_plan"] = deck_plan
+        elif hasattr(deck_plan, "model_dump"):
+            payload = dict(payload)
+            payload["deck_plan"] = deck_plan.model_dump(mode="json")
+
     try:
         from app.services.artifacts.artifact_service import ArtifactService
         from app.services.artifacts.preview_builder import convert_to_preview

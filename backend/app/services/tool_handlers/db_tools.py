@@ -313,6 +313,29 @@ async def _describe_schema(
                 db=db,
                 top_k=8,
             )
+            candidate_tables = [
+                t.get("table_name")
+                for t in (linker_result or {}).get("tables", [])
+                if t.get("table_name")
+            ]
+
+            # ── SchemaGraph path (flag-gated): structural view + join edges ──
+            if settings.SCHEMA_GRAPH_ENABLED and candidate_tables:
+                try:
+                    from app.services.db.schema_graph import SchemaGraph
+                    graph = await asyncio.to_thread(
+                        lambda: SchemaGraph(db, kb_id).build(candidate_tables)
+                    )
+                    graph_text = graph.to_llm_context()
+                    if graph_text.strip():
+                        return {
+                            "success": True,
+                            "schema": graph_text,
+                            "source": "schema_graph",
+                        }
+                except Exception as exc:
+                    logger.warning("describe_schema: schema_graph failed: %s", exc)
+
             slice_text = (linker_result or {}).get("slice_text") or ""
             useful_lines = [
                 line for line in slice_text.splitlines()
@@ -387,6 +410,27 @@ async def _execute_query(
                 "error": "Query blocked by data access policy: " + "; ".join(str(e) for e in errors),
                 "sql": sql,
             }
+
+    # ── Structural schema validation (flag-gated): feedback, not a gate ──
+    # Returns available-columns so the LLM self-corrects in the agent loop.
+    if settings.SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED:
+        try:
+            from app.services.nl2sql.schema_validator import validate_against_schema
+            vres = validate_against_schema(sql, kb_id, db)
+            if not vres.get("is_valid", True):
+                errors = vres.get("errors") or ["query references unknown tables/columns"]
+                logger.warning(
+                    "execute_query: schema validation failed on KB %s: %s",
+                    kb_id, "; ".join(str(e) for e in errors),
+                )
+                return {
+                    "success": False,
+                    "error": "Query references unknown tables/columns: " + "; ".join(str(e) for e in errors),
+                    "available_columns": vres.get("available_columns", {}),
+                    "sql": sql,
+                }
+        except Exception as exc:
+            logger.debug("execute_query: schema validator error: %s", exc)
 
     def _do_work() -> dict:
         svc = QueryService(db)

@@ -193,10 +193,17 @@ def _build_runner_modules() -> dict[str, str]:
     ``container_manager.write_runner_modules``.
     """
     sandbox_dir = Path(__file__).parent.parent / "sandbox"
+    sidebar_charts = Path(__file__).parent.parent / "artifacts" / "charts"
     targets = {
         "skill_driven_runner.py": sandbox_dir / "skill_driven_runner.py",
         "llm_client.py":          sandbox_dir / "llm_client.py",
         "fallback_generator.py":  sandbox_dir / "fallback_generator.py",
+        # Phase 1B: the deterministic sandbox_runner.generate_pptx now renders
+        # through the shared layout_engine (single source of truth with the
+        # in-process exporter).  Vendor both files so the sandbox container can
+        # `import layout_engine` / `import branded_charts` from /input/skill/.
+        "layout_engine.py":       sandbox_dir.parent / "artifacts" / "layout_engine.py",
+        "branded_charts.py":      sidebar_charts / "branded_charts.py",
     }
     out: dict[str, str] = {}
     for filename, path in targets.items():
@@ -510,9 +517,21 @@ async def _run_sandbox_skill(
         description=f"Generated from {len(data)} data rows",
     )
 
+    # Phase 1B: persist the DeckPlan into source_json so PHASE 2 edit tools can
+    # round-trip through DeckPlan.model_validate.  The orchestrator ships the
+    # plan dict in args["deck_plan"]; we store a stable JSON snapshot.
+    version_source_json = None
+    if fmt == "pptx":
+        deck_plan = args.get("deck_plan")
+        if isinstance(deck_plan, dict):
+            version_source_json = {"deck_plan": deck_plan}
+        elif hasattr(deck_plan, "model_dump"):
+            version_source_json = {"deck_plan": deck_plan.model_dump(mode="json")}
+
     version = artifact_service.create_version(
         artifact_id=artifact.id,
         changelog=f"Initial generation ({fmt.upper()})",
+        source_json=version_source_json,
         produced_by_skill="sandbox_runner",
     )
 
@@ -605,6 +624,13 @@ async def _run_sandbox_skill(
         "runner_script": runner_script_b64,
         "runner_script_name": runner_script_name,
     }
+
+    # Vendor the shared layout engine + branded charts alongside the runner so
+    # the deterministic sandbox_runner.generate_pptx can render via the SAME
+    # single source of truth as the in-process exporter.  The worker writes
+    # these to /input/skill/ (already on sys.path) so the runner can
+    # ``import layout_engine``.  Always present (cheap, base64 ~16 KB).
+    input_package["runner_modules_b64"] = _build_runner_modules()
 
     # Skill-driven jobs need the skill bundle + runner modules written
     # alongside the main script.  Both go through the existing base64

@@ -330,6 +330,7 @@ def _expand_joins(
                     "on": _join_on_text(r.source_columns, r.target_columns, src, tgt),
                     "hops": 1,
                     "relation_type": r.relation_type,
+                    "confidence": r.confidence if r.confidence is not None else 1.0,
                 })
 
     # 2-hop expansion (simplified: self-join through shared FK targets)
@@ -353,6 +354,7 @@ def _expand_joins(
                         "on": _join_on_text(r.source_columns, r.target_columns, src_name, tgt_name),
                         "hops": 2,
                         "relation_type": r.relation_type,
+                        "confidence": r.confidence if r.confidence is not None else 1.0,
                     })
 
     return paths
@@ -413,7 +415,8 @@ def _format_slice(
     if join_paths and included > 0:
         parts.append("\n-- Known join paths:")
         for jp in join_paths:
-            line = f"-- {jp['from_table']} → {jp['to_table']} ON {jp['on']} ({jp.get('relation_type', 'FK')})"
+            conf = jp.get('confidence', 1.0)
+            line = f"-- {jp['from_table']} → {jp['to_table']} ON {jp['on']} ({jp.get('relation_type', 'FK')}, conf={conf:.2f})"
             tok = _estimate_tokens(line)
             if used_tokens + tok <= token_budget:
                 parts.append(line)

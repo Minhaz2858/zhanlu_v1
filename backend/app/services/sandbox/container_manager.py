@@ -279,6 +279,14 @@ def prepare_input_package(input_dir: str, input_package: dict):
             written += 1
         logger.info("Wrote %d skill_bundle files into %s", written, bundle_dir)
 
+    # Vendored runner modules (e.g. layout_engine.py, branded_charts.py) — the
+    # deterministic sandbox_runner.generate_pptx imports these from /input/skill
+    # (already on sys.path).  Skill-driven jobs also rely on this for
+    # llm_client.py / fallback_generator.py.
+    modules_b64 = input_package.get("runner_modules_b64")
+    if modules_b64:
+        write_runner_modules(input_dir, modules_b64)
+
     logger.info("Input package prepared at %s", input_dir)
 
 

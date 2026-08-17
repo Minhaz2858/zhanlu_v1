@@ -7,10 +7,13 @@ small, safe, deterministic transform:
 * ``off_canvas`` — clamp shapes that spill past the slide edges back
   inside the canvas.
 * ``font_floor`` — raise any run below the 10pt floor to 10pt.
+* ``density_6x6`` — NOT byte-fixable here; ``repair_deck`` returns ``None`` so
+  the quality loop stops, and the fix is delegated to the LLM polish pass in
+  ``render_dispatcher`` (``polish_deck`` shortens / splits overloaded bullets).
 
 Any other rule id is *not* mechanically fixable (placeholder text,
-density, structure, …) and returns ``None`` so the quality loop knows to
-stop instead of spinning.
+structure, overflow, assertion_headline, …) and returns ``None`` so the
+quality loop knows to stop instead of spinning.
 """
 
 from __future__ import annotations
@@ -27,8 +30,14 @@ logger = logging.getLogger(__name__)
 # Minimum acceptable point size (matches the audit's ``font_floor`` check).
 FONT_FLOOR_PT = 10.0
 
-# Rule ids we know how to repair deterministically.
-SUPPORTED_RULES = {"off_canvas", "font_floor"}
+# Rule ids we know how to repair deterministically.  ``density_6x6`` is listed
+# as "supported" for dispatch purposes but is NOT byte-fixable in this module —
+# the dispatcher delegates density repair to the polish pass.
+SUPPORTED_RULES = {"off_canvas", "font_floor", "density_6x6"}
+
+# Rules that are plan-level (not byte-level) fixes; repair_deck returns None
+# for these and the orchestrator handles them via polish.
+PLAN_LEVEL_RULES = {"density_6x6"}
 
 
 def repair_deck(data: bytes, rule_ids: set[str]) -> Optional[bytes]:
@@ -36,12 +45,17 @@ def repair_deck(data: bytes, rule_ids: set[str]) -> Optional[bytes]:
 
     Returns the repaired PPTX bytes, or ``None`` when none of the rule ids
     are mechanically fixable (or the deck can't be opened).  Never raises.
+
+    ``density_6x6`` is intentionally NOT repaired here (bullets live in the
+    plan, not the bytes) — the caller re-renders via ``polish_deck``.
     """
     if not data:
         return None
 
-    wanted = set(rule_ids or []) & SUPPORTED_RULES
-    if not wanted:
+    byte_fixable = (set(rule_ids or {}) & SUPPORTED_RULES) - PLAN_LEVEL_RULES
+    if not byte_fixable:
+        # Either no supported rules, or only plan-level (density) rules.  The
+        # dispatcher handles density via the polish pass, so stop the byte loop.
         return None
 
     try:
@@ -53,10 +67,10 @@ def repair_deck(data: bytes, rule_ids: set[str]) -> Optional[bytes]:
     changed = False
     for slide in prs.slides:
         for shape in slide.shapes:
-            if "off_canvas" in wanted:
+            if "off_canvas" in byte_fixable:
                 if _clamp_off_canvas(shape, prs.slide_width, prs.slide_height):
                     changed = True
-            if "font_floor" in wanted:
+            if "font_floor" in byte_fixable:
                 if _bump_tiny_fonts(shape):
                     changed = True
 

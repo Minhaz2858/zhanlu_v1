@@ -402,6 +402,12 @@ class Settings(BaseSettings):
     PPT_SMART_ROUTER_ENABLED: bool = False
     PPT_LLM_POLISH_ENABLED: bool = False
     PPT_AUDIT_ENABLED: bool = False
+    # Phase 1B: layout-engine / data-table tuning (all defaults safe-off).
+    LAYOUT_ENGINE_TEMPLATE_PATH: str = ""
+    PPTX_DARK_THEME_PATH: str = ""
+    PPTX_TOP_TABLE_ROWS: int = 8
+    PPTX_DATA_TABLE_HIGHLIGHT_TOP: int = 3
+    PPTX_VISUAL_VERIFY_ENABLED: bool = False
 
     # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
     # Post-FINALIZE semantic quality layer: a combined completeness +
@@ -574,6 +580,35 @@ class Settings(BaseSettings):
     # DEPTH_ANALYSIS_LOOP_ENABLED: bounded hypothesis->query->validate loop
     #   for "why" questions; evidence packs; LLM explains, never decides.
     DEPTH_ANALYSIS_LOOP_ENABLED: bool = False
+    # ── Schema-Aware Multi-Table Analysis (join edge inference) ──────────
+    # CATALOG_JOIN_EDGES_ENABLED: at index time, sample joinable columns
+    #   (int + short varchar) and infer VALUE_OVERLAP / NAME_MATCH edges via
+    #   join_edge_detector, persisting them into kb_table_relation alongside
+    #   declared FKs. All inferred edges are ranked strictly below FK (1.0).
+    CATALOG_JOIN_EDGES_ENABLED: bool = False
+    # JOIN_EDGE_SAMPLE_LIMIT: max distinct values sampled per joinable column
+    #   for value-overlap inference (kept low to bound index-time cost).
+    JOIN_EDGE_SAMPLE_LIMIT: int = 200
+    # ── Schema Graph (runtime presentation + join planning) ─────────────
+    # SCHEMA_GRAPH_ENABLED: build a structural SchemaGraph over the catalog-
+    #   selected candidate tables and render it through describe_schema /
+    #   NLAnswerService (columns, types, keys, row-count estimates, sample
+    #   rows, join edges with kind + confidence).
+    SCHEMA_GRAPH_ENABLED: bool = False
+    # SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED: run the sqlglot structural validator
+    #   before executing generated SQL; on failure return available_columns
+    #   feedback for one retry.
+    SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED: bool = False
+    # SCHEMA_GRAPH_AUTOJOIN_THRESHOLD: minimum edge confidence for the agent
+    #   to auto-join silently (FK or value-overlap); below this it must ask
+    #   (except automation runs, which never ask).
+    SCHEMA_GRAPH_AUTOJOIN_THRESHOLD: float = 0.8
+    # SCHEMA_GRAPH_SAMPLE_ROWS: sample rows rendered per table in the graph
+    #   context block.
+    SCHEMA_GRAPH_SAMPLE_ROWS: int = 3
+    # SCHEMA_GRAPH_TOKEN_BUDGET: approximate token budget for the rendered
+    #   context block (~4 chars/token).
+    SCHEMA_GRAPH_TOKEN_BUDGET: int = 1200
 
     # ── Business Semantic Layer (Approach A) ────────────────────────────
     # KG_COVERAGE_PROBE_ENABLED: probe min_date/max_date per table at index
