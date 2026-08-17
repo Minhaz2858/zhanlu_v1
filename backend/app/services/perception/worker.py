@@ -17,6 +17,23 @@ from app.services.perception.alert_service import AlertService
 logger = logging.getLogger(__name__)
 
 
+class _DefaultPref:
+    """Quietest-safe default preferences for the org-wide scan.
+
+    Replaced by per-user AlertPrefSnapshot.from_user(...) once the
+    preferences router (Task 5) is in place.
+    """
+
+    muted_products: list[str] = []
+    min_severity: str = "low"
+    threshold_multiplier: float = 1.0
+    recommendations_enabled: bool = True
+
+
+def _default_pref_snapshot() -> _DefaultPref:
+    return _DefaultPref()
+
+
 async def run_alert_scan_cycle() -> dict:
     """One scan cycle: snapshot → detect → persist.
 
@@ -83,8 +100,15 @@ async def run_alert_scan_cycle() -> dict:
             )
             return result
 
-        # 3. Detect and persist
+        # 3. Detect and persist (Smart Alerts mode when enabled)
         org_id = settings.DEFAULT_ORG_ID
+        if settings.SMART_ALERTS_ENABLED:
+            from app.services.perception.smart_evaluator import SmartEvaluator
+
+            pref = _default_pref_snapshot()
+            evaluator = SmartEvaluator(db=db)
+            product_list = evaluator.evaluate(product_list, pref)
+
         new_alerts = AlertService.detect_and_persist(db, org_id, product_list)
         result["new_alerts"] = len(new_alerts)
 

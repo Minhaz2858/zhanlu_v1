@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
+import toast from 'react-hot-toast';
 import {
   Bell,
   TrendingUp,
@@ -7,8 +8,21 @@ import {
   AlertTriangle,
   ArrowRightLeft,
   Sun,
+  Settings,
+  ChevronDown,
+  ChevronUp,
+  Lightbulb,
+  VolumeX,
 } from 'lucide-react';
-import { getAlerts, markAlertsRead, dismissAlert } from '@/api/alertApi';
+import {
+  getAlerts,
+  markAlertsRead,
+  dismissAlert,
+  getAlertDiagnostics,
+  getAlertPreferences,
+  muteProduct,
+} from '@/api/alertApi';
+import AlertPreferencesModal from '@/components/AlertPreferencesModal';
 
 /** Severity badge color + label */
 const SEVERITY_CONFIG = {
@@ -32,7 +46,7 @@ function AlertTypeIcon({ type, className = 'h-4 w-4' }) {
 }
 
 /** Single alert card */
-function AlertCard({ alert, onDismiss, onInvestigate }) {
+function AlertCard({ alert, onDismiss, onInvestigate, onMute }) {
   const sev = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.medium;
   const borderColor =
     alert.severity === 'high'
@@ -45,10 +59,29 @@ function AlertCard({ alert, onDismiss, onInvestigate }) {
     ? new Date(alert.triggered_at).toLocaleString()
     : '';
 
+  // Smart-alert enrichment (payload set by the backend evaluator).
+  const payload = alert.payload || {};
+  const impact = payload.impact?.impact_yuan_per_day;
+  const ctx = payload.ctx || null;
+  const recommendation = ctx?.recommendation || null;
+  const [whyOpen, setWhyOpen] = useState(false);
+
   return (
     <div
       className={`relative rounded-xl border-l-4 shadow-sm p-4 gap-3 bg-white ${borderColor}`}
     >
+      {/* Mute button */}
+      {onMute && (
+        <button
+          onClick={() => onMute(alert)}
+          className="absolute top-2.5 right-8 p-0.5 text-slate-400 hover:text-rose-600 transition-colors rounded"
+          aria-label="Mute product"
+          title="Mute this product"
+        >
+          <VolumeX className="h-3.5 w-3.5" />
+        </button>
+      )}
+
       {/* Dismiss button */}
       <button
         onClick={() => onDismiss(alert.id)}
@@ -95,6 +128,68 @@ function AlertCard({ alert, onDismiss, onInvestigate }) {
         )}
       </div>
 
+      {/* ¥/day business impact chip */}
+      {payload.smart && (
+        <div className="mb-3">
+          {impact != null ? (
+            <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-emerald-700 bg-emerald-50 border border-emerald-200 rounded-full px-2.5 py-1">
+              <TrendingUp className="h-3 w-3" />
+              ¥
+              {Math.abs(impact).toLocaleString(undefined, {
+                maximumFractionDigits: 0,
+              })}
+              /day impact
+            </span>
+          ) : (
+            <span className="inline-flex items-center text-[11px] font-medium text-slate-400 bg-slate-50 border border-slate-200 rounded-full px-2.5 py-1">
+              impact TBD
+            </span>
+          )}
+        </div>
+      )}
+
+      {/* Why this matters — expandable */}
+      {ctx?.why && (
+        <div className="mb-3 rounded-lg bg-indigo-50/60 border border-indigo-100 overflow-hidden">
+          <button
+            onClick={() => setWhyOpen((v) => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 text-[11px] font-semibold text-indigo-700 hover:bg-indigo-100/60 transition-colors"
+            aria-label="Why this matters"
+            aria-expanded={whyOpen}
+          >
+            <span>Why this matters</span>
+            {whyOpen ? (
+              <ChevronUp className="h-3.5 w-3.5" />
+            ) : (
+              <ChevronDown className="h-3.5 w-3.5" />
+            )}
+          </button>
+          {whyOpen && (
+            <p className="px-3 pb-2.5 text-[11px] text-slate-600 leading-relaxed">
+              {ctx.why}
+            </p>
+          )}
+        </div>
+      )}
+
+      {/* Suggested next step */}
+      {recommendation && (
+        <div className="mb-3 rounded-lg border border-emerald-200 bg-emerald-50/60 px-3 py-2.5">
+          <p className="flex items-center gap-1 text-[11px] font-semibold text-emerald-800 mb-1">
+            <Lightbulb className="h-3.5 w-3.5 flex-shrink-0" />
+            {recommendation.title}
+          </p>
+          {Array.isArray(recommendation.steps) &&
+            recommendation.steps.length > 0 && (
+              <ul className="list-disc pl-4 text-[11px] text-slate-600 space-y-0.5">
+                {recommendation.steps.map((step, i) => (
+                  <li key={i}>{step}</li>
+                ))}
+              </ul>
+            )}
+        </div>
+      )}
+
       {/* Message */}
       {alert.message && (
         <p className="text-xs text-slate-600 mb-3 leading-relaxed">{alert.message}</p>
@@ -134,6 +229,48 @@ function EmptyAlerts({ onScan }) {
       >
         Scan now
       </button>
+    </div>
+  );
+}
+
+/**
+ * Compact diagnostics banner — explains *why* the panel may show zero alerts.
+ * Rendered from GET /api/alerts/diagnostics, not on every poll.
+ */
+function DiagnosticsBanner({ diagnostics }) {
+  if (!diagnostics) return null;
+
+  const { flags, warehouse, thresholds, triggering_products, effective_org_id } =
+    diagnostics;
+
+  const alertsOff = flags && flags.ecisco_bi_alerts_enabled === false;
+  const unreachable = warehouse && warehouse.configured && warehouse.reachable === false;
+  const notConfigured = warehouse && warehouse.configured === false;
+  const triggerCount = triggering_products ? triggering_products.length : 0;
+
+  // Only show the banner when something is worth explaining.
+  if (!alertsOff && !unreachable && !notConfigured) return null;
+
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-[11px] text-amber-800 space-y-1">
+      <div className="flex items-center gap-1.5 font-semibold">
+        <AlertTriangle className="h-3.5 w-3.5" />
+        <span>Pipeline diagnostic</span>
+      </div>
+      {alertsOff && (
+        <p>Alerts flag is OFF — enable <code>ECISCO_BI_ALERTS_ENABLED</code> to scan.</p>
+      )}
+      {notConfigured && (
+        <p>EDIA warehouse not configured (<code>EDIA_MYSQL_URL</code> missing).</p>
+      )}
+      {unreachable && (
+        <p>EDIA warehouse unreachable — no prices can be scanned.</p>
+      )}
+      <p className="text-amber-700">
+        Thresholds: spike ≥{thresholds?.price_spike}% / drop ≤{thresholds?.price_drop}%
+        / high ≥{thresholds?.high_severity}%. Org: <code>{effective_org_id}</code>.
+        {triggerCount > 0 && <> Would-trigger now: {triggerCount} product(s).</>}
+      </p>
     </div>
   );
 }
@@ -205,6 +342,10 @@ export default function ProactiveAlerts({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
   const [scanning, setScanning] = useState(false);
+  const [diagnostics, setDiagnostics] = useState(null);
+  const [scanResult, setScanResult] = useState(null);
+  const [prefsOpen, setPrefsOpen] = useState(false);
+  const [prefs, setPrefs] = useState(null);
   const pendingDismissRef = useRef(new Set());
 
   const fetchAlerts = useCallback(async () => {
@@ -221,12 +362,30 @@ export default function ProactiveAlerts({
     }
   }, []);
 
+  // Diagnostics fetched once on open (and after manual scans) — NOT on every poll.
+  const fetchDiagnostics = useCallback(async () => {
+    try {
+      const data = await getAlertDiagnostics();
+      setDiagnostics(data);
+    } catch (err) {
+      console.error('Failed to fetch alert diagnostics:', err);
+      setDiagnostics(null);
+    }
+  }, []);
+
   // Fetch on open
   useEffect(() => {
     if (open) {
       fetchAlerts();
+      fetchDiagnostics();
+      getAlertPreferences()
+        .then(setPrefs)
+        .catch((err) => {
+          console.error('Failed to load alert preferences:', err);
+          setPrefs(null);
+        });
     }
-  }, [open, fetchAlerts]);
+  }, [open, fetchAlerts, fetchDiagnostics]);
 
   // Polling every 2 minutes while open
   useEffect(() => {
@@ -263,14 +422,29 @@ export default function ProactiveAlerts({
     }
   };
 
+  const handleMute = async (alert) => {
+    const current = prefs?.muted_products || [];
+    try {
+      const updated = await muteProduct(alert.product_id, current);
+      setPrefs(updated);
+      toast.success(`${alert.product_name || alert.product_id} muted`);
+    } catch (err) {
+      console.error('Failed to mute product:', err);
+      toast.error('Could not mute product');
+    }
+  };
+
   const handleScan = async () => {
     const { scanAlerts: scanFn } = await import('@/api/alertApi');
     setScanning(true);
+    setScanResult(null);
     try {
-      await scanFn();
-      await fetchAlerts();
+      const result = await scanFn();
+      setScanResult(result);
+      await Promise.all([fetchAlerts(), fetchDiagnostics()]);
     } catch (err) {
       console.error('Scan failed:', err);
+      setScanResult({ error: err?.message || 'Scan failed' });
     } finally {
       setScanning(false);
     }
@@ -305,13 +479,23 @@ export default function ProactiveAlerts({
                 </p>
               </div>
             </div>
-            <button
-              onClick={onClose}
-              className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-              aria-label="Close alerts"
-            >
-              <X className="h-4 w-4" />
-            </button>
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setPrefsOpen(true)}
+                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                aria-label="Alert preferences"
+                title="Alert preferences"
+              >
+                <Settings className="h-4 w-4" />
+              </button>
+              <button
+                onClick={onClose}
+                className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
+                aria-label="Close alerts"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
           </div>
 
           {/* Severity counts */}
@@ -336,6 +520,43 @@ export default function ProactiveAlerts({
 
         {/* Body */}
         <div className="flex-1 overflow-y-auto px-4 py-4 space-y-3">
+          {/* Diagnostics banner — explains zero-alert states */}
+          <DiagnosticsBanner diagnostics={diagnostics} />
+
+          {/* Scan result feedback */}
+          {scanResult && (
+            <div
+              className={`rounded-lg border px-3 py-2.5 text-[11px] space-y-1 ${
+                scanResult.error
+                  ? 'border-red-200 bg-red-50 text-red-700'
+                  : 'border-emerald-200 bg-emerald-50 text-emerald-700'
+              }`}
+            >
+              <p className="font-semibold">
+                {scanResult.error ? 'Scan failed' : 'Scan complete'}
+              </p>
+              {!scanResult.error && (
+                <>
+                  <p>
+                    {scanResult.new_alerts != null && (
+                      <>New alerts: {scanResult.new_alerts} · </>
+                    )}
+                    Scanned: {scanResult.total_scanned ?? 0} product(s)
+                    {scanResult.reachable != null && (
+                      <> · Warehouse: {scanResult.reachable ? 'reachable' : 'UNREACHABLE'}</>
+                    )}
+                  </p>
+                  {scanResult.skipped && scanResult.reason && (
+                    <p className="opacity-80">Skipped: {scanResult.reason}</p>
+                  )}
+                </>
+              )}
+              {scanResult.error && (
+                <p className="opacity-80">{scanResult.error}</p>
+              )}
+            </div>
+          )}
+
           {loading && alerts.length === 0 && (
             <div className="flex items-center justify-center py-16">
               <div className="animate-spin rounded-full h-6 w-6 border-2 border-slate-300 border-t-slate-600" />
@@ -374,6 +595,7 @@ export default function ProactiveAlerts({
               alert={alert}
               onDismiss={handleDismiss}
               onInvestigate={onInvestigate}
+              onMute={handleMute}
             />
           ))}
         </div>
@@ -396,6 +618,13 @@ export default function ProactiveAlerts({
           </button>
         </div>
       </div>
+
+      {/* Preferences modal */}
+      <AlertPreferencesModal
+        open={prefsOpen}
+        onClose={() => setPrefsOpen(false)}
+        onSaved={setPrefs}
+      />
     </>
   );
 }

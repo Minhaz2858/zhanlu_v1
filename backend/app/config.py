@@ -431,6 +431,21 @@ class Settings(BaseSettings):
     # generated.  Set False to restrict quality eval to FSM-only.
     QUALITY_EVAL_ALL_PATHS: bool = True
 
+    # Universal Self-Evaluation & Re-Planning loop (all agents, all data
+    # sources). When enabled, the agent loop verifies its draft answer against
+    # the user's request at the synthesis boundary (deterministic detectors +
+    # one optional LLM strict-inspector call) and re-plans up to
+    # SELF_EVAL_MAX_REPLANS times before answering with a gap disclosure.
+    # Default OFF: flag-off keeps behavior byte-identical.
+    SELF_EVAL_REPLAN_ENABLED: bool = False
+    # Sub-flag: run the single LLM strict-inspector call at the synthesis
+    # boundary. When False, only deterministic detectors run.
+    SELF_EVAL_LLM_GATE_ENABLED: bool = True
+    # Max re-plan nudges per user turn before escalating to IMPOSSIBLE/disclose.
+    SELF_EVAL_MAX_REPLANS: int = 3
+    # Timeout for the synchronous LLM evaluator call (mirrors quality_eval).
+    SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 15.0
+
     # Phase 1 response grounding: char cap for the findings block injected
     # into the FINALIZE response prompt (spec §3.3). Metadata is preserved
     # over data rows under the cap.
@@ -523,6 +538,20 @@ class Settings(BaseSettings):
     ALERT_PRICE_SPIKE_THRESHOLD: float = 3.0        # +3% 7d change → price_spike
     ALERT_PRICE_DROP_THRESHOLD: float = -3.0        # -3% 7d change → price_drop
     ALERT_HIGH_SEVERITY_THRESHOLD: float = 6.0      # >= |6|% → high severity
+
+    # ── Smart Alerts (adaptive thresholds + context + recommendations) ──
+    # Master gate. When False, alert detection is byte-identical to the static
+    # ±3%/±6% thresholds above. When True, per-product LLM-judged baselines
+    # adapt the trigger, alerts carry ¥/day impact + templated recommendations,
+    # and user preferences + webhook delivery are honored.
+    SMART_ALERTS_ENABLED: bool = False               # Master gate for intelligent alerts
+    ALERT_BASELINE_LLM_ENABLED: bool = True          # LLM judges per-product weekly volatility baseline
+    ALERT_BASELINE_TTL_SECONDS: int = 604800         # Baseline cache TTL (7 days)
+    ALERT_BASELINE_DEFAULT_PCT: float = 2.5          # Seeded baseline when LLM unavailable
+    ALERT_IMPACT_ENABLED: bool = True                # ¥/day business impact on each alert
+    ALERT_RECOMMENDATIONS_ENABLED: bool = True       # Templated "why" + suggested next steps
+    ALERT_WEBHOOK_ENABLED: bool = True               # Webhook delivery channel (HMAC-signed)
+    ALERT_HIGH_SEVERITY_FLOOR: float = 6.0           # Floor for "high" severity in adaptive mode
 
     # ── Unified Forecasting Service (Layer 1 backend facade) ────────────
     # Thin facade ForecastingAgentService over the 4 fragmented forecasting
@@ -714,6 +743,12 @@ class Settings(BaseSettings):
     # Misfire visibility: if a task fires more than this many seconds late,
     # the dispatcher logs a WARNING (currently silent in production).
     AUTOMATION_MISFIRE_WARN_SECONDS: int = 120
+    # Status vocabulary enforcement: when enabled, _ensure_schema adds a
+    # DB-level CHECK constraint on automation_tasks.status so non-canonical
+    # values (e.g. "running" written by an LLM tool call) fail at write
+    # time instead of being silently skipped by the dispatcher. Default
+    # False so a legacy non-canonical row can never block startup.
+    AUTOMATION_STATUS_CHECK_CONSTRAINT_ENABLED: bool = False
 
     # ── Automation cognitive core (Phase 5 — Manus parity) ──────────────
     # Force the SynexiaFSM planning pipeline (GOAL→CONTEXT→PLAN→GATE→ACT→

@@ -65,6 +65,7 @@ from app.routers.reports import router as reports_router
 from app.routers.llm import router as llm_router
 from app.routers.app_logs import router as app_logs_router
 from app.routers.alerts import router as alerts_router
+from app.routers.alert_preferences import router as alert_preferences_router
 from app.routers.weekly_digest_api import router as weekly_digest_router
 
 
@@ -721,6 +722,7 @@ def create_app() -> FastAPI:
     app.include_router(llm_router)
     app.include_router(app_logs_router, prefix="/api")
     app.include_router(alerts_router, prefix="/api")
+    app.include_router(alert_preferences_router, prefix="/api")
     # NB: app_logs_router already declares its full path including ``/api/app-logs/...``
     # internally so it ignores the extra ``/api`` prefix and lives at
     # ``/api/app-logs/...`` — matching the @base44 plugin's expected URL.

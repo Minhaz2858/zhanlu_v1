@@ -92,6 +92,7 @@ from app.models.knowledge_catalog import (
 from app.models.resource_registry import ResourceRegistry
 from app.models.report_recipe import ReportRecipe
 from app.models.weekly_digest import WeeklyReportCard, WeeklyReportProduct
+from app.models.alert_baseline import AlertProductBaseline
 
 __all__ = [
     "TimestampedBase",
@@ -187,4 +188,5 @@ __all__ = [
     "ResponseCacheEntry",
     "WeeklyReportCard",
     "WeeklyReportProduct",
+    "AlertProductBaseline",
 ]

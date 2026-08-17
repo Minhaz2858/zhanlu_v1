@@ -12,11 +12,14 @@ from __future__ import annotations
 import logging
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.alert import AlertLog
+from app.services.perception.impact import (
+    compute_impact as _compute_impact,
+    get_avg_daily_volume as _get_avg_daily_volume,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,7 +60,7 @@ class DigestService:
         from app.services.perception.digest_narrator import DigestNarrator
 
         narrator = DigestNarrator()
-        narrative = await narrator.narrate(ranked, date_str=self._today_str())
+        narrative = await narrator.narrate(ranked, date=self._today_str())
         if narrative is None:
             narrative = self.render_template(ranked)
             narrator_used = "template"
@@ -88,40 +91,28 @@ class DigestService:
             query = query.filter(AlertLog.org_id == self.org_id)
 
         alerts = query.order_by(AlertLog.triggered_at.desc()).all()
-        return [self._alert_to_dict(a) for a in alerts]
+
+        # Dedup: the same product can trigger the same alert type multiple times
+        # in a window (e.g. repeated scans) — keep only the most recent one.
+        seen: set[tuple[str, str]] = set()
+        unique: list[dict] = []
+        for a in alerts:
+            key = (a.product_id or "", a.alert_type or "")
+            if key in seen:
+                continue
+            seen.add(key)
+            unique.append(self._alert_to_dict(a))
+        return unique
 
     # ── Impact computation ──────────────────────────────────────────────
 
     def compute_impact(self, alert: dict) -> dict:
         """Compute ¥ impact per day for a single alert.
 
-        Price alerts:  |price × change_7d_pct%| ÷ 7 × avg_daily_volume_tons
-        Arbitrage:     (spread − freight) × avg_daily_volume_tons
-
-        Volume source: erp_product_sales_details.shipment_quantity,
-                       30d trailing avg, FNAME match.
+        Delegates to the shared ``services.perception.impact`` module so the
+        digest and the smart-alert scan cycle share one formula.
         """
-        avg_volume = self._get_avg_daily_volume(alert.get("product_name", ""))
-        alert_type = alert.get("alert_type", "")
-        impact_yuan_per_day = None
-
-        if alert_type in ("price_spike", "price_drop"):
-            price = alert.get("price") or alert.get("current_price")
-            change_pct = alert.get("change_7d_pct", 0)
-            if price and change_pct and avg_volume:
-                impact_yuan_per_day = abs(price * change_pct / 100) / 7 * avg_volume
-
-        elif alert_type == "regional_arbitrage":
-            # spread = price column for arbitrage alerts; freight_cost from payload/message
-            spread = alert.get("price", 0)
-            freight = alert.get("freight_cost", 0)
-            if avg_volume and spread:
-                impact_yuan_per_day = (spread - freight) * avg_volume
-
-        return {
-            "impact_yuan_per_day": impact_yuan_per_day,
-            "avg_daily_volume_tons": avg_volume,
-        }
+        return _compute_impact(alert)
 
     # ── Rank ────────────────────────────────────────────────────────────
 
@@ -159,31 +150,12 @@ class DigestService:
 
     # ── Volume lookup (ERP) ─────────────────────────────────────────────
 
-    def _get_avg_daily_volume(self, product_name: str) -> float | None:
-        """Query erp_product_sales_details for 30d trailing avg shipment_quantity.
+    def _get_avg_daily_volume(self, alert: dict) -> float | None:
+        """30d average daily shipment volume (tons) for a product.
 
-        Matches by FNAME column. Returns None on failure (graceful degradation).
+        Delegates to the shared ``services.perception.impact`` module.
         """
-        if not product_name:
-            return None
-        try:
-            result = self.db.execute(
-                text(
-                    """
-                    SELECT AVG(shipment_quantity) AS avg_qty
-                    FROM erp_product_sales_details
-                    WHERE FNAME = :fname
-                      AND shipment_date >= NOW() - INTERVAL '30 days'
-                    """
-                ),
-                {"fname": product_name},
-            ).fetchone()
-            return float(result.avg_qty) if result and result.avg_qty else None
-        except Exception:
-            logger.warning(
-                "Failed to query ERP volume for %s", product_name, exc_info=True
-            )
-            return None
+        return _get_avg_daily_volume(alert)
 
     # ── Dedup ───────────────────────────────────────────────────────────
 

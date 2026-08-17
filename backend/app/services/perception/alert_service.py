@@ -159,20 +159,27 @@ class AlertService:
             if product_id is None or change_7d is None:
                 continue
 
-            # Determine alert type from threshold
-            if change_7d >= spike_threshold:
-                alert_type = "price_spike"
-            elif change_7d <= drop_threshold:
-                alert_type = "price_drop"
+            # Smart Alerts mode: the evaluator already decided trigger +
+            # severity against the adaptive baseline. Skip static checks.
+            enriched = product.get("_smart") or False
+            if enriched:
+                alert_type = product.get("alert_type", "price_spike")
+                severity = product.get("severity", "medium")
             else:
-                continue  # within normal range — skip
+                # Determine alert type from threshold
+                if change_7d >= spike_threshold:
+                    alert_type = "price_spike"
+                elif change_7d <= drop_threshold:
+                    alert_type = "price_drop"
+                else:
+                    continue  # within normal range — skip
 
-            # Severity
-            severity = (
-                "high"
-                if abs(change_7d) >= high_severity_threshold
-                else "medium"
-            )
+                # Severity
+                severity = (
+                    "high"
+                    if abs(change_7d) >= high_severity_threshold
+                    else "medium"
+                )
 
             # Dedup
             if AlertService.recent_alert_exists(
@@ -189,6 +196,17 @@ class AlertService:
                 else f"{product_name} price {direction} {abs(change_7d):.1f}% in 7 days"
             )
 
+            # Smart Alerts payload: impact + context + baseline reasoning.
+            payload = None
+            if enriched:
+                payload = {
+                    "smart": True,
+                    "impact": product.get("impact"),
+                    "ctx": product.get("ctx"),
+                    "baseline_used": product.get("baseline_used"),
+                    "baseline_reasoning": product.get("baseline_reasoning"),
+                }
+
             alert = AlertLog(
                 org_id=org_id,
                 product_id=product_id,
@@ -199,6 +217,7 @@ class AlertService:
                 price=round(price, 2) if price is not None else None,
                 message=message,
                 source="perception",
+                payload=payload,
             )
             db.add(alert)
             new_alerts.append(alert.to_dict())
