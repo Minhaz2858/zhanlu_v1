@@ -2477,6 +2477,37 @@ def _format_label(fmt: str | None) -> tuple[str, str]:
     return _FORMAT_LABELS.get(raw.lower(), raw), raw
 
 
+def _bump_session_unread(db: Session, session_id: str) -> None:
+    """Bump a chat session's metadata so it surfaces at the top of the
+    sidebar's recent-conversations list after an automation run.
+
+    * ``updated_date`` — the sidebar sorts by ``-updated_date``
+      (``ChatSession.list('-updated_date', 100)``), so refreshing it moves
+      the session to the top.
+    * ``last_message_at`` — ISO display string read by the frontend.
+    * ``unread`` — the sidebar renders a blue dot; cleared when the user
+      opens the session (frontend mark-read on ``selectSession``).
+
+    Never raises — a metadata bump failure must not block the run.
+    """
+    try:
+        from app.models.chat_session import ChatSession
+        sess = db.query(ChatSession).filter(ChatSession.id == session_id).first()
+        if sess is None:
+            return
+        _now = datetime.now(timezone.utc)
+        sess.last_message_at = _now.isoformat()
+        sess.updated_date = _now
+        sess.unread = True
+        db.commit()
+    except Exception as _bump_err:
+        logger.warning("_bump_session_unread: failed (non-fatal): %s", _bump_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _persist_run_to_chat(
     db: Session,
     task: AutomationTask,
@@ -2637,6 +2668,8 @@ def _persist_run_to_chat(
                 ))
 
         db.commit()
+        # Surface the session at the top of the recent list + mark unread.
+        _bump_session_unread(db, session_id)
     except Exception as _persist_err:
         logger.warning(
             "_persist_run_to_chat: chat persist failed (non-fatal): %s",
@@ -2766,6 +2799,9 @@ def _post_run_request_marker(
             db.add(asst_msg)
 
         db.commit()
+        # Surface the session at the top of the recent list + mark unread
+        # as soon as the run starts (live progress becomes visible).
+        _bump_session_unread(db, session_id)
     except Exception:
         logger.exception(
             "post_run_request_marker: failed (non-fatal) for execution %s",
@@ -2844,6 +2880,8 @@ def _notify_chat(
     db.commit()
     execution.notified_session_id = session_id
     db.commit()
+    # Success notification → surface the session + mark unread.
+    _bump_session_unread(db, session_id)
 
 
 def _chat_message_artifacts_for_files(files: list[AutomationFile]) -> list[dict]:
@@ -2920,6 +2958,9 @@ def _notify_chat_failure(
     db.commit()
     execution.notified_session_id = session_id
     db.commit()
+    # Failure notification → surface the session + mark unread too, so a
+    # failed automation is never a silent event.
+    _bump_session_unread(db, session_id)
     return msg
 
 

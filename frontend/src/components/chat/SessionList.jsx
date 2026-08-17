@@ -432,6 +432,17 @@ export default function SessionList() {
                                 data-has-automation="false"
                               />
                             )}
+                            {/* Unread dot — set by automation runs so the
+                                user knows a background run produced new
+                                content. Cleared via selectSession (mark-read). */}
+                            {s.unread && (
+                              <span
+                                className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-blue-500"
+                                aria-label={lang === 'en' ? 'Unread' : '未读'}
+                                title={lang === 'en' ? 'Unread' : '未读'}
+                                data-unread="true"
+                              />
+                            )}
                             <span className="flex-1 truncate text-sm text-foreground" title={s.title}>{s.title}</span>
                             {/* Right-side metadata — fades out on hover so the
                                 action button (rendered absolutely below) can

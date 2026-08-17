@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react';
+import { Link } from 'react-router-dom';
 import { CheckCircle2, XCircle, Loader2, MinusCircle, Calendar, Clock, AlertTriangle, MessageSquare } from 'lucide-react';
 import { useTranslate } from '@/lib/useTranslate';
 import { useLanguage } from '@/lib/LanguageProvider';
@@ -8,6 +9,20 @@ import RunChecklist from './RunChecklist';
 import RunFailureActions from './RunFailureActions';
 import { authFetch } from '@/api/authFetch';
 import { formatShortDateTime } from '@/lib/time';
+
+// Build the in-app chat URL for a run's "Open in chat" action. Navigates
+// within the SPA (no new tab) and carries the agent/project context so the
+// chat page can re-bind the right agent + KB scope.
+function buildChatUrl(entry, task) {
+  const convId = entry?.conversation_id || entry?.output_data?.conversation_id;
+  if (!convId) return null;
+  const params = new URLSearchParams({ conv: convId });
+  const agentName = entry?.output_data?.agent_name;
+  if (agentName) params.set('agentName', agentName);
+  if (task?.project_id) params.set('project', task.project_id);
+  if (task?.project && task.project !== 'global') params.set('projectName', task.project);
+  return `/?${params.toString()}`;
+}
 
 function fmtDuration(seconds) {
   if (!seconds && seconds !== 0) return '—';
@@ -197,16 +212,14 @@ export default function ExecutionLogsList({ task, noLogsText, refreshKey }) {
                       ))}
                   </div>
                 )}
-                {(entry.conversation_id || entry.output_data?.conversation_id) && (
-                  <a
-                    href={`/?conv=${encodeURIComponent(entry.conversation_id || entry.output_data?.conversation_id)}`}
-                    target="_blank"
-                    rel="noreferrer"
+                {buildChatUrl(entry, task) && (
+                  <Link
+                    to={buildChatUrl(entry, task)}
                     className="mt-2 inline-flex items-center gap-1.5 rounded-md border border-border bg-card px-2 py-1 text-xs text-foreground transition-colors hover:bg-secondary"
                   >
                     <MessageSquare className="h-3 w-3" />
                     {lang === 'en' ? 'Open in chat' : '在对话中打开'}
-                  </a>
+                  </Link>
                 )}
               </div>
             </div>

@@ -147,6 +147,14 @@ export function ChatSessionProvider({ children }) {
         : null;
       setPendingProjectState(projectName);
       setPendingProjectId(s.project_id || null);
+      // Clear the automation-run unread flag when the user opens the
+      // session. Optimistic local update + best-effort persistence —
+      // same pattern as starSession / renameSession. Guarded by the
+      // current value so we don't write on every click.
+      if (s.unread) {
+        setSessions((prev) => prev.map((x) => (x.id === id ? { ...x, unread: false } : x)));
+        base44.entities.ChatSession.update(id, { unread: false }).catch(() => {});
+      }
       // Keep the URL's ?conv= in sync with the active session's
       // AgentConversation. Previously this URL was only written by
       // Chat.jsx's handleAgentSend (on first send of a brand-new

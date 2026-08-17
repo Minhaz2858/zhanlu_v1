@@ -16,6 +16,9 @@ class ChatSession(TimestampedBase):
     )
     starred: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
     last_message_at: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # Set by automation runs so the sidebar can show an unread indicator.
+    # Cleared when the user opens the session (see ChatSessionContext.selectSession).
+    unread: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
 
     # ── Conversation / agent linkage (added by migration 029) ─────────
     # Persisted link to the AgentConversation this session was opened

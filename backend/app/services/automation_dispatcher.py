@@ -242,6 +242,24 @@ def _ensure_schema() -> None:
                         "automation schema: added column automation_tasks.%s (%s)",
                         col.name, ddl,
                     )
+
+        # --- chat_sessions (unread flag for automation-run notifications) -----
+        # No alembic migration: matches the project convention of idempotent
+        # raw SQL column sync at startup (see MEMORY.md "apply columns via
+        # raw SQL to avoid tripping the unapplied chain"). Uses the same
+        # inspector-driven pattern as the tables above so it works on both
+        # SQLite and Postgres (SQLite has no ADD COLUMN IF NOT EXISTS).
+        if "chat_sessions" in table_names:
+            existing = {c["name"] for c in insp.get_columns("chat_sessions")}
+            if "unread" not in existing:
+                with engine.begin() as conn:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE chat_sessions ADD COLUMN unread "
+                            + ("BOOLEAN DEFAULT FALSE" if is_pg else "INTEGER DEFAULT 0")
+                        )
+                    )
+                logger.info("automation schema: added column chat_sessions.unread")
     except Exception as e:
         logger.warning("automation schema ensure failed (non-fatal): %s", e)
 

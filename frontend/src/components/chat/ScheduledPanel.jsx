@@ -497,15 +497,21 @@ export default function ScheduledPanel({ sessionId, focusExecutionId, onClose })
                           </p>
                         )}
                         {(ex.conversation_id || ex.output_data?.conversation_id) && (
-                          <a
-                            href={`/?conv=${encodeURIComponent(ex.conversation_id || ex.output_data?.conversation_id)}`}
-                            target="_blank"
-                            rel="noreferrer"
+                          <Link
+                            to={`/?conv=${encodeURIComponent(ex.conversation_id || ex.output_data?.conversation_id)}${
+                              ex.output_data?.agent_name
+                                ? `&agentName=${encodeURIComponent(ex.output_data.agent_name)}`
+                                : ''
+                            }${task?.project_id ? `&project=${encodeURIComponent(task.project_id)}` : ''}${
+                              task?.project && task.project !== 'global'
+                                ? `&projectName=${encodeURIComponent(task.project)}`
+                                : ''
+                            }`}
                             className="inline-flex items-center gap-1 text-[11px] font-medium text-primary hover:underline"
                           >
                             <MessageSquare className="h-3 w-3" />
                             {isEn ? 'Open in chat' : '在对话中打开'}
-                          </a>
+                          </Link>
                         )}
                         {task.id && (
                           <Link
