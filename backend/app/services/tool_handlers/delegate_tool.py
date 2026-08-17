@@ -16,6 +16,7 @@ import uuid
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.llm_router import LLMEndpoint
 from app.services.tool_registry import registry
 from app.services.sub_agent_reliability import (
     call_llm_with_reliability,
@@ -43,6 +44,7 @@ async def _delegate_task(
     task = args.get("task", "").strip()
     agent_name = args.get("agent_name", "general_assistant")
     max_iterations = min(args.get("max_iterations", settings.DELEGATE_MAX_ITERATIONS), 10)
+    endpoint: LLMEndpoint | None = (context or {}).get("endpoint")
 
     if not task:
         return {"success": False, "error": "task is required"}
@@ -50,10 +52,10 @@ async def _delegate_task(
     # Check for batch mode (list of tasks)
     tasks = args.get("tasks")
     if tasks and isinstance(tasks, list):
-        return await _delegate_batch(tasks, agent_name, db, user_id, max_iterations)
+        return await _delegate_batch(tasks, agent_name, db, user_id, max_iterations, endpoint)
 
     # Single task
-    result = await _run_sub_agent(task, agent_name, db, user_id, max_iterations)
+    result = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
     return result
 
 
@@ -63,10 +65,11 @@ async def _delegate_batch(
     db: Session,
     user_id: str | None,
     max_iterations: int,
+    endpoint: LLMEndpoint | None = None,
 ) -> dict:
     """Run multiple sub-agent tasks concurrently."""
     coros = [
-        _run_sub_agent(task, agent_name, db, user_id, max_iterations)
+        _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
         for task in tasks
     ]
     results = await asyncio.gather(*coros, return_exceptions=True)
@@ -98,6 +101,7 @@ async def _run_sub_agent(
     db: Session,
     user_id: str | None,
     max_iterations: int,
+    endpoint: LLMEndpoint | None = None,
 ) -> dict:
     """Run a sub-agent conversation with restricted tools."""
     from app.services.agent_prompts import get_system_prompt, _get_all_crud_schemas
@@ -150,7 +154,9 @@ async def _run_sub_agent(
         pre_call_prep(messages)
 
         try:
-            llm_response = await call_llm_with_reliability(messages, tool_schemas)
+            llm_response = await call_llm_with_reliability(
+                messages, tool_schemas, endpoint=endpoint
+            )
         except Exception as e:
             logger.warning("Sub-agent LLM call failed: %s", e)
             metrics.record_budget(conv_budget.used, conv_budget.max_total)
