@@ -144,9 +144,11 @@ class TestFixDContextCondensing:
 
     @staticmethod
     def _big_rcp_result(title="Big Report"):
+        # Summary must be long enough that the serialized payload exceeds the
+        # 6000-char condensation threshold in _condense_data_agent_results.
         rcp = {
             "title": title,
-            "summary": "s" * 300,
+            "summary": "s" * 6000,
             "kpis": [
                 {"label": f"k{i}", "value": str(i)} for i in range(10)
             ],
