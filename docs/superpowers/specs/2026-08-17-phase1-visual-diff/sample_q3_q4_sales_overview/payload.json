@@ -1,0 +1,147 @@
+{
+  "title": "Q3 → Q4 Sales Overview: Resin Pricing Drives a 14% Margin Lift",
+  "source": "erp_product_sales_details, 2026-08-15 snapshot",
+  "generated_at": "2026-08-15T10:00:00Z",
+  "summary": "Resin product revenue grew 18% quarter-over-quarter while unit shipment volumes stayed flat, driven primarily by a 12% price lift in LDPE grades. PC grades underperformed against plan by 9% on softening export demand, partially offset by stronger PVC pricing in the domestic market.",
+  "methodology": "Aggregated from erp_product_sales_details (fact table joined to dim_product). Filters: FY26 Q3+Q4, sales org = Z01, currency = RMB. Top-8 by shipment_volume; rebalanced for grade-level margin to surface the resin / PC divergence.",
+  "kpis": [
+    {
+      "label": "Revenue",
+      "value": "¥1.84B",
+      "delta": "+18%",
+      "caption": "QoQ"
+    },
+    {
+      "label": "Volume",
+      "value": "212 kt",
+      "delta": "-1.2%",
+      "caption": "QoQ"
+    },
+    {
+      "label": "Margin",
+      "value": "21.4%",
+      "delta": "+2.8pt",
+      "caption": "QoQ"
+    },
+    {
+      "label": "Active SKUs",
+      "value": "126",
+      "delta": "+5",
+      "caption": "vs. plan"
+    },
+    {
+      "label": "Backlog",
+      "value": "¥312M",
+      "delta": "+7%",
+      "caption": "vs. last quarter"
+    },
+    {
+      "label": "OTIF",
+      "value": "94.1%",
+      "delta": "+1.3pt",
+      "caption": "Plan target 95%"
+    }
+  ],
+  "insights": [
+    "Resin grades (LDPE + LLDPE) drove 71% of margin expansion, even though they represent only 38% of volume.",
+    "PVC domestic pricing benefited from tighter spot-market supply in July; sustaining it is the upside risk.",
+    "PC export softness tracks softening EU appliance demand — not likely to reverse before CY27.",
+    "Top-customer concentration rose to 41% (vs. 38% prior quarter); worth a diversification play.",
+    "Freight cost per ton fell 6% on renegotiated rail contracts; an extra ¥22M of cushion."
+  ],
+  "key_findings": [
+    {
+      "text": "Resin pricing added ¥112M of gross margin vs. flat volumes, masking weaker PC grades."
+    },
+    {
+      "text": "PC grade export volume fell 14% QoQ; softer EU demand is the proximate cause."
+    },
+    {
+      "text": "Top-3 SKUs (LDPE Film, LLDPE Rotation, PVC Pipe) account for 28% of revenue; concentration is up."
+    },
+    {
+      "text": "Freight cost re-negotiation adds an estimated ¥22M of FY26 cushion."
+    },
+    {
+      "text": "OTIF misses plan by 0.9pt; root cause is concentrated at 2 plants (Shanghai, Tianjin)."
+    },
+    {
+      "text": "Backlog at ¥312M (+7% QoQ) gives some forward-cover against the PC softness."
+    }
+  ],
+  "recommendations": [
+    "Re-weight Oct–Dec plan toward resin grades to capture pricing upside; pause PC export push.",
+    "Diversify top-customer exposure — start renewal talks with #6–#10 accounts now.",
+    "Rebid the Shanghai + Tianjin OTIF root-cause (joint with S&OP) by end of September.",
+    "Lock in freight cost savings as a recurring line in the FY27 budget."
+  ],
+  "sections": [
+    {
+      "title": "Revenue & Margin",
+      "content": "Resin lift is the headline.",
+      "bullets": []
+    },
+    {
+      "title": "Volume Picture",
+      "content": "Volumes are flat, but skewed.",
+      "bullets": []
+    },
+    {
+      "title": "Customer Concentration",
+      "content": "Top-customer share up.",
+      "bullets": []
+    },
+    {
+      "title": "Forward Look",
+      "content": "Backlog supports next quarter.",
+      "bullets": []
+    }
+  ],
+  "next_step": "Endorse the resin-tilted Oct–Dec plan; bring OTIF root-cause to S&OP by end-September; sign off on the freight re-negotiation.",
+  "warnings": [
+    "Spot resin prices may roll over in Q4 if inventory rebuilds faster than demand."
+  ],
+  "chart": {
+    "type": "bar",
+    "title": "Revenue by Product Grade (¥M)",
+    "x_key": "grade",
+    "y_keys": [
+      "revenue"
+    ],
+    "data": [
+      {
+        "grade": "LDPE Film",
+        "revenue": 412
+      },
+      {
+        "grade": "LLDPE Rot.",
+        "revenue": 308
+      },
+      {
+        "grade": "PVC Pipe",
+        "revenue": 254
+      },
+      {
+        "grade": "PC Clear",
+        "revenue": 198
+      },
+      {
+        "grade": "PPH Inj.",
+        "revenue": 162
+      },
+      {
+        "grade": "HDPE Blow",
+        "revenue": 142
+      },
+      {
+        "grade": "ABS Inj.",
+        "revenue": 121
+      },
+      {
+        "grade": "EPS Block",
+        "revenue": 96
+      }
+    ]
+  },
+  "sql": "SELECT grade, SUM(revenue_rmb)/1e6 AS revenue\nFROM erp_product_sales_details\nWHERE fyear IN ('2026-Q3','2026-Q4')\nGROUP BY grade ORDER BY revenue DESC LIMIT 8;"
+}
