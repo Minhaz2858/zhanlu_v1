@@ -24,6 +24,7 @@ import os
 import httpx
 
 from app.config import settings
+from app.services.llm_router import LLMEndpoint
 from app.services.llm_service import llm_headers, llm_url, get_model
 from app.services.prompt_caching import apply_cache_control
 from app.services.api_error_classifier import classify_api_error
@@ -63,6 +64,7 @@ async def call_llm_with_reliability(
     tools: list[dict] | None,
     *,
     temperature: float = 0.7,
+    endpoint: LLMEndpoint | None = None,
 ) -> dict:
     """Call the LLM with prompt caching and structured error classification.
 
@@ -76,12 +78,25 @@ async def call_llm_with_reliability(
         tools: OpenAI-format tool schemas, or None/empty for no tools.
         temperature: Sampling temperature (sub-agents default 0.7; the Data
             Agent uses 0.2).
+        endpoint: Optional concrete ``LLMEndpoint`` from hierarchical config.
+            When set, uses endpoint.base_url / endpoint.api_key /
+            endpoint.model_id instead of global settings. When None, falls
+            back to the legacy global provider.
 
     Returns:
         dict with ``content`` (str), ``tool_calls`` (list), ``reasoning`` (str).
     """
+    if endpoint is not None:
+        _model = endpoint.model_id
+        _url = endpoint.base_url.rstrip("/") + "/chat/completions"
+        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+    else:
+        _model = get_model()
+        _url = llm_url()
+        _headers = llm_headers()
+
     payload = {
-        "model": get_model(),
+        "model": _model,
         "messages": apply_cache_control(
             messages,
             enabled=getattr(settings, "PROMPT_CACHE_ENABLED", False),
@@ -94,7 +109,7 @@ async def call_llm_with_reliability(
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(llm_url(), headers=llm_headers(), json=payload)
+            resp = await client.post(_url, headers=_headers, json=payload)
             resp.raise_for_status()
     except Exception as e:
         # P1: structured error classification + metrics
