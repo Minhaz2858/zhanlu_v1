@@ -173,6 +173,11 @@ _EMPTY_CONTENT_FALLBACK = (
 
 _GENERIC_EMPTY_CONTENT_FALLBACK = (
     "I gathered some information but had trouble putting it all together. "
+    "Could you try again with a more specific request?"
+)
+
+_DASHBOARD_REDIRECT_FALLBACK = (
+    "I gathered some information but had trouble putting it all together. "
     "Could you try again with a more specific request? "
     "If you asked me to build a dashboard, please say 'create dashboard' and I'll try again."
 )
@@ -186,6 +191,9 @@ def _collect_artifact_titles(
 
     Pulls titles from orchestrator-created artifacts (``_orch_created``) and
     from artifact/dashboard tool results recorded in ``tool_calls_for_frontend``.
+    Also scans for ``report_card_payload.title`` (data-agent results) and
+    any other ``results.title`` / ``results.summary.title`` fields so that
+    report-card artifacts are never hidden by the fallback.
     Deduplicated, order-preserving. Used by the artifact-aware fallback so an
     empty ``assistant_content`` never hides a successfully produced artifact.
     """
@@ -197,13 +205,27 @@ def _collect_artifact_titles(
     for tc in (tool_calls_for_frontend or []):
         name = tc.get("name")
         result = tc.get("results") or {}
+        if not isinstance(result, dict):
+            continue
+        # Dashboard artifact
         if name == "create_dashboard":
-            art = result.get("artifact") if isinstance(result, dict) else None
+            art = result.get("artifact")
             if isinstance(art, dict) and art.get("title"):
                 titles.append(str(art["title"]))
+        # Generic artifact / sandbox
         elif name in ("create_artifact", "run_sandbox_skill"):
-            if isinstance(result, dict) and result.get("title"):
+            if result.get("title"):
                 titles.append(str(result["title"]))
+        # Data-agent report card (ask_data_agent)
+        rcp = result.get("report_card_payload")
+        if isinstance(rcp, dict) and rcp.get("title"):
+            titles.append(str(rcp["title"]))
+        # Generic title / summary.title on any tool result
+        if result.get("title") and not (name in ("create_artifact", "run_sandbox_skill")):
+            titles.append(str(result["title"]))
+        summary = result.get("summary")
+        if isinstance(summary, dict) and summary.get("title"):
+            titles.append(str(summary["title"]))
     seen: set[str] = set()
     out: list[str] = []
     for t in titles:
@@ -227,6 +249,55 @@ def _artifact_aware_fallback(titles: list[str]) -> str:
         )
     joined = ", ".join(f"**{t}**" for t in titles)
     return f"I've completed your request. Here are the artifacts: {joined}."
+
+
+def _data_summary_fallback(titles: list[str], user_content: str = "") -> str:
+    """Fallback when data-agent report cards exist but synthesis text is empty.
+
+    This is more specific than the generic fallback: it names the reports
+    that were produced and avoids the misleading "create dashboard" redirect
+    unless the user actually asked for a dashboard.
+    """
+    if len(titles) == 1:
+        return (
+            f"I produced **{titles[0]}** above with the full data. "
+            f"Let me know if you'd like a more detailed analysis or a combined dashboard."
+        )
+    joined = ", ".join(f"**{t}**" for t in titles)
+    return (
+        f"I produced {joined} above with the full supply chain data. "
+        f"Let me know if you'd like a single combined dashboard or a deeper analysis."
+    )
+
+
+def _choose_fallback(
+    tool_calls_for_frontend: list[dict],
+    orch_created: list[dict],
+    user_content: str = "",
+) -> str:
+    """Choose the best fallback message based on what was produced this turn.
+
+    Priority:
+    1. If data-agent report cards exist → ``_data_summary_fallback``
+    2. If any artifact exists → ``_artifact_aware_fallback``
+    3. If user asked for a dashboard → ``_DASHBOARD_REDIRECT_FALLBACK``
+    4. Otherwise → ``_GENERIC_EMPTY_CONTENT_FALLBACK``
+    """
+    titles = _collect_artifact_titles(tool_calls_for_frontend, orch_created)
+    # Check if any data-agent report cards were produced
+    has_report_card = False
+    for tc in (tool_calls_for_frontend or []):
+        result = tc.get("results") or {}
+        if isinstance(result, dict) and result.get("report_card_payload"):
+            has_report_card = True
+            break
+    if has_report_card and titles:
+        return _data_summary_fallback(titles, user_content)
+    if titles:
+        return _artifact_aware_fallback(titles)
+    if _is_dashboard_request(user_content):
+        return _DASHBOARD_REDIRECT_FALLBACK
+    return _GENERIC_EMPTY_CONTENT_FALLBACK
 
 
 def _is_dashboard_request(user_content: str) -> bool:
@@ -7960,7 +8031,9 @@ async def add_message_stream(
         # the user sees "detailed report" + "I gathered some information..."
         # as a confusing double-message.
         if not assistant_content and not locals().get("content_streamed"):
-            assistant_content = _EMPTY_CONTENT_FALLBACK if agent_name == "agent_builder" else _GENERIC_EMPTY_CONTENT_FALLBACK
+            assistant_content = _EMPTY_CONTENT_FALLBACK if agent_name == "agent_builder" else _choose_fallback(
+                tool_calls_for_frontend, _orch_created, user_content=user_content,
+            )
 
         # Decision-summary pause (R4): if the assistant text contains a
         # `:::decision-summary` block, persist the pending payload to
@@ -8258,15 +8331,12 @@ async def add_message_stream(
                                 "Please try again — I'll create the dashboard more quickly this time."
                             )
                         else:
-                            # Artifact-aware fallback: if an artifact was
-                            # actually produced this turn, reference it instead
-                            # of claiming "trouble putting it together".
-                            _titles = _collect_artifact_titles(
+                            # Context-aware fallback: choose the best message
+                            # based on what was produced this turn (report cards,
+                            # artifacts, dashboard requests, or generic).
+                            assistant_content = _choose_fallback(
                                 tool_calls_for_frontend, _orch_created,
-                            )
-                            assistant_content = (
-                                _artifact_aware_fallback(_titles)
-                                if _titles else _GENERIC_EMPTY_CONTENT_FALLBACK
+                                user_content=user_content,
                             )
                 logger.info(
                     "Post-loop fallback: empty assistant_content, using fallback message "
