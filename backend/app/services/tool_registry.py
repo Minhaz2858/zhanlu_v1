@@ -197,6 +197,11 @@ class ToolRegistry:
             entry = self._tools.get(name)
         return entry.handler if entry else None
 
+    def get_entry(self, name: str) -> "ToolEntry | None":
+        """Return the full ToolEntry for a tool (schema, category, flags)."""
+        with self._lock:
+            return self._tools.get(name)
+
     def is_async_handler(self, name: str) -> bool:
         """Check if a tool's handler is a coroutine function."""
         with self._lock:

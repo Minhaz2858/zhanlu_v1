@@ -313,6 +313,101 @@ def _tool_was_called(tool_calls_for_frontend: list[dict], tool_name: str) -> boo
     return any(tc.get("name") == tool_name for tc in tool_calls_for_frontend)
 
 
+def _compact_report_card(rcp: dict) -> str:
+    """Build a compact LLM-facing digest of a data-agent report card.
+
+    Extracts title, summary, up to 6 KPIs, chart metadata (title/type/row
+    count + one sample row), and the top 3 insights.  This is far smaller
+    than the raw 5-10k-token report_card_payload, so the final synthesis
+    LLM keeps its output budget for prose instead of spending it on context.
+    """
+    lines: list[str] = []
+    title = str(rcp.get("title") or "Report")
+    lines.append(f"[DATA-AGENT REPORT: {title}]")
+    summary = rcp.get("summary")
+    if summary:
+        lines.append(f"Summary: {str(summary)[:400]}")
+    kpis = rcp.get("kpis") or []
+    if kpis:
+        parts = []
+        for k in kpis[:6]:
+            if isinstance(k, dict):
+                label = k.get("label") or k.get("name") or "?"
+                value = k.get("value") or ""
+                parts.append(f"{label}={value}")
+            else:
+                parts.append(str(k))
+        if parts:
+            suffix = " (…)" if len(kpis) > 6 else ""
+            lines.append("KPIs: " + "; ".join(parts) + suffix)
+    chart = rcp.get("chart")
+    if isinstance(chart, dict):
+        c_title = chart.get("title") or title
+        c_type = chart.get("type") or "bar"
+        lines.append(f"Chart: {c_title} ({c_type})")
+        data = chart.get("data")
+        if isinstance(data, list) and data:
+            lines.append(f"Chart rows: {len(data)}")
+            if isinstance(data[0], dict):
+                try:
+                    lines.append(
+                        "Sample row: "
+                        + json.dumps(data[0], ensure_ascii=False)[:300]
+                    )
+                except Exception:
+                    pass
+    insights = rcp.get("insights") or []
+    if insights:
+        lines.append("Insights (top 3):")
+        for ins in insights[:3]:
+            txt = ins.get("text") if isinstance(ins, dict) else ins
+            lines.append(f"- {str(txt)[:300]}")
+    actions = rcp.get("actions") or []
+    if actions:
+        lines.append(f"Follow-up actions available: {len(actions)}")
+    return "\n".join(lines)
+
+
+def _condense_data_agent_results(
+    llm_messages: list[dict],
+    max_tool_result_chars: int = 6000,
+) -> None:
+    """Condense oversized ``ask_data_agent`` tool results in-place (Fix D).
+
+    Data-agent results embed a ``report_card_payload`` (KPIs, chart series,
+    insights) that can be 5-10k tokens per result.  When two or more such
+    results are in context at once, the final synthesis LLM (typically
+    DeepSeek) can exceed its output budget and return empty content — the
+    ``assistant_content``-empty fallback then fires.
+
+    Called only on the final synthesis iteration (``tool_choice == "none"``)
+    so mid-loop tool decisions still see full data.  Each oversized
+    data-agent tool result is replaced with a compact digest produced by
+    ``_compact_report_card``.  Only the LLM-facing context is touched: the
+    full payload remains in ``tool_calls_for_frontend`` (frontend report-card
+    rendering) and in the persisted conversation messages.
+    """
+    for msg in llm_messages:
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str) or len(content) <= max_tool_result_chars:
+            continue
+        try:
+            data = json.loads(content)
+        except (TypeError, ValueError):
+            continue  # not JSON — leave untouched
+        if not isinstance(data, dict):
+            continue
+        rcp = data.get("report_card_payload")
+        if not isinstance(rcp, dict):
+            continue  # not a data-agent result — leave untouched
+        try:
+            msg["content"] = _compact_report_card(rcp)
+        except Exception as exc:  # defensive: never break the loop over context
+            logger.warning("condense report card failed: %s", exc)
+
+
 def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None, selected_skill_id: str | None) -> str:
     """Build a hard runtime instruction block for a chat-selected skill."""
     if not selected_skill and not selected_skill_id:
@@ -7063,6 +7158,11 @@ async def add_message_stream(
                 # P1.3: Pre-API deterministic tool result pruning
                 prune_tool_results_only(llm_messages, model=get_model())
                 sanitize_messages(llm_messages)
+                # Fix D: on the final text-only iteration, condense oversized
+                # ask_data_agent report cards so the synthesis LLM keeps its
+                # output budget (prevents empty-content synthesis).
+                if tool_choice == "none":
+                    _condense_data_agent_results(llm_messages)
                 if STREAM_TOKEN_DELTAS:
                     # ── Streaming path ────────────────────────────────
                     # Iterate the generator: deltas → client immediately;
