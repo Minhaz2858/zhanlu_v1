@@ -102,5 +102,77 @@ class TestCallLLMWithReliabilityEndpoint(unittest.TestCase):
         self.assertEqual(captured["json"]["model"], get_model())
 
 
+class TestDelegationLLMThreading(unittest.TestCase):
+    """Verify _call_llm and _call_llm_with_retry forward the endpoint."""
+
+    def test_call_llm_forwards_endpoint(self):
+        from app.services.llm_router import LLMEndpoint
+        from app.services.tool_handlers import delegation_tools
+
+        endpoint = LLMEndpoint(
+            base_url="https://api.moonshot.cn/v1",
+            api_key="kimi-secret-key",
+            model_id="kimi-k2.6",
+            provider="moonshot",
+        )
+
+        calls = {}
+
+        async def fake_reliability(messages, tools, *, temperature=0.2, endpoint=None):
+            calls["temperature"] = temperature
+            calls["endpoint"] = endpoint
+            return {"content": "hi", "tool_calls": [], "reasoning": ""}
+
+        with patch.object(
+            delegation_tools, "call_llm_with_reliability", side_effect=fake_reliability
+        ):
+            asyncio.run(delegation_tools._call_llm(
+                [{"role": "user", "content": "q"}], [], endpoint=endpoint
+            ))
+
+        self.assertIs(calls["endpoint"], endpoint)
+        self.assertEqual(calls["temperature"], 0.2)
+
+    def test_call_llm_with_retry_forwards_endpoint(self):
+        from app.services.llm_router import LLMEndpoint
+        from app.services.tool_handlers import delegation_tools
+
+        endpoint = LLMEndpoint(
+            base_url="https://api.moonshot.cn/v1",
+            api_key="kimi-secret-key",
+            model_id="kimi-k2.6",
+            provider="moonshot",
+        )
+
+        calls = {}
+
+        async def fake_llm(messages, tools, *, endpoint=None):
+            calls["endpoint"] = endpoint
+            return {"content": "hi", "tool_calls": [], "reasoning": ""}
+
+        with patch.object(delegation_tools, "_call_llm", side_effect=fake_llm):
+            asyncio.run(delegation_tools._call_llm_with_retry(
+                [{"role": "user", "content": "q"}], [], endpoint=endpoint
+            ))
+
+        self.assertIs(calls["endpoint"], endpoint)
+
+    def test_call_llm_with_retry_endpoint_none_defaults(self):
+        from app.services.tool_handlers import delegation_tools
+
+        calls = {}
+
+        async def fake_llm(messages, tools, *, endpoint=None):
+            calls["endpoint"] = endpoint
+            return {"content": "hi", "tool_calls": [], "reasoning": ""}
+
+        with patch.object(delegation_tools, "_call_llm", side_effect=fake_llm):
+            asyncio.run(delegation_tools._call_llm_with_retry(
+                [{"role": "user", "content": "q"}], []
+            ))
+
+        self.assertIsNone(calls["endpoint"])
+
+
 if __name__ == "__main__":
     unittest.main()

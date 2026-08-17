@@ -597,15 +597,27 @@ def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> 
             state["source_name"] = result["source_name"]
 
 
-async def _call_llm(messages: list[dict], tools: list[dict]) -> dict:
+async def _call_llm(
+    messages: list[dict],
+    tools: list[dict],
+    *,
+    endpoint=None,
+) -> dict:
     """Single-turn LLM call (delegates to reliability wrapper).
 
     Uses ``temperature=0.2`` (lower than the generic sub-agent default of
     0.7) because the Data Agent should be deterministic when writing SQL.
     Prompt caching, error classification, and metrics are applied by
     :func:`call_llm_with_reliability`.
+
+    Args:
+        endpoint: Optional concrete ``LLMEndpoint`` from the project binding.
+            Forwarded unchanged to ``call_llm_with_reliability``. When None,
+            the legacy global provider is used.
     """
-    return await call_llm_with_reliability(messages, tools, temperature=0.2)
+    return await call_llm_with_reliability(
+        messages, tools, temperature=0.2, endpoint=endpoint
+    )
 
 
 # Errors that are worth retrying — they typically mean the upstream
@@ -631,6 +643,7 @@ async def _call_llm_with_retry(
     *,
     max_retries: int = 2,
     base_backoff: float = 0.5,
+    endpoint=None,
 ) -> dict:
     """Call the LLM with bounded retry on transient errors.
 
@@ -645,11 +658,15 @@ async def _call_llm_with_retry(
     Bounded latency: max_retries=2 + base_backoff=0.5 → at most 1.5 s of
     extra wall time in the worst case (0.5s + 1.0s backoff between 3
     attempts).
+
+    Args:
+        endpoint: Optional concrete ``LLMEndpoint`` forwarded to ``_call_llm``
+            on every retry attempt.
     """
     last_exc: BaseException | None = None
     for attempt in range(max_retries + 1):
         try:
-            return await _call_llm(messages, tools)
+            return await _call_llm(messages, tools, endpoint=endpoint)
         except Exception as e:
             last_exc = e
             is_retryable = (
