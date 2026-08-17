@@ -35,6 +35,16 @@ def _require_alerts_enabled():
         raise HTTPException(status_code=403, detail="ECISCO_BI_ALERTS_ENABLED is off")
 
 
+def effective_org_id(current_user: User | None) -> str:
+    """Resolve the effective org id for a request.
+
+    The ``User`` model has no ``org_id`` column, so this falls back to
+    ``settings.DEFAULT_ORG_ID`` (the single-tenant default) and keeps the
+    reader/writer consistent with the background scan worker.
+    """
+    return getattr(current_user, "org_id", None) or settings.DEFAULT_ORG_ID
+
+
 # ── Pydantic schemas ────────────────────────────────────────────────────
 
 class AlertOut(BaseModel):
@@ -68,6 +78,17 @@ class ScanResponse(BaseModel):
     total_scanned: int = 0
     error: str | None = None
     skipped: bool = False
+    reachable: bool | None = None
+    reason: str | None = None
+
+
+class AlertDiagnosticsResponse(BaseModel):
+    flags: dict
+    warehouse: dict
+    thresholds: dict
+    effective_org_id: str
+    products: list[dict]
+    triggering_products: list[str]
 
 
 # ── Routes ──────────────────────────────────────────────────────────────
@@ -80,7 +101,7 @@ def list_alerts(
     """List active (non-dismissed) alerts, newest first."""
     _require_alerts_enabled()
 
-    org_id = current_user.org_id if hasattr(current_user, "org_id") else None
+    org_id = effective_org_id(current_user)
     alerts = AlertService.get_active_alerts(db, org_id=org_id)
     unread = AlertService.count_unread(db, org_id=org_id)
 
@@ -98,7 +119,7 @@ def mark_all_read(
     """Mark all unread alerts as read (per-org)."""
     _require_alerts_enabled()
 
-    org_id = current_user.org_id if hasattr(current_user, "org_id") else None
+    org_id = effective_org_id(current_user)
     count = AlertService.mark_all_read(db, org_id=org_id)
     return {"marked_read": count}
 
@@ -112,7 +133,7 @@ def dismiss_alert(
     """Dismiss a single alert by ID."""
     _require_alerts_enabled()
 
-    org_id = current_user.org_id if hasattr(current_user, "org_id") else None
+    org_id = effective_org_id(current_user)
     ok = AlertService.dismiss_alert(db, alert_id, org_id=org_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Alert not found")
@@ -132,6 +153,23 @@ def trigger_scan(
     return ScanResponse(**result)
 
 
+@router.get("/diagnostics", response_model=AlertDiagnosticsResponse)
+def alert_diagnostics(
+    current_user: User = Depends(get_current_user_required),
+):
+    """Diagnose *why* the alerts panel may show zero alerts.
+
+    Reports flag state, warehouse reachability, configured thresholds, and a
+    per-product probe (row count / latest price / 7-day change / would-trigger).
+
+    Gated by auth only (NOT ``ECISCO_BI_ALERTS_ENABLED``) so it can report the
+    flag-off state instead of hiding the reason behind a 403.
+    """
+    from app.services.perception.diagnostics import build_alert_diagnostics
+
+    return AlertDiagnosticsResponse(**build_alert_diagnostics())
+
+
 @router.post("/digest", response_model=AlertOut)
 async def trigger_digest(
     db: Session = Depends(get_db),
@@ -144,7 +182,7 @@ async def trigger_digest(
 
     from app.services.perception.digest_service import DigestService
 
-    org_id = current_user.org_id if hasattr(current_user, "org_id") else None
+    org_id = effective_org_id(current_user)
     svc = DigestService(db=db, org_id=org_id)
     result = await svc.build_and_persist()
     if not result:

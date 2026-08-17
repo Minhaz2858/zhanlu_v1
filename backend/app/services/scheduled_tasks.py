@@ -513,7 +513,7 @@ async def _run_digest_cycle() -> None:
 
         db = SessionLocal()
         try:
-            org_id = settings.ORG_ID if hasattr(settings, "ORG_ID") else None
+            org_id = settings.DEFAULT_ORG_ID
             svc = DigestService(db=db, org_id=org_id)
             result = await svc.build_and_persist()
             if result:

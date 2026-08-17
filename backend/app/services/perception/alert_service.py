@@ -19,16 +19,29 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.alert import AlertLog
 
 logger = logging.getLogger(__name__)
 
-# ── Thresholds ────────────────────────────────────────────────────────────
+# ── Thresholds (defaults; tunable via Settings) ──────────────────────────
+# The detection logic reads the live values from `settings.ALERT_*` at call
+# time so a `.env` change (or a test monkeypatch) takes effect without a
+# code edit. These module constants are kept as fallback defaults.
 PRICE_SPIKE_THRESHOLD = 3.0   # +3 % 7d change → price_spike
 PRICE_DROP_THRESHOLD = -3.0   # -3 % 7d change → price_drop
 HIGH_SEVERITY_THRESHOLD = 6.0   # >= |6| %
 DEDUP_WINDOW_DAYS = 7          # price alerts
 DEDUP_WINDOW_ARBITRAGE = 3     # arbitrage alerts
+
+
+def effective_thresholds() -> tuple[float, float, float]:
+    """Return (spike, drop, high_severity) thresholds from live settings."""
+    return (
+        getattr(settings, "ALERT_PRICE_SPIKE_THRESHOLD", PRICE_SPIKE_THRESHOLD),
+        getattr(settings, "ALERT_PRICE_DROP_THRESHOLD", PRICE_DROP_THRESHOLD),
+        getattr(settings, "ALERT_HIGH_SEVERITY_THRESHOLD", HIGH_SEVERITY_THRESHOLD),
+    )
 
 
 class AlertService:
@@ -134,6 +147,7 @@ class AlertService:
             list of newly persisted AlertLog.to_dict()
         """
         new_alerts: list[dict] = []
+        spike_threshold, drop_threshold, high_severity_threshold = effective_thresholds()
 
         # ── Price spike / drop detection ────────────────────────────
         for product in snapshot:
@@ -146,9 +160,9 @@ class AlertService:
                 continue
 
             # Determine alert type from threshold
-            if change_7d >= PRICE_SPIKE_THRESHOLD:
+            if change_7d >= spike_threshold:
                 alert_type = "price_spike"
-            elif change_7d <= PRICE_DROP_THRESHOLD:
+            elif change_7d <= drop_threshold:
                 alert_type = "price_drop"
             else:
                 continue  # within normal range — skip
@@ -156,7 +170,7 @@ class AlertService:
             # Severity
             severity = (
                 "high"
-                if abs(change_7d) >= HIGH_SEVERITY_THRESHOLD
+                if abs(change_7d) >= high_severity_threshold
                 else "medium"
             )
 

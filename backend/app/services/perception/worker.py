@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timezone
 
 from app.config import settings
+from app.core.mysql_db import is_edia_reachable
 from app.services.perception.service import build_perception_snapshot
 from app.services.perception.alert_service import AlertService
 
@@ -19,7 +20,7 @@ logger = logging.getLogger(__name__)
 async def run_alert_scan_cycle() -> dict:
     """One scan cycle: snapshot → detect → persist.
 
-    Returns dict with {scanned_at, new_alerts, total_scanned, error}.
+    Returns dict with {scanned_at, new_alerts, total_scanned, error, reachable, reason}.
 
     Called by the periodic scheduled task in scheduled_tasks.py,
     gated by ``ECISCO_BI_ALERTS_ENABLED``.
@@ -32,7 +33,21 @@ async def run_alert_scan_cycle() -> dict:
         "new_alerts": 0,
         "total_scanned": 0,
         "error": None,
+        "reachable": None,
+        "reason": None,
     }
+
+    # Reachability probe up-front so the UI can surface "warehouse unreachable"
+    # even when no products scan (the most common silent-zero cause).
+    result["reachable"] = is_edia_reachable()
+    if not result["reachable"]:
+        logger.warning(
+            "AlertScannerWorker: EDIA warehouse unreachable — 0 alerts will be "
+            "generated. Check EDIA_MYSQL_URL and network reachability to "
+            "10.10.10.49:3306."
+        )
+        result["reason"] = "warehouse unreachable"
+        return result
 
     from app.database import SessionLocal
 
@@ -69,7 +84,7 @@ async def run_alert_scan_cycle() -> dict:
             return result
 
         # 3. Detect and persist
-        org_id = settings.ORG_ID if hasattr(settings, "ORG_ID") else None
+        org_id = settings.DEFAULT_ORG_ID
         new_alerts = AlertService.detect_and_persist(db, org_id, product_list)
         result["new_alerts"] = len(new_alerts)
 
