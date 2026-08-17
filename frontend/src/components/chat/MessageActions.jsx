@@ -1,7 +1,7 @@
 import { useState, useCallback, useRef } from 'react';
 import {
   Copy, Check, Share2, ThumbsUp, ThumbsDown,
-  FileText, Image as ImageIcon, X,
+  FileText, Image as ImageIcon, X, Star,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import html2canvas from 'html2canvas';
@@ -20,12 +20,16 @@ export default function MessageActions({
   onFeedback,
   feedbackRating,
   isStreaming,
+  showRoleRating,
+  onRoleRelevance,
+  roleRelevanceRating,
 }) {
   const { lang } = useLanguage();
   const [copied, setCopied] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
   const [generatingImage, setGeneratingImage] = useState(false);
   const [generatingDoc, setGeneratingDoc] = useState(false);
+  const [hoverRating, setHoverRating] = useState(0);
 
   const handleCopy = useCallback(() => {
     const text = message.content || '';
@@ -218,6 +222,41 @@ export default function MessageActions({
               </TooltipContent>
             </Tooltip>
           </>
+        )}
+
+        {/* Role relevance rating (1-5 stars) — shown on throttled messages */}
+        {showRoleRating && onRoleRelevance && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                className={`inline-flex h-7 items-center gap-0.5 rounded-md px-1.5 text-xs transition-colors ${
+                  roleRelevanceRating
+                    ? 'bg-amber-50 font-medium text-amber-600'
+                    : 'text-muted-foreground hover:bg-secondary hover:text-amber-500'
+                }`}
+                aria-label={lang === 'en' ? 'Relevant to your role?' : '与您的角色相关吗？'}
+                onMouseEnter={() => setHoverRating(0)}
+                onMouseLeave={() => setHoverRating(0)}
+              >
+                {[1, 2, 3, 4, 5].map((n) => (
+                  <Star
+                    key={n}
+                    onMouseEnter={() => setHoverRating(n)}
+                    onClick={() => onRoleRelevance(message.id, n)}
+                    className={`h-3.5 w-3.5 cursor-pointer ${
+                      n <= (hoverRating || roleRelevanceRating || 0)
+                        ? 'fill-amber-400 text-amber-400'
+                        : 'text-muted-foreground'
+                    }`}
+                  />
+                ))}
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              <p>{lang === 'en' ? 'Relevant to your role?' : '与您的角色相关吗？'}</p>
+            </TooltipContent>
+          </Tooltip>
         )}
       </div>
     </TooltipProvider>

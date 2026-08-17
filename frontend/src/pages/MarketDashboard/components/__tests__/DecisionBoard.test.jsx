@@ -117,6 +117,31 @@ describe('DecisionBoard', () => {
     expect(screen.getByText('AI 分析师撰写')).toBeInTheDocument();
   });
 
+  it('relabels Supply & Demand to Macro Supply & Demand for upstream products', async () => {
+    const { marketDashboardApi } = await import('@/api/marketDashboard');
+    const upstreamBrief = {
+      ...FIXTURE,
+      products: [
+        {
+          ...FIXTURE.products[0],
+          id: 'crude_oil', name_zh: '原油', name_en: 'Crude Oil', code: 'crude_oil',
+          analyst_brief: {
+            market_update_zh: '市场动态:市场情报偏多。',
+            supply_demand_zh: '国际油价走强,裂解价差扩张,支撑价格中枢上移。',
+            forecast_zh: '价格预测:预计未来 7 天偏强。',
+            source: 'llm', day: 7, generated_at: '2026-08-04T00:00:00+00:00',
+          },
+        },
+      ],
+    };
+    marketDashboardApi.decisionBoard.mockResolvedValueOnce(upstreamBrief);
+    renderBoard({ group: 'upstream' });
+    const btn = await screen.findByLabelText('展开 原油');
+    fireEvent.click(btn);
+    expect(await screen.findByText(/宏观供需/)).toBeInTheDocument();
+    expect(screen.queryByText('供需研判')).not.toBeInTheDocument();
+  });
+
   it('shows no-events note when intel_event_count is 0', async () => {
     renderBoard();
     const btn = await screen.findByLabelText('展开 双环戊二烯');

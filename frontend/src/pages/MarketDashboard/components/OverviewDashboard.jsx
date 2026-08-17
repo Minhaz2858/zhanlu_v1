@@ -4,9 +4,10 @@ import html2canvas from 'html2canvas';
 import { jsPDF } from 'jspdf';
 import { Download, FileImage, FileText, Loader2 } from 'lucide-react';
 import { marketDashboardApi } from '@/api/marketDashboard';
-import { PRODUCT_LABELS } from '@/constants/marketDashboard';
+import { ERP_PRODUCT_IDS, PRODUCT_LABELS } from '@/constants/marketDashboard';
 import { getPriceChangeTextClass } from '../lib/priceChange';
 import { TYPO } from '../lib/typography';
+import { formatKpiValue as formatKpiValueBase } from '../lib/formatKpiValue';
 
 /**
  * OverviewDashboard — Chemical Product Market Overview.
@@ -629,6 +630,14 @@ export default function OverviewDashboard({
         dailyMove: 'Daily',
         loading: 'Loading...',
         regionalUnavailable: 'No regional data',
+        supplyChainKpiTitle: 'Supply Chain KPIs',
+        grade: 'Grade',
+        sku: 'SKU',
+        sales30d: '30D Sales',
+        inventory: 'Inventory',
+        inventoryDays: 'Days',
+        pending: 'Pending',
+        noGradeData: 'No data',
         execution: 'Execution',
         futuresWeeklyGapTitle: '7-Day AI Price Outlook · EDIA Forecast Model',
         forecast7dLabel: '7-day forecast',
@@ -662,6 +671,14 @@ export default function OverviewDashboard({
         dailyMove: '日涨跌',
         loading: '加载中...',
         regionalUnavailable: '暂无区域数据',
+        supplyChainKpiTitle: '供应链KPI',
+        grade: '牌号',
+        sku: 'SKU',
+        sales30d: '30日销量',
+        inventory: '库存',
+        inventoryDays: '库存天数',
+        pending: '待交量',
+        noGradeData: '暂无数据',
         execution: '执行',
         futuresWeeklyGapTitle: '7日AI价格展望 · EDIA预测模型',
         forecast7dLabel: '7日预测',
@@ -840,6 +857,7 @@ export default function OverviewDashboard({
 
   const weeklyForecastBaseByProduct = bundle?.forecast_base_by_product || {};
   const forecastOverlayByProduct = bundle?.forecast_overlay_by_product || {}; // Phase 6
+  const gradeKpisByProduct = bundle?.grade_kpis_by_product || {};
 
   /* Regional row payload by product_id. The bundle returns the schema used
    * by the regional-batch endpoint: { items: { product_id: { regions: [...] } } }
@@ -950,6 +968,8 @@ export default function OverviewDashboard({
     if (value == null || !Number.isFinite(value)) return noData;
     return value.toLocaleString(resolvedLocale, { minimumFractionDigits: 0, maximumFractionDigits: 2 });
   };
+
+  const formatKpiValue = (value) => formatKpiValueBase(value, resolvedLocale);
 
   const changeColor = (value, neutral = 'text-slate-500') => {
     if (value == null) return neutral;
@@ -1277,6 +1297,41 @@ export default function OverviewDashboard({
                               })()
                             )}
                           </div>
+
+                          {/* Supply-chain KPI section (ERP products only) */}
+                          {(() => {
+                            const gradeKpi = gradeKpisByProduct[item.id];
+                            const gradeRows = gradeKpi?.rows || [];
+                            if (!ERP_PRODUCT_IDS.includes(item.id) || gradeRows.length === 0) return null;
+                            return (
+                              <div className="overview-grade-kpi border-t border-slate-200 dark:border-slate-700 bg-slate-50/60 dark:bg-slate-800/40">
+                                <div className="px-3.5 pt-2 pb-1 text-[10px] md:text-[11px] font-semibold uppercase tracking-[0.05em] text-slate-400 dark:text-slate-500">
+                                  {text.supplyChainKpiTitle}
+                                </div>
+                                <div className="grid grid-cols-[minmax(0,1fr)_64px_60px_48px_64px] gap-2 px-3.5 pb-1 text-[9px] md:text-[10px] font-semibold uppercase tracking-[0.03em] text-slate-400 dark:text-slate-500">
+                                  <span>{text.grade}</span>
+                                  <span className="text-right">{text.sales30d}</span>
+                                  <span className="text-right">{text.inventory}</span>
+                                  <span className="text-right">{text.inventoryDays}</span>
+                                  <span className="text-right">{text.pending}</span>
+                                </div>
+                                <div className="px-3.5 pb-2">
+                                  {gradeRows.map((r) => (
+                                    <div key={r.sku_code || r.grade} className="grid grid-cols-[minmax(0,1fr)_64px_60px_48px_64px] items-center gap-2 border-t border-slate-100 dark:border-slate-800 py-1 text-[12px] md:text-[12px] first:border-t-0">
+                                      <span className="min-w-0">
+                                        <span className="block truncate font-medium text-foreground" title={r.grade}>{r.grade}</span>
+                                        <span className="block truncate text-[10px] text-slate-400 dark:text-slate-500" title={r.sku_code}>{r.sku_code}</span>
+                                      </span>
+                                      <span className="text-right font-mono text-[11px] md:text-[12px] text-foreground">{formatKpiValue(r.sales_30d_tons)}</span>
+                                      <span className="text-right font-mono text-[11px] md:text-[12px] text-foreground">{formatKpiValue(r.inventory_tons)}</span>
+                                      <span className="text-right font-mono text-[11px] md:text-[12px] text-foreground">{formatKpiValue(r.inventory_days)}</span>
+                                      <span className="text-right font-mono text-[11px] md:text-[12px] text-foreground">{formatKpiValue(r.pending_tons)}</span>
+                                    </div>
+                                  ))}
+                                </div>
+                              </div>
+                            );
+                          })()}
                         </div>
                       );
                     })}

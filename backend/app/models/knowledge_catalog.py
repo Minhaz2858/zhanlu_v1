@@ -27,6 +27,7 @@ class KBTableMeta(TimestampedBase):
     description_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    coverage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     indexed_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.utcnow()
     )
@@ -156,4 +157,37 @@ class ProjectCatalogOverlay(TimestampedBase):
             "project_id", "kb_id", "table_name",
             name="uq_project_catalog_overlay",
         ),
+    )
+
+
+class ProjectMetric(TimestampedBase):
+    """A curable per-project business metric (Approach A Business Semantic Layer).
+
+    Metrics are LLM-bootstrapped as ``status='proposed'`` and must be promoted to
+    ``status='approved'`` by a human before they are injected into NL2SQL prompts.
+    Domain content (SQL patterns, aliases, bindings) lives here as data — never in
+    global prompts, per the platform's domain-free convention.
+    """
+
+    __tablename__ = "project_metric"
+
+    project_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    kb_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
+    name: Mapped[str] = mapped_column(String(191), nullable=False)
+    aliases: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    definition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sql_expression: Mapped[str | None] = mapped_column(Text, nullable=True)
+    query_pattern: Mapped[str | None] = mapped_column(Text, nullable=True)
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    default_aggregation: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # sum / avg / max / min / count
+    bindings: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # [{table, measure_columns, date_column, dimensions}]
+    source: Mapped[str] = mapped_column(String(16), nullable=False, default="llm")
+    # llm / user
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="proposed")
+    # proposed / approved
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_project_metric"),
     )

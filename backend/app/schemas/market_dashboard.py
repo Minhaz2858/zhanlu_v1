@@ -26,6 +26,12 @@ class MarketSnapshot(BaseModel):
     weekly_reference_date: Optional[str] = None
     data_source_detail: Optional[str] = None
     note: Optional[str] = None  # set when mapping is missing
+    # 7-day summary-card fields (additive; None when unavailable so the
+    # overview card grid degrades gracefully).
+    price_7d_high: Optional[float] = None
+    price_7d_low: Optional[float] = None
+    sales_7d_tons: Optional[float] = None
+    sales_7d_change_pct: Optional[float] = None
 
 
 class PriceHistoryPoint(BaseModel):
@@ -295,6 +301,46 @@ class EventsResponse(BaseModel):
     count: int = 0
 
 
+class GradeKpiRow(BaseModel):
+    """One 牌号 (material_model) row in a product's supply-chain KPI table.
+
+    *grade* is the 牌号/型号 label (material_model), *sku_code* is the ERP
+    material_code (SKU). Numeric fields are None when the ERP has no data.
+    """
+    grade: str
+    sku_code: str
+    sales_30d_tons: Optional[float] = None
+    inventory_tons: Optional[float] = None
+    inventory_days: Optional[float] = None
+    pending_tons: Optional[float] = None
+
+
+class GradeKpiSummary(BaseModel):
+    """Aggregated supply-chain KPIs across all SKUs of one product.
+
+    ``avg_days_pending`` is the pending-tonnage-weighted average of each
+    row's ``(pending_tons / sales_30d_tons) * 30`` — i.e. how many days of
+    current sales rate it takes to ship all pending orders. None when no
+    row has both a positive pending and a positive 30d sales.
+    """
+    sales_30d_tons: Optional[float] = None
+    inventory_tons: Optional[float] = None
+    pending_tons: Optional[float] = None
+    avg_days_pending: Optional[float] = None
+
+
+class GradeKpiData(BaseModel):
+    """Grade-level supply-chain KPIs for one product."""
+    product_id: str
+    rows: list[GradeKpiRow] = Field(default_factory=list)
+    is_live: bool = False
+    summary: Optional[GradeKpiSummary] = None
+    # 30-day window bounds (ISO dates). window_end = latest ERP delivery date
+    # ("as of"); window_start = window_end - 30 days. None when no ERP mapping.
+    window_start: Optional[str] = None
+    window_end: Optional[str] = None
+
+
 class OverviewBundle(BaseModel):
     """One-shot payload for the chemical market overview page.
 
@@ -303,6 +349,7 @@ class OverviewBundle(BaseModel):
     separate /snapshot /regional-batch /forecast-base-batch /fx calls.
 
     Phase 6: includes forecast_overlay_by_product.
+    Grade KPIs: grade-level supply-chain table per ERP product.
     """
     snapshot: list[MarketSnapshot] = Field(default_factory=list)
     regional: dict[str, RegionalPriceData] = Field(default_factory=dict)
@@ -310,6 +357,7 @@ class OverviewBundle(BaseModel):
     forecast_day: int = 7
     forecast_base_by_product: dict[str, Optional[float]] = Field(default_factory=dict)
     forecast_overlay_by_product: dict[str, Optional[ForecastOverlayMeta]] = Field(default_factory=dict)  # Phase 6
+    grade_kpis_by_product: dict[str, GradeKpiData] = Field(default_factory=dict)
     fx: FxRateResponse
     cached: bool = False  # True when this response came from the in-memory cache
     cache_age_ms: int = 0  # how old the cached payload is (0 when freshly built)

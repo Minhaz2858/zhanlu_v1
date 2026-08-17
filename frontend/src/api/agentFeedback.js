@@ -34,4 +34,29 @@ export async function postMessageFeedback(appId, conversationId, messageId, rati
   return res.json();
 }
 
+/**
+ * Submit a 1-5 "Relevant to your role?" rating for an assistant message.
+ *
+ * @param {string} appId
+ * @param {string} conversationId
+ * @param {string} messageId
+ * @param {number} rating   1-5 role-relevance rating
+ * @returns {Promise<{ok: boolean, rating: number, message_id: string, role_snapshot: string[]}>}
+ */
+export async function postRoleFeedback(appId, conversationId, messageId, rating) {
+  const res = await authFetch(
+    `/api/apps/${appId}/agents/conversations/${conversationId}/messages/${messageId}/role-feedback`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ rating }),
+    },
+  );
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `role feedback request failed (${res.status})`);
+  }
+  return res.json();
+}
+
 export default postMessageFeedback;

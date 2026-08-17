@@ -56,6 +56,12 @@ _EXT_TO_TYPE = {
     ".json": "json",
 }
 
+# Audio extensions → Whisper transcription (gated by AUDIO_TRANSCRIBE_ENABLED).
+AUDIO_EXTS = {".mp3", ".wav", ".m4a", ".ogg", ".flac", ".m4b", ".aac"}
+
+# Video extensions → marker stub (true transcription needs ffmpeg, deferred).
+VIDEO_EXTS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+
 
 def _upload_root() -> Path:
     """Patchable in tests. Returns the on-disk uploads directory."""
@@ -212,7 +218,18 @@ def prepare_for_context(file_url: str, max_chars: int = MAX_EXTRACTED_CHARS) -> 
         out["file_type"] = _detect_type(file_url)
         out["is_image"] = ext in _IMAGE_EXTS
 
-        text = extractors.extract_text(str(local), out["file_type"])
+        # Dispatch by extension: audio → Whisper, video → marker stub,
+        # everything else → the text extractors.
+        if ext in AUDIO_EXTS:
+            text = extractors.extract_audio(str(local))
+            if not text:
+                # Always tell the LLM the file exists, even when Whisper is
+                # disabled or transcription failed.
+                text = f"[Audio attached: {local.name}]\n(Audio transcription unavailable.)"
+        elif ext in VIDEO_EXTS:
+            text = extractors.extract_video(str(local))
+        else:
+            text = extractors.extract_text(str(local), out["file_type"])
         if len(text) > max_chars:
             text = text[:max_chars] + "\n\n[... truncated: file exceeds per-file context cap ...]"
             out["truncated"] = True

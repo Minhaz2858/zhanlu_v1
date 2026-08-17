@@ -5,14 +5,16 @@ import { useLanguage } from '@/lib/LanguageProvider';
 import { marketDashboardApi } from '@/api/marketDashboard';
 import { TYPO } from './lib/typography';
 import RegionalTable from './components/RegionalTable';
+import SupplyChainSnapshot from './components/SupplyChainSnapshot';
 import OverviewDashboard from './components/OverviewDashboard';
 import ObservedDataStrip from './components/ObservedDataStrip';
 import ForecastTrendChart from './components/ForecastTrendChart';
 import PriceTransmissionChain from './components/PriceTransmissionChain';
 import DecisionBoard from './components/DecisionBoard';
 import ReportView from './components/ReportView';
+import WeeklySummaryForecast from './components/WeeklySummaryForecast';
 
-const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream', 'report'];
+const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream', 'report', 'weekly-summary'];
 
 // Upstream fallback so the strip paints instantly while the snapshot loads.
 // (Midstream products like Isoprene/Piperylene/DCPD and downstream products
@@ -48,7 +50,7 @@ export default function MarketDashboardPage() {
     queryFn: () => marketDashboardApi.snapshot(
       section === 'overview' ? undefined : section,
     ),
-    enabled: isValidSection && section !== 'report' && enabledQuery.data?.enabled && enabledQuery.data?.reachable,
+    enabled: isValidSection && section !== 'report' && section !== 'weekly-summary' && enabledQuery.data?.enabled && enabledQuery.data?.reachable,
     staleTime: 60_000,
   });
 
@@ -134,6 +136,12 @@ export default function MarketDashboardPage() {
     return <ReportView language={lang} />;
   }
 
+  // Weekly Summary and Forecast section: placeholder until content is defined.
+  // Bypasses the product-section layout (no snapshot / product selector needed).
+  if (section === 'weekly-summary') {
+    return <WeeklySummaryForecast language={lang} />;
+  }
+
   // Overview section: pixel-faithful EDIA layout (sidebar + 3 price cards +
   // 7-day forecast + industry intelligence + footer).
   if (section === 'overview') {
@@ -191,6 +199,7 @@ export default function MarketDashboardPage() {
       {selectedProductId && productIds.includes(selectedProductId) && (
         <div className="px-6 pt-6 pb-8">
           <RegionalTable productId={selectedProductId} />
+          <SupplyChainSnapshot productId={selectedProductId} language={lang} />
         </div>
       )}
     </div>

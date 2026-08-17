@@ -19,6 +19,7 @@ import logging
 import re
 import time
 import uuid
+from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -107,6 +108,7 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             await _generate_descriptions(tables)
             await asyncio.to_thread(_persist_catalog, db, kb.id, tables)
             await asyncio.to_thread(_persist_relations, db, kb.id, tables)
+            await _bootstrap_metrics(db, kb, tables)
         await asyncio.to_thread(_embed_catalog, kb.id, tables)
 
         _set_status(db, kb, "ready")
@@ -153,6 +155,41 @@ def _sync_registry(db: Session, kb: KnowledgeBase, table_count: int) -> None:
         db.commit()
     except Exception:
         logger.debug("catalog_indexer: registry sync failed (non-fatal)", exc_info=True)
+
+
+async def _bootstrap_metrics(
+    db: Session, kb: KnowledgeBase, tables: list[dict]
+) -> None:
+    """LLM-propose project metrics for each project bound to this KB.
+
+    Flag-gated (KG_METRIC_BOOTSTRAP_ENABLED) inside the bootstrap module;
+    best-effort — never fails the catalog index itself.
+    """
+    if not getattr(settings, "KG_METRIC_BOOTSTRAP_ENABLED", False):
+        return
+    try:
+        from app.services.knowledge_graph.metric_bootstrap import (
+            bootstrap_project_metrics,
+        )
+
+        project_ids: set[str] = set()
+        if getattr(kb, "project_id", None):
+            project_ids.add(kb.project_id)
+        legacy_name = getattr(kb, "project", None)
+        if legacy_name:
+            from app.models.project import Project
+
+            for p in (
+                db.query(Project)
+                .filter(Project.name == legacy_name, Project.is_deleted == False)  # noqa: E712
+                .all()
+            ):
+                project_ids.add(p.id)
+        for pid in project_ids:
+            if pid:
+                await bootstrap_project_metrics(db, pid, kb.id, tables)
+    except Exception:
+        logger.exception("catalog_indexer: metric bootstrap failed (non-fatal)")
 
 
 # ── internals ──────────────────────────────────────────────────────────────
@@ -217,6 +254,9 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
             schema_name, table_type, columns = _normalize_desc(desc)
             if row_count and columns:
                 _sample_column_values(conn, table_name, columns)
+            coverage = None
+            if settings.KG_COVERAGE_PROBE_ENABLED and columns:
+                coverage = _probe_coverage(conn, table_name, columns)
         return {
             "schema_name": schema_name,
             "table_name": table_name,
@@ -224,6 +264,7 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
             "row_count": row_count,
             "columns": columns,
             "foreign_keys": fks,
+            "coverage_json": coverage,
         }
     except Exception:
         logger.exception(
@@ -369,6 +410,114 @@ def _safe_foreign_keys(conn: Any, table: str) -> list[dict]:
     return []
 
 
+# ── coverage probe ─────────────────────────────────────────────────────────
+
+# Column-name tokens that strongly imply a temporal column.
+_DATE_COLUMN_RE = re.compile(
+    r"(date|time|day|month|year|dt$|created|updated|shipment|order_?date|"
+    r"period|statistic|entry)",
+    re.IGNORECASE,
+)
+# Explicit time-keyword columns are preferred over generic matches.
+_STRONG_DATE_RE = re.compile(
+    r"^(.*_)?(date|dt|time|day|month|year|created|updated)$",
+    re.IGNORECASE,
+)
+
+
+def _is_date_type(data_type: str) -> bool:
+    dt = (data_type or "").lower()
+    return any(k in dt for k in ("date", "time", "timestamp"))
+
+
+def _pick_date_column(columns: list[dict]) -> str | None:
+    """Choose the most likely temporal column for coverage probing.
+
+    Preference: (1) type is date/timestamp AND name matches a strong date
+    keyword; (2) type is date/timestamp; (3) name matches a date keyword.
+    Returns the column name or None if the table has no temporal column.
+    """
+    typed: list[dict] = []
+    for c in columns:
+        if _is_date_type(c.get("data_type", "")):
+            typed.append(c)
+        elif _DATE_COLUMN_RE.search(c.get("column_name", "")):
+            typed.append(c)
+
+    if not typed:
+        return None
+
+    # Strong keyword + typed wins.
+    for c in typed:
+        if _is_date_type(c.get("data_type", "")) and _STRONG_DATE_RE.search(
+            c.get("column_name", "")
+        ):
+            return c.get("column_name")
+
+    # Any typed column next.
+    for c in typed:
+        if _is_date_type(c.get("data_type", "")):
+            return c.get("column_name")
+
+    # Fallback: name-only match.
+    return typed[0].get("column_name") or None
+
+
+def _probe_coverage(conn: Any, table: str, columns: list[dict]) -> dict | None:
+    """Probe ``MIN``/``MAX`` of the best temporal column (timeout-capped).
+
+    Returns ``{date_column, min_date, max_date, probed_at}`` or None when the
+    table has no temporal column or the probe fails/times out. Mirrors the
+    ``_safe_row_count`` timeout discipline so a slow warehouse never stalls
+    the index.
+    """
+    date_col = _pick_date_column(columns)
+    if not date_col:
+        return None
+    try:
+        rows = conn.execute(
+            f"SELECT MIN({_maybe_quote(conn, date_col)}) AS min_date, "
+            f"MAX({_maybe_quote(conn, date_col)}) AS max_date "
+            f"FROM {_maybe_quote(conn, table)}",
+            timeout_s=ROW_COUNT_TIMEOUT_S,
+        )
+        if not rows:
+            return None
+        r = rows[0]
+        min_date = r.get("min_date") if isinstance(r, dict) else r[0]
+        max_date = r.get("max_date") if isinstance(r, dict) else r[1]
+        # Normalize date/datetime to a comparable ISO string.
+        return {
+            "date_column": date_col,
+            "min_date": _normalize_temporal(min_date),
+            "max_date": _normalize_temporal(max_date),
+            "probed_at": datetime.utcnow().isoformat() + "Z",
+        }
+    except Exception:
+        logger.debug(
+            "catalog_indexer: coverage probe failed for table '%s' (non-fatal)",
+            table, exc_info=True,
+        )
+        return None
+
+
+def _normalize_temporal(value: Any) -> str | None:
+    """Coerce a DB temporal value to ``YYYY-MM-DD`` (or ISO datetime) string."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value[:10]
+    if isinstance(value, (int, float)):
+        # Some drivers return a unix epoch — best-effort.
+        try:
+            return datetime.utcfromtimestamp(value).strftime("%Y-%m-%d")
+        except (ValueError, OSError, OverflowError):
+            return str(value)
+    if hasattr(value, "isoformat"):
+        return value.isoformat()[:10]
+    return str(value)[:10]
+
+
 def _maybe_quote(conn: Any, name: str) -> str:
     """Best-effort quoting — connector usually has quote_ident or we skip."""
     return name
@@ -483,6 +632,7 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             meta.row_count = t.get("row_count")
             meta.description_zh = t.get("description_zh")
             meta.description_en = t.get("description_en")
+            meta.coverage_json = t.get("coverage_json")
         else:
             import uuid as _uuid
             meta = KBTableMeta(
@@ -494,6 +644,7 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                 row_count=t.get("row_count"),
                 description_zh=t.get("description_zh"),
                 description_en=t.get("description_en"),
+                coverage_json=t.get("coverage_json"),
             )
             db.add(meta)
         db.flush()

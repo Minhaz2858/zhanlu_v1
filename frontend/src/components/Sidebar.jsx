@@ -282,6 +282,7 @@ export default function Sidebar() {
     { to: '/market-dashboard/midstream', label: t.sidebar.dashboardMidstream },
     { to: '/market-dashboard/downstream', label: t.sidebar.dashboardDownstream },
     { to: '/market-dashboard/report', label: t.sidebar.dashboardReport },
+    { to: '/market-dashboard/weekly-summary', label: t.sidebar.dashboardWeeklySummary },
   ];
   // enabledQuery is still fetched so the query is warm when the user
   // navigates to the dashboard page, but the accordion is no longer

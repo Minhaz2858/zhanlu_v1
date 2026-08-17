@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from app.deps import get_db, get_current_user_required
 from app.models.user import User
 from app.models.resource_share import ResourceShare
+from app.models.resource_access_policy import ResourceAccessPolicy
 
 router = APIRouter(prefix="/shares", tags=["resource-shares"])
 
@@ -202,5 +203,14 @@ async def revoke_share(
         )
 
     share.is_deleted = True
+
+    # Cascade: soft-delete every access policy attached to this share.  Without
+    # this, stale policies would linger and re-constrain the user if the share
+    # is later re-created (partial unique index only covers active rows).
+    db.query(ResourceAccessPolicy).filter(
+        ResourceAccessPolicy.resource_share_id == share_id,
+        ResourceAccessPolicy.is_deleted == False,  # noqa: E712
+    ).update({"is_deleted": True}, synchronize_session=False)
+
     db.commit()
     return {"revoked": True, "id": share_id}

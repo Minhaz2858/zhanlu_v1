@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Database, FileText, Brain, GitBranch, Search, RefreshCw,
-  Pencil, Loader2, Table2, Tag,
+  Pencil, Loader2, Table2, Tag, Sparkles, Check, X, Gauge,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -14,6 +14,7 @@ import { toast } from '@/components/ui/use-toast';
 import {
   listCatalogTables, putCatalogOverlay, listCatalogEntities,
   listRegistryResources, getProjectKnowledgeMap,
+  listCatalogMetrics, putCatalogMetric, bootstrapCatalogMetrics,
 } from '@/api/projectCatalog';
 
 const TYPE_ICONS = {
@@ -42,14 +43,20 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
   const [search, setSearch] = useState('');
   const [editTarget, setEditTarget] = useState(null);
   const [editForm, setEditForm] = useState({ alias: '', description: '', metric_definition: '' });
+  const [tab, setTab] = useState('tables');
+  const [metrics, setMetrics] = useState([]);
+  const [metricEditTarget, setMetricEditTarget] = useState(null);
+  const [metricEditForm, setMetricEditForm] = useState({ name: '', aliases: '', definition: '', unit: '', default_aggregation: '' });
+  const [bootstrapping, setBootstrapping] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
-    const [kmRes, tRes, rRes, eRes] = await Promise.allSettled([
+    const [kmRes, tRes, rRes, eRes, mRes] = await Promise.allSettled([
       getProjectKnowledgeMap(projectId),
       listCatalogTables(projectId),
       listRegistryResources(projectId),
       listCatalogEntities(projectId),
+      listCatalogMetrics(projectId),
     ]);
 
     if (kmRes.status === 'fulfilled') {
@@ -78,6 +85,9 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
     }
     if (kmRes.status !== 'fulfilled' && eRes.status === 'fulfilled') {
       setEntities(eRes.value.entities || []);
+    }
+    if (mRes.status === 'fulfilled') {
+      setMetrics(mRes.value.metrics || []);
     }
 
     setLoading(false);
@@ -123,6 +133,61 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
     }
   }
 
+  function startMetricEdit(metric) {
+    setMetricEditTarget(metric);
+    setMetricEditForm({
+      name: metric.name || '',
+      aliases: (metric.aliases || []).join(', '),
+      definition: metric.definition || '',
+      unit: metric.unit || '',
+      default_aggregation: metric.default_aggregation || '',
+    });
+  }
+
+  async function saveMetric() {
+    if (!metricEditTarget) return;
+    try {
+      await putCatalogMetric(projectId, metricEditTarget.id, {
+        name: metricEditForm.name,
+        aliases: metricEditForm.aliases.split(',').map((s) => s.trim()).filter(Boolean),
+        definition: metricEditForm.definition,
+        unit: metricEditForm.unit,
+        default_aggregation: metricEditForm.default_aggregation,
+      });
+      toast({ title: isEn ? 'Metric saved' : '指标已保存' });
+      setMetricEditTarget(null);
+      load();
+    } catch (e) {
+      toast({ title: isEn ? 'Save failed' : '保存失败', variant: 'destructive' });
+    }
+  }
+
+  async function setMetricStatus(metric, status) {
+    try {
+      await putCatalogMetric(projectId, metric.id, { status });
+      load();
+    } catch (e) {
+      toast({ title: isEn ? 'Update failed' : '更新失败', variant: 'destructive' });
+    }
+  }
+
+  async function doBootstrap() {
+    setBootstrapping(true);
+    try {
+      const res = await bootstrapCatalogMetrics(projectId);
+      toast({
+        title: isEn
+          ? `Proposed ${res.created?.length || 0} metrics`
+          : `已生成 ${res.created?.length || 0} 个指标（待审批）`,
+      });
+      load();
+    } catch (e) {
+      toast({ title: isEn ? 'Bootstrap failed' : '生成失败', variant: 'destructive' });
+    } finally {
+      setBootstrapping(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12 text-muted-foreground">
@@ -151,6 +216,31 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
         </Button>
       </div>
 
+      {/* Tab switch */}
+      <div className="flex items-center gap-1 rounded-lg border border-border p-1">
+        <button
+          type="button"
+          onClick={() => setTab('tables')}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            tab === 'tables' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <Database className="mr-1 inline h-3.5 w-3.5" />
+          {isEn ? 'Tables' : '数据表'}
+        </button>
+        <button
+          type="button"
+          onClick={() => setTab('metrics')}
+          className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${
+            tab === 'metrics' ? 'bg-secondary text-foreground' : 'text-muted-foreground hover:text-foreground'
+          }`}
+        >
+          <Gauge className="mr-1 inline h-3.5 w-3.5" />
+          {isEn ? 'Metrics' : '业务指标'}
+          <span className="ml-1.5 text-muted-foreground/60">({metrics.length})</span>
+        </button>
+      </div>
+
       {/* KB status badges */}
       {kbs.length > 0 && (
         <div className="flex flex-wrap gap-2">
@@ -166,6 +256,8 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
         </div>
       )}
 
+      {tab === 'tables' && (
+      <div className="space-y-5">
       {/* Catalog tables */}
       <div>
         <h3 className="mb-2 text-sm font-medium text-foreground">
@@ -286,6 +378,105 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
           </div>
         </div>
       )}
+      </div>
+      )}
+
+      {/* Metrics tab */}
+      {tab === 'metrics' && (
+        <div>
+          <div className="mb-2 flex items-center justify-between">
+            <h3 className="text-sm font-medium text-foreground">
+              {isEn ? 'Business Metrics' : '业务指标'}
+              <span className="ml-2 text-muted-foreground">({metrics.length})</span>
+            </h3>
+            {canEdit && (
+              <Button variant="outline" size="sm" onClick={doBootstrap} disabled={bootstrapping}>
+                {bootstrapping
+                  ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                  : <Sparkles className="mr-1.5 h-3.5 w-3.5" />}
+                {isEn ? 'Bootstrap' : '生成指标'}
+              </Button>
+            )}
+          </div>
+
+          {metrics.length === 0 ? (
+            <p className="py-6 text-center text-sm text-muted-foreground">
+              {isEn
+                ? 'No metrics yet. Click "Bootstrap" to let the AI propose metrics from your data, or curate them manually.'
+                : '暂无指标。点击"生成指标"让 AI 从数据中提出指标，或手动编辑。'}
+            </p>
+          ) : (
+            <div className="overflow-hidden rounded-lg border border-border">
+              <table className="w-full text-sm">
+                <thead className="bg-secondary/50">
+                  <tr className="text-left text-xs text-muted-foreground">
+                    <th className="px-3 py-2 font-medium">{isEn ? 'Metric' : '指标'}</th>
+                    <th className="px-3 py-2 font-medium">{isEn ? 'Definition' : '定义'}</th>
+                    <th className="px-3 py-2 font-medium">{isEn ? 'Unit' : '单位'}</th>
+                    <th className="px-3 py-2 font-medium">{isEn ? 'Status' : '状态'}</th>
+                    {canEdit && <th className="px-3 py-2 font-medium" />}
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {metrics.map((m) => (
+                    <tr key={m.id} className="hover:bg-secondary/30">
+                      <td className="px-3 py-2">
+                        <div className="font-medium text-foreground">{m.name}</div>
+                        {m.aliases?.length > 0 && (
+                          <div className="mt-0.5 flex flex-wrap gap-1">
+                            {m.aliases.map((a) => (
+                              <Badge key={a} variant="outline" className="py-0 text-[10px]">{a}</Badge>
+                            ))}
+                          </div>
+                        )}
+                      </td>
+                      <td className="max-w-xs px-3 py-2 text-xs text-muted-foreground">
+                        {m.definition || '—'}
+                      </td>
+                      <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">
+                        {m.unit || '—'}
+                      </td>
+                      <td className="px-3 py-2">
+                        <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${
+                          m.status === 'approved'
+                            ? 'bg-emerald-100 text-emerald-700'
+                            : 'bg-amber-100 text-amber-700'
+                        }`}>
+                          {m.status}
+                        </span>
+                        <Badge variant="outline" className="ml-1.5 py-0 text-[10px]">
+                          {m.source === 'llm' ? 'AI' : 'manual'}
+                        </Badge>
+                      </td>
+                      {canEdit && (
+                        <td className="px-3 py-2">
+                          <div className="flex items-center gap-1">
+                            {m.status !== 'approved' && (
+                              <Button variant="ghost" size="sm" className="h-7 px-2 text-emerald-600"
+                                onClick={() => setMetricStatus(m, 'approved')} title={isEn ? 'Approve' : '批准'}>
+                                <Check className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            {m.status !== 'proposed' && (
+                              <Button variant="ghost" size="sm" className="h-7 px-2 text-amber-600"
+                                onClick={() => setMetricStatus(m, 'proposed')} title={isEn ? 'Revoke approval' : '撤销批准'}>
+                                <X className="h-3.5 w-3.5" />
+                              </Button>
+                            )}
+                            <Button variant="ghost" size="sm" className="h-7 px-2" onClick={() => startMetricEdit(m)}>
+                              <Pencil className="h-3 w-3" />
+                            </Button>
+                          </div>
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Overlay edit sheet */}
       <Sheet open={!!editTarget} onOpenChange={(v) => !v && setEditTarget(null)}>
@@ -331,6 +522,74 @@ export default function DataMapSection({ projectId, canEdit, lang, T }) {
             </div>
             <Button onClick={saveEdit} className="w-full">
               {isEn ? 'Save Overlay' : '保存覆盖'}
+            </Button>
+          </div>
+        </SheetContent>
+      </Sheet>
+
+      {/* Metric edit sheet */}
+      <Sheet open={!!metricEditTarget} onOpenChange={(v) => !v && setMetricEditTarget(null)}>
+        <SheetContent side="right" className="w-[400px] space-y-4">
+          <SheetHeader>
+            <SheetTitle>{metricEditTarget?.name}</SheetTitle>
+            <SheetDescription>
+              {isEn ? 'Edit this business metric.' : '编辑此业务指标。'}
+            </SheetDescription>
+          </SheetHeader>
+          <div className="space-y-3">
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                {isEn ? 'Name' : '名称'}
+              </label>
+              <Input
+                value={metricEditForm.name}
+                onChange={(e) => setMetricEditForm({ ...metricEditForm, name: e.target.value })}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                {isEn ? 'Aliases (comma-separated)' : '别名（逗号分隔）'}
+              </label>
+              <Input
+                value={metricEditForm.aliases}
+                onChange={(e) => setMetricEditForm({ ...metricEditForm, aliases: e.target.value })}
+                placeholder={isEn ? 'gross margin, 毛利率' : '毛利率, gross margin'}
+              />
+            </div>
+            <div>
+              <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                {isEn ? 'Definition' : '定义'}
+              </label>
+              <Textarea
+                value={metricEditForm.definition}
+                onChange={(e) => setMetricEditForm({ ...metricEditForm, definition: e.target.value })}
+                rows={3}
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  {isEn ? 'Unit' : '单位'}
+                </label>
+                <Input
+                  value={metricEditForm.unit}
+                  onChange={(e) => setMetricEditForm({ ...metricEditForm, unit: e.target.value })}
+                  placeholder="%, CNY"
+                />
+              </div>
+              <div>
+                <label className="mb-1 block text-xs font-medium text-muted-foreground">
+                  {isEn ? 'Aggregation' : '聚合'}
+                </label>
+                <Input
+                  value={metricEditForm.default_aggregation}
+                  onChange={(e) => setMetricEditForm({ ...metricEditForm, default_aggregation: e.target.value })}
+                  placeholder="sum / avg"
+                />
+              </div>
+            </div>
+            <Button onClick={saveMetric} className="w-full">
+              {isEn ? 'Save Metric' : '保存指标'}
             </Button>
           </div>
         </SheetContent>

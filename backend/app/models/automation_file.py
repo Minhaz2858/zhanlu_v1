@@ -5,7 +5,7 @@ JSON, etc.). Files are stored on disk under ``uploads/automation/<id>/`` and
 served via the existing /api/uploads static mount.
 """
 
-from sqlalchemy import String, Integer, ForeignKey
+from sqlalchemy import String, Integer, ForeignKey, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -34,3 +34,5 @@ class AutomationFile(TimestampedBase):
     file_path: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     # MIME type for content-type header on download.
     mime_type: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    read: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    pinned: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)

@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator, model_v
 from app.models.dashboard import Dashboard
 from app.models.knowledge_base import KnowledgeBase
 from app.services.dashboard_query import validate_widget_sql, clamp_refresh_interval
+from app.services import access_policy_service
 
 logger = logging.getLogger(__name__)
 
@@ -97,12 +98,20 @@ class CreateDashboardArgs(BaseModel):
     description: Optional[str] = None
 
 
-def _user_can_access_kb(db, user_id, org_id, project_id, kb_id) -> KnowledgeBase | None:
+def _user_can_access_kb(
+    db, user_id, org_id, project_id, kb_id,
+    resource_type: str | None = None, resource_id: str | None = None,
+) -> KnowledgeBase | None:
     """Resolve the KB and verify it belongs to the user's org.
 
     When a project context is known, additionally require an id-OR-name project
     match (the dual-column convention used across zhanlu). Without a project
     context (chat without an active project) org-scoping alone is sufficient.
+
+    When *resource_type*/*resource_id* are provided (injected into the tool
+    context by ``prepare_data_source_runtime``), the user-level data access
+    policy is also enforced: a KB the shared user is fully denied on returns
+    ``None``.
     """
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id,
@@ -111,15 +120,31 @@ def _user_can_access_kb(db, user_id, org_id, project_id, kb_id) -> KnowledgeBase
     ).first()
     if kb is None:
         return None
-    if not project_id:
-        return kb
-    if kb.project_id and str(kb.project_id) == str(project_id):
-        return kb
-    from app.models.project import Project
-    proj = db.query(Project).filter(Project.id == project_id, Project.org_id == org_id).first()
-    if proj and (kb.project or "").lower() == (proj.name or "").lower():
-        return kb
-    return None
+    if project_id:
+        if not (kb.project_id and str(kb.project_id) == str(project_id)):
+            from app.models.project import Project
+            proj = db.query(Project).filter(
+                Project.id == project_id, Project.org_id == org_id
+            ).first()
+            if not (proj and (kb.project or "").lower() == (proj.name or "").lower()):
+                return None
+
+    # Per-user data access policy: block dashboards bound to a fully-denied KB.
+    if resource_type and resource_id and user_id:
+        policy = access_policy_service.resolve_user_policies(
+            db,
+            user_id=user_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            bound_kb_ids=[kb_id],
+        )
+        if policy.is_kb_fully_denied(kb_id):
+            logger.info(
+                "create_dashboard: KB %s denied for user %s", kb_id, user_id
+            )
+            return None
+
+    return kb
 
 
 async def _create_dashboard(args: dict, db, user_id, context: dict | None = None) -> dict:
@@ -131,7 +156,11 @@ async def _create_dashboard(args: dict, db, user_id, context: dict | None = None
     except ValidationError as e:
         return {"success": False, "error": f"Invalid dashboard definition: {e}"}
 
-    kb = _user_can_access_kb(db, user_id, org_id, project_id, parsed.datasource_id)
+    kb = _user_can_access_kb(
+        db, user_id, org_id, project_id, parsed.datasource_id,
+        resource_type=ctx.get("resource_type"),
+        resource_id=ctx.get("resource_id"),
+    )
     if kb is None:
         return {"success": False, "error": "Datasource not accessible in this project/org."}
 

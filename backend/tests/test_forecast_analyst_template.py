@@ -93,3 +93,47 @@ def test_brief_missing_data_degrades():
     b = render_template_brief(pack)
     assert "数据不足" in b["forecast_zh"]
     assert b["upstream_logic_zh"] == ""
+
+
+def _upstream_pack(pid, name_zh, upstream_histories):
+    """An upstream product pack (naphtha / crude_oil) with a valid run."""
+    return build_pack(
+        product_id=pid, name_zh=name_zh, day=7,
+        history_rows=_history(start=6500.0, step=1.5),
+        upstream_histories=upstream_histories,
+        run_results={"7": {"base": [6700.0, 6750.0], "bull": [7000.0, 7100.0], "bear": [6450.0, 6400.0]}},
+        model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.08, "naive_mape": 0.1},
+        explanation=_explanation(), as_of_month=8,
+    )
+
+
+def test_brief_upstream_uses_macro_supply_demand():
+    # naphtha has a parent (crude_oil) but is upstream → macro supply/demand,
+    # NOT the ERP-demand seasonal section.
+    b = render_template_brief(_upstream_pack(
+        "naphtha", "石脑油", {"crude_oil": _history(start=5000.0, step=1.0)}))
+    assert b["supply_demand_zh"].startswith("宏观供需")
+    assert "传统需求旺季" not in b["supply_demand_zh"]
+
+
+def test_brief_crude_oil_uses_macro_context():
+    # crude_oil = top of chain (empty upstream) → macro context, not empty string.
+    b = render_template_brief(_upstream_pack("crude_oil", "原油", {}))
+    assert b["upstream_logic_zh"].startswith("上游传导")
+    assert "产业链最上游" in b["upstream_logic_zh"]
+    assert b["supply_demand_zh"].startswith("宏观供需")
+
+
+def test_brief_downstream_keeps_erp_supply_demand():
+    # downstream (c5_resin) still uses the seasonal ERP-demand section, not the
+    # upstream macro section. (c5_resin has a month-8 seasonal rule → 旺季.)
+    b = render_template_brief(build_pack(
+        product_id="c5_resin", name_zh="C5石油树脂", day=7,
+        history_rows=_history(start=12000.0, step=2.0),
+        upstream_histories={"cracked_c5": _history(start=5800.0, step=1.0)},
+        run_results={"7": {"base": [12500.0, 12600.0], "bull": [12900.0, 13100.0], "bear": [12100.0, 12000.0]}},
+        model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.07, "naive_mape": 0.1},
+        explanation=_explanation(), as_of_month=8,
+    ))
+    assert b["supply_demand_zh"].startswith("供需研判")
+    assert "传统需求旺季" in b["supply_demand_zh"]

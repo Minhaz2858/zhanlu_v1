@@ -17,6 +17,8 @@ import logging
 import re
 from pathlib import Path
 
+import httpx  # module-level so tests can patch extractors.httpx.post
+
 logger = logging.getLogger(__name__)
 
 
@@ -176,26 +178,83 @@ def _extract_html(file_path: str) -> str:
 
 
 def _extract_image(file_path: str) -> str:
-    """Extract text from an image via Tesseract OCR.
+    """Extract text from an image via Tesseract OCR (flag-gated).
 
-    Returns the recognised text. When Tesseract (or pytesseract) is not
-    installed, returns "" — the caller (prepare_for_context) then treats
-    the file as a multimodal input passed through to the LLM as an image
-    content block rather than as plain text.
+    ALWAYS returns an ``[Image attached: <name>]`` marker so the LLM knows
+    the file exists even when OCR is disabled or unavailable. When
+    ``IMAGE_OCR_ENABLED`` is True AND Tesseract (pytesseract + PIL) is
+    installed, the recognised text is appended to the marker. When OCR is
+    off/unavailable, the caller (prepare_for_context) still marks the file
+    ``is_image=True`` so the multimodal path can forward the raw bytes.
     """
+    from app.config import settings  # lazy
+
+    name = Path(file_path).name
+    marker = f"[Image attached: {name}]"
+
+    if not settings.IMAGE_OCR_ENABLED:
+        return marker + "\n(OCR disabled; image content not extracted.)"
+
     try:
         import pytesseract  # lazy
         from PIL import Image  # lazy
     except ImportError:
-        logger.info("_extract_image: pytesseract/PIL unavailable — returning ''")
-        return ""
+        logger.info("_extract_image: pytesseract/PIL unavailable — marker only")
+        return marker + "\n(OCR unavailable; image content not extracted.)"
 
     try:
-        img = Image.open(file_path)
-        text = pytesseract.image_to_string(img)
-        return (text or "").strip()
+        text = (pytesseract.image_to_string(Image.open(file_path)) or "").strip()
+        if text:
+            return marker + "\n" + text
     except Exception as e:
         # Tesseract binary missing is the common cause — log once and
-        # bail so the multimodal LLM path can take over.
+        # fall back to the marker so the LLM still knows the image exists.
         logger.warning("_extract_image: OCR failed for %s: %s", file_path, e)
+    return marker + "\n(OCR unavailable; image content not extracted.)"
+
+
+def extract_audio(file_path: str) -> str:
+    """Transcribe an audio file via an OpenAI-compatible Whisper endpoint.
+
+    Uses the existing ``OPENAI_API_KEY`` + ``OPENAI_BASE_URL`` (no new keys)
+    and is gated by ``AUDIO_TRANSCRIBE_ENABLED``. Returns "" on any failure
+    so the caller can fall back to an "[Audio attached: ...]" marker.
+    """
+    from app.config import settings  # lazy
+
+    if not settings.AUDIO_TRANSCRIBE_ENABLED:
         return ""
+    if not settings.OPENAI_API_KEY:
+        logger.warning(
+            "extract_audio: AUDIO_TRANSCRIBE_ENABLED set but OPENAI_API_KEY missing"
+        )
+        return ""
+
+    base = (settings.OPENAI_BASE_URL or "").rstrip("/")
+    url = f"{base}/audio/transcriptions"
+    try:
+        with Path(file_path).open("rb") as f:
+            files = {"file": (Path(file_path).name, f, "audio/mpeg")}
+            data = {"model": settings.WHISPER_MODEL, "response_format": "json"}
+            headers = {"Authorization": f"Bearer {settings.OPENAI_API_KEY}"}
+            resp = httpx.post(
+                url,
+                files=files,
+                data=data,
+                headers=headers,
+                timeout=settings.WHISPER_TIMEOUT_S,
+            )
+            resp.raise_for_status()
+        return (resp.json().get("text") or "").strip()
+    except Exception as exc:
+        logger.warning("extract_audio: transcription failed for %s: %s", file_path, exc)
+        return ""
+
+
+def extract_video(file_path: str) -> str:
+    """Return an "[Video attached: ...]" marker for video files.
+
+    True video transcription needs ffmpeg (extract the audio track → Whisper),
+    which is not installed in the container. Deferred to a follow-up.
+    """
+    return f"[Video attached: {Path(file_path).name}]\n(Video transcription not yet supported.)"

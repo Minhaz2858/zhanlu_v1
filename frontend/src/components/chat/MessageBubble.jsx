@@ -218,7 +218,7 @@ function parseContent(content) {
   return parts;
 }
 
-export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onShowTrace, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating }) {
+export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onShowTrace, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating }) {
   const { lang } = useLanguage();
   const isUser = message.role === 'user';
   const parts = isUser ? null : parseContent(message.content || '');
@@ -561,6 +561,9 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 onFeedback={onFeedback}
                 feedbackRating={feedbackRating}
                 isStreaming={isStreaming}
+                showRoleRating={showRoleRating}
+                onRoleRelevance={onRoleRelevance}
+                roleRelevanceRating={roleRelevanceRating}
               />
             )}
           </div>

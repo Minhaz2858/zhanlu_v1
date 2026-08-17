@@ -113,8 +113,8 @@ export default function FilesView({ scope = 'all' }) {
           project_id: r.project_id,
           session_id: r.session_id,
           agent_name: r.agent_name,
-          read: false,
-          pinned: false,
+          read: r.read,
+          pinned: r.pinned,
           size: null,
           updated_date: r.updated_date,
           created_date: r.created_date,
@@ -145,8 +145,8 @@ export default function FilesView({ scope = 'all' }) {
           // "automation_agent" only when the agent is missing/renamed, so
           // the dropdown can still show *something* rather than "(none)".
           agent_name: agentNameById[task.agent_id] || 'automation_agent',
-          read: false,
-          pinned: false,
+          read: f.read,
+          pinned: f.pinned,
           size: f.size || null,
           updated_date: f.updated_date || f.created_date,
           created_date: f.created_date,
@@ -228,24 +228,33 @@ export default function FilesView({ scope = 'all' }) {
         : base44.entities.UserFile;
 
   async function togglePin(item) {
-    if (isReport(item) || isAutomationFile(item)) return; // no pinned field
-    await base44.entities.UserFile.update(item.id, { pinned: !item.pinned });
+    // Optimistic local update + persist for all three entity types. Every
+    // type now has a backend `pinned` column (UserFile always has; Report +
+    // AutomationFile gained one), so pinning survives page refreshes. The
+    // `load()` refresh re-sorts pinned items to the top.
+    const next = !item.pinned;
+    setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, pinned: next } : i)));
+    try {
+      await entityFor(item).update(item.id, { pinned: next });
+    } catch (_) {
+      // Intentionally swallowed — the optimistic local update above is the
+      // visible behaviour; the DB write failing just means the pin won't
+      // survive the next load().
+    }
     load();
   }
   async function markRead(item) {
     // Optimistic local update across all three entity types so the orange
     // "Unread" badge / dot clears immediately on click — no manual reload
-    // required. Only UserFile has a backend `read` column today
-    // (Report + AutomationFile don't store read state server-side), so for
-    // those two we update only local state. For UserFile we additionally
-    // persist `read: true` to the DB so the badge stays cleared on next
-    // page visit. If the DB write fails, the optimistic UI update still
-    // stands and the next manual reload will resync.
+    // required. Every entity type now persists `read: true` to the DB
+    // (UserFile always has; Report + AutomationFile gained a `read` column),
+    // so the badge stays cleared across page refreshes. If the DB write
+    // fails, the optimistic UI update still stands and the next manual
+    // reload will resync.
     if (item.read === true) return;
     setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, read: true } : i)));
-    if (isReport(item) || isAutomationFile(item)) return;
     try {
-      await base44.entities.UserFile.update(item.id, { read: true });
+      await entityFor(item).update(item.id, { read: true });
     } catch (_) {
       // Intentionally swallowed — the optimistic local update above is
       // the visible behaviour; the badge will re-appear on the next

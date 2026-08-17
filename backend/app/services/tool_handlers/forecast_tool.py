@@ -52,6 +52,23 @@ def _resolve_org_context(context: dict | None) -> tuple[str, str]:
     )
 
 
+def _forecast_engine(db: Session):
+    """Return ``ForecastingAgentService`` (flag on) or ``ForecastEngine`` (legacy).
+
+    The facade exposes engine-compatible methods (``discover_and_register``,
+    ``compute_target_anchored``, ``compute_all``, ``get_latest_run``,
+    ``get_accuracy``) so it is a drop-in for ``ForecastEngine`` at these
+    call-sites.
+    """
+    from app.config import settings
+
+    if settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
+        from app.services.forecasting.unified_service import ForecastingAgentService
+
+        return ForecastingAgentService(db)
+    return ForecastEngine(db)
+
+
 def _serialize_target(t: ForecastTarget) -> dict:
     """Convert a ForecastTarget row to a safe dict for tool responses."""
     ds = t.datasource or {}
@@ -123,7 +140,7 @@ async def _forecast_discover(
     org_id, app_id = _resolve_org_context(context)
 
     def _do_work() -> dict:
-        engine = ForecastEngine(db)
+        engine = _forecast_engine(db)
         targets = engine.discover_and_register(kb_id, org_id, app_id, max_tables)
         return {
             "success": True,
@@ -198,7 +215,7 @@ async def _forecast_run(
         )
         from app.services.forecasting.truth_gate import wrap_forecast_result
 
-        engine = ForecastEngine(db)
+        engine = _forecast_engine(db)
 
         if target_id:
             target = db.get(ForecastTarget, target_id)
@@ -447,7 +464,7 @@ async def _forecast_get(
 
     from app.services.forecasting.answer_format import format_run_answer
 
-    engine = ForecastEngine(db)
+    engine = _forecast_engine(db)
     run = engine.get_latest_run(target_id)
 
     if run is None:
@@ -524,7 +541,7 @@ async def _forecast_accuracy(
     if not target_id:
         return {"success": False, "error": "target_id is required."}
 
-    engine = ForecastEngine(db)
+    engine = _forecast_engine(db)
     logs = engine.get_accuracy(target_id)
 
     return {"success": True, "accuracy_log": logs, "count": len(logs)}
@@ -966,9 +983,15 @@ async def _forecast_brief(
         return {"success": False, "error": "product_id is required."}
     day = int(args.get("day", 7))
 
-    from app.services.forecasting.analyst import service as analyst_service
-
     def _do_work():
+        from app.config import settings
+
+        if settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
+            from app.services.forecasting.unified_service import ForecastingAgentService
+
+            return ForecastingAgentService(db).get_forecast_brief(product_id, day=day)
+        from app.services.forecasting.analyst import service as analyst_service
+
         return analyst_service.get_analyst_brief(product_id, day=day, db=db)
 
     try:

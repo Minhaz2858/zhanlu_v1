@@ -48,6 +48,7 @@ def build_system_prompt(
     inject_learning_graph: bool = True,
     inject_recipes: bool = True,
     inject_user_profile: bool = True,
+    inject_role_context: bool = True,
 ) -> str:
     """Build the complete system prompt from all sources.
 
@@ -90,6 +91,10 @@ def build_system_prompt(
     # 6. User profile (experience layer Layer 3) — flag-gated
     if inject_user_profile:
         prompt = _inject_user_profile(prompt, agent_app_id, user_id)
+
+    # 7. Role context (role-based personalization) — flag-gated
+    if inject_role_context:
+        prompt = _inject_role_context(prompt, db, user_id)
 
     return prompt
 
@@ -210,6 +215,59 @@ def _inject_user_profile(prompt: str, agent_app_id: str, user_id: str | None) ->
             prompt += f"\n\n{profile_text}"
     except Exception as e:
         logger.debug("User profile injection failed (non-fatal): %s", e)
+    return prompt
+
+
+def _inject_role_context(prompt: str, db: Session, user_id: str | None) -> str:
+    """Inject the user's role descriptions into the prompt.
+
+    Flag-gated by ROLE_PERSONALIZATION_ENABLED. Queries the ``User`` row by
+    ``user_id`` for ``role_descriptions`` (a JSON list of free-text business
+    roles) and appends a ``[User Role Context]`` block instructing the model
+    to tailor depth, terminology, and focus to the user's role(s).
+
+    Best-effort: any failure (missing user, missing roles, flag off) leaves
+    the prompt unchanged.
+    """
+    try:
+        if not user_id:
+            return prompt
+        from app.config import settings
+        if not getattr(settings, "ROLE_PERSONALIZATION_ENABLED", False):
+            return prompt
+
+        from app.models.user import User
+        user = db.query(User).filter(User.id == user_id, User.is_deleted == False).first()  # noqa: E712
+        if user is None:
+            return prompt
+
+        roles = user.role_descriptions
+        if not roles or not isinstance(roles, list):
+            return prompt
+
+        roles = [str(r).strip() for r in roles if str(r).strip()]
+        if not roles:
+            return prompt
+
+        role_list = ", ".join(roles)
+        block = (
+            "[User Role Context]\n"
+            f"The current user's role(s): {role_list}.\n"
+        )
+        description = getattr(user, "role_description_text", None)
+        if description and str(description).strip():
+            block += (
+                f"Role description: {str(description).strip()}\n"
+            )
+        block += (
+            "Tailor your answer to this role: use the depth, terminology, and "
+            "focus areas most relevant to this role; surface the details and "
+            "next-step recommendations that matter most to someone in this "
+            "position rather than giving a generic reply."
+        )
+        prompt += f"\n\n{block}"
+    except Exception as e:
+        logger.debug("Role context injection failed (non-fatal): %s", e)
     return prompt
 
 

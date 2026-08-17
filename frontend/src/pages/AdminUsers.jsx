@@ -3,7 +3,7 @@ import { useAuth } from '@/lib/AuthContext';
 import { authFetch } from '@/api/authFetch';
 import PageHeader from '@/components/PageHeader';
 import { Button } from '@/components/ui/button';
-import { Loader2, UserPlus, Trash2, Shield, ShieldCheck, X, Pencil, Eye, ChevronDown } from 'lucide-react';
+import { Loader2, UserPlus, Trash2, Shield, ShieldCheck, X, Pencil, ChevronDown, Star, Tag } from 'lucide-react';
 
 const APP_ID = import.meta.env.VITE_BASE44_APP_ID || 'local-zhanlu-app';
 
@@ -72,6 +72,8 @@ export default function AdminUsers() {
     <div className="h-full overflow-y-auto px-8 py-8">
       <PageHeader title="User Management" subtitle="Manage user accounts and roles" />
 
+      <RoleMetricsCard />
+
       <div className="mb-4 flex items-center justify-between">
         <p className="text-sm text-muted-foreground">{users.length} user(s)</p>
         <Button onClick={() => setShowCreate(true)} size="sm">
@@ -95,6 +97,7 @@ export default function AdminUsers() {
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Name</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Email</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Role</th>
+                <th className="px-4 py-3 text-left font-medium text-muted-foreground">Business Roles</th>
                 <th className="px-4 py-3 text-left font-medium text-muted-foreground">Created</th>
                 <th className="px-4 py-3 text-right font-medium text-muted-foreground">Actions</th>
               </tr>
@@ -109,6 +112,19 @@ export default function AdminUsers() {
                       {u.role === 'admin' ? <ShieldCheck className="h-3 w-3" /> : <Shield className="h-3 w-3" />}
                       {u.role}
                     </span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <div className="flex flex-wrap gap-1">
+                      {(u.role_descriptions || []).length === 0 ? (
+                        <span className="text-xs text-muted-foreground/50">—</span>
+                      ) : (
+                        (u.role_descriptions || []).map((r, i) => (
+                          <span key={`${r}-${i}`} className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-[11px] font-medium text-secondary-foreground">
+                            <Tag className="h-2.5 w-2.5" />{r}
+                          </span>
+                        ))
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-xs text-muted-foreground">{u.created_date ? new Date(u.created_date).toLocaleDateString() : '—'}</td>
                   <td className="px-4 py-3 text-right">
@@ -148,7 +164,7 @@ export default function AdminUsers() {
 }
 
 function CreateUserModal({ onClose, onCreated }) {
-  const [form, setForm] = useState({ email: '', full_name: '', password: '', role: 'user' });
+  const [form, setForm] = useState({ email: '', full_name: '', password: '', role: 'user', role_descriptions: [] });
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
 
@@ -187,6 +203,14 @@ function CreateUserModal({ onClose, onCreated }) {
             <option value="user">User</option>
             <option value="admin">Admin</option>
           </select>
+          <div className="block text-xs text-muted-foreground">
+            Business Roles
+            <RoleTagInput
+              value={form.role_descriptions}
+              onChange={(roles) => setForm({ ...form, role_descriptions: roles })}
+              placeholder="e.g. Financial Analyst"
+            />
+          </div>
           {err && <p className="text-sm text-destructive">{err}</p>}
           <div className="flex justify-end gap-2 pt-2">
             <Button type="button" variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
@@ -205,29 +229,12 @@ function EditUserModal({ user, onClose, onUpdated }) {
     full_name: user.full_name || '',
     role: user.role || 'user',
     password: '',
+    role_descriptions: user.role_descriptions || [],
+    role_description_text: user.role_description_text || '',
   });
   const [showPassword, setShowPassword] = useState(false);
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState(null);
-  const [detail, setDetail] = useState(null); // { owned, granted }
-  const [detailLoading, setDetailLoading] = useState(true);
-  const [tab, setTab] = useState('owned'); // 'owned' | 'granted'
-
-  // Load owned + granted resources
-  useEffect(() => {
-    async function loadDetail() {
-      setDetailLoading(true);
-      try {
-        const resp = await authFetch(`/api/admin/users/${user.id}`);
-        if (resp.ok) {
-          const data = await resp.json();
-          setDetail({ owned: data.owned || [], granted: data.granted || [] });
-        }
-      } catch (_) { /* non-critical */ }
-      finally { setDetailLoading(false); }
-    }
-    loadDetail();
-  }, [user.id]);
 
   async function submit(e) {
     e.preventDefault();
@@ -243,7 +250,13 @@ function EditUserModal({ user, onClose, onUpdated }) {
         return;
       }
 
-      const body = { email: form.email, full_name: form.full_name, role: form.role };
+      const body = {
+        email: form.email,
+        full_name: form.full_name,
+        role: form.role,
+        role_descriptions: form.role_descriptions || [],
+        role_description_text: form.role_description_text || '',
+      };
       if (form.password) body.password = form.password;
 
       const resp = await authFetch(`/api/admin/users/${user.id}`, {
@@ -260,9 +273,6 @@ function EditUserModal({ user, onClose, onUpdated }) {
       setSaving(false);
     }
   }
-
-  const ownedCount = detail?.owned?.length || 0;
-  const grantedCount = detail?.granted?.length || 0;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={onClose}>
@@ -288,6 +298,28 @@ function EditUserModal({ user, onClose, onUpdated }) {
               <option value="admin">Admin</option>
             </select>
           </label>
+          <div className="block text-xs text-muted-foreground">
+            Business Roles
+            <RoleTagInput
+              value={form.role_descriptions}
+              onChange={(roles) => setForm({ ...form, role_descriptions: roles })}
+              placeholder="e.g. Supply Chain Manager"
+            />
+          </div>
+
+          <label className="block text-xs text-muted-foreground">
+            Business Role Description
+            <textarea
+              value={form.role_description_text}
+              onChange={(e) => setForm({ ...form, role_description_text: e.target.value })}
+              rows={4}
+              placeholder="Optional: describe this user's business role."
+              className="mt-1 w-full resize-y rounded-lg border border-border bg-background px-3 py-2 text-sm text-foreground"
+            />
+            <span className="mt-1 block text-[11px] text-muted-foreground/70">
+              Optional. Used to personalize agent responses.
+            </span>
+          </label>
 
           {/* Collapsible password section */}
           <button type="button" onClick={() => setShowPassword(!showPassword)} className="flex w-full items-center gap-1 text-xs text-muted-foreground hover:text-foreground">
@@ -305,57 +337,126 @@ function EditUserModal({ user, onClose, onUpdated }) {
             <Button type="submit" size="sm" disabled={saving}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Save'}</Button>
           </div>
         </form>
-
-        {/* Resources section */}
-        <div className="mt-5 border-t border-border pt-4">
-          <h3 className="mb-3 flex items-center gap-1.5 text-sm font-medium text-foreground">
-            <Eye className="h-3.5 w-3.5" />
-            Resources
-          </h3>
-
-          {/* Tabs */}
-          <div className="mb-3 flex rounded-lg border border-border bg-muted/30 p-0.5">
-            <button onClick={() => setTab('owned')} className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${tab === 'owned' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground'}`}>
-              Owned ({ownedCount})
-            </button>
-            <button onClick={() => setTab('granted')} className={`flex-1 rounded-md px-3 py-1.5 text-xs font-medium transition-colors ${tab === 'granted' ? 'bg-background text-foreground shadow-sm' : 'text-muted-foreground'}`}>
-              Granted ({grantedCount})
-            </button>
-          </div>
-
-          {detailLoading ? (
-            <div className="flex justify-center py-4"><Loader2 className="h-5 w-5 animate-spin text-muted-foreground" /></div>
-          ) : tab === 'owned' ? (
-            <ResourceList items={detail?.owned || []} badge="Owner" emptyText="No resources owned by this user." />
-          ) : (
-            <ResourceList items={detail?.granted || []} badge="Shared" emptyText="No resources shared with this user." showGrantedBy />
-          )}
-        </div>
       </div>
     </div>
   );
 }
 
 
-function ResourceList({ items, badge, emptyText, showGrantedBy }) {
-  if (items.length === 0) {
-    return <p className="py-3 text-center text-xs text-muted-foreground">{emptyText}</p>;
+function RoleTagInput({ value, onChange, placeholder }) {
+  const [draft, setDraft] = useState('');
+  const roles = Array.isArray(value) ? value : [];
+
+  function add() {
+    const text = draft.trim();
+    if (!text) return;
+    if (roles.some((r) => r.toLowerCase() === text.toLowerCase())) {
+      setDraft('');
+      return;
+    }
+    onChange([...roles, text]);
+    setDraft('');
   }
+
+  function remove(idx) {
+    onChange(roles.filter((_, i) => i !== idx));
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter' || e.key === ',') {
+      e.preventDefault();
+      add();
+    } else if (e.key === 'Backspace' && !draft && roles.length) {
+      remove(roles.length - 1);
+    }
+  }
+
   return (
-    <div className="max-h-48 overflow-y-auto rounded-lg border border-border">
-      {items.map((r, i) => (
-        <div key={`${r.type}-${r.id}-${i}`} className="flex items-center justify-between border-b border-border px-3 py-2 last:border-0 text-sm">
-          <div className="min-w-0 flex-1">
-            <p className="truncate text-foreground">{r.name}</p>
-            {showGrantedBy && r.granted_by_email && (
-              <p className="truncate text-[11px] text-muted-foreground">by {r.granted_by_email}</p>
-            )}
-          </div>
-          <span className="ml-2 shrink-0 rounded-full bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
-            {badge}
+    <div>
+      <div className="flex flex-wrap gap-1.5">
+        {roles.map((r, i) => (
+          <span key={`${r}-${i}`} className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-2 py-0.5 text-xs font-medium text-primary">
+            <Tag className="h-2.5 w-2.5" />
+            {r}
+            <button type="button" onClick={() => remove(i)} className="text-primary/70 hover:text-primary" aria-label={`Remove ${r}`}>
+              <X className="h-3 w-3" />
+            </button>
           </span>
+        ))}
+      </div>
+      <input
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={onKeyDown}
+        onBlur={add}
+        placeholder={placeholder || 'Add role (press Enter)'}
+        className="mt-1.5 w-full rounded-lg border border-border bg-background px-3 py-2 text-sm"
+      />
+    </div>
+  );
+}
+
+
+function RoleMetricsCard() {
+  const [metrics, setMetrics] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const resp = await authFetch('/api/admin/users/role-feedback-metrics');
+        if (resp.ok) setMetrics(await resp.json());
+      } catch (_) {
+        /* non-critical: hide card if metrics unavailable */
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="mb-4 flex items-center gap-2 rounded-xl border border-border px-4 py-3 text-sm text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading personalization metrics…
+      </div>
+    );
+  }
+
+  if (!metrics || metrics.total_feedback === 0) return null;
+
+  return (
+    <div className="mb-4 rounded-xl border border-border bg-card p-4">
+      <div className="mb-3 flex items-center gap-2">
+        <Star className="h-4 w-4 text-primary" />
+        <h3 className="text-sm font-medium text-foreground">Role Personalization</h3>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+          <p className="text-[11px] text-muted-foreground">Avg. role relevance</p>
+          <p className="text-lg font-semibold text-foreground">
+            {metrics.avg_rating != null ? `${metrics.avg_rating} / 5` : '—'}
+          </p>
         </div>
-      ))}
+        <div className="rounded-lg border border-border bg-muted/20 px-3 py-2">
+          <p className="text-[11px] text-muted-foreground">Feedback count</p>
+          <p className="text-lg font-semibold text-foreground">{metrics.total_feedback}</p>
+        </div>
+      </div>
+      {metrics.per_role && metrics.per_role.length > 0 && (
+        <div className="mt-3">
+          <p className="mb-1.5 text-[11px] font-medium text-muted-foreground">Per-role breakdown</p>
+          <div className="flex flex-wrap gap-2">
+            {metrics.per_role.map((r) => (
+              <span key={r.role} className="inline-flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 text-xs text-secondary-foreground">
+                {r.role}
+                <span className="text-muted-foreground">
+                  {r.avg_rating != null ? `${r.avg_rating}/5` : '—'} · {r.count}
+                </span>
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

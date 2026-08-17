@@ -26,6 +26,23 @@ BRIEF_JSON_SCHEMA = {
 
 
 def build_analyst_prompt(pack: dict) -> str:
+    is_upstream = pack.get("product_group") == "upstream"
+    if is_upstream:
+        supply_demand_rule = (
+            "   - supply_demand_zh(宏观供需:近30日价格涨跌、价格分位、波动状态、"
+            "首要驱动因子、模型间分歧。上游产品无ERP销量/开工率数据,禁止编造交易量)\n"
+        )
+        upstream_rule = (
+            "   - upstream_logic_zh(上游传导:原油为产业链最上游,无上游原料,"
+            "写宏观市场情绪、在册事件、波动状态;若有上游原料数据则写原料变化与弹性传导)\n"
+        )
+    else:
+        supply_demand_rule = (
+            "   - supply_demand_zh(供需研判:季节性、模型驱动因子、模型间分歧)\n"
+        )
+        upstream_rule = (
+            "   - upstream_logic_zh(上游传导:上游原料变化、弹性传导、与模型方向是否一致)\n"
+        )
     return (
         "你是石化市场分析师。根据下方 EVIDENCE_JSON 撰写该产品的 AI 简评,按周报格式分7个板块。\n"
         "严格规则:\n"
@@ -34,8 +51,8 @@ def build_analyst_prompt(pack: dict) -> str:
         "3. 输出简体中文 JSON,7个字段对应7个板块:\n"
         "   - market_update_zh(市场动态:市场情报方向、在册事件数、波动状态)\n"
         "   - price_data_zh(价格数据:现价、近三年分位、近7日/30日涨跌、均线位置)\n"
-        "   - upstream_logic_zh(上游传导:上游原料变化、弹性传导、与模型方向是否一致)\n"
-        "   - supply_demand_zh(供需研判:季节性、模型驱动因子、模型间分歧)\n"
+        f"{upstream_rule}"
+        f"{supply_demand_rule}"
         "   - forecast_zh(价格预测:必须给出区间[bear–bull]和方向箭头,如 ↘偏弱/↗偏强/→稳定/↔震荡,"
         "可加定性词如易跌难涨;附上涨概率和置信度)\n"
         "   - watch_triggers_zh(2-4 条重新评估触发条件,字符串数组)\n"

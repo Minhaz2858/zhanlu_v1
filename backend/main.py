@@ -26,6 +26,8 @@ from app.models import (
     AgentRunStep,
     LlmModel,
     AlertLog,
+    WeeklyReportCard,
+    WeeklyReportProduct,
 )
 
 # Import tool_handlers to register all 8 new capability tools in the registry
@@ -58,10 +60,12 @@ from app.routers.market_dashboard import router as market_dashboard_router
 from app.routers.forecast_ops import router as forecast_ops_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.resource_shares import router as resource_shares_router
+from app.routers.access_policies import router as access_policies_router
 from app.routers.reports import router as reports_router
 from app.routers.llm import router as llm_router
 from app.routers.app_logs import router as app_logs_router
 from app.routers.alerts import router as alerts_router
+from app.routers.weekly_digest_api import router as weekly_digest_router
 
 
 ENTITY_MODELS = {
@@ -708,9 +712,11 @@ def create_app() -> FastAPI:
     app.include_router(dashboards_router, prefix="/api")
     app.include_router(hooks_router, prefix="/api")
     app.include_router(market_dashboard_router, prefix="/api")
+    app.include_router(weekly_digest_router, prefix="/api")
     app.include_router(forecast_ops_router, prefix="/api")
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(resource_shares_router, prefix="/api")
+    app.include_router(access_policies_router, prefix="/api")
     app.include_router(reports_router, prefix="/api")
     app.include_router(llm_router)
     app.include_router(app_logs_router, prefix="/api")

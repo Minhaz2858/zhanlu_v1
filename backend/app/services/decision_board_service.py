@@ -219,11 +219,39 @@ def _build_decision_roi(product_id: str, db) -> Optional[DecisionRoiMeta]:
         return None
 
 
+def _surface(db):
+    """Return a ``ForecastingAgentService`` when the unified flag is on, else None.
+
+    The decision board composes market snapshots + forecast base batch +
+    forecast analysis + analyst brief. When the unified service is enabled,
+    all four reads route through one facade; otherwise the legacy direct
+    ``mds`` / ``analyst_service`` calls remain active (flag off — default).
+    """
+    from app.config import settings
+
+    if not settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
+        return None
+    from app.services.forecasting.unified_service import ForecastingAgentService
+
+    return ForecastingAgentService(db)
+
+
 def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResponse:
     product_ids = PRODUCT_GROUP_MAP.get(group, [])
+    svc = _surface(db)
     # get_market_snapshot enforces the EDIA fail-closed guard (503).
-    snapshots = {s.id: s for s in mds.get_market_snapshot(group)}
-    batch = mds.get_forecast_base_batch_v2(product_ids, day=day, db=db)
+    snapshots = {
+        s.id: s for s in (
+            svc.get_market_snapshot(group)
+            if svc is not None
+            else mds.get_market_snapshot(group)
+        )
+    }
+    batch = (
+        svc.get_forecast_base_batch_v2(product_ids, day=day)
+        if svc is not None
+        else mds.get_forecast_base_batch_v2(product_ids, day=day, db=db)
+    )
 
     products: list[DecisionBoardProduct] = []
     for pid in product_ids:
@@ -255,7 +283,11 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
         # AI 分析依据 (trend / model / uncertainty + action logic)
         analysis = None
         try:
-            analysis = mds.get_forecast_analysis(pid, day, db=db)
+            analysis = (
+                svc.get_forecast_analysis(pid, day)
+                if svc is not None
+                else mds.get_forecast_analysis(pid, day, db=db)
+            )
         except Exception:  # additive — never break the board on analysis failure
             analysis = None
         basis_zh = analysis.basis_zh if analysis else ""
@@ -266,8 +298,11 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
         # legacy template narrative is used.
         brief = None
         try:
-            from app.services.forecasting.analyst import service as analyst_service
-            brief = analyst_service.get_analyst_brief(pid, day=day, db=db)
+            if svc is not None:
+                brief = svc.get_forecast_brief(pid, day=day)
+            else:
+                from app.services.forecasting.analyst import service as analyst_service
+                brief = analyst_service.get_analyst_brief(pid, day=day, db=db)
         except Exception:
             brief = None
 

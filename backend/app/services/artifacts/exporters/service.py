@@ -32,6 +32,7 @@ The service is *not* a singleton — instantiate per request as
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -43,6 +44,7 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.artifact import Artifact, ArtifactBlob, ArtifactVersion
 from app.services.synexia.contracts import ReportCardPayload
 from app.services.artifacts.exporters import (
@@ -52,7 +54,7 @@ from app.services.artifacts.exporters import (
     safe_file_extension,
     safe_mime_type,
 )
-from app.services.artifacts.exporters._common import stamp_filename
+from app.services.artifacts.exporters._common import chart_rows, stamp_filename
 
 logger = logging.getLogger(__name__)
 
@@ -328,6 +330,12 @@ class ExportService:
         ``ZHANLU_AUDIT_REPAIR_CYCLES`` rounds), so mechanically-fixable
         violations never reach the user.
         """
+        # ctx / deck_rows are set by the standard path below and consulted by
+        # the post-render copy-polish pass.  They stay None/[] for the
+        # canonical-HTML→DOCX/PDF path.
+        ctx: Optional[ExportContext] = None
+        deck_rows: list[dict[str, Any]] = []
+
         # ── Canonical HTML → DOCX / PDF path ──
         if (
             artifact.canonical_format == "html"
@@ -357,7 +365,17 @@ class ExportService:
                 ctx.doc_type = doc_type
             if theme_tokens:
                 ctx.theme_tokens = theme_tokens
-            data, mime, ext = render(format, payload, ctx)
+
+            # ── PPT pipeline: planner → router → layout engine ──
+            # All flags default OFF, so the report-card renderer below is the
+            # unchanged path unless a deployment opts into deck planning.
+            if format == "pptx" and settings.PPT_DECK_PLANNER_ENABLED:
+                deck_rows = chart_rows(payload) if payload else []
+                data, mime, ext = self._render_deck_pipeline(
+                    payload, ctx, deck_rows, user_message=user_message
+                )
+            else:
+                data, mime, ext = render(format, payload, ctx)
             if not data:
                 raise ExportError(f"Renderer returned empty bytes for format {format!r}")
 
@@ -366,6 +384,20 @@ class ExportService:
 
         # ── P0.1 self-healing quality loop ──
         data, audit_report, audit_history = self._quality_loop(format, data)
+
+        # ── One-shot LLM copy polish (runs ONCE, not inside the repair loop) ──
+        # The polish re-renders the deck, then the quality loop runs again on
+        # the polished output.  Only applies when the deck was actually planned.
+        if (
+            format == "pptx"
+            and settings.PPT_LLM_POLISH_ENABLED
+            and ctx is not None
+            and ctx.deck_plan is not None
+        ):
+            polished = self._run_deck_polish(ctx, deck_rows, user_message=user_message)
+            if polished is not None:
+                data = polished
+                data, audit_report, audit_history = self._quality_loop(format, data)
 
         # Themed one-off renders are returned fresh without caching or
         # audit-record (the per-format cache key doesn't encode the theme yet,
@@ -434,6 +466,109 @@ class ExportService:
             format, artifact.id, version.version_number, len(data),
         )
         return data, blob.mime_type, blob.file_name
+
+    # --- PPT deck pipeline helpers -----------------------------------------
+
+    @staticmethod
+    def _run_coro(coro: Any) -> Any:
+        """Run an async coroutine to completion in any calling context.
+
+        ``_render_and_store`` is synchronous but is reached from both sync
+        FastAPI endpoints (threadpool, no running loop) and from inside the
+        async agent chat loop (running loop present).  ``asyncio.run`` only
+        works in the former; for the latter we run the coroutine in a fresh
+        thread with its own event loop.
+        """
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop — safe to drive directly.
+            return asyncio.run(coro)
+
+        # A loop is already running (async agent path).  Drive the coroutine
+        # in a dedicated thread so we don't deadlock the live loop.
+        import concurrent.futures
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            return pool.submit(asyncio.run, coro).result()
+
+    def _render_deck_pipeline(
+        self,
+        payload: Optional[ReportCardPayload],
+        ctx: ExportContext,
+        rows: list[dict[str, Any]],
+        *,
+        user_message: str,
+    ) -> tuple[bytes, str, str]:
+        """Run planner → router → layout-engine render for a PPT deck.
+
+        Only reached when ``PPT_DECK_PLANNER_ENABLED`` is on.  The planner
+        always returns a plan (LLM when the flag is on, deterministic
+        fallback otherwise); the router then classifies it as "structured" vs
+        "sandbox".  A full sandbox html2pptx render is an agent-side skill
+        concern, so the deterministic export pipeline renders through the
+        layout engine as a faithful fallback while recording the route.
+        """
+        from app.services.artifacts.deck_planner import build_deck_plan
+        from app.services.artifacts.deck_router import route_deck
+        from app.services.artifacts.exporters.pptx_export import render_deck
+
+        plan, _profile = self._run_coro(build_deck_plan(user_message, rows))
+
+        ctx.deck_type = plan.deck_type or "data_report"
+        ctx.deck_plan = plan
+
+        route = "structured"
+        if settings.PPT_SMART_ROUTER_ENABLED:
+            route = route_deck(plan, user_message)
+
+        if route == "sandbox":
+            # Design-heavy deck.  The DeckPlan already carries the cover /
+            # agenda / section-divider / kpi layouts, so the structured layout
+            # engine is a faithful deterministic fallback.  Full html2pptx
+            # sandbox rendering is delegated to the agent's html2pptx SKILL via
+            # agent_prompts guidance for interactive design-heavy requests.
+            logger.info(
+                "ExportService: deck routed to sandbox (type=%s); rendering "
+                "via layout engine as deterministic fallback",
+                plan.deck_type,
+            )
+            ctx.cover_art = True
+
+        return render_deck(plan, ctx, rows)
+
+    def _run_deck_polish(
+        self,
+        ctx: ExportContext,
+        rows: list[dict[str, Any]],
+        *,
+        user_message: str,
+    ) -> Optional[bytes]:
+        """Run the one-shot LLM copy-polish pass, then re-render the deck.
+
+        Returns the re-rendered bytes, or ``None`` when the polish produced no
+        change / failed (caller then keeps the pre-polish bytes).
+        """
+        from app.services.artifacts.copy_polish import polish_deck
+        from app.services.artifacts.exporters.pptx_export import render_deck
+
+        plan = ctx.deck_plan
+        if plan is None:
+            return None
+
+        polished = self._run_coro(polish_deck(plan, rows, user_message))
+        if polished is plan:  # identity — polish returned the original unchanged
+            return None
+
+        ctx.deck_plan = polished
+        new_data, _mime, _ext = render_deck(polished, ctx, rows)
+        if not new_data:
+            logger.warning(
+                "ExportService: polished deck re-render produced empty bytes; "
+                "keeping pre-polish output"
+            )
+            return None
+        return new_data
 
     def _render_from_html_canonical(
         self, artifact: Artifact, format: str

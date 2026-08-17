@@ -21,7 +21,12 @@ from app.models.market_dashboard import (
     get_md_lz_regional_prefix,
     DATE_COL, PRICE_COL, SUPPLIER_COL,
 )
-from app.schemas.market_dashboard import MarketSnapshot, PriceHistoryPoint
+from app.schemas.market_dashboard import (
+    GradeKpiData, GradeKpiRow, GradeKpiSummary, MarketSnapshot, PriceHistoryPoint,
+)
+from app.services.erp.kpi import (
+    _PRODUCT_MATERIAL_NAMES, _material_name_params, _parse_ref_date as _parse_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -249,7 +254,11 @@ def _read_product_history_rows(product_id: str) -> list[tuple]:
 
 
 def get_price_history(product_id: str, days: int = 30) -> list[PriceHistoryPoint]:
-    """Return daily price points for the last N days (default 30)."""
+    """Return daily price points for the last N days (default 30).
+
+    Each point also carries ``volume`` (per-day sales volume in tons) when the
+    product has an ERP material mapping; otherwise ``volume`` stays ``None``.
+    """
     _require_edia()
     rows = _read_product_history_rows(product_id)
     if not rows:
@@ -260,6 +269,59 @@ def get_price_history(product_id: str, days: int = 30) -> list[PriceHistoryPoint
         if d < cutoff:
             continue
         out.append(PriceHistoryPoint(date=d, price=p))
+
+    # Attach per-day sales volume (ERP-mapped products only). Brent/Naphtha
+    # have no material mapping, so their volume stays None.
+    if out:
+        daily = _fetch_daily_sales(product_id, out[0].date, out[-1].date)
+        if daily:
+            for pt in out:
+                pt.volume = daily.get(pt.date)
+    return out
+
+
+def _fetch_daily_sales(product_id: str, start_date: str, end_date: str) -> dict[str, float]:
+    """Return ``{YYYY-MM-DD: volume_tons}`` per-day sales for a product.
+
+    Groups ``erp_v_sale_orderentry.FDELIQTY`` by ``DATE(PLANDATE)`` over
+    ``[start_date, end_date]``. Returns an empty dict for products without an
+    ERP material mapping or on any error (caller degrades gracefully).
+    """
+    material_names = _PRODUCT_MATERIAL_NAMES.get(product_id, [])
+    if not material_names:
+        return {}
+    eng = get_mysql_engine()
+    if eng is None:
+        return {}
+    name_ph, name_params = _material_name_params(material_names)
+    try:
+        with eng.connect() as conn:
+            params = dict(name_params)
+            params["start_date"] = start_date
+            params["end_date"] = end_date
+            rows = conn.execute(text(
+                f"SELECT DATE(PLANDATE) AS d, SUM(COALESCE(FDELIQTY, 0)) AS vol "
+                f"FROM erp_v_sale_orderentry "
+                f"WHERE material_name IN ({name_ph}) "
+                f"  AND PLANDATE IS NOT NULL "
+                f"  AND DATE(PLANDATE) >= :start_date AND DATE(PLANDATE) <= :end_date "
+                f"GROUP BY DATE(PLANDATE)"
+            ), params).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("daily-sales query failed for %s: %s", product_id, exc)
+        return {}
+
+    out: dict[str, float] = {}
+    for row in rows:
+        d = row[0]
+        v = row[1]
+        if d is None or v is None:
+            continue
+        d_str = d if isinstance(d, str) else str(d)[:10]
+        try:
+            out[d_str] = round(float(v), 2)
+        except (TypeError, ValueError):
+            continue
     return out
 
 
@@ -307,6 +369,17 @@ def get_market_snapshot(group: Optional[str] = None) -> list[MarketSnapshot]:
             round((last_price - weekly_prev) / weekly_prev * 100, 2)
             if weekly_prev else None
         )
+        # 7-day high/low from the same window (no extra query needed).
+        weekly_prices = [p for _, p in weekly_rows]
+        price_7d_high = round(max(weekly_prices), 2) if weekly_prices else None
+        price_7d_low = round(min(weekly_prices), 2) if weekly_prices else None
+        # 7-day sales volume + change (ERP-mapped products only). Any
+        # unexpected error here must degrade to None, never abort the snapshot.
+        try:
+            sales_7d_tons, sales_7d_change_pct = _fetch_sales_7d(pid)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("sales-7d lookup raised for %s: %s", pid, exc)
+            sales_7d_tons, sales_7d_change_pct = None, None
         # Data source provenance: prefer the md_t_lz_price primary over
         # the legacy long table so users see where the live price came from.
         cfg = PRODUCT_TABLE_MAP[pid]
@@ -332,6 +405,10 @@ def get_market_snapshot(group: Optional[str] = None) -> list[MarketSnapshot]:
             weekly_gap_value=round(last_price - weekly_prev, 2) if weekly_prev else None,
             weekly_reference_date=(weekly_rows[0][0] if len(weekly_rows) > 0 else None),
             data_source_detail=source_detail,
+            price_7d_high=price_7d_high,
+            price_7d_low=price_7d_low,
+            sales_7d_tons=sales_7d_tons,
+            sales_7d_change_pct=sales_7d_change_pct,
         ))
     return snapshots
 
@@ -344,6 +421,87 @@ def _within_7d(d_str: str, ref_date_str: str) -> bool:
     except ValueError:
         return False
     return (ref - timedelta(days=7)) <= d <= ref
+
+
+def _fetch_sales_7d(product_id: str) -> tuple[Optional[float], Optional[float]]:
+    """Return (sales_7d_tons, sales_7d_change_pct) for an ERP-mapped product.
+
+    Queries ``erp_v_sale_orderentry`` with a single combined SQL statement that
+    conditionally aggregates the current 7-day window vs. the prior 7-day window
+    (one round-trip per product), mirroring the direct EDIA MySQL pattern used by
+    ``get_grade_kpis_batch``.
+
+    Returns ``(None, None)`` on any error or missing data so the overview card
+    grid degrades gracefully.
+    """
+    material_names = _PRODUCT_MATERIAL_NAMES.get(product_id, [])
+    if not material_names:
+        return None, None
+
+    eng = get_mysql_engine()
+    if eng is None:
+        return None, None
+
+    name_ph, name_params = _material_name_params(material_names)
+
+    # Reference date = latest delivery date in the warehouse (same convention as
+    # get_grade_kpis_batch / ErpKpiService). Fall back to today on any error.
+    ref_date = date.today()
+    try:
+        with eng.connect() as conn:
+            ref_row = conn.execute(text(
+                "SELECT MAX(DATE(PLANDATE)) FROM erp_v_sale_orderentry "
+                "WHERE PLANDATE IS NOT NULL"
+            )).first()
+            if ref_row and ref_row[0] is not None:
+                ref_date = _parse_date(ref_row[0])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sales-7d ref-date query failed for %s: %s", product_id, exc)
+
+    ref_str = ref_date.isoformat()
+    # Current window: [ref_date - 6d, ref_date] (7 days inclusive).
+    # Prior window:   [ref_date - 13d, ref_date - 7d] (the 7 days before).
+    curr_start = (ref_date - timedelta(days=6)).isoformat()
+    prev_start = (ref_date - timedelta(days=13)).isoformat()
+    prev_end = (ref_date - timedelta(days=7)).isoformat()
+
+    try:
+        with eng.connect() as conn:
+            params = dict(name_params)
+            params["curr_start"] = curr_start
+            params["ref_str"] = ref_str
+            params["prev_start"] = prev_start
+            params["prev_end"] = prev_end
+            row = conn.execute(text(
+                f"SELECT "
+                f"  SUM(CASE WHEN PLANDATE IS NOT NULL "
+                f"         AND DATE(PLANDATE) >= :curr_start "
+                f"         AND DATE(PLANDATE) <= :ref_str "
+                f"      THEN COALESCE(FDELIQTY, 0) ELSE 0 END) AS curr_vol, "
+                f"  SUM(CASE WHEN PLANDATE IS NOT NULL "
+                f"         AND DATE(PLANDATE) >= :prev_start "
+                f"         AND DATE(PLANDATE) <= :prev_end "
+                f"      THEN COALESCE(FDELIQTY, 0) ELSE 0 END) AS prev_vol "
+                f"FROM erp_v_sale_orderentry "
+                f"WHERE material_name IN ({name_ph})"
+            ), params).first()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("sales-7d query failed for %s: %s", product_id, exc)
+        return None, None
+
+    if row is None:
+        return None, None
+
+    curr_vol = float(row[0]) if row[0] is not None else None
+    prev_vol = float(row[1]) if row[1] is not None else None
+
+    sales_7d_tons = round(curr_vol, 2) if curr_vol is not None else None
+
+    sales_7d_change_pct = None
+    if curr_vol is not None and prev_vol is not None and prev_vol > 0:
+        sales_7d_change_pct = round((curr_vol - prev_vol) / prev_vol * 100, 2)
+
+    return sales_7d_tons, sales_7d_change_pct
 
 
 # ── Phase E: regional + news (v1 simplified) ──────────────────────────
@@ -1234,6 +1392,214 @@ from app.schemas.market_dashboard import (
 )  # noqa: E402  imported here to avoid changing the existing block
 
 
+def get_grade_kpis_batch(product_ids: list[str]) -> dict[str, GradeKpiData]:
+    """Query grade-level (牌号 / material_model) supply-chain KPIs.
+
+    Data sources (read-only EDIA MySQL):
+      * sales 30d — ``erp_v_sale_orderentry.FDELIQTY`` delivered in the last 30d
+      * pending   — ``erp_v_sale_orderentry.FREMAINOUTQTY`` (remaining to ship)
+      * inventory — ``erp_v_stk_inventory.FBASEQTY``
+
+    Rows are grouped by ``material_code`` (SKU). The 牌号 label comes from
+    ``material_model``; for SKUs that only appear in inventory (no recent
+    sales) the ``material`` master table supplies the label.
+
+    Upstream products (crude_oil, naphtha, mixed_c5) have no ERP mapping, so
+    they naturally yield empty results.
+    """
+    out: dict[str, GradeKpiData] = {
+        pid: GradeKpiData(product_id=pid) for pid in product_ids
+    }
+
+    eng = get_mysql_engine()
+    if eng is None:
+        return out
+
+    # One flat name list; each material_name maps to exactly one product.
+    name_to_pid: dict[str, str] = {}
+    for pid in product_ids:
+        for name in _PRODUCT_MATERIAL_NAMES.get(pid, []):
+            name_to_pid.setdefault(name, pid)
+
+    if not name_to_pid:
+        return out
+
+    names = list(name_to_pid.keys())
+    name_ph, name_params = _material_name_params(names)
+
+    # Reference date = latest delivery date in the warehouse; consistent with
+    # ErpKpiService. Falls back to today on any error.
+    ref_date = date.today()
+    try:
+        with eng.connect() as conn:
+            ref_row = conn.execute(text(
+                "SELECT MAX(DATE(PLANDATE)) FROM erp_v_sale_orderentry "
+                "WHERE PLANDATE IS NOT NULL"
+            )).first()
+            if ref_row and ref_row[0] is not None:
+                ref_date = _parse_date(ref_row[0])
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("grade-kpis ref-date query failed: %s", exc)
+
+    ref_str = ref_date.isoformat()
+    cutoff = (ref_date - timedelta(days=30)).isoformat()
+
+    # Expose the actual 30-day window so callers can render "as of" dates.
+    for data in out.values():
+        data.window_start = cutoff
+        data.window_end = ref_str
+
+    # ── sales + pending per SKU ──────────────────────────────────────────
+    sales_map: dict[str, dict] = {}
+    try:
+        with eng.connect() as conn:
+            sp = dict(name_params)
+            sp["start_date"] = cutoff
+            sp["end_date"] = ref_str
+            rows = conn.execute(text(
+                f"SELECT material_code, material_name, material_model, "
+                f"  SUM(CASE WHEN PLANDATE IS NOT NULL "
+                f"         AND DATE(PLANDATE) >= :start_date "
+                f"         AND DATE(PLANDATE) <= :end_date "
+                f"      THEN COALESCE(FDELIQTY, 0) ELSE 0 END) AS sales_30d, "
+                f"  SUM(CASE WHEN COALESCE(FREMAINOUTQTY, 0) > 0 "
+                f"      THEN FREMAINOUTQTY ELSE 0 END) AS pending "
+                f"FROM erp_v_sale_orderentry "
+                f"WHERE material_name IN ({name_ph}) "
+                f"  AND material_code IS NOT NULL AND material_code <> '' "
+                f"GROUP BY material_code, material_name, material_model"
+            ), sp).all()
+        for r in rows:
+            code = str(r[0] or "").strip()
+            if not code:
+                continue
+            model = str(r[2] or "").strip()
+            entry = sales_map.setdefault(code, {
+                "name": str(r[1] or "").strip(),
+                "model": model,
+                "sales_30d": 0.0,
+                "pending": 0.0,
+            })
+            if model and not entry["model"]:
+                entry["model"] = model
+            entry["sales_30d"] += float(r[3] or 0.0)
+            entry["pending"] += float(r[4] or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("grade-kpis sales query failed: %s", exc)
+
+    # ── inventory per SKU ────────────────────────────────────────────────
+    inv_map: dict[str, float] = {}
+    try:
+        with eng.connect() as conn:
+            rows = conn.execute(text(
+                f"SELECT material_code, SUM(COALESCE(FBASEQTY, 0)) AS inv_tons "
+                f"FROM erp_v_stk_inventory "
+                f"WHERE material_name IN ({name_ph}) "
+                f"  AND material_code IS NOT NULL AND material_code <> '' "
+                f"GROUP BY material_code"
+            ), dict(name_params)).all()
+        for r in rows:
+            code = str(r[0] or "").strip()
+            if not code:
+                continue
+            inv_map[code] = float(r[1] or 0.0)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("grade-kpis inventory query failed: %s", exc)
+
+    # ── canonical 牌号 label for inventory-only SKUs ─────────────────────
+    master_model: dict[str, str] = {}
+    try:
+        with eng.connect() as conn:
+            rows = conn.execute(text(
+                f"SELECT material_code, MAX(material_model) AS model "
+                f"FROM material "
+                f"WHERE material_name IN ({name_ph}) "
+                f"  AND material_code IS NOT NULL AND material_code <> '' "
+                f"GROUP BY material_code"
+            ), dict(name_params)).all()
+        for r in rows:
+            if r[0] and r[1]:
+                master_model[str(r[0]).strip()] = str(r[1]).strip()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("grade-kpis material-master query failed: %s", exc)
+
+    # ── merge + bucket by product ────────────────────────────────────────
+    all_codes: set[str] = set(sales_map) | set(inv_map)
+    for code in all_codes:
+        s = sales_map.get(code) or {}
+        name = s.get("name") or ""
+        pid = name_to_pid.get(name)
+        if pid is None:
+            continue
+
+        model = (s.get("model") or master_model.get(code) or "").strip()
+        grade = model if model else code
+
+        sales_30d = float(s.get("sales_30d") or 0.0)
+        pending = float(s.get("pending") or 0.0)
+        inv_tons = inv_map.get(code)
+
+        inventory_days = None
+        if inv_tons is not None and sales_30d > 0:
+            inventory_days = round(inv_tons / (sales_30d / 30.0), 2)
+
+        out[pid].rows.append(GradeKpiRow(
+            grade=grade,
+            sku_code=code,
+            sales_30d_tons=round(sales_30d, 2) if sales_30d else None,
+            inventory_tons=round(inv_tons, 2) if inv_tons is not None else None,
+            inventory_days=inventory_days,
+            pending_tons=round(pending, 2) if pending else None,
+        ))
+
+    for pid in out:
+        out[pid].rows.sort(
+            key=lambda r: (r.sales_30d_tons is None, -(r.sales_30d_tons or 0.0), r.sku_code)
+        )
+        out[pid].is_live = bool(out[pid].rows)
+
+    return out
+
+
+def get_supply_chain(product_id: str) -> GradeKpiData:
+    """Return per-product supply-chain snapshot (grade KPIs + summary).
+
+    Thin wrapper over ``get_grade_kpis_batch`` — reuses the single SQL
+    implementation and only adds the presentation-only ``summary`` aggregate
+    (totals + weighted ``avg_days_pending``). Does NOT modify the batch
+    function, which is shared by OverviewBundle / price-chain / ECISCO BI.
+
+    ``avg_days_pending`` = Σ(days_pendingᵢ · pending_tonsᵢ) / Σ(pending_tonsᵢ)
+    over rows where pending_tons > 0 and sales_30d_tons > 0, with
+    ``days_pendingᵢ = (pending_tonsᵢ / sales_30d_tonsᵢ) × 30``.
+    """
+    data = get_grade_kpis_batch([product_id])[product_id]
+    rows = data.rows
+
+    sales_30d_tons = sum(r.sales_30d_tons for r in rows if r.sales_30d_tons)
+    inventory_tons = sum(r.inventory_tons for r in rows if r.inventory_tons)
+    pending_tons = sum(r.pending_tons for r in rows if r.pending_tons)
+
+    weighted_num = 0.0
+    weighted_den = 0.0
+    for r in rows:
+        p = r.pending_tons
+        s = r.sales_30d_tons
+        if p and p > 0 and s and s > 0:
+            days_pending = (p / s) * 30.0
+            weighted_num += days_pending * p
+            weighted_den += p
+    avg_days_pending = round(weighted_num / weighted_den, 2) if weighted_den > 0 else None
+
+    data.summary = GradeKpiSummary(
+        sales_30d_tons=round(sales_30d_tons, 2) if sales_30d_tons else None,
+        inventory_tons=round(inventory_tons, 2) if inventory_tons else None,
+        pending_tons=round(pending_tons, 2) if pending_tons else None,
+        avg_days_pending=avg_days_pending,
+    )
+    return data
+
+
 def get_overview_bundle(
     bypass_cache: bool = False, forecast_day: int = 7,
 ) -> OverviewBundle:
@@ -1264,7 +1630,10 @@ def get_overview_bundle(
     # 3. Forecast 7-day base per product + overlay (v2, Phase 6).
     forecast_resp = get_forecast_base_batch_v2(pids, day=forecast_day)
 
-    # 4. FX (static for v1).
+    # 4. Grade-level supply-chain KPIs (ERP products only).
+    grade_kpis = get_grade_kpis_batch(pids)
+
+    # 5. FX (static for v1).
     fx = get_fx_rate()
 
     bundle = OverviewBundle(
@@ -1274,6 +1643,7 @@ def get_overview_bundle(
         forecast_day=forecast_day,
         forecast_base_by_product=forecast_resp.base_by_product,
         forecast_overlay_by_product=forecast_resp.overlay_by_product,  # Phase 6
+        grade_kpis_by_product=grade_kpis,
         fx=fx,
         cached=False,
         cache_age_ms=0,

@@ -169,6 +169,19 @@ class Settings(BaseSettings):
     # Example: '[{"name":"backup","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","model":"deepseek-chat"}]'
     LLM_FALLBACK_PROVIDERS: str = ""
 
+    # ── Document ingestion — audio / image / video ────────────────────────
+    # Audio: transcribe uploads via an OpenAI-compatible Whisper endpoint
+    # (OPENAI_BASE_URL/audio/transcriptions) using the existing OPENAI_API_KEY.
+    # No new API keys. Video transcription is deferred (needs ffmpeg).
+    AUDIO_TRANSCRIBE_ENABLED: bool = False
+    WHISPER_MODEL: str = "whisper-1"
+    WHISPER_TIMEOUT_S: float = 60.0
+    # Image: when True, run Tesseract OCR on uploaded images. Regardless of
+    # this flag, the image extractor ALWAYS emits an "[Image attached: name]"
+    # marker so the LLM knows the file exists (and the multimodal path can
+    # forward the raw bytes to a vision-capable model).
+    IMAGE_OCR_ENABLED: bool = False
+
     # Embeddings — semantic memory recall (P0). text-embedding-3-small is
     # OpenAI-compatible; providers without an /embeddings endpoint will
     # cause get_embedding() to return None and memory search transparently
@@ -368,6 +381,20 @@ class Settings(BaseSettings):
     # costly.  They use a stricter shipping threshold than interactive chat.
     SYNEXIA_QUALITY_GATE_THRESHOLD_AUTOMATION: float = 0.6
 
+    # ── PPT generation pipeline (multi-stage deck exporter) ──────────────
+    # All four flags default OFF so the existing report-card renderer path is
+    # byte-for-byte unchanged until a deployment opts in.  When enabled they
+    # add: LLM deck planning (content structuring), deterministic smart routing
+    # (structured vs sandbox html2pptx), and a one-shot LLM copy-polish pass.
+    # NOTE: the P0 audit/repair loop (audit_deck.py → repair_deck.py) is a
+    # pre-existing always-on safety net gated by ZHANLU_AUDIT_REPAIR_CYCLES and
+    # is NOT toggled here — PPT_AUDIT_ENABLED is reserved for an explicit
+    # opt-out/opt-in override in future releases.
+    PPT_DECK_PLANNER_ENABLED: bool = False
+    PPT_SMART_ROUTER_ENABLED: bool = False
+    PPT_LLM_POLISH_ENABLED: bool = False
+    PPT_AUDIT_ENABLED: bool = False
+
     # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
     # Post-FINALIZE semantic quality layer: a combined completeness +
     # reflexion LLM critique on the generated response, with a bounded
@@ -459,12 +486,28 @@ class Settings(BaseSettings):
     ECISCO_BI_INTEL_ENHANCED_ENABLED: bool = False    # 5D
     ECISCO_BI_ERP_WRITEBACK_ENABLED: bool = False     # 5F
     ECISCO_BI_ALERTS_ENABLED: bool = False           # 5G — proactive market alert detection + UI
+    ECISCO_BI_SCHEMA_DEPRECATION_ENABLED: bool = True  # F_PAEZ_JC over material_model hint for ecisco_bi_assistant
+
+    # ── Supply Chain Snapshot (per-product ERP panel under RegionalTable) ──
+    SUPPLY_CHAIN_SNAPSHOT_ENABLED: bool = False      # Gate for GET /market-dashboard/supply-chain/{product_id}
 
     # ── CEO Morning Digest (built on top of 5G alerts) ────────────────
     ALERT_DIGEST_ENABLED: bool = False              # Master gate for CEO morning digest
     ALERT_DIGEST_LLM_ENABLED: bool = True           # LLM narrator (default ON, template is fallback)
     ALERT_DIGEST_HOUR_UTC: int = 0                  # Digest generation hour (0 = 08:00 CST)
     ALERT_DIGEST_TOP_N: int = 5                     # Top-N items in digest
+
+    # ── Unified Forecasting Service (Layer 1 backend facade) ────────────
+    # Thin facade ForecastingAgentService over the 4 fragmented forecasting
+    # data paths. When False, routers/tools keep calling the individual
+    # services directly; flip to True to route them through the unified API.
+    UNIFIED_FORECASTING_SERVICE_ENABLED: bool = False
+
+    # ── Weekly Summary & Forecast Digest ────────────────────────────────
+    WEEKLY_DIGEST_ENABLED: bool = False             # Master gate for weekly digest scheduler + API
+    WEEKLY_DIGEST_HOUR_UTC: int = 0                 # Generation hour (0 = 08:00 CST Monday)
+    WEEKLY_DIGEST_DAY_UTC: int = 0                  # Day of week (0=Monday, 6=Sunday)
+    WEEKLY_DIGEST_PPTX_EXPORT_ENABLED: bool = False # One-click PPTX export of a weekly digest report
 
     # ── Experience layer (self-learning agent) ──────────────────────────
     # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):
@@ -483,6 +526,15 @@ class Settings(BaseSettings):
     ECISCO_BI_RESPONSE_CACHE_ENABLED: bool = False    # Layer 2
     ECISCO_BI_FEEDBACK_ENABLED: bool = False          # Phase C wiring
     ECISCO_BI_AUTOMATION_FASTPATH_ENABLED: bool = False  # DISABLED — automation only via UI "New Automation Task" button
+
+    # ── Role-based personalization ───────────────────────────────────────
+    # ROLE_PERSONALIZATION_ENABLED: inject the user's free-text
+    #   role_descriptions into the agent system prompt as a
+    #   [User Role Context] block so answers are tailored to the user's role(s).
+    # ROLE_FEEDBACK_THROTTLE: show the "Relevant to your role?" 1-5 rating on
+    #   every Nth assistant message (client-side throttle, N >= 1).
+    ROLE_PERSONALIZATION_ENABLED: bool = False
+    ROLE_FEEDBACK_THROTTLE: int = 3
 
     # ── Project Knowledge Graph / Semantic Catalog ───────────────────────
     # Phase 1 flags (default OFF — roll out after catalog indexer + schema
@@ -514,6 +566,21 @@ class Settings(BaseSettings):
     # DEPTH_ANALYSIS_LOOP_ENABLED: bounded hypothesis->query->validate loop
     #   for "why" questions; evidence packs; LLM explains, never decides.
     DEPTH_ANALYSIS_LOOP_ENABLED: bool = False
+
+    # ── Business Semantic Layer (Approach A) ────────────────────────────
+    # KG_COVERAGE_PROBE_ENABLED: probe min_date/max_date per table at index
+    #   time (5s timeout), stored in kb_table_meta.coverage_json.
+    # KG_FRESHNESS_SHORTCIRCUIT_ENABLED: if a relative-date question's window
+    #   starts after all relevant tables' max_date, answer immediately with a
+    #   plain-language stale-data statement (~1s) instead of scanning the table.
+    # KG_BUSINESS_CONTEXT_ENABLED: inject matched approved project_metric
+    #   definitions + coverage annotations into the NL2SQL prompt.
+    # KG_METRIC_BOOTSTRAP_ENABLED: LLM-propose project_metric rows at index
+    #   time (status='proposed'; human approval required before use).
+    KG_COVERAGE_PROBE_ENABLED: bool = False
+    KG_FRESHNESS_SHORTCIRCUIT_ENABLED: bool = False
+    KG_BUSINESS_CONTEXT_ENABLED: bool = False
+    KG_METRIC_BOOTSTRAP_ENABLED: bool = False
 
     # ── Data Agent latency optimizations ───────────────────────────────
     # DATA_AGENT_FASTPATH_ENABLED: when the call targets a single bound

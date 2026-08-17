@@ -58,8 +58,16 @@ class NLAnswerService:
     def __init__(self, db: Session):
         self._db = db
 
-    async def answer(self, kb_id: str, question: str) -> dict:
+    async def answer(
+        self, kb_id: str, question: str, resolved_policy=None, project_id: str | None = None
+    ) -> dict:
         """Return a structured + prose answer for a user question.
+
+        ``resolved_policy`` is an optional
+        ``access_policy_service.ResolvedPolicy`` for the current user.  When
+        provided, denied tables/columns are stripped from the schema context
+        before text→SQL, and the generated SQL is validated against the policy
+        before execution.
 
         Returns:
             {
@@ -75,6 +83,45 @@ class NLAnswerService:
         """
         if not question or not question.strip():
             return {"success": False, "error": "Question is required"}
+
+        if resolved_policy is not None and resolved_policy.is_kb_fully_denied(kb_id):
+            return {
+                "success": False,
+                "error": "Access to this data source is restricted.",
+                "source_id": kb_id,
+            }
+
+        # 0. Freshness short-circuit (deterministic, ~1s, no SQL): if the
+        # question's relative window starts after every probed table's
+        # max_date, answer immediately with a plain-language stale-data
+        # statement instead of scanning the full table.
+        if settings.KG_FRESHNESS_SHORTCIRCUIT_ENABLED:
+            try:
+                from app.services.knowledge_graph.business_context import (
+                    parse_relative_window,
+                    freshness_verdict,
+                )
+                window = parse_relative_window(question)
+                verdict = freshness_verdict(self._db, kb_id, window)
+                if verdict and verdict.get("stale"):
+                    logger.info(
+                        "NLAnswer: freshness short-circuit hit for KB %s "
+                        "(window=%s, max_date=%s)",
+                        kb_id, window, verdict.get("max_date"),
+                    )
+                    return {
+                        "success": True,
+                        "answer": verdict["message"],
+                        "rows": [],
+                        "sql": None,
+                        "source_id": kb_id,
+                        "source_name": None,
+                        "citations": [],
+                        "iterations": 0,
+                        "short_circuit": "freshness",
+                    }
+            except Exception as e:
+                logger.warning("NLAnswer: freshness short-circuit skipped: %s", e)
 
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
@@ -124,9 +171,18 @@ class NLAnswerService:
                     "source_id": kb_id,
                 }
 
+        # 1b. Apply the user's access policy to the schema context: strip
+        # denied tables and restrict columns, then re-render the prompt text so
+        # the LLM never sees forbidden data.
+        if resolved_policy is not None and resolved_policy.has_policies:
+            schema_info = _filter_schema_info(schema_info, resolved_policy, kb_id)
+            schema_text = _format_schema_for_prompt(schema_info)
+
         # 2. Text → SQL
         try:
-            sql = await self._text_to_sql(question, schema_info, schema_text=schema_text)
+            sql = await self._text_to_sql(
+                question, schema_info, schema_text=schema_text, project_id=project_id
+            )
         except Exception as e:
             logger.warning("NLAnswer: text→SQL failed: %s", e)
             return {
@@ -141,6 +197,24 @@ class NLAnswerService:
                 "error": "Model did not produce a SQL statement.",
                 "source_id": kb_id,
             }
+
+        # 2b. Validate generated SQL against the user's policy (defense-in-depth:
+        # even if the LLM referenced a denied table, refuse to execute it).
+        if resolved_policy is not None and resolved_policy.has_policies:
+            vr = _validate_against_policy(sql, resolved_policy, kb_id)
+            if vr is not None and not vr.is_valid:
+                errors = vr.errors or ["query references forbidden tables"]
+                logger.warning(
+                    "NLAnswer: blocked generated SQL for KB %s: %s",
+                    kb_id, "; ".join(str(e) for e in errors),
+                )
+                return {
+                    "success": False,
+                    "error": "Query blocked by data access policy: "
+                    + "; ".join(str(e) for e in errors),
+                    "sql": sql,
+                    "source_id": kb_id,
+                }
 
         # 3. Execute
         try:
@@ -188,25 +262,48 @@ class NLAnswerService:
         question: str,
         schema_info: dict,
         schema_text: str | None = None,
+        project_id: str | None = None,
     ) -> str:
         """Ask the LLM to produce a single SQL statement.
 
         ``schema_text`` is the pre-rendered prompt context (e.g. the schema
         linker's curated slice); when None it is rendered from schema_info.
+
+        ``project_id`` (optional) enables Business Semantic Layer injection:
+        matched approved ``project_metric`` definitions + coverage annotations
+        are appended to the prompt (progressive disclosure, token-capped).
         """
         if schema_text is None:
             schema_text = _format_schema_for_prompt(schema_info)
+
+        # Business context injection (Approach A). Only when a project_id is
+        # known; flag-gated and token-capped inside build_business_context.
+        business_context = ""
+        if project_id and settings.KG_BUSINESS_CONTEXT_ENABLED:
+            try:
+                from app.services.knowledge_graph.business_context import (
+                    build_business_context,
+                )
+                business_context = build_business_context(
+                    self._db, project_id, schema_info["source"].get("id"), question
+                )
+            except Exception as e:
+                logger.warning("NLAnswer: business context injection skipped: %s", e)
+
+        user_content = (
+            f"Database: {schema_info['source'].get('db_type')}\n"
+            f"Schema:\n{schema_text}\n\n"
+        )
+        if business_context:
+            user_content += f"{business_context}\n\n"
+        user_content += (
+            f"Question: {question}\n\n"
+            "Return only the SQL — no explanation, no markdown."
+        )
+
         messages = [
             {"role": "system", "content": _SQL_GEN_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Database: {schema_info['source'].get('db_type')}\n"
-                    f"Schema:\n{schema_text}\n\n"
-                    f"Question: {question}\n\n"
-                    "Return only the SQL — no explanation, no markdown."
-                ),
-            },
+            {"role": "user", "content": user_content},
         ]
         text = await _chat(messages, temperature=0.0)
         return _strip_sql_fences(text)
@@ -365,10 +462,24 @@ _SQL_GEN_SYSTEM_PROMPT = (
 )
 
 _NARRATE_SYSTEM_PROMPT = (
-    "You are a data analyst. Given a user's question, the SQL that was run, "
-    "and the resulting rows, write a concise natural-language answer. "
-    "Mention totals, top values, and column names where they add clarity. "
-    "If the rows are empty, say so explicitly. Match the user's language."
+    "You are an executive analyst writing for a CEO. Given the user's question, "
+    "the SQL that was run, and the resulting rows, produce a business-focused "
+    "answer in exactly this structure:\n"
+    "1. HEADLINE — one actionable business insight (what changed / what matters).\n"
+    "2. KEY FIGURES — 2 to 4 supporting numbers, each with its unit and the "
+    "metric it represents.\n"
+    "3. CAVEAT — exactly one line about data coverage, freshness, or confidence.\n"
+    "4. NEXT STEP — one recommended follow-up action.\n"
+    "Hard rules:\n"
+    "- Never use meta-language such as \"snapshot\", \"payload\", \"as of the data\", "
+    "or \"the following\".\n"
+    "- Never present a raw record count (e.g. \"1,387 rows\") as the answer or as "
+    "a headline; counts are only supporting detail, never the insight itself.\n"
+    "- Every figure must be traceable to the SQL evidence; do not invent numbers.\n"
+    "- If the data is stale (max date older than the requested window), say so "
+    "explicitly in the CAVEAT.\n"
+    "- If the rows are empty, state plainly that no data was found and why.\n"
+    "- Match the user's language."
 )
 
 
@@ -389,6 +500,46 @@ def _format_schema_for_prompt(schema_info: dict) -> str:
             col_lines.append(f"  {c['name']} {c['type']}{nullable}{default}{pk}")
         parts.append(f"TABLE {t} (\n" + ",\n".join(col_lines) + "\n)")
     return "\n\n".join(parts) or "(no tables found)"
+
+
+def _filter_schema_info(schema_info: dict, resolved_policy, kb_id: str) -> dict:
+    """Strip denied tables and restrict columns from a describe_all-shaped dict.
+
+    Returns a shallow copy with ``tables`` filtered so the LLM never sees
+    forbidden tables or columns.
+    """
+    blocked = {t.lower() for t in resolved_policy.blocked_tables_for_kb(kb_id)}
+    allowed = resolved_policy.allowed_tables_for_kb(kb_id)
+    allowed_set = {t.lower() for t in allowed} if allowed is not None else None
+
+    filtered_tables: list[dict] = []
+    for entry in schema_info.get("tables", []):
+        tname = (entry.get("table") or "")
+        tname_l = tname.lower()
+        if tname_l in blocked:
+            continue
+        if allowed_set is not None and tname_l not in allowed_set:
+            continue
+
+        columns = entry.get("columns", [])
+        allowlist = resolved_policy.allowed_columns_for(kb_id, tname)
+        if allowlist is not None:
+            allow_lower = {c.lower() for c in allowlist}
+            columns = [
+                c for c in columns if (c.get("name") or "").lower() in allow_lower
+            ]
+        filtered_tables.append({**entry, "columns": columns})
+
+    return {**schema_info, "tables": filtered_tables}
+
+
+def _validate_against_policy(sql: str, resolved_policy, kb_id: str):
+    """Validate *sql* against a resolved policy using the nl2sql validator."""
+    from app.services.nl2sql.validator import validate
+
+    blocked = resolved_policy.blocked_tables_for_kb(kb_id)
+    allowed = resolved_policy.allowed_tables_for_kb(kb_id)
+    return validate(sql, allowed_tables=allowed, block_tables=blocked)
 
 
 def _shadow_validate_and_log(

@@ -209,6 +209,71 @@ def _supply_demand(p: dict) -> str:
     return "供需研判:" + ";".join(bits) + "。"
 
 
+def _is_upstream(p: dict) -> bool:
+    return p.get("product_group") == "upstream"
+
+
+def _macro_supply_demand(p: dict) -> str:
+    """宏观供需 — upstream products have no ERP sales volume, so render a macro
+    supply/demand narrative from price position, trend, volatility and drivers."""
+    bits: list[str] = []
+    t = p.get("trend") or {}
+    if t.get("chg_30d_pct") is not None:
+        bits.append(f"近30日价格{_fmt_pct_signed(t['chg_30d_pct'])}")
+    pctile = p.get("price_percentile")
+    if pctile is not None:
+        if pctile >= 70:
+            bits.append(f"价格处近三年高位(约 {pctile:.0f}% 分位)")
+        elif pctile <= 30:
+            bits.append(f"价格处近三年低位(约 {pctile:.0f}% 分位)")
+        else:
+            bits.append(f"价格处近三年中位(约 {pctile:.0f}% 分位)")
+    vol = (p.get("policy") or {}).get("volatility_regime")
+    vol_zh = _VOL_ZH.get(vol, "") if vol else ""
+    if vol_zh:
+        bits.append(f"波动{vol_zh}")
+    drivers = p.get("drivers") or []
+    if drivers:
+        bits.append(f"首要驱动因子:{drivers[0]['feature']}"
+                    f"(权重 {drivers[0]['weight'] * 100:.0f}%)")
+    ag = (p.get("models") or {}).get("agreement")
+    if ag and ag.get("spread_pct") is not None and ag["spread_pct"] > 0.02:
+        bits.append(f"{ag['n_models']} 模型间分歧偏大(区间 "
+                    f"{_fmt_price(ag['min'])}–{_fmt_price(ag['max'])})")
+    intel = p.get("intelligence") or {}
+    if intel.get("event_count"):
+        bits.append(f"在册事件 {intel['event_count']} 条")
+    if not bits:
+        return "宏观供需:暂无足够宏观数据,建议结合国际市场价格与库存周期研判。"
+    return "宏观供需:" + ";".join(bits) + "。"
+
+
+def _upstream_macro_context(p: dict) -> str:
+    """上游传导(原油) — when there is no usable upstream parent (crude_oil at the
+    top of the chain, or upstream data missing), render a global macro context
+    narrative instead of a causal elasticity chain that would otherwise be empty."""
+    intel = p.get("intelligence") or {}
+    bias = intel.get("bias", "neutral")
+    bias_zh = _INTEL_BIAS_ZH.get(bias, "中性")
+    vol = (p.get("policy") or {}).get("volatility_regime")
+    vol_zh = _VOL_ZH.get(vol, "") if vol else ""
+    upstream = p.get("upstream") or []
+    if upstream:
+        head = f"上游{upstream[0].get('name_zh', '')}数据暂缺"
+    else:
+        head = f"{p.get('name_zh', '')}为产业链最上游,无上游原料传导"
+    bits = [head]
+    bits.append(f"宏观市场情绪{bias_zh}")
+    if intel.get("event_count"):
+        bits.append(f"在册宏观事件 {intel['event_count']} 条")
+    if vol_zh:
+        bits.append(f"当前波动{vol_zh}")
+    t = p.get("trend") or {}
+    if t.get("chg_30d_pct") is not None:
+        bits.append(f"近30日价格{_fmt_pct_signed(t['chg_30d_pct'])}")
+    return "上游传导:" + ",".join(bits) + "。"
+
+
 def _forecast(p: dict) -> str:
     """价格预测 — range [bear,bull] + directional signal + confidence + action advice."""
     if p.get("forecast_base") is None or p.get("current_price") is None:
@@ -308,11 +373,21 @@ SECTION_TITLES = [
 
 
 def render_template_brief(pack: dict) -> dict:
+    is_up = _is_upstream(pack)
+    # crude_oil (top of chain) has an empty upstream list, so `_upstream_logic`
+    # would return "" — render macro context instead. Naphtha/cracked_c5/cracked_c9
+    # have upstream parents but no ERP demand volume, so swap supply/demand.
+    upstream_has_parent = bool((pack.get("upstream") or [{}])[0].get("chg_30d_pct") is not None)
     return {
         "market_update_zh": _market_update(pack),
         "price_data_zh": _price_data(pack),
-        "upstream_logic_zh": _upstream_logic(pack),
-        "supply_demand_zh": _supply_demand(pack),
+        "upstream_logic_zh": (
+            _upstream_macro_context(pack) if (is_up and not upstream_has_parent)
+            else _upstream_logic(pack)
+        ),
+        "supply_demand_zh": (
+            _macro_supply_demand(pack) if is_up else _supply_demand(pack)
+        ),
         "forecast_zh": _forecast(pack),
         "watch_triggers_zh": _triggers(pack),
         "risk_zh": _risk(pack),

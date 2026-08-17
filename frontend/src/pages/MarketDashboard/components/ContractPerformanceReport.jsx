@@ -4,16 +4,18 @@ import {
   TrendingUp, TrendingDown, Minus, Loader2, Search, RotateCcw, Sparkles,
 } from 'lucide-react';
 import {
-  BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RcTooltip,
-  ResponsiveContainer, Cell, Legend,
+  ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip as RcTooltip,
+  ResponsiveContainer, LabelList, Legend,
 } from 'recharts';
 import { reportsApi } from '@/api/reports';
 import { TYPO } from '../lib/typography';
 import { getChartTheme, rechartsTooltipStyle } from '../lib/chartTheme';
 import { useLanguage } from '@/lib/LanguageProvider';
 
-const BAR_COLORS = ['#3B82F6', '#6366F1', '#8B5CF6', '#A855F7', '#0EA5E9'];
-const EXEC_FAIL_COLOR = '#EF4444';
+const COLOR_CONTRACT_QTY = '#E2E8F0';
+const COLOR_DELIVERED_QTY = '#3B82F6';
+const COLOR_EXEC_RATE = '#10B981';
+const COLOR_CONTRACT_LABEL = '#64748B';
 
 function YoYBadge({ yoy }) {
   if (yoy == null || yoy === 0) {
@@ -57,6 +59,13 @@ export default function ContractPerformanceReport({ org }) {
         notOutQty: '未出量',
         uninvoicedAmount: '未开票金额',
         contractExec: '合同执行情况',
+        chartTitle: '各产品合同执行情况',
+        contractQtyFull: '合同数量',
+        deliveredQty: '已出数量',
+        execRate: '执行率',
+        unitQtyTon: '数量 (吨)',
+        leftAxisQty: '数量 (吨)',
+        rightAxisRate: '执行率 (%)',
         aiBrief: 'AI 整体简评',
         aiError: 'AI 分析出错',
         unfulfilledContracts: '未出库合同',
@@ -94,6 +103,13 @@ export default function ContractPerformanceReport({ org }) {
         notOutQty: 'Not-out Qty',
         uninvoicedAmount: 'Uninvoiced Amount',
         contractExec: 'Contract Performance',
+        chartTitle: 'Contract Execution by Product',
+        contractQtyFull: 'Contract Qty',
+        deliveredQty: 'Delivered Qty',
+        execRate: 'Execution Rate',
+        unitQtyTon: 'Qty (ton)',
+        leftAxisQty: 'Qty (ton)',
+        rightAxisRate: 'Execution Rate (%)',
         aiBrief: 'AI Overall Brief',
         aiError: 'AI analysis error',
         unfulfilledContracts: 'Unfulfilled Contracts',
@@ -108,12 +124,12 @@ export default function ContractPerformanceReport({ org }) {
         colAmountWan: 'Amount (10k CNY)',
       };
   const today = new Date().toISOString().slice(0, 10);
-  const thirtyDaysAgo = new Date(Date.now() - 30 * 864e5).toISOString().slice(0, 10);
+  const sevenDaysAgo = new Date(Date.now() - 7 * 864e5).toISOString().slice(0, 10);
 
-  const [startDate, setStartDate] = useState('');
-  const [endDate, setEndDate] = useState('');
+  const [startDate, setStartDate] = useState(sevenDaysAgo);
+  const [endDate, setEndDate] = useState(today);
   const [material, setMaterial] = useState('');
-  const [queried, setQueried] = useState(false);
+  const [queried, setQueried] = useState(true);
 
   // AI State
   const [aiLoading, setAiLoading] = useState(false);
@@ -130,8 +146,8 @@ export default function ContractPerformanceReport({ org }) {
   // Actual query params after user clicks Search
   const [queryParams, setQueryParams] = useState({
     org,
-    start_date: '',
-    end_date: '',
+    start_date: sevenDaysAgo,
+    end_date: today,
     material: '',
   });
 
@@ -264,7 +280,7 @@ export default function ContractPerformanceReport({ org }) {
           <label className="block text-xs text-slate-500 mb-1">{t.startDate}</label>
           <input
             type="date"
-            value={startDate || thirtyDaysAgo}
+            value={startDate}
             onChange={(e) => setStartDate(e.target.value)}
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 focus:border-slate-400 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
           />
@@ -273,7 +289,7 @@ export default function ContractPerformanceReport({ org }) {
           <label className="block text-xs text-slate-500 mb-1">{t.endDate}</label>
           <input
             type="date"
-            value={endDate || today}
+            value={endDate}
             onChange={(e) => setEndDate(e.target.value)}
             className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-sm text-slate-700 focus:border-slate-400 focus:outline-none dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
           />
@@ -361,30 +377,77 @@ export default function ContractPerformanceReport({ org }) {
               )}
 
               <div className="rounded-lg border border-slate-200 bg-white p-4 dark:border-slate-700 dark:bg-slate-800">
-                <div className={TYPO.cardTitle}>{t.contractExec}</div>
-                <div className="mt-2" style={{ width: '100%', height: 300 }}>
+                <div className={TYPO.cardTitle}>{t.chartTitle}</div>
+                <div className="mt-2" style={{ width: '100%', height: 360 }}>
                   <ResponsiveContainer>
-                    <BarChart
+                    <ComposedChart
                       data={(data.execution_chart || []).slice(0, 12)}
-                      layout="vertical"
-                      margin={{ left: 10, right: 10 }}
+                      margin={{ top: 20, left: 10, right: 10, bottom: 10 }}
                     >
                       <CartesianGrid strokeDasharray="3 3" stroke={theme.grid} />
-                      <XAxis type="number" tick={{ fontSize: 11, fill: theme.tick }} />
-                      <YAxis
-                        type="category"
+                      <XAxis
                         dataKey="product"
-                        width={100}
+                        angle={-15}
+                        textAnchor="end"
+                        height={80}
+                        interval={0}
+                        tick={{ fontSize: 10, fill: theme.tick }}
+                      />
+                      <YAxis
+                        yAxisId="qty"
+                        domain={[0, (dataMax) => Math.ceil(dataMax * 1.1)]}
                         tick={{ fontSize: 11, fill: theme.tick }}
+                        label={{ value: t.leftAxisQty, angle: -90, position: 'insideLeft', style: { fontSize: 11, fill: theme.tick } }}
+                      />
+                      <YAxis
+                        yAxisId="rate"
+                        orientation="right"
+                        domain={[0, 100]}
+                        tickFormatter={(v) => `${v}%`}
+                        tick={{ fontSize: 11, fill: theme.tick }}
+                        label={{ value: t.rightAxisRate, angle: 90, position: 'insideRight', style: { fontSize: 11, fill: theme.tick } }}
                       />
                       <RcTooltip
                         contentStyle={ttStyle}
-                        formatter={(v, name) => [`${Number(v).toLocaleString()} ${t.unitTon}`, name === 'contract_qty' ? t.contractQty : t.outQty]}
+                        formatter={(value, name, props) => {
+                          const dataKey = props?.dataKey || name;
+                          if (dataKey === 'execution_rate') return [`${Number(value).toFixed(1)}%`, t.execRate];
+                          const label = dataKey === 'contract_qty' ? t.contractQtyFull : t.deliveredQty;
+                          return [`${Number(value).toLocaleString()} ${t.unitTon}`, label];
+                        }}
                       />
-                      <Legend wrapperStyle={{ fontSize: 11 }} />
-                      <Bar dataKey="contract_qty" name={t.contractQty} fill={BAR_COLORS[0]} barSize={16} />
-                      <Bar dataKey="out_qty" name={t.outQty} fill={BAR_COLORS[2]} barSize={16} />
-                    </BarChart>
+                      <Legend verticalAlign="top" align="center" wrapperStyle={{ fontSize: 11 }} />
+                      <Bar
+                        yAxisId="qty"
+                        dataKey="contract_qty"
+                        name={t.contractQtyFull}
+                        fill={COLOR_CONTRACT_QTY}
+                        barSize={20}
+                      >
+                        <LabelList dataKey="contract_qty" position="top" fill={COLOR_CONTRACT_LABEL} fontSize={10} formatter={(v) => Number(v).toLocaleString()} />
+                      </Bar>
+                      <Bar
+                        yAxisId="qty"
+                        dataKey="out_qty"
+                        name={t.deliveredQty}
+                        fill={COLOR_DELIVERED_QTY}
+                        barSize={20}
+                      >
+                        <LabelList dataKey="out_qty" position="inside" fill="#FFFFFF" fontSize={10} formatter={(v) => Number(v).toLocaleString()} />
+                      </Bar>
+                      <Line
+                        yAxisId="rate"
+                        dataKey="execution_rate"
+                        name={t.execRate}
+                        type="monotone"
+                        stroke={COLOR_EXEC_RATE}
+                        strokeWidth={2}
+                        dot={{ r: 4, fill: COLOR_EXEC_RATE, stroke: COLOR_EXEC_RATE, strokeWidth: 1 }}
+                        activeDot={{ r: 5 }}
+                      >
+                        <LabelList dataKey="execution_rate" position="top" fill={COLOR_EXEC_RATE} fontSize={10} formatter={(v) => `${v?.toFixed?.(1) ?? v}%`} />
+                      </Line>
+                    </ComposedChart>
                   </ResponsiveContainer>
                 </div>
               </div>

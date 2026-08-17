@@ -518,6 +518,73 @@ async def _digest_loop() -> None:
         await asyncio.sleep(5)
 
 
+# ---- Weekly Summary & Forecast Digest Loop (Sunday 00:00 UTC) ----------
+
+def _calculate_seconds_until_weekly_digest_hour() -> float:
+    """Return seconds from now until the next weekly digest generation time.
+
+    Runs on WEEKLY_DIGEST_DAY_UTC (default 0=Monday) at WEEKLY_DIGEST_HOUR_UTC (default 0=midnight).
+    """
+    from app.config import settings
+    target_hour = settings.WEEKLY_DIGEST_HOUR_UTC
+    target_day = settings.WEEKLY_DIGEST_DAY_UTC  # 0=Monday
+    now = datetime.datetime.now(datetime.timezone.utc)
+    # Find the next occurrence of the target day+hour
+    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
+    days_ahead = (target_day - now.weekday()) % 7
+    if days_ahead == 0 and now >= target:
+        days_ahead = 7
+    target += datetime.timedelta(days=days_ahead)
+    return (target - now).total_seconds()
+
+
+async def _run_weekly_digest_cycle() -> None:
+    """Run one weekly digest generation cycle."""
+    from app.config import settings
+    if not settings.WEEKLY_DIGEST_ENABLED:
+        return
+    try:
+        from app.database import SessionLocal
+        from app.services.weekly_digest.generator import generate_weekly_digest_parallel
+
+        db = SessionLocal()
+        try:
+            card = await generate_weekly_digest_parallel(db, org_id="default-org")
+            logger.info(
+                "[weekly-digest] Generation complete: card=%s, status=%s, products=%d",
+                card.id, card.status, card.product_count,
+            )
+        finally:
+            db.close()
+    except Exception:
+        logger.exception("[weekly-digest] Unhandled exception in weekly digest cycle")
+
+
+async def _weekly_digest_loop() -> None:
+    """Infinite loop: sleep until next weekly digest time, run cycle, repeat."""
+    from app.config import settings
+    if not settings.WEEKLY_DIGEST_ENABLED:
+        logger.info("[weekly-digest] WEEKLY_DIGEST_ENABLED is off — digest loop not started")
+        return
+
+    while True:
+        delay = _calculate_seconds_until_weekly_digest_hour()
+        next_run = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
+            seconds=delay
+        )
+        logger.info(
+            "[weekly-digest] Next run in %.1f hours (%s UTC)",
+            delay / 3600,
+            next_run.isoformat(),
+        )
+        await asyncio.sleep(delay)
+        try:
+            await _run_weekly_digest_cycle()
+        except Exception:
+            logger.exception("[weekly-digest] Unhandled exception in weekly digest loop")
+        await asyncio.sleep(60)  # Cooldown to prevent tight retry
+
+
 async def _periodic_task(
     name: str,
     interval: int,
@@ -597,6 +664,10 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _digest_loop(),
             name="sched-digest",
+        ),
+        loop.create_task(
+            _weekly_digest_loop(),
+            name="sched-weekly-digest",
         ),
     ]
 

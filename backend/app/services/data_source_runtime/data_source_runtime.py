@@ -491,6 +491,7 @@ def prepare_data_source_runtime(
     selected_project_id: str | None = None,
     selected_project_name: str | None = None,
     pinned_data_source_id: str | None = None,
+    user_id: str | None = None,
 ) -> tuple[list[dict], str, dict]:
     """Augment the agent's tool list + system prompt for data source support.
 
@@ -588,12 +589,30 @@ def prepare_data_source_runtime(
         + ("\n\n" + entity_block if entity_block else "")
     )
 
-    # Carry `project_id` into the tool context so handlers (create_automation,
-    # list_knowledge_bases) can scope their results to the current project
-    # without needing the LLM to pass `project_id` itself.
+    # Carry `project_id` + `user_id` + resource scoping into the tool context
+    # so handlers (create_automation, list_knowledge_bases, and the DB access
+    # policy enforcement layer) can scope their results to the current project
+    # and current user without needing the LLM to pass these itself.
+    #
+    # Resource scoping for access policies: when a project is selected the
+    # policy is resolved against the PROJECT share; otherwise against the AGENT
+    # share (contextual scoping — mirrors how bound KBs are resolved above).
+    if selected_project_id:
+        resource_type = "project"
+        resource_id = selected_project_id
+    elif agent_app is not None and getattr(agent_app, "id", None):
+        resource_type = "agent"
+        resource_id = agent_app.id
+    else:
+        resource_type = None
+        resource_id = None
+
     ctx_extras: dict = {
         "bound_kb_ids": bound_ids,
         "project_id": selected_project_id,
+        "user_id": user_id,
+        "resource_type": resource_type,
+        "resource_id": resource_id,
     }
 
     return augmented_tools, new_prompt, ctx_extras

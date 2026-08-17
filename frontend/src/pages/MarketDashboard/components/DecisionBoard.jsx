@@ -52,6 +52,7 @@ import { normalizeForecastPoints } from '../lib/forecastChartMath';
       roiPnl: '累计盈亏',
       noRoi: '暂无决策记录',
       drivers: '预测驱动因子',
+      macroSupplyDemand: '宏观供需',
     }
   : {
       loading: 'Loading AI Decision Board…',
@@ -88,6 +89,7 @@ import { normalizeForecastPoints } from '../lib/forecastChartMath';
       roiPnl: 'Cumulative P&L',
       noRoi: 'No decision track record yet',
       drivers: 'Forecast Drivers',
+      macroSupplyDemand: 'Macro Supply & Demand',
     };
 
 const ACTION_STYLES = {
@@ -228,6 +230,7 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
                 day={data.day}
                 lang={lang}
                 t={t}
+                group={group}
                 isSelected={isSelected}
                 isExpanded={isExpanded}
                 onSelect={() => onSelectProduct?.(p.id)}
@@ -250,7 +253,7 @@ export default function DecisionBoard({ group, selectedId, onSelectProduct }) {
   );
 }
 
-function DecisionRow({ p, day, lang, t, isSelected, isExpanded, onSelect, onToggle, onFeedback }) {
+function DecisionRow({ p, day, lang, t, group, isSelected, isExpanded, onSelect, onToggle, onFeedback }) {
   const name = lang === 'zh' ? p.name_zh : (p.name_en || p.name_zh);
   const chgCls =
     p.expected_change_pct == null
@@ -317,7 +320,7 @@ function DecisionRow({ p, day, lang, t, isSelected, isExpanded, onSelect, onTogg
     {isExpanded && (
       <tr className="border-b border-slate-100 dark:border-slate-800">
         <td colSpan={9} className="bg-slate-50/60 px-4 py-3 dark:bg-slate-800/30">
-          <ExpandedCard p={p} day={day} lang={lang} t={t} />
+          <ExpandedCard p={p} day={day} lang={lang} t={t} group={group} />
         </td>
       </tr>
     )}
@@ -325,7 +328,7 @@ function DecisionRow({ p, day, lang, t, isSelected, isExpanded, onSelect, onTogg
   );
 }
 
-function ExpandedCard({ p, day, lang, t }) {
+function ExpandedCard({ p, day, lang, t, group }) {
   const { data } = useQuery({
     queryKey: ['market-dashboard', 'forecast-chart', p.id, 30],
     queryFn: () => marketDashboardApi.forecastChart(p.id, 30),
@@ -361,7 +364,10 @@ function ExpandedCard({ p, day, lang, t }) {
               {BRIEF_SECTIONS.map((sec) => {
                 const val = p.analyst_brief[sec.key];
                 if (!val) return null;
-                const title = lang === 'zh' ? sec.zh : sec.en;
+                const isMacro = group === 'upstream' && sec.key === 'supply_demand_zh';
+                const title = isMacro
+                  ? t.macroSupplyDemand
+                  : (lang === 'zh' ? sec.zh : sec.en);
                 if (sec.emphasis) {
                   return (
                     <div key={sec.key} className="rounded-md bg-blue-50 px-2.5 py-1.5 dark:bg-blue-900/20">

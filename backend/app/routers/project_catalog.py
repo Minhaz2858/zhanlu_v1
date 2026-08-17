@@ -465,4 +465,133 @@ def register_project_catalog_router() -> APIRouter:
             "can_edit": can_edit,
         }
 
+    @router.get("/projects/{project_id}/catalog/metrics")
+    def list_catalog_metrics(
+        app_id: str,
+        project_id: str,
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user_required),
+    ):
+        from app.models.knowledge_catalog import ProjectMetric
+        from app.services.knowledge_graph.metric_bootstrap import _metric_to_dict
+
+        project = _load_project(db, project_id)
+        has_access, can_edit = _check_access(db, project, user)
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this project")
+
+        rows = (
+            db.query(ProjectMetric)
+            .filter(
+                ProjectMetric.project_id == project_id,
+                ProjectMetric.is_deleted == False,  # noqa: E712
+            )
+            .order_by(ProjectMetric.status, ProjectMetric.name)
+            .all()
+        )
+        return {
+            "metrics": [_metric_to_dict(m) for m in rows],
+            "can_edit": can_edit,
+        }
+
+    @router.put("/projects/{project_id}/catalog/metrics/{metric_id}")
+    def put_catalog_metric(
+        app_id: str,
+        project_id: str,
+        metric_id: str,
+        payload: dict,
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user_required),
+    ):
+        from app.models.knowledge_catalog import ProjectMetric
+        from app.services.knowledge_graph.metric_bootstrap import _metric_to_dict
+
+        project = _load_project(db, project_id)
+        has_access, can_edit = _check_access(db, project, user)
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this project")
+        if not can_edit:
+            raise HTTPException(status_code=403, detail="Only the project owner or an admin can edit metrics")
+
+        row = (
+            db.query(ProjectMetric)
+            .filter(
+                ProjectMetric.id == metric_id,
+                ProjectMetric.project_id == project_id,
+                ProjectMetric.is_deleted == False,  # noqa: E712
+            )
+            .first()
+        )
+        if not row:
+            raise HTTPException(status_code=404, detail="Metric not found")
+
+        # Approve / reject via status. Field edits allowed for owner/admin.
+        for field in (
+            "name", "aliases", "definition", "sql_expression", "query_pattern",
+            "unit", "default_aggregation", "bindings", "status",
+        ):
+            if field in payload:
+                setattr(row, field, payload[field])
+        if "source" in payload:
+            row.source = payload["source"]
+        db.commit()
+        return {"success": True, "metric": _metric_to_dict(row)}
+
+    @router.post("/projects/{project_id}/catalog/metrics/bootstrap")
+    async def bootstrap_catalog_metrics(
+        app_id: str,
+        project_id: str,
+        db: Session = Depends(get_db),
+        user=Depends(get_current_user_required),
+    ):
+        from app.models.knowledge_catalog import KBTableMeta
+        from app.services.knowledge_graph.metric_bootstrap import (
+            bootstrap_project_metrics,
+        )
+
+        project = _load_project(db, project_id)
+        has_access, can_edit = _check_access(db, project, user)
+        if not has_access:
+            raise HTTPException(status_code=403, detail="You do not have access to this project")
+        if not can_edit:
+            raise HTTPException(status_code=403, detail="Only the project owner or an admin can bootstrap metrics")
+
+        kbs = _bound_kbs(db, project)
+        if not kbs:
+            return {"success": True, "created": [], "message": "No data sources bound"}
+
+        kb_ids = [kb.id for kb in kbs]
+        metas = (
+            db.query(KBTableMeta)
+            .filter(KBTableMeta.kb_id.in_(kb_ids))
+            .all()
+        )
+        tables_by_kb: dict[str, list[dict]] = {kb.id: [] for kb in kbs}
+        for m in metas:
+            tables_by_kb.setdefault(m.kb_id, []).append({
+                "table_name": m.table_name,
+                "columns": _columns_for(m, db),
+            })
+
+        created: list[dict] = []
+        for kb in kbs:
+            created += await bootstrap_project_metrics(
+                db, project_id, kb.id, tables_by_kb.get(kb.id, [])
+            )
+
+        return {"success": True, "created": created}
+
     return router
+
+
+def _columns_for(meta, db: Session) -> list[dict]:
+    """Load column names + types for a KBTableMeta row (bootstrap helper)."""
+    from app.models.knowledge_catalog import KBColumnMeta
+
+    cols = (
+        db.query(KBColumnMeta)
+        .filter(KBColumnMeta.table_meta_id == meta.id)
+        .order_by(KBColumnMeta.ordinal)
+        .all()
+    )
+    return [{"column_name": c.column_name, "data_type": c.data_type} for c in cols]

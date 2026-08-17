@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.services.db import NLAnswerService, QueryService, SchemaService
 from app.services.db.connector_factory import DriverUnavailable
+from app.services import access_policy_service
 from app.services.tool_registry import registry
 
 logger = logging.getLogger(__name__)
@@ -75,6 +76,142 @@ def _require_kb_id(args: dict, context: dict | None) -> tuple[str | None, dict |
     return kb_id, None
 
 
+def _resolve_user_policy(
+    db: Session,
+    user_id: str | None,
+    context: dict | None,
+) -> "access_policy_service.ResolvedPolicy":
+    """Resolve the current user's data-access policy from tool context.
+
+    Reads ``resource_type`` / ``resource_id`` (injected by
+    ``prepare_data_source_runtime``) and the bound KB set.  When the context
+    lacks resource scoping (e.g. the builtin Data Agent), returns a full-access
+    policy — policies only apply to shared users of a project/agent.
+    """
+    if not context or not user_id:
+        return access_policy_service.ResolvedPolicy(has_policies=False)
+    resource_type = context.get("resource_type")
+    resource_id = context.get("resource_id")
+    if not resource_type or not resource_id:
+        return access_policy_service.ResolvedPolicy(has_policies=False)
+    return access_policy_service.resolve_user_policies(
+        db,
+        user_id=user_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        bound_kb_ids=_resolve_bound_kb_ids(context),
+    )
+
+
+def _apply_schema_policy(
+    result: dict,
+    policy: "access_policy_service.ResolvedPolicy",
+    kb_id: str,
+    requested_table: str | None,
+) -> dict:
+    """Filter a SchemaService result to the user's policy for *kb_id*.
+
+    Handles the three SchemaService shapes:
+      - list_tables:    {"tables": ["a", "b"]}
+      - describe_table: {"table": "a", "columns": [{name: ...}, ...]}
+      - describe_all:   {"tables": [{"table": "a", "columns": [...]}, ...]}
+    """
+    if not policy.has_policies and not policy.blocked_kb_ids:
+        return result
+
+    blocked = {t.lower() for t in policy.blocked_tables_for_kb(kb_id)}
+    allowed = policy.allowed_tables_for_kb(kb_id)  # None or list of allowed tables
+    allowed_set = {t.lower() for t in allowed} if allowed is not None else None
+
+    def _table_visible(name: str | None) -> bool:
+        n = (name or "").lower()
+        if n in blocked:
+            return False
+        if allowed_set is not None and n not in allowed_set:
+            return False
+        return True
+
+    def _filter_columns(table_name: str | None, columns: list) -> list:
+        allowlist = policy.allowed_columns_for(kb_id, table_name)
+        if allowlist is None:
+            return columns
+        allow_lower = {c.lower() for c in allowlist}
+        return [c for c in columns if (c.get("name") or "").lower() in allow_lower]
+
+    # describe_table shape: {"table": ..., "columns": [...]}
+    if "table" in result and isinstance(result.get("columns"), list):
+        tname = result.get("table")
+        if not _table_visible(tname):
+            raise ValueError("Access to this table is restricted.")
+        result["columns"] = _filter_columns(tname, result.get("columns", []))
+        return result
+
+    # list_tables (list of strings) or describe_all (list of dicts)
+    tables = result.get("tables", [])
+    if not tables:
+        return result
+
+    if isinstance(tables[0], dict):
+        filtered = []
+        for entry in tables:
+            tname = entry.get("table")
+            if not _table_visible(tname):
+                continue
+            entry["columns"] = _filter_columns(tname, entry.get("columns", []))
+            filtered.append(entry)
+        result["tables"] = filtered
+        return result
+
+    result["tables"] = [t for t in tables if _table_visible(t)]
+    return result
+
+
+# Columns that are deprecated in the EDIA warehouse and their replacements.
+# Scoped to the ecisco_bi_assistant only — the annotation is applied solely
+# when the calling agent matches, so other agents never see these notes.
+_DEPRECATED_COLUMNS: dict[str, str] = {
+    "material_model": "F_PAEZ_JC",
+}
+
+
+def _annotate_deprecated_columns(result: dict, agent_name: str | None) -> dict:
+    """Mark deprecated warehouse columns so the LLM prefers the replacement.
+
+    Defense-in-depth on top of the ecisco_bi_assistant prompt hint. Only fires
+    for the ecisco_bi_assistant (plus the flag gate), and only mutates the
+    ``columns`` lists in a SchemaService result (describe_table / describe_all
+    shapes). The ``list_tables`` shape (list of strings) is left untouched.
+    """
+    if not getattr(settings, "ECISCO_BI_SCHEMA_DEPRECATION_ENABLED", True):
+        return result
+    if not agent_name or agent_name != "ecisco_bi_assistant":
+        return result
+
+    def _annotate(columns: list) -> None:
+        for col in columns:
+            if not isinstance(col, dict):
+                continue
+            name = (col.get("name") or "").lower()
+            if name in _DEPRECATED_COLUMNS:
+                col["deprecated"] = True
+                col["note"] = (
+                    f"DEPRECATED — use {_DEPRECATED_COLUMNS[name]} instead"
+                )
+
+    # describe_table shape: {"table": ..., "columns": [...]}
+    if isinstance(result.get("columns"), list):
+        _annotate(result["columns"])
+        return result
+
+    # describe_all shape: {"tables": [{"table": ..., "columns": [...]}, ...]}
+    tables = result.get("tables")
+    if isinstance(tables, list):
+        for entry in tables:
+            if isinstance(entry, dict) and isinstance(entry.get("columns"), list):
+                _annotate(entry["columns"])
+    return result
+
+
 # ---------------------------------------------------------------------------
 # list_data_sources
 # ---------------------------------------------------------------------------
@@ -101,23 +238,41 @@ async def _list_data_sources(
         .filter(KnowledgeBase.id.in_(bound), KnowledgeBase.is_deleted == False)  # noqa: E712
         .all()
     )
-    return {
-        "success": True,
-        "data_sources": [
-            {
-                "id": kb.id,
-                "name": kb.name,
-                "description": kb.description or "",
-                "source_kind": kb.source_kind or "database",
-                "db_type": kb.db_type or "",
-                "database_name": kb.database_name or "",
-                "file_type": kb.file_type or "",
-                "indexing_status": kb.indexing_status,
-                "chunk_count": kb.chunk_count or 0,
-            }
-            for kb in rows
-        ],
-    }
+
+    # Per-user access policy: hide KBs the user is denied, and annotate
+    # restricted KBs with their allowed/blocked tables so the LLM can avoid
+    # querying forbidden data.
+    policy = _resolve_user_policy(db, user_id, context)
+
+    data_sources = []
+    for kb in rows:
+        if policy.is_kb_fully_denied(kb.id):
+            logger.info(
+                "list_data_sources: hiding KB %s (denied for user %s)", kb.id, user_id
+            )
+            continue
+        entry = {
+            "id": kb.id,
+            "name": kb.name,
+            "description": kb.description or "",
+            "source_kind": kb.source_kind or "database",
+            "db_type": kb.db_type or "",
+            "database_name": kb.database_name or "",
+            "file_type": kb.file_type or "",
+            "indexing_status": kb.indexing_status,
+            "chunk_count": kb.chunk_count or 0,
+        }
+        if policy.is_kb_restricted(kb.id):
+            entry["restricted"] = True
+            allowed = policy.allowed_tables_for_kb(kb.id)
+            if allowed is not None:
+                entry["allowed_tables"] = allowed
+            blocked = policy.blocked_tables_for_kb(kb.id)
+            if blocked:
+                entry["blocked_tables"] = blocked
+        data_sources.append(entry)
+
+    return {"success": True, "data_sources": data_sources}
 
 
 # ---------------------------------------------------------------------------
@@ -138,8 +293,17 @@ async def _describe_schema(
     full = bool(args.get("full", False))
     max_tables = int(args.get("max_tables", 30))
 
+    policy = _resolve_user_policy(db, user_id, context)
+    if policy.is_kb_fully_denied(kb_id):
+        logger.warning("describe_schema: KB %s denied for user %s", kb_id, user_id)
+        return {"success": False, "error": "Access to this data source is restricted."}
+
+    restricted = policy.is_kb_restricted(kb_id)
+
     # ── Schema linker path (flag-gated) — runs before _do_work ──
-    if settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+    # Skip when the KB is policy-restricted: the catalog slice is a free-text
+    # blob we can't reliably filter, so fall back to the filtered describe path.
+    if not restricted and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
         try:
             from app.services.knowledge_graph.schema_linker import link_schema
             question = args.get("question", "") or (context or {}).get("user_query", "") or ""
@@ -170,6 +334,10 @@ async def _describe_schema(
 
     try:
         result = await asyncio.to_thread(_do_work)
+        result = _apply_schema_policy(result, policy, kb_id, table)
+        result = _annotate_deprecated_columns(
+            result, (context or {}).get("agent_name")
+        )
         return {"success": True, **result}
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}
@@ -200,12 +368,35 @@ async def _execute_query(
     max_rows = int(args.get("max_rows", 1000))
     timeout_s = int(args.get("timeout_s", 10))
 
+    # Per-user access policy: reject queries against denied tables BEFORE
+    # execution (closes the gap where QueryService.execute had no validation).
+    policy = _resolve_user_policy(db, user_id, context)
+    if policy.is_kb_fully_denied(kb_id):
+        logger.warning("execute_query: KB %s denied for user %s", kb_id, user_id)
+        return {"success": False, "error": "Access to this data source is restricted.", "sql": sql}
+    if policy.has_policies:
+        vr = access_policy_service.validate_sql_against_policy(sql, policy, kb_id)
+        if vr and not getattr(vr, "is_valid", True):
+            errors = getattr(vr, "errors", []) or ["query references forbidden tables"]
+            logger.warning(
+                "execute_query: blocked SQL for user %s on KB %s: %s",
+                user_id, kb_id, "; ".join(str(e) for e in errors),
+            )
+            return {
+                "success": False,
+                "error": "Query blocked by data access policy: " + "; ".join(str(e) for e in errors),
+                "sql": sql,
+            }
+
     def _do_work() -> dict:
         svc = QueryService(db)
         return svc.execute(kb_id, sql, max_rows=max_rows, timeout_s=timeout_s)
 
     try:
         result = await asyncio.to_thread(_do_work)
+        hints = _build_validation_hints(db, kb_id, result)
+        if hints:
+            result["validation_hints"] = hints
         return {"success": True, **result}
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing", "sql": sql}
@@ -214,6 +405,92 @@ async def _execute_query(
     except Exception as e:
         logger.warning("execute_query failed: %s", e)
         return {"success": False, "error": f"Query failed: {e}", "sql": sql}
+
+
+def _build_validation_hints(db: Session, kb_id: str, result: dict) -> list[dict]:
+    """Advisory validation hints attached to a successful ``execute_query``.
+
+    Computed from already-returned rows + cached coverage metadata (O(rows),
+    no extra queries). The agent reads these and may retry (≤2). Flag-gated —
+    returns [] when the Business Semantic Layer is off. Never blocks.
+
+    Hints produced:
+    - ``empty_set`` — result has no rows; distinguish "genuinely no data"
+      (coverage max_date is recent) from "no data in window / stale".
+    - ``null_rate`` — % of NULL values in the first numeric-ish columns.
+    - ``date_range`` — whether the result's temporal span matches coverage.
+    """
+    if not settings.KG_BUSINESS_CONTEXT_ENABLED:
+        return []
+    try:
+        from app.services.knowledge_graph.business_context import (
+            _coverage_max_dates,
+        )
+    except Exception:  # pragma: no cover - import guard
+        return []
+
+    hints: list[dict] = []
+    rows = result.get("rows") or []
+    coverage = _coverage_max_dates(db, kb_id)
+    cov_by_table = {c["table_name"]: c for c in coverage}
+
+    # 1. Empty-set vs coverage.
+    if not rows:
+        if coverage:
+            latest = max(
+                (c["max_date"] for c in coverage if c.get("max_date")),
+                default=None,
+            )
+            if latest:
+                hints.append({
+                    "kind": "empty_set",
+                    "message": (
+                        f"The query returned no rows. The source's latest data is "
+                        f"{latest.isoformat()} — if the question asked for a period "
+                        f"after that date, the data is stale (check the ERP/warehouse "
+                        f"sync). Otherwise the filter may be too narrow."
+                    ),
+                })
+        return hints
+
+    # 2. NULL rate on leading columns.
+    if rows and isinstance(rows[0], dict):
+        first_row = rows[0]
+        for col in list(first_row.keys())[:6]:
+            total = len(rows)
+            nulls = sum(1 for r in rows if r.get(col) is None)
+            if total and nulls / total > 0.5:
+                hints.append({
+                    "kind": "null_rate",
+                    "column": col,
+                    "null_ratio": round(nulls / total, 2),
+                    "message": (
+                        f"Column '{col}' is NULL in {nulls}/{total} rows — the metric "
+                        f"may be missing data or the join is wrong."
+                    ),
+                })
+                break  # one representative column is enough
+
+    # 3. Date-range vs coverage (best-effort: first temporal column present).
+    if rows and isinstance(rows[0], dict):
+        for cov in coverage:
+            dc = cov.get("date_column")
+            if not dc or dc not in rows[0]:
+                continue
+            md = cov.get("max_date")
+            if md:
+                hints.append({
+                    "kind": "date_range",
+                    "date_column": dc,
+                    "coverage_max": md.isoformat(),
+                    "message": (
+                        f"The source's data for {dc} ends at {md.isoformat()}. "
+                        f"If the question asks for a more recent period, the answer "
+                        f"is 'no data after {md.isoformat()}'."
+                    ),
+                })
+                break
+    return hints
 
 
 # ---------------------------------------------------------------------------
@@ -234,9 +511,11 @@ async def _answer_from_database(
     if not question:
         return {"success": False, "error": "question is required"}
 
+    policy = _resolve_user_policy(db, user_id, context)
+
     try:
         svc = NLAnswerService(db)
-        result = await svc.answer(kb_id, question)
+        result = await svc.answer(kb_id, question, resolved_policy=policy)
         return result
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}

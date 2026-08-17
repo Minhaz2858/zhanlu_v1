@@ -42,3 +42,27 @@ export async function getProjectKnowledgeMap(projectId) {
   if (!resp.ok) throw new Error('Failed to load project knowledge map');
   return resp.json();
 }
+
+export async function listCatalogMetrics(projectId) {
+  const resp = await authFetch(`${base(projectId)}/catalog/metrics`);
+  if (!resp.ok) throw new Error('Failed to load metrics');
+  return resp.json();
+}
+
+export async function putCatalogMetric(projectId, metricId, payload) {
+  const resp = await authFetch(`${base(projectId)}/catalog/metrics/${metricId}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!resp.ok) throw new Error('Failed to save metric');
+  return resp.json();
+}
+
+export async function bootstrapCatalogMetrics(projectId) {
+  const resp = await authFetch(`${base(projectId)}/catalog/metrics/bootstrap`, {
+    method: 'POST',
+  });
+  if (!resp.ok) throw new Error('Failed to bootstrap metrics');
+  return resp.json();
+}

@@ -4,6 +4,7 @@ import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { filterUserAgents } from '@/lib/systemAgents';
 import { Plus, Upload, Wrench, Bot, Search, ChevronLeft, Check, Folder } from 'lucide-react';
+import { toast } from 'sonner';
 
 export default function PlusMenu({
   onUpload, onSelectSkill, onSelectAgent, onSelectProject,
@@ -103,7 +104,14 @@ export default function PlusMenu({
       // Each call to onUpload uploads + persists + appends to attachments
       // state in the parent (Chat.jsx handleUploadFile).
       for (const file of files) {
-        await onUpload?.(file);
+        try {
+          await onUpload?.(file);
+        } catch (err) {
+          // Surface the failure but keep going so one bad file doesn't
+          // abort the rest of the batch.
+          console.error('[PlusMenu] onUpload threw:', err);
+          toast.error(err?.message || 'Upload failed');
+        }
       }
       setOpen(false);
       setView('main');

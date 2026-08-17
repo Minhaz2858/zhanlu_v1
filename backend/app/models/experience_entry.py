@@ -13,7 +13,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from app.models.base import TimestampedBase
 
 EXPERIENCE_OUTCOMES = ["success", "partial", "failure", "timeout", "cancelled"]
-EXPERIENCE_ENTRY_TYPES = ["execution", "skill_run", "tool_call", "user_feedback", "review", "test_result"]
+EXPERIENCE_ENTRY_TYPES = ["execution", "skill_run", "tool_call", "user_feedback", "review", "test_result", "role_relevance_feedback"]
 
 
 class ExperienceEntry(TimestampedBase):

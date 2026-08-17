@@ -242,26 +242,13 @@ function LlmModelDialog({ editing, initialForm, providerKey, onProviderChange, o
 
           {/* Model Name */}
           <div>
-            <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Model Name</label>
-            {isCustom || preset?.models?.length === 0 ? (
-              <input
-                value={form.model_id}
-                onChange={(e) => setForm({ ...form, model_id: e.target.value, name: e.target.value })}
-                placeholder="Enter model ID"
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
-              />
-            ) : (
-              <select
-                value={form.model_id}
-                onChange={(e) => setForm({ ...form, model_id: e.target.value, name: e.target.value })}
-                className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
-              >
-                <option value="">Select a model…</option>
-                {preset.models.map((m) => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            )}
+          <label className="mb-1.5 block text-xs font-semibold uppercase tracking-wider text-muted-foreground">Model Name</label>
+          <input
+            value={form.model_id}
+            onChange={(e) => setForm({ ...form, model_id: e.target.value, name: e.target.value })}
+            placeholder="Enter model ID"
+            className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+          />
           </div>
 
           {/* Toggles */}
@@ -494,6 +481,15 @@ function AccountSection({ user, stats }) {
           <h2 className="font-display text-2xl text-foreground">{name}</h2>
           <p className="text-sm text-muted-foreground">{user?.email || t.common.notLoggedIn}</p>
           <p className="mt-1 text-xs text-muted-foreground">{t.settings.account.role}：{user?.role === 'admin' ? t.common.admin : t.common.user}</p>
+          {Array.isArray(user?.role_descriptions) && user.role_descriptions.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {user.role_descriptions.map((r, i) => (
+                <span key={`${r}-${i}`} className="inline-flex items-center gap-1 rounded-full bg-secondary px-2 py-0.5 text-xs font-medium text-secondary-foreground">
+                  {r}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       </div>
       <div>
@@ -556,13 +552,12 @@ function Row({ label, children }) {
 
 // ── LLM Model Catalog Section (admin only) ──────────────────────────────
 
-// Preset providers — selecting one auto-fills base_url and offers common
-// model IDs as a dropdown. Custom lets the user enter everything manually.
+// Preset providers — selecting one auto-fills base_url. The Model Name is
+// always a free-text input (see LlmModelDialog), so users type any model ID.
 const PROVIDER_PRESETS = {
   deepseek: {
     label: 'DeepSeek',
     baseUrl: 'https://api.deepseek.com/v1',
-    models: ['deepseek-chat', 'deepseek-reasoner', 'deepseek-coder'],
     isPrivate: false,
     color: '#4F6EF7',
     icon: '🐋',
@@ -570,7 +565,6 @@ const PROVIDER_PRESETS = {
   openai: {
     label: 'OpenAI',
     baseUrl: 'https://api.openai.com/v1',
-    models: ['gpt-4o-mini', 'gpt-4o', 'gpt-4-turbo', 'o1-mini', 'o1-preview'],
     isPrivate: false,
     color: '#10A37F',
     icon: '◉',
@@ -578,7 +572,6 @@ const PROVIDER_PRESETS = {
   anthropic: {
     label: 'Anthropic',
     baseUrl: 'https://api.anthropic.com/v1',
-    models: ['claude-3-5-sonnet-20241022', 'claude-3-haiku-20240307', 'claude-3-opus-20240229'],
     isPrivate: false,
     color: '#D4A574',
     icon: '◈',
@@ -586,7 +579,6 @@ const PROVIDER_PRESETS = {
   google: {
     label: 'Google Gemini',
     baseUrl: 'https://generativelanguage.googleapis.com/v1beta/openai',
-    models: ['gemini-2.0-flash-exp', 'gemini-1.5-pro', 'gemini-1.5-flash'],
     isPrivate: false,
     color: '#4285F4',
     icon: '◇',
@@ -594,7 +586,6 @@ const PROVIDER_PRESETS = {
   moonshot: {
     label: 'Moonshot Kimi',
     baseUrl: 'https://api.moonshot.cn/v1',
-    models: ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
     isPrivate: false,
     color: '#0066FF',
     icon: 'K',
@@ -602,7 +593,6 @@ const PROVIDER_PRESETS = {
   qwen: {
     label: 'Qwen',
     baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
-    models: ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-long'],
     isPrivate: false,
     color: '#7B1FA2',
     icon: 'Q',
@@ -610,7 +600,6 @@ const PROVIDER_PRESETS = {
   zhipu: {
     label: 'Zhipu GLM',
     baseUrl: 'https://open.bigmodel.cn/api/paas/v4',
-    models: ['glm-4-flash', 'glm-4-air', 'glm-4', 'glm-4-plus'],
     isPrivate: false,
     color: '#1A73E8',
     icon: 'Z',
@@ -618,7 +607,6 @@ const PROVIDER_PRESETS = {
   ollama: {
     label: 'Ollama',
     baseUrl: 'http://localhost:11434/v1',
-    models: ['llama3.1', 'qwen2.5', 'mistral', 'phi3'],
     isPrivate: true,
     color: '#FF6B35',
     icon: '🦙',
@@ -626,7 +614,6 @@ const PROVIDER_PRESETS = {
   custom: {
     label: 'Custom',
     baseUrl: '',
-    models: [],
     isPrivate: true,
     color: '#6B7280',
     icon: '+',

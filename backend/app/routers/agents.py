@@ -178,6 +178,57 @@ _GENERIC_EMPTY_CONTENT_FALLBACK = (
 )
 
 
+def _collect_artifact_titles(
+    tool_calls_for_frontend: list[dict],
+    orch_created: list[dict],
+) -> list[str]:
+    """Best-effort list of artifact titles produced this turn.
+
+    Pulls titles from orchestrator-created artifacts (``_orch_created``) and
+    from artifact/dashboard tool results recorded in ``tool_calls_for_frontend``.
+    Deduplicated, order-preserving. Used by the artifact-aware fallback so an
+    empty ``assistant_content`` never hides a successfully produced artifact.
+    """
+    titles: list[str] = []
+    for art in (orch_created or []):
+        t = (art or {}).get("title")
+        if t:
+            titles.append(str(t))
+    for tc in (tool_calls_for_frontend or []):
+        name = tc.get("name")
+        result = tc.get("results") or {}
+        if name == "create_dashboard":
+            art = result.get("artifact") if isinstance(result, dict) else None
+            if isinstance(art, dict) and art.get("title"):
+                titles.append(str(art["title"]))
+        elif name in ("create_artifact", "run_sandbox_skill"):
+            if isinstance(result, dict) and result.get("title"):
+                titles.append(str(result["title"]))
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in titles:
+        if t and t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _artifact_aware_fallback(titles: list[str]) -> str:
+    """Build a user-facing message that references the produced artifact(s).
+
+    Prefer this over ``_GENERIC_EMPTY_CONTENT_FALLBACK`` when the loop ended
+    with empty assistant text but an artifact WAS produced — the artifact is
+    the real deliverable, so the message should point at it instead of
+    claiming the agent "had trouble putting it together".
+    """
+    if len(titles) == 1:
+        return (
+            f"I've completed your request. Here's the artifact: **{titles[0]}**."
+        )
+    joined = ", ".join(f"**{t}**" for t in titles)
+    return f"I've completed your request. Here are the artifacts: {joined}."
+
+
 def _is_dashboard_request(user_content: str) -> bool:
     """Heuristic: does the user's message ask for a dashboard?"""
     if not user_content:
@@ -2654,6 +2705,7 @@ async def add_message(
                 db, agent_app, tools, system_prompt,
                 selected_project_id=getattr(conv, "project_id", None),
                 selected_project_name=_sel_proj_name,
+                user_id=user.id if user else None,
             )
         except Exception as e:
             logger.debug("Data source runtime prep failed (non-fatal): %s", e)
@@ -5507,6 +5559,99 @@ def add_message_feedback(
     }
 
 
+@router.post("/apps/{app_id}/agents/conversations/{conversation_id}/messages/{message_id}/role-feedback")
+def add_role_relevance_feedback(
+    app_id: str,
+    conversation_id: str,
+    message_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Record a 1-5 "Relevant to your role?" rating on an assistant message.
+
+    Writes an ``ExperienceEntry`` (entry_type="role_relevance_feedback") with
+    the user's role snapshot at feedback time so admins can measure whether
+    role-based personalization is working. Distinct from thumbs up/down.
+    """
+    try:
+        rating = int(body.get("rating", 0))
+        if rating < 1 or rating > 5:
+            raise ValueError("rating must be between 1 and 5")
+    except (TypeError, ValueError) as _fb_payload_err:
+        return JSONResponse(
+            status_code=422,
+            content={"ok": False, "error": f"invalid feedback payload: {_fb_payload_err}"},
+        )
+
+    conv = (
+        db.query(AgentConversation)
+        .filter(
+            AgentConversation.id == conversation_id,
+            AgentConversation.is_deleted == False,  # noqa: E712
+        )
+        .first()
+    )
+    if conv is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "conversation not found"})
+
+    messages = list(conv.messages or [])
+    target_msg = next(
+        (m for m in messages if str(m.get("id")) == message_id and m.get("role") == "assistant"),
+        None,
+    )
+    if target_msg is None:
+        return JSONResponse(status_code=404, content={"ok": False, "error": "message not found"})
+
+    agent_key = _resolve_agent_app_key(db, conv.agent_name, app_id)
+
+    # Snapshot the user's role descriptions at feedback time so historical
+    # feedback stays interpretable even if roles change later.
+    role_snapshot: list[str] = []
+    try:
+        raw_roles = getattr(user, "role_descriptions", None)
+        if raw_roles and isinstance(raw_roles, list):
+            role_snapshot = [str(r).strip() for r in raw_roles if str(r).strip()]
+    except Exception as _role_err:  # noqa: BLE001 — best-effort
+        logger.debug("role-feedback: role snapshot failed: %s", _role_err)
+
+    try:
+        from app.models.experience_entry import ExperienceEntry
+
+        db.add(
+            ExperienceEntry(
+                agent_app_id=agent_key,
+                entry_type="role_relevance_feedback",
+                summary=f"role-relevance rating {rating}/5",
+                detail_json={
+                    "message_id": message_id,
+                    "rating": rating,
+                    "role_snapshot": role_snapshot,
+                    "conversation_id": conversation_id,
+                },
+                outcome="positive" if rating >= 4 else ("neutral" if rating == 3 else "negative"),
+                confidence=None,
+                user_rating=rating,
+                user_feedback=None,
+                tags=["role_relevance"],
+            )
+        )
+        db.commit()
+    except Exception as _ee_err:  # noqa: BLE001 — best-effort
+        logger.warning("role-feedback: ExperienceEntry write failed (non-fatal): %s", _ee_err)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    return {
+        "ok": True,
+        "rating": rating,
+        "message_id": message_id,
+        "role_snapshot": role_snapshot,
+    }
+
+
 @router.post("/apps/{app_id}/agents/conversations/v3/{conversation_id}/messages/stream")
 async def add_message_stream(
     app_id: str,
@@ -5872,6 +6017,7 @@ async def add_message_stream(
                         "",
                         selected_project_id=_v3_effective_pid,
                         selected_project_name=_v3_effective_pname,
+                        user_id=user.id if user else None,
                     )
         finally:
             _dsr_db.close()
@@ -6388,6 +6534,7 @@ async def add_message_stream(
             db, agent_app, tools, system_prompt,
             selected_project_id=_v3_effective_pid,
             selected_project_name=_v3_effective_pname,
+            user_id=user.id if user else None,
         )
     except Exception as e:
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
@@ -7942,7 +8089,16 @@ async def add_message_stream(
                                 "Please try again — I'll create the dashboard more quickly this time."
                             )
                         else:
-                            assistant_content = _GENERIC_EMPTY_CONTENT_FALLBACK
+                            # Artifact-aware fallback: if an artifact was
+                            # actually produced this turn, reference it instead
+                            # of claiming "trouble putting it together".
+                            _titles = _collect_artifact_titles(
+                                tool_calls_for_frontend, _orch_created,
+                            )
+                            assistant_content = (
+                                _artifact_aware_fallback(_titles)
+                                if _titles else _GENERIC_EMPTY_CONTENT_FALLBACK
+                            )
                 logger.info(
                     "Post-loop fallback: empty assistant_content, using fallback message "
                     "(conv=%s, len=%d)",

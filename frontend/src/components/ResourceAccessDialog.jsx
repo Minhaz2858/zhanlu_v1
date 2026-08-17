@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react';
 import { authFetch } from '@/api/authFetch';
-import { Loader2, X, Users, Search } from 'lucide-react';
+import { Loader2, X, Users, Search, ShieldCheck } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 
 /**
@@ -22,6 +22,7 @@ export default function ResourceAccessDialog({
   resourceId,
   resourceName,
   onClose,
+  onConfigureAccess,
 }) {
   const [users, setUsers] = useState([]);
   const [sharedUserIds, setSharedUserIds] = useState(new Set());
@@ -225,6 +226,20 @@ export default function ResourceAccessDialog({
                         <span className="rounded-full bg-primary/10 px-1.5 py-0.5 text-[10px] text-primary">
                           admin
                         </span>
+                      )}
+                      {checked && onConfigureAccess && (
+                        <button
+                          type="button"
+                          title="Configure data access"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            onConfigureAccess(u.id);
+                          }}
+                          className="rounded-md p-1.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        >
+                          <ShieldCheck className="h-4 w-4" />
+                        </button>
                       )}
                     </label>
                   );

@@ -276,6 +276,7 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
             "row_count": meta.row_count,
             "description_zh": meta.description_zh,
             "description_en": meta.description_en,
+            "coverage_json": meta.coverage_json,
             "rrf_score": t.get("rrf_score", 0),
             "columns": [
                 {
@@ -394,6 +395,12 @@ def _format_slice(
             chunk += f"  -- {t['description_zh']}"
         if t.get("row_count"):
             chunk += f"  -- ~{t['row_count']:,} rows"
+        _cov = t.get("coverage_json") or {}
+        if _cov.get("max_date"):
+            chunk += (
+                f"  -- coverage: latest {_cov.get('date_column') or 'date'} = "
+                f"{_cov['max_date']}"
+            )
 
         tok = _estimate_tokens(chunk)
         if used_tokens + tok > token_budget:

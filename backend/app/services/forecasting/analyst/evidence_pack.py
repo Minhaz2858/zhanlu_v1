@@ -6,6 +6,7 @@ from typing import Optional
 
 import pandas as pd  # noqa: F401  (type context for forecast series)
 
+from app.models.market_dashboard import PRODUCT_GROUP_MAP
 from app.services.forecasting import narrative as fn
 from app.services.forecasting.domain_signals import (
     compute_seasonal_adjustment, get_elasticity,
@@ -24,6 +25,14 @@ _UPSTREAM_NAME_ZH = {
     "crude_oil": "原油", "naphtha": "石脑油",
     "cracked_c5": "裂解碳五", "cracked_c9": "裂解碳九",
 }
+
+
+def _get_product_group(product_id: str) -> str:
+    """Classify a product as upstream/midstream/downstream via PRODUCT_GROUP_MAP."""
+    for group, pids in PRODUCT_GROUP_MAP.items():
+        if product_id in pids:
+            return group
+    return "unknown"
 
 
 def compute_model_agreement(forecasts: dict, horizon: int) -> Optional[dict]:
@@ -127,6 +136,7 @@ def build_pack(*, product_id, name_zh, day, history_rows, upstream_histories,
 
     return {
         "product_id": product_id, "name_zh": name_zh, "day": day,
+        "product_group": _get_product_group(product_id),
         "current_price": current_price,
         "price_date": (history_rows[-1][0] if history_rows else None),
         "price_percentile": compute_price_percentile(history_rows),

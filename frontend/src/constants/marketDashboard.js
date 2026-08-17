@@ -31,3 +31,20 @@ export const PRODUCT_GROUPS = {
 // Products that have a forecast in the v_forecast_price view.
 // Mirrors backend MATERIAL_FORECAST_IDS keys.
 export const PRODUCTS_WITH_FORECAST = ["cracked_c5", "cracked_c9"];
+
+// Products that map to an ERP family (and therefore get a grade-level
+// supply-chain KPI section). Upstream commodities (crude_oil, naphtha,
+// mixed_c5) have no ERP mapping and are intentionally excluded.
+// Mirrors backend `app.services.erp.kpi._PRODUCT_MATERIAL_NAMES` keys.
+export const ERP_PRODUCT_IDS = [
+  "isoprene",
+  "piperylene",
+  "dcpd",
+  "raffinate_c5",
+  "sis",
+  "c5_resin",
+  "blowing_agent",
+  "styrene",
+  "cracked_c5",
+  "cracked_c9",
+];

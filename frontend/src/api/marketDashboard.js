@@ -40,6 +40,8 @@ export const marketDashboardApi = {
     getJson(`/api/market-dashboard/history/${productId}`, { days }),
   regional: (productId) =>
     getJson(`/api/market-dashboard/regional/${productId}`),
+  supplyChain: (productId) =>
+    getJson(`/api/market-dashboard/supply-chain/${productId}`),
   regionalBatch: (productIds) =>
     getJson('/api/market-dashboard/regional-batch', {
       product_ids: productIds.join(','),
@@ -102,5 +104,42 @@ export const marketDashboardApi = {
     );
     if (!res.ok) return [];
     return res.json();
+  },
+};
+
+/** Weekly Summary & Forecast Digest API client. */
+export const weeklyDigestApi = {
+  /** List all weekly report cards (paginated, newest first). */
+  list: (page = 1, pageSize = 20) =>
+    getJson('/api/weekly-digest', { page, page_size: pageSize }),
+  /** Get a single report with all product data. */
+  get: (reportId) => getJson(`/api/weekly-digest/${reportId}`),
+  /** Get the latest ready report. */
+  latest: () => getJson('/api/weekly-digest/latest'),
+  /** Manually trigger weekly digest generation. */
+  async trigger() {
+    const res = await authFetch('/api/weekly-digest/trigger', { method: 'POST' });
+    if (!res.ok) throw new Error(`trigger failed: ${res.status}`);
+    return res.json();
+  },
+  /** Download the weekly report as a branded .pptx deck. */
+  async exportPptx(reportId) {
+    const res = await authFetch(`/api/weekly-digest/${reportId}/export/pptx`, {
+      method: 'POST',
+    });
+    if (!res.ok) {
+      let detail;
+      try {
+        const body = await res.json();
+        detail = body?.detail;
+      } catch {
+        /* ignore parse errors */
+      }
+      throw new Error(detail || `export failed (${res.status})`);
+    }
+    const disp = res.headers.get('Content-Disposition') || '';
+    const m = /filename="?([^";]+)"?/.exec(disp);
+    const filename = m?.[1] || `weekly_digest_${reportId}.pptx`;
+    return { blob: await res.blob(), filename };
   },
 };

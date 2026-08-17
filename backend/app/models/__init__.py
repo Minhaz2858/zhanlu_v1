@@ -78,6 +78,7 @@ from app.models.forecasting import (
 from app.models.response_cache_entry import ResponseCacheEntry
 from app.models.intelligence import IntelligenceEvent, IntelligenceIngestionStatus
 from app.models.resource_share import ResourceShare
+from app.models.resource_access_policy import ResourceAccessPolicy
 from app.models.eval_result import EvalResult
 from app.models.prompt_ab_test import PromptABTest
 from app.models.agent_run import AgentRun
@@ -90,6 +91,7 @@ from app.models.knowledge_catalog import (
 )
 from app.models.resource_registry import ResourceRegistry
 from app.models.report_recipe import ReportRecipe
+from app.models.weekly_digest import WeeklyReportCard, WeeklyReportProduct
 
 __all__ = [
     "TimestampedBase",
@@ -176,10 +178,13 @@ __all__ = [
     "IntelligenceEvent",
     "IntelligenceIngestionStatus",
     "ResourceShare",
+    "ResourceAccessPolicy",
     "EvalResult",
     "PromptABTest",
     "AgentRun",
     "AgentRunStep",
     "LlmModel",
     "ResponseCacheEntry",
+    "WeeklyReportCard",
+    "WeeklyReportProduct",
 ]

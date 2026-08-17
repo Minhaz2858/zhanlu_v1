@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.deps import get_current_user_required
 from app.database import get_db
+from app.config import settings
 from app.schemas.market_dashboard import (
     EnabledResponse, MarketSnapshot, PriceHistoryPoint,
     RegionalPriceData, NewsListResponse,
@@ -23,6 +24,7 @@ from app.schemas.market_dashboard import (
     ForecastChartResponse, PriceChainResponse,
     SkuForecastMeta, DecisionBoardResponse,
     ForecastFeedbackRequest, ForecastFeedbackItem,
+    GradeKpiData,
 )
 from app.services import market_dashboard_service as svc
 from app.services import decision_board_service as dbs
@@ -33,11 +35,24 @@ from app.services.forecasting.ops.feedback_service import (
 router = APIRouter(prefix="/market-dashboard", tags=["market-dashboard"])
 
 
+def _surface(db=None):
+    """Return the unified facade when the flag is on, else the legacy module.
+
+    The facade exposes the same method names as ``svc`` (plus
+    ``get_decision_board``), so call-sites stay identical under both branches.
+    """
+    if settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
+        from app.services.forecasting.unified_service import ForecastingAgentService
+        return ForecastingAgentService(db)
+    return svc
+
+
 @router.get("/enabled", response_model=EnabledResponse)
 def get_enabled(user=Depends(get_current_user_required)) -> EnabledResponse:
-    if not svc.is_edia_enabled():
+    s = _surface()
+    if not s.is_edia_enabled():
         return EnabledResponse(enabled=False, reachable=False, reason="not_configured")
-    reachable = svc.is_edia_reachable_cached()
+    reachable = s.is_edia_reachable_cached()
     return EnabledResponse(
         enabled=True,
         reachable=reachable,
@@ -54,7 +69,7 @@ def get_snapshot(
 
     group omitted → all 12 products (overview section).
     """
-    return svc.get_market_snapshot(group=group)
+    return _surface().get_market_snapshot(group=group)
 
 
 @router.get("/history/{product_id}", response_model=list[PriceHistoryPoint])
@@ -63,7 +78,7 @@ def get_history(
     days: int = Query(30, ge=1, le=365),
     user=Depends(get_current_user_required),
 ) -> list[PriceHistoryPoint]:
-    return svc.get_price_history(product_id, days=days)
+    return _surface().get_price_history(product_id, days=days)
 
 
 @router.get("/regional/{product_id}", response_model=RegionalPriceData)
@@ -72,7 +87,7 @@ def get_regional(
     user=Depends(get_current_user_required),
 ) -> RegionalPriceData:
     """Return per-region prices for a product (v1 simplified)."""
-    return svc.get_regional_prices(product_id)
+    return _surface().get_regional_prices(product_id)
 
 
 @router.get("/news", response_model=NewsListResponse)
@@ -82,7 +97,7 @@ def get_news(
     user=Depends(get_current_user_required),
 ) -> NewsListResponse:
     """Return industry news (v1: empty list with explanatory note)."""
-    return svc.get_news_events(group=group, limit=limit)
+    return _surface().get_news_events(group=group, limit=limit)
 
 
 # ── Phase 7 (verbatim port): batch + new endpoints ─────────────────
@@ -95,7 +110,23 @@ def get_regional_batch(
 ) -> RegionalBatchResponse:
     """Return regional prices for multiple products in one request."""
     ids = [p.strip() for p in product_ids.split(",") if p.strip()]
-    return svc.get_regional_prices_batch(ids)
+    return _surface().get_regional_prices_batch(ids)
+
+
+@router.get("/supply-chain/{product_id}", response_model=GradeKpiData)
+def get_supply_chain(
+    product_id: str,
+    user=Depends(get_current_user_required),
+) -> GradeKpiData:
+    """Return per-product supply-chain snapshot (grade KPIs + summary).
+
+    Gated by ``SUPPLY_CHAIN_SNAPSHOT_ENABLED`` — returns an empty
+    ``GradeKpiData`` (no rows, no summary) while the flag is off so the
+    frontend renders its "no ERP mapping" empty state instead of crashing.
+    """
+    if not settings.SUPPLY_CHAIN_SNAPSHOT_ENABLED:
+        return GradeKpiData(product_id=product_id)
+    return _surface().get_supply_chain(product_id)
 
 
 @router.get("/forecast-base-batch", response_model=ForecastBaseBatchResponse)
@@ -106,7 +137,7 @@ def get_forecast_base_batch(
 ) -> ForecastBaseBatchResponse:
     """Return 7-day-ahead forecast base prices for the requested products."""
     ids = [p.strip() for p in product_ids.split(",") if p.strip()]
-    return svc.get_forecast_base_batch_v2(ids, day=day)
+    return _surface().get_forecast_base_batch_v2(ids, day=day)
 
 
 @router.get("/decision-board", response_model=DecisionBoardResponse)
@@ -116,6 +147,8 @@ def get_decision_board(
     user=Depends(get_current_user_required),
 ) -> DecisionBoardResponse:
     """Plain-language weekly decision board for all products in a group."""
+    if settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
+        return _surface().get_decision_board(group=group, day=day)
     return dbs.build_decision_board(group=group, day=day)
 
 
@@ -127,7 +160,7 @@ def get_events_latest(
     user=Depends(get_current_user_required),
 ) -> EventsResponse:
     """Return latest intelligence events (news) from the warehouse."""
-    return svc.get_events_latest(
+    return _surface().get_events_latest(
         hours=hours, review_status=review_status,
         min_usefulness_score=min_usefulness_score,
     )
@@ -138,7 +171,7 @@ def get_fx(
     user=Depends(get_current_user_required),
 ) -> FxRateResponse:
     """Return the USD-CNY FX rate (v1: static 7.20)."""
-    return svc.get_fx_rate()
+    return _surface().get_fx_rate()
 
 
 @router.get("/overview", response_model=OverviewBundle)
@@ -153,7 +186,7 @@ def get_overview(
     warehouse. Pass `?no_cache=1` (or call invalidate endpoint) to force
     a fresh fetch — used by the Refresh button in the UI.
     """
-    return svc.get_overview_bundle(
+    return _surface().get_overview_bundle(
         bypass_cache=no_cache, forecast_day=forecast_day,
     )
 
@@ -164,7 +197,7 @@ def post_overview_refresh(
 ) -> dict:
     """Drop the in-memory overview cache (e.g. after a DB write triggers
     the frontend to invalidate caches globally)."""
-    dropped = svc.invalidate_overview_cache()
+    dropped = _surface().invalidate_overview_cache()
     return {"invalidated": dropped, "key_prefix": "overview:bundle:"}
 
 
@@ -182,7 +215,7 @@ def get_forecast_chart(
     - Past zone (left): actual price + previous AI rec for accuracy review
     - Forecast zone (right): base / bull / bear curves from latest ForecastRun
     """
-    return svc.get_forecast_chart(product_id, days=days)
+    return _surface().get_forecast_chart(product_id, days=days)
 
 
 @router.get("/forecast-skus")
@@ -257,7 +290,7 @@ def get_price_chain(
     Each node: current price, 30d change, sparkline (30-day), percentile.
     Tiers: crude → naphtha → cracked C5/C9 → isoprene/piperylene/DCPD.
     """
-    return svc.get_price_chain()
+    return _surface().get_price_chain()
 
 
 # ── HITL forecast feedback (Task 5) ──────────────────────────────────

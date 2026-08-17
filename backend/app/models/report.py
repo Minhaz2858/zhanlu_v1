@@ -1,6 +1,6 @@
 """Report model — generated DOCX reports."""
 
-from sqlalchemy import String, Text, ForeignKey
+from sqlalchemy import String, Text, ForeignKey, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -20,3 +20,5 @@ class Report(TimestampedBase):
     )
     project: Mapped[str | None] = mapped_column(String(255), nullable=True)
     agent_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    read: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    pinned: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)

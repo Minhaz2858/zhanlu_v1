@@ -110,3 +110,20 @@ def test_pack_implied_change_pct():
     assert p["implied_change_pct"] == round(6660.0 / 6920.8 - 1.0, 4)
     p_none = _pack(run_results={})
     assert p_none["implied_change_pct"] is None
+
+
+def test_pack_product_group_classification():
+    # dcpd is midstream, naphtha is upstream, sis is downstream
+    assert _pack().get("product_group") == "midstream"
+    assert _pack(product_id="naphtha", name_zh="石脑油",
+                 upstream_histories={"crude_oil": _history(start=5000.0, step=1.0)}).get("product_group") == "upstream"
+    assert _pack(product_id="sis", name_zh="SIS橡胶",
+                 upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)}).get("product_group") == "downstream"
+    assert _pack(product_id="crude_oil", name_zh="原油",
+                 upstream_histories={}).get("product_group") == "upstream"
+
+
+def test_pack_crude_oil_has_empty_upstream():
+    p = _pack(product_id="crude_oil", name_zh="原油", upstream_histories={})
+    assert p["upstream"] == []
+    assert p["causal"]["elasticity"] is None

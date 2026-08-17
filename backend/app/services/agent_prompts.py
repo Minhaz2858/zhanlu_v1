@@ -104,6 +104,16 @@ def _build_default_skills_block() -> str:
             "(NOT `material_name`), `material_id` / `FMATERIALID` for product IDs, `shipment_date`, "
             "`shipment_quantity`, `contract_price`, `partner_name`, `shipment_grade`. "
             "Always use `describe_schema` to confirm column names before writing SQL.\n\n",
+            "Deck guidance (PPTX): When the user asks for a presentation / deck / slides, first classify "
+            "the deck type: `data_report` (data & analytics focused — use `create_artifact(type=\"pptx\", ...)` "
+            "with the report-card payload), `executive_brief` (short decision-oriented summary), `investor_deck` "
+            "(fundraising pitch — design-heavy), or `marketing` (brand / sales — design-heavy). For design-heavy "
+            "decks (investor_deck / marketing, or when the user says \"beautiful\", \"polished\", \"pitch\", "
+            "\"investor\", \"stunning\", \"路演\", \"融资\", \"精美\"), use the pptx html2pptx SKILL "
+            "(`skill_view(\"pptx\")` → author HTML slides → html2pptx) for full layout freedom. For data reports, "
+            "prefer the structured `create_artifact` path, which auto-plans, renders, audits, and polishes. "
+            "Every deck must follow a clear narrative arc (hook → context → evidence → insight → action → closing) "
+            "and end with a next-step or call-to-action slide.\n\n",
         ]
         for fmt_key, entry in DEFAULT_SKILLS.items():
             skill_name = entry["skill_name"]
@@ -125,6 +135,23 @@ def _build_default_skills_block() -> str:
 
 # Cached at import time — rarely changes, and a missing import is non-fatal.
 _DEFAULT_SKILLS_BLOCK: str = _build_default_skills_block()
+
+
+# Ecisco BI-only schema deprecation hint. Scoped exclusively to the
+# `ecisco_bi_assistant` (NOT injected into _DEFAULT_SKILLS_BLOCK, which every
+# agent shares). Tells the agent to prefer the actively maintained `F_PAEZ_JC`
+# column over the stale `material_model` column — the two hold identical data.
+_ECISCO_BI_SCHEMA_HINT_BLOCK = """
+
+ECISCO BI SCHEMA DEPRECATION RULE (HARD RULE — applies to every SQL you write
+for dashboards, forecasting, and decision-making in the Ecisco BI project):
+- The warehouse column `material_model` is DEPRECATED and STALE. Do NOT use it.
+- Use `F_PAEZ_JC` instead — it holds the exact same product-grade / material
+  model data and is the actively maintained field.
+- When `describe_schema` lists both `material_model` and `F_PAEZ_JC`, always
+  select `F_PAEZ_JC` in SELECT, WHERE, GROUP BY, and JOIN clauses.
+- Never reference `material_model` in generated SQL.
+"""
 
 
 # ---------------------------------------------------------------------------
@@ -1393,6 +1420,15 @@ def get_system_prompt(
     # ("I do not have real-time data access") even though web_search is
     # available.
     prompt = prompt + _runtime_context_block()
+
+    # Ecisco BI schema deprecation hint — appended to the ecisco_bi_assistant
+    # ONLY (regardless of which code path above resolved its prompt), so the
+    # LLM prefers F_PAEZ_JC over the stale material_model column. Flag-gated
+    # for rollback; never injected into any other agent's prompt.
+    if agent_name == "ecisco_bi_assistant" and getattr(
+        settings, "ECISCO_BI_SCHEMA_DEPRECATION_ENABLED", True
+    ):
+        prompt = prompt + _ECISCO_BI_SCHEMA_HINT_BLOCK
 
     # 4. If the user message is time-sensitive, contains a URL, or asks for
     #    a file, append the matching [GROUNDING REQUIRED] / [FILE

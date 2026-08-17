@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
+import { useAuth } from '@/lib/AuthContext';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { toast } from '@/components/ui/use-toast';
@@ -10,10 +11,11 @@ import {
   DialogDescription, DialogFooter,
 } from '@/components/ui/dialog';
 import ProjectCreateDialog from '@/components/project/ProjectCreateDialog';
+import ResourceAccessPolicyDialog from '@/components/ResourceAccessPolicyDialog';
 import {
   Folder, Plus, Loader2, Pencil, FolderKanban, Archive,
   ArchiveRestore, AlertTriangle, Bot, Database, FileText, Search, ArrowUpDown,
-  Sparkles, LayoutGrid, Clock, ArrowDownAZ, Building2,
+  Sparkles, LayoutGrid, Clock, ArrowDownAZ, Building2, ShieldCheck,
 } from 'lucide-react';
 
 /**
@@ -56,6 +58,7 @@ import { formatRelativeTime } from '@/lib/time';
 export default function ProjectsView({ scope = null }) {
   const { t, lang } = useLanguage();
   const navigate = useNavigate();
+  const { user, isAdmin } = useAuth();
   const isEn = lang === 'en';
 
   const [projects, setProjects] = useState([]);
@@ -64,6 +67,11 @@ export default function ProjectsView({ scope = null }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [archiveTarget, setArchiveTarget] = useState(null);
   const [archiveBusy, setArchiveBusy] = useState(false);
+  const [policyTarget, setPolicyTarget] = useState(null);
+
+  // Only owners (or admins) can configure per-user data access.
+  const canManageAccess = (p) => !!p && (isAdmin || p.created_by_id === user?.id);
+  const openAccessPolicy = (p) => setPolicyTarget(p);
 
   // Search + sort state. Search is a live filter on name/description;
   // sort is one of "recent" | "name" | "agents".
@@ -368,6 +376,8 @@ export default function ProjectsView({ scope = null }) {
                   rename={rename}
                   unarchive={unarchive}
                   openArchive={openArchive}
+                  canManageAccess={canManageAccess}
+                  onManageAccess={openAccessPolicy}
                 />
               )}
             </>
@@ -408,6 +418,8 @@ export default function ProjectsView({ scope = null }) {
                   rename={rename}
                   unarchive={unarchive}
                   openArchive={openArchive}
+                  canManageAccess={canManageAccess}
+                  onManageAccess={openAccessPolicy}
                 />
               )}
             </>
@@ -469,6 +481,17 @@ export default function ProjectsView({ scope = null }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Data access policy dialog (owner/admin only) */}
+      {policyTarget && (
+        <ResourceAccessPolicyDialog
+          open={!!policyTarget}
+          resourceType="project"
+          resourceId={policyTarget.id}
+          resourceName={policyTarget.name}
+          onClose={() => setPolicyTarget(null)}
+        />
+      )}
     </div>
   );
 }
@@ -493,6 +516,7 @@ export default function ProjectsView({ scope = null }) {
  */
 function ProjectCard({
   project, counts, isArchived, isEn, relativeTime, onOpen, onRename, onArchive,
+  onManageAccess,
 }) {
   const total = counts.agents + counts.kb + counts.files;
   return (
@@ -563,6 +587,13 @@ function ProjectCard({
                       onClick={(e) => { e.stopPropagation(); onRename(e); }}
                       label={isEn ? 'Rename' : '重命名'}
                       icon={<Pencil className="h-3.5 w-3.5" />}
+                    />
+                  )}
+                  {onManageAccess && (
+                    <IconAction
+                      onClick={onManageAccess}
+                      label={isEn ? 'Manage access' : '数据访问'}
+                      icon={<ShieldCheck className="h-3.5 w-3.5" />}
                     />
                   )}
                   <IconAction
@@ -758,6 +789,7 @@ function SectionHeader({ icon: Icon, title, badge }) {
 function ProjectGrid({
   projects, counts, lang, isEn, formatRelativeTime,
   navigate, rename, unarchive, openArchive,
+  canManageAccess, onManageAccess,
 }) {
   return (
     <ul
@@ -779,6 +811,7 @@ function ProjectGrid({
             onOpen={() => navigate(`/my-space/project/${p.id}`)}
             onRename={isArchived ? undefined : (e) => { e.stopPropagation(); rename(p); }}
             onArchive={isArchived ? (e) => { e.stopPropagation(); unarchive(p); } : (e) => { e.stopPropagation(); openArchive(p); }}
+            onManageAccess={!isArchived && canManageAccess?.(p) ? (e) => { e.stopPropagation(); onManageAccess?.(p); } : undefined}
           />
         );
       })}

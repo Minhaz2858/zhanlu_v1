@@ -14,17 +14,17 @@ import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import AddAgentToProjectDialog from '@/components/project/AddAgentToProjectDialog';
 import AddKbToProjectDialog from '@/components/project/AddKbToProjectDialog';
-import DataMapSection from '@/components/data-map/DataMapSection';
 import LlmModelSelector from '@/components/chat/LlmModelSelector';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
 import ResourceAccessDialog from '@/components/ResourceAccessDialog';
+import ResourceAccessPolicyDialog from '@/components/ResourceAccessPolicyDialog';
 import { toast } from '@/components/ui/use-toast';
 import {
   ArrowLeft, Bot, Database, MessageSquare, Cog,
   Sparkles, Check, X, Trash2, Plus, Loader2, Folder,
   ArrowUpRight, Zap, Settings2, ListChecks,
   Pencil, Save, MoreVertical, FileStack, Layers,
-  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users, Cpu, Lock,
+  Clock, Calendar, ChevronRight, Activity, AlertCircle, Users, Cpu, Lock, ShieldCheck,
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
@@ -44,9 +44,10 @@ import brandLogo from '../../logo/logo.png';
 // in their face; it's one click away via the sidebar.
 const SECTIONS = [
   { key: 'agents', icon: Bot, scrollable: true },
-  { key: 'data_map', icon: Database, scrollable: true },
   { key: 'resources', icon: Layers, scrollable: false },
   { key: 'chats', icon: MessageSquare, scrollable: true },
+  { key: 'access', icon: Users, scrollable: false, action: 'access' },
+  { key: 'policy', icon: ShieldCheck, scrollable: false, action: 'policy' },
 ];
 
 /**
@@ -153,6 +154,8 @@ export default function ProjectDetail() {
   // ── Modals / sheets ──
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
   const [accessDialogOpen, setAccessDialogOpen] = useState(false);
+  const [policyDialogOpen, setPolicyDialogOpen] = useState(false);
+  const [policyInitialUserId, setPolicyInitialUserId] = useState(null);
   const [kbDialogOpen, setKbDialogOpen] = useState(false);
   const [resourcesOpen, setResourcesOpen] = useState(false);
   const [createAutoOpen, setCreateAutoOpen] = useState(false);
@@ -635,16 +638,28 @@ export default function ProjectDetail() {
         {/* Sticky sidebar (no Overview / Files — removed per user) */}
         <aside className="sticky top-4 hidden h-fit w-52 shrink-0 md:block">
           <div className="rounded-xl border border-border bg-card p-2 shadow-sm">
-            {SECTIONS.map((s) => {
+            {SECTIONS.filter((s) => {
+              if (s.action === 'access') return isAdmin && canEditProject;
+              if (s.action === 'policy') return canEditProject;
+              return true;
+            }).map((s) => {
               const Icon = s.icon;
               const count = countFor(s.key, { agents, kbs, conversations });
               const active = s.scrollable && activeSection === s.key;
               const onClick = s.scrollable
                 ? () => scrollToSection(s.key)
-                : () => setResourcesOpen(true);
+                : s.action === 'access'
+                  ? () => setAccessDialogOpen(true)
+                  : s.action === 'policy'
+                    ? () => { setPolicyInitialUserId(null); setPolicyDialogOpen(true); }
+                    : () => setResourcesOpen(true);
               const label = s.scrollable
                 ? (t.projectDetail?.sections?.[s.key] || s.key)
-                : (t.projectDetail?.sections?.[s.key] || 'Resources');
+                : s.action === 'access'
+                  ? (isEn ? 'Access' : '访问权限')
+                  : s.action === 'policy'
+                    ? (t.accessPolicy?.manageAccess || (isEn ? 'Manage Access' : '管理访问'))
+                    : (t.projectDetail?.sections?.[s.key] || 'Resources');
               return (
                 <button
                   key={s.key}
@@ -717,16 +732,6 @@ export default function ProjectDetail() {
                 )}
               </div>
               <div className="flex gap-2">
-                {isAdmin && canEditProject && (
-                  <Button
-                    size="sm" variant="outline"
-                    className="gap-1.5"
-                    onClick={() => setAccessDialogOpen(true)}
-                  >
-                    <Users className="h-3.5 w-3.5" />
-                    {isEn ? 'Access' : '访问权限'}
-                  </Button>
-                )}
                 {canEditProject && (
                   <Button
                     size="sm" variant="outline"
@@ -848,30 +853,6 @@ export default function ProjectDetail() {
               T={T}
               onOpenTask={setHistoryTask}
               onCreateClick={() => setCreateAutoOpen(true)}
-            />
-          </section>
-
-          {/* ── Data Map (catalog browser + registry + entities) ── */}
-          <section
-            id="project-section-data_map"
-            ref={setRef('data_map')}
-            className="scroll-mt-20 rounded-xl border border-border bg-card p-5 shadow-sm"
-          >
-            <header className="mb-4 flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
-                  <Database className="h-4 w-4" />
-                </span>
-                <h2 className="font-display text-base font-semibold text-foreground">
-                  {isEn ? 'Catalog' : '目录'}
-                </h2>
-              </div>
-            </header>
-            <DataMapSection
-              projectId={projectId}
-              canEdit={canEditProject}
-              lang={lang}
-              T={T}
             />
           </section>
         </main>
@@ -1064,6 +1045,23 @@ export default function ProjectDetail() {
           resourceId={projectId}
           resourceName={project?.name || `Project ${projectId}`}
           onClose={() => setAccessDialogOpen(false)}
+          onConfigureAccess={(userId) => {
+            setAccessDialogOpen(false);
+            setPolicyInitialUserId(userId);
+            setPolicyDialogOpen(true);
+          }}
+        />
+      )}
+
+      {/* ── Data access policy dialog ── */}
+      {policyDialogOpen && (
+        <ResourceAccessPolicyDialog
+          open={policyDialogOpen}
+          resourceType="project"
+          resourceId={projectId}
+          resourceName={project?.name || `Project ${projectId}`}
+          initialUserId={policyInitialUserId}
+          onClose={() => setPolicyDialogOpen(false)}
         />
       )}
 
@@ -1116,7 +1114,6 @@ function countFor(key, s) {
     case 'agents': return s.agents.length;
     case 'resources': return s.kbs.length;
     case 'chats': return s.conversations.length;
-    case 'data_map': return 0;  // count surfaced inside the section
     default: return 0;
   }
 }

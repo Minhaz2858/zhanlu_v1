@@ -8,7 +8,7 @@ import { useChatSession } from '@/lib/ChatSessionContext';
 import { toast } from 'sonner';
 import ChatInput from '@/components/chat/ChatInput';
 import MessageBubble from '@/components/chat/MessageBubble';
-import { postMessageFeedback } from '@/api/agentFeedback';
+import { postMessageFeedback, postRoleFeedback } from '@/api/agentFeedback';
 import RelatedContent from '@/components/chat/RelatedContent';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
@@ -88,6 +88,10 @@ export default function Chat() {
   const isAutomationSession = location.pathname === '/automation/chat';
 
   const [messages, setMessages] = useState([]);
+
+  // How often to surface the "Relevant to your role?" rating (every Nth
+  // assistant message). Mirrors backend ROLE_FEEDBACK_THROTTLE default.
+  const ROLE_FEEDBACK_THROTTLE = 3;
 
   // Pre-compute the file-format request associated with each assistant
   // message, derived from the most recent user message before it. Used
@@ -282,6 +286,45 @@ export default function Chat() {
     } catch (err) {
       setFeedbackByMessage((p) => ({ ...p, [messageId]: prev }));
       toast.error(`反馈提交失败：${err.message || err}`);
+    }
+  };
+  // Role-based personalization: per-message 1-5 "Relevant to your role?"
+  // rating state, collected only on throttled assistant messages (every
+  // ROLE_FEEDBACK_THROTTLE-th assistant message) to avoid fatigue.
+  const [roleRelevanceByMessage, setRoleRelevanceByMessage] = useState({});
+  // Which assistant message ids should surface the role-relevance rating.
+  // Throttled to every ROLE_FEEDBACK_THROTTLE-th assistant message (by
+  // chronological order in the current conversation) to reduce fatigue.
+  const roleRatingMessageIds = useMemo(() => {
+    const ids = new Set();
+    let assistantCount = 0;
+    for (const m of messages) {
+      if (m.role === 'assistant' && (m.content || '').trim()) {
+        assistantCount += 1;
+        if (assistantCount % ROLE_FEEDBACK_THROTTLE === 0) ids.add(m.id);
+      }
+    }
+    return ids;
+  }, [messages]);
+  const handleRoleRelevance = async (messageId, rating) => {
+    const s = activeId ? getSession(activeId) : null;
+    const convId = s?.conversation_id;
+    if (!convId || !messageId) {
+      toast.error('无法提交角色相关度反馈：会话信息不完整');
+      return;
+    }
+    const prev = roleRelevanceByMessage[messageId];
+    if (prev === rating) {
+      setRoleRelevanceByMessage((p) => ({ ...p, [messageId]: null }));
+      return;
+    }
+    setRoleRelevanceByMessage((p) => ({ ...p, [messageId]: rating }));
+    try {
+      await postRoleFeedback(appParams.appId, convId, messageId, rating);
+      toast.success('已记录角色相关度评分，感谢反馈！');
+    } catch (err) {
+      setRoleRelevanceByMessage((p) => ({ ...p, [messageId]: prev }));
+      toast.error(`角色相关度反馈提交失败：${err.message || err}`);
     }
   };
   // P2 (conversational dashboards): persistent dock panel state. `open` toggles
@@ -2749,16 +2792,35 @@ export default function Chat() {
   }
 
   async function handleUploadFile(file) {
-    const { file_url } = await base44.integrations.Core.UploadFile({ file });
-    const sid = await ensureSession(file.name);
+    let file_url;
     const ext = (file.name.split('.').pop() || '').toLowerCase();
     const kind = ['csv', 'xls', 'xlsx', 'json', 'tsv'].includes(ext) ? 'data_file'
       : ['html', 'htm'].includes(ext) ? 'html_file' : 'document';
-    await base44.entities.UserFile.create({
-      name: file.name, file_type: ext, size: file.size, file_url, source: 'upload',
-      resource_kind: kind, session_id: sid, project: pendingProject || t.sessionList.ungrouped,
-    });
-    setAttachments((prev) => [...prev, { name: file.name, file_url }]);
+
+    // 1) Upload the bytes first so the chip can render even if persistence fails.
+    try {
+      const uploaded = await base44.integrations.Core.UploadFile({ file });
+      file_url = uploaded?.file_url;
+      if (!file_url) throw new Error('Upload returned no file_url');
+    } catch (err) {
+      console.error('[upload] UploadFile failed:', err);
+      toast.error(`Upload failed: ${file.name}`);
+      return; // chip never appears; the picker stays open
+    }
+
+    // 2) Render the chip immediately so the user sees their file.
+    setAttachments((prev) => [...prev, { name: file.name, file_url, ext, kind }]);
+
+    // 3) Best-effort persistence — don't block the chip if this fails.
+    try {
+      const sid = await ensureSession(file.name);
+      await base44.entities.UserFile.create({
+        name: file.name, file_type: ext, size: file.size, file_url, source: 'upload',
+        resource_kind: kind, session_id: sid, project: pendingProject || t.sessionList.ungrouped,
+      });
+    } catch (err) {
+      console.error('[upload] persistence failed (chip still rendered):', err);
+    }
   }
 
   return (
@@ -2865,7 +2927,7 @@ export default function Chat() {
                           const isStreaming = m.id === streamingId;
                           const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
                           return (
-                            <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} />
+                            <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} />
                           );
                         })}
                       </div>

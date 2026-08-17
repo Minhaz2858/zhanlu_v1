@@ -18,6 +18,7 @@ from typing import Any, Optional
 from app.services.synexia.contracts import (
     ActionSpec,
     ChartSpec,
+    DeckPlan,
     InsightSpec,
     KPISpec,
     ReportCardPayload,
@@ -62,6 +63,12 @@ class ExportContext:
     #   "brief"  — compact: no cover page, no TOC, straight into headings
     #   "memo"   — To/From/Date/Subject header block, no cover, no TOC
     doc_type: str = "report"
+    # Deck planner / smart-router (PPT pipeline):
+    #   deck_type — data_report | investor_deck | marketing | executive_brief
+    #   deck_plan — the planner's structured output (None when the flag is off,
+    #               meaning the report-card renderer path is used unchanged).
+    deck_type: str = "data_report"
+    deck_plan: Optional[DeckPlan] = None
 
 
 # --- Filename / slug helpers -------------------------------------------------
