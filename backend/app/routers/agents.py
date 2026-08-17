@@ -46,6 +46,7 @@ from app.services.agent_prompts import (
     apply_grounding_to_schemas,
     parse_decision_summary_block,
     strip_decision_summary_block,
+    calculate_agent_budget,
 )
 # execute_tool_with_retry wraps execute_tool with result-level retry +
 # one-shot argument reformulation (Phase B). All ReAct-loop call sites in
@@ -298,6 +299,29 @@ def _choose_fallback(
     if _is_dashboard_request(user_content):
         return _DASHBOARD_REDIRECT_FALLBACK
     return _GENERIC_EMPTY_CONTENT_FALLBACK
+
+
+def _schema_edge_count(result) -> int:
+    """Best-effort count of high-confidence join edges in a describe_schema result.
+
+    Returns 0 unless the result came from the schema-graph path and its
+    rendered context lists related-table edges (lines shaped like
+    ``    - <target_table> via <src> -> <tgt> (FK, conf=0.90)``).
+    Only edges with confidence >= 0.8 count (those are the join edges the
+    protocol block invites the agent to auto-join on).
+    """
+    if not isinstance(result, dict) or result.get("source") != "schema_graph":
+        return 0
+    schema_text = str(result.get("schema") or "")
+    edges = 0
+    for line in schema_text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("- "):
+            continue
+        m = re.search(r"conf=(\d\.\d{2})", stripped)
+        if m and float(m.group(1)) >= 0.8:
+            edges += 1
+    return edges
 
 
 def _is_dashboard_request(user_content: str) -> bool:
@@ -4360,12 +4384,32 @@ async def resume_conversation(
     # BEFORE the loop rebinds it.
     _final_iteration = iteration + MAX_TOOL_ITERATIONS
     _wrapup_nudged = False
+    # ── Dynamic per-turn budget (schema-aware soft cap) ────────────
+    # Resumes are user-approval-driven (never unattended automation), so
+    # the automation heuristic stays off here. MAX_TOOL_ITERATIONS remains
+    # the hard cap; the soft cap can be RAISED mid-loop once describe_schema
+    # reveals join edges (see the upgrade hook in the tool-execution branch).
+    _resume_base_iter = _final_iteration - MAX_TOOL_ITERATIONS
+    _effective_budget = calculate_agent_budget(
+        None, user_content or "", is_automation=False,
+    )
+    _soft_final_iter = _resume_base_iter + _effective_budget
+    _schema_edges_seen = False
     for iteration in range(iteration + 1, iteration + 1 + MAX_TOOL_ITERATIONS):
         # P0: consume one iteration from the conversation-level budget
         if not conv_budget.consume():
             logger.info(
                 "Conversation %s iteration budget exhausted (%d/%d), breaking",
                 conversation_id, conv_budget.used, conv_budget.max_total,
+            )
+            break
+        # ── Dynamic soft-cap check ────────────────────────────────
+        # The per-turn budget is a soft cap: the model self-regulates via
+        # the T-3 wrap-up nudge below, and we break here if it keeps going.
+        if iteration > _soft_final_iter:
+            logger.info(
+                "v2 resume: dynamic per-turn budget reached (%d) for conv=%s; wrapping up",
+                _effective_budget, conversation_id,
             )
             break
         # Per-tool-name runaway guard (same as the main loop above).
@@ -4395,9 +4439,10 @@ async def resume_conversation(
             )
             llm_messages.append({"role": "user", "content": nudge})
             break
-        # Finish line: with 3 iterations left, tell the model to stop
-        # exploring and assemble its final answer (injected exactly once).
-        if iteration == _final_iteration - 3 and not _wrapup_nudged:
+        # Finish line: with 3 iterations left (per the DYNAMIC soft cap),
+        # tell the model to stop exploring and assemble its final answer
+        # (injected exactly once).
+        if iteration == _soft_final_iter - 3 and not _wrapup_nudged:
             _wrapup_nudged = True
             llm_messages.append({
                 "role": "user",
@@ -4628,6 +4673,30 @@ async def resume_conversation(
             _result_str = _persisted_result_str(tool_name, result, conversation_id)
             llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": _result_str})
             guard_ctrl.after_call(tool_name, call["args"], _result_str)
+
+            # ── Dynamic budget upgrade ───────────────────────────────
+            # describe_schema revealed schema-graph join edges: widen the
+            # per-turn soft cap so the agent can explore the joins instead
+            # of being nudged to wrap up too early. Idempotent (runs once,
+            # on the first edge-bearing result).
+            if not _schema_edges_seen and tool_name == "describe_schema":
+                _edge_count = _schema_edge_count(result)
+                if _edge_count:
+                    _schema_edges_seen = True
+                    _upgraded_budget = calculate_agent_budget(
+                        [{"confidence": 0.9}] * min(_edge_count, 3),
+                        user_content or "", is_automation=False,
+                    )
+                    if _upgraded_budget > _effective_budget:
+                        logger.info(
+                            "v2 resume: schema graph revealed %d join edge(s); "
+                            "per-turn budget %d->%d (conv=%s)",
+                            _edge_count, _effective_budget,
+                            _upgraded_budget, conversation_id,
+                        )
+                        _effective_budget = _upgraded_budget
+                        _soft_final_iter = _resume_base_iter + _effective_budget
+
             # P8: Record learning
             try:
                 from app.services.learning_graph import record_learning as _rl
@@ -6994,12 +7063,38 @@ async def add_message_stream(
         # the T-3 wrap-up message is injected exactly once.
         dashboard_forced = False
         _wrapup_nudged = False
+        # ── Dynamic per-turn budget (schema-aware soft cap) ───────────
+        # db-bound agents get a dynamic iteration budget that scales with
+        # schema-graph join complexity (see calculate_agent_budget in
+        # agent_prompts). MAX_TOOL_ITERATIONS stays the absolute hard cap;
+        # this soft cap can be RAISED mid-loop once describe_schema reveals
+        # join edges (see the upgrade hook in the tool-execution branch).
+        _auto_flag = bool(
+            body.get("force_planning")
+            or body.get("phase") == "automation"
+            or _auto_task_id
+            or _auto_exec_id
+        )
+        _effective_budget = calculate_agent_budget(
+            None, user_content or "", is_automation=_auto_flag,
+        )
+        _schema_edges_seen = False
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
                 logger.info(
                     "Conversation %s iteration budget exhausted (%d/%d), breaking",
                     conversation_id, conv_budget.used, conv_budget.max_total,
+                )
+                break
+            # ── Dynamic soft-cap check ────────────────────────────────
+            # The per-turn budget is a soft cap: the model self-regulates
+            # via the T-3 wrap-up nudge below, and we break here if it
+            # keeps going. MAX_TOOL_ITERATIONS still bounds the range.
+            if iteration >= _effective_budget:
+                logger.info(
+                    "v3 stream: dynamic per-turn budget reached (%d) for conv=%s; wrapping up",
+                    _effective_budget, conversation_id,
                 )
                 break
             # --- Mid-turn steer drain (P2) ---
@@ -7086,9 +7181,10 @@ async def add_message_stream(
                 # "I gathered some information" message for other agents).
                 _loop_guard_user_facing = user_facing
                 break
-            # Finish line: with 3 iterations left, tell the model to stop
-            # exploring and assemble its final answer (injected exactly once).
-            if iteration == MAX_TOOL_ITERATIONS - 3 and not _wrapup_nudged:
+            # Finish line: with 3 iterations left (per the DYNAMIC soft cap),
+            # tell the model to stop exploring and assemble its final answer
+            # (injected exactly once).
+            if iteration == _effective_budget - 3 and not _wrapup_nudged:
                 _wrapup_nudged = True
                 llm_messages.append({
                     "role": "user",
@@ -7822,6 +7918,28 @@ async def add_message_stream(
                 if tool_name in INTERNAL_TOOLS:
                     tool_call_record["display_projection"] = _internal_tool_projection(tool_name)
                 tool_calls_for_frontend.append(tool_call_record)
+
+                # ── Dynamic budget upgrade ───────────────────────────
+                # describe_schema revealed schema-graph join edges: widen
+                # the per-turn soft cap so the agent can explore the joins
+                # instead of being nudged to wrap up too early. Idempotent
+                # (runs once, on the first edge-bearing result).
+                if not _schema_edges_seen and tool_name == "describe_schema":
+                    _edge_count = _schema_edge_count(result)
+                    if _edge_count:
+                        _schema_edges_seen = True
+                        _upgraded_budget = calculate_agent_budget(
+                            [{"confidence": 0.9}] * min(_edge_count, 3),
+                            user_content or "", is_automation=_auto_flag,
+                        )
+                        if _upgraded_budget > _effective_budget:
+                            logger.info(
+                                "v3 stream: schema graph revealed %d join edge(s); "
+                                "per-turn budget %d->%d (conv=%s)",
+                                _edge_count, _effective_budget,
+                                _upgraded_budget, conversation_id,
+                            )
+                            _effective_budget = _upgraded_budget
 
                 # Gap B checkpoint: the moment a report card or artifact
                 # exists, persist it — a dropped SSE stream or crash later

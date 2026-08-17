@@ -516,6 +516,14 @@ class Settings(BaseSettings):
     ALERT_DIGEST_HOUR_UTC: int = 0                  # Digest generation hour (0 = 08:00 CST)
     ALERT_DIGEST_TOP_N: int = 5                     # Top-N items in digest
 
+    # ── Market alert detection thresholds (tunable without code edits) ──
+    # 7-day % change required to trigger a price_spike / price_drop alert,
+    # and the magnitude for a "high" severity classification. Defaults match
+    # the historical hardcoded constants in alert_service.py.
+    ALERT_PRICE_SPIKE_THRESHOLD: float = 3.0        # +3% 7d change → price_spike
+    ALERT_PRICE_DROP_THRESHOLD: float = -3.0        # -3% 7d change → price_drop
+    ALERT_HIGH_SEVERITY_THRESHOLD: float = 6.0      # >= |6|% → high severity
+
     # ── Unified Forecasting Service (Layer 1 backend facade) ────────────
     # Thin facade ForecastingAgentService over the 4 fragmented forecasting
     # data paths. When False, routers/tools keep calling the individual

@@ -155,10 +155,11 @@ for dashboards, forecasting, and decision-making in the Ecisco BI project):
 
 
 # ---------------------------------------------------------------------------
-# Schema-Aware Multi-Table Query Protocol — appended to ecisco_bi_assistant
-# (and, later, all db-bound agents) when SCHEMA_GRAPH_ENABLED is on. Fully
-# generic: it reasons purely over schema structure (tables, columns, keys,
-# join edges) — zero business keywords, zero domain-specific column names.
+# Schema-Aware Multi-Table Query Protocol — appended to all db-bound agents
+# (system agents with DB tools + user agents with bound knowledge bases or the
+# "Database Query" skill) when SCHEMA_GRAPH_ENABLED is on. Fully generic: it
+# reasons purely over schema structure (tables, columns, keys, join edges) —
+# zero business keywords, zero domain-specific column names.
 # ---------------------------------------------------------------------------
 
 _SCHEMA_AWARE_PROTOCOL_BLOCK = """
@@ -238,7 +239,140 @@ tables with join edges)
    timestamp that the schema context lists instead), return the results with
    metrics, then note "⚠️ Note: <original_column> is 100% null in this table, so
    I used <alternative_column> for the date filter."
-"""
+
+9. EXTENSION OFFER (medium-confidence edges only). If you answered the user's
+   question using table X alone, and the schema graph shows a related table Y
+   joined to X by an edge with confidence 0.5–0.8 (e.g. NAME_MATCH or a weak
+   VALUE_OVERLAP), do NOT silently join and do NOT ignore it:
+   - Present the current results first, then make ONE specific offer:
+     "I found [data from table X]. The schema also shows [table Y] connected via
+     [column Z] with [confidence] overlap. Want me to join [table Y] for
+     [missing dimension]?"
+   - If the user says "yes", "join it", "add that", or "extend": execute the
+     join immediately using the edge's column pair from the schema graph — do
+     NOT re-ask which column to join on.
+   - Do NOT offer when the edge is high-confidence (FK or VALUE_OVERLAP >= 0.8):
+     those are auto-joined silently per rule 3.
+   - In unattended/scheduled runs (no interactive user is waiting), skip the
+     offer entirely and proceed with the best available join path.
+   """
+
+
+# ---------------------------------------------------------------------------
+# DB-bound agent detection — decides which agents receive the schema-aware
+# multi-table protocol block. Generic: works for system agents AND any
+# user-created agent with a bound knowledge base or "Database Query" skill.
+# ---------------------------------------------------------------------------
+
+# Tool names that grant database access. The granular tools are exposed to the
+# built-in data_agent; the delegation tool is auto-injected for any agent with
+# a bound data source.
+_DB_TOOL_NAMES = frozenset(
+  {"ask_data_agent", "execute_query", "describe_schema", "answer_from_database"}
+)
+
+# System agents that ship with database tools in their default toolset.
+_DB_BOUND_SYSTEM_AGENTS = frozenset(
+  {
+      "data_agent",
+      "ecisco_bi_assistant",
+      "general_assistant",
+      "automation_agent",
+      "power_user",
+  }
+)
+
+# Skill display name that grants database access (user-created agents).
+_DB_SKILL_DISPLAY_NAME = "Database Query"
+
+
+def _agent_is_db_bound(agent_name: str | None, agent_app=None) -> bool:
+  """Return True if the agent has database access tools.
+
+  Fast, dependency-free heuristic evaluated at prompt-build time (the resolved
+  tool list is not available yet — ``get_tools`` runs after ``get_system_prompt``).
+  Covers three cases:
+    1. Known system agents that ship with DB tools (``_DB_BOUND_SYSTEM_AGENTS``).
+    2. User-created agents with at least one bound knowledge base
+       (``ask_data_agent`` is auto-injected at runtime for bound data sources).
+    3. User-created agents whose skills include "Database Query".
+  """
+  if agent_name and agent_name in _DB_BOUND_SYSTEM_AGENTS:
+      return True
+  if agent_app is not None:
+      # Case 2: bound knowledge bases → data source runtime auto-injects ask_data_agent.
+      kbs = getattr(agent_app, "knowledge_bases", None) or []
+      if kbs:
+          return True
+      # Case 3: explicit "Database Query" skill on a user-created agent.
+      skills = getattr(agent_app, "skills", None) or []
+      if _DB_SKILL_DISPLAY_NAME in skills:
+          return True
+      # Fallback: agent_app already resolved its tool config explicitly.
+      tool_config = getattr(agent_app, "tool_config", None) or {}
+      enabled = (
+          tool_config.get("enabled_tools", [])
+          if isinstance(tool_config, dict)
+          else []
+      )
+      if any(t in _DB_TOOL_NAMES for t in enabled):
+          return True
+  return False
+
+
+# ---------------------------------------------------------------------------
+# Dynamic iteration budget — generic multi-table agent budget.
+# Base 4 for simple single-table queries; scales with related-table count and
+# multi-table intent; automation runs get extra headroom (no human to ask).
+# Hard cap at 10 keeps runaway tool loops in check.
+# ---------------------------------------------------------------------------
+
+_MULTI_TABLE_KEYWORDS = (
+  "supply chain",
+  "full report",
+  "dashboard",
+  "complete",
+  "overview",
+  "all data",
+  "join",
+  "combined",
+  "consolidated",
+)
+
+_DYNAMIC_BUDGET_MIN = 4
+_DYNAMIC_BUDGET_MAX = 10
+
+
+def calculate_agent_budget(
+  schema_graph_edges: list | None = None,
+  user_question: str = "",
+  is_automation: bool = False,
+) -> int:
+  """Dynamic per-turn iteration budget for db-bound agents.
+
+  Base: 4 iterations for simple single-table queries.
+  +2 per high-confidence related table (FK or value-overlap >= 0.8).
+  +2 if the query implies multi-table intent (dashboard/report/join keywords).
+  +2 for automation runs (no human available to approve or clarify).
+  Returns a value in [_DYNAMIC_BUDGET_MIN, _DYNAMIC_BUDGET_MAX].
+  """
+  budget = _DYNAMIC_BUDGET_MIN
+
+  if schema_graph_edges:
+      high_conf = [
+          e for e in schema_graph_edges if (e.get("confidence") or 0) >= 0.8
+      ]
+      budget += len(high_conf) * 2
+
+  if user_question:
+      lowered = user_question.lower()
+      if any(kw in lowered for kw in _MULTI_TABLE_KEYWORDS):
+          budget += 2
+
+  if is_automation:
+      budget += 2
+
+  return max(_DYNAMIC_BUDGET_MIN, min(_DYNAMIC_BUDGET_MAX, budget))
 
 
 # ---------------------------------------------------------------------------
@@ -1517,10 +1651,12 @@ def get_system_prompt(
     ):
         prompt = prompt + _ECISCO_BI_SCHEMA_HINT_BLOCK
 
-    # Schema-Aware Multi-Table Query Protocol — appended to ecisco_bi_assistant
-    # ONLY when SCHEMA_GRAPH_ENABLED, so the LLM reasons over join edges and
-    # self-corrects on structural validation feedback. Flag-gated for rollback.
-    if agent_name == "ecisco_bi_assistant" and getattr(
+    # Schema-Aware Multi-Table Query Protocol — appended to EVERY db-bound
+    # agent (system agents with DB tools + user agents with bound knowledge
+    # bases or the "Database Query" skill) when SCHEMA_GRAPH_ENABLED is on,
+    # so the LLM reasons over join edges and self-corrects on structural
+    # validation feedback. Flag-gated for rollback.
+    if _agent_is_db_bound(agent_name, agent_app) and getattr(
         settings, "SCHEMA_GRAPH_ENABLED", False
     ):
         prompt = prompt + _SCHEMA_AWARE_PROTOCOL_BLOCK
