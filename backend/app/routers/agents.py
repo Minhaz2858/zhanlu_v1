@@ -3377,13 +3377,20 @@ async def add_message(
                 # the enriched payload on the same tool_call record.
                 if tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
                     try:
+                        _synth_endpoint = _eff_llm_v2.endpoint
+
+                        async def _synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+                            return await _call_synthesis_llm(
+                                system_prompt, msgs, endpoint=_ep
+                            )
+
                         synth_result = await synthesize_report(
                             user_message=user_content,
                             rows=result.get("rows"),
                             sql=result.get("sql"),
                             source_name=result.get("source_name"),
                             source_id=result.get("source_id"),
-                            call_llm_fn=_call_synthesis_llm,
+                            call_llm_fn=_synth_call,
                         )
                         if synth_result.report_card_payload is not None:
                             # ── FINALIZE: persist Artifact row + HTML blob ──
@@ -4785,15 +4792,30 @@ async def _bg_extract_memories(
         logger.warning("Background memory extraction failed: %s", e)
 
 
-async def _call_synthesis_llm(system_prompt: str, messages: list[dict]) -> dict:
+async def _call_synthesis_llm(
+    system_prompt: str,
+    messages: list[dict],
+    endpoint: "LLMEndpoint | None" = None,
+) -> dict:
     """Single-turn LLM call for report synthesis (no tools).
 
     Signature matches what ``synthesize_report()`` expects for its
     ``call_llm_fn`` parameter: accepts (system_prompt, [messages]) and
     returns ``{"content": "..."}``.
+
+    When ``endpoint`` is provided (project binding), targets the endpoint's
+    base_url / api_key / model_id. Otherwise falls back to the legacy global
+    provider (get_model / llm_url / llm_headers).
     """
     full_messages = [{"role": "system", "content": system_prompt}] + messages
-    _model = get_model()
+    if endpoint is not None:
+        _model = endpoint.model_id
+        _url = endpoint.base_url.rstrip("/") + "/chat/completions"
+        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+    else:
+        _model = get_model()
+        _url = llm_url()
+        _headers = llm_headers()
     payload = {
         "model": _model,
         "messages": full_messages,
@@ -4802,7 +4824,7 @@ async def _call_synthesis_llm(system_prompt: str, messages: list[dict]) -> dict:
         payload["temperature"] = 0.7
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(llm_url(), headers=llm_headers(), json=payload)
+            resp = await client.post(_url, headers=_headers, json=payload)
             resp.raise_for_status()
     except httpx.HTTPStatusError as e:
         raise HTTPException(
@@ -7500,13 +7522,20 @@ async def add_message_stream(
                 # ── Report synthesis: enrich ask_data_agent results ──────
                 if tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
                     try:
+                        _synth_endpoint = effective_llm.endpoint
+
+                        async def _synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+                            return await _call_synthesis_llm(
+                                system_prompt, msgs, endpoint=_ep
+                            )
+
                         synth_result = await synthesize_report(
                             user_message=user_content,
                             rows=result.get("rows"),
                             sql=result.get("sql"),
                             source_name=result.get("source_name"),
                             source_id=result.get("source_id"),
-                            call_llm_fn=_call_synthesis_llm,
+                            call_llm_fn=_synth_call,
                         )
                         if synth_result.report_card_payload is not None:
                             # ── FINALIZE: persist Artifact row + HTML blob ──
