@@ -89,6 +89,7 @@ from app.services.tool_handlers import x_search_tool  # noqa: F401
 # Phase 5: media + artifacts
 from app.services.tool_handlers import tts_tool  # noqa: F401
 from app.services.tool_handlers import artifact_tool  # noqa: F401
+from app.services.tool_handlers import deck_edit_tool  # noqa: F401
 from app.services.tool_handlers import video_generation_tool  # noqa: F401
 from app.services.tool_handlers import transcription_tool  # noqa: F401
 from app.services.tool_handlers import vision_tool  # noqa: F401

@@ -402,6 +402,11 @@ class Settings(BaseSettings):
     PPT_SMART_ROUTER_ENABLED: bool = False
     PPT_LLM_POLISH_ENABLED: bool = False
     PPT_AUDIT_ENABLED: bool = False
+    # Phase 1C: deterministic per-slide deck EDITING tools (edit_slide /
+    # add_slide / restyle_deck / update_chart / remove_slide / reorder_slide).
+    # Routes "edit my deck"-style messages to the six deck-edit tools while
+    # keeping "regenerate / redo / from scratch" on the full re-generation path.
+    DECK_EDIT_ROUTING_ENABLED: bool = False
     # Phase 1B: layout-engine / data-table tuning (all defaults safe-off).
     LAYOUT_ENGINE_TEMPLATE_PATH: str = ""
     PPTX_DARK_THEME_PATH: str = ""

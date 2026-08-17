@@ -101,3 +101,92 @@ EXPORT_SIGNAL_BY_FORMAT: dict[FileFormat, str] = {
 def user_signal_for_format(fmt: FileFormat) -> str:
     """Return the canonical user_signal string for a given file format."""
     return EXPORT_SIGNAL_BY_FORMAT[fmt]
+
+
+# ---------------------------------------------------------------------------
+# Deck-edit intent detection
+# ---------------------------------------------------------------------------
+#
+# Mirrors ``detect_file_intent``: cheap, dependency-free, regex-only.  Maps a
+# user message to one of the six deck-edit tools, or ``None`` when the message
+# is not an edit request.  Regeneration phrasing ("redo", "from scratch",
+# "regenerate") short-circuits to ``None`` so the caller keeps the full
+# regeneration path instead of editing an existing artifact.
+
+# Recognized deck-edit tools.  Order matters: more specific patterns win.
+DeckEditTool = Literal[
+    "edit_slide", "add_slide", "restyle_deck", "update_chart",
+    "remove_slide", "reorder_slide",
+]
+
+# Regeneration phrases — these mean "throw the old one away and rebuild", NOT
+# "edit the existing deck".  Checked before the edit patterns.
+_DECK_EDIT_REGENERATE_RE = re.compile(
+    r"\b(?:regenerate|re-?generate|redo|re-?do|from\s+scratch|re-?make|remake)\b"
+    r"|重新生成|重做|重来|从头生成|重新做",
+    re.IGNORECASE,
+)
+
+# Slide index fragment: digits or common Chinese numerals (一二三四五六七八九十).
+# e.g. "第3页", "第三页", "第一页".
+_SLIDE_IDX = r"[0-9一二三四五六七八九十百]*"
+
+_DECK_EDIT_INTENT_PATTERNS: tuple[tuple[DeckEditTool, str], ...] = (
+    (
+        "remove_slide",
+        r"\b(?:remove|delete)\s+(?:the\s+)?(?:slide|page)\b"
+        r"|删除第?\s*" + _SLIDE_IDX + r"\s*[页張张]"
+        r"|删掉第?\s*" + _SLIDE_IDX + r"\s*[页張张]"
+        r"|移除第?\s*" + _SLIDE_IDX + r"\s*[页張张]",
+    ),
+    (
+        "reorder_slide",
+        r"\b(?:reorder|re-?order|rearrange)\b|调整顺序|调换顺序"
+        r"|移动第?\s*" + _SLIDE_IDX + r"\s*[页張张]",
+    ),
+    (
+        "add_slide",
+        r"\b(?:add|insert)\s+(?:a\s+|an\s+)?(?:new\s+)?(?:slide|page)\b"
+        r"|添加一页|新增一页|加一页|加个页面|增加一页",
+    ),
+    (
+        "update_chart",
+        r"\b(?:update|change|modify|edit)\s+(?:the\s+)?chart\b"
+        r"|修改图表|更新图表|改图表|改下图表|调整图表",
+    ),
+    (
+        "restyle_deck",
+        r"\b(?:change|switch|swap)\s+(?:the\s+)?(?:to\s+)?(?:a\s+|an\s+)?"
+        r"(?:different\s+)?(?:theme|style|color\s*scheme)\b"
+        r"|换个主题|换主题|改主题|更换主题|换个风格|改风格|换风格",
+    ),
+    (
+        "edit_slide",
+        r"\b(?:edit|update|change|modify|revise|rewrite)\s+(?:the\s+)?(?:slide|page)\b"
+        r"|修改第?\s*" + _SLIDE_IDX + r"\s*[页張张]"
+        r"|编辑第?\s*" + _SLIDE_IDX + r"\s*[页張张]"
+        r"|改第?\s*" + _SLIDE_IDX + r"\s*[页張张]",
+    ),
+)
+
+_DECK_EDIT_COMPILED: dict[DeckEditTool, re.Pattern[str]] = {
+    tool: re.compile(pat, re.IGNORECASE)
+    for tool, pat in _DECK_EDIT_INTENT_PATTERNS
+}
+
+
+def detect_deck_edit_intent(text: Optional[str]) -> Optional[str]:
+    """Return the deck-edit tool name for a message, or ``None``.
+
+    Regeneration phrasing (``regenerate`` / ``redo`` / ``from scratch`` /
+    ``重新生成`` / ``重做`` ...) short-circuits to ``None`` so the caller
+    keeps the full regeneration path.
+    """
+    if not text:
+        return None
+    if _DECK_EDIT_REGENERATE_RE.search(text):
+        return None
+    for tool, pattern in _DECK_EDIT_COMPILED.items():
+        if pattern.search(text):
+            return tool
+    return None

@@ -16,8 +16,24 @@ from __future__ import annotations
 import re
 from typing import Optional
 
-from app.services.synexia.intent_router import detect_file_intent, FileFormat
+from app.config import settings
+from app.services.synexia.intent_router import (
+    detect_deck_edit_intent,
+    detect_file_intent,
+    FileFormat,
+)
 from app.services.skill_routing.post_router_hook import post_router_pick
+
+# The six deck-edit tools registered by ``tool_handlers.deck_edit_tool``.
+# Surfaced to the agent only when ``DECK_EDIT_ROUTING_ENABLED`` is on.
+DECK_EDIT_TOOL_NAMES: tuple[str, ...] = (
+    "edit_slide",
+    "add_slide",
+    "restyle_deck",
+    "update_chart",
+    "remove_slide",
+    "reorder_slide",
+)
 
 # ── Default Skills Registry ────────────────────────────────────────────────
 #
@@ -129,6 +145,22 @@ def detect_soft_intent(text: str) -> Optional[str]:
     return None
 
 
+def detect_deck_edit_routing(text: str) -> Optional[str]:
+    """Return the deck-edit tool name for ``text``, gated by the flag.
+
+    Returns ``None`` when ``DECK_EDIT_ROUTING_ENABLED`` is off OR the message
+    is not a deck-edit request (including regeneration phrasing, which
+    ``detect_deck_edit_intent`` short-circuits to ``None``).
+
+    This is the routing signal used by ``pick_default_skill`` (to avoid
+    forcing a regeneration skill for an edit request) and by the chat loop
+    (to surface the deck-edit tools).
+    """
+    if not getattr(settings, "DECK_EDIT_ROUTING_ENABLED", False):
+        return None
+    return detect_deck_edit_intent(text)
+
+
 # ── Public API ──────────────────────────────────────────────────────────────
 
 
@@ -179,6 +211,18 @@ def pick_default_skill(
     fmt: Optional[FileFormat] = detect_file_intent(user_message)
     if fmt and fmt in DEFAULT_SKILLS:
         return DEFAULT_SKILLS[fmt]
+
+    # 2.5 Deck-edit routing. When the flag is on and the message is an edit
+    #     request (e.g. "update the chart", "add a slide", "change theme"),
+    #     do NOT force a generation skill — the chat loop surfaces the
+    #     deck-edit tools and the agent edits the existing artifact instead.
+    #     Regeneration phrasing is already short-circuited inside
+    #     ``detect_deck_edit_intent``, so it still falls through to normal
+    #     skill selection (full regeneration). Off by default: when the flag
+    #     is off, ``detect_deck_edit_routing`` returns None and behavior is
+    #     identical to before.
+    if detect_deck_edit_routing(user_message):
+        return None
 
     # 3. Strong skill match. This must run before generic report/docx soft
     # intent so enabled custom skills like weekly-report-generation can win

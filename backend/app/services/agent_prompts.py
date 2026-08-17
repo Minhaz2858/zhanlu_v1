@@ -1890,7 +1890,7 @@ AUTOMATION_AGENT_TOOLS = [
 ]
 
 
-def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app=None) -> list[dict]:
+def _get_tools_base(agent_name: str | None, tool_config: dict | None = None, agent_app=None) -> list[dict]:
     """Return the appropriate tool definitions for the given agent_name.
 
     Priority:
@@ -2004,6 +2004,47 @@ def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app
         return fallback_schemas
 
     return []
+
+
+def _get_deck_edit_schemas() -> list[dict]:
+    """Return the six deck-edit tool schemas when routing is enabled.
+
+    Gated by ``DECK_EDIT_ROUTING_ENABLED`` (default off) so the deck-edit
+    tools only surface when the feature is explicitly enabled. Returns an
+    empty list otherwise — keeping ``get_tools`` behaviour identical to
+    before when the flag is off.
+    """
+    if not getattr(settings, "DECK_EDIT_ROUTING_ENABLED", False):
+        return []
+    # Ensure the deck-edit tools are registered regardless of import order.
+    import app.services.tool_handlers.deck_edit_tool  # noqa: F401
+    from app.services.synexia.default_skills import DECK_EDIT_TOOL_NAMES
+    from app.services.tool_registry import registry
+
+    schemas: list[dict] = []
+    for name in DECK_EDIT_TOOL_NAMES:
+        entry = registry.get_entry(name)
+        if entry:
+            schemas.append(entry.schema)
+    return schemas
+
+
+def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app=None) -> list[dict]:
+    """Return the appropriate tool definitions for the given agent_name.
+
+    Thin wrapper around :func:`_get_tools_base` that appends the deck-edit
+    tools (``edit_slide`` / ``add_slide`` / ... ) when
+    ``DECK_EDIT_ROUTING_ENABLED`` is on, so agents can edit generated decks.
+    """
+    schemas = _get_tools_base(agent_name, tool_config, agent_app)
+    deck_edit = _get_deck_edit_schemas()
+    if deck_edit:
+        # Avoid duplicate injection (defensive, e.g. tool_config already
+        # whitelists one of these tools).
+        existing = {s.get("function", {}).get("name") for s in schemas}
+        schemas = schemas + [s for s in deck_edit
+                             if s.get("function", {}).get("name") not in existing]
+    return schemas
 
 
 def _apply_agent_def_tool_filter(agent_name: str | None, schemas: list[dict]) -> list[dict]:

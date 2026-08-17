@@ -18,10 +18,13 @@ version / thumbnail flow:
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
+# Importing the handler module registers the six deck-edit tools in the
+# registry (needed by test_tool_registered when this file runs alone).
+import app.services.tool_handlers.deck_edit_tool  # noqa: F401
 from app.services.tool_registry import registry
 
 # ---------------------------------------------------------------------------
@@ -85,6 +88,10 @@ def _ctx(**overrides):
         "conversation_metadata": {},
         "chat_session_id": "sess-1",
         "endpoint": "https://llm.example/v1",
+        # Tenant reference the agent loop injects via data_ctx_extras; the
+        # deck-edit guard compares artifact.org_id/app_id against these.
+        "org_id": "org-1",
+        "app_id": "app-1",
     }
     base.update(overrides)
     return base
@@ -223,7 +230,7 @@ async def test_edit_slide_success(mock_service, mock_render, mock_thumbnails):
     # original blob + thumbnails stored
     mock_service.store_blob.assert_any_call(
         mock_service.create_version.return_value.id, "original",
-        pytest.ANY, "application/vnd.openxmlformats-officedocument.presentationml.presentation", b"pptx-bytes",
+        ANY, "application/vnd.openxmlformats-officedocument.presentationml.presentation", b"pptx-bytes",
     )
     assert mock_service.mark_version_built.called
     assert mock_thumbnails.called
