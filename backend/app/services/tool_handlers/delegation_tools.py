@@ -154,11 +154,14 @@ async def _ask_data_agent(
         sub_context["data_source_id"] = preferred_kb
 
     iterations = 0
-    # P0.5: default 2 iterations (was 4). Most data questions need only
-    # 1 LLM turn + 1 synthesis turn. Schema exploration is now handled
-    # by the parallel-fix in the outer sub-agent loop. The cap of 10 is
+    # Default 4 iterations (was 2). The Data Agent now follows a
+    # schema-discover -> query -> correct -> synthesize pattern: (1) call
+    # `describe_schema`, (2) execute the query, (3) detect bad/null data and
+    # re-query with corrected columns, (4) write the prose answer. A budget
+    # of 2 leaves no room for self-correction, which caused the agent to
+    # report "date coverage: None" instead of re-querying. The cap of 10 is
     # preserved for complex multi-table queries.
-    max_iterations = min(args.get("max_iterations", 2), 10)
+    max_iterations = min(args.get("max_iterations", 4), 10)
     final_text = ""
     # Distinguish two failure modes:
     #   _initial_llm_failure: set ONLY when the FIRST _call_llm in the

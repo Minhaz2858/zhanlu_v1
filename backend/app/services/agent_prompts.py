@@ -209,11 +209,13 @@ tables with join edges)
    X.col = Y.col via FK"). Never claim a relationship that no edge supports.
 5. DATA QUALITY REPORTER. If you detect data quality issues while building an
    EXECUTION query:
-   - Automatically select the best alternative column (e.g. if FPRODUCEDATE is
-     null, use FUPDATETIME instead).
+   - Automatically select the best alternative column. For example, if your
+     first-choice date/timestamp column is null, use a different timestamp
+     column that the schema context lists (an update timestamp, a created-at
+     column, etc.) instead.
    - Proceed with the query using the working column.
-   - Note the issue in the response insights: "⚠️ Used FUPDATETIME instead of
-     FPRODUCEDATE (null)".
+   - Note the issue in the response insights, e.g. "⚠️ Used <alternative_column>
+     instead of <original_column> (null)".
    - NEVER stop execution to ask permission on column substitutions.
 6. NEVER HALLUCINATE COLUMNS. Use only columns the schema context lists. If the
    query is rejected for an unknown column, correct it using the available
@@ -231,10 +233,11 @@ tables with join edges)
    User: "Retry the full 30-day inventory pull"
    ❌ WRONG (current behavior): run a single aggregate row, report the row count,
    then say "I'll wait for your go-ahead".
-   ✅ CORRECT (target behavior): pull the last 30 days using FUPDATETIME
-   (FPRODUCEDATE was null, so use the update timestamp instead), return the
-   results with metrics, then note "⚠️ Note: FPRODUCEDATE is 100% null in this
-   table, so I used FUPDATETIME for the date filter."
+   ✅ CORRECT (target behavior): pull the last 30 days using the best available
+   timestamp column (if the primary date column is null, use an update/created
+   timestamp that the schema context lists instead), return the results with
+   metrics, then note "⚠️ Note: <original_column> is 100% null in this table, so
+   I used <alternative_column> for the date filter."
 """
 
 

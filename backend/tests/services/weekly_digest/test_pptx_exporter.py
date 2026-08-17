@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE_TYPE
 
 from app.services.weekly_digest.pptx_exporter import WeeklyDigestPptxBuilder
 
@@ -129,6 +130,71 @@ def test_market_overview_kpi_values_present():
     overview = next(t for t in texts if "市场概况" in t)
     assert "2" in overview
     assert "1" in overview
+
+
+def test_market_overview_not_hidden_by_kpi_cards():
+    """A long market overview must be fully rendered below the title and the
+    KPI cards must sit below it so no text is clipped or overlapped."""
+    long_overview = (
+        "**市场概况：**\n"
+        "本周C5C9产业链整体呈现稳中偏强格局，共统计11个已定价产品，其中上涨5个、"
+        "持平5个、下跌1个，市场情绪以看涨为主，预测看涨品种达11个，无看跌品种。"
+        "宏观层面，国际油价受地缘局势及需求预期影响窄幅震荡，石脑油价格持稳运行，"
+        "裂解原料成本支撑相对稳固，但向上驱动有限。成本端整体平稳，为下游产品价格调整提供一定空间。\n\n"
+        "**原料与成本：**\n"
+        "原料方面，日本石脑油周度价格持平于716元/吨，预测区间685~839元/吨，"
+        "反映短期成本中枢未见明显波动。裂解碳五、裂解碳九同样持平，分别报5800元/吨和4612元/吨，"
+        "裂解原料供应维持稳定，未对C5C9分离及深加工环节形成额外压力。\n\n"
+        "**整体走势：**\n"
+        "本周价格上涨品种主要集中在高附加值产品，其中苯乙烯领涨，周涨幅达3.6%。"
+    )
+    prs = _build(_FakeDB({
+        "WeeklyReportCard": [_card(market_overview=long_overview)],
+        "WeeklyReportProduct": [_product(), _product(id="prod-2",
+                                                      report_order=1,
+                                                      current_price=None,
+                                                      change_pct_7d=-2.0)],
+    }))
+    overview_slide = next(
+        (slide for slide in prs.slides
+         if any(sh.has_text_frame and "市场概况" in "".join(
+             r.text for p in sh.text_frame.paragraphs for r in p.runs)
+             for sh in slide.shapes)),
+        None,
+    )
+    assert overview_slide is not None
+
+    from pptx.util import Emu
+
+    def shape_bottom(sh):
+        return Emu(sh.top).inches + Emu(sh.height).inches
+
+    # Collect the overview body textbox (the one carrying the LLM paragraphs).
+    overview_box = next(
+        (sh for sh in overview_slide.shapes
+         if sh.has_text_frame and "本周C5C9产业链" in "".join(
+             r.text for p in sh.text_frame.paragraphs for r in p.runs)),
+        None,
+    )
+    assert overview_box is not None
+    overview_text = "".join(
+        r.text for p in overview_box.text_frame.paragraphs for r in p.runs
+    )
+    assert "整体走势" in overview_text, "overview tail text missing"
+    assert "…" not in overview_text, "overview was hard-truncated"
+
+    # The first KPI card background must start below the overview text box.
+    # The card rect is the leftmost autoshape positioned below the overview area
+    # (the title accent sits at top 1.25" and should be ignored).
+    cards = [
+        sh for sh in overview_slide.shapes
+        if sh.shape_type == MSO_SHAPE_TYPE.AUTO_SHAPE
+        and Emu(sh.top).inches > 2.0
+    ]
+    assert cards, "no KPI card autoshapes found"
+    first_card = min(cards, key=lambda sh: Emu(sh.left).inches)
+    card_top = Emu(first_card.top).inches
+    assert card_top >= shape_bottom(overview_box) - 0.05, "KPI cards overlap overview text"
 
 
 def test_product_slide_contains_forecast_table_and_chart():

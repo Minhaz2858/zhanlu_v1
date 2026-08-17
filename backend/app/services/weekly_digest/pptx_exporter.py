@@ -387,9 +387,20 @@ class WeeklyDigestPptxBuilder:
         s = self._prs.slides.add_slide(self._layout)
         _set_bg(s, t.slide_bg)
         _add_section_title(s, "市场概况 / Market Overview", t)
-        _add_textbox(
-            s, Inches(0.6), Inches(1.4), Inches(12.1), Inches(0.7),
-            text=card.market_overview or "", size=14, color=t.text,
+
+        # Render the full market overview with auto-fitting so verbose LLM output
+        # is never clipped or hidden by the KPI cards below it.
+        overview_text = card.market_overview or ""
+        overview_w = 12.1
+        max_overview_h = 2.8
+        _, overview_size = self._fit_text_size(
+            overview_text, overview_w, max_overview_h, start=14, floor=10
+        )
+        needed_h = self._est_text_height(overview_text, overview_size, overview_w)
+        overview_h = max(0.7, min(max_overview_h, needed_h))
+        self._add_markdown_box(
+            s, Inches(0.6), Inches(1.4), Inches(overview_w), Inches(overview_h),
+            overview_text, size=overview_size, color=t.text,
             font_name=t.font_body,
         )
 
@@ -403,28 +414,29 @@ class WeeklyDigestPptxBuilder:
             ("下跌", str(down), _DOWN_COLOR),
         ]
         tile_w = Inches(2.85)
+        tile_h = Inches(1.5)
         gap = Inches(0.2)
-        y = Inches(2.5)
+        # Place KPI cards below the overview text with a small gap so the cards
+        # never overlap and hide any part of the analysis.
+        y = Inches(1.4 + overview_h + 0.15)
         for i, (label, val, color) in enumerate(tiles):
             x = Inches(0.6) + i * (tile_w + gap)
-            box = _add_rect(s, x, y, tile_w, Inches(1.5), fill=t.band_bg,
-                            border=t.border, radius_in=0.08)
-            tf = box.text_frame
-            tf.word_wrap = True
-            p1 = tf.paragraphs[0]
-            r1 = p1.add_run()
-            r1.text = val
-            r1.font.size = Pt(34)
-            r1.font.bold = True
-            r1.font.color.rgb = color
-            r1.font.name = t.font_body
-            p2 = tf.add_paragraph()
-            r2 = p2.add_run()
-            r2.text = label
-            r2.font.size = Pt(12)
-            r2.font.bold = True
-            r2.font.color.rgb = t.muted
-            r2.font.name = t.font_body
+            _add_rect(s, x, y, tile_w, tile_h, fill=t.band_bg,
+                      border=t.border, radius_in=0.08)
+            # Big value at the top of the card.
+            _add_textbox(
+                s, x + Inches(0.15), y + Inches(0.18),
+                tile_w - Inches(0.3), Inches(0.85),
+                text=val, size=34, bold=True, color=color,
+                font_name=t.font_body,
+            )
+            # Label below the value, always visible.
+            _add_textbox(
+                s, x + Inches(0.15), y + Inches(1.05),
+                tile_w - Inches(0.3), Inches(0.3),
+                text=label, size=12, bold=True, color=t.muted,
+                font_name=t.font_body,
+            )
 
     def _add_executive_summary(self, card: WeeklyReportCard) -> None:
         t = self.theme
