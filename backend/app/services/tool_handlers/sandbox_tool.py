@@ -34,6 +34,34 @@ from app.services.tool_registry import registry
 
 logger = logging.getLogger(__name__)
 
+# Proactive post-generation edit suggestion.  Appended to the success message
+# of the ``pptx`` branch only when (a) the deck-edit routing flag is on and
+# (b) a ``deck_plan`` was persisted into ``source_json`` — i.e. the artifact is
+# actually editable by the six ``deck_edit`` tools.  Bilingual so the agent can
+# surface it in the user's language.
+_DECK_EDIT_SUGGESTION = (
+    "You can now ask me to refine this deck: add/remove slides, edit a slide's "
+    "title or bullets, change the chart, switch the theme, or reorder slides. "
+    "（您还可以让我继续编辑这份 PPT：添加/删除页面、修改标题或要点、调整图表、"
+    "更换主题或调整页面顺序。）"
+)
+
+
+def _deck_edit_hint(fmt: str, version_source_json: Optional[dict]) -> str:
+    """Return the proactive edit hint when the deck is editable, else ''."""
+    if fmt != "pptx":
+        return ""
+    if not version_source_json or "deck_plan" not in version_source_json:
+        return ""
+    try:
+        from app.config import settings
+        if not getattr(settings, "DECK_EDIT_ROUTING_ENABLED", False):
+            return ""
+    except Exception:  # pragma: no cover - settings import is safe
+        return ""
+    return " " + _DECK_EDIT_SUGGESTION
+
+
 # Path to the generic sandbox runner script — gets mounted into the container
 _RUNNER_SCRIPT_PATH = Path(__file__).parent.parent / "sandbox" / "sandbox_runner.py"
 
@@ -896,6 +924,7 @@ async def _run_sandbox_skill(
             f"Tell the user they can preview or download it using the artifact card. "
             f"Preview URL: /api/artifacts/{artifact.id}/preview, "
             f"Download URL: /api/artifacts/{artifact.id}/download"
+            f"{_deck_edit_hint(fmt, version_source_json)}"
         ),
     }
 

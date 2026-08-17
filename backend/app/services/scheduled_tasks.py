@@ -29,6 +29,7 @@ MEMORY_CONSOLIDATION_INTERVAL = 30 * 60  # 30 minutes
 SKILL_CURATION_INTERVAL = 6 * 60 * 60   # 6 hours
 ALERT_CHECK_INTERVAL = 5 * 60            # 5 minutes
 MARKET_ALERT_SCAN_INTERVAL = 5 * 60      # 5 minutes (Ecisco BI market alert scan)
+PERCEPTION_HEALTH_INTERVAL = 60 * 60      # 1 hour (perception snapshot health canary)
 NEWS_INGESTION_INTERVAL = 60 * 60        # 1 hour (intelligence layer)
 DAILY_EVAL_INTERVAL = 24 * 60 * 60       # 24 hours (LLM quality eval pipeline)
 
@@ -157,6 +158,39 @@ async def _run_market_alert_scan_cycle() -> None:
         await run_alert_scan_cycle()
     except Exception as e:
         logger.warning("Market alert scan cycle failed: %s", e)
+
+
+# Perceptual health guard — runs hourly so a regression in the price-warehouse
+# bridge (empty snapshot) surfaces in logs instead of silently dropping alerts.
+_PERCEPTION_HEALTH_MIN_PRODUCTS = 3
+
+
+def _perception_health_check() -> None:
+    """Verify the perception snapshot resolves real prices for enough products.
+
+    Logs a WARNING when fewer than ``_PERCEPTION_HEALTH_MIN_PRODUCTS`` products
+    carry a price — the canary that would otherwise let the alert table go empty
+    without any signal.
+    """
+    try:
+        from app.services.perception.service import build_perception_snapshot
+
+        snapshot = build_perception_snapshot(db=None)
+        products = snapshot.get("products", {})
+        priced = [pid for pid, p in products.items() if p.get("latest_price") is not None]
+        if len(priced) < _PERCEPTION_HEALTH_MIN_PRODUCTS:
+            logger.warning(
+                "[perception-health] snapshot returned only %d/%d priced products "
+                "(expected >= %d). Check market_dashboard_service.read_product_history_rows "
+                "and PerceptionService._get_product_price.",
+                len(priced), len(products), _PERCEPTION_HEALTH_MIN_PRODUCTS,
+            )
+        else:
+            logger.info(
+                "[perception-health] OK — %d priced products in snapshot", len(priced)
+            )
+    except Exception as e:
+        logger.warning("[perception-health] check failed: %s", e)
 
 
 # ---- Daily LLM Quality Eval Pipeline -------------------------------------------
@@ -660,6 +694,13 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("market_alert_scan", MARKET_ALERT_SCAN_INTERVAL, _run_market_alert_scan_cycle),
             name="sched-market-alert-scan",
+        ),
+        loop.create_task(
+            _periodic_task(
+                "perception_health", PERCEPTION_HEALTH_INTERVAL,
+                lambda: asyncio.to_thread(_perception_health_check),
+            ),
+            name="sched-perception-health",
         ),
         loop.create_task(
             _digest_loop(),

@@ -61,7 +61,11 @@ async def run_alert_scan_cycle() -> dict:
         result["total_scanned"] = len(product_list)
 
         if not product_list:
-            logger.debug("AlertScannerWorker: snapshot returned 0 products with prices — nothing to scan")
+            logger.warning(
+                "AlertScannerWorker: snapshot returned 0 products with prices — "
+                "nothing to scan. Check perception._get_product_price / "
+                "market_dashboard_service.read_product_history_rows."
+            )
             return result
 
         # 3. Detect and persist

@@ -59,13 +59,15 @@ async def _handle_ask_decision(
 
     mode = (args.get("mode") or "full").strip().lower()
 
-    # Try to auto-fetch perception if not provided
+    # Try to auto-fetch perception if not provided. Route through the real
+    # perception pipeline (which bridges to the price warehouse) instead of the
+    # dead MarketDashboardService.build_snapshot() that always returned empty.
     perception = args.get("perception") or {}
     if not perception and db:
         try:
-            from app.services.market_dashboard.service import MarketDashboardService
-            mds = MarketDashboardService(db)
-            perception = mds.build_snapshot()
+            from app.services.perception.service import build_perception_snapshot
+
+            perception = build_perception_snapshot(db=db)
         except Exception as exc:
             logger.warning("Could not build perception snapshot: %s", exc)
 

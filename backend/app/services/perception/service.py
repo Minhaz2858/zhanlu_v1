@@ -21,6 +21,12 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+# Single bridge to the EDIA MySQL price warehouse. The perception pipeline must
+# ONLY resolve real prices through here (imported lazily to avoid a hard import
+# cycle at module load). All other call sites (pricing/tool.py, decision/tool.py)
+# reuse PerceptionService rather than re-importing this module.
+from app.services import market_dashboard_service as mds  # noqa: E402
+
 # IsolationForest config
 _ANOMALY_WINDOW = 90
 _CONTAMINATION = 0.05
@@ -135,46 +141,95 @@ class PerceptionService:
             snapshot["intelligence_events"] = intel_events
         return snapshot
 
-    def _get_product_price(self, product_id: str, ref_date: str) -> dict | None:
-        """Get latest price for a product from market_dashboard_service."""
-        if not self.db:
-            return None
-        try:
-            from app.services.market_dashboard.service import MarketDashboardService
-            svc = MarketDashboardService(self.db)
-            # Try to get product snapshot
-            snap = getattr(svc, 'get_product_snapshot', None)
-            if snap:
-                result = snap(product_id)
-                if result:
-                    return {
-                        "latest_price": result.get("price", 0),
-                        "latest_date": result.get("date", ref_date),
-                        "change_7d_pct": result.get("change_7d_pct", 0),
-                        "name_en": result.get("name_en", product_id),
-                        "name_cn": result.get("name_cn", product_id),
-                        "real_data": True,
-                    }
-            # Fallback: use build_snapshot and extract
-            full = svc.build_snapshot()
-            if full and product_id in full:
-                entry = full[product_id]
-                return {
-                    "latest_price": entry.get("latest_price", entry.get("price", 0)),
-                    "latest_date": str(entry.get("latest_date", ref_date)),
-                    "change_7d_pct": entry.get("change_7d_pct", 0),
-                    "name_en": entry.get("name_en", product_id),
-                    "name_cn": entry.get("name_cn", product_id),
-                    "real_data": True,
-                }
-        except Exception as exc:
-            logger.debug("Could not get price for %s: %s", product_id, exc)
-        return None
+    @staticmethod
+    def _get_product_price(product_id: str, ref_date: str | None = None) -> dict | None:
+        """Resolve real latest price + 7-day change for a product.
 
-    def _get_price_history(self, product_id: str) -> list[dict]:
-        """Get 90-day price history for anomaly detection. Stub — returns empty."""
-        # TODO: Wire to real historical price endpoint
-        return []
+        Bridges the knowledge graph node to the EDIA MySQL price warehouse via
+        ``market_dashboard_service.read_product_history_rows``. The 7-day change
+        is computed against the real 7-day-old row (calendar-window based), NOT
+        simply the previous-day row, matching ``get_market_snapshot``.
+
+        This is a ``staticmethod`` because the warehouse call opens its own MySQL
+        connection and needs no SQLAlchemy session — so callers (perception,
+        pricing tool, decision tool) can invoke it without an instance.
+
+        Returns ``None`` when no rows exist so callers skip the product instead
+        of persisting a false zero. Any failure is logged at WARNING (not
+        swallowed at debug) so a future regression surfaces at default log level.
+        """
+        try:
+            from app.models.market_dashboard import PRODUCT_LABELS
+
+            rows = mds.read_product_history_rows(product_id)
+            if not rows:
+                logger.warning("No price history for %s — skipping", product_id)
+                return None
+
+            # rows are [(date_str, price_float)] oldest→newest.
+            last_date, last_price = rows[-1]
+            labels = PRODUCT_LABELS.get(product_id, {})
+            name_en = labels.get("label_en", product_id)
+            name_cn = labels.get("label_zh", product_id)
+
+            # 7-day change: pick the oldest row within the 7-day window before
+            # the latest date (calendar-based, robust to gaps / non-daily data).
+            from datetime import date as _date, timedelta as _td
+
+            try:
+                ref = _date.fromisoformat(last_date)
+            except ValueError:
+                ref = None
+
+            weekly_ref_price = None
+            if ref is not None:
+                # 7-day-old reference = oldest row within [ref-7d, ref) window
+                # (excludes the latest row itself).
+                older = [p for d, p in rows
+                         if _date.fromisoformat(d) < ref
+                         and _date.fromisoformat(d) >= (ref - _td(days=7))]
+                if older:
+                    weekly_ref_price = older[0]
+
+            change_7d_pct = 0.0
+            if weekly_ref_price:
+                try:
+                    change_7d_pct = round(
+                        (last_price - weekly_ref_price) / weekly_ref_price * 100, 2
+                    )
+                except ZeroDivisionError:
+                    change_7d_pct = 0.0
+
+            return {
+                "product_id": product_id,
+                "latest_price": last_price,
+                "latest_date": str(last_date),
+                "change_7d_pct": change_7d_pct,
+                "name_en": name_en,
+                "name_cn": name_cn,
+                "real_data": True,
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not get price for %s: %s", product_id, exc)
+            return None
+
+    @staticmethod
+    def _get_price_history(product_id: str) -> list[dict]:
+        """Get 90-day price history for IsolationForest anomaly detection.
+
+        Delegates to the real ``market_dashboard_service.get_price_history`` so
+        the anomaly detector stops being a no-op. Returns [] on any failure so
+        anomaly detection simply skips rather than crashing the snapshot.
+        """
+        try:
+            rows = mds.get_price_history(product_id, days=90)
+            return [
+                {"date": d, "price": p}
+                for d, p in rows
+            ] if rows else []
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not get price history for %s: %s", product_id, exc)
+            return []
 
     def _compute_macro_regime(self, products: dict) -> tuple[str, str, str]:
         """Compute macro signals: crude_trend, naphtha_trend, market_phase."""

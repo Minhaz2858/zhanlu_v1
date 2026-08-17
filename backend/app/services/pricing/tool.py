@@ -56,13 +56,23 @@ async def _handle_ask_pricing(
             f"cracked_c9, raffinate_c5, sis, c5_resin, styrene, blowing_agent",
         }
 
-    # Build or accept perception snapshot
+    # Build or accept perception snapshot. Route through the perception pipeline
+    # (the single bridge to the real price warehouse) instead of the dead
+    # MarketDashboardService.build_snapshot() that always returned empty.
     perception = args.get("perception") or args.get("perception_snapshot") or {}
     if not perception and db:
         try:
-            from app.services.market_dashboard.service import MarketDashboardService
-            mds = MarketDashboardService(db)
-            perception = mds.build_snapshot()
+            from app.services.perception.service import PerceptionService
+
+            ps = PerceptionService(db=db)
+            entry = ps._get_product_price(product_id)
+            if entry:
+                perception = {"products": {product_id: entry}}
+            else:
+                logger.warning(
+                    "Pricing tool: no perception entry for %s — proceeding with "
+                    "empty perception", product_id
+                )
         except Exception as exc:
             logger.warning("Could not build perception snapshot: %s", exc)
 
