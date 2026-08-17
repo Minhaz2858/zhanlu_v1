@@ -3292,6 +3292,7 @@ async def add_message(
                 "conversation_metadata": conv.metadata_ or {},
                 "chat_session_id": chat_session_id,
                 **(data_ctx_extras or {}),
+                "endpoint": _eff_llm_v2.endpoint,
             }
 
             # Execute tools: sequential for single call, parallel for multiple.
@@ -3988,6 +3989,17 @@ async def resume_conversation(
     # ── User-level LLM overrides ─────────────────────────────────────
     llm_overrides = get_user_llm_overrides(db, user.id)
 
+    # ── Resolve project-bound LLM endpoint (same precedence as add_message) ──
+    _resume_eff_llm = resolve_effective_llm(
+        db,
+        project_id=getattr(conv, "project_id", None),
+        agent_name=conv.agent_name,
+        user_model=None,
+        user_is_admin=(user.role == "admin"),
+        org_id=conv.org_id,
+        app_id=conv.app_id,
+    )
+
     resume_state = (conv.metadata_ or {}).get("_resume_state")
     if not resume_state:
         raise HTTPException(status_code=400, detail="No pending approval to resume")
@@ -4042,6 +4054,7 @@ async def resume_conversation(
         "conversation_metadata": conv.metadata_ or {},
         "chat_session_id": chat_session_id,
         **(data_ctx_extras or {}),
+        "endpoint": _resume_eff_llm.endpoint,
     }
 
     messages = conv.messages or []
@@ -7457,6 +7470,7 @@ async def add_message_stream(
                 "conversation_metadata": conv.metadata_ or {},
                 "chat_session_id": chat_session_id,
                 **(data_ctx_extras or {}),
+                "endpoint": effective_llm.endpoint,
             }
 
             if len(parsed_calls) == 1:
