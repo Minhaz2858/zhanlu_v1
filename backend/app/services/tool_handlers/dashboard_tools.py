@@ -637,6 +637,16 @@ class UpdateFullstackDashboardArgs(BaseModel):
         return v
 
 
+class RevertFullstackDashboardArgs(BaseModel):
+    slug: str
+
+    @field_validator("slug")
+    def _slug_ok(cls, v: str) -> str:
+        if not _SLUG_RE.match(v):
+            raise ValueError("slug must be lowercase [a-z0-9_-], 1-64 chars")
+        return v
+
+
 async def _create_fullstack_dashboard(
     args: dict, db, user_id, context: Optional[dict] = None,
 ) -> dict:
@@ -703,6 +713,8 @@ async def _create_fullstack_dashboard(
 
     app_url = f"/api/dashboards/apps/{parsed.slug}/"
     dashboard_app_manager.set_status(parsed.slug, "running", app_url=app_url)
+    # T6: first restore point — "undo" can bring the app back to its initial state.
+    dashboard_app_manager.commit_version(parsed.slug, "create")
     logger.info("full-stack dashboard created: %s (%d metrics)", parsed.slug, len(parsed.metrics))
     return {
         "success": True,
@@ -930,6 +942,63 @@ LIST_FULLSTACK_DASHBOARDS_SCHEMA = {
     },
 }
 
+REVERT_FULLSTACK_DASHBOARD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "revert_fullstack_dashboard",
+        "description": (
+            "Undo the last accepted change to a full-stack dashboard app. Restores "
+            "the previous generated version (files + config) and hot-reloads the "
+            "app. Use when the user is unhappy with the latest edit and asks to "
+            "undo / revert / go back."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Existing app slug."},
+            },
+            "required": ["slug"],
+        },
+    },
+}
+
+
+async def _revert_fullstack_dashboard(
+    args: dict, db, user_id, context: Optional[dict] = None,
+) -> dict:
+    """Restore the most recent snapshot of a dashboard app (undo last change)."""
+    ctx = context or {}
+    org_id = ctx.get("org_id") or "default-org"
+    if not _fullstack_dashboard_enabled():
+        return {
+            "success": False,
+            "error": (
+                "The full-stack dashboard pipeline is disabled "
+                "(FULLSTACK_DASHBOARD_ENABLED=False)."
+            ),
+        }
+    try:
+        parsed = RevertFullstackDashboardArgs.model_validate(args)
+    except ValidationError as e:
+        return {"success": False, "error": f"Invalid args: {e}"}
+
+    from app.models.dashboard_app import DashboardApp
+    record = (
+        db.query(DashboardApp)
+        .filter(DashboardApp.slug == parsed.slug, DashboardApp.org_id == org_id)
+        .first()
+    )
+    if record is None:
+        return {"success": False, "error": f"No dashboard app with slug '{parsed.slug}'."}
+
+    from app.services.dashboard_app.manager import dashboard_app_manager
+
+    result = dashboard_app_manager.revert(parsed.slug)
+    return {"success": result.get("success", False),
+            "message": result.get("message"),
+            "slug": parsed.slug}
+
+
 try:
     from app.services.tool_registry import registry
 
@@ -965,6 +1034,18 @@ try:
         toolset="dashboards",
         description="List dashboard apps for the current org.",
         emoji="\U0001f5c2\ufe0f",
+        is_async=True,
+        check_fn=_fullstack_dashboard_enabled,
+        max_result_size_chars=4_000,
+    )
+    registry.register(
+        name="revert_fullstack_dashboard",
+        schema=REVERT_FULLSTACK_DASHBOARD_SCHEMA,
+        handler=_revert_fullstack_dashboard,
+        category="dashboards",
+        toolset="dashboards",
+        description="Undo the last accepted change to a full-stack dashboard app.",
+        emoji="\u21a9\ufe0f",
         is_async=True,
         check_fn=_fullstack_dashboard_enabled,
         max_result_size_chars=4_000,

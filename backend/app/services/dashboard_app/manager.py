@@ -17,6 +17,7 @@ import asyncio
 import importlib
 import logging
 import sys
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI
@@ -24,6 +25,7 @@ from fastapi import FastAPI
 from app.database import SessionLocal
 from app.models.dashboard_app import DashboardApp
 from app.services.dashboard_app.generator import module_name
+from app.services.dashboard_app.versioning import consume_latest, snapshot_app_dir
 
 logger = logging.getLogger(__name__)
 
@@ -116,12 +118,52 @@ class DashboardAppManager:
         """Hot-reload: regenerate files, drop cached modules, remount, restart poller."""
         from app.services.dashboard_app.generator import get_generator
 
+        # T6: capture the pre-change state so the user can say "undo" to revert.
+        self.commit_version(slug, "pre-change")
         get_generator().generate(spec)
         self._reload_module(slug)
         self.unmount(slug)
         self.mount(slug)
         self.start_poller(slug)
         logger.info("dashboard app regenerated: %s", slug)
+
+    # ── versioning (T6: snapshot-per-change + undo) ──
+    def commit_version(self, slug: str, message: str) -> Optional[Path]:
+        """Snapshot the current on-disk app (a restore point).
+
+        Called after every accepted create/update so the user can say "undo".
+        Returns the snapshot dir, or None when the app dir does not exist yet.
+        """
+        from app.services.dashboard_app.generator import get_generator
+
+        app_dir = get_generator().app_dir(slug)
+        return snapshot_app_dir(app_dir, message)
+
+    def revert(self, slug: str) -> Dict[str, Any]:
+        """Restore the most recent snapshot and hot-reload the app.
+
+        "Undo" semantics: each accepted change created a snapshot, and the
+        most recent one is restored + consumed. Returns a JSON-safe result.
+        """
+        from app.services.dashboard_app.generator import get_generator
+
+        app_dir = get_generator().app_dir(slug)
+        restored = consume_latest(app_dir)
+        if restored is None:
+            return {"success": False, "slug": slug,
+                    "message": "Nothing to undo — no previous version found for this dashboard."}
+        try:
+            self._reload_module(slug)
+            self.unmount(slug)
+            self.mount(slug)
+            self.start_poller(slug)
+        except Exception as exc:
+            logger.exception("revert(%s): remount failed", slug)
+            return {"success": False, "slug": slug,
+                    "message": f"Snapshot restored, but remount failed: {exc}"}
+        self.set_status(slug, "running")
+        return {"success": True, "slug": slug, "restored_snapshot": restored.name,
+                "message": f"Reverted to the previous version ({restored.name})."}
 
     # ── pollers ──
     def start_poller(self, slug: str) -> None:

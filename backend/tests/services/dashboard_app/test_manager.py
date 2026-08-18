@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 import app.services.dashboard_app.manager as mgr_mod
+from app.services.dashboard_app.generator import DashboardAppGenerator, TEMPLATE_DIR
 from app.services.dashboard_app.manager import DashboardAppManager
 
 
@@ -156,3 +157,71 @@ def test_unmount_missing_is_noop(mgr):
     # unmounting a slug that was never mounted must not raise
     manager.unmount("never-mounted")
     assert "never-mounted" not in manager._mounted
+
+
+def _tmp_generator(monkeypatch, tmp_path):
+    """Point manager's get_generator at an isolated temp-dir generator."""
+    from app.services.dashboard_app import generator as gen_mod
+
+    gen = DashboardAppGenerator(template_dir=TEMPLATE_DIR, apps_dir=tmp_path / "apps")
+    monkeypatch.setattr(gen_mod, "get_generator", lambda: gen)
+    return gen
+
+
+def test_commit_version_snapshots_app_dir(mgr, monkeypatch, tmp_path):
+    """T6: commit_version writes a .versions snapshot for the on-disk app."""
+    manager, fake = mgr
+    gen = _tmp_generator(monkeypatch, tmp_path)
+    gen.generate({"name": "S", "slug": "t6-snap", "datasource_id": "kb", "metrics": []})
+
+    snap = manager.commit_version("t6-snap", "create")
+    assert snap is not None and snap.is_dir()
+    assert (snap / "api.py").is_file()
+    assert (snap / "config.json").is_file()
+
+
+def test_commit_version_missing_dir_returns_none(mgr, monkeypatch, tmp_path):
+    """T6: commit_version on a never-generated slug must not raise."""
+    manager, fake = mgr
+    _tmp_generator(monkeypatch, tmp_path)
+    assert manager.commit_version("never-generated", "create") is None
+
+
+def test_revert_nothing_to_undo(mgr, monkeypatch, tmp_path):
+    """T6: revert with no snapshots returns a helpful failure, never raises."""
+    manager, fake = mgr
+    _tmp_generator(monkeypatch, tmp_path)
+    manager.create_app_record({"name": "S", "slug": "t6-noundo", "datasource_id": "kb", "metrics": []},
+                              "org1", "u1")
+    result = manager.revert("t6-noundo")
+    assert result["success"] is False
+    assert "Nothing to undo" in result["message"]
+
+
+def test_revert_restores_previous_version_and_reloads(mgr, monkeypatch, tmp_path):
+    """T6: revert restores the pre-change files and hot-reloads the app."""
+    manager, fake = mgr
+    gen = _tmp_generator(monkeypatch, tmp_path)
+    gen.generate({"name": "S", "slug": "t6-revert", "datasource_id": "kb", "metrics": []})
+    manager.create_app_record({"name": "S", "slug": "t6-revert", "datasource_id": "kb", "metrics": []},
+                              "org1", "u1")
+    manager.commit_version("t6-revert", "create")
+
+    # Simulate an edit (as regenerate() would) after the snapshot.
+    app_dir = gen.app_dir("t6-revert")
+    original = (app_dir / "api.py").read_text(encoding="utf-8")
+    (app_dir / "api.py").write_text(original + "\n# EDIT-MARKER\n", encoding="utf-8")
+    assert "# EDIT-MARKER" in (app_dir / "api.py").read_text(encoding="utf-8")
+
+    calls = []
+    monkeypatch.setattr(manager, "_reload_module", lambda slug: calls.append(("reload", slug)))
+    monkeypatch.setattr(manager, "unmount", lambda slug: calls.append(("unmount", slug)))
+    monkeypatch.setattr(manager, "mount", lambda slug: calls.append(("mount", slug)))
+    monkeypatch.setattr(manager, "start_poller", lambda slug: calls.append(("poller", slug)))
+
+    result = manager.revert("t6-revert")
+    assert result["success"] is True
+    assert "# EDIT-MARKER" not in (app_dir / "api.py").read_text(encoding="utf-8")
+    assert calls == [("reload", "t6-revert"), ("unmount", "t6-revert"),
+                     ("mount", "t6-revert"), ("poller", "t6-revert")]
+    assert manager.get_app("t6-revert").status == "running"

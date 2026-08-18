@@ -101,6 +101,7 @@ class DashboardAppGenerator:
         (app_dir / "config.json").write_text(
             json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        self._scaffold_gitignore(app_dir)
         self._copy_frontend(app_dir)
         logger.info("dashboard app generated at %s", app_dir)
         return app_dir
@@ -135,6 +136,22 @@ class DashboardAppGenerator:
             "design_system_ref": spec.get("design_system_ref"),
             "metrics": metrics,
         }
+
+    def _scaffold_gitignore(self, app_dir: Path) -> None:
+        """Write a .gitignore so per-app versioning never tracks build artifacts.
+
+        The per-app directory lives under app/dashboards/{slug}/ and, if the
+        repo owner later chooses git-based versioning, this prevents dist/ and
+        the .versions/ snapshot store from being committed.
+        """
+        (app_dir / ".gitignore").write_text(
+            "# Generated dashboard app — build artifacts & version snapshots\n"
+            "dist/\n"
+            ".versions/\n"
+            "__pycache__/\n"
+            "*.pyc\n",
+            encoding="utf-8",
+        )
 
     def _copy_frontend(self, app_dir: Path) -> None:
         src = self.template_dir / "frontend" / "dist"
