@@ -105,7 +105,27 @@ export default function App() {
     [hasFilters, refetchMetric],
   );
 
-  const streamStatus = useDashboardStream(slug, onFrame);
+  // Fresh full snapshot after any WS reconnect — live frames may have been
+  // missed while disconnected, so the REST state is the source of truth again.
+  const refetchAll = useCallback(() => {
+    if (!config) return;
+    config.metrics.forEach((m) => refetchMetric(m.id));
+  }, [config, refetchMetric]);
+
+  const streamStatus = useDashboardStream(slug, onFrame, refetchAll);
+
+  // Tell the parent (FullStackDashboardViewer) about our WS state so it can
+  // show a reconnect indicator in its toolbar without reaching into the iframe.
+  useEffect(() => {
+    try {
+      window.parent.postMessage(
+        { type: 'dashboard-ws-status', status: streamStatus },
+        window.location.origin,
+      );
+    } catch {
+      /* cross-origin parent — ignore */
+    }
+  }, [streamStatus]);
 
   if (configError) {
     return (

@@ -17,7 +17,20 @@ import { Loader2, RefreshCw, AlertTriangle } from 'lucide-react';
 export default function FullStackDashboardViewer({ appUrl, name, slug }) {
   const [status, setStatus] = useState('loading'); // loading | ready | error
   const [reloadKey, setReloadKey] = useState(0);
+  const [wsStatus, setWsStatus] = useState(null); // 'live' | 'connecting' | 'reconnecting'
   const iframeRef = useRef(null);
+
+  // The dashboard app posts its WebSocket state up (same-origin iframe), so the
+  // viewer toolbar can show a reconnect indicator without reaching into the app.
+  useEffect(() => {
+    function onMessage(e) {
+      if (e.data && e.data.type === 'dashboard-ws-status' && typeof e.data.status === 'string') {
+        setWsStatus(e.data.status);
+      }
+    }
+    window.addEventListener('message', onMessage);
+    return () => window.removeEventListener('message', onMessage);
+  }, []);
 
   const resolvedUrl = useMemo(() => {
     if (!appUrl) return null;
@@ -62,6 +75,12 @@ export default function FullStackDashboardViewer({ appUrl, name, slug }) {
           {name || slug || 'Dashboard'} · live app
         </span>
         <div className="flex items-center gap-2">
+          {wsStatus === 'reconnecting' && (
+            <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-[11px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+              <Loader2 className="h-3 w-3 animate-spin" />
+              Reconnecting…
+            </span>
+          )}
           {status === 'loading' && (
             <Loader2 className="h-3.5 w-3.5 animate-spin text-zinc-400" />
           )}

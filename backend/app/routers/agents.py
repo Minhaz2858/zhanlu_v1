@@ -3185,6 +3185,7 @@ async def add_message(
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
         _gate_attempts = 0  # universal self-eval re-plan nudges this turn
+        _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
         # Finish-line state (UnboundLocalError discipline: initialized BEFORE
         # the loop so any post-loop read is safe). ``dashboard_forced`` tracks
         # whether the dashboard guard forced ``create_dashboard`` this turn;
@@ -3290,10 +3291,34 @@ async def add_message(
                     "function": {"name": "create_dashboard"},
                 }
                 dashboard_forced = True
+            # PPTX turn-guard: mirror the dashboard forcing for artifact decks.
+            # When the user asked for a PPT and the tool-loop budget window is
+            # closing with no pptx artifact created, force create_artifact so
+            # the model must emit the call (dashboard forcing wins via the
+            # dashboard_forced guard inside should_force_create_pptx).
+            _pptx_forced = False
+            if should_force_create_pptx(
+                user_content,
+                tool_calls_for_frontend,
+                iteration=iteration,
+                max_iterations=MAX_TOOL_ITERATIONS,
+                has_artifact_tool="create_artifact" in _tool_names,
+                dashboard_forced=dashboard_forced,
+            ):
+                logger.info(
+                    "v2 stream: forcing create_artifact for pptx request "
+                    "(conv=%s, iter=%d, prior_tool_count=%d)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_artifact"},
+                }
+                _pptx_forced = True
             # Finish line: on the final iteration force tool_choice="none" so
-            # the LLM must answer in text. Dashboard-guard forcing wins.
+            # the LLM must answer in text. Guard forcing (dashboard + pptx) wins.
             tool_choice = _finish_line_tool_choice(
-                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced, tool_choice,
+                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced or _pptx_forced, tool_choice,
             )
             try:
                 # P1.3: Pre-API deterministic tool result pruning (no LLM call)
@@ -3441,6 +3466,32 @@ async def add_message(
                     llm_messages.append({"role": "user", "content": _verify_nudge})
                     _verify_attempts += 1
                     continue
+                # P2.1.5: PPTX turn-guard — if the user asked for a PPT deck
+                # and the model ended its turn with text only (no tool call),
+                # nudge it to call create_artifact(type="pptx") now (cap 1/turn).
+                # Runs BEFORE the self-eval gate: a missing deliverable
+                # outranks answer-quality issues on this boundary.
+                _pptx_guard = pptx_turn_guard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                    attempts=_pptx_nudge_attempts,
+                )
+                if _pptx_guard.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _pptx_guard.message})
+                    _pptx_nudge_attempts += 1
+                    logger.info(
+                        "v2 stream: pptx turn-guard nudge injected (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                    continue
+                if _pptx_guard.action == "disclose":
+                    logger.warning(
+                        "v2 stream: pptx deliverable not generated; disclosure "
+                        "appended (conv=%s, iter=%d)", conversation_id, iteration,
+                    )
+                    assistant_content = (assistant_content or "") + " " + _pptx_guard.message
                 # P2.2: Universal Self-Evaluation & Re-Planning gate (re-plan
                 # up to SELF_EVAL_MAX_REPLANS times before best-effort answer).
                 _gate_result = await _check_answer_verification_gate(
@@ -4612,6 +4663,7 @@ async def resume_conversation(
     _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
     conv_budget = IterationBudget(max_total=_max_iters)
     _verify_attempts = 0
+    _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn (resume)
     # Finish-line state (UnboundLocalError discipline). The loop variable
     # shadows the outer ``iteration``, so capture the final value it will take
     # BEFORE the loop rebinds it.
@@ -4736,6 +4788,30 @@ async def resume_conversation(
                 llm_messages.append({"role": "user", "content": _verify_nudge})
                 _verify_attempts += 1
                 continue
+            # P2.1.5: PPTX turn-guard (resume loop) — same deliverable
+            # enforcement: nudge (cap 1/turn) or disclose. Runs BEFORE the
+            # self-eval gate so a missing deliverable is addressed first.
+            _pptx_guard = pptx_turn_guard(
+                user_content,
+                tool_calls_for_frontend,
+                budget_remaining=_final_iteration - iteration,
+                attempts=_pptx_nudge_attempts,
+            )
+            if _pptx_guard.action == "nudge":
+                llm_messages.append({"role": "assistant", "content": assistant_content})
+                llm_messages.append({"role": "user", "content": _pptx_guard.message})
+                _pptx_nudge_attempts += 1
+                logger.info(
+                    "resume: pptx turn-guard nudge injected (conv=%s, iter=%d)",
+                    conversation_id, iteration,
+                )
+                continue
+            if _pptx_guard.action == "disclose":
+                logger.warning(
+                    "resume: pptx deliverable not generated; disclosure "
+                    "appended (conv=%s, iter=%d)", conversation_id, iteration,
+                )
+                assistant_content = (assistant_content or "") + " " + _pptx_guard.message
             # P2.2: Universal Self-Evaluation & Re-Planning gate (resume loop)
             _gate_result = await _check_answer_verification_gate(
                 user_content,
@@ -7296,6 +7372,7 @@ async def add_message_stream(
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
         _gate_attempts = 0  # universal self-eval re-plan nudges this turn
+        _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
         # Initialize BEFORE the loop: the budget guard and the tool-call
         # loop guard can both ``break`` on the FIRST iteration, before the
         # in-loop assignment runs — the post-loop ``if not content_streamed``
@@ -7483,11 +7560,35 @@ async def add_message_stream(
                     "function": {"name": "create_dashboard"},
                 }
                 dashboard_forced = True
+            # PPTX turn-guard: mirror the dashboard forcing for artifact decks.
+            # When the user asked for a PPT and the tool-loop budget window is
+            # closing with no pptx artifact created, force create_artifact so
+            # the model must emit the call (dashboard forcing wins via the
+            # dashboard_forced guard inside should_force_create_pptx).
+            _pptx_forced = False
+            if should_force_create_pptx(
+                user_content,
+                tool_calls_for_frontend,
+                iteration=iteration,
+                max_iterations=MAX_TOOL_ITERATIONS,
+                has_artifact_tool="create_artifact" in _tool_names,
+                dashboard_forced=dashboard_forced,
+            ):
+                logger.info(
+                    "v3 stream: forcing create_artifact for pptx request "
+                    "(conv=%s, iter=%d, prior_tool_count=%d)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_artifact"},
+                }
+                _pptx_forced = True
 
             # Finish line: on the final iteration force tool_choice="none" so
-            # the LLM must answer in text. Dashboard-guard forcing wins.
+            # the LLM must answer in text. Guard forcing (dashboard + pptx) wins.
             tool_choice = _finish_line_tool_choice(
-                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced, tool_choice,
+                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced or _pptx_forced, tool_choice,
             )
 
             # ── Gap 1: true token streaming ───────────────────────────
@@ -7714,6 +7815,31 @@ async def add_message_stream(
                     llm_messages.append({"role": "user", "content": _verify_nudge})
                     _verify_attempts += 1
                     continue
+                # P2.1.5: PPTX turn-guard (v3 loop) — if the user asked for a
+                # PPT deck and the model ended its turn with text only (no tool
+                # call), nudge it to call create_artifact(type="pptx") now
+                # (cap 1/turn). Runs BEFORE the self-eval gate.
+                _pptx_guard = pptx_turn_guard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                    attempts=_pptx_nudge_attempts,
+                )
+                if _pptx_guard.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _pptx_guard.message})
+                    _pptx_nudge_attempts += 1
+                    logger.info(
+                        "v3 stream: pptx turn-guard nudge injected (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                    continue
+                if _pptx_guard.action == "disclose":
+                    logger.warning(
+                        "v3 stream: pptx deliverable not generated; disclosure "
+                        "appended (conv=%s, iter=%d)", conversation_id, iteration,
+                    )
+                    assistant_content = (assistant_content or "") + " " + _pptx_guard.message
                 # P2.2: Universal Self-Evaluation & Re-Planning gate (v3 loop)
                 _gate_result = await _check_answer_verification_gate(
                     user_content,

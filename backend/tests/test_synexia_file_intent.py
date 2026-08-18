@@ -37,6 +37,19 @@ class TestDetectFileIntent(unittest.TestCase):
         self.assertEqual(detect_file_intent("a pitch deck"), "pptx")
         self.assertEqual(detect_file_intent("a slide deck"), "pptx")
 
+    def test_pptx_standalone_ppt(self):
+        # Bare "PPT"/"ppt" (no "x", no dot) is the most common request form.
+        self.assertEqual(detect_file_intent("make a sales overview PPT"), "pptx")
+        self.assertEqual(detect_file_intent("Please build a ppt for me"), "pptx")
+
+    def test_pptx_chinese(self):
+        # CJK-adjacent tokens have no \b boundary; the pattern must not rely
+        # on word boundaries for 演示文稿 / 幻灯片 / CJK+PPT.
+        self.assertEqual(detect_file_intent("做一份销售总览PPT"), "pptx")
+        self.assertEqual(detect_file_intent("帮我生成一个演示文稿"), "pptx")
+        self.assertEqual(detect_file_intent("做一个幻灯片汇报"), "pptx")
+        self.assertEqual(detect_file_intent("帮我做一个ppt汇报材料"), "pptx")
+
     def test_xlsx_keyword(self):
         self.assertEqual(detect_file_intent("export to xlsx"), "xlsx")
         self.assertEqual(detect_file_intent("excel workbook"), "xlsx")

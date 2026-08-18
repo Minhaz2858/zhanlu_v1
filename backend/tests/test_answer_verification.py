@@ -172,6 +172,117 @@ def test_dimension_present_in_assistant_text_counts_covered():
     assert "coverage" not in result.signals
 
 
+# ── Detectors: blank dimension columns ─────────────────────────────────
+
+
+def test_blank_dimension_detected_when_name_column_all_blank():
+    result = av.evaluate_answer(
+        "show me last month sales data",
+        [{"tool": "execute_query",
+          "columns": ["FCUSTMATNAME", "amount"],
+          "rows": [{"FCUSTMATNAME": "", "amount": 100},
+                   {"FCUSTMATNAME": None, "amount": 200},
+                   {"FCUSTMATNAME": "   ", "amount": 300}]}],
+        "Here are the sales figures by product.",
+        attempts=0, budget_remaining=30,
+    )
+    assert result.status == "INCOMPLETE"
+    assert "blank_dimension" in result.signals
+    assert any("FCUSTMATNAME" in g for g in result.gaps)
+
+
+def test_blank_dimension_not_detected_when_name_column_has_values():
+    result = av.evaluate_answer(
+        "show me sales data",
+        [{"tool": "execute_query",
+          "columns": ["FCUSTMATNAME", "amount"],
+          "rows": [{"FCUSTMATNAME": "PVC", "amount": 100},
+                   {"FCUSTMATNAME": "C5", "amount": 200}]}],
+        "PVC: 100, C5: 200.",
+        attempts=0, budget_remaining=30,
+    )
+    assert "blank_dimension" not in result.signals
+
+
+def test_blank_dimension_not_detected_on_numeric_only_columns():
+    result = av.evaluate_answer(
+        "what are the amounts?",
+        [{"tool": "execute_query",
+          "columns": ["amount", "volume"],
+          "rows": [{"amount": None, "volume": 0},
+                   {"amount": "", "volume": 0}]}],
+        "Amounts listed above.",
+        attempts=0, budget_remaining=30,
+    )
+    assert "blank_dimension" not in result.signals
+
+
+def test_blank_dimension_not_detected_on_empty_rows():
+    result = av.evaluate_answer(
+        "what are the product names?",
+        [{"tool": "execute_query", "columns": ["FCUSTMATNAME", "amount"], "rows": []}],
+        "No rows returned.",
+        attempts=0, budget_remaining=30,
+    )
+    assert "blank_dimension" not in result.signals
+
+
+def test_blank_dimension_not_detected_when_secondary_name_column_blank():
+    """Only the FIRST name-role column is the primary dimension; a later
+    blank name column must not fire (avoids over-triggering)."""
+    result = av.evaluate_answer(
+        "show me sales data",
+        [{"tool": "execute_query",
+          "columns": ["FCUSTMATNAME", "FNAME", "amount"],
+          "rows": [{"FCUSTMATNAME": "PVC", "FNAME": "", "amount": 100},
+                   {"FCUSTMATNAME": "C5", "FNAME": None, "amount": 200}]}],
+        "PVC: 100, C5: 200.",
+        attempts=0, budget_remaining=30,
+    )
+    assert "blank_dimension" not in result.signals
+
+
+def test_blank_dimension_nudge_suggests_master_join():
+    result = av.evaluate_answer(
+        "show me last month sales data",
+        [{"tool": "execute_query",
+          "columns": ["FCUSTMATNAME", "amount"],
+          "rows": [{"FCUSTMATNAME": "", "amount": 100}]}],
+        "Sales figures by product.",
+        attempts=0, budget_remaining=30,
+    )
+    nudge = av.build_replan_nudge(result)
+    assert "entity master" in nudge.lower() or "master" in nudge.lower()
+    assert "join" in nudge.lower()
+
+
+def test_blank_dimension_detected_without_columns_key():
+    """Real QueryService payloads carry rows dicts but NO 'columns' key (main
+    loop + data-agent sub-loop forward the raw payload). The detector must
+    derive columns from rows[0].keys() or it is dead code."""
+    result = av.evaluate_answer(
+        "show me last month sales data",
+        [{"tool": "execute_query",
+          "rows": [{"FCUSTMATNAME": "", "amount": 100},
+                   {"FCUSTMATNAME": None, "amount": 200}]}],
+        "Here are the sales figures.",
+        attempts=0, budget_remaining=30,
+    )
+    assert result.status == "INCOMPLETE"
+    assert "blank_dimension" in result.signals
+
+
+def test_blank_dimension_not_detected_numeric_without_columns_key():
+    result = av.evaluate_answer(
+        "what are the amounts?",
+        [{"tool": "execute_query",
+          "rows": [{"amount": None, "volume": 0}]}],
+        "Amounts listed above.",
+        attempts=0, budget_remaining=30,
+    )
+    assert "blank_dimension" not in result.signals
+
+
 # ── Gate semantics: complete answers ───────────────────────────────────
 
 

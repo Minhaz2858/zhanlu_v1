@@ -211,6 +211,35 @@ class SchemaGraph:
             reverse=True,
         )
 
+    def find_master_for_fk(self, table: str, fk_col: str) -> tuple[str, str, str] | None:
+        """Return ``(master_table, master_join_col, fk_col)`` if an
+        ``entity_master``-role target connects via an edge whose source columns
+        include ``fk_col``; else ``None``.
+
+        Reuses ``get_related_tables`` edges + ``node.table_role ==
+        "entity_master"``. Structural only — no hardcoded table/column names.
+        """
+        if not fk_col:
+            return None
+        for edge in self.get_related_tables(table):
+            src_cols = edge.get("source_columns") or []
+            if fk_col not in src_cols:
+                continue
+            target = edge.get("target_table")
+            target_node = self.nodes.get(target)
+            if target_node and target_node.table_role == "entity_master":
+                tgt_cols = edge.get("target_columns") or []
+                # Aligned lists: use the column matching fk_col's index.
+                join_col = None
+                try:
+                    join_col = tgt_cols[src_cols.index(fk_col)]
+                except (ValueError, IndexError):
+                    join_col = tgt_cols[0] if tgt_cols else None
+                if not join_col:
+                    continue
+                return (target, join_col, fk_col)
+        return None
+
     # -- rendering -------------------------------------------------------
 
     def to_llm_context(

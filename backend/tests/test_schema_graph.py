@@ -147,3 +147,73 @@ def test_get_related_tables_empty_for_unknown():
         graph = SchemaGraph(db, "kb1").build(["a"])
 
     assert graph.get_related_tables("nope") == []
+
+
+# -- find_master_for_fk -------------------------------------------------
+
+
+def _meta_with_role(mid, name, role):
+    m = _meta(mid, name)
+    m.table_role = role
+    return m
+
+
+def _build_graph(db, tables, metas=None):
+    with patch("app.services.db.schema_graph.SchemaService") as MockSvc, \
+         patch("app.services.db.schema_graph.get_connector", return_value=_FakeConn()):
+        MockSvc.return_value.describe_table.return_value = {"columns": []}
+        return SchemaGraph(db, "kb1").build(tables)
+
+
+def test_find_master_for_fk_hits_entity_master():
+    db = _make_db(
+        kb=_kb(),
+        metas=[
+            _meta_with_role("m_a", "a", "fact"),
+            _meta_with_role("m_b", "b", "entity_master"),
+        ],
+        rels=[
+            _rel("m_a", "m_b", kind="FK",
+                  src_cols=["FMATERIALID"], tgt_cols=["id"]),
+        ],
+    )
+    graph = _build_graph(db, ["a", "b"])
+    assert graph.find_master_for_fk("a", "FMATERIALID") == ("b", "id", "FMATERIALID")
+
+
+def test_find_master_for_fk_none_when_fk_not_in_edge_columns():
+    db = _make_db(
+        kb=_kb(),
+        metas=[
+            _meta_with_role("m_a", "a", "fact"),
+            _meta_with_role("m_b", "b", "entity_master"),
+        ],
+        rels=[
+            _rel("m_a", "m_b", kind="FK",
+                  src_cols=["OTHER_COL"], tgt_cols=["id"]),
+        ],
+    )
+    graph = _build_graph(db, ["a", "b"])
+    assert graph.find_master_for_fk("a", "FMATERIALID") is None
+
+
+def test_find_master_for_fk_none_when_target_not_master():
+    db = _make_db(
+        kb=_kb(),
+        metas=[
+            _meta_with_role("m_a", "a", "fact"),
+            _meta_with_role("m_b", "b", "dimension"),
+        ],
+        rels=[
+            _rel("m_a", "m_b", kind="FK",
+                  src_cols=["FMATERIALID"], tgt_cols=["id"]),
+        ],
+    )
+    graph = _build_graph(db, ["a", "b"])
+    assert graph.find_master_for_fk("a", "FMATERIALID") is None
+
+
+def test_find_master_for_fk_none_for_unknown_table():
+    db = _make_db(kb=_kb(), metas=[_meta_with_role("m_a", "a", "fact")])
+    graph = _build_graph(db, ["a"])
+    assert graph.find_master_for_fk("nope", "col") is None

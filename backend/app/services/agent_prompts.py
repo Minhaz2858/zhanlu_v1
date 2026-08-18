@@ -141,7 +141,13 @@ def _build_default_skills_block() -> str:
             "(`skill_view(\"pptx\")` → author HTML slides → html2pptx) for full layout freedom. For data reports, "
             "prefer the structured `create_artifact` path, which auto-plans, renders, audits, and polishes. "
             "Every deck must follow a clear narrative arc (hook → context → evidence → insight → action → closing) "
-            "and end with a next-step or call-to-action slide.\n\n",
+            "and end with a next-step or call-to-action slide.\n"
+            "PPTX DELIVERABLE (HARD RULE): the .pptx file IS the deliverable — you MUST call "
+            "`create_artifact(type=\"pptx\", ...)` (or the html2pptx skill path for design-heavy decks) "
+            "IN THIS TURN, after gathering the data. NEVER end the turn with a promise such as "
+            "\"I'll build the PPT\" or a markdown-only summary — if you can describe the deck, you have "
+            "enough data to build it. Do not spend the whole budget on exploratory queries: run at most "
+            "two, then create the artifact with the numbers you already have.\n\n",
         ]
         for fmt_key, entry in DEFAULT_SKILLS.items():
             skill_name = entry["skill_name"]

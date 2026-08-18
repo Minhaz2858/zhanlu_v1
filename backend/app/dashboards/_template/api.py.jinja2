@@ -16,6 +16,7 @@ from fastapi import APIRouter, Depends, Request, WebSocket
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.services.auth_service import auth_service
 from app.services.dashboard_app.realtime import get_connection_manager
 
 from .queries import METRICS, run_metric
@@ -49,7 +50,13 @@ async def get_metric(metric_id: str, request: Request, db: Session = Depends(get
 
 
 @router.websocket("/ws")
-async def ws_endpoint(websocket: WebSocket) -> None:
+async def ws_endpoint(websocket: WebSocket, token: str | None = None) -> None:
+    # T9: WebSocket auth — the client sends the session access token as a
+    # query param (?token=…) because browser WebSockets cannot set headers.
+    # Anonymous or invalid connections are rejected with close code 1008.
+    if not token or not auth_service.verify_token(token):
+        await websocket.close(code=1008)
+        return
     mgr = get_connection_manager()
     await mgr.connect(SLUG, websocket)
     try:

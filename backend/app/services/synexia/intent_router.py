@@ -42,7 +42,7 @@ FileFormat = Literal["docx", "pptx", "xlsx", "pdf", "md", "html", "dashboard"]
 # - "md"   prefix also matches "md" / "markdown"
 _FORMAT_PATTERNS: tuple[tuple[FileFormat, str], ...] = (
     ("docx", r"\b(?:docx|word\s*document)\b|\.docx?\b|公文|报告文档"),
-    ("pptx", r"\b(?:pptx|powerpoint|\.ppt|presentation\s*deck|slide\s*deck|pitch\s*deck|project\s*deck)\b"),
+    ("pptx", r"(?<![a-zA-Z])(?:pptx|ppt|powerpoint)(?![a-zA-Z])|\.ppt\b|presentation\s*deck|slide\s*deck|pitch\s*deck|project\s*deck|演示文稿|幻灯片"),
     ("xlsx", r"\b(?:xlsx|excel\s*workbook|spreadsheet)\b|\.xls\b"),
     ("pdf",  r"\b(?:pdf)\b"),
     ("md",   r"\bmarkdown\b|\.md\b"),

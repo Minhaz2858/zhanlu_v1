@@ -13,7 +13,7 @@
  */
 const FILE_FORMAT_PATTERNS = [
   { ext: 'docx', regex: /\b(docx|word\s*document|word\s*file|ms\s*word|\.docx)\b/i },
-  { ext: 'pptx', regex: /\b(pptx|powerpoint|presentation\s*deck|slide\s*deck|slides?\s*deck|\.pptx)\b/i },
+  { ext: 'pptx', regex: /(?<![a-zA-Z])(pptx|ppt|powerpoint)(?![a-zA-Z])|\.pptx?\b|presentation\s*deck|slide\s*deck|slides?\s*deck|演示文稿|幻灯片/i },
   { ext: 'pdf',  regex: /\b(\.pdf|adobe\s*pdf)\b/i },
   { ext: 'xlsx', regex: /\b(xlsx|excel\s*spreadsheet|excel\s*file|spreadsheet|\.xlsx)\b/i },
   { ext: 'md',   regex: /\b(markdown|\.md|md\s*file)\b/i },

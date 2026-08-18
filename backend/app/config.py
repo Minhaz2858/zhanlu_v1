@@ -411,6 +411,10 @@ class Settings(BaseSettings):
     # Routes "edit my deck"-style messages to the six deck-edit tools while
     # keeping "regenerate / redo / from scratch" on the full re-generation path.
     DECK_EDIT_ROUTING_ENABLED: bool = False
+    # PPT turn-guard: enforce that a requested PPT deck is actually produced.
+    # Synthesis-boundary nudge (cap 1/turn) + T-3 tool_choice forcing toward
+    # create_artifact(type="pptx"); the dashboard guard takes precedence.
+    PPT_TURN_GUARD_ENABLED: bool = False
     # Phase 1B: layout-engine / data-table tuning (all defaults safe-off).
     LAYOUT_ENGINE_TEMPLATE_PATH: str = ""
     PPTX_DARK_THEME_PATH: str = ""

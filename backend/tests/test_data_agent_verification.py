@@ -89,6 +89,29 @@ def test_gate_metadata_only_nudges():
     assert "VERIFICATION GAP" in msg
 
 
+def test_gate_blank_dimension_rows_nudge():
+    """GAP 3: Data Agent rows whose name column is 100% blank must be
+    intercepted by the sub-loop gate with a master-join nudge — not passed
+    through un-flagged."""
+    state = {
+        "last_rows": [
+            {"FCUSTMATNAME": "", "FMATERIALID": 1, "amount": 100},
+            {"FCUSTMATNAME": None, "FMATERIALID": 2, "amount": 200},
+        ],
+        "last_sql": "SELECT FCUSTMATNAME, FMATERIALID, amount "
+                    "FROM erp_product_sales_details",
+    }
+    action, msg = _run(delegation_tools._sub_loop_answer_gate(
+        "show me last month sales data",
+        state,
+        "Here are the sales figures by product.",
+        attempts=0, budget_remaining=3,
+    ))
+    assert action == "nudge"
+    assert "VERIFICATION GAP" in msg
+    assert "master" in msg.lower()
+
+
 def test_gate_zero_rows_empty_nudges():
     """A real query that returned 0 rows must nudge (anti-pattern #3)."""
     state = {"last_rows": [], "last_sql": "SELECT ..."}

@@ -17,13 +17,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.services.db import NLAnswerService, QueryService, SchemaService
 from app.services.db.connector_factory import DriverUnavailable
+from app.services.db.schema_graph import SchemaGraph
 from app.services import access_policy_service
 from app.services.tool_registry import registry
 
@@ -496,30 +499,178 @@ async def _execute_query(
         return {"success": False, "error": f"Query failed: {e}", "sql": sql}
 
 
+# Name-role / id-role structural detection — mirrors answer_verification +
+# catalog_indexer conventions (boundary + suffix-anchored, zero hardcoded names).
+_NAME_ROLE_RE = re.compile(
+    r"(^|_)(name|fname|title|label)(_|$)|(name|title|label)$",
+    re.IGNORECASE,
+)
+_ID_ROLE_RE = re.compile(
+    r"(^|_)(id|code|no|number)(_|$)|(id|code|no|number)$",
+    re.IGNORECASE,
+)
+_FROM_TABLE_RE = re.compile(r"\bFROM\s+([`\"\[]?[\w.]+[`\"\]]?)", re.IGNORECASE)
+
+
+def _parse_from_table(sql: str) -> str | None:
+    """Best-effort parse of the first FROM table from generated SQL."""
+    if not sql:
+        return None
+    m = _FROM_TABLE_RE.search(sql)
+    if not m:
+        return None
+    return m.group(1).strip("`\"[]") or None
+
+
+def _is_blank_dim_value(value: Any) -> bool:
+    """Blank = None | '' | whitespace-only string. Numeric zero is NOT blank."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _relation_partners(db: Session, kb_id: str, table: str) -> list[str]:
+    """Direct relation partners of `table` from cached catalog metadata
+    (KBTableRelation) — no connector, no introspection."""
+    from app.models.knowledge_catalog import KBTableMeta, KBTableRelation
+
+    meta = (
+        db.query(KBTableMeta)
+        .filter(KBTableMeta.kb_id == kb_id, KBTableMeta.table_name == table)
+        .first()
+    )
+    if not meta:
+        return []
+    rels = (
+        db.query(KBTableRelation)
+        .filter(
+            KBTableRelation.kb_id == kb_id,
+            or_(
+                KBTableRelation.source_table_meta_id == meta.id,
+                KBTableRelation.target_table_meta_id == meta.id,
+            ),
+        )
+        .all()
+    )
+    ids: set[int] = set()
+    for r in rels:
+        ids.add(r.source_table_meta_id)
+        ids.add(r.target_table_meta_id)
+    if not ids:
+        return []
+    names = dict(
+        db.query(KBTableMeta.id, KBTableMeta.table_name)
+        .filter(KBTableMeta.kb_id == kb_id, KBTableMeta.id.in_(ids))
+        .all()
+    )
+    return [n for i in ids if (n := names.get(i)) and n != table]
+
+
+def _find_master_for_fk(
+    db: Session, kb_id: str, table: str, fk_col: str
+) -> tuple[str, str, str] | None:
+    """Focused schema-graph query: build over `table` + its relation partners
+    and ask find_master_for_fk. Returns (master, join_col, fk_col) | None."""
+    try:
+        partners = _relation_partners(db, kb_id, table)
+        graph = SchemaGraph(db, kb_id).build([table] + partners)
+        return graph.find_master_for_fk(table, fk_col)
+    except Exception as exc:  # never block the query result
+        logger.debug("find_master_for_fk failed for %s.%s: %s", table, fk_col, exc)
+        return None
+
+
+def _blank_dimension_hint(db: Session, kb_id: str, result: dict) -> dict | None:
+    """Detect a 100%-blank FIRST name-role column and suggest a master JOIN.
+
+    Structural only — the primary name-role column must be blank (None | ''
+    | whitespace) across ALL returned rows. Numeric-only or empty results
+    never fire. The master lookup reuses SchemaGraph.find_master_for_fk.
+    """
+    rows = result.get("rows") or []
+    if not rows or not isinstance(rows[0], dict):
+        return None
+    columns = list(rows[0].keys())
+    name_cols = [c for c in columns if _NAME_ROLE_RE.search(str(c))]
+    if not name_cols:
+        return None
+    primary = name_cols[0]
+    if not all(_is_blank_dim_value(r.get(primary)) for r in rows):
+        return None
+
+    table = _parse_from_table(result.get("sql") or "")
+    master_table = None
+    join_desc = None
+    if table:
+        for col in columns:
+            if not _ID_ROLE_RE.search(str(col)):
+                continue
+            found = _find_master_for_fk(db, kb_id, table, str(col))
+            if found:
+                master_table, master_col, fk_col = found
+                join_desc = f"{fk_col} -> {master_col}"
+                break
+    if master_table:
+        message = (
+            f"Column '{primary}' is 100% blank in all returned rows. JOIN the "
+            f"entity master table '{master_table}' via '{join_desc}' and re-query "
+            f"using its name column so the answer shows real names. This fix is "
+            f"deterministic from the schema graph — do not ask the user for permission."
+        )
+    else:
+        message = (
+            f"Column '{primary}' is 100% blank in all returned rows. JOIN the "
+            f"entity master table connected via this table's FK/id column in the "
+            f"schema graph and re-query using its name column so the answer shows "
+            f"real names."
+        )
+    return {
+        "kind": "blank_dimension",
+        "column": primary,
+        "master_table": master_table,
+        "join": join_desc,
+        "message": message,
+    }
+
+
 def _build_validation_hints(db: Session, kb_id: str, result: dict) -> list[dict]:
     """Advisory validation hints attached to a successful ``execute_query``.
 
     Computed from already-returned rows + cached coverage metadata (O(rows),
-    no extra queries). The agent reads these and may retry (≤2). Flag-gated —
-    returns [] when the Business Semantic Layer is off. Never blocks.
+    no extra queries). The agent reads these and may retry (≤2). Never blocks.
 
     Hints produced:
+    - ``blank_dimension`` — first name-role column is 100% blank; JOIN the
+      entity master via the schema graph. Gated by SCHEMA_GRAPH_ENABLED
+      (independent of KG_BUSINESS_CONTEXT_ENABLED so it can't be silently off).
     - ``empty_set`` — result has no rows; distinguish "genuinely no data"
       (coverage max_date is recent) from "no data in window / stale".
     - ``null_rate`` — % of NULL values in the first numeric-ish columns.
     - ``date_range`` — whether the result's temporal span matches coverage.
     """
+    hints: list[dict] = []
+    rows = result.get("rows") or []
+
+    # blank_dimension is computed BEFORE the KG flag early-return.
+    if settings.SCHEMA_GRAPH_ENABLED:
+        try:
+            blank = _blank_dimension_hint(db, kb_id, result)
+            if blank:
+                hints.append(blank)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("blank_dimension hint failed (non-fatal): %s", exc)
+
     if not settings.KG_BUSINESS_CONTEXT_ENABLED:
-        return []
+        return hints
     try:
         from app.services.knowledge_graph.business_context import (
             _coverage_max_dates,
         )
     except Exception:  # pragma: no cover - import guard
-        return []
+        return hints
 
-    hints: list[dict] = []
-    rows = result.get("rows") or []
     coverage = _coverage_max_dates(db, kb_id)
     cov_by_table = {c["table_name"]: c for c in coverage}
 

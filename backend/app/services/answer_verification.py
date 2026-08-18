@@ -116,6 +116,13 @@ _SCOPE_QUALIFIED_NOUN_RE = re.compile(
 )
 _OVERSCOPE_ROW_THRESHOLD = 200
 
+# Name-role column detection (structural — mirrors catalog_indexer's boundary +
+# suffix-anchored patterns). No vendor prefixes, no hardcoded names.
+_NAME_ROLE_RE = re.compile(
+    r"(^|_)(name|fname|title|label)(_|$)|(name|title|label)$",
+    re.IGNORECASE,
+)
+
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_]{2,}")
 _STOPWORDS = frozenset({
     "the", "and", "for", "with", "this", "that", "from", "have", "has", "are",
@@ -299,6 +306,59 @@ def _detect_dimension_coverage(
     corpus = _normalize_token(_payload_text(results) + " " + (assistant_text or ""))
     missing = [tok for tok in sorted(requested) if tok not in corpus]
     return missing
+
+
+def _is_blank_value(value: Any) -> bool:
+    """Blank = None | "" | whitespace-only string. Numeric zero is NOT blank."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    return False
+
+
+def _detect_blank_dimension_columns(results: list[dict]) -> list[str]:
+    """Return the FIRST name-role column per result that is 100% blank/NULL
+    across all summarized rows (None | "" | whitespace only).
+
+    Only the first (primary) name-role column of a result is checked — a later
+    secondary blank name column does not fire (avoids over-triggering). Numeric
+    columns never fire because they are not name-role. Returns [] when nothing
+    qualifies.
+    """
+    fired: list[str] = []
+    for r in results:
+        rows = r.get("rows") or []
+        # Real QueryService payloads (main loop + data-agent sub-loop) carry
+        # rows dicts with NO "columns" key — derive from the first row when
+        # absent, otherwise the detector is dead code in production.
+        columns = r.get("columns") or (
+            list(rows[0].keys()) if rows and isinstance(rows[0], dict) else []
+        )
+        if not columns or not rows:
+            continue
+        name_cols = [c for c in columns if _NAME_ROLE_RE.search(str(c))]
+        if not name_cols:
+            continue
+        primary = name_cols[0]
+        try:
+            idx = columns.index(primary)
+        except ValueError:
+            continue
+        values: list[Any] = []
+        for row in rows:
+            if isinstance(row, dict):
+                values.append(row.get(primary))
+            elif isinstance(row, (list, tuple)) and idx < len(row):
+                values.append(row[idx])
+            else:
+                values.append(None)
+        if not values:
+            continue
+        if all(_is_blank_value(v) for v in values):
+            fired.append(primary)
+            break  # one firing result is enough to flag the whole answer
+    return fired
 
 
 def _detect_overscope_filter(user_message: str, results: list[dict]) -> bool:
@@ -502,6 +562,14 @@ def _evaluate_answer_inner(
             "though the request asked for a specific subset (category/type/quantity)"
         )
 
+    blank_cols = _detect_blank_dimension_columns(results)
+    if blank_cols:
+        signals.append("blank_dimension")
+        gaps.append(
+            "primary dimension column '{}' is 100% blank/NULL".format(blank_cols[0])
+        )
+        logger.info("answer_verification: blank_dimension on column %s", blank_cols[0])
+
     max_replans = int(getattr(settings, "SELF_EVAL_MAX_REPLANS", 3))
 
     if signals:
@@ -576,6 +644,15 @@ def _suggested_fix(signals: list[str], results: list[dict]) -> str:
         return (
             "Do not summarize row counts or schemas as the answer. Extract the "
             "requested values from the tool results and present them directly."
+        )
+    if "blank_dimension" in signals:
+        return (
+            "The primary dimension column returned 100% blank/NULL values. "
+            "Identify the entity master table connected via this table's FK/id "
+            "column in the schema graph (tagged table_role: entity_master), JOIN "
+            "it, and re-query using the master's name column so the answer shows "
+            "real entity names. This fix is deterministic from the schema graph — "
+            "do not ask the user for permission."
         )
     if "coverage" in signals:
         return (
