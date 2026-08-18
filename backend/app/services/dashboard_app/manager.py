@@ -256,12 +256,27 @@ class DashboardAppManager:
         finally:
             db.close()
 
-    def list_apps(self, org_id: Optional[str] = None) -> List[DashboardApp]:
+    def list_apps(self, org_id: Optional[str] = None,
+                  user_id: Optional[str] = None) -> List[DashboardApp]:
+        """List dashboard apps the user may see, ordered newest-first.
+
+        T10 scope rule: ``company`` apps are visible to the whole org;
+        ``personal`` apps are visible only to their creator. When ``user_id``
+        is omitted the caller opts out of scope filtering (returns all org
+        apps) — used by internal tooling, never by the user-facing API.
+        """
         db = SessionLocal()
         try:
             q = db.query(DashboardApp)
             if org_id:
                 q = q.filter(DashboardApp.org_id == org_id)
+            if user_id:
+                from sqlalchemy import or_
+                q = q.filter(or_(
+                    DashboardApp.scope == "company",
+                    (DashboardApp.scope == "personal")
+                    & (DashboardApp.created_by_id == user_id),
+                ))
             return q.order_by(DashboardApp.created_date.desc()).all()
         finally:
             db.close()

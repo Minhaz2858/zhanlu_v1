@@ -597,6 +597,9 @@ class CreateFullstackDashboardArgs(BaseModel):
     metrics: list[FullstackMetricSpec] = Field(min_length=1)
     refresh_interval_seconds: int = 30
     theme: str = "light"
+    # T10: "personal" (creator only) or "company" (whole org). The agent
+    # should ask the user at creation time; falls back to the config default.
+    scope: str = "personal"
 
     @field_validator("slug")
     def _slug_ok(cls, v: str) -> str:
@@ -610,6 +613,12 @@ class CreateFullstackDashboardArgs(BaseModel):
     def _theme_ok(cls, v: str) -> str:
         if v not in ("light", "dark"):
             raise ValueError("theme must be 'light' or 'dark'")
+        return v
+
+    @field_validator("scope")
+    def _scope_ok(cls, v: str) -> str:
+        if v not in ("personal", "company"):
+            raise ValueError("scope must be 'personal' or 'company'")
         return v
 
 
@@ -699,9 +708,13 @@ async def _create_fullstack_dashboard(
     #    offer "Open in chat" — the conversation id is the AgentConversation id
     #    the frontend deep-links via ?conv=<id>.
     chat_thread_id = (ctx.get("conversation_id") or "").strip() or None
+    # T10: explicit scope wins; otherwise fall back to the config default so a
+    #    user-created personal dashboard is never exposed org-wide by accident.
+    from app.config import settings
+    scope = parsed.scope or settings.DASHBOARD_DEFAULT_SCOPE
     record = dashboard_app_manager.create_app_record(
         spec, org_id=org_id, created_by_id=user_id, project_id=project_id,
-        chat_thread_id=chat_thread_id,
+        chat_thread_id=chat_thread_id, scope=scope,
     )
     try:
         dashboard_app_manager.mount(parsed.slug)
@@ -845,7 +858,10 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
             "persist=True) first and pass the returned design_system_ref; "
             "(2) confirm the data contract with the user (which datasource, "
             "which metrics, read-only SQL) — NEVER fabricate data; "
-            "(3) submit this spec with real read-only SELECT queries. "
+            "(3) T10: if the user did not say, ASK whether this dashboard "
+            "should be scope='personal' (only they can see it) or "
+            "scope='company' (whole org can see it) — then submit this spec "
+            "with real read-only SELECT queries. "
             "Responds with slug + app_url. Iterate later via "
             "update_fullstack_dashboard(slug=...)."
         ),
@@ -888,6 +904,12 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
                     "default": 30,
                 },
                 "theme": {"type": "string", "enum": ["light", "dark"], "default": "light"},
+                "scope": {
+                    "type": "string",
+                    "enum": ["personal", "company"],
+                    "default": "personal",
+                    "description": "personal = creator only; company = whole org. Ask the user if unspecified.",
+                },
             },
             "required": ["name", "slug", "datasource_id", "metrics"],
         },

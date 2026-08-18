@@ -173,6 +173,7 @@ export default function FilesView({ scope = 'all' }) {
         resource_kind: 'dashboard',
         project: r.project,
         project_id: r.project_id,
+        scope: r.scope || 'personal', // T10: personal = creator only; company = whole org
         session_id: r.session_id || null,
         agent_name: r.agent_name || null,
         // T5: the AgentConversation id that built this app — powers the
@@ -224,6 +225,9 @@ export default function FilesView({ scope = 'all' }) {
   // Unknown project ids / agent names also fall back to "personal" so
   // legacy files don't disappear silently.
   const classify = (item) => {
+    // T10: full-stack dashboards carry their own scope field (personal =
+    // creator only; company = whole org) — it wins over the project fallback.
+    if (item._entityType === 'DashboardApp') return item.scope || 'personal';
     if (item.project_id) return projectTypes[item.project_id] || 'personal';
     if (item.agent_name) return agentTypes[item.agent_name] || 'personal';
     return 'personal';

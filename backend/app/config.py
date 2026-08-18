@@ -584,6 +584,11 @@ class Settings(BaseSettings):
     #   routed to the new pipeline and the legacy tool is hidden from the agent.
     FULLSTACK_DASHBOARD_ENABLED: bool = False
     LEGACY_DASHBOARD_ENABLED: bool = False
+    # T10: default visibility scope for newly-created full-stack dashboards.
+    # "personal" = visible only to the creator; "company" = visible to the
+    # whole org. The agent can still ask the user at creation time and pass
+    # an explicit scope to create_fullstack_dashboard.
+    DASHBOARD_DEFAULT_SCOPE: str = "personal"
 
     # ── Experience layer (self-learning agent) ──────────────────────────
     # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):

@@ -73,13 +73,13 @@ def _seed_kb(db, org_id="default-org"):
     return kb
 
 
-def _seed_dashboard(db, slug, org_id="default-org", chat_thread_id=None):
+def _seed_dashboard(db, slug, org_id="default-org", chat_thread_id=None, created_by_id="u"):
     kb = _seed_kb(db, org_id=org_id)
     rec = DashboardApp(
         slug=slug, name=f"Dashboard {slug}", description=None,
         datasource_kb_id=kb.id, spec={"name": slug}, status="running",
         refresh_interval_seconds=30, org_id=org_id,
-        created_by_id="u", project_id=None, chat_thread_id=chat_thread_id,
+        created_by_id=created_by_id, project_id=None, chat_thread_id=chat_thread_id,
         scope="personal",
     )
     db.add(rec)
@@ -89,7 +89,7 @@ def _seed_dashboard(db, slug, org_id="default-org", chat_thread_id=None):
 
 def test_chat_thread_returns_bound_thread(db):
     user = _seed_user(db)
-    _seed_dashboard(db, "sales-dash", chat_thread_id="conv-sales")
+    _seed_dashboard(db, "sales-dash", chat_thread_id="conv-sales", created_by_id=user.id)
     client = _make_client(db, user)
     r = client.get("/api/dashboards/app-records/sales-dash/chat-thread")
     assert r.status_code == 200, r.text
@@ -100,7 +100,7 @@ def test_chat_thread_returns_bound_thread(db):
 
 def test_chat_thread_404_when_no_thread_bound(db):
     user = _seed_user(db)
-    _seed_dashboard(db, "headless-dash")  # built outside a chat
+    _seed_dashboard(db, "headless-dash", created_by_id=user.id)  # built outside a chat
     client = _make_client(db, user)
     r = client.get("/api/dashboards/app-records/headless-dash/chat-thread")
     assert r.status_code == 404
@@ -134,7 +134,7 @@ def test_chat_thread_requires_auth(db):
 def test_app_record_serializes_chat_thread_id(db):
     """The My Files list needs chat_thread_id on the record payload itself."""
     user = _seed_user(db)
-    _seed_dashboard(db, "linked-dash", chat_thread_id="conv-link")
+    _seed_dashboard(db, "linked-dash", chat_thread_id="conv-link", created_by_id=user.id)
     client = _make_client(db, user)
     r = client.get("/api/dashboards/app-records/linked-dash")
     assert r.status_code == 200, r.text
