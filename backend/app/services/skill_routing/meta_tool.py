@@ -21,6 +21,38 @@ from app.services.tool_registry import registry
 
 logger = logging.getLogger(__name__)
 
+# Tool names the LLM sometimes mistakes for skill names when invoking the
+# ``Skill`` dispatcher (e.g. ``Skill {"command": "load_skill_body"}``). When
+# detected, we return a self-correcting redirect instead of a dead-end
+# "Skill not found" error.
+_TOOL_NAMES_MISTAKEN_AS_SKILLS = frozenset({
+    "load_skill_body",
+    "skills",
+    "list_default_skills",
+    "skill",
+    "ask_data_agent",
+    "ask_perception",
+    "ask_intelligence",
+    "ask_diagnosis",
+    "ask_forecast_agent",
+    "ask_forecast",
+    "ask_pricing",
+    "ask_forecast_pricing",
+    "ask_perception_intelligence_diagnosis",
+    "ask_report_agent",
+    "ask_rag_research",
+    "ask_rag",
+    "ask_knowledge_graph",
+    "ask_decision",
+    "ask_macro_override",
+    "ask_erp_kpi",
+    "ask_erp_writeback",
+    "ask_weekly_report",
+    "execute_query",
+    "describe_schema",
+    "web_search",
+})
+
 # ── The Skill meta-tool handler ─────────────────────────────────────────
 
 
@@ -38,6 +70,22 @@ async def _skill_meta_tool(
 
     # Strip optional action prefixes
     action, skill_name = _parse_action(command)
+
+    # Self-correcting redirect: the LLM sometimes passes a *tool* name as the
+    # skill name (e.g. `Skill {"command": "load_skill_body"}`), confusing the
+    # Skill dispatcher with the underlying tool. Detect that and tell the LLM
+    # exactly what to do instead of returning a dead-end "Skill not found".
+    if skill_name in _TOOL_NAMES_MISTAKEN_AS_SKILLS:
+        return {
+            "success": False,
+            "error": (
+                f"'{skill_name}' is a tool name, not a skill name. "
+                "To activate a skill, call: Skill {\"command\": \"execute <skill-name>\"} "
+                f"(e.g. 'execute weekly-report-generation'). "
+                f"To call the '{skill_name}' tool, invoke it directly by its own "
+                "name — do NOT pass it as a Skill command."
+            ),
+        }
 
     try:
         from app.services.skills_loader import get_skill, unified_search

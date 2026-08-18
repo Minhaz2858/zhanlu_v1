@@ -38,8 +38,9 @@ and explicit risk flags — ready to read in chat, no file generation overhead.
    (market context + data + synthesis) over Step 3 (forecast/pricing).
 6. **Cite sources.** Every section names the tool/pipeline that produced
    its data (e.g. "source: ask_perception_intelligence_diagnosis").
-7. **Tool budget discipline.** At most two `ask_data_agent` calls. Never
-   exhaust the tool loop before Step 4 synthesis.
+7. **Tool budget discipline.** Exactly two `ask_data_agent` calls are
+   budgeted for Step 2: one for sales, one for inventory. Never exhaust the
+   tool loop before Step 4 synthesis.
 
 ## Pipeline
 
@@ -56,14 +57,35 @@ Do NOT call `ask_perception`, `ask_intelligence`, or `ask_diagnosis`
 separately — the batch tool is faster and uses one tool call instead of
 three.
 
-### Step 2 — Data deep-dive
+### Step 2 — Data deep-dive (TWO `ask_data_agent` calls — sales + inventory)
 
-- `ask_data_agent("sales and inventory for <product> — prefer
-  erp_t_sal_outstock / erp_v_sale_orderentry (live) over the stale
-  erp_product_sales_details; note the product name column is FNAME in
-  erp_product_sales_details")` — volumes, shipment quantities, inventory
-  status. Verify freshness with MAX(date_column) before reporting
-  date-bounded numbers.
+Query ALL C5/C9 products in ONE query using the unified LIVE views. Do NOT
+query product-specific views one at a time (`sale_erp_v_抽余碳五_data`,
+`sale_erp_v_双环戊二烯_data`, …) — each holds a single product and silently
+produces a one-product report. The C5/C9 portfolio covers: 碳五石油树脂,
+双环戊二烯, 异戊二烯, 戊烷发泡剂, 抽余碳五, 间戊二烯, 工业用裂解碳九.
+
+**Call A — Sales (ALL products):**
+`ask_data_agent("weekly sales volume, shipment quantity and revenue for ALL
+C5/C9 products in ONE query from erp_v_sale_orderentry (or erp_t_sal_outstock)
+grouped by product name; include latest date via MAX(date_column); products:
+碳五石油树脂, 双环戊二烯, 异戊二烯, 戊烷发泡剂, 抽余碳五, 间戊二烯,
+工业用裂解碳九 — do not restrict to a single product")`
+
+**Call B — Inventory (ALL products):**
+`ask_data_agent("current inventory for ALL C5/C9 products from
+erp_v_stk_inventory (or erp_t_stk_inventory) — inventory quantity/position by
+product name; same product list as the sales query")`
+
+Rules:
+- ALWAYS use the unified tables (`erp_v_sale_orderentry` / `erp_t_sal_outstock`
+  for sales; `erp_v_stk_inventory` / `erp_t_stk_inventory` for inventory).
+  Never a single product-specific view — that yields a one-product report.
+- If the user says "C5/C9 products" (or the weekly report covers the C5/C9
+  portfolio), the report MUST cover all seven products listed above.
+- Prefer the LIVE tables over the STALE `erp_product_sales_details` (note the
+  product name column is FNAME there).
+- Verify freshness with MAX(date_column) before reporting date-bounded numbers.
 
 ### Step 3 — Forward view (BATCH, one tool call)
 

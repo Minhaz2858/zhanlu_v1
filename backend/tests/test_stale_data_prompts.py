@@ -70,3 +70,41 @@ def test_weekly_report_skill_uses_batch_tool():
     )
     assert skill is not None
     assert "ask_perception_intelligence_diagnosis" in skill.body
+
+
+def test_ecisco_schema_hint_block_mentions_inventory_tables():
+    """The Ecisco BI schema hint must name the inventory tables explicitly."""
+    from app.services.agent_prompts import _ECISCO_BI_SCHEMA_HINT_BLOCK
+
+    low = _ECISCO_BI_SCHEMA_HINT_BLOCK.lower()
+    assert "erp_v_stk_inventory" in low or "erp_t_stk_inventory" in low
+    assert "erp_v_sale_orderentry" in low or "erp_t_sal_outstock" in low
+    assert "inventory" in low
+
+
+def test_weekly_report_skill_covers_all_products_and_inventory():
+    """SKILL.md must list ALL C5/C9 products and name the inventory table."""
+    from app.services.skills_loader import load_skill_package
+
+    skill = load_skill_package(
+        _BACKEND_ROOT / "skills" / "weekly-report-generation", source="bundled"
+    )
+    assert skill is not None
+    body = skill.body
+    # All seven C5/C9 products must be listed (not just one product).
+    for product in (
+        "碳五石油树脂",
+        "双环戊二烯",
+        "异戊二烯",
+        "戊烷发泡剂",
+        "抽余碳五",
+        "间戊二烯",
+        "工业用裂解碳九",
+    ):
+        assert product in body, f"missing product {product!r} in SKILL.md"
+    # Inventory table must be named explicitly.
+    assert "erp_v_stk_inventory" in body or "erp_t_stk_inventory" in body
+    # Unified sales view must be named explicitly.
+    assert "erp_v_sale_orderentry" in body or "erp_t_sal_outstock" in body
+    # Sales and inventory must be split into two queries.
+    assert "sales" in body.lower() and "inventory" in body.lower()

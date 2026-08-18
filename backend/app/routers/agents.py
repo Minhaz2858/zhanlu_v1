@@ -3073,9 +3073,11 @@ async def add_message(
                         "You have access to ALL skills below — not just the "
                         "ones bound to you. Use the `Skill` tool to load or "
                         "execute any skill by name (e.g. "
-                        '`Skill {command: "execute <name>"}). Call '
-                        "`load_skill_body(name)` to read a skill's full "
-                        "methodology before using it.\n"
+                        '`Skill {command: "execute weekly-report-generation"}`). '
+                        "`load_skill_body` is a SEPARATE tool from the `Skill` "
+                        "dispatcher — call it directly with {name: '<skill-name>'} "
+                        "to read a skill's full methodology. NEVER pass a tool "
+                        "name (like 'load_skill_body') as a Skill command.\n"
                         f"{priority_hint}\n<available_skills>\n"
                         f"{catalog_block}\n</available_skills>"
                     )
@@ -7068,9 +7070,11 @@ async def add_message_stream(
                     "You have access to ALL skills below — not just the "
                     "ones bound to you. Use the `Skill` tool to load or "
                     "execute any skill by name (e.g. "
-                    '`Skill {command: "execute <name>"}). Call '
-                    "`load_skill_body(name)` to read a skill's full "
-                    "methodology before using it.\n\n"
+                    '`Skill {command: "execute weekly-report-generation"}`). '
+                    "`load_skill_body` is a SEPARATE tool from the `Skill` "
+                    "dispatcher — call it directly with {name: '<skill-name>'} "
+                    "to read a skill's full methodology. NEVER pass a tool "
+                    "name (like 'load_skill_body') as a Skill command.\n\n"
                     f"<available_skills>\n{catalog_block}\n</available_skills>"
                 )
         except Exception:
