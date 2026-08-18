@@ -320,6 +320,79 @@ def list_themes() -> list[dict]:
     return out
 
 
+# Alias map so human-typed / LLM-emitted theme tokens resolve to a real file.
+_THEME_ALIASES: dict[str, str] = {
+    "zhanlu-blue": "zhanlu-blue",
+    "zhanlu-dark": "zhanlu-dark",
+    "blue": "zhanlu-blue",
+    "default": "zhanlu-blue",
+    "dark": "zhanlu-dark",
+    "brand": "zhanlu-blue",
+    "midnight": "midnight-navy",
+    "navy": "midnight-navy",
+    "midnight-navy": "midnight-navy",
+    "forest": "forest-green",
+    "forest-green": "forest-green",
+    "green": "forest-green",
+    "sunset": "sunset-orange",
+    "sunset-orange": "sunset-orange",
+    "orange": "sunset-orange",
+    "royal": "royal-purple",
+    "royal-purple": "royal-purple",
+    "purple": "royal-purple",
+    "teal": "teal-cyan",
+    "teal-cyan": "teal-cyan",
+    "cyan": "teal-cyan",
+    "rose": "rose-pink",
+    "rose-pink": "rose-pink",
+    "pink": "rose-pink",
+    "slate": "slate-gray",
+    "slate-gray": "slate-gray",
+    "gray": "slate-gray",
+    "grey": "slate-gray",
+    "amber": "amber-gold",
+    "amber-gold": "amber-gold",
+    "gold": "amber-gold",
+    "crimson": "crimson-red",
+    "crimson-red": "crimson-red",
+    "red": "crimson-red",
+    "emerald": "emerald-deep",
+    "emerald-deep": "emerald-deep",
+    "mono": "mono-ink",
+    "mono-ink": "mono-ink",
+    "ink": "mono-ink",
+}
+
+
+def list_theme_names() -> list[str]:
+    """Return the canonical theme file names (no aliases)."""
+    return sorted(p.stem for p in _THEMES_DIR.glob("*.json"))
+
+
+def validate_theme_name(name: Optional[str]) -> str:
+    """Resolve a user/LLM theme string to a real theme name.
+
+    Accepts aliases and case-insensitive matches. Raises ``ValueError``
+    with the full available list when the name cannot be resolved, so
+    callers (e.g. ``restyle_deck``) can surface a helpful error.
+    """
+    if not name:
+        raise ValueError("theme name is required")
+    key = name.strip().lower()
+    if key in _THEME_ALIASES:
+        return _THEME_ALIASES[key]
+    if key in list_theme_names():
+        return key
+    # Case-insensitive exact file match.
+    for nm in list_theme_names():
+        if nm.lower() == key:
+            return nm
+    available = ", ".join(sorted(set(_THEME_ALIASES.values())))
+    raise ValueError(
+        f"unknown theme '{name}'. Available themes: {available}"
+    )
+
+
 def load_theme(name: Optional[str], mode: str = DEFAULT_MODE) -> DeckTheme:
     """Resolve a theme name (or token dict) into a :class:`DeckTheme`.
 
@@ -502,6 +575,8 @@ __all__ = [
     "resolve_ctx_theme",
     "resolve_recipe",
     "list_themes",
+    "list_theme_names",
+    "validate_theme_name",
     "theme_from_hex_dict",
     "theme_from_brand_kit",
     "DEFAULT_THEME",

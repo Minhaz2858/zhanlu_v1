@@ -513,10 +513,30 @@ class ExportService:
         re-run the quality loop for this path.
         """
         from app.services.artifacts.deck_planner import build_deck_plan
-        from app.services.artifacts.deck_router import route_deck
+        from app.services.artifacts.deck_router import (
+            classify_profile,
+            route_deck,
+        )
         from app.services.artifacts.render_dispatcher import render_pptx_from_plan_sync
 
-        plan, _profile = self._run_coro(build_deck_plan(user_message, rows))
+        # Phase 4: classify the deck profile from the user's intent. The
+        # deterministic classifier runs sync (no LLM); an explicit profile
+        # carried on the context always wins.
+        profile_name = self._run_coro(
+            classify_profile(
+                user_message,
+                explicit=getattr(ctx, "deck_profile", None),
+                allow_llm_fallback=False,
+            )
+        )
+
+        plan, _profile = self._run_coro(
+            build_deck_plan(
+                user_message, rows,
+                theme_recommendation=getattr(ctx, "theme_name", None),
+                profile_name=profile_name,
+            )
+        )
 
         ctx.deck_type = plan.deck_type or "data_report"
         ctx.deck_plan = plan

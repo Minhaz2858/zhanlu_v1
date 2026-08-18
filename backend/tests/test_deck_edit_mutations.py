@@ -148,7 +148,8 @@ class TestRestyleDeck:
             _sample_plan(),
             {"theme_recommendation": "sunset", "headline_style": "assertion"},
         )
-        assert out.theme_recommendation == "sunset"
+        # "sunset" is an alias → resolved to the canonical file name.
+        assert out.theme_recommendation == "sunset-orange"
         assert out.headline_style == "assertion"
         assert out.summary == "Quarterly sales summary"  # untouched
 
@@ -174,6 +175,25 @@ class TestRestyleDeck:
         plan = _sample_plan()
         restyle_deck(plan, {"theme_recommendation": "sunset"})
         assert plan.theme_recommendation == "zhanlu-blue"
+
+    def test_resolves_theme_alias(self):
+        from app.services.artifacts.editors.deck_edit import restyle_deck
+
+        # Aliases (e.g. "dark", "navy") must resolve to a canonical file name.
+        out = restyle_deck(_sample_plan(), {"theme_recommendation": "navy"})
+        assert out.theme_recommendation == "midnight-navy"
+
+    def test_rejects_unknown_theme_with_available_list(self):
+        from app.services.artifacts.editors.deck_edit import (
+            DeckEditError,
+            restyle_deck,
+        )
+
+        with pytest.raises(DeckEditError) as exc:
+            restyle_deck(_sample_plan(), {"theme_recommendation": "not-a-theme"})
+        msg = str(exc.value)
+        assert "not-a-theme" in msg
+        assert "zhanlu-blue" in msg  # lists available themes
 
 
 class TestUpdateChart:

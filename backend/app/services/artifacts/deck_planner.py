@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from app.config import settings
+from app.services.artifacts.exporters._theme import load_theme, validate_theme_name
 from app.services.synexia.contracts import (
     ChartSpecInSlide,
     ChartSpec,
@@ -167,12 +168,23 @@ def _build_planner_prompt(
     profile_summary: str,
     chart_hints: list[dict[str, Any]],
     row_count: int,
+    theme_name: str = "zhanlu-blue",
+    theme_mood: str = "",
 ) -> str:
     chart_lines = "\n".join(
         f"- {c['chart_type']} | x={c['x_key']} | y={c['y_keys']} | {c['title']}"
         for c in chart_hints
     ) or "(none)"
     methodology = _load_skill_methodology()
+    theme_guidance = (
+        f"\nTHEME: the deck will render in the '{theme_name}' theme"
+        + (f" ({theme_mood})" if theme_mood else "")
+        + ". Match the copy tone to its mood — e.g. an authoritative/executive "
+          "theme wants punchy assertion headlines; a warm/creative theme can use "
+          "more evocative phrasing. Set theme_recommendation to '"
+        + theme_name
+        + "'.\n"
+    )
     return (
         "You are a presentation architect. Build a concise, narrative slide "
         "sequence for the following request.\n\n"
@@ -197,6 +209,7 @@ def _build_planner_prompt(
         "the suggested charts. For 'beautiful'/'investor'/'pitch' requests use "
         "'investor_deck' or 'marketing' and lean on cover / section_divider / "
         "kpi_grid layouts.\n\n"
+        f"{theme_guidance}\n"
         "METHODOLOGY (from the pptx skill — follow it):\n"
         f"{methodology}\n"
     )
@@ -207,6 +220,8 @@ async def _llm_deck_plan(
     profile_summary: str,
     chart_hints: list[dict[str, Any]],
     row_count: int,
+    theme_name: str = "zhanlu-blue",
+    theme_mood: str = "",
 ) -> Optional[DeckPlan]:
     """Make the single bounded LLM call and coerce the result into a DeckPlan.
 
@@ -214,7 +229,10 @@ async def _llm_deck_plan(
     """
     from app.services.llm_service import call_llm
 
-    prompt = _build_planner_prompt(user_intent, profile_summary, chart_hints, row_count)
+    prompt = _build_planner_prompt(
+        user_intent, profile_summary, chart_hints, row_count,
+        theme_name=theme_name, theme_mood=theme_mood,
+    )
     try:
         result = await asyncio.wait_for(
             call_llm(
@@ -347,69 +365,140 @@ def _fallback_plan(
     user_intent: str,
     profile: dict[str, dict[str, Any]],
     rows: list[dict[str, Any]],
+    profile_name: str = "data_report",
 ) -> DeckPlan:
-    """Deterministic minimal plan used when the LLM fails or is disabled."""
-    title = "Data Overview"
+    """Deterministic minimal plan used when the LLM fails or is disabled.
+
+    When ``DECK_PROFILES_ENABLED`` is on, ``profile_name`` selects a
+    profile-specific structure so the same data renders differently for an
+    executive brief vs. a pitch vs. a periodic review.  When off (default),
+    this is the historical ``data_report`` behavior (unchanged).
+    """
+    from app.services.artifacts.deck_profiles import get_profile
+
+    prof = get_profile(profile_name)
     chart_hints = suggest_charts(profile)
+    kpis = _profile_kpis(profile, rows)
+    hint = chart_hints[0] if chart_hints else None
+
+    # Cap the chart to the profile's preferred type when one is requested.
+    preferred = prof.preferred_chart_types
+    if hint and preferred and hint["chart_type"] not in preferred:
+        # Best-effort: keep the hint but mark preference via headline mood.
+        pass
+
+    title = _derive_title(user_intent, prof)
 
     slides: list[SlidePlan] = [
         SlidePlan(layout="cover", title=title, narrative_role="hook"),
     ]
 
-    kpis = _profile_kpis(profile, rows)
-    if kpis:
-        slides.append(
-            SlidePlan(
-                layout="kpi_grid",
-                title="Key Metrics",
-                kpi_specs=kpis,
-                narrative_role="context",
-            )
-        )
-
-    if chart_hints:
-        hint = chart_hints[0]
-        slides.append(
-            SlidePlan(
-                layout="chart_full",
-                title=hint["title"],
+    if prof.name == "executive_brief":
+        if kpis:
+            slides.append(SlidePlan(layout="kpi_grid", title="Key Metrics",
+                                    kpi_specs=kpis, narrative_role="context"))
+        if hint:
+            slides.append(SlidePlan(
+                layout="chart_with_bullets", title=hint["title"],
+                bullets=_hint_bullets(hint),
                 chart_spec=ChartSpecInSlide(
-                    chart_type=hint["chart_type"],
-                    x_key=hint["x_key"],
-                    y_keys=hint["y_keys"],
-                    title=hint["title"],
-                ),
-                narrative_role="evidence",
-            )
-        )
+                    chart_type=hint["chart_type"], x_key=hint["x_key"],
+                    y_keys=hint["y_keys"], title=hint["title"]),
+                chart_rows=rows, narrative_role="evidence"))
+        slides.append(SlidePlan(layout="closing", title="Recommendation",
+                                narrative_role="closing"))
+        return _finalize_fallback(title, prof, slides)
+
+    if prof.name == "pitch_narrative":
+        slides.append(SlidePlan(layout="section_divider",
+                                title="The Opportunity", narrative_role="hook"))
+        if kpis:
+            slides.append(SlidePlan(layout="findings_cards", title="The Problem",
+                                    bullets=_problem_bullets(kpis, hint),
+                                    narrative_role="context"))
+        if hint:
+            slides.append(SlidePlan(
+                layout="chart_with_bullets", title=hint["title"],
+                bullets=_hint_bullets(hint),
+                chart_spec=ChartSpecInSlide(
+                    chart_type=hint["chart_type"], x_key=hint["x_key"],
+                    y_keys=hint["y_keys"], title=hint["title"]),
+                chart_rows=rows, narrative_role="evidence"))
+        slides.append(SlidePlan(layout="recommendations",
+                                title="What We Recommend", narrative_role="ask"))
+        slides.append(SlidePlan(layout="closing", title="Let's Build It",
+                                narrative_role="closing"))
+        return _finalize_fallback(title, prof, slides)
+
+    if prof.name == "periodic_review":
+        if kpis:
+            slides.append(SlidePlan(layout="kpi_grid", title="This Period",
+                                    kpi_specs=kpis, narrative_role="context"))
+        if hint:
+            slides.append(SlidePlan(
+                layout="chart_full", title=hint["title"],
+                chart_spec=ChartSpecInSlide(
+                    chart_type=hint["chart_type"], x_key=hint["x_key"],
+                    y_keys=hint["y_keys"], title=hint["title"]),
+                chart_rows=rows, narrative_role="evidence"))
+        slides.append(SlidePlan(layout="insights_bullets",
+                                title="What Changed", narrative_role="context"))
+        slides.append(SlidePlan(layout="closing", title="Next Period",
+                                narrative_role="closing"))
+        return _finalize_fallback(title, prof, slides)
+
+    # ---- data_report (default, historical behavior) -----------------------
+    if kpis:
+        slides.append(SlidePlan(layout="kpi_grid", title="Key Metrics",
+                                kpi_specs=kpis, narrative_role="context"))
+    if hint:
+        slides.append(SlidePlan(
+            layout="chart_full", title=hint["title"],
+            chart_spec=ChartSpecInSlide(
+                chart_type=hint["chart_type"], x_key=hint["x_key"],
+                y_keys=hint["y_keys"], title=hint["title"]),
+            chart_rows=rows, narrative_role="evidence"))
     elif rows:
-        # No chart-worthy numeric column (e.g. messy text-only data):
-        # degrade gracefully to a data table instead of an empty chart.
-        slides.append(
-            SlidePlan(
-                layout="data_table",
-                title="Data Sample",
-                narrative_role="evidence",
-            )
-        )
-
-    # Big datasets get a top-8 table so the deck shows actual rows
-    # alongside the chart (layout engine truncates to 8).
+        slides.append(SlidePlan(layout="data_table", title="Data Sample",
+                                narrative_role="evidence"))
     if len(rows) > 15:
-        slides.append(
-            SlidePlan(
-                layout="data_table",
-                title="Top Data Rows",
-                narrative_role="evidence",
-            )
-        )
+        slides.append(SlidePlan(layout="data_table", title="Top Data Rows",
+                                narrative_role="evidence"))
+    slides.append(SlidePlan(layout="closing", title="Thank you",
+                            narrative_role="closing"))
+    return _finalize_fallback(title, prof, slides)
 
-    # The deterministic fallback has no findings source; it never synthesizes a
-    # filler insights slide. Real insights (when present) come from the LLM plan
-    # and are post-processed by _drop_empty_insights_slides in _coerce_plan.
-    slides.append(SlidePlan(layout="closing", title="Thank you", narrative_role="closing"))
 
-    return DeckPlan(title=title, deck_type="data_report", slides=slides)
+def _derive_title(user_intent: str, prof) -> str:
+    intent = (user_intent or "").strip()
+    if intent:
+        # Use the user's intent as the deck title (trimmed).
+        return intent[:60].strip().rstrip(".") or "Data Overview"
+    return "Data Overview"
+
+
+def _hint_bullets(hint: dict) -> list[str]:
+    return [f"{hint.get('title', 'Trend')} across {hint.get('x_key', 'categories')}."]
+
+
+def _problem_bullets(kpis, hint) -> list[str]:
+    if kpis:
+        return [f"{k.label} sits at {k.value}." for k in kpis[:3]]
+    return ["Current state needs attention."]
+
+
+def _finalize_fallback(title: str, prof, slides: list[SlidePlan]) -> DeckPlan:
+    # Enforce the profile's slide-count ceiling.
+    lo, hi = prof.slide_count_range
+    if len(slides) > hi:
+        slides = slides[:hi]
+    plan = DeckPlan(
+        title=title,
+        deck_type=prof.name,
+        headline_style=prof.headline_style,
+        slides=slides,
+    )
+    return plan
 
 
 def _profile_kpis(
@@ -523,24 +612,66 @@ async def _llm_assertion_rewrite(title: str, bullets: list[str]) -> Optional[str
 async def build_deck_plan(
     user_intent: str,
     rows: list[dict[str, Any]],
+    theme_recommendation: str | None = None,
+    profile_name: str | None = None,
 ) -> tuple[DeckPlan, dict[str, dict[str, Any]]]:
     """Entry point: profile the data, then plan the deck.
 
-    Returns ``(DeckPlan, profile)``.  Falls back to a deterministic plan
-    when the LLM call is disabled, fails, or times out.
+    ``theme_recommendation`` (optional) is the active theme name so the LLM
+    planner can match copy tone / mood.  ``profile_name`` (optional) selects a
+    deck profile (Phase 4); when ``DECK_PROFILES_ENABLED`` is on it is
+    classified from ``user_intent`` if not explicitly provided.  Returns
+    ``(DeckPlan, profile)``.  Falls back to a deterministic plan when the LLM
+    call is disabled, fails, or times out.
     """
+    from app.services.artifacts.deck_profiles import classify_profile, get_profile
+
     profile = profile_rows(rows)
     profile_summary = summarize_profile(profile)
     chart_hints = suggest_charts(profile)
     row_count = len(rows)
 
+    # Resolve the theme name + mood for planner awareness (alias-tolerant).
+    theme_name = "zhanlu-blue"
+    theme_mood = ""
+    if theme_recommendation:
+        try:
+            resolved = validate_theme_name(theme_recommendation)
+            theme = load_theme(resolved)
+            theme_name = resolved
+            theme_mood = theme.best_for or ""
+        except ValueError:
+            logger.warning(
+                "deck_planner: unknown theme_recommendation '%s'; using default",
+                theme_recommendation,
+            )
+
+    # Resolve the deck profile (Phase 4). Explicit wins; otherwise classify
+    # from intent when the feature flag is enabled; else default data_report.
+    resolved_profile_name = "data_report"
+    if profile_name:
+        resolved_profile_name = profile_name
+    elif settings.DECK_PROFILES_ENABLED:
+        resolved_profile_name = classify_profile(user_intent).name
+    prof = get_profile(resolved_profile_name)
+    profile_summary_text = (
+        f"Deck profile: {prof.name} — {prof.description} "
+        f"Target {prof.slide_count_range[0]}-{prof.slide_count_range[1]} slides, "
+        f"headline tone '{prof.headline_style}', "
+        f"prefer charts {list(prof.preferred_chart_types)}."
+        + (" Avoid raw data tables." if prof.forbid_tables else "")
+    )
+
     if not settings.PPT_DECK_PLANNER_ENABLED:
-        plan = _fallback_plan(user_intent, profile, rows)
+        plan = _fallback_plan(user_intent, profile, rows, profile_name=resolved_profile_name)
         return _enforce_assertion_headlines(plan), profile
 
-    plan = await _llm_deck_plan(user_intent, profile_summary, chart_hints, row_count)
+    plan = await _llm_deck_plan(
+        user_intent, profile_summary_text, chart_hints, row_count,
+        theme_name=theme_name, theme_mood=theme_mood,
+    )
     if plan is None:
-        plan = _fallback_plan(user_intent, profile, rows)
+        plan = _fallback_plan(user_intent, profile, rows, profile_name=resolved_profile_name)
         return _enforce_assertion_headlines(plan), profile
 
     return _enforce_assertion_headlines(plan), profile

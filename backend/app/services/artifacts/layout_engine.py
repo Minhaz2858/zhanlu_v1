@@ -266,19 +266,27 @@ def render(plan, rows: list[dict], ctx: Optional[dict] = None) -> bytes:
 def apply_master(theme: dict, style_recipe: str = "sharp") -> Presentation:
     """Return a Presentation with the brand template loaded if available.
 
-    Falls back to a fresh 16:9 deck if the template file is missing —
-    the per-slide ``slide.background.fill`` is what actually paints
-    the brand bg, so the deck is still brand-correct even without the
-    template.
+    Resolution order (Phase 3 — one master template per vendored theme):
+      1. ``templates/theme_<name>.pptx``  (per-theme, built by
+         ``scripts/build_pptx_templates.py``)
+      2. ``templates/zhanlu_dark.pptx``   (legacy, when "dark" in name)
+      3. ``templates/zhanlu_default.pptx`` (legacy, light themes)
+      4. a fresh 16:9 deck (always safe)
+
+    Falls back gracefully — the per-slide ``slide.background.fill`` is what
+    actually paints the brand bg, so the deck is brand-correct regardless.
     """
-    # Resolve the template path by theme name.
     theme_name = (theme or {}).get("name", "zhanlu-blue")
-    candidate = DARK_TEMPLATE_PATH if "dark" in theme_name else DEFAULT_TEMPLATE_PATH
-    if candidate.exists():
+    per_theme = (
+        Path(__file__).resolve().parent / "templates" / f"theme_{theme_name}.pptx"
+    )
+    legacy = DARK_TEMPLATE_PATH if "dark" in theme_name else DEFAULT_TEMPLATE_PATH
+    candidates = [p for p in (per_theme, legacy) if p.exists()]
+    for candidate in candidates:
         try:
             return Presentation(str(candidate))
         except Exception:
-            logger.warning("apply_master: failed to load %s, falling back to blank",
+            logger.warning("apply_master: failed to load %s, trying next",
                            candidate, exc_info=True)
     prs = Presentation()
     prs.slide_width = Inches(SLIDE_W_IN)

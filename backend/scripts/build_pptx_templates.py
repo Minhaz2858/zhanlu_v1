@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Programmatic .pptx template builder for the PHASE 1 layout engine.
+"""Programmatic .pptx template builder for the PHASE 1/3 layout engine.
 
-This script builds two blank PowerPoint decks with slide masters baked
-from code:
-
-    - zhanlu_default.pptx — zhanlu-blue theme (default brand)
-    - zhanlu_dark.pptx    — zhanlu-dark theme  (alt brand)
+Builds one blank PowerPoint deck *per vendored theme* with slide masters
+baked from code. Themes are discovered from ``backend/data/themes/*.json``
+(11 themes) so the gallery, ``restyle_deck``, and the layout engine all
+share a single source of truth.
 
 These are the templates the layout engine (`app/services/artifacts/
 layout_engine.py`) loads via ``apply_master()`` to seed every deck with
@@ -16,24 +15,20 @@ files are byte-identical across runs.
 DESIGN DECISIONS (logged here so the choices are reviewable):
 
     * 16:9 slide size (13.333 × 7.5 in) — modern PowerPoint default.
-    * One master per file, one layout (blank, index 6) — every deck slide
-      is built on the blank layout and stacked with explicit textboxes +
-      shapes (no titles / body placeholders), so the layout engine has
-      total control over positions.
+    * One master per file, one layout (blank) — every deck slide is built
+      on the blank layout and stacked with explicit textboxes + shapes
+      (no titles / body placeholders), so the layout engine has total
+      control over positions.
     * Calibri (the Microsoft default and PowerPoint's theme font). Falls
       back to the OS sans-serif if Calibri is not installed.
-    * Typography scale:
-            TITLE       32pt bold
-            SUBTITLE    18pt
-            BODY        16pt
-            CAPTION     12pt
-            FOOTER       9pt
-    * Default 0.6" margins all around (applied via the layout engine, not
-      via the master — see layout_engine.MARGIN_IN).
     * Theme colors are stored in `<a:clrScheme>` of the theme XML inside
       the .pptx so PowerPoint recognises them under "Design > Variants".
     * No footer text. Layout engine applies subtle slide numbers via
       ``add_slide_number()`` at render time.
+
+Phase 3 extension: previously generated only ``zhanlu_default.pptx`` +
+``zhanlu_dark.pptx``. Now iterates the full vendored theme library so every
+theme ships a matching master template.
 
 Usage:
     cd backend && python scripts/build_pptx_templates.py
@@ -42,57 +37,63 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import sys
 from pathlib import Path
 
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Inches
 from pptx.dml.color import RGBColor
 
 
 # Where the .pptx files live (alongside the layout engine).
 THIS_DIR = Path(__file__).resolve().parent
-TEMPLATES_DIR = THIS_DIR.parent / "app" / "services" / "artifacts" / "templates"
+BACKEND_ROOT = THIS_DIR.parent
+TEMPLATES_DIR = BACKEND_ROOT / "app" / "services" / "artifacts" / "templates"
+THEMES_DIR = BACKEND_ROOT / "data" / "themes"
 
-
-# Theme dictionaries. Hex strings (no leading '#').
-# These mirror the `theme_tokens` shape used by pptx_export / sandbox
-# runner so callers can supply the same dict to both renderers.
-ZHANLU_BLUE = {
-    "name": "zhanlu-blue",
-    "primary":   "#2563EB",
-    "text":      "#0F172A",
-    "muted":     "#64748B",
-    "border":    "#E2E8F0",
-    "band_bg":   "#F8FAFC",
-    "kpi_bg":    "#F1F5F9",
-    "finding_bg": "#F5F3FF",
-    "finding_accent": "#7C3AED",
-    "rec_bg":    "#EFF6FF",
-    "warn_bg":   "#FFFBEB",
-    "warn_accent": "#F59E0B",
-    "slide_bg":  "#FFFFFF",
-    "delta_up":  "#059669",
-    "delta_down": "#DC2626",
+# Theme files that predate this script's JSON theme library and are still
+# emitted under their legacy master names for backward compatibility.
+LEGACY_TEMPLATE_NAMES = {
+    "zhanlu-blue": "zhanlu_default",
+    "zhanlu-dark": "zhanlu_dark",
 }
 
-ZHANLU_DARK = {
-    "name": "zhanlu-dark",
-    "primary":   "#60A5FA",
-    "text":      "#F1F5F9",
-    "muted":     "#94A3B8",
-    "border":    "#334155",
-    "band_bg":   "#1E293B",
-    "kpi_bg":    "#0F172A",
-    "finding_bg": "#1E1B4B",
-    "finding_accent": "#A78BFA",
-    "rec_bg":    "#172554",
-    "warn_bg":   "#422006",
-    "warn_accent": "#FBBF24",
-    "slide_bg":  "#0F172A",
-    "delta_up":  "#34D399",
-    "delta_down": "#F87171",
-}
+
+def _flatten_theme(data: dict, mode: str = "light") -> dict:
+    """Map a vendored theme JSON to the flat color dict build_template needs.
+
+    Vendored themes nest colors under ``data["colors"][mode]`` with keys
+    like ``primary`` / ``background`` / ``text`` / ``text_muted`` /
+    ``border``.  build_template expects top-level ``primary`` / ``text`` /
+    ``muted`` / ``border`` / ``slide_bg``.
+    """
+    name = data.get("name") or "unnamed"
+    color_blob = data.get("colors", {})
+    palette = color_blob.get(mode) or color_blob.get("light") or next(
+        iter(color_blob.values()), {}
+    )
+    return {
+        "name": name,
+        "primary": palette.get("primary", "#2563EB"),
+        "text": palette.get("text", "#0F172A"),
+        "muted": palette.get("text_muted", palette.get("secondary", "#64748B")),
+        "border": palette.get("border", "#E2E8F0"),
+        "slide_bg": palette.get("background", "#FFFFFF"),
+    }
+
+
+def _load_themes() -> list[dict]:
+    """Load every vendored theme JSON into a flat color dict (light mode)."""
+    themes = []
+    for path in sorted(THEMES_DIR.glob("*.json")):
+        data = json.loads(path.read_text(encoding="utf-8"))
+        data.setdefault("name", path.stem)
+        themes.append(_flatten_theme(data, mode="light"))
+    if not themes:
+        raise SystemExit(f"[build_pptx_templates] no theme JSONs in {THEMES_DIR}")
+    return themes
 
 
 def _set_master_font(master, rgb: RGBColor) -> None:
@@ -111,38 +112,28 @@ def _set_master_font(master, rgb: RGBColor) -> None:
                 run.font.color.rgb = rgb
 
 
-def build_template(theme: dict, name: str, output_path: Path) -> None:
+def build_template(theme: dict, output_path: Path) -> None:
     """Build a single .pptx template deterministically.
 
     Args:
-        theme: Theme color dict (one of ZHANLU_BLUE / ZHANLU_DARK).
-        name: File stem (e.g. "zhanlu_default").
+        theme: Theme color dict loaded from a vendored JSON.
         output_path: Absolute path to write the .pptx file.
     """
     prs = Presentation()
     prs.slide_width = Inches(13.333)
     prs.slide_height = Inches(7.5)
 
-    # 1) Set the slide-master fonts to Calibri in the brand primary.
     primary = RGBColor.from_string(theme["primary"].lstrip("#"))
     text_rgb = RGBColor.from_string(theme["text"].lstrip("#"))
     for master in prs.slide_masters:
         _set_master_font(master, text_rgb)
 
-    # 2) Custom slide-master background fill (so PowerPoint shows the
-    #    brand-tinted slide bg in the thumbnails).
     bg_rgb = RGBColor.from_string(theme["slide_bg"].lstrip("#"))
     for master in prs.slide_masters:
         fill = master.background.fill
         fill.solid()
         fill.fore_color.rgb = bg_rgb
 
-    # 3) Save the slide_master XML edit directly: store theme colors
-    #    via the `clrScheme` element so PowerPoint's "Variants" menu
-    #    picks them up. python-pptx exposes `prs.slide_masters[0]
-    #    .element.getparent()` but the theme lives on a separate part —
-    #    we mutate the theme XML in-place. This is the simplest way to
-    #    embed the brand colors as a proper theme.
     _write_theme_colors(prs, theme)
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -163,7 +154,6 @@ def _write_theme_colors(prs, theme: dict) -> None:
     nsmap = {
         "a": "http://schemas.openxmlformats.org/drawingml/2006/main",
     }
-    # Find the theme part.
     theme_part = None
     for part in prs.part.package.iter_parts():
         if part.partname.endswith("/theme/theme1.xml"):
@@ -187,14 +177,12 @@ def _write_theme_colors(prs, theme: dict) -> None:
         srgb = etree.SubElement(accents[0], "{%s}srgbClr" % nsmap["a"])
         srgb.set("val", theme["primary"].lstrip("#"))
 
-    # Update dk2 to muted (used for some inheritance chains in PowerPoint).
     dk2s = clr_scheme.findall("a:dk2", namespaces=nsmap)
     if dk2s:
         dk2s[0].clear()
         srgb = etree.SubElement(dk2s[0], "{%s}srgbClr" % nsmap["a"])
         srgb.set("val", theme["muted"].lstrip("#"))
 
-    # Persist.
     new_blob = etree.tostring(
         root, xml_declaration=True, encoding="UTF-8", standalone=True
     )
@@ -203,7 +191,7 @@ def _write_theme_colors(prs, theme: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(
-        description="Build the zhanlu *.pptx templates programmatically."
+        description="Build one *.pptx master template per vendored theme."
     )
     p.add_argument(
         "--out-dir",
@@ -215,22 +203,26 @@ def main(argv: list[str] | None = None) -> int:
     out_dir = Path(args.out_dir).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    targets = [
-        (ZHANLU_BLUE, "zhanlu_default", out_dir / "zhanlu_default.pptx"),
-        (ZHANLU_DARK, "zhanlu_dark",    out_dir / "zhanlu_dark.pptx"),
-    ]
-    for theme, stem, out in targets:
-        build_template(theme, stem, out)
+    themes = _load_themes()
+    written: list[Path] = []
+    for theme in themes:
+        name = theme["name"]
+        # Legacy master names for the two original brand themes so existing
+        # layout-engine callers (which reference zhanlu_default/zhanlu_dark)
+        # keep working unchanged.
+        stem = LEGACY_TEMPLATE_NAMES.get(name, f"theme_{name}")
+        out = out_dir / f"{stem}.pptx"
+        build_template(theme, out)
         size = out.stat().st_size
-        print(f"WROTE {out}  ({size:,} bytes, theme={theme['name']})")
+        print(f"WROTE {out}  ({size:,} bytes, theme={name})")
+        written.append(out)
 
-    # Determinism check.
-    import hashlib
-    paths = [t[2] for t in targets]
-    digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    # Determinism check — byte-identical output across runs.
+    digests = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in written}
     for name, d in digests.items():
         print(f"SHA256 {name}: {d}")
 
+    print(f"\n[OK] {len(written)} theme templates generated.")
     return 0
 
 

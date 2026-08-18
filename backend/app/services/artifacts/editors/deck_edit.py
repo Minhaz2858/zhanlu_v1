@@ -25,6 +25,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from app.services.artifacts.exporters._theme import validate_theme_name
 from app.services.synexia.contracts import (
     ChartSpecInSlide,
     DeckPlan,
@@ -186,10 +187,26 @@ def add_slide(plan: DeckPlan, slide_index: Optional[int], slide: dict) -> DeckPl
 
 def restyle_deck(plan: DeckPlan, changes: dict) -> DeckPlan:
     """Update whitelisted deck fields: theme_recommendation, headline_style,
-    summary, methodology."""
+    summary, methodology.
+
+    ``theme_recommendation`` is validated against the vendored theme library
+    (with alias resolution). An unknown theme raises ``DeckEditError`` listing
+    the available themes — the existing ``load_theme`` fallback to
+    ``zhanlu-blue`` only applies at *render* time, so we surface the typo
+    here rather than silently rendering the wrong deck.
+    """
     if not isinstance(changes, dict) or not changes:
         raise DeckEditError("restyle_deck requires a non-empty 'changes' object")
     _check_only_fields(changes, _RESTYLE_FIELDS, "restyle_deck")
+
+    if "theme_recommendation" in changes:
+        try:
+            changes["theme_recommendation"] = validate_theme_name(
+                changes["theme_recommendation"]
+            )
+        except ValueError as exc:
+            raise DeckEditError(str(exc)) from exc
+
     out = _copy(plan)
     for key, value in changes.items():
         setattr(out, key, value)
