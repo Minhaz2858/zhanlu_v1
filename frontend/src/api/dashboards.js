@@ -61,3 +61,19 @@ export function getDashboardByConversation(conversationId) {
 export function undoDashboardEdit(id) {
   return authFetch(`${BASE}/${id}/undo`, { method: 'POST' }).then(j);
 }
+
+// ── Full-stack dashboard app records (new pipeline) ──
+// The app frontends are served as static files at `${BASE}/apps/{slug}/`
+// (mounted by DashboardAppManager). These JSON record endpoints use the
+// `/app-records/` prefix to avoid colliding with that static mount.
+export function getDashboardApp(slug) {
+  return authFetch(`${BASE}/app-records/${slug}`, { method: 'GET' }).then(j);
+}
+
+export function listDashboardApps() {
+  return authFetch(`${BASE}/app-records`, { method: 'GET' }).then(j);
+}
+
+export function markDashboardViewed(slug) {
+  return authFetch(`${BASE}/app-records/${slug}/mark-viewed`, { method: 'POST' }).then(j);
+}

@@ -5,6 +5,7 @@ import { authFetch } from '@/api/authFetch';
 import { getDashboard } from '@/api/dashboards';
 import { needsPreviewToken } from '@/lib/previewToken';
 import DashboardViewer from '@/components/dashboard/DashboardViewer';
+import FullStackDashboardViewer from '@/components/dashboard/FullStackDashboardViewer';
 import DocxArtifactPreview from './DocxArtifactPreview';
 import PptxArtifactPreview from './PptxArtifactPreview';
 import PdfFaithfulPreview from './PdfFaithfulPreview';
@@ -146,9 +147,31 @@ function formatSize(bytes) {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-function LiveDashboardArtifactPreview({ dashboardId }) {
+function LiveDashboardArtifactPreview({ dashboardId, artifact }) {
   const [dashboard, setDashboard] = useState(null);
   const [error, setError] = useState(null);
+
+  // Full-stack pipeline dashboards are served as standalone apps (not stored in
+  // the legacy `dashboards` table). Render them directly from the artifact's
+  // served URL without any legacy fetch.
+  if (artifact?.source === 'dashboard_app') {
+    const appUrl = artifact.app_url || dashboardId;
+    if (!appUrl) {
+      return (
+        <div className="flex h-full items-center justify-center p-6 text-sm text-muted-foreground">
+          <AlertTriangle className="mr-2 h-4 w-4 text-destructive" />
+          Dashboard URL is missing.
+        </div>
+      );
+    }
+    return (
+      <FullStackDashboardViewer
+        appUrl={appUrl}
+        name={artifact.name}
+        slug={artifact.slug}
+      />
+    );
+  }
 
   useEffect(() => {
     if (!dashboardId) return undefined;
@@ -418,7 +441,7 @@ export default function ArtifactPreviewPane({ artifact, onClose }) {
             panel is dragged wider, which made the content look frozen
             — see the regression the user filed. */}
         {artifact.type === 'dashboard' ? (
-          <LiveDashboardArtifactPreview dashboardId={dashboardId} />
+          <LiveDashboardArtifactPreview dashboardId={dashboardId} artifact={artifact} />
         ) : isOfficeDoc ? (
           /* Office-file artifacts (docx/pptx/xlsx): three view modes.
              'html' is the default (matches Files in this task modal).

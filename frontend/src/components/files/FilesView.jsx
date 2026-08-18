@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo } from 'react';
 import { base44 } from '@/api/base44Client';
+import { listDashboardApps, markDashboardViewed } from '@/api/dashboards';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useTranslate } from '@/lib/useTranslate';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -67,7 +68,7 @@ export default function FilesView({ scope = 'all' }) {
   async function load() {
     setLoading(true);
     try {
-      const [files, reports, projects, agentApps, automationFiles, automationTasks] = await Promise.all([
+      const [files, reports, projects, agentApps, automationFiles, automationTasks, dashAppRecords] = await Promise.all([
         base44.entities.UserFile.list('-updated_date', 500),
         base44.entities.Report.list('-updated_date', 500).catch(() => []),
         // Project + AgentApp lists are needed for (a) the filter dropdowns
@@ -80,6 +81,10 @@ export default function FilesView({ scope = 'all' }) {
         base44.entities.AgentApp.list('-updated_date', 500).catch(() => []),
         base44.entities.AutomationFile.list('-updated_date', 500).catch(() => []),
         base44.entities.AutomationTask.list('-updated_date', 500).catch(() => []),
+        // Full-stack dashboard apps (Phase 2): separate DashboardApp records
+        // (not UserFile rows). Loaded so the My Files list shows live
+        // dashboards with "last data change" timestamps + unread badges.
+        listDashboardApps().catch(() => []),
       ]);
       // Build agent_id → name lookup so each automation file can resolve
       // its real producer agent (task.agent_id → AgentApp.name) instead
@@ -153,8 +158,30 @@ export default function FilesView({ scope = 'all' }) {
           _entityType: 'AutomationFile',
         };
       });
-      // Merge Report + automation rows after UserFile rows (UserFile first = pinned items surface on top)
-      setItems([...files, ...reportItems, ...automationItems]);
+      // Full-stack dashboard apps → UserFile-shaped items. `updated_date` is
+      // set to last_data_change_at (falls back to created_date) so the card
+      // shows when the underlying data last refreshed; `read: !unread` powers
+      // the unread badge (unread = data changed after the user last opened it).
+      const dashAppItems = (dashAppRecords || []).map((r) => ({
+        id: r.slug,
+        name: r.name,
+        file_type: 'html',
+        file_url: r.app_url || `/api/dashboards/apps/${r.slug}/`,
+        source: 'dashboard_app',
+        resource_kind: 'dashboard',
+        project: r.project,
+        project_id: r.project_id,
+        session_id: r.session_id || null,
+        agent_name: r.agent_name || null,
+        read: r.unread ? false : true,
+        pinned: false,
+        size: null,
+        updated_date: r.last_data_change_at || r.created_date || r.updated_date,
+        created_date: r.created_date,
+        _entityType: 'DashboardApp',
+      }));
+      // Merge Report + automation + dashboard rows after UserFile rows (UserFile first = pinned items surface on top)
+      setItems([...files, ...reportItems, ...automationItems, ...dashAppItems]);
       const projectMap = {};
       for (const p of (projects || [])) projectMap[p.id] = p.resource_type || 'personal';
       setProjectTypes(projectMap);
@@ -222,12 +249,16 @@ export default function FilesView({ scope = 'all' }) {
 
   const isReport = (item) => item._entityType === 'Report';
   const isAutomationFile = (item) => item._entityType === 'AutomationFile';
+  const isDashboardApp = (item) => item._entityType === 'DashboardApp';
   const entityFor = (item) =>
     isReport(item) ? base44.entities.Report
       : isAutomationFile(item) ? base44.entities.AutomationFile
         : base44.entities.UserFile;
 
   async function togglePin(item) {
+    // Dashboard apps have no `pinned` column — the pin control is hidden for
+    // them in FileCard, so this is a no-op guard.
+    if (isDashboardApp(item)) return;
     // Optimistic local update + persist for all three entity types. Every
     // type now has a backend `pinned` column (UserFile always has; Report +
     // AutomationFile gained one), so pinning survives page refreshes. The
@@ -244,6 +275,20 @@ export default function FilesView({ scope = 'all' }) {
     load();
   }
   async function markRead(item) {
+    // Dashboard apps: "read" = user opened the app → POST mark-viewed which
+    // stamps `viewed_at` on the backend (unread = last_data_change_at newer
+    // than viewed_at).
+    if (isDashboardApp(item)) {
+      if (item.read === true) return;
+      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, read: true } : i)));
+      try {
+        await markDashboardViewed(item.id);
+      } catch (_) {
+        // Intentionally swallowed — optimistic local update stands; the badge
+        // will re-appear on next load() if the write was rejected.
+      }
+      return;
+    }
     // Optimistic local update across all three entity types so the orange
     // "Unread" badge / dot clears immediately on click — no manual reload
     // required. Every entity type now persists `read: true` to the DB
@@ -262,11 +307,15 @@ export default function FilesView({ scope = 'all' }) {
     }
   }
   async function remove(item) {
+    // Dashboard apps have no delete endpoint yet — skip (the record is owned
+    // by the chat pipeline; T6 adds the versioned delete flow).
+    if (isDashboardApp(item)) return;
     await entityFor(item).delete(item.id);
     load();
   }
   async function doRename(name) {
     if (!renameItem || !name.trim()) return;
+    if (isDashboardApp(renameItem)) return;
     if (isReport(renameItem)) {
       await base44.entities.Report.update(renameItem.id, { title: name.trim() });
     } else if (isAutomationFile(renameItem)) {

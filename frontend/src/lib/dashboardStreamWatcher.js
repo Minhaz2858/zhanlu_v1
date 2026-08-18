@@ -4,6 +4,8 @@ const DASHBOARD_TOOLS = new Set([
   'create_dashboard',
   'update_dashboard',
   'undo_dashboard_edit',
+  'create_fullstack_dashboard',
+  'update_fullstack_dashboard',
 ]);
 
 export function dashboardArtifactFromToolCall(toolCall) {
@@ -14,6 +16,30 @@ export function dashboardArtifactFromToolCall(toolCall) {
   const result = toolCall.results || toolCall.result || {};
   const artifact = result.artifact || {};
   const dashboard = result.dashboard || {};
+  const dashboardApp = result.dashboard_app || {};
+
+  // New full-stack pipeline: artifact {source:'dashboard_app', slug, title, app_url}.
+  if (artifact.source === 'dashboard_app' || dashboardApp.slug || dashboardApp.app_url) {
+    const slug = artifact.slug || dashboardApp.slug;
+    if (!slug) return null;
+    const title = artifact.title || dashboardApp.name || result.title || 'Dashboard';
+    return {
+      type: 'dashboard',
+      source: 'dashboard_app',
+      id: slug,
+      artifact_id: slug,
+      dashboard_id: slug,
+      slug,
+      title,
+      file_name: title,
+      datasource_name: artifact.datasource_name || result.datasource_name,
+      app_url: artifact.app_url || dashboardApp.app_url || `/api/dashboards/apps/${slug}/`,
+      metric_count: artifact.metric_count ?? dashboardApp.metric_count,
+      live: true,
+      has_preview: true,
+    };
+  }
+
   const dashboardId = artifact.dashboard_id || dashboard.id || result.dashboard_id || result.id;
   if (!dashboardId) return null;
 
