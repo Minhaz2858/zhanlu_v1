@@ -179,6 +179,51 @@ def test_gate_forwards_attempts_and_budget(monkeypatch):
     assert captured["tool_results"][0]["rows"] == [{"material": "A", "price": 1.0}]
 
 
+def test_gate_all_null_aggregate_rows_nudge():
+    """The C5/C9 'no data' bug: a query that returned a single all-NULL
+    aggregate row (wrong column name + English filter literal) must be
+    rejected by the gate — the agent is nudged to re-probe instead of
+    answering 'no data'."""
+    state = {
+        "last_rows": [
+            {"total_volume": None, "total_revenue": None, "product_count": None},
+        ],
+        "last_sql": "SELECT SUM(shipment_quantity) AS total_volume, ... "
+                    "FROM erp_product_sales_details "
+                    "WHERE material_name LIKE '%C5%'",
+    }
+    action, msg = _run(delegation_tools._sub_loop_answer_gate(
+        "total sales for C5/C9 in July 2026",
+        state,
+        "No data available for July 2026.",
+        attempts=0, budget_remaining=3,
+    ))
+    assert action == "nudge"
+    assert "VERIFICATION GAP" in msg
+
+
+def test_gate_all_null_payload_is_schema_shaped(monkeypatch):
+    """All-NULL rows must be represented as columns + zero rows (NOT passed
+    through as real rows), so the metadata-only detector fires."""
+    captured = {}
+
+    def _recorder(question, tool_results, final_text, **kwargs):
+        captured["tool_results"] = tool_results
+        return VerificationResult(status="COMPLETE")
+
+    monkeypatch.setattr(delegation_tools, "evaluate_answer", _recorder)
+    _run(delegation_tools._sub_loop_answer_gate(
+        "total sales",
+        {"last_rows": [{"total_volume": None, "total_revenue": None}]},
+        "no data",
+        attempts=0, budget_remaining=3,
+    ))
+    payload = captured["tool_results"][0]
+    assert payload["columns"] == ["total_volume", "total_revenue"]
+    assert payload["row_count"] == 0
+    assert payload["rows"] == []
+
+
 def test_gate_metadata_payload_is_schema_shaped(monkeypatch):
     """The metadata-only payload must carry columns + zero rows so the
     metadata-only detector fires inside evaluate_answer."""

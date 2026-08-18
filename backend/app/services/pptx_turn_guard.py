@@ -38,8 +38,11 @@ _PPTX_BUILD_TOOLS = frozenset(
 # Force the create_artifact call when this many iterations remain.
 PPTX_FORCE_WINDOW = 4
 
-# At most one synthesis-boundary nudge per turn.
-_PPTX_NUDGE_CAP = 1
+# Default cap for synthesis-boundary nudges per turn (configurable via
+# settings.PPTX_NUDGE_MAX). After the last allowed nudge the loop MUST force
+# create_artifact via tool_choice (force_next=True) — prose deflection can
+# never end the turn without a deck.
+_PPTX_NUDGE_CAP = 2
 
 
 def is_pptx_request(user_content: str | None) -> bool:
@@ -128,10 +131,15 @@ class PptxTurnGuardResult:
     - ``"disclose"`` — append ``message`` to the final assistant text
     - ``"none"`` — nothing to do (flag off / not a pptx request / already
       created / nudge cap reached)
+
+    ``force_next`` is True when this is the LAST allowed nudge: the loop must
+    then force ``tool_choice=create_artifact`` on the next iteration instead
+    of accepting another prose deflection.
     """
 
     action: str
     message: str = ""
+    force_next: bool = False
 
 
 def pptx_turn_guard(
@@ -148,12 +156,15 @@ def pptx_turn_guard(
     """
     if not getattr(settings, "PPT_TURN_GUARD_ENABLED", False):
         return PptxTurnGuardResult("none")
-    if attempts >= _PPTX_NUDGE_CAP:
+    cap = int(getattr(settings, "PPTX_NUDGE_MAX", _PPTX_NUDGE_CAP) or _PPTX_NUDGE_CAP)
+    if attempts >= cap:
         return PptxTurnGuardResult("none")
     if not is_pptx_request(user_content):
         return PptxTurnGuardResult("none")
     if pptx_artifact_created(tool_calls_for_frontend):
         return PptxTurnGuardResult("none")
     if budget_remaining >= 2:
-        return PptxTurnGuardResult("nudge", build_pptx_nudge())
+        return PptxTurnGuardResult(
+            "nudge", build_pptx_nudge(), force_next=(attempts == cap - 1)
+        )
     return PptxTurnGuardResult("disclose", build_pptx_disclosure())

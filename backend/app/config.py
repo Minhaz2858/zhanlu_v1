@@ -422,6 +422,26 @@ class Settings(BaseSettings):
     PPTX_DATA_TABLE_HIGHLIGHT_TOP: int = 3
     PPTX_VISUAL_VERIFY_ENABLED: bool = False
 
+    # ── DELIVERABLE GUARANTEE (2026-08-18 incident hardening) ────────────
+    # Fix 1a: a mid-turn report card (html_report artifact) must NOT satisfy
+    # an explicit pptx/docx/xlsx/dashboard request. When enabled, the
+    # orchestrator fallback only counts artifacts whose stored type matches
+    # the requested format; non-matching ids no longer preempt the fallback.
+    DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED: bool = False
+    # Fix 1b: max synthesis-boundary nudges the PPT turn-guard may emit per
+    # turn. After the last nudge the v3/v2 loop FORCES create_artifact via
+    # tool_choice instead of accepting another prose deflection.
+    PPTX_NUDGE_MAX: int = 2
+    # Fix 2: deterministic plausibility detectors (part > whole, cross-call
+    # total drift) feed the answer-verification retry/disclose path.
+    ANSWER_PLAUSIBILITY_CHECK_ENABLED: bool = False
+    # Fix 3: NL2SQL JOIN fan-out guard — pre-aggregation-before-join rules
+    # in the SQL prompt + structural warnings that trigger one self-correct.
+    NL2SQL_FANOUT_GUARD_ENABLED: bool = False
+    # Fix 5: consonant-skeleton fuzzy match so "Dashbord"-class typos still
+    # route to the dashboard machinery across all four intent detectors.
+    DASHBOARD_FUZZY_MATCH_ENABLED: bool = False
+
     # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
     # Post-FINALIZE semantic quality layer: a combined completeness +
     # reflexion LLM critique on the generated response, with a bounded

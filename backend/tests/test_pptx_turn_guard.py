@@ -40,6 +40,25 @@ def test_is_pptx_request_chinese():
 
 # ---------------------------------------------- agents.py wiring (regression)
 
+def test_agents_module_wires_pptx_force_next():
+    """Fix 1b: the last-allowed nudge must arm a force flag consumed at the
+    top of the next loop iteration in both v3 and v2 stream loops, so prose
+    deflection can never end the turn without a deck."""
+    import inspect
+
+    import app.routers.agents as agents_mod
+
+    src = inspect.getsource(agents_mod)
+    assert "_pptx_force_next_iteration" in src
+    assert "_pptx_guard.force_next" in src
+    # The force flag must be read at the same place the T-window force is
+    # evaluated — i.e. OR'd into the should_force_create_pptx condition.
+    assert "_pptx_force_next_iteration or should_force_create_pptx" in src
+    # Both v3 and v2 stream loops must initialize the flag (UnboundLocalError
+    # discipline — the value is read AFTER the loop's guard block).
+    assert src.count("_pptx_force_next_iteration = False") >= 2
+
+
 def test_agents_module_exports_turn_guard_symbols():
     """Regression: agents.py must import the pptx turn-guard helpers.
 
@@ -214,7 +233,33 @@ def test_turn_guard_disclose_when_budget_short(monkeypatch):
 
 def test_turn_guard_attempts_cap(monkeypatch):
     monkeypatch.setattr(settings, "PPT_TURN_GUARD_ENABLED", True)
+    res = pptx_turn_guard("make a PPT", [], budget_remaining=10, attempts=2)
+    assert res.action == "none"
+
+
+def test_turn_guard_nudge_force_next_on_last_attempt(monkeypatch):
+    """The final allowed nudge must flag force_next so the loop can force
+    create_artifact on the next iteration instead of accepting prose."""
+    monkeypatch.setattr(settings, "PPT_TURN_GUARD_ENABLED", True)
     res = pptx_turn_guard("make a PPT", [], budget_remaining=10, attempts=1)
+    assert res.action == "nudge"
+    assert res.force_next is True
+
+
+def test_turn_guard_nudge_no_force_next_before_last(monkeypatch):
+    monkeypatch.setattr(settings, "PPT_TURN_GUARD_ENABLED", True)
+    res = pptx_turn_guard("make a PPT", [], budget_remaining=10, attempts=0)
+    assert res.action == "nudge"
+    assert res.force_next is False
+
+
+def test_turn_guard_cap_configurable(monkeypatch):
+    monkeypatch.setattr(settings, "PPT_TURN_GUARD_ENABLED", True)
+    monkeypatch.setattr(settings, "PPTX_NUDGE_MAX", 3)
+    res = pptx_turn_guard("make a PPT", [], budget_remaining=10, attempts=2)
+    assert res.action == "nudge"
+    assert res.force_next is True
+    res = pptx_turn_guard("make a PPT", [], budget_remaining=10, attempts=3)
     assert res.action == "none"
 
 

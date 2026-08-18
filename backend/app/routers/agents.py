@@ -67,6 +67,7 @@ from app.services.dashboard_turn_guard import (
     dashboard_guard_blocked_tools,
     contract_confirmation_needed,
     dashboard_build_tool,
+    fuzzy_dashboard_request,
 )
 from app.services.pptx_turn_guard import (
     pptx_turn_guard,
@@ -340,7 +341,11 @@ def _is_dashboard_request(user_content: str) -> bool:
     if not user_content:
         return False
     low = user_content.lower()
-    return any(kw in low for kw in ("dashboard", "看板", "仪表盘", "数据面板"))
+    if any(kw in low for kw in ("dashboard", "看板", "仪表盘", "数据面板")):
+        return True
+    # Flag-gated fuzzy "Dashbord"-class typo detection (no-op when the flag
+    # is off, so behavior is unchanged by default).
+    return fuzzy_dashboard_request(user_content)
 
 
 def _tool_was_called(tool_calls_for_frontend: list[dict], tool_name: str) -> bool:
@@ -532,6 +537,13 @@ _LONG_RUNNING_TOOLS = frozenset({
     "ask_knowledge_graph", "ask_decision", "ask_macro_override",
     "ask_erp_kpi", "ask_erp_writeback",
     "web_search", "execute_automation", "execute_code",
+    # Artifact / dashboard generation can take tens of seconds to minutes
+    # (Jinja scaffold + DB writes + optional git commits + poller start).
+    # Register them so the batch tool wrapper emits tool_progress frames and
+    # long builds never idle-kill the SSE connection.
+    "create_artifact", "create_fullstack_dashboard",
+    "update_fullstack_dashboard", "create_dashboard",
+    "revert_fullstack_dashboard", "run_sandbox_skill",
 })
 
 
@@ -3190,6 +3202,10 @@ async def add_message(
         _verify_attempts = 0
         _gate_attempts = 0  # universal self-eval re-plan nudges this turn
         _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
+        # Fix 1b: one-shot "force create_artifact next iteration" signal set
+        # by the LAST allowed pptx nudge (pptx_turn_guard.force_next). Read at
+        # the top of the next iteration next to should_force_create_pptx.
+        _pptx_force_next_iteration = False
         # Finish-line state (UnboundLocalError discipline: initialized BEFORE
         # the loop so any post-loop read is safe). ``dashboard_forced`` tracks
         # whether the dashboard guard forced ``create_dashboard`` this turn;
@@ -3292,7 +3308,7 @@ async def add_message(
                 )
                 tool_choice = {
                     "type": "function",
-                    "function": {"name": "create_dashboard"},
+                    "function": {"name": _dash_build_tool},
                 }
                 dashboard_forced = True
             # PPTX turn-guard: mirror the dashboard forcing for artifact decks.
@@ -3301,7 +3317,10 @@ async def add_message(
             # the model must emit the call (dashboard forcing wins via the
             # dashboard_forced guard inside should_force_create_pptx).
             _pptx_forced = False
-            if should_force_create_pptx(
+            # Fix 1b: the last-allowed synthesis-boundary nudge arms
+            # _pptx_force_next_iteration, which overrides the T-window check
+            # here so the model MUST emit create_artifact next turn.
+            if _pptx_force_next_iteration or should_force_create_pptx(
                 user_content,
                 tool_calls_for_frontend,
                 iteration=iteration,
@@ -3319,6 +3338,7 @@ async def add_message(
                     "function": {"name": "create_artifact"},
                 }
                 _pptx_forced = True
+                _pptx_force_next_iteration = False  # consume the one-shot force
             # Finish line: on the final iteration force tool_choice="none" so
             # the LLM must answer in text. Guard forcing (dashboard + pptx) wins.
             tool_choice = _finish_line_tool_choice(
@@ -3485,9 +3505,14 @@ async def add_message(
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": _pptx_guard.message})
                     _pptx_nudge_attempts += 1
+                    # Fix 1b: the LAST allowed nudge arms a one-shot force so
+                    # the next iteration forces create_artifact (the model can
+                    # no longer deflect in prose).
+                    if _pptx_guard.force_next:
+                        _pptx_force_next_iteration = True
                     logger.info(
-                        "v2 stream: pptx turn-guard nudge injected (conv=%s, iter=%d)",
-                        conversation_id, iteration,
+                        "v2 stream: pptx turn-guard nudge injected (conv=%s, iter=%d, force_next=%s)",
+                        conversation_id, iteration, _pptx_guard.force_next,
                     )
                     continue
                 if _pptx_guard.action == "disclose":
@@ -7377,6 +7402,11 @@ async def add_message_stream(
         _verify_attempts = 0
         _gate_attempts = 0  # universal self-eval re-plan nudges this turn
         _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
+        # Fix 1b: one-shot "force create_artifact next iteration" signal set
+        # by the LAST allowed pptx nudge (pptx_turn_guard.force_next). Read at
+        # the top of the next iteration next to should_force_create_pptx, so
+        # prose deflection can never end the turn without a deck.
+        _pptx_force_next_iteration = False
         # Initialize BEFORE the loop: the budget guard and the tool-call
         # loop guard can both ``break`` on the FIRST iteration, before the
         # in-loop assignment runs — the post-loop ``if not content_streamed``
@@ -7561,7 +7591,7 @@ async def add_message_stream(
                 )
                 tool_choice = {
                     "type": "function",
-                    "function": {"name": "create_dashboard"},
+                    "function": {"name": _dash_build_tool},
                 }
                 dashboard_forced = True
             # PPTX turn-guard: mirror the dashboard forcing for artifact decks.
@@ -7570,7 +7600,10 @@ async def add_message_stream(
             # the model must emit the call (dashboard forcing wins via the
             # dashboard_forced guard inside should_force_create_pptx).
             _pptx_forced = False
-            if should_force_create_pptx(
+            # Fix 1b: the last-allowed synthesis-boundary nudge arms
+            # _pptx_force_next_iteration, which overrides the T-window check
+            # here so the model MUST emit create_artifact next turn.
+            if _pptx_force_next_iteration or should_force_create_pptx(
                 user_content,
                 tool_calls_for_frontend,
                 iteration=iteration,
@@ -7588,6 +7621,7 @@ async def add_message_stream(
                     "function": {"name": "create_artifact"},
                 }
                 _pptx_forced = True
+                _pptx_force_next_iteration = False  # consume the one-shot force
 
             # Finish line: on the final iteration force tool_choice="none" so
             # the LLM must answer in text. Guard forcing (dashboard + pptx) wins.
@@ -7833,9 +7867,14 @@ async def add_message_stream(
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": _pptx_guard.message})
                     _pptx_nudge_attempts += 1
+                    # Fix 1b: the LAST allowed nudge arms a one-shot force so
+                    # the next iteration forces create_artifact (the model can
+                    # no longer deflect in prose).
+                    if _pptx_guard.force_next:
+                        _pptx_force_next_iteration = True
                     logger.info(
-                        "v3 stream: pptx turn-guard nudge injected (conv=%s, iter=%d)",
-                        conversation_id, iteration,
+                        "v3 stream: pptx turn-guard nudge injected (conv=%s, iter=%d, force_next=%s)",
+                        conversation_id, iteration, _pptx_guard.force_next,
                     )
                     continue
                 if _pptx_guard.action == "disclose":
@@ -8904,35 +8943,40 @@ async def add_message_stream(
         if not (assistant_content or "").strip():
             try:
                 # Dashboard-specific rescue: if the user asked for a
-                # dashboard but create_dashboard was never called, inject
-                # a final nudge forcing the LLM to call create_dashboard
-                # with whatever schema info it has. This prevents the
-                # common "budget exhausted during exploration" failure.
+                # dashboard but the active build tool was never called,
+                # inject a final nudge forcing the LLM to call it with
+                # whatever schema info it has. The tool name is flag-aware
+                # (dashboard_build_tool) so we never force the disabled
+                # legacy create_dashboard. This prevents the common
+                # "budget exhausted during exploration" failure.
+                _rescue_build_tool = dashboard_build_tool()
                 if (
-                    _is_dashboard_request(user_content)
-                    and not _tool_was_called(tool_calls_for_frontend, "create_dashboard")
+                    _rescue_build_tool
+                    and _is_dashboard_request(user_content)
+                    and not _tool_was_called(tool_calls_for_frontend, _rescue_build_tool)
+                    and not _tool_was_called(tool_calls_for_frontend, "update_fullstack_dashboard")
                     and not _tool_was_called(tool_calls_for_frontend, "update_dashboard")
                 ):
                     logger.info(
                         "Dashboard rescue: user asked for dashboard but "
-                        "create_dashboard never called (conv=%s). Injecting "
-                        "rescue nudge.",
-                        conversation_id,
+                        "%s never called (conv=%s). Injecting rescue nudge.",
+                        _rescue_build_tool, conversation_id,
                     )
                     rescue_nudge = (
                         "CRITICAL: The user asked for a dashboard but you ran "
-                        "out of tool iterations before calling create_dashboard. "
-                        "You MUST call create_dashboard NOW with the schema "
+                        "out of tool iterations before calling "
+                        + _rescue_build_tool + ". "
+                        "You MUST call " + _rescue_build_tool + " NOW with the schema "
                         "information you already have. Use the column names you "
                         "discovered from describe_schema/execute_query. Do NOT "
                         "explore further — build the dashboard with what you know."
                     )
                     llm_messages.append({"role": "user", "content": rescue_nudge})
-                    # One final LLM call to force create_dashboard
+                    # One final LLM call to force the active build tool
                     try:
                         _rescue_stream = _stream_llm_with_tools(
                             llm_messages, tools,
-                            tool_choice={"type": "function", "function": {"name": "create_dashboard"}},
+                            tool_choice={"type": "function", "function": {"name": _rescue_build_tool}},
                             model_override=user_model,
                             endpoint=effective_llm.endpoint,
                             temperature=llm_overrides.get("temperature"),
@@ -8945,12 +8989,12 @@ async def add_message_stream(
                                 yield f'data: {json.dumps({"type": "delta", "content": _ev_data})}\n\n'
                             elif _ev_type == "tool_calls":
                                 raw_tool_calls = _ev_data or []
-                        # If the rescue produced a create_dashboard call, execute it
+                        # If the rescue produced a build-tool call, execute it
                         if raw_tool_calls:
                             for _tc in raw_tool_calls:
                                 _fn = _tc.get("function", {})
                                 _tname = _fn.get("name", "")
-                                if _tname == "create_dashboard":
+                                if _tname == _rescue_build_tool:
                                     _targs = _fn.get("arguments", "{}")
                                     if isinstance(_targs, str):
                                         import json as _json
@@ -8973,7 +9017,7 @@ async def add_message_stream(
                                     tc_id = _tc.get("id", str(uuid.uuid4()))
                                     tool_calls_for_frontend.append({
                                         "id": tc_id,
-                                        "name": "create_dashboard",
+                                        "name": _rescue_build_tool,
                                         "arguments_string": _fn.get("arguments", "{}") if isinstance(_fn.get("arguments"), str) else json.dumps(_fn.get("arguments", {})),
                                         "status": "completed" if isinstance(_tool_result, dict) and _tool_result.get("success") else "failed",
                                         "results": _tool_result,
@@ -8986,8 +9030,9 @@ async def add_message_stream(
                                     llm_messages.append({"role": "assistant", "content": None, "tool_calls": [_tc]})
                                     llm_messages.append({"role": "tool", "tool_call_id": tc_id, "content": json.dumps(_tool_result)})
                                     logger.info(
-                                        "Dashboard rescue: create_dashboard executed "
+                                        "Dashboard rescue: %s executed "
                                         "(success=%s, conv=%s)",
+                                        _rescue_build_tool,
                                         isinstance(_tool_result, dict) and _tool_result.get("success"),
                                         conversation_id,
                                     )
@@ -9016,8 +9061,13 @@ async def add_message_stream(
                     elif locals().get("_loop_guard_user_facing"):
                         assistant_content = _loop_guard_user_facing
                     else:
-                        # Dashboard-specific fallback message
-                        if _is_dashboard_request(user_content) and not _tool_was_called(tool_calls_for_frontend, "create_dashboard"):
+                        # Dashboard-specific fallback message (flag-aware tool
+                        # name so the check matches what the agent actually had
+                        # available this turn).
+                        if _is_dashboard_request(user_content) and not _tool_was_called(
+                            tool_calls_for_frontend,
+                            locals().get("_rescue_build_tool") or "create_dashboard",
+                        ):
                             assistant_content = (
                                 "I ran out of steps while exploring the data for your dashboard. "
                                 "Please try again — I'll create the dashboard more quickly this time."
@@ -9109,12 +9159,25 @@ async def add_message_stream(
         # stored state.
         conv.messages = list(messages)
         conv.updated_date = datetime.now(timezone.utc)
-        try:
+        # Offload the final commit to a worker thread: the DB write can take
+        # tens of milliseconds (JSON column + flush), and blocking the event
+        # loop here starves the SSE heartbeat pings exactly when the client
+        # most needs them (right before `done`). NEVER re-raise on failure —
+        # a persistence error must not abort the stream before `done` is
+        # emitted; the user still sees their answer, and the row can be
+        # reconciled later.
+        def _final_commit() -> None:
+            conv.messages = list(messages)
             db.commit()
+
+        try:
+            await asyncio.to_thread(_final_commit)
         except Exception as _commit_err:
-            logger.error("v3 stream final commit failed: %s", _commit_err)
-            db.rollback()
-            raise
+            logger.error("v3 stream final commit failed (non-fatal): %s", _commit_err)
+            try:
+                db.rollback()
+            except Exception:
+                pass
         # The checkpoint block above may have expunged the instance;
         # re-query a fresh one so the final to_dict() reflects the
         # freshly-committed row.

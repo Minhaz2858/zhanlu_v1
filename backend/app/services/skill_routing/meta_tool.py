@@ -71,6 +71,20 @@ async def _skill_meta_tool(
     # Strip optional action prefixes
     action, skill_name = _parse_action(command)
 
+    # Bare action prefix (e.g. `Skill {"command": "execute"}`) — the LLM
+    # invoked the action without a skill name. Return an instructive error
+    # instead of the dead-end "Skill not found: 'execute'".
+    if command in ("execute", "load"):
+        return {
+            "success": False,
+            "error": (
+                f"'{command}' is an action prefix, not a skill name. "
+                "You must include the skill name after the action. "
+                "Call: Skill {\"command\": \"execute <skill-name>\"} "
+                "(e.g. 'execute weekly-report-generation')."
+            ),
+        }
+
     # Self-correcting redirect: the LLM sometimes passes a *tool* name as the
     # skill name (e.g. `Skill {"command": "load_skill_body"}`), confusing the
     # Skill dispatcher with the underlying tool. Detect that and tell the LLM

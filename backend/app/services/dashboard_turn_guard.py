@@ -15,6 +15,47 @@ _LIVE_DASHBOARD_EN_RE = re.compile(
 _LIVE_DASHBOARD_ZH = ("仪表盘", "看板", "数据面板", "数据看板", "仪表板")
 
 
+def _fuzzy_dashboard_word(token: str) -> bool:
+    """Consonant-skeleton match for typo'd 'dashboard' (Fix 5).
+
+    Pipeline: lowercase -> strip non-alpha -> drop vowels, then compare the
+    remaining consonant skeleton against ``dshbrd``/``dshbrds``. Because all
+    vowels are dropped, vowel-order typos are absorbed, and consonant
+    transpositions that preserve the skeleton (e.g. "Dashbord") match:
+    "dashbord" / "dashboard" / "dash-board" all normalize to ``dshbrd``.
+
+    Flag-gated by ``DASHBOARD_FUZZY_MATCH_ENABLED`` (default False) so the
+    guard is byte-identical to before when the flag is off.
+    """
+    try:
+        from app.config import settings
+
+        if not getattr(settings, "DASHBOARD_FUZZY_MATCH_ENABLED", False):
+            return False
+    except Exception:
+        return False
+    if not token:
+        return False
+    skeleton = re.sub(r"[^a-z]", "", token.lower())
+    skeleton = re.sub(r"[aeiou]", "", skeleton)
+    return skeleton in {"dshbrd", "dshbrds"}
+
+
+def fuzzy_dashboard_request(user_content: str | None) -> bool:
+    """True when any word in ``user_content`` is a fuzzy 'dashboard' match.
+
+    Hyphens are kept as token separators (``dash-board`` stays one token);
+    all other non-alpha characters split tokens. Returns False immediately
+    when ``DASHBOARD_FUZZY_MATCH_ENABLED`` is off.
+    """
+    if not user_content:
+        return False
+    for token in re.split(r"[^a-zA-Z-]+", user_content.lower()):
+        if _fuzzy_dashboard_word(token):
+            return True
+    return False
+
+
 def is_live_dashboard_request(user_content: str | None) -> bool:
     """True for ordinary live-dashboard requests.
 
@@ -25,6 +66,8 @@ def is_live_dashboard_request(user_content: str | None) -> bool:
     if not user_content:
         return False
     if _LIVE_DASHBOARD_EN_RE.search(user_content):
+        return True
+    if fuzzy_dashboard_request(user_content):
         return True
     return any(kw in user_content for kw in _LIVE_DASHBOARD_ZH)
 

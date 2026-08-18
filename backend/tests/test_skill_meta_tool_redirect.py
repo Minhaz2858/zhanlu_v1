@@ -67,3 +67,17 @@ def test_parse_action_unchanged():
     )
     assert _parse_action("load pptx") == ("load", "pptx")
     assert _parse_action("pptx") == ("load", "pptx")
+
+
+@pytest.mark.parametrize("command", ["execute", "load"])
+def test_bare_action_prefix_returns_instructive_error(command):
+    """A bare action prefix (no skill name) must return an instructive error
+    telling the LLM to include the skill name — NOT the dead-end
+    'Skill not found: execute' seen in production."""
+    from app.services.skill_routing.meta_tool import _skill_meta_tool
+
+    result = asyncio.run(_skill_meta_tool({"command": command}))
+    assert result["success"] is False
+    assert "action prefix" in result["error"]
+    assert "execute <skill-name>" in result["error"]
+    assert "Skill not found" not in result["error"]

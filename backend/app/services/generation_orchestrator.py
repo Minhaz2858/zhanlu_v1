@@ -36,6 +36,8 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.models.artifact import Artifact
 from app.services.artifact_markers import find_markers
 from app.services.synexia.intent_router import FileFormat
 
@@ -79,6 +81,27 @@ _FORMAT_TO_ARTIFACT_TYPE = {
     "html": "html",
     "dashboard": "html",
 }
+
+
+def _artifact_matches_requested_format(artifact_id: str, doc_format: str, db) -> bool:  # noqa: ANN001
+    """True only when the stored Artifact's type/payload signal matches the
+    explicitly requested doc_format (pptx/docx/xlsx/dashboard). Report cards
+    and other html/text artifacts never satisfy an explicit file request."""
+    expected = _FORMAT_TO_ARTIFACT_TYPE.get(doc_format)
+    if expected is None:
+        # xlsx / md are not renderable by this pipeline; no artifact can be
+        # considered a match, so the fallback keeps trying.
+        return False
+    try:
+        artifact = db.get(Artifact, artifact_id)
+    except Exception:  # noqa: BLE001 — db is best-effort here
+        artifact = None
+    if artifact is None:
+        return False
+    atype = (artifact.artifact_type or "").lower().strip()
+    # dashboard requests are satisfied by html artifacts (the orchestrator
+    # fallback itself produces type=html), never by html_report report cards.
+    return atype == expected
 
 
 def _marker_to_artifact_args(kind: str, payload: dict, filename: str) -> Optional[dict]:
@@ -694,10 +717,21 @@ async def ensure_artifact_for_doc_request(
         return None  # a marker already produced one
 
     if artifact_ids:
-        # The ask_data_agent finalize path (rich or no-data) already
-        # produced an artifact this turn — creating another would be a
-        # user-visible duplicate.
-        return None
+        if not settings.DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED:
+            # Legacy behavior: the ask_data_agent finalize path (rich or
+            # no-data) already produced an artifact this turn — creating
+            # another would be a user-visible duplicate.
+            return None
+        # Strict mode: only artifacts whose stored type matches the
+        # requested format count as satisfaction. A report card (html_report)
+        # never satisfies an explicit pptx/docx/xlsx/dashboard request.
+        if any(
+            _artifact_matches_requested_format(aid, doc_format, db)
+            for aid in artifact_ids
+        ):
+            return None
+        # None matched — fall through to the fallback so the user still gets
+        # the deliverable they asked for.
 
     for tc in tool_calls_for_frontend or []:
         if tc.get("name") not in ("create_artifact", "run_sandbox_skill"):

@@ -47,6 +47,7 @@ from typing import Optional
 
 # Reuse existing detectors rather than reinventing them.
 from app.services.agent_prompts import GROUNDING_REQUIRED_BLOCK, TIME_SENSITIVE_PATTERN
+from app.services.dashboard_turn_guard import fuzzy_dashboard_request
 from app.services.synexia.intent_router import FileFormat, detect_file_intent
 
 logger = logging.getLogger(__name__)
@@ -169,7 +170,10 @@ def resolve_turn_action(
     tool_set = set(tool_names or [])
     ctx = data_ctx_extras or {}
 
-    if user_message and LIVE_DASHBOARD_PATTERN.search(user_message):
+    if user_message and (
+        LIVE_DASHBOARD_PATTERN.search(user_message)
+        or fuzzy_dashboard_request(user_message)
+    ):
         logger.info("turn_action: live dashboard intent detected; leaving tool_choice on auto")
         return TurnAction()
 
@@ -247,7 +251,7 @@ def grounding_block_for_message(user_message: Optional[str]) -> str:
     """
     if not user_message:
         return ""
-    if LIVE_DASHBOARD_PATTERN.search(user_message):
+    if LIVE_DASHBOARD_PATTERN.search(user_message) or fuzzy_dashboard_request(user_message):
         return ""
     if detect_file_intent(user_message):
         return GROUNDING_DOC_BLOCK

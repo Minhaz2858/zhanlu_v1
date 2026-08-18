@@ -12,6 +12,7 @@ keywords.
 from __future__ import annotations
 
 import logging
+import re
 
 from sqlalchemy.orm import Session
 import sqlglot
@@ -23,18 +24,85 @@ from app.services.db.schema_service import SchemaService
 
 logger = logging.getLogger(__name__)
 
+# Measure-column stems (generic, boundary-anchored) — SUM over one of these
+# across a row-multiplying join is the classic fan-out bug.
+_MEASURE_STEM_RE = re.compile(
+    r"(amount|qty|quantity|price|value|sales|revenue|volume|count|sum|total)",
+    re.IGNORECASE,
+)
+
+
+def _has_fanout_risk(parsed: exp.Expression) -> str | None:
+    """Return a warning string when the query aggregates a measure column with
+    SUM() over a JOIN without a pre-aggregating CTE/subquery on either side.
+
+    Structural heuristic only (no business keywords): joins may be explicit
+    (``JOIN``) or implicit (multi-table ``FROM``); pre-aggregation is any CTE
+    or subquery anywhere in the statement.
+    """
+    joins = list(parsed.find_all(exp.Join))
+    tables = _extract_tables(parsed)
+    if not joins and len(tables) < 2:
+        return None
+    sums = list(parsed.find_all(exp.Sum))
+    if not sums:
+        return None
+    measure_cols: set[str] = set()
+    for s in sums:
+        for col in s.find_all(exp.Column):
+            if col.name and _MEASURE_STEM_RE.search(col.name):
+                measure_cols.add(col.name)
+    if not measure_cols:
+        return None
+    # Pre-aggregation present anywhere (CTE or subquery) → assume cardinality
+    # is controlled; do not warn.
+    if list(parsed.find_all(exp.Subquery)) or list(parsed.find_all(exp.CTE)):
+        return None
+    return (
+        "potential fan-out: SUM(" + ", ".join(sorted(measure_cols))
+        + ") over a JOIN without pre-aggregation on either side — aggregate "
+        "each side in a CTE/subquery before joining"
+    )
+
 
 def _extract_tables(parsed: exp.Expression) -> set[str]:
     return {t.name for t in parsed.find_all(exp.Table) if t.name}
 
 
 def _extract_alias_map(parsed: exp.Expression) -> dict[str, str]:
-    """Map lowercase alias -> real table name."""
+    """Map lowercase alias -> real table name.
+
+    sqlglot stores a plain ``FROM fact f`` alias on the Table node itself
+    (``Table.alias``); the Alias node form only appears for SELECT-expression
+    aliases. Read both so qualified columns on aliased tables resolve.
+    """
     alias_map: dict[str, str] = {}
+    for t in parsed.find_all(exp.Table):
+        alias = getattr(t, "alias", None)
+        if alias and t.name:
+            alias_map[str(alias).lower()] = t.name
     for a in parsed.find_all(exp.Alias):
         if isinstance(a.this, exp.Table) and a.alias and a.this.name:
-            alias_map[a.alias.lower()] = a.this.name
+            alias_map[str(a.alias).lower()] = a.this.name
     return alias_map
+
+
+def _cte_output_columns(cte: exp.CTE) -> list[str]:
+    """Output column names of a CTE (``SELECT a, SUM(x) AS b ...`` -> [a, b]).
+
+    CTEs are virtual tables: references to them must not be reported as
+    'table does not exist', and their projected columns must resolve in the
+    unqualified-column check.
+    """
+    cols: list[str] = []
+    select = cte.this
+    for e in getattr(select, "expressions", None) or []:
+        if isinstance(e, exp.Alias):
+            if e.alias:
+                cols.append(str(e.alias))
+        elif hasattr(e, "name") and e.name:
+            cols.append(str(e.name))
+    return cols
 
 
 def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
@@ -42,7 +110,11 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
 
     Returns:
         ``{"is_valid": bool, "errors": [str, ...],
+           "warnings": [str, ...],
            "available_columns": {table: [col, ...]}}``.
+
+    ``warnings`` never affect ``is_valid`` (structural validity is intact);
+    they flag cardinality risks (fan-out) that callers may choose to act on.
     """
     kb = db.query(KnowledgeBase).filter(
         KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False
@@ -62,9 +134,19 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     alias_map = _extract_alias_map(parsed)
     service = SchemaService(db)
 
+    # CTEs are virtual tables: register their projected columns so references
+    # to them validate without a describe call.
+    cte_columns: dict[str, list[str]] = {}
+    for cte in parsed.find_all(exp.CTE):
+        if getattr(cte, "alias", None):
+            cte_columns[str(cte.alias).lower()] = _cte_output_columns(cte)
+
     available_columns: dict[str, list[str]] = {}
     errors: list[str] = []
     for t in sorted(tables):
+        if t.lower() in cte_columns:
+            available_columns[t] = list(cte_columns[t.lower()])
+            continue
         try:
             desc = service.describe_table(kb_id, t)
             cols = [c.get("name") for c in (desc.get("columns") or []) if c.get("name")]
@@ -92,12 +174,20 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
             if resolved in available_columns and name not in available_columns[resolved]:
                 errors.append(f"column '{name}' not found in table '{resolved}'")
         else:
-            # Unqualified column: valid if present in any referenced table.
+            # Unqualified column: valid if present in any referenced table
+            # (real tables + CTE projections).
             if not any(name in cols for cols in available_columns.values()):
                 errors.append(f"column '{name}' not found in any referenced table")
+
+    warning: str | None = None
+    try:
+        warning = _has_fanout_risk(parsed)
+    except Exception as exc:  # noqa: BLE001 — structural check is best-effort
+        logger.debug("schema_validator: fan-out check failed: %s", exc)
 
     return {
         "is_valid": len(errors) == 0,
         "errors": errors,
+        "warnings": [warning] if warning else [],
         "available_columns": available_columns,
     }

@@ -215,9 +215,14 @@ async def test_fallback_runs_when_tool_call_success_but_no_artifact_id():
 
 @pytest.mark.asyncio
 async def test_fallback_skipped_when_artifact_ids_present():
-    # The ask_data_agent finalize path (rich or no-data) already attached an
+    # Legacy behavior (DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED off): the
+    # ask_data_agent finalize path (rich or no-data) already attached an
     # artifact this turn — the fallback must not create a user-visible dup.
-    with patch.object(orch, "_create_artifact_tool", new=AsyncMock()) as m:
+    from app.config import settings
+
+    with patch.object(settings, "DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED", False), patch.object(
+        orch, "_create_artifact_tool", new=AsyncMock()
+    ) as m:
         result = await orch.ensure_artifact_for_doc_request(
             doc_format="pptx",
             assistant_content="here is the deck",
@@ -229,6 +234,93 @@ async def test_fallback_skipped_when_artifact_ids_present():
         )
     assert result is None
     assert m.await_count == 0
+
+
+# ---------------------------------------------------------------------------
+# DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED: report-card artifacts must not
+# preempt an explicit file request (Fix 1a).
+# ---------------------------------------------------------------------------
+
+
+class _FakeArtifact:
+    def __init__(self, artifact_type):
+        self.artifact_type = artifact_type
+
+
+class _FakeDB:
+    def __init__(self, artifacts):
+        self._artifacts = artifacts
+
+    def get(self, model, artifact_id):
+        return self._artifacts.get(artifact_id)
+
+
+@pytest.mark.asyncio
+async def test_fallback_runs_when_artifact_ids_are_report_cards_only():
+    # A report card (artifact_type=html_report) does NOT satisfy an explicit
+    # pptx request, even though the finalize path attached an artifact id.
+    from app.config import settings
+
+    fake_db = _FakeDB({"rc1": _FakeArtifact("html_report")})
+    with patch.object(settings, "DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED", True), patch.object(
+        orch, "_create_artifact_tool", new=AsyncMock(return_value={"success": True, "artifact_id": "a2"})
+    ) as m:
+        result = await orch.ensure_artifact_for_doc_request(
+            doc_format="pptx",
+            assistant_content="here is the deck",
+            already_created=[],
+            tool_calls_for_frontend=[],
+            db=fake_db,
+            context={},
+            artifact_ids=["rc1"],
+        )
+    assert result is not None
+    assert m.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_fallback_skipped_when_artifact_matches_doc_format():
+    # A real pptx artifact DOES satisfy an explicit pptx request.
+    from app.config import settings
+
+    fake_db = _FakeDB({"p1": _FakeArtifact("pptx")})
+    with patch.object(settings, "DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED", True), patch.object(
+        orch, "_create_artifact_tool", new=AsyncMock()
+    ) as m:
+        result = await orch.ensure_artifact_for_doc_request(
+            doc_format="pptx",
+            assistant_content="deck",
+            already_created=[],
+            tool_calls_for_frontend=[],
+            db=fake_db,
+            context={},
+            artifact_ids=["p1"],
+        )
+    assert result is None
+    assert m.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_dashboard_fallback_runs_when_only_report_card_present():
+    # The dashboard fallback branch must be reachable again: a report card
+    # must not preempt an explicit dashboard request.
+    from app.config import settings
+
+    fake_db = _FakeDB({"rc1": _FakeArtifact("html_report")})
+    with patch.object(settings, "DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED", True), patch.object(
+        orch, "_create_artifact_tool", new=AsyncMock(return_value={"success": True, "artifact_id": "d1"})
+    ) as m:
+        result = await orch.ensure_artifact_for_doc_request(
+            doc_format="dashboard",
+            assistant_content="make a dashboard",
+            already_created=[],
+            tool_calls_for_frontend=[],
+            db=fake_db,
+            context={},
+            artifact_ids=["rc1"],
+        )
+    assert result is not None
+    assert m.await_count == 1
 
 
 @pytest.mark.asyncio

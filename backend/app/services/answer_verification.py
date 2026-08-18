@@ -123,6 +123,28 @@ _NAME_ROLE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Total-labeled cell detection (generic EN + CJK, no domain vocabulary).
+# A label counts as a total when it carries one of these tokens; CJK is
+# matched verbatim (no word boundary exists for CJK), ASCII tokens are
+# boundary-anchored so "sum" cannot match "assumption".
+_TOTAL_LABEL_RE = re.compile(
+    r"(合计|总计|总收入|总金额|总额|"
+    r"(?<![a-z0-9])(total|grand\s*total|overall|sum)(?![a-z0-9]))",
+    re.IGNORECASE,
+)
+
+# "stated total" extraction from the draft answer: "<total-token> ... <number>"
+# within a short window (e.g. "Total sales was 1,100 dollars").
+_STATED_TOTAL_RE = re.compile(
+    r"(?:total|合计|总计|总收入|总金额|总额)[^\d\n]{0,80}?"
+    r"([\d,]+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+# id-role column detection — id columns are never measures, so plausibility
+# detectors skip them (prevents sequential-id false positives).
+_ID_COL_RE = re.compile(r"(^|_)(id|ids)(_|$)", re.IGNORECASE)
+
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_]{2,}")
 _STOPWORDS = frozenset({
     "the", "and", "for", "with", "this", "that", "from", "have", "has", "are",
@@ -516,6 +538,123 @@ def evaluate_answer(
         return VerificationResult(status="COMPLETE", source="heuristic")
 
 
+# ---------------------------------------------------------------------------
+# Plausibility detectors (Fix 2 — part-vs-whole + cross-call total drift)
+# ---------------------------------------------------------------------------
+
+
+def _to_number(value: Any) -> float | None:
+    """Best-effort numeric coercion (int/float/string with commas)."""
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value.strip().replace(",", ""))
+        except ValueError:
+            return None
+    return None
+
+
+def _row_label_parts(row: dict) -> list[str]:
+    """String cell values of a row — the label candidates for total detection."""
+    return [str(v) for v in row.values() if isinstance(v, str)]
+
+
+def _is_total_label(label: str) -> bool:
+    return bool(_TOTAL_LABEL_RE.search(label))
+
+
+def _detect_part_whole_inconsistency(
+    results: list[dict], assistant_text: str
+) -> list[str]:
+    """Return ``["part_whole"]`` when a breakdown part (or the parts-sum)
+    exceeds a total-labeled value by >2% — either within one result set (a
+    "合计/total" row vs its sibling rows) or against a total stated in the
+    draft answer. Flag-gated by ``ANSWER_PLAUSIBILITY_CHECK_ENABLED``.
+    """
+    if not getattr(settings, "ANSWER_PLAUSIBILITY_CHECK_ENABLED", False):
+        return []
+    parts_sums: list[float] = []
+    for r in results:
+        rows = r.get("rows") or []
+        if not rows or not isinstance(rows[0], dict):
+            continue
+        columns = r.get("columns") or list(rows[0].keys())
+        for col in columns:
+            # id-role columns are never measures — skip (cuts stated-total
+            # false positives on sequential ids).
+            if _ID_COL_RE.search(str(col)):
+                continue
+            totals: list[float] = []
+            parts: list[float] = []
+            for row in rows:
+                if not isinstance(row, dict) or col not in row:
+                    continue
+                num = _to_number(row.get(col))
+                if num is None:
+                    continue
+                if any(_is_total_label(l) for l in _row_label_parts(row)):
+                    totals.append(num)
+                else:
+                    parts.append(num)
+            if totals:
+                total = max(totals)
+                if parts and (sum(parts) > total * 1.02 or max(parts) > total * 1.02):
+                    return ["part_whole"]
+            elif parts:
+                # No in-result total for this column — the parts may still
+                # contradict a total stated in the draft answer.
+                parts_sums.append(sum(parts))
+    if parts_sums:
+        # Cross-check against totals stated in the draft answer.
+        for m in _STATED_TOTAL_RE.finditer(assistant_text or ""):
+            try:
+                stated = float(m.group(1).replace(",", ""))
+            except ValueError:
+                continue
+            if any(ps > stated * 1.02 for ps in parts_sums):
+                return ["part_whole"]
+    return []
+
+
+def _detect_total_drift(results: list[dict]) -> list[str]:
+    """Return ``["total_drift"]`` when two same-scope total-labeled values in
+    this turn's results differ by >10% (same column name = same scope).
+    Flag-gated by ``ANSWER_PLAUSIBILITY_CHECK_ENABLED``.
+    """
+    if not getattr(settings, "ANSWER_PLAUSIBILITY_CHECK_ENABLED", False):
+        return []
+    totals: list[tuple[str, float]] = []
+    for r in results:
+        rows = r.get("rows") or []
+        if not rows or not isinstance(rows[0], dict):
+            continue
+        columns = r.get("columns") or list(rows[0].keys())
+        for col in columns:
+            for row in rows:
+                if not isinstance(row, dict) or col not in row:
+                    continue
+                num = _to_number(row.get(col))
+                if num is None:
+                    continue
+                if any(_is_total_label(l) for l in _row_label_parts(row)):
+                    totals.append((col, num))
+    if len(totals) < 2:
+        return []
+    for i in range(len(totals)):
+        for j in range(i + 1, len(totals)):
+            if totals[i][0] != totals[j][0]:
+                continue
+            a, b = totals[i][1], totals[j][1]
+            if a == 0 or b == 0:
+                continue
+            if max(a, b) / min(a, b) > 1.10:
+                return ["total_drift"]
+    return []
+
+
 def _evaluate_answer_inner(
     user_message: str,
     tool_results: list[dict],
@@ -569,6 +708,21 @@ def _evaluate_answer_inner(
             "primary dimension column '{}' is 100% blank/NULL".format(blank_cols[0])
         )
         logger.info("answer_verification: blank_dimension on column %s", blank_cols[0])
+
+    # Fix 2: numeric plausibility — a part exceeding its total, or two
+    # same-scope totals contradicting each other, can never be a correct answer.
+    if _detect_part_whole_inconsistency(results, assistant_text):
+        signals.append("part_whole")
+        gaps.append(
+            "a breakdown part (or the sum of parts) exceeds the stated total "
+            "by more than 2% — the numbers cannot all be correct"
+        )
+    if _detect_total_drift(results):
+        signals.append("total_drift")
+        gaps.append(
+            "two same-scope period totals in this turn's query results differ "
+            "by more than 10% — the numbers are internally contradictory"
+        )
 
     max_replans = int(getattr(settings, "SELF_EVAL_MAX_REPLANS", 3))
 
@@ -666,6 +820,12 @@ def _suggested_fix(signals: list[str], results: list[dict]) -> str:
             "count, id+name+category columns, tagged table_role: entity_master), "
             "filter it to the relevant entity IDs, then re-query the fact table "
             "with WHERE <entity_id> IN (...) before answering."
+        )
+    if "part_whole" in signals or "total_drift" in signals:
+        return (
+            "Re-query with one source-of-truth aggregation and verify sums "
+            "before presenting; if the numbers are still contradictory, "
+            "disclose the discrepancy to the user."
         )
     return "Try an alternative approach to obtain the missing information."
 

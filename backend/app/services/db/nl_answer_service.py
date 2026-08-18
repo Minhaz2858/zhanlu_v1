@@ -253,29 +253,18 @@ class NLAnswerService:
                     "source_id": kb_id,
                 }
 
-        # 2c. Structural schema validation (flag-gated): one self-correct retry.
-        if settings.SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED:
-            try:
-                from app.services.nl2sql.schema_validator import validate_against_schema
-                vres = validate_against_schema(sql, kb_id, self._db)
-                if not vres.get("is_valid", True):
-                    logger.warning(
-                        "NLAnswer: generated SQL failed schema validation for KB %s: %s",
-                        kb_id, "; ".join(str(e) for e in vres.get("errors", [])),
-                    )
-                    corrected = await self._text_to_sql_with_correction(
-                        question,
-                        schema_info,
-                        schema_text=schema_text,
-                        project_id=project_id,
-                        errors=vres.get("errors", []),
-                        available_columns=vres.get("available_columns", {}),
-                        endpoint=endpoint,
-                    )
-                    if corrected and corrected != sql:
-                        sql = corrected
-            except Exception as e:
-                logger.debug("NLAnswer: schema validator error: %s", e)
+        # 2c. Structural schema validation (flag-gated): one self-correct retry
+        # on hard errors (always) OR fan-out warnings (Fix 3,
+        # NL2SQL_FANOUT_GUARD_ENABLED).
+        sql, _corrected = await self._correct_sql_with_validator_feedback(
+            sql,
+            question,
+            kb_id,
+            schema_info,
+            schema_text=schema_text,
+            project_id=project_id,
+            endpoint=endpoint,
+        )
 
         # 3. Execute
         try:
@@ -403,6 +392,57 @@ class NLAnswerService:
         except Exception as e:
             logger.debug("NLAnswer: correction retry failed: %s", e)
             return None
+
+    async def _correct_sql_with_validator_feedback(
+        self,
+        sql: str,
+        question: str,
+        kb_id: str,
+        schema_info: dict,
+        schema_text: str | None,
+        project_id: str | None,
+        endpoint: LLMEndpoint | None,
+    ) -> tuple[str, bool]:
+        """Structural schema validation with one self-correct retry (Fix 3).
+
+        Triggers the correction on hard errors (always) OR fan-out warnings
+        (only when ``NL2SQL_FANOUT_GUARD_ENABLED``). Returns
+        ``(maybe-corrected_sql, corrected_bool)``; identical output is not
+        applied.
+        """
+        if not settings.SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED:
+            return sql, False
+        try:
+            from app.services.nl2sql.schema_validator import validate_against_schema
+            vres = validate_against_schema(sql, kb_id, self._db)
+        except Exception as e:
+            logger.debug("NLAnswer: schema validator error: %s", e)
+            return sql, False
+        problems = list(vres.get("errors", []))
+        warnings = list(vres.get("warnings", []))
+        should_correct = bool(problems) or (
+            bool(warnings) and getattr(settings, "NL2SQL_FANOUT_GUARD_ENABLED", False)
+        )
+        if not should_correct:
+            return sql, False
+        logger.warning(
+            "NLAnswer: generated SQL needs correction for KB %s "
+            "(errors=%d warnings=%d): %s",
+            kb_id, len(problems), len(warnings),
+            "; ".join(str(e) for e in (problems or warnings)),
+        )
+        corrected = await self._text_to_sql_with_correction(
+            question,
+            schema_info,
+            schema_text=schema_text,
+            project_id=project_id,
+            errors=problems or warnings,
+            available_columns=vres.get("available_columns", {}),
+            endpoint=endpoint,
+        )
+        if corrected and corrected != sql:
+            return corrected, True
+        return sql, False
 
     async def _narrate(
         self, question: str, exec_result: dict, endpoint: LLMEndpoint | None = None
@@ -556,7 +596,15 @@ _SQL_GEN_SYSTEM_PROMPT = (
     "question, output exactly one SQL statement that answers the question. "
     "Use only tables and columns present in the schema. Do not invent columns. "
     "Prefer explicit JOINs. Use the SQL dialect implied by the db_type. "
-    "Output the raw SQL only — no markdown, no explanation, no leading prose."
+    "Output the raw SQL only — no markdown, no explanation, no leading prose.\n"
+    "Cardinality rules (fan-out guard):\n"
+    "- Never SUM a measure across a row-multiplying join (a one-to-many or "
+    "many-to-many join inflates the measure before aggregation).\n"
+    "- When a fact table joins a snapshot/variant-bearing or dimension table, "
+    "pre-aggregate each side in a CTE or subquery first, then join the "
+    "aggregated results.\n"
+    "- If a SUM is needed across joined tables, compute it over a "
+    "pre-aggregated subquery, never over the raw join product."
 )
 
 _NARRATE_SYSTEM_PROMPT = (

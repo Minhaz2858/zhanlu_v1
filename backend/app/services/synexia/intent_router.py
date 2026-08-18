@@ -82,6 +82,17 @@ def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
     for fmt, pattern in _COMPILED.items():
         if pattern.search(text):
             return fmt
+    # Flag-gated fuzzy "dashboard" typo fallback ("Dashbord" / "dash-board"
+    # etc.) so a typo still reaches the dashboard machinery. Lazy import keeps
+    # this module import-free at load time (the helper itself lazily reads the
+    # DASHBOARD_FUZZY_MATCH_ENABLED flag and no-ops when it is off).
+    try:
+        from app.services.dashboard_turn_guard import fuzzy_dashboard_request
+
+        if fuzzy_dashboard_request(text):
+            return "dashboard"
+    except Exception:
+        pass
     return None
 
 

@@ -142,7 +142,12 @@ async def _ask_data_agent(
         if fastpath_result is not None:
             return fastpath_result
 
-    system_prompt = _build_sub_agent_prompt(question, bound_kb_ids, preferred_kb)
+    system_prompt = _build_sub_agent_prompt(
+        question,
+        bound_kb_ids,
+        preferred_kb,
+        caller=(context or {}).get("agent_name"),
+    )
     tool_schemas = _build_sub_agent_tool_schemas()
 
     # Track the most recent execute_query result for the structured return.
@@ -534,8 +539,42 @@ async def _try_nl_fastpath(
     }
 
 
+# Ecisco BI-only hint for the Data Agent sub-loop. Scoped to calls made BY
+# the `ecisco_bi_assistant` main agent. The sub-agent writes the actual SQL,
+# so it MUST know the real column names (`FNAME` holds Chinese product names
+# like 碳五/碳九, codes live in `F_PAEZ_JC`/`FMATERIALID`) — without this it
+# invents columns (e.g. `material_name`) and filters with English literals
+# (`FNAME LIKE '%C5%'`), silently returning zero rows.
+_ECISCO_DATA_AGENT_HINT_BLOCK = """
+
+ECISCO BI SUB-AGENT HARD RULES (the calling agent is `ecisco_bi_assistant`;
+you are writing SQL against the Ecisco BI warehouse):
+- COLUMN NAMES: There is NO `material_name` column. Product names live in
+  `FNAME` (Chinese names, e.g. 碳五/碳九). Product codes live in `F_PAEZ_JC`
+  and `FMATERIALID`. `material_model` is DEPRECATED and STALE — never use it.
+- DISCOVER VALUES BEFORE FILTERING: before filtering a product portfolio
+  (e.g. C5/C9), run `SELECT DISTINCT FNAME, F_PAEZ_JC FROM <table> LIMIT 200`
+  and match against the ACTUAL values returned. Never filter with English
+  literals (e.g. `FNAME LIKE '%C5%'`) — the stored names are Chinese and the
+  query will silently return zero rows.
+- TABLE PREFERENCE: prefer the LIVE high-volume tables `erp_t_sal_outstock`
+  and `erp_v_sale_orderentry` (~90k rows, current through 2026) over the
+  stale `erp_product_sales_details` (1.4k rows, ends 2025-12-31). Confirm
+  with MAX(date_column) before choosing.
+- PORTFOLIO RULE: when the question covers a product portfolio (e.g.
+  "C5/C9 products"), query ALL products in ONE query grouped by product
+  name — never single-product views one at a time.
+- ZERO-ROW RECOVERY: if a query returns zero rows or all-NULL aggregates,
+  do NOT report "no data". Re-probe: `SELECT DISTINCT FNAME, F_PAEZ_JC ...`
+  to discover real values, fix the filters, and re-run.
+"""
+
+
 def _build_sub_agent_prompt(
-    question: str, bound_kb_ids: list[str], preferred_kb: str | None
+    question: str,
+    bound_kb_ids: list[str],
+    preferred_kb: str | None,
+    caller: str | None = None,
 ) -> str:
     """Compose the system prompt the Data Agent sub-loop runs with."""
     from app.services.agent_definitions import DATA_AGENT_PROMPT
@@ -550,7 +589,14 @@ def _build_sub_agent_prompt(
         if preferred_kb:
             bound_section += f"\nThe caller suggested source: {preferred_kb!r}."
 
-    return DATA_AGENT_PROMPT + bound_section
+    prompt = DATA_AGENT_PROMPT + bound_section
+
+    # Ecisco BI: the main agent delegates SQL writing to this sub-loop, so the
+    # schema/product-naming rules must be visible to the SQL writer itself.
+    if caller == "ecisco_bi_assistant":
+        prompt = prompt + _ECISCO_DATA_AGENT_HINT_BLOCK
+
+    return prompt
 
 
 def _build_sub_agent_tool_schemas() -> list[dict]:
@@ -627,6 +673,20 @@ def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> 
             state["source_name"] = result["source_name"]
 
 
+def _rows_all_null(rows: list) -> bool:
+    """True when every returned row is an all-NULL dict (aggregate query that
+    matched nothing — e.g. wrong column name + English filter literal). Such
+    rows are schema-shaped evidence of "no data", not real business data."""
+    if not rows:
+        return False
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        if any(v is not None for v in row.values()):
+            return False
+    return True
+
+
 async def _sub_loop_answer_gate(
     question: str,
     state: dict,
@@ -656,11 +716,24 @@ async def _sub_loop_answer_gate(
     tool_results: list[dict] = []
     rows = state.get("last_rows")
     if rows is not None:
-        tool_results.append({
-            "tool": "execute_query",
-            "rows": rows,
-            "sql": state.get("last_sql"),
-        })
+        if _rows_all_null(rows):
+            # All-NULL aggregate rows (wrong column name + filter that
+            # matched nothing) mean "no business data" — represent them as
+            # columns + zero rows so the metadata-only detector fires and the
+            # agent is nudged to re-probe instead of answering "no data".
+            first = rows[0] if rows and isinstance(rows[0], dict) else {}
+            tool_results.append({
+                "tool": "execute_query",
+                "columns": list(first.keys()),
+                "row_count": 0,
+                "rows": [],
+            })
+        else:
+            tool_results.append({
+                "tool": "execute_query",
+                "rows": rows,
+                "sql": state.get("last_sql"),
+            })
     else:
         meta_rows = state.get("last_metadata_rows")
         if meta_rows is not None:
