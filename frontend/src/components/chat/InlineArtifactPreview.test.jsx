@@ -5,6 +5,10 @@ vi.mock('@/api/authFetch', () => ({
   authFetch: vi.fn(),
 }));
 
+vi.mock('./PptxArtifactPreview', () => ({
+  default: () => <div data-testid="pptx-previewer">PptxArtifactPreview</div>,
+}));
+
 import InlineArtifactPreview from './InlineArtifactPreview';
 import { authFetch } from '@/api/authFetch';
 
@@ -52,15 +56,39 @@ describe('InlineArtifactPreview', () => {
     expect(screen.queryByRole('button', { name: /open preview/i })).toBeNull();
   });
 
-  it('does not call onOpen when openInModal is true (default)', async () => {
+  it('delegates Open to onOpen when a parent right-pane handler is provided', async () => {
+    // The chat composer / message-bubble path passes `onOpen` (which wires to
+    // ArtifactPreviewPane) but leaves `openInModal` at its default. The Open
+    // button must route to the right side pane, not the modal popup.
     const onOpen = vi.fn();
     render(<InlineArtifactPreview artifact={baseArtifact} onOpen={onOpen} />);
-    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
-    expect(onOpen).not.toHaveBeenCalled();
-    // The modal opens instead.
+    fireEvent.click(screen.getByRole('button', { name: /open deliverable in side preview/i }));
+    expect(onOpen).toHaveBeenCalledWith(baseArtifact);
     await waitFor(() => {
-      expect(screen.getByRole('dialog')).toBeTruthy();
+      expect(screen.queryByRole('dialog')).toBeNull();
+      expect(document.querySelector('iframe')).toBeNull();
+      expect(authFetch).not.toHaveBeenCalled();
     });
+  });
+
+  it('mounts the dedicated PPTX previewer inside the modal when no onOpen exists', async () => {
+    // The automation-run log path passes no `onOpen` — the modal is the only
+    // surface, but it must render the real deck instead of an iframe pointed
+    // at the raw PPTX bytes (which hung on "Loading preview…").
+    const pptxArtifact = {
+      ...baseArtifact,
+      type: 'pptx',
+      file_name: 'deck.pptx',
+      name: 'deck.pptx',
+      title: 'deck.pptx',
+    };
+    render(<InlineArtifactPreview artifact={pptxArtifact} />);
+    fireEvent.click(screen.getByRole('button', { name: /open file in preview popup/i }));
+    await waitFor(() => {
+      expect(screen.getByTestId('pptx-previewer')).toBeTruthy();
+    });
+    expect(document.querySelector('iframe')).toBeNull();
+    expect(authFetch).not.toHaveBeenCalled();
   });
 
   it('opens a Dialog with the file name as title and Download + Close in the footer', async () => {

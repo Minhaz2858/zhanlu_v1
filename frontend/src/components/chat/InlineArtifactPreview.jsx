@@ -9,6 +9,9 @@ import {
   Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription,
   DialogFooter, DialogClose,
 } from '@/components/ui/dialog';
+import PptxArtifactPreview from './PptxArtifactPreview';
+import DocxArtifactPreview from './DocxArtifactPreview';
+import PdfFaithfulPreview from './PdfFaithfulPreview';
 
 /**
  * InlineArtifactPreview — Manus-style deliverable card surfaced in the chat
@@ -68,6 +71,11 @@ const TYPE_LABEL = {
 
 const SCRIPTABLE_TYPES = new Set(['html', 'html_report']);
 
+// Office formats browsers cannot render from raw bytes inside an iframe. When
+// the modal is the only preview surface, these mount the same dedicated
+// previewers the right pane uses (mirrors ArtifactPreviewPane's dispatch).
+const OFFICE_TYPES_REQUIRING_DEDICATED_PREVIEWER = new Set(['pptx', 'docx', 'xlsx']);
+
 function formatSize(bytes) {
   if (bytes == null) return null;
   if (bytes < 1024) return `${bytes} B`;
@@ -88,6 +96,16 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
   // Null-safe derivations so hooks below run unconditionally (rules-of-hooks).
   const artifactId = artifact?.id;
   const artifactPreviewUrl = artifact?.preview_url;
+  const artifactType = pickType(artifact);
+  // Chat / message-bubble callers pass `onOpen` (wired to ArtifactPreviewPane
+  // on the right side); automation-run logs pass neither and rely on the modal.
+  // `openInModal === false` is the legacy opt-out meaning "the parent owns the
+  // preview surface". Either way, an `onOpen` parent means the right pane wins.
+  const hasRightPane = openInModal === false || !!onOpen;
+  // Office formats can't render from raw bytes in an iframe — the modal mounts
+  // the dedicated previewers (PptxArtifactPreview / DocxArtifactPreview /
+  // PdfFaithfulPreview) instead, so no signed token is needed for them.
+  const isOfficeRequiringDedicatedPreviewer = OFFICE_TYPES_REQUIRING_DEDICATED_PREVIEWER.has(artifactType);
   // Inline expand is only used when NOT in modal mode (opt-out path). In modal
   // mode the signed token is minted when the Dialog opens instead.
   const wantsPreview = !openInModal
@@ -96,6 +114,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
     && !!artifactPreviewUrl;
   const wantsModalPreview = openInModal
     && modalOpen
+    && !isOfficeRequiringDedicatedPreviewer
     && (artifact?.has_preview ?? !!artifactPreviewUrl)
     && !!artifactPreviewUrl;
   const needsSignedToken = wantsPreview || wantsModalPreview;
@@ -157,19 +176,16 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
   }
 
   function handleOpen() {
-    // Modal mode (default): Open opens a popup preview when the file is
-    // previewable; otherwise fall back to download (no empty modal).
-    if (openInModal) {
-      if (hasPreview) {
-        setModalOpen(true);
-        return;
-      }
-      handleDownload();
+    // Right-pane path (chat / message bubble / any caller that hands us an
+    // `onOpen`): the parent owns the surface — delegate, never pop a modal.
+    if (hasRightPane) {
+      onOpen?.(artifact);
       return;
     }
-    // Opt-out path (legacy): delegate to parent right pane or download.
-    if (onOpen) {
-      onOpen(artifact);
+    // Modal-only context (e.g. automation run log): open the popup preview
+    // when the file is previewable; otherwise fall back to download.
+    if (hasPreview) {
+      setModalOpen(true);
       return;
     }
     // fileUrl is an authenticated route — window.open would 401. Download
@@ -217,7 +233,7 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
           <button
             type="button"
             onClick={handleOpen}
-            aria-label={openInModal ? 'Open file in preview popup' : 'Open deliverable in side preview'}
+            aria-label={hasRightPane ? 'Open deliverable in side preview' : 'Open file in preview popup'}
             className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90"
           >
             <ExternalLink className="h-3.5 w-3.5" />
@@ -271,7 +287,38 @@ export default function InlineArtifactPreview({ artifact, onOpen, defaultOpen = 
               </DialogDescription>
             </DialogHeader>
             <div className="flex-1 min-h-0 overflow-hidden bg-background">
-              {previewFailed ? (
+              {isOfficeRequiringDedicatedPreviewer ? (
+                // Browsers can't render office bytes inside an iframe — mount
+                // the same dedicated previewers the right pane uses. No signed
+                // token is minted for these (wantsModalPreview excludes them).
+                artifactType === 'pptx' ? (
+                  <PptxArtifactPreview
+                    key={`modal-pptx-${artifactId}`}
+                    artifactId={artifactId}
+                    outline={artifact.preview_outline || []}
+                    title={title}
+                    downloadUrl={fileUrl}
+                  />
+                ) : artifactType === 'docx' ? (
+                  <DocxArtifactPreview
+                    key={`modal-docx-${artifactId}`}
+                    artifactId={artifactId}
+                    outline={artifact.preview_outline || []}
+                    title={title}
+                    downloadUrl={fileUrl}
+                  />
+                ) : (
+                  <PdfFaithfulPreview
+                    key={`modal-xlsx-${artifactId}`}
+                    artifactId={artifactId}
+                    previewUrl={fileUrl && fileUrl.includes('/api/automations/files/')
+                      ? `/api/automations/files/${artifactId}/preview`
+                      : null}
+                    title={title}
+                    downloadUrl={fileUrl}
+                  />
+                )
+              ) : previewFailed ? (
                 <div className="flex h-full items-center justify-center gap-2 px-4 py-3 text-sm text-muted-foreground">
                   <AlertTriangle className="h-4 w-4 text-amber-500" />
                   Could not load preview. Use Download instead.
