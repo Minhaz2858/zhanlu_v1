@@ -49,12 +49,17 @@ async def get_metric(metric_id: str, request: Request, db: Session = Depends(get
     return {"metric_id": metric_id, "data": await run_metric(db, metric_id, filters)}
 
 
+def _authorize_ws_token(token: str | None) -> bool:
+    """T9: only valid session access tokens may open the live WebSocket."""
+    return bool(token) and bool(auth_service.verify_token(token))
+
+
 @router.websocket("/ws")
 async def ws_endpoint(websocket: WebSocket, token: str | None = None) -> None:
     # T9: WebSocket auth — the client sends the session access token as a
     # query param (?token=…) because browser WebSockets cannot set headers.
     # Anonymous or invalid connections are rejected with close code 1008.
-    if not token or not auth_service.verify_token(token):
+    if not _authorize_ws_token(token):
         await websocket.close(code=1008)
         return
     mgr = get_connection_manager()
