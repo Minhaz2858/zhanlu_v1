@@ -685,8 +685,13 @@ async def _create_fullstack_dashboard(
     #    deployable. (Regression: create used to persist a record with no files,
     #    making mount() fail with ModuleNotFoundError.)
     get_generator().generate(spec)
+    # 2) T5: bind the chat thread that created this dashboard so My Files can
+    #    offer "Open in chat" — the conversation id is the AgentConversation id
+    #    the frontend deep-links via ?conv=<id>.
+    chat_thread_id = (ctx.get("conversation_id") or "").strip() or None
     record = dashboard_app_manager.create_app_record(
         spec, org_id=org_id, created_by_id=user_id, project_id=project_id,
+        chat_thread_id=chat_thread_id,
     )
     try:
         dashboard_app_manager.mount(parsed.slug)
@@ -715,6 +720,7 @@ async def _create_fullstack_dashboard(
             "datasource_name": kb.name,
             "metric_count": len(parsed.metrics),
             "app_url": app_url,
+            "chat_thread_id": chat_thread_id,
         },
     }
 
@@ -774,6 +780,11 @@ async def _update_fullstack_dashboard(
     record.spec = current
     record.status = "running"
     record.refresh_interval_seconds = int(current.get("refresh_interval_seconds", 30))
+    # T5: keep the chat link fresh when iterating from a conversation (e.g. the
+    # user re-opens an old dashboard in a new chat and edits it there).
+    conv_id = (ctx.get("conversation_id") or "").strip() or None
+    if conv_id and record.chat_thread_id != conv_id:
+        record.chat_thread_id = conv_id
     db.commit()
     logger.info("full-stack dashboard updated: %s", parsed.slug)
     return {

@@ -107,6 +107,42 @@ def test_get_and_list_apps(mgr):
     assert len(apps) == 2
 
 
+def test_create_app_record_stores_chat_thread(mgr):
+    """T5: chat_thread_id passed at creation is persisted on the row."""
+    manager, fake = mgr
+    rec = manager.create_app_record(
+        {"name": "T", "slug": "t5-dash", "datasource_id": "kb", "metrics": []},
+        org_id="org1", created_by_id="u1",
+        chat_thread_id="conv-abc",
+    )
+    assert rec.chat_thread_id == "conv-abc"
+
+
+def test_create_app_record_defaults_scope_personal(mgr):
+    """T10: scope defaults to personal unless explicitly overridden."""
+    manager, fake = mgr
+    rec = manager.create_app_record(
+        {"name": "T", "slug": "t5-scope", "datasource_id": "kb", "metrics": []},
+        org_id="org1", created_by_id="u1",
+    )
+    assert rec.scope == "personal"
+
+
+def test_touch_chat_thread_binds_existing_record(mgr):
+    """T5: touch_chat_thread re-binds the thread on an existing record."""
+    manager, fake = mgr
+    manager.create_app_record({"name": "T", "slug": "t5-touch", "datasource_id": "kb", "metrics": []},
+                              "org1", "u1")
+    assert manager.touch_chat_thread("t5-touch", "conv-xyz") is True
+    assert manager.get_app("t5-touch").chat_thread_id == "conv-xyz"
+
+
+def test_touch_chat_thread_missing_slug_returns_false(mgr):
+    """T5: touching a slug that was never created must not raise."""
+    manager, fake = mgr
+    assert manager.touch_chat_thread("never-existed", "conv-q") is False
+
+
 def test_mount_requires_init_app(mgr):
     manager, fake = mgr
     manager.create_app_record({"name": "A", "slug": "a", "datasource_id": "kb", "metrics": []}, "org1", "u1")

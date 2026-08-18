@@ -329,6 +329,25 @@ def list_dashboard_app_records(db: Session = Depends(get_db), user=Depends(get_c
     return [_record_with_meta(r) for r in records]
 
 
+@router.get("/app-records/{slug}/chat-thread")
+def get_dashboard_app_chat_thread(slug: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
+    """Return the chat conversation that created a dashboard app, or 404.
+
+    T5 artifact linking: My Files "Open in chat" needs the AgentConversation id
+    (``chat_thread_id``) to deep-link via ``/?conv=<id>``. Org-scoped; 404 when
+    the record is missing or was built outside a chat (no thread bound).
+    """
+    record = db.query(DashboardApp).filter(
+        DashboardApp.slug == slug,
+        DashboardApp.org_id == user.org_id,
+    ).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    if not record.chat_thread_id:
+        raise HTTPException(status_code=404, detail="No chat thread bound to this dashboard")
+    return {"slug": slug, "chat_thread_id": record.chat_thread_id}
+
+
 @router.post("/app-records/{slug}/mark-viewed")
 def mark_dashboard_app_viewed(slug: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
     """Clear the unread badge: record when the user last opened the dashboard.

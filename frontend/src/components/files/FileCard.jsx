@@ -1,4 +1,4 @@
-import { Bot, Zap, FileText, LayoutDashboard, FileCode, Database, Pin, Pencil, Trash2 } from 'lucide-react';
+import { Bot, Zap, FileText, LayoutDashboard, FileCode, Database, Pin, Pencil, Trash2, MessageSquare } from 'lucide-react';
 
 const KIND_ICON = {
   chatbot: Bot,
@@ -10,12 +10,15 @@ const KIND_ICON = {
   data_file: Database,
 };
 
-export default function FileCard({ item, t, translate, dateLabel, timeLabel, onOpen, onPin, onRename, onDelete }) {
+export default function FileCard({ item, t, translate, dateLabel, timeLabel, onOpen, onPin, onRename, onDelete, onOpenChat }) {
   const kind = item.resource_kind || 'document';
   const Icon = KIND_ICON[kind] || FileText;
   const unread = item.read === false;
   const isAuto = kind === 'automation_result';
   const pinned = item.pinned === true;
+  // T5: "Open in chat" — dashboard artifacts with a bound chat thread
+  // (AgentConversation id) can resume the conversation that built them.
+  const canOpenChat = item.source === 'dashboard_app' && !!item.chat_thread_id && !!onOpenChat;
 
   return (
     <div
@@ -52,6 +55,11 @@ export default function FileCard({ item, t, translate, dateLabel, timeLabel, onO
       </div>
 
       <div className="flex shrink-0 items-center gap-0.5" onClick={(e) => e.stopPropagation()}>
+        {canOpenChat && (
+          <button onClick={() => onOpenChat(item)} title={t.myFiles.openInChat || 'Open in chat'} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-primary">
+            <MessageSquare className="h-3.5 w-3.5" />
+          </button>
+        )}
         <button onClick={() => onPin(item)} title={pinned ? t.myFiles.unpin : t.myFiles.pin} className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground hover:bg-secondary hover:text-foreground">
           <Pin className={`h-3.5 w-3.5 ${pinned ? 'fill-primary text-primary' : ''}`} />
         </button>

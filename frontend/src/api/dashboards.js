@@ -77,3 +77,7 @@ export function listDashboardApps() {
 export function markDashboardViewed(slug) {
   return authFetch(`${BASE}/app-records/${slug}/mark-viewed`, { method: 'POST' }).then(j);
 }
+
+export function getDashboardChatThread(slug) {
+  return authFetch(`${BASE}/app-records/${slug}/chat-thread`, { method: 'GET' }).then(j);
+}

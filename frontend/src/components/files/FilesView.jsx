@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { listDashboardApps, markDashboardViewed } from '@/api/dashboards';
 import { useLanguage } from '@/lib/LanguageProvider';
@@ -31,6 +32,7 @@ import FilePreviewModal from '@/components/chat/FilePreviewModal';
  * migration on UserFile and keeps the rest of the code unchanged.
  */
 export default function FilesView({ scope = 'all' }) {
+  const navigate = useNavigate();
   const { t, lang } = useLanguage();
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -173,6 +175,9 @@ export default function FilesView({ scope = 'all' }) {
         project_id: r.project_id,
         session_id: r.session_id || null,
         agent_name: r.agent_name || null,
+        // T5: the AgentConversation id that built this app — powers the
+        // "Open in chat" action (deep-link ``/?conv=<id>``).
+        chat_thread_id: r.chat_thread_id || null,
         read: r.unread ? false : true,
         pinned: false,
         size: null,
@@ -330,6 +335,14 @@ export default function FilesView({ scope = 'all' }) {
     markRead(item);
     setPreviewItem(item);
   }
+  // T5: resume the chat conversation that built a dashboard. The artifact
+  // carries the AgentConversation id, which the Chat page deep-links via
+  // ``/?conv=<id>`` — same contract as Project Detail "Recent Chats".
+  function openChat(item) {
+    if (!item?.chat_thread_id) return;
+    markRead(item);
+    navigate(`/?conv=${encodeURIComponent(item.chat_thread_id)}`);
+  }
 
   const isZh = lang === 'zh';
   const fmtDate = (d) => moment(d).format(isZh ? 'YYYY-MM-DD' : 'MMM D, YYYY');
@@ -399,7 +412,7 @@ export default function FilesView({ scope = 'all' }) {
             <div>
               <p className="mb-2 text-xs font-medium text-muted-foreground">{t.myFiles.pinned}</p>
               <div className="space-y-2">
-                {pinned.map((it) => <FileCard key={it.id} item={it} t={t} translate={translate} dateLabel={fmtDate(it.updated_date)} timeLabel={fmtTime(it.updated_date)} onOpen={openItem} onPin={togglePin} onRename={setRenameItem} onDelete={remove} />)}
+                {pinned.map((it) => <FileCard key={it.id} item={it} t={t} translate={translate} dateLabel={fmtDate(it.updated_date)} timeLabel={fmtTime(it.updated_date)} onOpen={openItem} onPin={togglePin} onRename={setRenameItem} onDelete={remove} onOpenChat={openChat} />)}
               </div>
             </div>
           )}
@@ -407,7 +420,7 @@ export default function FilesView({ scope = 'all' }) {
             <div>
               {pinned.length > 0 && <p className="mb-2 text-xs font-medium text-muted-foreground">{t.myFiles.unpinned}</p>}
               <div className="space-y-2">
-                {others.map((it) => <FileCard key={it.id} item={it} t={t} translate={translate} dateLabel={fmtDate(it.updated_date)} timeLabel={fmtTime(it.updated_date)} onOpen={openItem} onPin={togglePin} onRename={setRenameItem} onDelete={remove} />)}
+                {others.map((it) => <FileCard key={it.id} item={it} t={t} translate={translate} dateLabel={fmtDate(it.updated_date)} timeLabel={fmtTime(it.updated_date)} onOpen={openItem} onPin={togglePin} onRename={setRenameItem} onDelete={remove} onOpenChat={openChat} />)}
               </div>
             </div>
           )}

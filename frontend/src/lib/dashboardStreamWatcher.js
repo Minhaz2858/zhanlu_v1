@@ -35,6 +35,9 @@ export function dashboardArtifactFromToolCall(toolCall) {
       datasource_name: artifact.datasource_name || result.datasource_name,
       app_url: artifact.app_url || dashboardApp.app_url || `/api/dashboards/apps/${slug}/`,
       metric_count: artifact.metric_count ?? dashboardApp.metric_count,
+      // T5: AgentConversation id that built the app — lets the dock panel /
+      // My Files offer "Open in chat" (deep-link ``/?conv=<id>``).
+      chat_thread_id: artifact.chat_thread_id || dashboardApp.chat_thread_id || result.chat_thread_id || null,
       live: true,
       has_preview: true,
     };
