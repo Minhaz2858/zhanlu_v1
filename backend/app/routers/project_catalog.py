@@ -198,6 +198,8 @@ def register_project_catalog_router() -> APIRouter:
                         "kb_name": kb_map[m.kb_id].name,
                         "table_name": m.table_name,
                         "table_type": m.table_type,
+                        "table_role": m.table_role or "unknown",
+                        "entity_master_hints": m.entity_master_hints,
                         "row_count": m.row_count,
                         "description_zh": m.description_zh,
                         "description_en": m.description_en,
@@ -275,6 +277,8 @@ def register_project_catalog_router() -> APIRouter:
                 "kb_name": kb_map[m.kb_id].name,
                 "table_name": m.table_name,
                 "table_type": m.table_type,
+                "table_role": m.table_role or "unknown",
+                "entity_master_hints": m.entity_master_hints,
                 "row_count": m.row_count,
                 "description_zh": m.description_zh,
                 "description_en": m.description_en,
@@ -284,6 +288,7 @@ def register_project_catalog_router() -> APIRouter:
                         "alias": ov.alias,
                         "description": ov.description,
                         "metric_definition": ov.metric_definition,
+                        "table_role": ov.table_role,
                     }
                     if ov
                     else None
@@ -340,6 +345,13 @@ def register_project_catalog_router() -> APIRouter:
         kb_id = payload.get("kb_id")
         table_name = payload.get("table_name")
         scope = payload.get("scope") or ("table" if table_name else "kb")
+        if scope not in ("table", "kb", "table_role"):
+            raise HTTPException(
+                status_code=400,
+                detail="scope must be one of: table, kb, table_role",
+            )
+        if scope == "table_role" and not table_name:
+            raise HTTPException(status_code=400, detail="table_name is required for scope=table_role")
         if not kb_id:
             raise HTTPException(status_code=400, detail="kb_id is required")
 
@@ -365,6 +377,8 @@ def register_project_catalog_router() -> APIRouter:
         row.alias = payload.get("alias", row.alias)
         row.description = payload.get("description", row.description)
         row.metric_definition = payload.get("metric_definition", row.metric_definition)
+        if "table_role" in payload:
+            row.table_role = payload.get("table_role") or None
         row.scope = scope
         db.commit()
         return {"success": True, "id": row.id}

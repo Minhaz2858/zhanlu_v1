@@ -106,6 +106,11 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
         logger.info("catalog_indexer: kb=%s discovered %d tables", kb.id, len(tables))
 
         if tables:
+            if settings.TABLE_ROLE_AUTO_CLASSIFY_ENABLED:
+                await asyncio.to_thread(_classify_table_roles, tables)
+            else:
+                for t in tables:
+                    t["table_role"] = "unknown"
             await _generate_descriptions(tables)
             await asyncio.to_thread(_persist_catalog, db, kb.id, tables)
             await asyncio.to_thread(_persist_relations, db, kb.id, tables)
@@ -277,6 +282,101 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
             kb.id, table_name,
         )
         return None
+
+
+# ── table role classification (Entity Master Filter) ───────────────────────
+
+# Column-name signals for role classification.  Purely structural — these are
+# generic patterns that hold across any business schema (Ecisco, SaaS,
+# manufacturing, healthcare …).  Zero domain keywords, zero hardcoded table
+# names.
+_ROLE_NAME_RE = re.compile(r"(^|_)(name|fname|title|label)(_|$)", re.IGNORECASE)
+_ROLE_CATEGORY_RE = re.compile(
+    r"(type|category|class|status|grade|group|kind|segment|variety)",
+    re.IGNORECASE,
+)
+_ROLE_DATE_RE = re.compile(
+    r"(date|time|dt$|_at$|created|updated|period|entry|shipment|statistic)",
+    re.IGNORECASE,
+)
+_ROLE_MEASURE_RE = re.compile(
+    r"(qty|quantity|amount|price|cost|revenue|sales|volume|value|fee|total|"
+    r"balance|weight|count)",
+    re.IGNORECASE,
+)
+_ROLE_ID_RE = re.compile(r"(^|_)(id|code|no|number)(_|$)", re.IGNORECASE)
+
+
+def _classify_table_roles(tables: list[dict]) -> None:
+    """Mutate each table dict with a structural ``table_role`` classification.
+
+    Called during catalog indexing when ``TABLE_ROLE_AUTO_CLASSIFY_ENABLED``.
+    Uses the full table set so FK in-degree (how many other tables point TO a
+    given table) is available — a strong signal that the target is a master.
+    Best-effort: imperfect classifications are refined at runtime by the LLM
+    and overridden per-project via ProjectCatalogOverlay.
+    """
+    name_to_idx = {t["table_name"]: i for i, t in enumerate(tables)}
+    indegree: dict[int, int] = {}
+    for t in tables:
+        for fk in t.get("foreign_keys", []):
+            ref = fk.get("ref_table", "")
+            if ref in name_to_idx:
+                j = name_to_idx[ref]
+                indegree[j] = indegree.get(j, 0) + 1
+
+    for i, t in enumerate(tables):
+        t["table_role"] = _classify_table_role(t, indegree.get(i, 0))
+
+
+def _classify_table_role(table: dict, fk_indegree: int) -> str:
+    """Classify a single table's role via structural heuristics.
+
+    Returns: ``entity_master | fact | dimension | bridge | unknown``.
+    Priority order:
+      1. entity_master — small row count, id+name columns, a category/type
+         column OR referenced by FKs from other tables.
+      2. fact        — large row count, a temporal column + measure columns.
+      3. bridge      — 2+ FK columns, no measure columns (junction table).
+      4. dimension   — moderate row count with id+name columns.
+      5. unknown     — fallback.
+    """
+    row_count = table.get("row_count") or 0
+    cols = table.get("columns", [])
+    col_names = [c.get("column_name", "") for c in cols]
+    col_types = [c.get("data_type", "") for c in cols]
+
+    has_id = any(_ROLE_ID_RE.search(cn) for cn in col_names)
+    has_name = any(_ROLE_NAME_RE.search(cn) for cn in col_names)
+    has_category = any(_ROLE_CATEGORY_RE.search(cn) for cn in col_names)
+    has_date = any(
+        _ROLE_DATE_RE.search(cn) or _is_date_type(ct)
+        for cn, ct in zip(col_names, col_types)
+    )
+    has_measure = any(_ROLE_MEASURE_RE.search(cn) for cn in col_names)
+    fk_col_count = sum(1 for cn in col_names if _ROLE_ID_RE.search(cn))
+
+    # 1) entity_master — small, name-bearing, category'd or FK-referenced.
+    if (
+        row_count and row_count < settings.ENTITY_MASTER_MAX_ROW_COUNT
+        and has_id and has_name
+        and (has_category or fk_indegree > 0)
+    ):
+        return "entity_master"
+
+    # 2) fact — large, temporal, measurable.
+    if row_count and row_count > 10000 and has_date and has_measure:
+        return "fact"
+
+    # 3) bridge — multi-FK junction without measures.
+    if fk_col_count >= 2 and not has_measure:
+        return "bridge"
+
+    # 4) dimension — moderate size with id+name.
+    if has_id and has_name and (not row_count or row_count < 100000):
+        return "dimension"
+
+    return "unknown"
 
 
 def _normalize_desc(desc: Any) -> tuple[str, str, list[dict]]:
@@ -675,6 +775,7 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             )
             .first()
         )
+        role = t.get("table_role", "unknown") or "unknown"
         if existing:
             meta = existing
             meta.table_type = t.get("table_type", "TABLE")
@@ -682,6 +783,11 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             meta.description_zh = t.get("description_zh")
             meta.description_en = t.get("description_en")
             meta.coverage_json = t.get("coverage_json")
+            # Preserve a human/LLM-set role; only overwrite with a fresh
+            # auto-classification (index-time) if still "unknown" or coming
+            # from this same index pass.
+            if role != "unknown":
+                meta.table_role = role
         else:
             import uuid as _uuid
             meta = KBTableMeta(
@@ -694,6 +800,7 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                 description_zh=t.get("description_zh"),
                 description_en=t.get("description_en"),
                 coverage_json=t.get("coverage_json"),
+                table_role=role,
             )
             db.add(meta)
         db.flush()

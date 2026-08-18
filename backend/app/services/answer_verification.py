@@ -100,6 +100,22 @@ _CONTAINER_STOPWORDS = frozenset({
     "title", "titles", "label", "labels",
 })
 
+# Overscope detection (Entity Master Filter). User asks for a specific subset
+# (category/type/quantity/qualified noun) but the tool results look like a
+# full-table dump of a fact table with no filtering evidence.
+_SCOPE_QUALIFIER_RE = re.compile(
+    r"(category|categories|type(?:s)?\b|segments?|grades?|classes?|groups?|"
+    r"kinds?|variants?|subset|specific|particular|only|just|"
+    r"top\s+\d+|first\s+\d+|list\s+\d+|exact\s+\d+)",
+    re.IGNORECASE,
+)
+_SCOPE_QUALIFIED_NOUN_RE = re.compile(
+    r"\b\w[\w\-/.]+\s+(product|material|item|customer|client|supplier|vendor|"
+    r"warehouse|region|employee|user)s?\b",
+    re.IGNORECASE,
+)
+_OVERSCOPE_ROW_THRESHOLD = 200
+
 _TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_]{2,}")
 _STOPWORDS = frozenset({
     "the", "and", "for", "with", "this", "that", "from", "have", "has", "are",
@@ -164,9 +180,17 @@ def summarize_tool_result(raw: dict | None, max_rows: int = 5, max_chars: int = 
     if rows is None:
         rows = raw.get("data")
     if isinstance(rows, list):
-        out["row_count"] = len(rows)
         out["empty"] = len(rows) == 0
         out["rows"] = rows[:max_rows]
+    # Honor an explicit total (the raw result may carry the full dump size
+    # even when `rows` is truncated to a sample) — this is what lets the
+    # overscope detector see a 42k-record dump whose preview shows 5 rows.
+    rc = raw.get("row_count")
+    if not isinstance(rc, int):
+        rc = raw.get("total")
+    if not isinstance(rc, int):
+        rc = len(rows) if isinstance(rows, list) else 0
+    out["row_count"] = rc
     columns = raw.get("columns") or raw.get("column_names")
     if columns is None and out["rows"] and isinstance(out["rows"][0], dict):
         columns = list(out["rows"][0].keys())
@@ -275,6 +299,46 @@ def _detect_dimension_coverage(
     corpus = _normalize_token(_payload_text(results) + " " + (assistant_text or ""))
     missing = [tok for tok in sorted(requested) if tok not in corpus]
     return missing
+
+
+def _detect_overscope_filter(user_message: str, results: list[dict]) -> bool:
+    """Detect unfiltered fact-table dumps despite a subset-specific request.
+
+    Structural only — zero domain keywords, zero hardcoded table/column names.
+    Fires when ALL of the following hold:
+
+      1. The user asks for a specific subset: a category/type/segment word, a
+         quantity limit ("top N", "only", "just"), or a qualified noun
+         ("C5/C9 products" — slash/hyphen qualifier + entity noun).
+      2. At least one tool result returned a large row count (>= 200 rows) —
+         the shape of a full fact-table scan rather than a scoped answer.
+      3. No tool result's SQL shows filtering evidence (WHERE / JOIN / IN(...)),
+         so the large dump was NOT deliberately scoped.
+
+    This is the verification-gate enforcement of the Entity Master Filter
+    pattern: when the agent answers a category-specific question by dumping the
+    whole fact table, the gate flags it INCOMPLETE and nudges a master-first
+    re-plan.
+    """
+    if not user_message or not results:
+        return False
+    has_scope_signal = bool(
+        _SCOPE_QUALIFIER_RE.search(user_message)
+        or _SCOPE_QUALIFIED_NOUN_RE.search(user_message)
+    )
+    if not has_scope_signal:
+        return False
+    has_large_dump = any(
+        (r.get("row_count") or 0) >= _OVERSCOPE_ROW_THRESHOLD for r in results
+    )
+    if not has_large_dump:
+        return False
+    # Give the benefit of the doubt when ANY executed SQL shows scoping.
+    for r in results:
+        sql = r.get("sql", "")
+        if sql and re.search(r"\b(WHERE|JOIN|IN\s*\()", sql, re.IGNORECASE):
+            return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -431,6 +495,13 @@ def _evaluate_answer_inner(
             "requested dimensions not found in the data: " + ", ".join(missing[:5])
         )
 
+    if _detect_overscope_filter(user_message, results):
+        signals.append("overscope")
+        gaps.append(
+            "the query returned a large unfiltered dump from a fact table even "
+            "though the request asked for a specific subset (category/type/quantity)"
+        )
+
     max_replans = int(getattr(settings, "SELF_EVAL_MAX_REPLANS", 3))
 
     if signals:
@@ -510,6 +581,14 @@ def _suggested_fix(signals: list[str], results: list[dict]) -> str:
         return (
             "Query the columns that actually contain the requested dimensions "
             f"from the {hint} source, then answer with those values."
+        )
+    if "overscope" in signals:
+        return (
+            "The query scanned the whole fact table without entity filtering. "
+            "Identify the entity master table for the requested entity (low row "
+            "count, id+name+category columns, tagged table_role: entity_master), "
+            "filter it to the relevant entity IDs, then re-query the fact table "
+            "with WHERE <entity_id> IN (...) before answering."
         )
     return "Try an alternative approach to obtain the missing information."
 

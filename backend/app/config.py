@@ -652,6 +652,22 @@ class Settings(BaseSettings):
     #   context block (~4 chars/token).
     SCHEMA_GRAPH_TOKEN_BUDGET: int = 1200
 
+    # ── Entity Master Filter (universal master-first query pattern) ─────
+    # ENTITY_MASTER_FILTER_ENABLED: master gate. When True, ALL database-bound
+    #   agents get the _ENTITY_MASTER_FILTER_BLOCK prompt section + the cached
+    #   "Known Entity Masters" map injected into their system prompt, and the
+    #   schema graph renders table_role annotations.
+    # TABLE_ROLE_AUTO_CLASSIFY_ENABLED: sub-flag. When True, the catalog
+    #   indexer auto-classifies each table's role (entity_master / fact /
+    #   dimension / bridge / unknown) using structural heuristics (row count,
+    #   column-name patterns, FK relationships) and persists it in
+    #   kb_table_meta.table_role.
+    # ENTITY_MASTER_MAX_ROW_COUNT: row-count ceiling used by the classifier to
+    #   decide whether a table is small enough to be an entity master.
+    ENTITY_MASTER_FILTER_ENABLED: bool = False
+    TABLE_ROLE_AUTO_CLASSIFY_ENABLED: bool = False
+    ENTITY_MASTER_MAX_ROW_COUNT: int = 50000
+
     # ── Business Semantic Layer (Approach A) ────────────────────────────
     # KG_COVERAGE_PROBE_ENABLED: probe min_date/max_date per table at index
     #   time (5s timeout), stored in kb_table_meta.coverage_json.

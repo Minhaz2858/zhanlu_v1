@@ -37,6 +37,10 @@ class TableNode:
     row_count_approx: int | None = None
     sample_rows: list[dict] = field(default_factory=list)
     edges: list[dict] = field(default_factory=list)
+    # entity_master | fact | dimension | bridge | unknown — structural role
+    # classified at catalog-index time (kb_table_meta.table_role) so the LLM
+    # knows which tables to query FIRST (masters) vs. which to filter via them.
+    table_role: str = "unknown"
 
 
 def _quote_ident(conn: Any, name: str) -> str:
@@ -149,6 +153,10 @@ class SchemaGraph:
             KBTableMeta.table_name.in_(list(self.nodes.keys())),
         ).all()
         id_to_name = {m.id: m.table_name for m in metas}
+        for m in metas:
+            node = self.nodes.get(m.table_name)
+            if node is not None and getattr(m, "table_role", None):
+                node.table_role = m.table_role
         ids = list(id_to_name.keys())
         if not ids:
             return
@@ -241,6 +249,7 @@ class SchemaGraph:
 
     def _render_node(self, node: TableNode, with_samples: bool = True) -> str:
         lines = [f"Table: {node.name}"]
+        lines.append(f"  table_role: {node.table_role or 'unknown'}")
         if node.row_count_approx is not None:
             lines.append(f"  rows_approx: {node.row_count_approx}")
         if node.columns:

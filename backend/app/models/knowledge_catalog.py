@@ -28,6 +28,13 @@ class KBTableMeta(TimestampedBase):
     description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     coverage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    table_role: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
+    # entity_master | fact | dimension | bridge | unknown
+    entity_master_hints: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # {"entity_type": str, "filter_columns": list[str], "category_column": str,
+    #  "sample_categories": list[str]} — discovered filter metadata for
+    # entity_master tables; persisted by the LLM at runtime so later queries
+    # skip re-discovery.
     indexed_at: Mapped[datetime] = mapped_column(
         DateTime, nullable=False, default=lambda: datetime.utcnow()
     )
@@ -149,8 +156,10 @@ class ProjectCatalogOverlay(TimestampedBase):
     alias: Mapped[str | None] = mapped_column(String(191), nullable=True)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     metric_definition: Mapped[str | None] = mapped_column(Text, nullable=True)
+    table_role: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Per-project override of the auto-classified KBTableMeta.table_role.
     scope: Mapped[str] = mapped_column(String(20), nullable=False, default="table")
-    # table / kb
+    # table / kb / table_role
 
     __table_args__ = (
         UniqueConstraint(

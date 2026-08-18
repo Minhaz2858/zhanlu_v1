@@ -165,6 +165,20 @@ analysis in the Ecisco BI project):
   answer: "Latest data is from 2025-12-31; the analysis uses the available
   data." NEVER claim the data covers a period it does not cover, and never
   present stale 2025 numbers as the current market picture.
+
+ECISCO BI SALES + INVENTORY COVERAGE RULE (HARD RULE):
+- SALES: for sales volume / shipment quantity / revenue, query the unified
+  LIVE views — `erp_v_sale_orderentry` or `erp_t_sal_outstock` (~90k rows,
+  current through 2026). When the question covers a product portfolio (e.g.
+  "C5/C9 products"), query ALL products in ONE query grouped by product name —
+  do NOT query single-product views (`sale_erp_v_<product>_data`) one at a
+  time, as that silently yields a one-product answer.
+- INVENTORY: current inventory position must come from `erp_v_stk_inventory`
+  or `erp_t_stk_inventory` (by product name) — never guess inventory from a
+  sales-only table, and never report inventory as empty/null without querying
+  the inventory tables first.
+- A complete product answer combines sales (from the sales tables) + inventory
+  (from the inventory tables) + prices (from `actual_price` / `market_prices`).
 """
 
 
@@ -463,6 +477,45 @@ INITIATIVE
 - If a deliverable needs data the user didn't supply and they've granted latitude (or asked for a demo/sample), generate clearly-marked synthetic data and label it as indicative/demo. Never present invented numbers as real.
 - When a choice genuinely matters, offer at most 3 numbered options with your recommendation marked, and tell the user they can reply with a number or "your call". Then stop — one question per turn, never a questionnaire.
 - Default to action: a good-enough deliverable now beats a perfect one after three rounds of questions."""
+
+
+_ENTITY_MASTER_FILTER_BLOCK = """
+ENTITY MASTER FILTER RULE (HARD RULE — ALL DATABASES)
+
+Before querying ANY fact table (sales, inventory, orders, transactions,
+shipments, details), you MUST first identify and filter by the relevant
+ENTITY MASTER table. The schema context tags tables with their role:
+``table_role: entity_master`` (low row count, id+name columns, category/type
+columns, referenced by other tables), ``fact`` (high row count, dates +
+quantities/amounts), ``dimension``, ``bridge``, or ``unknown``.
+
+Three-step master-first query pattern:
+
+1. DISCOVER THE MASTER. Look for a table tagged ``table_role: entity_master``
+   matching the entity the user asked about (product/material/SKU, customer/
+   client/buyer, supplier/vendor, region/warehouse/location, employee/user,
+   department, etc.). If a "Known Entity Masters" section appears in this
+   prompt, use it directly — those mappings were discovered and cached from
+   previous sessions; do NOT re-discover them.
+2. FILTER THE MASTER. Query the master table to get ONLY the relevant entity
+   IDs, using its category/type/status/name columns:
+
+   SELECT id, name, category FROM {master_table}
+   WHERE category = '<relevant_type>' OR name LIKE '%<keyword>%' OR type IN (...)
+
+3. QUERY FACT TABLES WITH THE FILTER. Join or filter the fact table using ONLY
+   those entity IDs (WHERE <fact>.entity_id IN (...)) and any date range the
+   user requested.
+
+FORBIDDEN:
+- ❌ NEVER query a fact table without entity filtering when the user asks for a
+  specific category, segment, type, or keyword (e.g. "C5/C9 products",
+  "premium customers", "raw material inventory").
+- ❌ NEVER return raw full-table dumps ("42,993 records") when the user asked
+  for a handful of products/customers/suppliers.
+- ❌ NEVER assume every row in a fact table is relevant — ALWAYS scope via the
+  entity master first.
+"""
 
 
 _ANSWER_VERIFICATION_BLOCK = """
@@ -1727,6 +1780,16 @@ def get_system_prompt(
         settings, "SCHEMA_GRAPH_ENABLED", False
     ):
         prompt = prompt + _SCHEMA_AWARE_PROTOCOL_BLOCK
+
+    # Entity Master Filter — generic master-first query pattern for ALL
+    # db-bound agents (not just Ecisco). Teaches the LLM to scope fact-table
+    # queries via the entity master. The cached "Known Entity Masters" map
+    # (per-project, from kb_table_meta.table_role='entity_master') is injected
+    # by dynamic_prompt_builder, which has the DB session. Flag-gated.
+    if _agent_is_db_bound(agent_name, agent_app) and getattr(
+        settings, "ENTITY_MASTER_FILTER_ENABLED", False
+    ):
+        prompt = prompt + _ENTITY_MASTER_FILTER_BLOCK
 
     # 4. If the user message is time-sensitive, contains a URL, or asks for
     #    a file, append the matching [GROUNDING REQUIRED] / [FILE

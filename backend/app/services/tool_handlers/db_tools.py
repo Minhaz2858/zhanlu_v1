@@ -212,6 +212,50 @@ def _annotate_deprecated_columns(result: dict, agent_name: str | None) -> dict:
     return result
 
 
+def _annotate_table_roles(result: dict, db: Session, kb_id: str) -> dict:
+    """Annotate describe_table / describe_all results with ``table_role``.
+
+    Loads the cached structural role (entity_master / fact / dimension /
+    bridge / unknown) from ``kb_table_meta.table_role`` so the LLM knows
+    which tables to query FIRST (masters) when using the non-schema-graph
+    fallback path. Flag-gated by ENTITY_MASTER_FILTER_ENABLED; best-effort
+    (any failure leaves the result untouched).
+    """
+    if not getattr(settings, "ENTITY_MASTER_FILTER_ENABLED", False):
+        return result
+    try:
+        from app.models.knowledge_catalog import KBTableMeta
+        name_to_role: dict[str, str] = {}
+        table_names: list[str] = []
+        # describe_table shape
+        if isinstance(result.get("table"), str):
+            table_names.append(result["table"])
+        # describe_all shape
+        for entry in result.get("tables", []) or []:
+            if isinstance(entry, dict) and isinstance(entry.get("table"), str):
+                table_names.append(entry["table"])
+        if not table_names:
+            return result
+        metas = (
+            db.query(KBTableMeta)
+            .filter(
+                KBTableMeta.kb_id == kb_id,
+                KBTableMeta.table_name.in_(table_names),
+            )
+            .all()
+        )
+        name_to_role = {m.table_name: m.table_role or "unknown" for m in metas}
+
+        if isinstance(result.get("table"), str):
+            result["table_role"] = name_to_role.get(result["table"], "unknown")
+        for entry in result.get("tables", []) or []:
+            if isinstance(entry, dict) and isinstance(entry.get("table"), str):
+                entry["table_role"] = name_to_role.get(entry["table"], "unknown")
+    except Exception as exc:
+        logger.debug("_annotate_table_roles failed (non-fatal): %s", exc)
+    return result
+
+
 # ---------------------------------------------------------------------------
 # list_data_sources
 # ---------------------------------------------------------------------------
@@ -361,6 +405,7 @@ async def _describe_schema(
         result = _annotate_deprecated_columns(
             result, (context or {}).get("agent_name")
         )
+        result = _annotate_table_roles(result, db, kb_id)
         return {"success": True, **result}
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}

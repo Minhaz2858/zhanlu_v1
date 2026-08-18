@@ -49,6 +49,7 @@ def build_system_prompt(
     inject_recipes: bool = True,
     inject_user_profile: bool = True,
     inject_role_context: bool = True,
+    inject_entity_masters: bool = True,
 ) -> str:
     """Build the complete system prompt from all sources.
 
@@ -95,6 +96,12 @@ def build_system_prompt(
     # 7. Role context (role-based personalization) — flag-gated
     if inject_role_context:
         prompt = _inject_role_context(prompt, db, user_id)
+
+    # 8. Known Entity Masters map (cached master-first discovery) — flag-gated
+    #    Reads kb_table_meta.table_role='entity_master' rows for the agent's
+    #    bound KBs and injects a compact table so the LLM skips re-discovery.
+    if inject_entity_masters:
+        prompt = _inject_entity_masters(prompt, db, agent_app, project_id=project_id)
 
     return prompt
 
@@ -216,6 +223,104 @@ def _inject_user_profile(prompt: str, agent_app_id: str, user_id: str | None) ->
     except Exception as e:
         logger.debug("User profile injection failed (non-fatal): %s", e)
     return prompt
+
+
+def _inject_entity_masters(
+    prompt: str,
+    db: Session,
+    agent_app: Any,
+    project_id: str | None = None,
+) -> str:
+    """Inject the cached "Known Entity Masters" map into the prompt.
+
+    Reads ``kb_table_meta.table_role='entity_master'`` rows for the agent's
+    bound KBs (plus per-project ``ProjectCatalogOverlay.table_role``
+    overrides) and appends a compact map so the LLM skips re-discovery.
+    This is the knowledge-graph cache layer of the Entity Master Filter:
+    the first session classifies + discovers; every later session reuses it.
+
+    Flag-gated by ENTITY_MASTER_FILTER_ENABLED. Best-effort — any failure
+    leaves the prompt unchanged.
+    """
+    try:
+        from app.config import settings
+        if not getattr(settings, "ENTITY_MASTER_FILTER_ENABLED", False):
+            return prompt
+
+        kb_ids = _agent_kb_ids(agent_app)
+        if not kb_ids:
+            return prompt
+
+        from app.models.knowledge_catalog import KBTableMeta, ProjectCatalogOverlay
+
+        rows = (
+            db.query(KBTableMeta)
+            .filter(
+                KBTableMeta.kb_id.in_(kb_ids),
+                KBTableMeta.table_role == "entity_master",
+                KBTableMeta.is_deleted == False,  # noqa: E712
+            )
+            .order_by(KBTableMeta.table_name)
+            .all()
+        )
+        if not rows:
+            return prompt
+
+        # Per-project overlay overrides (scope='table_role') — human/LLM
+        # corrections win over auto-classification.
+        overlay_by_table: dict[str, str] = {}
+        if project_id:
+            try:
+                overlays = (
+                    db.query(ProjectCatalogOverlay)
+                    .filter(
+                        ProjectCatalogOverlay.project_id == project_id,
+                        ProjectCatalogOverlay.scope == "table_role",
+                        ProjectCatalogOverlay.table_role.isnot(None),
+                    )
+                    .all()
+                )
+                for o in overlays:
+                    overlay_by_table[o.table_name] = o.table_role
+            except Exception:
+                overlay_by_table = {}
+
+        lines = ["## Known Entity Masters (cached from previous sessions)"]
+        lines.append("| Master Table | Filter Columns | Sample Categories |")
+        lines.append("|---|---|---|")
+        for meta in rows:
+            hints = meta.entity_master_hints or {}
+            # Include by default; only suppress when an explicit overlay says
+            # the table is NOT an entity master for this project.
+            if overlay_by_table.get(meta.table_name, "entity_master") != "entity_master":
+                continue
+            fcols = ", ".join(hints.get("filter_columns") or [])
+            samples = ", ".join(str(x) for x in (hints.get("sample_categories") or [])[:4])
+            lines.append(f"| {meta.table_name} | {fcols or '-'} | {samples or '-'} |")
+        if len(lines) <= 3:  # all overlays suppressed → nothing useful
+            return prompt
+        prompt += "\n\n" + "\n".join(lines)
+    except Exception as e:
+        logger.debug("Entity masters injection failed (non-fatal): %s", e)
+    return prompt
+
+
+def _agent_kb_ids(agent_app: Any) -> list[str]:
+    """Extract bound KB ids from an AgentApp (normalizes string-array JSON)."""
+    if agent_app is None:
+        return []
+    kbs = getattr(agent_app, "knowledge_bases", None)
+    if not kbs:
+        return []
+    if isinstance(kbs, str):
+        import json as _json
+        try:
+            kbs = _json.loads(kbs)
+        except Exception:
+            return []
+    if isinstance(kbs, (list, tuple, set)):
+        return [str(k) for k in kbs if k]
+    return []
 
 
 def _inject_role_context(prompt: str, db: Session, user_id: str | None) -> str:
