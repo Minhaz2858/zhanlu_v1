@@ -112,3 +112,79 @@ def dashboard_guard_blocked_tools() -> frozenset[str]:
     the agent then dumps as markdown instead of shipping a dashboard.
     """
     return frozenset({"execute_query", "execute_sql", "sql_query"})
+
+
+# ── T7: data-contract confirmation gate ────────────────────────────────────
+# Schema-inspection tools count as "grounding": if the agent has run any of
+# these this turn, its SQL references real tables/columns (the tool result is
+# the actual schema), so the build is allowed through.
+_SCHEMA_INSPECTION_TOOLS = frozenset({
+    "describe_schema",
+    "describe_table",
+    "list_data_sources",
+    "inspect_data_source",
+})
+
+# Approval words — either language signals the user accepted a proposed
+# data contract. \b fails on CJK, so Chinese approval is matched separately.
+_CONTRACT_APPROVAL_EN_RE = re.compile(
+    r"\b(?:confirm(?:ed|ation)?|approved?|agree|ok|okay|yes|sure|"
+    r"go ahead|looks? good|great|perfect)\b",
+    re.IGNORECASE,
+)
+_CONTRACT_APPROVAL_ZH = ("确认", "可以", "同意", "没问题", "就用", "就按", "好的")
+
+# Entity-shaped token: snake_case identifiers or ALL_CAPS acronyms — the shape
+# of real table/column names (e.g. `erp_product_sales_details`, `FNAME`).
+_ENTITY_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
+
+
+def mentions_concrete_entities(user_content: str) -> bool:
+    """True when the user request names concrete tables/columns (e.g.
+    ``erp_product_sales_details``, ``FNAME``, ``shipment_date``)."""
+    return any("_" in tok or tok.isupper() for tok in _ENTITY_TOKEN_RE.findall(user_content))
+
+
+def _has_user_approval(user_content: str) -> bool:
+    if _CONTRACT_APPROVAL_EN_RE.search(user_content):
+        return True
+    return any(kw in user_content for kw in _CONTRACT_APPROVAL_ZH)
+
+
+def contract_confirmation_needed(
+    user_content: str | None,
+    tool_calls_for_frontend: list[dict],
+) -> bool:
+    """T7 data-contract confirmation gate.
+
+    True when the agent is trying to build a live dashboard while the data
+    contract is NOT confirmed:
+
+    - the request is dashboard-shaped,
+    - the build tool is flag-enabled (gate is inert otherwise),
+    - the build tool has not already run this turn,
+    - no schema-inspection tool ran this turn (the agent has NO grounding —
+      it would be guessing table/column names),
+    - the user has not named concrete entities or approved a proposed contract.
+
+    When True, the chat loop must block the build tool call and inject a
+    synthetic clarification so the agent asks instead of fabricating data.
+    """
+    if not user_content or not is_live_dashboard_request(user_content):
+        return False
+    build_tool = dashboard_build_tool()
+    if not build_tool:
+        return False
+    names = {
+        tc.get("name") or tc.get("tool_name")
+        for tc in (tool_calls_for_frontend or [])
+    }
+    if build_tool in names:
+        return False  # already built this turn
+    if names & _SCHEMA_INSPECTION_TOOLS:
+        return False  # grounded in the real schema
+    if _has_user_approval(user_content):
+        return False  # user approved the contract
+    if mentions_concrete_entities(user_content):
+        return False  # user named real tables/columns — inspect and build
+    return True

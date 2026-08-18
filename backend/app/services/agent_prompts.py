@@ -113,6 +113,18 @@ def _build_default_skills_block() -> str:
             "(NOT `material_name`), `material_id` / `FMATERIALID` for product IDs, `shipment_date`, "
             "`shipment_quantity`, `contract_price`, `partner_name`, `shipment_grade`. "
             "Always use `describe_schema` to confirm column names before writing SQL.\n\n",
+            "DATA-CONTRACT CONFIRMATION (HARD RULE — applies to every dashboard build): "
+            "NEVER invent, guess, or fabricate table or column names. Every table and column in "
+            "your SQL must come from `describe_schema` / the schema graph — if you have not "
+            "inspected the schema, inspect it BEFORE building. If the user's request is ambiguous "
+            "about WHICH data source, metric, or aggregation to use, ask ONE short clarifying "
+            "question and wait for the answer before calling the build tool — do not silently "
+            "pick. A data contract is CONFIRMED when (a) the user explicitly approved the proposed "
+            "metric mapping, or (b) the request names concrete tables/metrics and `describe_schema` "
+            "confirmed those exact column names exist. If a requested table or metric does not "
+            "exist in the schema, say so and propose the closest REAL alternative — never "
+            "silently substitute an invented name. An honest clarification beats a dashboard "
+            "built on fabricated data.\n\n",
             "Deck guidance (PPTX): When the user asks for a presentation / deck / slides, first classify "
             "the deck type into one of four intent-driven PROFILES (Phase 4 — auto-classified from the "
             "request unless the user names one explicitly):\n"
@@ -574,7 +586,26 @@ FORBIDDEN BEHAVIORS
   failure text without first stating exactly what is missing and why.
 - NEVER report "0 results" without first attempting at least one
   alternative query/source for the same request.
-- NEVER claim you retrieved data you did not actually retrieve."""
+- NEVER claim you retrieved data you did not actually retrieve.
+
+UNIT-SEMANTICS SAFETY (HARD RULE)
+- NEVER compare or combine numbers from sources with incompatible units
+  (e.g. tons vs pieces, tons vs yuan) or incompatible aggregation
+  semantics (e.g. totals vs averages) as if they were the same measure.
+- If a comparison requires mixed units, EITHER explicitly normalize both
+  sides to one unit and show the conversion, OR declare the comparison
+  invalid and omit the numbers rather than printing an apples-to-oranges
+  figure. A wrong-looking number is worse than an honest "not comparable".
+
+BLANK-DIMENSION MASTER JOIN (HARD RULE)
+- If a name/description dimension column (e.g. a product, customer or
+  material name column) comes back 100% blank/NULL for all rows, DO NOT
+  answer grouped by blank values. Re-plan deterministically: find the
+  entity master table connected via this table's FK/id column in the
+  schema graph (validation hints tell you the master table + join), JOIN
+  it, and re-query using the master's name column so the answer shows
+  real entity names. This fix comes from the schema graph — never ask
+  the user for permission to fix it."""
 
 
 # ---------------------------------------------------------------------------

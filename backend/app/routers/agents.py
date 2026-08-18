@@ -65,6 +65,7 @@ from app.services.dashboard_turn_guard import (
     is_live_dashboard_request,
     should_force_create_dashboard,
     dashboard_guard_blocked_tools,
+    contract_confirmation_needed,
     dashboard_build_tool,
 )
 from app.services.tool_result_persistence import (
@@ -3484,6 +3485,62 @@ async def add_message(
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
                 _v2_tool_names = _tool_names_from_schemas(tools)
                 _v2_build_tool = dashboard_build_tool()
+                # ── Data-contract confirmation gate (T7) ──────────────
+                # Same gate as the v3 stream: never let the build tool run on
+                # an unconfirmed data contract (ambiguous request, no schema
+                # grounding, no user approval). Block + inject clarification.
+                if _v2_build_tool in _dash_guard_names and contract_confirmation_needed(
+                    user_content, tool_calls_for_frontend
+                ):
+                    _v2_build_call = next(
+                        (p for p in parsed_calls if p["tool_name"] == _v2_build_tool),
+                        None,
+                    )
+                    _v2_non_build = [p for p in parsed_calls if p["tool_name"] != _v2_build_tool]
+                    if _v2_build_call is not None:
+                        logger.warning(
+                            "v2 stream: data-contract gate blocked %s on unconfirmed "
+                            "contract (conv=%s, iter=%d).",
+                            _v2_build_tool, conversation_id, iteration,
+                        )
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _v2_build_call["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _v2_build_tool,
+                                    "arguments": _v2_build_call["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _v2_build_call["tool_call_id"],
+                            "content": (
+                                "BLOCKED by the data-contract guard: you tried to build a "
+                                "live dashboard before confirming the data contract. You "
+                                "MUST first inspect the real schema with `describe_schema` "
+                                "or `inspect_data_source`. If the user's request is "
+                                "ambiguous about which table, metric, or aggregation to "
+                                "use, ask the user ONE clarifying question and wait for "
+                                "the answer. NEVER invent table or column names — a "
+                                "dashboard built on fabricated data is worse than none."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"contract_gate_{uuid.uuid4()}",
+                            "name": "data_contract_gate",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _v2_build_tool,
+                                "reason": "data contract not confirmed (ambiguous request, no schema grounding)",
+                            },
+                        })
+                        parsed_calls = _v2_non_build
+                        if not _v2_non_build:
+                            continue
                 if (
                     _v2_build_tool in _dash_guard_names
                     or _v2_build_tool in _v2_tool_names
@@ -7697,6 +7754,64 @@ async def add_message_stream(
             # tool result so the LLM sees why its call was rejected and
             # retries with create_dashboard. Only `create_dashboard` and
             # harmless side-effect tools are allowed through.
+            # ── Data-contract confirmation gate (T7) ──────────────────
+            # If the LLM tries to call the build tool while the data contract
+            # is unconfirmed (ambiguous request, no schema grounding, no user
+            # approval), block the build and inject a synthetic clarification
+            # so the agent asks instead of building on invented tables.
+            if parsed_calls and _dash_build_tool in {p["tool_name"] for p in parsed_calls}:
+                if contract_confirmation_needed(user_content, tool_calls_for_frontend):
+                    _build_call = next(
+                        (p for p in parsed_calls if p["tool_name"] == _dash_build_tool),
+                        None,
+                    )
+                    _non_build = [p for p in parsed_calls if p["tool_name"] != _dash_build_tool]
+                    if _build_call is not None:
+                        logger.warning(
+                            "v3 stream: data-contract gate blocked %s on unconfirmed "
+                            "contract (conv=%s, iter=%d).",
+                            _dash_build_tool, conversation_id, iteration,
+                        )
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _build_call["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _dash_build_tool,
+                                    "arguments": _build_call["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _build_call["tool_call_id"],
+                            "content": (
+                                "BLOCKED by the data-contract guard: you tried to build a "
+                                "live dashboard before confirming the data contract. You "
+                                "MUST first inspect the real schema with `describe_schema` "
+                                "or `inspect_data_source`. If the user's request is "
+                                "ambiguous about which table, metric, or aggregation to "
+                                "use, ask the user ONE clarifying question and wait for "
+                                "the answer. NEVER invent table or column names — a "
+                                "dashboard built on fabricated data is worse than none."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"contract_gate_{uuid.uuid4()}",
+                            "name": "data_contract_gate",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _dash_build_tool,
+                                "reason": "data contract not confirmed (ambiguous request, no schema grounding)",
+                            },
+                        })
+                        parsed_calls = _non_build
+                        if not _non_build:
+                            yield (f'data: {json.dumps({"type": "tool_call", "name": "data_contract_gate", "args": {"blocked": _dash_build_tool}})}\n\n')
+                            continue
+
             if parsed_calls:
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
                 if (
