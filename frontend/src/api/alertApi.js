@@ -132,15 +132,3 @@ export async function updateAlertPreferences(patch) {
   }
   return resp.json();
 }
-
-/**
- * Mute a product so its alerts are suppressed.
- * @param {string} productId
- * @param {string[]} currentMuted — the current muted list (to append, not replace)
- * @returns {Promise<Object>} The full updated snapshot
- */
-export async function muteProduct(productId, currentMuted = []) {
-  return updateAlertPreferences({
-    muted_products: [...currentMuted, productId],
-  });
-}

@@ -11,7 +11,6 @@ vi.mock('@/api/alertApi', () => ({
   scanAlerts: vi.fn(),
   getAlertPreferences: vi.fn(),
   updateAlertPreferences: vi.fn(),
-  muteProduct: vi.fn(),
 }));
 
 const makeAlert = (overrides = {}) => ({
@@ -32,7 +31,6 @@ describe('ProactiveAlerts smart payload', () => {
     getAlerts.mockReset();
     getAlertDiagnostics.mockReset().mockResolvedValue({});
     getAlertPreferences.mockReset().mockResolvedValue({
-      muted_products: [],
       channels: ['in_app'],
       min_severity: 'low',
       threshold_multiplier: 1.0,

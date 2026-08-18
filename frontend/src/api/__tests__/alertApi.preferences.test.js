@@ -3,7 +3,6 @@ import { authFetch } from '@/api/authFetch';
 import {
   getAlertPreferences,
   updateAlertPreferences,
-  muteProduct,
 } from '@/api/alertApi';
 
 vi.mock('@/api/authFetch', () => ({ authFetch: vi.fn() }));
@@ -49,15 +48,5 @@ describe('alertApi preferences', () => {
     );
     const [, init] = authFetch.mock.calls[0];
     expect(JSON.parse(init.body)).toEqual({ min_severity: 'high' });
-  });
-
-  it('muteProduct appends the product to the current muted list', async () => {
-    const updated = { muted_products: ['a', 'c5'] };
-    authFetch.mockResolvedValue({ ok: true, json: async () => updated });
-
-    const result = await muteProduct('c5', ['a']);
-    expect(result).toEqual(updated);
-    const [, init] = authFetch.mock.calls[0];
-    expect(JSON.parse(init.body)).toEqual({ muted_products: ['a', 'c5'] });
   });
 });

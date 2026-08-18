@@ -12,7 +12,6 @@ import {
   ChevronDown,
   ChevronUp,
   Lightbulb,
-  VolumeX,
 } from 'lucide-react';
 import {
   getAlerts,
@@ -20,7 +19,6 @@ import {
   dismissAlert,
   getAlertDiagnostics,
   getAlertPreferences,
-  muteProduct,
 } from '@/api/alertApi';
 import AlertPreferencesModal from '@/components/AlertPreferencesModal';
 
@@ -46,7 +44,7 @@ function AlertTypeIcon({ type, className = 'h-4 w-4' }) {
 }
 
 /** Single alert card */
-function AlertCard({ alert, onDismiss, onInvestigate, onMute }) {
+function AlertCard({ alert, onDismiss, onInvestigate }) {
   const sev = SEVERITY_CONFIG[alert.severity] || SEVERITY_CONFIG.medium;
   const borderColor =
     alert.severity === 'high'
@@ -70,18 +68,6 @@ function AlertCard({ alert, onDismiss, onInvestigate, onMute }) {
     <div
       className={`relative rounded-xl border-l-4 shadow-sm p-4 gap-3 bg-white ${borderColor}`}
     >
-      {/* Mute button */}
-      {onMute && (
-        <button
-          onClick={() => onMute(alert)}
-          className="absolute top-2.5 right-8 p-0.5 text-slate-400 hover:text-rose-600 transition-colors rounded"
-          aria-label="Mute product"
-          title="Mute this product"
-        >
-          <VolumeX className="h-3.5 w-3.5" />
-        </button>
-      )}
-
       {/* Dismiss button */}
       <button
         onClick={() => onDismiss(alert.id)}
@@ -92,7 +78,7 @@ function AlertCard({ alert, onDismiss, onInvestigate, onMute }) {
       </button>
 
       {/* Header: icon + product name + severity badge */}
-      <div className="flex items-center gap-2 mb-3">
+      <div className="flex items-center gap-2 mb-3 pr-8">
         <AlertTypeIcon type={alert.alert_type} />
         <span className="text-sm font-semibold text-slate-800 truncate flex-1">
           {alert.product_name || alert.product_id}
@@ -422,18 +408,6 @@ export default function ProactiveAlerts({
     }
   };
 
-  const handleMute = async (alert) => {
-    const current = prefs?.muted_products || [];
-    try {
-      const updated = await muteProduct(alert.product_id, current);
-      setPrefs(updated);
-      toast.success(`${alert.product_name || alert.product_id} muted`);
-    } catch (err) {
-      console.error('Failed to mute product:', err);
-      toast.error('Could not mute product');
-    }
-  };
-
   const handleScan = async () => {
     const { scanAlerts: scanFn } = await import('@/api/alertApi');
     setScanning(true);
@@ -595,7 +569,6 @@ export default function ProactiveAlerts({
               alert={alert}
               onDismiss={handleDismiss}
               onInvestigate={onInvestigate}
-              onMute={handleMute}
             />
           ))}
         </div>

@@ -4,7 +4,6 @@ import {
   Bell,
   Settings,
   SlidersHorizontal,
-  VolumeX,
   Webhook,
   X,
 } from 'lucide-react';
@@ -23,7 +22,7 @@ const CHANNELS = [
 
 /**
  * Modal for tuning per-user alert preferences: severity floor, channels,
- * sensitivity multiplier, quiet hours, recommendations and the mute list.
+ * sensitivity multiplier, quiet hours and recommendations.
  */
 export default function AlertPreferencesModal({ open, onClose, onSaved }) {
   const [loading, setLoading] = useState(true);
@@ -38,8 +37,6 @@ export default function AlertPreferencesModal({ open, onClose, onSaved }) {
   });
   const [recommendationsEnabled, setRecommendationsEnabled] = useState(true);
   const [webhookUrl, setWebhookUrl] = useState('');
-  const [mutedProducts, setMutedProducts] = useState([]);
-  const [mutedInput, setMutedInput] = useState('');
 
   useEffect(() => {
     if (!open) return;
@@ -56,7 +53,6 @@ export default function AlertPreferencesModal({ open, onClose, onSaved }) {
         );
         setRecommendationsEnabled(prefs.recommendations_enabled ?? true);
         setWebhookUrl(prefs.webhook_url || '');
-        setMutedProducts(prefs.muted_products || []);
       })
       .catch((err) => {
         console.error('Failed to load alert preferences:', err);
@@ -78,25 +74,11 @@ export default function AlertPreferencesModal({ open, onClose, onSaved }) {
     );
   };
 
-  const addMutedProduct = () => {
-    const name = mutedInput.trim();
-    if (!name) return;
-    setMutedProducts((prev) =>
-      prev.includes(name) ? prev : [...prev, name],
-    );
-    setMutedInput('');
-  };
-
-  const removeMutedProduct = (name) => {
-    setMutedProducts((prev) => prev.filter((p) => p !== name));
-  };
-
   const handleSave = async () => {
     setSaving(true);
     try {
       const payload = {
         min_severity: minSeverity,
-        muted_products: mutedProducts,
         channels,
         threshold_multiplier: Number(multiplier),
         quiet_hours: quietHours,
@@ -330,57 +312,6 @@ export default function AlertPreferencesModal({ open, onClose, onSaved }) {
                   Show recommendations
                 </span>
               </label>
-
-              {/* Mute list */}
-              <section>
-                <div className="flex items-center gap-2 mb-2">
-                  <VolumeX className="h-4 w-4 text-slate-500" />
-                  <h3 className="text-xs font-semibold text-slate-700">
-                    Muted products
-                  </h3>
-                </div>
-                <div className="flex items-center gap-2">
-                  <input
-                    type="text"
-                    value={mutedInput}
-                    onChange={(e) => setMutedInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        e.preventDefault();
-                        addMutedProduct();
-                      }
-                    }}
-                    placeholder="Add product to mute"
-                    className="flex-1 text-xs border border-slate-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                  />
-                  <button
-                    onClick={addMutedProduct}
-                    className="text-xs font-semibold text-indigo-600 bg-indigo-50 hover:bg-indigo-100 border border-indigo-200 rounded-lg px-3 py-2 transition-colors"
-                    aria-label="Add mute"
-                  >
-                    Add
-                  </button>
-                </div>
-                {mutedProducts.length > 0 && (
-                  <div className="flex flex-wrap gap-1.5 mt-2">
-                    {mutedProducts.map((name) => (
-                      <span
-                        key={name}
-                        className="inline-flex items-center gap-1 bg-rose-50 text-rose-700 border border-rose-200 text-[11px] font-medium rounded-full pl-2 pr-1 py-0.5"
-                      >
-                        {name}
-                        <button
-                          onClick={() => removeMutedProduct(name)}
-                          className="p-0.5 hover:bg-rose-100 rounded-full"
-                          aria-label={`Remove ${name}`}
-                        >
-                          <X className="h-3 w-3" />
-                        </button>
-                      </span>
-                    ))}
-                  </div>
-                )}
-              </section>
             </>
           )}
         </div>
