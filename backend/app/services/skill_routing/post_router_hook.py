@@ -60,6 +60,15 @@ _MIN_NAME_TOKEN_LEN: int = 3
 
 _DASHBOARD_INTENT_RE = re.compile(r"\b(?:dashboard|dash-board|kpi\s*dashboard|仪表盘)\b", re.IGNORECASE)
 
+_WEEKLY_REPORT_INTENT_RE = re.compile(
+    # NOTE: `\b` only wraps the ASCII alternatives. CJK characters are word
+    # chars in Python re, so `\b周报\b` would fail when 周报 is adjacent to
+    # another CJK char (e.g. "本周的周报"). CJK alternatives match bare.
+    r"(?:\b(?:weekly\s*(?:market\s*)?report|weekly\s*summary|weekly\s*review|"
+    r"market\s*report)\b|周报|周度报告|本周报告)",
+    re.IGNORECASE,
+)
+
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -214,6 +223,18 @@ def post_router_pick(
                     "skill_name": "dashboard-generation",
                     "triggers": [],
                     "format": "dashboard",
+                    "forced": True,
+                    "score": 1.0,
+                    "source": cand.get("source", "filesystem"),
+                }
+
+    if _WEEKLY_REPORT_INTENT_RE.search(str(user_message or "")):
+        for cand in candidates:
+            if (cand.get("name") or "").strip().lower() == "weekly-report-generation":
+                return {
+                    "skill_name": "weekly-report-generation",
+                    "triggers": [],
+                    "format": None,
                     "forced": True,
                     "score": 1.0,
                     "source": cand.get("source", "filesystem"),

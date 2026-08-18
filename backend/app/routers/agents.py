@@ -512,6 +512,56 @@ STREAM_TOKEN_DELTAS = os.environ.get("ZHANLU_STREAM_TOKEN_DELTAS", "1") not in (
 # Override via the ZHANLU_SSE_HEARTBEAT_S env var for tuning.
 _SSE_HEARTBEAT_INTERVAL = max(1.0, float(os.environ.get("ZHANLU_SSE_HEARTBEAT_S", "5")))
 
+# ── tool_progress heartbeat during long tool execution ──────────────────
+# Delegation / sub-agent tools (ask_perception, ask_intelligence,
+# ask_diagnosis, ask_perception_intelligence_diagnosis, ask_data_agent, …)
+# can run for minutes. While they execute, the v3 loop emits
+# ``tool_progress`` SSE frames so the client sees liveness and proxies
+# don't idle-kill the connection. Fast utility tools are excluded.
+_LONG_RUNNING_TOOLS = frozenset({
+    "ask_perception", "ask_intelligence", "ask_diagnosis",
+    "ask_perception_intelligence_diagnosis", "ask_forecast_pricing",
+    "ask_data_agent", "ask_orchestrator", "ask_weekly_report",
+    "ask_pricing", "ask_forecast", "ask_report", "ask_rag_research",
+    "ask_knowledge_graph", "ask_decision", "ask_macro_override",
+    "ask_erp_kpi", "ask_erp_writeback",
+    "web_search", "execute_automation", "execute_code",
+})
+
+
+def _is_long_running_tool(tool_name: str) -> bool:
+    """True if ``tool_name`` may run for tens of seconds or minutes."""
+    return tool_name in _LONG_RUNNING_TOOLS
+
+
+async def _emit_tool_progress_while_waiting(
+    task: asyncio.Task,
+    parsed_calls: list,
+    interval: float = 15.0,
+):
+    """Yield ``tool_progress`` SSE frames while ``task`` is still running.
+
+    The tool-execution task keeps running in the background; every
+    ``interval`` seconds we yield a ``data: {...}`` chunk that marks the
+    in-flight tool calls as ``status: running``. This is additive — the
+    frontend already renders ``tool_progress`` events and treats entries
+    without a ``results`` key as in-flight.
+    """
+    running_calls = [
+        {
+            "id": c.get("tool_call_id", ""),
+            "name": TOOL_DISPLAY_NAMES.get(c.get("tool_name", ""), c.get("tool_name", "")),
+            "arguments_string": c.get("args_str", ""),
+            "status": "running",
+        }
+        for c in parsed_calls
+    ]
+    while not task.done():
+        done, _pending = await asyncio.wait({task}, timeout=interval)
+        if done:
+            break
+        yield f'data: {json.dumps({"type": "tool_progress", "tool_calls": running_calls})}\n\n'
+
 
 async def _sse_with_heartbeat(agen, interval: float = _SSE_HEARTBEAT_INTERVAL):
     """Wrap an async generator of SSE frames with keepalive comment pings.
@@ -7892,17 +7942,23 @@ async def add_message_stream(
                 "endpoint": effective_llm.endpoint,
             }
 
-            if len(parsed_calls) == 1:
-                call = parsed_calls[0]
-                _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-                if _gd.allows_execution:
-                    results = [await execute_tool(
-                        call["tool_name"], call["args"],
-                        db, user.id if user else None, context=ctx,
-                    )]
-                else:
-                    results = [json.loads(_guardrail_synthetic_result(_gd))]
-            else:
+            # ── Tool execution ──────────────────────────────────────────────
+            # Long-running delegation tools (ask_perception / ask_intelligence
+            # / ask_diagnosis / batch tool / …) can block for minutes. When
+            # any call in this batch is long-running, run the whole batch in a
+            # background task and emit ``tool_progress`` heartbeat frames while
+            # it executes, so the client sees liveness and proxies don't
+            # idle-kill the connection.
+            async def _run_tool_batch():
+                if len(parsed_calls) == 1:
+                    call = parsed_calls[0]
+                    _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
+                    if _gd.allows_execution:
+                        return [await execute_tool(
+                            call["tool_name"], call["args"],
+                            db, user.id if user else None, context=ctx,
+                        )]
+                    return [json.loads(_guardrail_synthetic_result(_gd))]
                 async def _exec_one(call):
                     _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
                     if _gd.allows_execution:
@@ -7922,6 +7978,19 @@ async def add_message_stream(
                         results.append({"success": False, "error": f"{type(r).__name__}: {r}"})
                     else:
                         results.append(r)
+                return results
+
+            if any(_is_long_running_tool(c["tool_name"]) for c in parsed_calls):
+                _tool_task = asyncio.ensure_future(_run_tool_batch())
+                try:
+                    async for _frame in _emit_tool_progress_while_waiting(_tool_task, parsed_calls):
+                        yield _frame
+                finally:
+                    if not _tool_task.done():
+                        _tool_task.cancel()
+                results = _tool_task.result()
+            else:
+                results = await _run_tool_batch()
 
             # Process results — check for approval pause
             paused_for_approval = False

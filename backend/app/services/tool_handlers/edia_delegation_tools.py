@@ -57,6 +57,8 @@ _DENIED_RECURSIVE = {
     "ask_report_agent", "ask_data_agent", "ask_intelligence",
     "ask_knowledge_graph", "ask_decision", "ask_macro_override",
     "ask_erp_kpi", "ask_erp_writeback",
+    "ask_perception_intelligence_diagnosis",
+    "ask_forecast_pricing",
     "delegate_task",
     "create_agent", "update_agent", "create_skill", "update_skill",
     "create_automation", "update_automation", "send_message",
@@ -448,6 +450,123 @@ async def _ask_intelligence(args: dict, db: Session, user_id: str | None, contex
     return await _run_sub_agent("intelligence_agent", question, db, user_id, context)
 
 
+async def _ask_perception_intelligence_diagnosis(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Run perception + intelligence + diagnosis sub-agents in parallel (batch).
+
+    The three sub-agents are independent: market snapshot, market
+    intelligence context, and driver diagnosis. Running them concurrently
+    with ``asyncio.gather`` replaces three sequential 226s tool calls with a
+    single ~226s tool call, cutting weekly-report wall time roughly 3x.
+
+    Returns a combined dict:
+
+        {
+            "success": True,
+            "perception":   {…},   # raw sub-agent result
+            "intelligence": {…},   # raw sub-agent result
+            "diagnosis":    {…},   # raw sub-agent result
+            "answer": "<concatenated prose for the calling agent>",
+            "agent": "perception+intelligence+diagnosis",
+        }
+    """
+    question = (args.get("question") or "").strip()
+    if not question:
+        return {"success": False, "error": "question is required"}
+
+    import asyncio
+
+    perception, intelligence, diagnosis = await asyncio.gather(
+        _run_sub_agent("perception_agent", question, db, user_id, context),
+        _run_sub_agent("intelligence_agent", question, db, user_id, context),
+        _run_sub_agent("diagnosis_agent", question, db, user_id, context),
+    )
+
+    sections = []
+    for label, result in (
+        ("PERCEPTION", perception),
+        ("INTELLIGENCE", intelligence),
+        ("DIAGNOSIS", diagnosis),
+    ):
+        ok = bool(result and result.get("success"))
+        text = (result or {}).get("answer") or ""
+        if ok and text:
+            sections.append(f"[{label}]\n{text}")
+        else:
+            err = (result or {}).get("error") or "no result"
+            sections.append(f"[{label}]\n({label.lower()} failed: {err})")
+
+    return {
+        "success": True,
+        "perception": perception,
+        "intelligence": intelligence,
+        "diagnosis": diagnosis,
+        "answer": "\n\n".join(sections),
+        "agent": "perception+intelligence+diagnosis",
+    }
+
+
+async def _ask_forecast_pricing(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Run forecast + pricing sub-agents in parallel (batch).
+
+    The two sub-agents are independent: an ensemble forecast of
+    forecastable products and a 9-step pricing recommendation. Running
+    them concurrently with ``asyncio.gather`` replaces two sequential
+    long tool calls with a single one, cutting weekly-report wall time
+    roughly in half for Step 3.
+
+    Returns a combined dict:
+
+        {
+            "success": True,
+            "forecast": {…},   # raw sub-agent result
+            "pricing":  {…},   # raw sub-agent result
+            "answer": "<concatenated prose for the calling agent>",
+            "agent": "forecast+pricing",
+        }
+    """
+    question = (args.get("question") or "").strip()
+    if not question:
+        return {"success": False, "error": "question is required"}
+
+    import asyncio
+
+    forecast, pricing = await asyncio.gather(
+        _run_sub_agent("forecast_agent", question, db, user_id, context),
+        _run_sub_agent("pricing_agent", question, db, user_id, context),
+    )
+
+    sections = []
+    for label, result in (
+        ("FORECAST", forecast),
+        ("PRICING", pricing),
+    ):
+        ok = bool(result and result.get("success"))
+        text = (result or {}).get("answer") or ""
+        if ok and text:
+            sections.append(f"[{label}]\n{text}")
+        else:
+            err = (result or {}).get("error") or "no result"
+            sections.append(f"[{label}]\n({label.lower()} failed: {err})")
+
+    return {
+        "success": True,
+        "forecast": forecast,
+        "pricing": pricing,
+        "answer": "\n\n".join(sections),
+        "agent": "forecast+pricing",
+    }
+
+
 async def _ask_knowledge_graph(args: dict, db: Session, user_id: str | None, context: dict | None = None) -> dict:
     """Direct knowledge graph query via Python service (no sub-agent delegation)."""
     from app.services.knowledge_graph.tool import _handle_knowledge_graph
@@ -692,6 +811,26 @@ for _name, _schema, _handler, _desc in (
         ),
         _ask_macro_override,
         "Apply a macro-level pricing override.",
+    ),
+    (
+        "ask_perception_intelligence_diagnosis",
+        _make_schema(
+            "ask_perception_intelligence_diagnosis",
+            "BATCH TOOL: Ask the Perception, Intelligence, and Diagnosis agents in PARALLEL with a single call. Runs all three independent sub-agents concurrently (market snapshot, market intelligence context, and driver diagnosis) and returns a combined answer. Use this instead of calling ask_perception, ask_intelligence, and ask_diagnosis separately — it is 3x faster and uses one tool call instead of three.",
+            "Perception + Intelligence + Diagnosis (parallel batch)",
+        ),
+        _ask_perception_intelligence_diagnosis,
+        "Ask Perception, Intelligence, and Diagnosis agents in parallel.",
+    ),
+    (
+        "ask_forecast_pricing",
+        _make_schema(
+            "ask_forecast_pricing",
+            "BATCH TOOL: Ask the Forecast and Pricing agents in PARALLEL with a single call. Runs both sub-agents concurrently (ensemble forecast + 9-step pricing recommendation) and returns a combined answer. Use this instead of calling ask_forecast_agent and ask_pricing separately — it is ~2x faster and uses one tool call instead of two.",
+            "Forecast + Pricing (parallel batch)",
+        ),
+        _ask_forecast_pricing,
+        "Ask Forecast and Pricing agents in parallel.",
     ),
     (
         "ask_erp_kpi",

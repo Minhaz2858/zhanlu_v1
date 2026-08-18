@@ -151,6 +151,20 @@ for dashboards, forecasting, and decision-making in the Ecisco BI project):
 - When `describe_schema` lists both `material_model` and `F_PAEZ_JC`, always
   select `F_PAEZ_JC` in SELECT, WHERE, GROUP BY, and JOIN clauses.
 - Never reference `material_model` in generated SQL.
+
+ECISCO BI DATA FRESHNESS RULE (HARD RULE — applies to every date-bounded
+analysis in the Ecisco BI project):
+- Before reporting "last 30 days" / "this month" / recent-period numbers,
+  run `SELECT MAX(<date_column>) FROM <table>` on a real date column from
+  `describe_schema` to confirm what the data actually covers.
+- TABLE PREFERENCE: prefer the LIVE, high-volume tables — `erp_t_sal_outstock`
+  and `erp_v_sale_orderentry` (~90k rows, current through 2026) — over the
+  low-volume STALE table `erp_product_sales_details` (1.4k rows, data ends
+  2025-12-31). Confirm with MAX(date_column) before choosing.
+- If the freshest data is stale (>30 days old), state it explicitly in the
+  answer: "Latest data is from 2025-12-31; the analysis uses the available
+  data." NEVER claim the data covers a period it does not cover, and never
+  present stale 2025 numbers as the current market picture.
 """
 
 
