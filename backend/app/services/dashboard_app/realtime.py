@@ -13,9 +13,12 @@ Phase-2 upgrade path: swap the poller for Postgres LISTEN/NOTIFY; the
 import hashlib
 import json
 import logging
+import re
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -107,3 +110,73 @@ def get_connection_manager() -> ConnectionManager:
         if _manager is None:
             _manager = ConnectionManager()
         return _manager
+
+
+# --- T11: Postgres LISTEN/NOTIFY push layer --------------------------------
+# Upgrades the generated poller from pure interval polling to event-driven
+# refresh when the app DB is Postgres AND DASHBOARD_PG_LISTEN_ENABLED. The
+# ConnectionManager API is unchanged; only the polling strategy differs.
+#
+# Channel naming: one channel per dashboard, derived from its slug. NOTIFY is
+# sent on the SAME database the poller LISTENs on — the app's own Postgres
+# (settings.DATABASE_URL), not the external datasource. Any backend writer
+# that mutates dashboard-relevant data can call notify_data_changed(slug) to
+# wake the poller instantly; interval hash-polling remains as the fallback so
+# external writers that never NOTIFY still get picked up within one interval.
+
+_PG_CHANNEL_PREFIX = "zhanlu_dashboard_"
+
+
+def pg_listen_channel(slug: str) -> str:
+    """Deterministic Postgres channel name for one dashboard (<=63 bytes)."""
+    return f"{_PG_CHANNEL_PREFIX}{slug}"
+
+
+def pg_async_dsn() -> "str | None":
+    """Return an asyncpg-compatible DSN for the app DB, or None when the app
+    DB is not Postgres (asyncpg cannot talk to SQLite/MySQL).
+
+    Converts the SQLAlchemy dialect prefix (``postgresql+psycopg2://``,
+    ``postgresql://``, ``postgres://``) to asyncpg's ``postgresql://``.
+    """
+    url = (getattr(settings, "DATABASE_URL", "") or "").strip()
+    if "postgres" not in url.split("://", 1)[0]:
+        return None
+    return re.sub(r"^postgres(?:ql)?(?:\+[a-z0-9_]+)?://", "postgresql://", url)
+
+
+def is_pg_listen_supported() -> bool:
+    """True when the T11 push layer is enabled AND the app DB is Postgres."""
+    return bool(getattr(settings, "DASHBOARD_PG_LISTEN_ENABLED", False)) and pg_async_dsn() is not None
+
+
+def notify_data_changed(slug: str, db=None) -> None:
+    """Best-effort NOTIFY on the app's Postgres DB to wake dashboard pollers.
+
+    Idempotent no-op when the push layer is disabled or the app DB is not
+    Postgres. Any backend writer that changes data consumed by a dashboard
+    can call this after committing to trigger an immediate refresh + broadcast
+    (the poller still hash-checks, so an empty wake is harmless).
+
+    ``db`` may be injected for tests; when omitted a short-lived connection is
+    opened and closed.
+    """
+    if not is_pg_listen_supported():
+        return
+    channel = pg_listen_channel(slug)
+    try:
+        if db is not None:
+            db.execute(_pg_notify_stmt(channel))
+            return
+        from sqlalchemy import text
+        from app.database import engine
+        with engine.connect() as conn:
+            conn.execute(text(f'NOTIFY "{channel}"'))
+    except Exception as exc:  # pragma: no cover - defensive; never break writers
+        logger.warning("notify_data_changed(%s) failed: %s", slug, exc)
+
+
+def _pg_notify_stmt(channel: str):
+    """Build a SQLAlchemy statement for NOTIFY (kept importable without engine)."""
+    from sqlalchemy import text
+    return text(f'NOTIFY "{channel}"')

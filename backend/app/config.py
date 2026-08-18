@@ -589,6 +589,13 @@ class Settings(BaseSettings):
     # whole org. The agent can still ask the user at creation time and pass
     # an explicit scope to create_fullstack_dashboard.
     DASHBOARD_DEFAULT_SCOPE: str = "personal"
+    # T11: Postgres LISTEN/NOTIFY upgrade. When True AND the app DB is
+    # Postgres, generated dashboard pollers subscribe to a per-dashboard
+    # channel (zhanlu_dashboard_{slug}) and refresh immediately on NOTIFY,
+    # instead of pure interval polling. Interval hash-polling is kept as the
+    # fallback (catches external writers that never NOTIFY). Non-Postgres
+    # backends always use interval polling. Default False.
+    DASHBOARD_PG_LISTEN_ENABLED: bool = False
 
     # ── Experience layer (self-learning agent) ──────────────────────────
     # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):

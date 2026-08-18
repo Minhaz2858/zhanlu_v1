@@ -9,6 +9,10 @@ from app.services.dashboard_app.realtime import (
     ConnectionManager,
     compute_rows_hash,
     get_connection_manager,
+    is_pg_listen_supported,
+    notify_data_changed,
+    pg_async_dsn,
+    pg_listen_channel,
     touch_last_data_change,
 )
 
@@ -129,3 +133,87 @@ def test_touch_last_data_change_db_error_swallowed():
     ):
         # Must not raise
         touch_last_data_change("slug-a")
+
+
+# ── T11: Postgres LISTEN/NOTIFY push layer ──
+
+
+def test_pg_listen_channel_deterministic_and_short():
+    """Channel names are deterministic and stay under PG's 63-byte limit for
+    realistic slugs (PG truncates over-long channel identifiers silently; the
+    app's slug generator caps slug length far below the limit)."""
+    assert pg_listen_channel("sales-overview") == "zhanlu_dashboard_sales-overview"
+    assert pg_listen_channel("sales-overview") == pg_listen_channel("sales-overview")
+    assert len(pg_listen_channel("sales-overview")) < 63
+    assert pg_listen_channel("a" * 40) == f"zhanlu_dashboard_{'a' * 40}"
+
+
+def test_pg_async_dsn_converts_dialect_prefix(monkeypatch):
+    """SQLAlchemy dialect prefixes convert to asyncpg's postgresql://."""
+    for raw, expected in [
+        ("postgresql+psycopg2://u:p@h:5432/db", "postgresql://u:p@h:5432/db"),
+        ("postgresql://u:p@h:5432/db", "postgresql://u:p@h:5432/db"),
+        ("postgres://u:p@h:5432/db", "postgresql://u:p@h:5432/db"),
+    ]:
+        monkeypatch.setattr("app.services.dashboard_app.realtime.settings.DATABASE_URL", raw)
+        assert pg_async_dsn() == expected
+
+
+def test_pg_async_dsn_returns_none_for_non_postgres(monkeypatch):
+    """SQLite/MySQL app DBs can't use asyncpg — must return None."""
+    for raw in ("sqlite:///./x.db", "mysql+pymysql://u:p@h/db", ""):
+        monkeypatch.setattr("app.services.dashboard_app.realtime.settings.DATABASE_URL", raw)
+        assert pg_async_dsn() is None
+
+
+def test_is_pg_listen_supported_gates_on_flag_and_dialect(monkeypatch):
+    """T11 push layer requires BOTH the flag AND a Postgres app DB."""
+    from app.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "DASHBOARD_PG_LISTEN_ENABLED", True)
+    monkeypatch.setattr(real_settings, "DATABASE_URL", "postgresql+psycopg2://u:p@h/db")
+    assert is_pg_listen_supported() is True
+
+    monkeypatch.setattr(real_settings, "DASHBOARD_PG_LISTEN_ENABLED", False)
+    assert is_pg_listen_supported() is False
+
+    monkeypatch.setattr(real_settings, "DASHBOARD_PG_LISTEN_ENABLED", True)
+    monkeypatch.setattr(real_settings, "DATABASE_URL", "sqlite:///./x.db")
+    assert is_pg_listen_supported() is False
+
+
+def test_notify_data_changed_sends_notify(monkeypatch):
+    """A writer calling notify_data_changed must issue NOTIFY on the app DB."""
+    from app.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "DASHBOARD_PG_LISTEN_ENABLED", True)
+    monkeypatch.setattr(real_settings, "DATABASE_URL", "postgresql+psycopg2://u:p@h/db")
+
+    db = MagicMock()
+    notify_data_changed("sales-overview", db=db)
+    db.execute.assert_called_once()
+    stmt = db.execute.call_args[0][0]
+    assert str(stmt) == 'NOTIFY "zhanlu_dashboard_sales-overview"'
+
+
+def test_notify_data_changed_disabled_is_noop(monkeypatch):
+    """Flag off → no NOTIFY is issued (keeps writers lightweight)."""
+    from app.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "DASHBOARD_PG_LISTEN_ENABLED", False)
+    db = MagicMock()
+    notify_data_changed("sales-overview", db=db)
+    db.execute.assert_not_called()
+
+
+def test_notify_data_changed_swallows_errors(monkeypatch):
+    """A failed NOTIFY must never break the writer's transaction path."""
+    from app.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "DASHBOARD_PG_LISTEN_ENABLED", True)
+    monkeypatch.setattr(real_settings, "DATABASE_URL", "postgresql+psycopg2://u:p@h/db")
+
+    db = MagicMock()
+    db.execute.side_effect = RuntimeError("db down")
+    # Must not raise
+    notify_data_changed("sales-overview", db=db)
