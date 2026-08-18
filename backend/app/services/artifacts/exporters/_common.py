@@ -214,38 +214,45 @@ def cap_chart_categories(
     largest contributors stay visible).  Everything beyond ``cap`` is folded
     into one ``other_label`` row whose y-values are the summed remainder.
 
-    Returns the rows unchanged when there are ``<= cap`` distinct categories or
-    when no numeric y-values can be parsed.
+    Returns aggregated rows (one per distinct category) when there are
+    ``<= cap`` distinct categories, or one row per top category plus a single
+    ``other_label`` row when there are more, so callers always receive one
+    series point per category regardless of how many raw rows shared that
+    label.  Returns the rows unchanged when no numeric y-values can be parsed.
     """
     if not rows or not y_keys:
         return rows
-    if len(rows) <= cap:
-        return rows
 
-    # Aggregate value per category label.
+    # Aggregate every raw row into one bucket per distinct category label.
+    # y-values are summed; the first-seen value is kept for other columns.
+    buckets: dict[str, dict[str, Any]] = {}
     totals: dict[str, float] = {}
     for r in rows:
         label = str(r.get(x_key, ""))
+        if label not in buckets:
+            bucket = {x_key: label}
+            for k in y_keys:
+                bucket[k] = 0.0
+            buckets[label] = bucket
         s = 0.0
         for k in y_keys:
             n = coerce_number(r.get(k))
             if n is not None:
                 s += n
+        buckets[label][x_key] = label
+        for k in y_keys:
+            buckets[label][k] = (buckets[label].get(k) or 0.0) + (coerce_number(r.get(k)) or 0.0)
         totals[label] = totals.get(label, 0.0) + s
 
-    if len(totals) <= cap:
-        return rows
+    distinct = list(buckets.values())
+    if len(distinct) <= cap:
+        return distinct
 
     ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
-    top_labels = {label for label, _ in ranked[:cap]}
+    top_labels = [label for label, _ in ranked[:cap]]
     other_sum = sum(v for label, v in ranked[cap:])
 
-    capped: list[dict[str, Any]] = []
-    for r in rows:
-        label = str(r.get(x_key, ""))
-        if label in top_labels:
-            capped.append(dict(r))
-
+    capped: list[dict[str, Any]] = [buckets[label] for label in top_labels]
     other_row: dict[str, Any] = {x_key: other_label}
     for k in y_keys:
         other_row[k] = other_sum
