@@ -36,6 +36,7 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.services.artifacts.event_logger import log_deck_event_fire_and_forget
 from app.services.tool_registry import registry
 from app.services.synexia.contracts import ReportCardPayload
 
@@ -689,6 +690,25 @@ async def _create_artifact_tool(
             "create_artifact tool produced %s (%d bytes) — artifact=%s, preview=%s",
             file_name, len(data), artifact.id, has_preview,
         )
+
+        # Phase 5 — usage instrumentation (fire-and-forget, pptx only).
+        if artifact_type == "pptx":
+            org_id = (context or {}).get("org_id", "default-org")
+            app_id = (context or {}).get("app_id", "default-app")
+            slide_count = None
+            try:
+                slide_count = len(payload.get("deck_plan", {}).get("slides", [])) or None
+            except Exception:
+                slide_count = None
+            log_deck_event_fire_and_forget(
+                None, "deck_generated", artifact_id=artifact.id, user_id=user_id,
+                metadata={
+                    "title": title,
+                    "slide_count": slide_count,
+                    "has_preview": has_preview,
+                },
+                org_id=org_id, app_id=app_id,
+            )
         return result
 
     except Exception as exc:

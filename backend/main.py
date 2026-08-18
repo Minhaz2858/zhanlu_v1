@@ -632,9 +632,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Catalog watchdog startup error (non-fatal): %s", e)
 
+    # Mount persisted full-stack dashboard apps (generated sub-routers + pollers)
+    try:
+        from app.services.dashboard_app.manager import dashboard_app_manager
+        dashboard_app_manager.init_app(app)
+        n_apps = dashboard_app_manager.load_persisted_apps()
+        if n_apps:
+            startup_logger.info("Dashboard app manager: mounted %d app(s)", n_apps)
+    except Exception as e:
+        startup_logger.warning("Dashboard app manager startup error (non-fatal): %s", e)
+
     yield
 
     # ── Shutdown ──
+    try:
+        from app.services.dashboard_app.manager import dashboard_app_manager
+        dashboard_app_manager.shutdown()
+    except Exception as e:
+        startup_logger.warning("Dashboard app manager shutdown error (non-fatal): %s", e)
+
     catalog_watchdog_stop.set()
     if catalog_watchdog_task is not None:
         try:

@@ -35,6 +35,7 @@ from app.models.artifact import (
 from app.models.sandbox_job import SandboxJob, SandboxJobEvent, SandboxCommand
 from app.models.data_snapshot import DataSnapshot, SnapshotArtifactLink
 from app.models.execution import Execution, Plan, PlanNode, ObservationRecord
+from app.models.artifact_event import ArtifactEvent, ARTIFACT_EVENT_TYPES
 from app.models.agent_data_binding import AgentDataBinding
 from app.models.agent_skill_binding import AgentSkillBinding
 from app.models.skill_profile import SkillProfile
@@ -93,6 +94,7 @@ from app.models.resource_registry import ResourceRegistry
 from app.models.report_recipe import ReportRecipe
 from app.models.weekly_digest import WeeklyReportCard, WeeklyReportProduct
 from app.models.alert_baseline import AlertProductBaseline
+from app.models.dashboard_app import DashboardApp
 
 __all__ = [
     "TimestampedBase",

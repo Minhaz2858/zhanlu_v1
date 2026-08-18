@@ -402,6 +402,10 @@ class Settings(BaseSettings):
     PPT_SMART_ROUTER_ENABLED: bool = False
     PPT_LLM_POLISH_ENABLED: bool = False
     PPT_AUDIT_ENABLED: bool = False
+    # Phase 4: intent-driven deck profiles (data_report / executive_brief /
+    # pitch_narrative / periodic_review).  When OFF, every deck uses the
+    # historical data_report structure (backward compatible, zero risk).
+    DECK_PROFILES_ENABLED: bool = False
     # Phase 1C: deterministic per-slide deck EDITING tools (edit_slide /
     # add_slide / restyle_deck / update_chart / remove_slide / reorder_slide).
     # Routes "edit my deck"-style messages to the six deck-edit tools while
@@ -564,6 +568,18 @@ class Settings(BaseSettings):
     WEEKLY_DIGEST_HOUR_UTC: int = 0                 # Generation hour (0 = 08:00 CST Monday)
     WEEKLY_DIGEST_DAY_UTC: int = 0                  # Day of week (0=Monday, 6=Sunday)
     WEEKLY_DIGEST_PPTX_EXPORT_ENABLED: bool = False # One-click PPTX export of a weekly digest report
+
+    # ── Full-Stack Dashboard Pipeline (replaces legacy SQL-widget dashboards) ──
+    # FULLSTACK_DASHBOARD_ENABLED: master gate for the NEW pipeline — agent
+    #   calls uiux_design_system (--persist) → confirms data contract → calls
+    #   create_fullstack_dashboard → generator fills Jinja2 templates →
+    #   manager mounts a FastAPI sub-router → WebSocket pushes live data.
+    # LEGACY_DASHBOARD_ENABLED: keeps the OLD create_dashboard SQL-widget tool
+    #   + Dashboard model + REST router available for emergency rollback.
+    # Both default False. When FULLSTACK is on, dashboard-shaped requests are
+    #   routed to the new pipeline and the legacy tool is hidden from the agent.
+    FULLSTACK_DASHBOARD_ENABLED: bool = False
+    LEGACY_DASHBOARD_ENABLED: bool = False
 
     # ── Experience layer (self-learning agent) ──────────────────────────
     # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):
@@ -836,6 +852,13 @@ class Settings(BaseSettings):
     @property
     def generated_path(self) -> Path:
         p = Path(self.GENERATED_DIR)
+        p.mkdir(parents=True, exist_ok=True)
+        return p
+
+    @property
+    def design_system_path(self) -> Path:
+        """Root dir for persisted design systems: ``{GENERATED_DIR}/design-system``."""
+        p = Path(self.GENERATED_DIR) / "design-system"
         p.mkdir(parents=True, exist_ok=True)
         return p
 

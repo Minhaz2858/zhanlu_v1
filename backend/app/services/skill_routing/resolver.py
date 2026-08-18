@@ -34,6 +34,10 @@ DEFAULT_SKILL_MAP: dict[str, str] = {
     "pptx": "pptx",
     "pdf": "pdf",
     "html": "artifacts-builder",
+    # "dashboard-generation" skill now carries the FULL-STACK dashboard
+    # methodology: uiux_design_system(--persist) → data contract → 
+    # create_fullstack_dashboard → WebSocket live data. Legacy SQL-widget
+    # creation lives behind LEGACY_DASHBOARD_ENABLED only.
     "dashboard": "dashboard-generation",
     # Companion design intelligence — explicit /design, /uiux, /palette
     # commands resolve here. Does NOT auto-trigger from soft-intent
@@ -45,8 +49,9 @@ DEFAULT_SKILL_MAP: dict[str, str] = {
 
 # Companion skill: ui-ux-pro-max is a *helper* skill, not a default format.
 # Surfaced as a sidekick via the /design, /uiux, /palette commands above
-# (see agent_prompts._build_default_skills_block). The old build-dashboard
-# companion link was removed when dashboard was remapped to artifacts-builder.
+# (see agent_prompts._build_default_skills_block). It is ALSO the mandatory
+# design-first step of the full-stack dashboard pipeline
+# (uiux_design_system --persist → design_system_ref → create_fullstack_dashboard).
 COMPANION_SKILLS: frozenset[str] = frozenset({"ui-ux-pro-max"})
 
 FALLBACK_SKILL = "docx"

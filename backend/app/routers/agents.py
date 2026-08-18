@@ -65,6 +65,7 @@ from app.services.dashboard_turn_guard import (
     is_live_dashboard_request,
     should_force_create_dashboard,
     dashboard_guard_blocked_tools,
+    dashboard_build_tool,
 )
 from app.services.tool_result_persistence import (
     persist_tool_result,
@@ -3267,8 +3268,9 @@ async def add_message(
                 "ecisco_bi" in agent_name.lower()
                 or "bi_assistant" in agent_name.lower()
             ))
+            _dash_build_tool = dashboard_build_tool()
             if (
-                "create_dashboard" in _tool_names
+                _dash_build_tool in _tool_names
                 and should_force_create_dashboard(
                     user_content,
                     tool_calls_for_frontend,
@@ -3277,10 +3279,10 @@ async def add_message(
                 )
             ):
                 logger.info(
-                    "v2 stream: forcing create_dashboard after schema/design "
+                    "v2 stream: forcing %s after schema/design "
                     "pass (conv=%s, iter=%d, prior_tool_count=%d, dash_project=%s)",
-                    conversation_id, iteration, len(tool_calls_for_frontend),
-                    _is_dash_project,
+                    _dash_build_tool, conversation_id, iteration,
+                    len(tool_calls_for_frontend), _is_dash_project,
                 )
                 tool_choice = {
                     "type": "function",
@@ -3481,9 +3483,10 @@ async def add_message(
             if parsed_calls:
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
                 _v2_tool_names = _tool_names_from_schemas(tools)
+                _v2_build_tool = dashboard_build_tool()
                 if (
-                    "create_dashboard" in _dash_guard_names
-                    or "create_dashboard" in _v2_tool_names
+                    _v2_build_tool in _dash_guard_names
+                    or _v2_build_tool in _v2_tool_names
                 ) and any(
                     n in dashboard_guard_blocked_tools()
                     for n in _dash_guard_names
@@ -7402,8 +7405,9 @@ async def add_message_stream(
                 "ecisco_bi" in conv.agent_name.lower()
                 or "bi_assistant" in conv.agent_name.lower()
             ))
+            _dash_build_tool = dashboard_build_tool()
             if (
-                "create_dashboard" in _tool_names
+                _dash_build_tool in _tool_names
                 and should_force_create_dashboard(
                     user_content,
                     tool_calls_for_frontend,
@@ -7412,10 +7416,10 @@ async def add_message_stream(
                 )
             ):
                 logger.info(
-                    "v3 stream: forcing create_dashboard after schema/design "
+                    "v3 stream: forcing %s after schema/design "
                     "pass (conv=%s, iter=%d, prior_tool_count=%d, dash_project=%s)",
-                    conversation_id, iteration, len(tool_calls_for_frontend),
-                    _is_dash_project,
+                    _dash_build_tool, conversation_id, iteration,
+                    len(tool_calls_for_frontend), _is_dash_project,
                 )
                 tool_choice = {
                     "type": "function",
@@ -7696,8 +7700,8 @@ async def add_message_stream(
             if parsed_calls:
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
                 if (
-                    "create_dashboard" in _dash_guard_names
-                    or "create_dashboard" in _tool_names
+                    _dash_build_tool in _dash_guard_names
+                    or _dash_build_tool in _tool_names
                 ) and any(
                     n in dashboard_guard_blocked_tools()
                     for n in _dash_guard_names

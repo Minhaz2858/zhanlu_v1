@@ -1,116 +1,83 @@
-# Dashboard Generation
+# Dashboard Generation (Full-Stack Pipeline)
 
 ## Purpose
 
-Build a LIVE dashboard that queries a database in real time via the
-`create_dashboard` tool. The dashboard auto-polls the bound datasource while
-open and persists to the user's My Space for later access.
+Build a DEPLOYABLE FULL-STACK REAL-TIME dashboard application: a generated
+FastAPI sub-router + pre-built React frontend (Tailwind + Recharts) connected
+to a real database with a WebSocket live-data channel. A dashboard request is
+an **app-build request** with a design step in front of it — never a static
+page, never fabricated data.
 
 ## Use when
 
-- The user asks for a "dashboard", "live metrics", "KPI view", "metrics board".
+- The user asks for a "dashboard", "live metrics", "KPI view", "metrics board",
+  "仪表盘", "看板", "数据面板", "数据看板", "仪表板".
 - The project has a connected database datasource.
 
 ## Hard rules
 
-1. NEVER hand-write HTML for a live dashboard. ALWAYS call `create_dashboard`.
-2. If the user has NOT named a datasource, STOP and ask them to pick ONE
-   datasource from the project's connected databases before calling the tool.
-   One dashboard binds to exactly ONE datasource.
-3. Every widget's `sql` MUST be read-only: a single `SELECT` or `WITH`
-   statement. No INSERT/UPDATE/DELETE/DDL. Alias numeric/date columns so the
-   viewer can map them to axes.
-4. Stored SQL is re-validated read-only at query time — never trusted.
-
-## Widget schema
-
-Each widget is `{id, type, title, sql, options}`.
-
-- `type`: `kpi` | `line` | `bar` | `pie` | `table`
-- `options`:
-  - `kpi`: `{value_column}` — the column holding the single headline number.
-    Optional: `unit` (suffix like `%`, `ms`, `USD`), `compare_column`
-    (second numeric column → renders a ▲/▼ delta chip), `subtitle`
-    (muted context line under the value).
-  - `line` / `bar`: `{x_column, y_column}` — x is the category/axis, y is numeric
-  - `pie`: `{name_column, value_column}`
-  - `table`: `{}` — renders all returned rows/columns
-  - ALL types, optional `dimensions`: `[{token, column}]` — enables cross-widget
-    filtering. Use `:dim_<token>` in the widget SQL (renders `column = 'value'`
-    when the filter is active, `1=1` when not). Example:
-    `SELECT region, SUM(amount) FROM orders WHERE :dim_region GROUP BY region`
-    with `dimensions: [{token: 'region', column: 'region'}]`.
-  - ALL types, optional `drill`: `{value_column, sql, title}` — clicking a
-    bar/slice/row runs `sql` with `:drill_value` set to the clicked value, shown
-    as an inline detail table. `sql` must be read-only SELECT/WITH.
-  - `kpi`, optional `thresholds`: `{direction:'higher_is_worse'|'lower_is_worse',
-    warning:<n>, critical:<n>}` — value colors green (good) / amber (warning) /
-    red (critical).
-  - ANY widget SQL may use `:from` / `:to` / `:date` tokens to bind to the
-    viewer's date-range selector (default last-30-days).
-
-## Compose with
-
-### Design research (tool-backed — call BEFORE designing widgets)
-
-- `ui-ux-pro-max` — general design intelligence: palettes, typography,
-  styles, chart-type guidance, and UX guidelines across 22 stacks. Query it
-  via the `uiux_search` and `uiux_design_system` tools (NOT `load_skill_body`)
-  to gather palette/chart/UX recommendations, then translate them into the
-  zhanlu token system using the four prompt companions below.
-
-### Implementation spec (load via `load_skill_body`)
-
-Load these prompt companions BEFORE designing widgets — they define the
-professional standard the viewer renders to and translate the recommendations
-above into zhanlu-specific tokens:
-
-- `data-viz-design` — chart-type selection, visual encoding, token colors,
-  number formatting, axis/legend conventions.
-- `dashboard-layout-architecture` — information hierarchy (KPI row → trends
-  → breakdown → detail table), responsive grid, ordering, density.
-- `dashboard-ui-polish` — theme tokens only, typography scale, card anatomy,
-  dark-mode theming, empty/error/loading states, accessibility.
-- `dashboard-interaction-state` — polling UX, skeletons, stale/error
-  handling, KPI delta semantics.
+1. **Design FIRST** — ALWAYS call `uiux_design_system(query=..., persist=True)`
+   before building. Pass the returned `design_system_ref` to the build tool.
+   (Use `uiux_search(domain="chart")` when the chart choice is unclear.)
+2. **Data contract** — BEFORE writing any code, confirm with the user: which
+   datasource, which metrics/KPIs, and what each KPI means. Inspect the schema
+   with `describe_schema`. If the DB is unreachable, ASK the user for
+   connection details — NEVER fabricate data.
+3. **NEVER hand-write code files.** Submit a DashboardSpec to
+   `create_fullstack_dashboard`. The system (Jinja2 template generator) writes
+   the app: `api.py`, `queries.py`, `realtime.py`, `config.json` + pre-built
+   React dist.
+4. Every metric `sql` MUST be read-only: a single `SELECT` or `WITH` statement.
+   No INSERT/UPDATE/DELETE/DDL. Stored SQL is re-validated read-only at query
+   time — never trusted.
+5. After delivery, keep iterating conversationally: to add/change/remove/
+   restyle/break-down a metric, call `update_fullstack_dashboard(slug=..., ...)`
+   with the slug returned by `create_fullstack_dashboard`. Do NOT answer such
+   requests in chat alone.
 
 ## Workflow
 
-1. **Clarify before building.** Before designing widgets, confirm these five
-   items with the user. If ANY is ambiguous or unspecified, ask in ONE message
-   with numbered options (A/B/C) and WAIT for the reply — do NOT guess:
-   - **Datasource** — which connected database (if >1 available, ask the user
-     to pick ONE). One dashboard binds to exactly ONE datasource.
-   - **Time window / duration** — e.g. last 7d / 30d / 90d / YTD / custom. This
-     drives the `:from`/`:to` tokens you put in widget SQL and the default the
-     viewer opens with.
-   - **Key metrics & columns** — what to measure (e.g. revenue + order count vs
-     revenue by region).
-   - **Filter / drill dimensions** — which dimensions the user wants to
-     filter/drill by; declare them in `options.dimensions` and use `:dim_<token>`
-     tokens in SQL.
-   - **Chart intent** — how to visualize (KPI + trend / pie + table / bar
-     comparison).
-   Only when all five are resolved (explicitly stated or unambiguous) proceed.
-2. Optionally call `uiux_design_system(query="analytics dashboard")` and/or
-   `uiux_search(domain="chart", query="<request>")` to gather general palette
-  and chart-type recommendations. If those tools fail or are unavailable,
-  continue with the built-in professional dashboard rules below instead of
-  stopping.
-3. Load the four implementation companions via `load_skill_body`, then design
-   3–6 widgets covering the request — at least one KPI + one trend chart —
-   translating the recommendations into zhanlu tokens (`hsl(var(--chart-N))`,
-   `bg-card`, `text-muted-foreground`).
-4. Do not call `ask_data_agent` for dashboard creation. Use direct datasource
-  and schema tools (`list_data_sources`, `describe_schema`). At most two exploratory `execute_query` calls to verify column names or date ranges.
-  Do not exhaust the tool loop validating every widget query. If the schema is
-  sufficient, proceed with read-only SQL widgets and let the dashboard viewer
-  isolate any per-widget query errors.
-5. Call `create_dashboard` with `datasource_id`, `title`, `widgets[]`, and
-   `refresh_interval_seconds` (default 30; clamped to 10..300).
-  You must call `create_dashboard` before the tool loop budget is exhausted.
-6. Tell the user the dashboard is live, can be reopened from My Space, and
-   will refresh automatically while open.
+1. **Design system** — call `uiux_design_system(query="<dashboard topic>",
+   persist=True, project="<project name>")`. It returns `design_system_ref`
+   (e.g. `design-system/{org}/MASTER.md`). If the CLI is unavailable the tool
+   still returns a built-in design system and persists it.
+2. **Clarify the data contract** — confirm with the user, in ONE message:
+   - **Datasource** — which connected database (if >1, ask the user to pick ONE).
+     One dashboard app binds to exactly ONE datasource.
+   - **Key metrics & columns** — what to measure (e.g. revenue + order count,
+     revenue by region, top products).
+   - **Chart intent** — how to visualize: KPI row + line trend + bar breakdown
+     + detail table is the recommended layout.
+   - **Refresh cadence** — `refresh_interval_seconds` (default 30).
+   Only when the contract is resolved (explicitly stated or unambiguous) proceed.
+3. **Inspect the schema** — use `list_data_sources` + `describe_schema` to
+   confirm column names before writing SQL. At most two exploratory
+   `execute_query` calls. Do NOT exhaust the tool loop validating every query.
+   Common pitfall: `erp_product_sales_details` uses `FNAME` (NOT
+   `material_name`), `material_id` / `FMATERIALID`, `shipment_date`,
+   `shipment_quantity`, `contract_price`, `partner_name`, `shipment_grade`.
+4. **Build** — call `create_fullstack_dashboard` with a DashboardSpec:
+   - `name`, `slug` (lowercase `[a-z0-9_-]`, URL-safe, unique),
+   - `datasource_id` (the confirmed KB),
+   - `design_system_ref` from step 1,
+   - `metrics`: 3–6 widgets, at least one KPI + one trend chart. Widget types:
+     `kpi | line | bar | pie | table | area | gauge | radar`.
+   - `refresh_interval_seconds`, `theme` (`light` | `dark`).
+   The tool responds with `slug` + `app_url`. The app mounts a WebSocket
+   channel at `{app_url}ws` and pushes updates when the underlying data changes.
+5. **Deliver** — tell the user the dashboard is live at `app_url`, updates
+   automatically (~2 s after DB changes), and is listed in My Files as a
+   "Dashboard" artifact. Invite iteration ("tell me what to change — layout,
+   metrics, theme, or data").
+6. **Iterate** — user requests → `update_fullstack_dashboard(slug=..., ...)`.
+   The app regenerates and hot-reloads.
+
+## Anti-fake-data guarantee
+
+- Every metric is a real read-only query against the confirmed datasource.
+- If the DB is unreachable at build time, return an explicit error explaining
+  the missing connection and ask for connection details — do NOT ship
+  placeholder numbers.
 
 ## Safety rules
 

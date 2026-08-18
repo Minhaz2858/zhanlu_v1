@@ -240,6 +240,48 @@ async def _uiux_search(
     return result
 
 
+def _persist_design_system(result: dict, args: dict, project: Optional[str]) -> dict:
+    """When ``persist=True``, write the design-system markdown to disk.
+
+    Location: ``{generated_path}/{output_dir|'design-system'}/{org_id}/MASTER.md``.
+    Adds ``design_system_ref`` (relative path — referenced by DashboardSpec) and
+    ``persisted_to`` (absolute path) to the result. Failures are logged, never
+    raised — a successful generation without persistence is still usable.
+    """
+    if not args.get("persist") or not result.get("success"):
+        return result
+    text = (result.get("result") or "").strip()
+    if not text:
+        return result
+    try:
+        from datetime import datetime, timezone
+
+        from app.config import settings
+
+        org_id = str(args.get("org_id") or context_org_id(args))
+        output_dir = str(args.get("output_dir") or "design-system").strip("/") or "design-system"
+        out_dir = Path(settings.generated_path) / output_dir / org_id
+        out_dir.mkdir(parents=True, exist_ok=True)
+        master = out_dir / "MASTER.md"
+        header = (
+            f"# Design System — {project or result.get('query') or 'dashboard'}\n\n"
+            f"> Persisted by uiux_design_system (persist=True) on "
+            f"{datetime.now(timezone.utc).isoformat()}\n\n"
+        )
+        master.write_text(header + text + "\n", encoding="utf-8")
+        result["design_system_ref"] = f"{output_dir}/{org_id}/MASTER.md"
+        result["persisted_to"] = str(master)
+    except Exception as exc:
+        logger.warning("persist design system failed: %s", exc)
+        result["persist_error"] = str(exc)
+    return result
+
+
+def context_org_id(args: dict) -> str:
+    """Best-effort org id from the tool args (agent passes it through context)."""
+    return str(args.get("org_id") or "default-org")
+
+
 async def _uiux_design_system(
     args: dict,
     db: Optional[Session] = None,
@@ -283,11 +325,13 @@ async def _uiux_design_system(
         logger.warning("ui-ux-pro-max CLI missing; using built-in design-system fallback: %s", exc)
         result = _builtin_fallback(query, design_system=True)
         result["error"] = str(exc)
+        result["query"] = query
         result["project"] = project
         result["dials"] = {
             k: v for k, v in {"variance": variance, "motion": motion, "density": density}.items()
             if v is not None
         }
+        _persist_design_system(result, args, project)
         return result
 
     result = _run_cli(cmd)
@@ -301,6 +345,7 @@ async def _uiux_design_system(
                 ("density", density),
             ) if v is not None
         }
+    _persist_design_system(result, args, project)
     return result
 
 
@@ -405,6 +450,20 @@ UIUX_DESIGN_SYSTEM_SCHEMA = {
                     "minimum": 1,
                     "maximum": 10,
                     "description": "1 = spacious, 10 = dense/dashboard.",
+                },
+                "persist": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "When True, persist the design system markdown to "
+                        "design-system/{org_id}/MASTER.md and return "
+                        "design_system_ref for use in create_fullstack_dashboard."
+                    ),
+                },
+                "output_dir": {
+                    "type": "string",
+                    "default": "design-system",
+                    "description": "Subdirectory under the generated dir to persist into.",
                 },
             },
             "required": ["query"],

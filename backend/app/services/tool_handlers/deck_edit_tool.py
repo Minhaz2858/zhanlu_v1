@@ -26,6 +26,7 @@ from typing import Any, Optional
 from app.services.artifacts.artifact_service import ArtifactService
 from app.services.artifacts.editors import deck_edit as edit_ops
 from app.services.artifacts.editors.deck_edit import DeckEditError
+from app.services.artifacts.event_logger import log_deck_event_fire_and_forget
 from app.services.artifacts.render_dispatcher import render_pptx_from_plan_sync
 from app.services.artifacts.thumbnails import render_page_thumbnails
 from app.services.synexia.contracts import DeckPlan
@@ -499,6 +500,19 @@ async def _run_deck_edit(
         "file_size": len(pptx_bytes),
         "message": message,
     }
+
+    # Phase 5 — usage instrumentation (fire-and-forget).
+    try:
+        org_id = (context or {}).get("org_id", "default-org")
+        app_id = (context or {}).get("app_id", "default-app")
+        log_deck_event_fire_and_forget(
+            None, "deck_edited", artifact_id=getattr(artifact, "id", None),
+            user_id=user_id,
+            metadata={"edit_kind": tool, "version_number": getattr(new_version, "version_number", None)},
+            org_id=org_id, app_id=app_id,
+        )
+    except Exception as exc:  # noqa: BLE001 — instrumentation must not break the edit
+        logger.warning("[deck_edit:%s] event log failed: %s", tool, exc)
 
 
 def _make_handler(tool: str):

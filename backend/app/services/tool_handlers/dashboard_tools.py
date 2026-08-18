@@ -16,6 +16,7 @@ from app.models.dashboard import Dashboard
 from app.models.knowledge_base import KnowledgeBase
 from app.services.dashboard_query import validate_widget_sql, clamp_refresh_interval
 from app.services import access_policy_service
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -359,20 +360,24 @@ CREATE_DASHBOARD_SCHEMA = {
     },
 }
 
-try:
-    from app.services.tool_registry import registry
-    registry.register(
-        name="create_dashboard",
-        schema=CREATE_DASHBOARD_SCHEMA,
-        handler=_create_dashboard,
-        category="dashboards",
-        toolset="dashboards",
-        description="Build a live database dashboard that auto-polls while open.",
-        emoji="📊",
-        max_result_size_chars=4_000,
-    )
-except Exception:
-    logger.exception("Failed to register create_dashboard tool")
+# Legacy SQL-widget pipeline. Kept behind LEGACY_DASHBOARD_ENABLED for emergency
+# rollback — hidden from the default agent path (the new full-stack pipeline is
+# the default when FULLSTACK_DASHBOARD_ENABLED=True).
+if getattr(settings, "LEGACY_DASHBOARD_ENABLED", False):
+    try:
+        from app.services.tool_registry import registry
+        registry.register(
+            name="create_dashboard",
+            schema=CREATE_DASHBOARD_SCHEMA,
+            handler=_create_dashboard,
+            category="dashboards",
+            toolset="dashboards",
+            description="Build a live database dashboard that auto-polls while open.",
+            emoji="📊",
+            max_result_size_chars=4_000,
+        )
+    except Exception:
+        logger.exception("Failed to register create_dashboard tool")
 
 
 UPDATE_DASHBOARD_SCHEMA = {
@@ -530,3 +535,428 @@ try:
     )
 except Exception:
     logger.exception("Failed to register undo_dashboard_edit tool")
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# Full-Stack Dashboard App Pipeline (new)
+#
+# Replaces the legacy SQL-widget create_dashboard flow. The agent submits a
+# DashboardSpec; the generator fills Jinja2 templates → deployable FastAPI
+# sub-router + pre-built React dist + WebSocket realtime layer. Design system
+# comes from uiux_design_system(--persist). All flags gated by
+# FULLSTACK_DASHBOARD_ENABLED (default False).
+# ═══════════════════════════════════════════════════════════════════════════
+
+import re as _re
+
+FULLSTACK_ALLOWED_TYPES = {
+    "kpi", "line", "bar", "pie", "table", "area", "gauge", "radar",
+}
+
+_SLUG_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def _fullstack_dashboard_enabled() -> bool:
+    try:
+        from app.config import settings
+        return bool(settings.FULLSTACK_DASHBOARD_ENABLED)
+    except Exception:
+        return False
+
+
+class FullstackMetricSpec(BaseModel):
+    """One dashboard widget. SQL is validated read-only at arg time."""
+
+    id: str
+    type: str  # kpi | line | bar | pie | table | area | gauge | radar
+    title: str
+    sql: str
+    options: dict = Field(default_factory=dict)
+
+    @field_validator("type")
+    def _valid_type(cls, v: str) -> str:
+        if v not in FULLSTACK_ALLOWED_TYPES:
+            raise ValueError(f"type must be one of {sorted(FULLSTACK_ALLOWED_TYPES)}")
+        return v
+
+    @field_validator("sql")
+    def _readonly_sql(cls, v: str) -> str:
+        try:
+            validate_widget_sql(v)
+        except ValueError as exc:
+            raise ValueError(f"invalid SQL: {exc}") from exc
+        return v
+
+
+class CreateFullstackDashboardArgs(BaseModel):
+    name: str
+    slug: str
+    description: Optional[str] = None
+    datasource_id: str
+    design_system_ref: Optional[str] = None
+    metrics: list[FullstackMetricSpec] = Field(min_length=1)
+    refresh_interval_seconds: int = 30
+    theme: str = "light"
+
+    @field_validator("slug")
+    def _slug_ok(cls, v: str) -> str:
+        if not _SLUG_RE.match(v):
+            raise ValueError(
+                "slug must be 1-64 chars, lowercase [a-z0-9_-], starting with a letter/digit"
+            )
+        return v
+
+    @field_validator("theme")
+    def _theme_ok(cls, v: str) -> str:
+        if v not in ("light", "dark"):
+            raise ValueError("theme must be 'light' or 'dark'")
+        return v
+
+
+class UpdateFullstackDashboardArgs(BaseModel):
+    """Only provided fields are applied to the existing app's spec."""
+
+    slug: str
+    name: Optional[str] = None
+    description: Optional[str] = None
+    design_system_ref: Optional[str] = None
+    metrics: Optional[list[FullstackMetricSpec]] = None
+    refresh_interval_seconds: Optional[int] = None
+    theme: Optional[str] = None
+
+    @field_validator("slug")
+    def _slug_ok(cls, v: str) -> str:
+        if not _SLUG_RE.match(v):
+            raise ValueError("slug must be lowercase [a-z0-9_-], 1-64 chars")
+        return v
+
+    @field_validator("theme")
+    def _theme_ok(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and v not in ("light", "dark"):
+            raise ValueError("theme must be 'light' or 'dark'")
+        return v
+
+
+async def _create_fullstack_dashboard(
+    args: dict, db, user_id, context: Optional[dict] = None,
+) -> dict:
+    """Deploy a full-stack dashboard app from a DashboardSpec."""
+    ctx = context or {}
+    org_id = ctx.get("org_id") or "default-org"
+    project_id = ctx.get("project_id")
+    if not _fullstack_dashboard_enabled():
+        return {
+            "success": False,
+            "error": (
+                "The full-stack dashboard pipeline is disabled "
+                "(FULLSTACK_DASHBOARD_ENABLED=False)."
+            ),
+        }
+    try:
+        parsed = CreateFullstackDashboardArgs.model_validate(args)
+    except ValidationError as e:
+        return {"success": False, "error": f"Invalid dashboard spec: {e}"}
+
+    kb = _user_can_access_kb(
+        db, user_id, org_id, project_id, parsed.datasource_id,
+        resource_type=ctx.get("resource_type"),
+        resource_id=ctx.get("resource_id"),
+    )
+    if kb is None:
+        return {"success": False, "error": "Datasource not accessible in this project/org."}
+
+    from app.models.dashboard_app import DashboardApp
+    existing = db.query(DashboardApp).filter(DashboardApp.slug == parsed.slug).first()
+    if existing:
+        return {
+            "success": False,
+            "error": (
+                f"A dashboard app with slug '{parsed.slug}' already exists. "
+                "Use update_fullstack_dashboard or pick a different slug."
+            ),
+        }
+
+    from app.services.dashboard_app.generator import get_generator
+    from app.services.dashboard_app.manager import dashboard_app_manager
+
+    spec = parsed.model_dump()
+    # 1) Write the app files FIRST — mount() imports the generated module and
+    #    serves its dist, so the generator must run before the record is marked
+    #    deployable. (Regression: create used to persist a record with no files,
+    #    making mount() fail with ModuleNotFoundError.)
+    get_generator().generate(spec)
+    record = dashboard_app_manager.create_app_record(
+        spec, org_id=org_id, created_by_id=user_id, project_id=project_id,
+    )
+    try:
+        dashboard_app_manager.mount(parsed.slug)
+        dashboard_app_manager.start_poller(parsed.slug)
+    except Exception as exc:
+        logger.exception("create_fullstack_dashboard: deploy failed for %s", parsed.slug)
+        dashboard_app_manager.set_status(parsed.slug, "error")
+        return {"success": False, "error": f"Deploy failed: {exc}"}
+
+    app_url = f"/api/dashboards/apps/{parsed.slug}/"
+    dashboard_app_manager.set_status(parsed.slug, "running", app_url=app_url)
+    logger.info("full-stack dashboard created: %s (%d metrics)", parsed.slug, len(parsed.metrics))
+    return {
+        "success": True,
+        "dashboard_app": {
+            "slug": parsed.slug,
+            "name": parsed.name,
+            "status": "running",
+            "app_url": app_url,
+            "metric_count": len(parsed.metrics),
+        },
+        "artifact": {
+            "source": "dashboard_app",
+            "slug": parsed.slug,
+            "title": parsed.name,
+            "datasource_name": kb.name,
+            "metric_count": len(parsed.metrics),
+            "app_url": app_url,
+        },
+    }
+
+
+async def _update_fullstack_dashboard(
+    args: dict, db, user_id, context: Optional[dict] = None,
+) -> dict:
+    """Regenerate + hot-reload an existing dashboard app (conversational iteration)."""
+    ctx = context or {}
+    org_id = ctx.get("org_id") or "default-org"
+    if not _fullstack_dashboard_enabled():
+        return {
+            "success": False,
+            "error": (
+                "The full-stack dashboard pipeline is disabled "
+                "(FULLSTACK_DASHBOARD_ENABLED=False)."
+            ),
+        }
+    try:
+        parsed = UpdateFullstackDashboardArgs.model_validate(args)
+    except ValidationError as e:
+        return {"success": False, "error": f"Invalid update spec: {e}"}
+
+    from app.models.dashboard_app import DashboardApp
+    record = (
+        db.query(DashboardApp)
+        .filter(DashboardApp.slug == parsed.slug, DashboardApp.org_id == org_id)
+        .first()
+    )
+    if record is None:
+        return {"success": False, "error": f"No dashboard app with slug '{parsed.slug}'."}
+
+    current = dict(record.spec or {})
+    if parsed.name is not None:
+        current["name"] = parsed.name
+    if parsed.description is not None:
+        current["description"] = parsed.description
+    if parsed.design_system_ref is not None:
+        current["design_system_ref"] = parsed.design_system_ref
+    if parsed.metrics is not None:
+        current["metrics"] = [m.model_dump() for m in parsed.metrics]
+    if parsed.refresh_interval_seconds is not None:
+        current["refresh_interval_seconds"] = parsed.refresh_interval_seconds
+    if parsed.theme is not None:
+        current["theme"] = parsed.theme
+    current["datasource_id"] = record.datasource_kb_id  # immutable after creation
+
+    from app.services.dashboard_app.manager import dashboard_app_manager
+
+    try:
+        dashboard_app_manager.regenerate(parsed.slug, current)
+    except Exception as exc:
+        logger.exception("update_fullstack_dashboard: regenerate failed for %s", parsed.slug)
+        dashboard_app_manager.set_status(parsed.slug, "error")
+        return {"success": False, "error": f"Regenerate failed: {exc}"}
+
+    record.spec = current
+    record.status = "running"
+    record.refresh_interval_seconds = int(current.get("refresh_interval_seconds", 30))
+    db.commit()
+    logger.info("full-stack dashboard updated: %s", parsed.slug)
+    return {
+        "success": True,
+        "dashboard_app": {
+            "slug": parsed.slug,
+            "name": current.get("name", parsed.slug),
+            "status": "running",
+            "app_url": record.app_url or f"/api/dashboards/apps/{parsed.slug}/",
+        },
+    }
+
+
+async def _list_fullstack_dashboards(
+    args: dict, db, user_id, context: Optional[dict] = None,
+) -> dict:
+    """List dashboard apps the user can see (discoverability for the agent)."""
+    ctx = context or {}
+    org_id = ctx.get("org_id") or "default-org"
+    from app.services.dashboard_app.manager import dashboard_app_manager
+    apps = dashboard_app_manager.list_apps(org_id=org_id)
+    return {
+        "success": True,
+        "dashboards": [
+            {
+                "slug": a.slug,
+                "name": a.name,
+                "status": a.status,
+                "app_url": a.app_url,
+                "metric_count": len((a.spec or {}).get("metrics", [])),
+            }
+            for a in apps
+        ],
+    }
+
+
+CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "create_fullstack_dashboard",
+        "description": (
+            "Build a full-stack real-time dashboard application: FastAPI "
+            "sub-router + pre-built React frontend + WebSocket live data, "
+            "generated from a DashboardSpec (Jinja2 templates). "
+            "REQUIRED WORKFLOW: (1) call uiux_design_system(query=..., "
+            "persist=True) first and pass the returned design_system_ref; "
+            "(2) confirm the data contract with the user (which datasource, "
+            "which metrics, read-only SQL) — NEVER fabricate data; "
+            "(3) submit this spec with real read-only SELECT queries. "
+            "Responds with slug + app_url. Iterate later via "
+            "update_fullstack_dashboard(slug=...)."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Dashboard display name."},
+                "slug": {
+                    "type": "string",
+                    "description": "URL-safe unique id: lowercase [a-z0-9_-], 1-64 chars.",
+                },
+                "description": {"type": "string", "description": "Optional."},
+                "datasource_id": {
+                    "type": "string",
+                    "description": "KnowledgeBase id that the metrics query against.",
+                },
+                "design_system_ref": {
+                    "type": "string",
+                    "description": "Path returned by uiux_design_system(persist=True), e.g. design-system/{org}/MASTER.md.",
+                },
+                "metrics": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "type": {"type": "string", "enum": sorted(FULLSTACK_ALLOWED_TYPES)},
+                            "title": {"type": "string"},
+                            "sql": {"type": "string", "description": "Read-only SELECT/WITH."},
+                            "options": {"type": "object"},
+                        },
+                        "required": ["id", "type", "title", "sql"],
+                    },
+                },
+                "refresh_interval_seconds": {
+                    "type": "integer",
+                    "minimum": 5,
+                    "maximum": 3600,
+                    "default": 30,
+                },
+                "theme": {"type": "string", "enum": ["light", "dark"], "default": "light"},
+            },
+            "required": ["name", "slug", "datasource_id", "metrics"],
+        },
+    },
+}
+
+UPDATE_FULLSTACK_DASHBOARD_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "update_fullstack_dashboard",
+        "description": (
+            "Hot-reload an existing full-stack dashboard app. Provide the slug "
+            "from create_fullstack_dashboard plus any fields to change "
+            "(metrics, theme, refresh interval, name, design_system_ref). "
+            "Regenerates the app and restarts its realtime poller."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "slug": {"type": "string", "description": "Existing app slug."},
+                "name": {"type": "string"},
+                "description": {"type": "string"},
+                "design_system_ref": {"type": "string"},
+                "metrics": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "type": {"type": "string", "enum": sorted(FULLSTACK_ALLOWED_TYPES)},
+                            "title": {"type": "string"},
+                            "sql": {"type": "string"},
+                            "options": {"type": "object"},
+                        },
+                        "required": ["id", "type", "title", "sql"],
+                    },
+                },
+                "refresh_interval_seconds": {"type": "integer", "minimum": 5, "maximum": 3600},
+                "theme": {"type": "string", "enum": ["light", "dark"]},
+            },
+            "required": ["slug"],
+        },
+    },
+}
+
+LIST_FULLSTACK_DASHBOARDS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_fullstack_dashboards",
+        "description": "List dashboard apps visible to the current org (slug, status, app_url).",
+        "parameters": {"type": "object", "properties": {}, "required": []},
+    },
+}
+
+try:
+    from app.services.tool_registry import registry
+
+    registry.register(
+        name="create_fullstack_dashboard",
+        schema=CREATE_FULLSTACK_DASHBOARD_SCHEMA,
+        handler=_create_fullstack_dashboard,
+        category="dashboards",
+        toolset="dashboards",
+        description="Build a full-stack real-time dashboard app from a DashboardSpec.",
+        emoji="\U0001f4ca",
+        is_async=True,
+        check_fn=_fullstack_dashboard_enabled,
+        max_result_size_chars=4_000,
+    )
+    registry.register(
+        name="update_fullstack_dashboard",
+        schema=UPDATE_FULLSTACK_DASHBOARD_SCHEMA,
+        handler=_update_fullstack_dashboard,
+        category="dashboards",
+        toolset="dashboards",
+        description="Hot-reload an existing full-stack dashboard app.",
+        emoji="\U0001f504",
+        is_async=True,
+        check_fn=_fullstack_dashboard_enabled,
+        max_result_size_chars=4_000,
+    )
+    registry.register(
+        name="list_fullstack_dashboards",
+        schema=LIST_FULLSTACK_DASHBOARDS_SCHEMA,
+        handler=_list_fullstack_dashboards,
+        category="dashboards",
+        toolset="dashboards",
+        description="List dashboard apps for the current org.",
+        emoji="\U0001f5c2\ufe0f",
+        is_async=True,
+        check_fn=_fullstack_dashboard_enabled,
+        max_result_size_chars=4_000,
+    )
+except Exception:
+    logger.exception("Failed to register full-stack dashboard tools")

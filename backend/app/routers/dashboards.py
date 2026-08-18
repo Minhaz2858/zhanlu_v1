@@ -12,6 +12,8 @@ from app.services.dashboard_query import (
     validate_widget_sql, clamp_refresh_interval, run_dashboard_query,
     _run_single_sql,
 )
+from app.services.dashboard_app.manager import dashboard_app_manager
+from app.models.dashboard_app import DashboardApp
 
 router = APIRouter(prefix="/dashboards", tags=["dashboards"])
 
@@ -276,3 +278,74 @@ async def preview_widget_sql(dashboard_id: str, body: PreviewSqlBody,
     # _run_single_sql renders tokens (unknown token -> error field), re-validates,
     # and executes; execution/DB errors are returned in `error` (HTTP 200), not 5xx.
     return await _run_single_sql(db, d.datasource_kb_id, body.sql, body.params or {}, [], max_rows, timeout_s)
+
+
+# ── Full-stack dashboard app records ──
+# NOTE: the generated app *frontends* are served as static files at
+# `/api/dashboards/apps/{slug}/` (mounted by DashboardAppManager). These
+# JSON record endpoints use the `/app-records/` prefix to avoid colliding
+# with that static mount.
+def _record_with_meta(record: DashboardApp) -> dict:
+    """Serialize a DashboardApp record + derived fields.
+
+    ``unread`` is derived from the realtime poller's ``last_data_change_at``
+    vs the user's last ``viewed_at``: data changed after the user last opened
+    the dashboard → unread. NULL ``last_data_change_at`` (no change event yet)
+    is never unread.
+    """
+    data = record.to_dict()
+    data["app_url"] = data.get("app_url") or f"/api/dashboards/apps/{record.slug}/"
+    # Compare on the ORM datetime objects (to_dict() emits ISO strings).
+    last_change = record.last_data_change_at
+    viewed = record.viewed_at
+    data["unread"] = bool(
+        last_change is not None
+        and (viewed is None or last_change > viewed)
+    )
+    return data
+
+
+@router.get("/app-records/{slug}")
+def get_dashboard_app_record(slug: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
+    """Return the DashboardApp record for a full-stack dashboard slug.
+
+    Org-scoped. 404 when the slug does not exist or belongs to another org.
+    The frontend uses this to decide whether ``/dashboard/:id`` is a
+    full-stack app (render iframe) vs a legacy SQL-widget dashboard.
+    """
+    record = db.query(DashboardApp).filter(
+        DashboardApp.slug == slug,
+        DashboardApp.org_id == user.org_id,
+    ).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    return _record_with_meta(record)
+
+
+@router.get("/app-records")
+def list_dashboard_app_records(db: Session = Depends(get_db), user=Depends(get_current_user_required)):
+    """List full-stack dashboard app records for the current org."""
+    records = dashboard_app_manager.list_apps(org_id=user.org_id)
+    return [_record_with_meta(r) for r in records]
+
+
+@router.post("/app-records/{slug}/mark-viewed")
+def mark_dashboard_app_viewed(slug: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
+    """Clear the unread badge: record when the user last opened the dashboard.
+
+    Idempotent. Org-scoped like the rest of the app-records API. Returns the
+    updated record so the frontend can refresh the My Files list without a
+    second round-trip.
+    """
+    from datetime import datetime, timezone
+
+    record = db.query(DashboardApp).filter(
+        DashboardApp.slug == slug,
+        DashboardApp.org_id == user.org_id,
+    ).first()
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    record.viewed_at = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(record)
+    return _record_with_meta(record)

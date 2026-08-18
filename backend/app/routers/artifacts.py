@@ -21,6 +21,7 @@ from app.services.artifacts.exporters import SUPPORTED_FORMATS
 from app.services.artifacts.exporters._theme import list_themes
 from app.services.artifacts.exporters.service import ExportError, ExportService
 from app.config import settings
+from app.services.artifacts.event_logger import log_deck_event_fire_and_forget
 from app.services.artifacts.preview_builder import (
     convert_to_preview,
     generate_thumbnail,
@@ -32,6 +33,23 @@ from app.services.artifacts.preview_builder import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _log_deck_download(artifact, user_id: Optional[str], fmt: str) -> None:
+    """Phase 5 — fire-and-forget deck_downloaded event (pptx only)."""
+    try:
+        log_deck_event_fire_and_forget(
+            None,
+            "deck_downloaded",
+            artifact_id=getattr(artifact, "id", None),
+            user_id=user_id,
+            metadata={"format": fmt},
+            org_id=getattr(artifact, "org_id", "default-org"),
+            app_id=getattr(artifact, "app_id", "default-app"),
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("deck download event log failed: %s", exc)
+
 
 router = APIRouter(tags=["artifacts"])
 
@@ -694,6 +712,8 @@ def download_artifact(
         blob_data = service.get_blob_data(blob)
         if blob_data is None:
             raise HTTPException(status_code=404, detail="Artifact data not available")
+        if getattr(artifact, "artifact_type", None) == "pptx":
+            _log_deck_download(artifact, user_id=None, fmt="original")
         return Response(
             content=blob_data,
             media_type=blob.mime_type,
@@ -721,6 +741,8 @@ def download_artifact(
         logger.exception("Export render failed for %s format=%s", artifact_id, fmt)
         raise HTTPException(status_code=500, detail=f"Export failed: {e}")
 
+    if getattr(artifact, "artifact_type", None) == "pptx":
+        _log_deck_download(artifact, user_id=None, fmt=fmt)
     return Response(
         content=data,
         media_type=mime,

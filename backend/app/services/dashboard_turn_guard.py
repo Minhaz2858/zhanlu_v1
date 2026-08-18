@@ -29,6 +29,27 @@ def is_live_dashboard_request(user_content: str | None) -> bool:
     return any(kw in user_content for kw in _LIVE_DASHBOARD_ZH)
 
 
+def dashboard_build_tool() -> str | None:
+    """The active dashboard build tool name, flag-aware.
+
+    Returns:
+    - ``create_fullstack_dashboard`` when ``FULLSTACK_DASHBOARD_ENABLED=True``
+      (the new full-stack pipeline),
+    - ``create_dashboard`` when ``LEGACY_DASHBOARD_ENABLED=True``
+      (rollback pipeline),
+    - ``None`` when both are disabled → the guard is inert.
+    """
+    try:
+        from app.config import settings
+    except Exception:
+        return None
+    if getattr(settings, "FULLSTACK_DASHBOARD_ENABLED", False):
+        return "create_fullstack_dashboard"
+    if getattr(settings, "LEGACY_DASHBOARD_ENABLED", False):
+        return "create_dashboard"
+    return None
+
+
 def should_force_create_dashboard(
     user_content: str | None,
     tool_calls_for_frontend: list[dict],
@@ -36,7 +57,10 @@ def should_force_create_dashboard(
     has_dashboard_tool: bool = True,
     is_dashboard_project: bool = False,
 ) -> bool:
-    """After a small schema/design pass, force the next call to create_dashboard.
+    """After a small schema/design pass, force the next build-tool call.
+
+    The build tool is flag-aware: ``create_fullstack_dashboard`` (new
+    pipeline) or ``create_dashboard`` (legacy).
 
     Two trigger paths:
 
@@ -50,14 +74,17 @@ def should_force_create_dashboard(
        the agent has already done ``describe_schema`` + a design tool, force
        the call. This catches the "user said hi in an Ecisco BI chat" case
        where the agent speculatively loads dashboard skills and then dumps
-       markdown instead of calling ``create_dashboard``.
+       markdown instead of calling the build tool.
     """
+    build_tool = dashboard_build_tool()
+    if not build_tool:
+        return False
     if not has_dashboard_tool:
         return False
     if not user_content:
         return False
     names = [tc.get("name") or tc.get("tool_name") for tc in (tool_calls_for_frontend or [])]
-    if "create_dashboard" in names:
+    if build_tool in names:
         return False
 
     has_schema = "describe_schema" in names
@@ -79,9 +106,9 @@ def should_force_create_dashboard(
 
 def dashboard_guard_blocked_tools() -> frozenset[str]:
     """Tools that the dashboard guard should NOT let execute when its
-    conditions are met — only ``create_dashboard`` (or harmless side-effect
-    tools) should run. We block additional ``execute_query`` calls because
-    they just produce more rows that the agent then dumps as markdown
-    instead of shipping a dashboard.
+    conditions are met — only the active build tool (``create_fullstack_dashboard``
+    or ``create_dashboard``) or harmless side-effect tools should run. We block
+    additional ``execute_query`` calls because they just produce more rows that
+    the agent then dumps as markdown instead of shipping a dashboard.
     """
     return frozenset({"execute_query", "execute_sql", "sql_query"})
