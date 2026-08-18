@@ -145,7 +145,9 @@ class DashboardAppManager:
 
     # ── persistence helpers ──
     def create_app_record(self, spec: Dict[str, Any], org_id: str, created_by_id: str,
-                          project_id: Optional[str] = None) -> DashboardApp:
+                          project_id: Optional[str] = None,
+                          chat_thread_id: Optional[str] = None,
+                          scope: str = "personal") -> DashboardApp:
         """Persist a new DashboardApp row (status=building). Returns the record."""
         db = SessionLocal()
         try:
@@ -161,11 +163,32 @@ class DashboardAppManager:
                 org_id=org_id,
                 project_id=project_id,
                 created_by_id=created_by_id,
+                chat_thread_id=chat_thread_id,
+                scope=scope,
             )
             db.add(record)
             db.commit()
             db.refresh(record)
             return record
+        finally:
+            db.close()
+
+    def touch_chat_thread(self, slug: str, chat_thread_id: str) -> bool:
+        """Bind (or re-bind) the chat conversation that created this dashboard.
+
+        Used by create/update tools when they have a conversation context. Also
+        the reverse direction of the T5 link — a dashboard row points at its
+        thread, and the thread's ``dashboard_id``/``chat_thread_id`` flows back
+        through the router. Returns True when a record was updated.
+        """
+        db = SessionLocal()
+        try:
+            record = db.query(DashboardApp).filter(DashboardApp.slug == slug).first()
+            if record is None:
+                return False
+            record.chat_thread_id = chat_thread_id
+            db.commit()
+            return True
         finally:
             db.close()
 

@@ -40,6 +40,13 @@ class DashboardApp(TimestampedBase):
     # Phase 2 (T4): when the current user last opened/viewed the dashboard.
     # Combined with last_data_change_at → `unread` flag for the My Files badge.
     viewed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    # Phase 2 (T5): the chat conversation (agent_conversations.id) that created
+    # this dashboard. Powers My Files "Open in chat" — resumes the exact thread
+    # that built the app. NULL for dashboards created outside a chat.
+    chat_thread_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True, index=True)
+    # Phase 2 (T10): visibility scope — "personal" (creator only) or "company"
+    # (visible to the whole org). Defaults to personal per project convention.
+    scope: Mapped[str] = mapped_column(String(20), default="personal", nullable=False)
 
     __table_args__ = (
         Index("ix_dashboard_apps_org_slug", "org_id", "slug", unique=True),
