@@ -15,6 +15,16 @@ export default function App() {
   const [data, setData] = useState({}); // metric_id -> {columns, rows, ...}
   const [theme, setTheme] = useState('light');
 
+  // Deep-linked filtered views: every query-string key on the dashboard URL
+  // (e.g. /api/dashboards/apps/<slug>/?product=%E4%B9%99%E4%BA%8C%E9%86%87) is
+  // forwarded to the backend, which only substitutes DECLARED :dim_* tokens.
+  const filters = useMemo(() => new URLSearchParams(window.location.search), []);
+  const filterQuery = useMemo(() => {
+    const q = filters.toString();
+    return q ? `?${q}` : '';
+  }, [filters]);
+  const hasFilters = useMemo(() => [...filters.keys()].length > 0, [filters]);
+
   useEffect(() => {
     let cancelled = false;
     fetch('./config.json', { headers: { Accept: 'application/json' } })
@@ -47,7 +57,9 @@ export default function App() {
     if (!config) return undefined;
     let cancelled = false;
     config.metrics.forEach((m) => {
-      fetch(`./metrics/${encodeURIComponent(m.id)}`, { headers: { Accept: 'application/json' } })
+      fetch(`./metrics/${encodeURIComponent(m.id)}${filterQuery}`, {
+        headers: { Accept: 'application/json' },
+      })
         .then((r) => r.json())
         .then((res) => {
           if (!cancelled && res && res.data) {
@@ -59,13 +71,39 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [config]);
+  }, [config, filterQuery]);
 
-  const onFrame = useCallback((frame) => {
-    if (frame && frame.metric_id && frame.data) {
-      setData((prev) => ({ ...prev, [frame.metric_id]: frame.data }));
-    }
-  }, []);
+  // Refetch a metric through the URL filters (used to keep filtered views live).
+  const refetchMetric = useCallback(
+    (metricId) => {
+      fetch(`./metrics/${encodeURIComponent(metricId)}${filterQuery}`, {
+        headers: { Accept: 'application/json' },
+      })
+        .then((r) => r.json())
+        .then((res) => {
+          if (res && res.data) {
+            setData((prev) => ({ ...prev, [metricId]: res.data }));
+          }
+        })
+        .catch(() => {});
+    },
+    [filterQuery],
+  );
+
+  const onFrame = useCallback(
+    (frame) => {
+      if (frame && frame.metric_id && frame.data) {
+        if (hasFilters) {
+          // Unfiltered WS frames would clobber the deep-linked view — refetch
+          // through the active URL filters instead so it stays live + filtered.
+          refetchMetric(frame.metric_id);
+        } else {
+          setData((prev) => ({ ...prev, [frame.metric_id]: frame.data }));
+        }
+      }
+    },
+    [hasFilters, refetchMetric],
+  );
 
   const streamStatus = useDashboardStream(slug, onFrame);
 
@@ -87,6 +125,11 @@ export default function App() {
           <h1 className="text-xl font-semibold tracking-tight">{config.name}</h1>
           {config.description ? (
             <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{config.description}</p>
+          ) : null}
+          {hasFilters ? (
+            <p className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+              Filtered view: {filters.toString()}
+            </p>
           ) : null}
         </div>
         <span

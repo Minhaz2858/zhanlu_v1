@@ -12,7 +12,7 @@ Mounted by ``DashboardAppManager`` as a sub-router on the main FastAPI app.
 """
 import asyncio
 
-from fastapi import APIRouter, Depends, WebSocket
+from fastapi import APIRouter, Depends, Request, WebSocket
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -39,8 +39,13 @@ async def list_metrics() -> dict:
 
 
 @router.get("/metrics/{metric_id}")
-async def get_metric(metric_id: str, db: Session = Depends(get_db)) -> dict:
-    return {"metric_id": metric_id, "data": await run_metric(db, metric_id)}
+async def get_metric(metric_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    # Deep-linked filtered views: every query-string key/value on the URL
+    # (e.g. /metrics/sales?product=%E4%B9%99%E4%BA%8C%E9%86%87) is forwarded to
+    # run_metric, which only substitutes DECLARED :dim_* tokens and SQL-escapes
+    # every value. Undeclared keys are inert — see queries.metric_dimensions.
+    filters = dict(request.query_params)
+    return {"metric_id": metric_id, "data": await run_metric(db, metric_id, filters)}
 
 
 @router.websocket("/ws")
