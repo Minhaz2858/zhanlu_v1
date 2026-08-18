@@ -68,6 +68,10 @@ from app.services.dashboard_turn_guard import (
     contract_confirmation_needed,
     dashboard_build_tool,
 )
+from app.services.pptx_turn_guard import (
+    pptx_turn_guard,
+    should_force_create_pptx,
+)
 from app.services.tool_result_persistence import (
     persist_tool_result,
     apply_turn_budget,

@@ -38,6 +38,24 @@ def test_is_pptx_request_chinese():
     assert is_pptx_request("帮我做一个ppt汇报材料")
 
 
+# ---------------------------------------------- agents.py wiring (regression)
+
+def test_agents_module_exports_turn_guard_symbols():
+    """Regression: agents.py must import the pptx turn-guard helpers.
+
+    A silently dropped import edit caused a runtime NameError
+    ("should_force_create_pptx" is not defined) inside the v2/v3 stream
+    loops at the T-3 forcing block. Because that block runs for every
+    message (the guard call is unconditional and internally checks the
+    request), every chat turn died with a broken SSE connection
+    ("Sorry, the connection was interrupted") — even plain "hi".
+    """
+    import app.routers.agents as agents_mod
+
+    assert callable(agents_mod.should_force_create_pptx)
+    assert callable(agents_mod.pptx_turn_guard)
+
+
 def test_is_pptx_request_negative():
     assert not is_pptx_request("make a sales summary")
     assert not is_pptx_request("export to xlsx")
