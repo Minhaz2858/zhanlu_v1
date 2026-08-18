@@ -306,6 +306,15 @@ _ROLE_MEASURE_RE = re.compile(
 )
 _ROLE_ID_RE = re.compile(r"(^|_)(id|code|no|number)(_|$)", re.IGNORECASE)
 
+# Suffix-anchored complements.  The boundary-anchored patterns above only match
+# snake_case (e.g. ``product_id``, ``customer_name``).  Compound names where the
+# keyword is embedded as a suffix WITHOUT a leading separator — Kingdee F-prefix
+# (``FCUSTID``), SAP B1 (``BKCU_ID``), PascalCase (``OrderId``), CamelCase
+# (``materialID``) or bare concatenations (``CUSTID``, ``PRODUCTNAME``) — need a
+# suffix anchor.  Purely structural: no vendor knowledge, works on any database.
+_ROLE_ID_SUFFIX_RE = re.compile(r"(id|code|no|number)$", re.IGNORECASE)
+_ROLE_NAME_SUFFIX_RE = re.compile(r"(name|title|label)$", re.IGNORECASE)
+
 
 def _classify_table_roles(tables: list[dict]) -> None:
     """Mutate each table dict with a structural ``table_role`` classification.
@@ -346,15 +355,21 @@ def _classify_table_role(table: dict, fk_indegree: int) -> str:
     col_names = [c.get("column_name", "") for c in cols]
     col_types = [c.get("data_type", "") for c in cols]
 
-    has_id = any(_ROLE_ID_RE.search(cn) for cn in col_names)
-    has_name = any(_ROLE_NAME_RE.search(cn) for cn in col_names)
+    has_id = any(
+        _ROLE_ID_RE.search(cn) or _ROLE_ID_SUFFIX_RE.search(cn) for cn in col_names
+    )
+    has_name = any(
+        _ROLE_NAME_RE.search(cn) or _ROLE_NAME_SUFFIX_RE.search(cn) for cn in col_names
+    )
     has_category = any(_ROLE_CATEGORY_RE.search(cn) for cn in col_names)
     has_date = any(
         _ROLE_DATE_RE.search(cn) or _is_date_type(ct)
         for cn, ct in zip(col_names, col_types)
     )
     has_measure = any(_ROLE_MEASURE_RE.search(cn) for cn in col_names)
-    fk_col_count = sum(1 for cn in col_names if _ROLE_ID_RE.search(cn))
+    fk_col_count = sum(
+        1 for cn in col_names if _ROLE_ID_RE.search(cn) or _ROLE_ID_SUFFIX_RE.search(cn)
+    )
 
     # 1) entity_master — small, name-bearing, category'd or FK-referenced.
     if (

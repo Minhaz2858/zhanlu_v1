@@ -276,6 +276,49 @@ def test_classify_unknown_fallback():
     assert _classify_table_role(t, 0) == "unknown"
 
 
+def test_classify_kingdee_fprefix_compound_names():
+    """F-prefixed columns (FCUSTID/FNAME/FGROUP) classify as entity_master.
+
+    The keyword is a suffix (``FCUSTID`` -> ``id``) with no leading separator,
+    so only the suffix-anchored patterns can see it.  ``FGROUP`` still hits the
+    unanchored category pattern (``group``).
+    """
+    t = _table(
+        "erp_t_bd_customer", 771,
+        [_col("FCUSTID", "INT"), _col("FNAME"), _col("FGROUP")],
+    )
+    assert _classify_table_role(t, 0) == "entity_master"
+
+
+def test_classify_bare_concatenated_id_name():
+    """Bare concatenations (CUSTID/CUSTNAME) work with no separators at all."""
+    t = _table(
+        "customers", 300,
+        [_col("CUSTID", "INT"), _col("CUSTNAME"), _col("REGION")],
+    )
+    assert _classify_table_role(t, 2) == "entity_master"
+    # No category and no FK references -> dimension, not entity_master.
+    assert _classify_table_role(t, 0) == "dimension"
+
+
+def test_classify_pascal_case_compound_names():
+    """PascalCase (OrderId/ProductName/Category) works via suffix anchor."""
+    t = _table(
+        "order_items", 500,
+        [_col("OrderId", "INT"), _col("ProductName"), _col("Category")],
+    )
+    assert _classify_table_role(t, 0) == "entity_master"
+
+
+def test_classify_camel_case_compound_names():
+    """CamelCase (materialID/materialName) classifies as dimension."""
+    t = _table(
+        "materials", 200,
+        [_col("materialID", "INT"), _col("materialName")],
+    )
+    assert _classify_table_role(t, 0) == "dimension"
+
+
 def test_classify_table_roles_uses_fk_indegree():
     products = _table(
         "products", 500,
