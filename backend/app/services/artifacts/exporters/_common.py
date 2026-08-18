@@ -191,6 +191,68 @@ def chart_x_value(row: dict[str, Any], payload: ReportCardPayload) -> str:
     return str(v)
 
 
+# Cap enforced at the shared data-prep layer so native charts AND tables agree.
+CHART_CATEGORY_CAP = 8
+OTHER_BUCKET_LABEL = "Other"
+
+
+def cap_chart_categories(
+    rows: list[dict[str, Any]],
+    x_key: str,
+    y_keys: list[str],
+    *,
+    cap: int = CHART_CATEGORY_CAP,
+    other_label: str = OTHER_BUCKET_LABEL,
+) -> list[dict[str, Any]]:
+    """Cap chart categories at ``cap`` by summed value, aggregating the rest.
+
+    This is the single source of truth for chart/table category limits — both
+    the native chart renderer and the table renderer call it, so a deck never
+    shows 15 pie slices in the chart while the table lists all 15.
+
+    Ranking is by the *sum* of the numeric y-values per category (so the
+    largest contributors stay visible).  Everything beyond ``cap`` is folded
+    into one ``other_label`` row whose y-values are the summed remainder.
+
+    Returns the rows unchanged when there are ``<= cap`` distinct categories or
+    when no numeric y-values can be parsed.
+    """
+    if not rows or not y_keys:
+        return rows
+    if len(rows) <= cap:
+        return rows
+
+    # Aggregate value per category label.
+    totals: dict[str, float] = {}
+    for r in rows:
+        label = str(r.get(x_key, ""))
+        s = 0.0
+        for k in y_keys:
+            n = coerce_number(r.get(k))
+            if n is not None:
+                s += n
+        totals[label] = totals.get(label, 0.0) + s
+
+    if len(totals) <= cap:
+        return rows
+
+    ranked = sorted(totals.items(), key=lambda kv: kv[1], reverse=True)
+    top_labels = {label for label, _ in ranked[:cap]}
+    other_sum = sum(v for label, v in ranked[cap:])
+
+    capped: list[dict[str, Any]] = []
+    for r in rows:
+        label = str(r.get(x_key, ""))
+        if label in top_labels:
+            capped.append(dict(r))
+
+    other_row: dict[str, Any] = {x_key: other_label}
+    for k in y_keys:
+        other_row[k] = other_sum
+    capped.append(other_row)
+    return capped
+
+
 # --- Timestamp / meta helpers ------------------------------------------------
 
 
@@ -242,6 +304,9 @@ __all__ = [
     "chart_x_key",
     "chart_y_keys",
     "chart_x_value",
+    "cap_chart_categories",
+    "CHART_CATEGORY_CAP",
+    "OTHER_BUCKET_LABEL",
     "short_generated_at",
     "insight_icon_to_emoji",
 ]

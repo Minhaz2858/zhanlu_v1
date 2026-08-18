@@ -306,3 +306,109 @@ class TestRenderDeck:
         )
         data, _mime, ext = render_deck(plan, rows=[])
         assert ext == ".pptx"
+
+
+# ---------------------------------------------------------------------------
+# Fix #2 regression: empty / filler-only insights slides must be dropped
+# ---------------------------------------------------------------------------
+
+
+class TestDropEmptyInsightsSlides:
+    def test_fallback_plan_no_insights_slide_when_empty(self, monkeypatch):
+        """A payload with no key_findings/insights must NOT render an
+        empty 'Summary' insights slide."""
+        monkeypatch.setattr("app.config.settings.PPT_DECK_PLANNER_ENABLED", False)
+        from app.services.artifacts.deck_planner import build_deck_plan
+
+        async def _run():
+            return await build_deck_plan(
+                "Make a report",
+                [{"month": "2025-01", "revenue": 100, "units": 10}],
+            )
+
+        import asyncio
+
+        plan, _ = asyncio.run(_run())
+        insight_slides = [
+            s for s in plan.slides if s.layout in ("insights_bullets", "findings_cards")
+        ]
+        assert not insight_slides, (
+            "empty insights slide should be dropped, found: "
+            f"{[s.title for s in insight_slides]}"
+        )
+
+    def test_fallback_plan_keeps_insights_slide_when_present(self):
+        """When real findings exist (LLM plan via _coerce_plan), the insights
+        slide is kept (not dropped) by the post-process."""
+        from app.services.artifacts.deck_planner import _coerce_plan
+
+        plan = _coerce_plan(
+            {
+                "title": "T",
+                "slides": [
+                    {"layout": "cover", "title": "T"},
+                    {
+                        "layout": "insights_bullets",
+                        "title": "Summary",
+                        "bullets": ["Revenue grew 12% QoQ", "East region led volume"],
+                    },
+                    {"layout": "closing", "title": "Thank you"},
+                ],
+            }
+        )
+        insight_slides = [
+            s for s in plan.slides if s.layout in ("insights_bullets", "findings_cards")
+        ]
+        assert insight_slides, "real insights slide should be present"
+        assert insight_slides[0].bullets == [
+            "Revenue grew 12% QoQ",
+            "East region led volume",
+        ]
+
+    def test_coerce_plan_drops_filler_only_insights(self):
+        """_coerce_plan post-process drops an insights slide whose only content
+        is the legacy filler stub."""
+        from app.services.artifacts.deck_planner import _coerce_plan
+
+        plan = _coerce_plan(
+            {
+                "title": "T",
+                "slides": [
+                    {"layout": "cover", "title": "T"},
+                    {
+                        "layout": "insights_bullets",
+                        "title": "Summary",
+                        "bullets": ["See the accompanying data for full detail."],
+                    },
+                    {"layout": "closing", "title": "Thank you"},
+                ],
+            }
+        )
+        assert plan is not None
+        insight_slides = [
+            s for s in plan.slides if s.layout in ("insights_bullets", "findings_cards")
+        ]
+        assert not insight_slides, "filler-only insights slide must be dropped"
+
+    def test_coerce_plan_keeps_real_insights(self):
+        from app.services.artifacts.deck_planner import _coerce_plan
+
+        plan = _coerce_plan(
+            {
+                "title": "T",
+                "slides": [
+                    {"layout": "cover", "title": "T"},
+                    {
+                        "layout": "insights_bullets",
+                        "title": "Summary",
+                        "bullets": ["Revenue grew 12% QoQ"],
+                    },
+                    {"layout": "closing", "title": "Thank you"},
+                ],
+            }
+        )
+        assert plan is not None
+        insight_slides = [
+            s for s in plan.slides if s.layout in ("insights_bullets", "findings_cards")
+        ]
+        assert insight_slides, "real insights slide must be kept"

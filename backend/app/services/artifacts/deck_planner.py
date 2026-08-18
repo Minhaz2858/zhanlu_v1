@@ -274,6 +274,50 @@ def _coerce_plan(data: dict[str, Any]) -> Optional[DeckPlan]:
         cleaned.append(SlidePlan(layout="closing", title="Thank you"))
 
     plan.slides = cleaned
+
+    # Drop empty / filler-only insights slides (no real takeaway content).
+    plan = _drop_empty_insights_slides(plan)
+
+    return plan
+
+
+# Filler bullet the fallback planner used to inject when no insights existed.
+_FILLER_INSIGHT = "see the accompanying data for full detail."
+
+
+def _is_empty_insights_slide(slide: SlidePlan) -> bool:
+    """An insights/findings slide with no real takeaway must be dropped.
+
+    Covers: no bullets, empty bullets, or only the legacy filler stub.
+    """
+    if slide.layout not in ("insights_bullets", "findings_cards"):
+        return False
+    bullets = [str(b).strip() for b in (slide.bullets or []) if str(b).strip()]
+    if not bullets:
+        return True
+    non_filler = [b for b in bullets if b.lower() != _FILLER_INSIGHT]
+    return not non_filler
+
+
+def _drop_empty_insights_slides(plan: DeckPlan) -> DeckPlan:
+    """Post-process (planner layer, not renderer): remove empty insights slides.
+
+    Applies to both LLM and fallback plans so the rendered deck never shows a
+    blank "Summary"/"Key Findings" slide whose only content is a filler stub.
+    Never drops the cover or closing.
+    """
+    kept: list[SlidePlan] = []
+    for slide in plan.slides:
+        if slide.layout in ("cover", "closing"):
+            kept.append(slide)
+            continue
+        if _is_empty_insights_slide(slide):
+            logger.info(
+                "deck_planner: dropping empty insights slide '%s'", slide.title
+            )
+            continue
+        kept.append(slide)
+    plan.slides = kept
     return plan
 
 
@@ -360,14 +404,9 @@ def _fallback_plan(
             )
         )
 
-    slides.append(
-        SlidePlan(
-            layout="insights_bullets",
-            title="Summary",
-            bullets=["See the accompanying data for full detail."],
-            narrative_role="insight",
-        )
-    )
+    # The deterministic fallback has no findings source; it never synthesizes a
+    # filler insights slide. Real insights (when present) come from the LLM plan
+    # and are post-processed by _drop_empty_insights_slides in _coerce_plan.
     slides.append(SlidePlan(layout="closing", title="Thank you", narrative_role="closing"))
 
     return DeckPlan(title=title, deck_type="data_report", slides=slides)

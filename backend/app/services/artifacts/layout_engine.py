@@ -44,6 +44,8 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
 
+from app.services.artifacts.exporters._common import cap_chart_categories
+
 
 logger = logging.getLogger(__name__)
 
@@ -393,6 +395,39 @@ def _coerce(v) -> float:
         return 0
 
 
+def _cap_table_rows(
+    rows: list[dict[str, Any]],
+    cols: list[str],
+    sort_col: Optional[str],
+    cap: int = 8,
+) -> list[dict[str, Any]]:
+    """Cap a table at ``cap`` rows, folding the remainder into one "Other" row.
+
+    Mirrors :func:`cap_chart_categories` so tables and native charts obey the
+    same 8 + Other rule.  Rows are ranked by ``sort_col`` when present (largest
+    first); otherwise the first 8 rows are kept in order.  Numeric columns are
+    summed into the "Other" row; the first (label) column becomes ``"Other"``.
+    """
+    if not rows or len(rows) <= cap:
+        return list(rows)
+    if sort_col:
+        ordered = sorted(rows, key=lambda r: _coerce(r.get(sort_col)), reverse=True)
+    else:
+        ordered = list(rows)
+    kept = [dict(r) for r in ordered[:cap]]
+    rest = ordered[cap:]
+    if not rest:
+        return kept
+    other: dict[str, Any] = {}
+    for ci, c in enumerate(cols):
+        if ci == 0:
+            other[c] = "Other"
+        else:
+            other[c] = sum(_coerce(r.get(c)) for r in rest)
+    kept.append(other)
+    return kept
+
+
 # ----------------------------------------------------------------------------
 # Layout builders
 # ----------------------------------------------------------------------------
@@ -503,6 +538,8 @@ def _layout_chart_full(slide, sp, theme, idx, total) -> None:
     cd = CategoryChartData()
     x_key = chart_spec.get("x_key", "label")
     y_keys = chart_spec.get("y_keys") or ["value"]
+    # Shared data-prep cap: top-8 categories by value + "Other" bucket.
+    rows = cap_chart_categories(rows, x_key, y_keys)
     cd.categories = [str(r.get(x_key, "")) for r in rows]
     for y in y_keys:
         cd.add_series(str(y), [_coerce(r.get(y)) for r in rows])
@@ -544,6 +581,8 @@ def _layout_chart_with_bullets(slide, sp, theme, idx, total) -> None:
         cd = CategoryChartData()
         x_key = chart_spec.get("x_key", "label")
         y_keys = chart_spec.get("y_keys") or ["value"]
+        # Shared data-prep cap: top-8 categories by value + "Other" bucket.
+        rows = cap_chart_categories(rows, x_key, y_keys)
         cd.categories = [str(r.get(x_key, "")) for r in rows]
         for y in y_keys:
             cd.add_series(str(y), [_coerce(r.get(y)) for r in rows])
@@ -681,9 +720,10 @@ def _layout_data_table(slide, sp, theme, idx, total) -> None:
             reverse=sort_desc,
         )
 
-    # PHASE 1 acceptance: top-8 with top-3 highlighted; ignore `metadata`
-    # (extensions live in PHASE 1B).
-    top_rows = rows[:8]
+    # PHASE 1 acceptance + Fix #3: cap at the SAME top-8 limit the charts use,
+    # folding the remainder into an "Other" row so the table and the native
+    # chart always show the identical category rule (8 + Other).
+    top_rows = _cap_table_rows(rows, cols, sort_col, 8)
 
     # --- Table shape ---
     n_data_rows = len(top_rows)
@@ -736,13 +776,6 @@ def _layout_data_table(slide, sp, theme, idx, total) -> None:
             elif ri % 2 == 0:
                 cell.fill.solid()
                 cell.fill.fore_color.rgb = _rgb(theme, "band_bg", "#F8FAFC")
-    if len(rows) > 8:
-        _add_textbox(
-            slide, MARGIN_IN, SLIDE_H_IN - 0.35,
-            SLIDE_W_IN - 2 * MARGIN_IN, 0.25,
-            f"… {len(rows) - 8} more rows suppressed; ask 'show all data' for the appendix.",
-            FOOTER_PT, color=_rgb(theme, "muted", "#64748B"),
-        )
 
 
 def _layout_methodology(slide, sp, theme, idx, total) -> None:

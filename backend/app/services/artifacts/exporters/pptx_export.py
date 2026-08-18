@@ -43,6 +43,7 @@ from app.services.synexia.contracts import (
 from app.services.artifacts.exporters._common import (
     ExportContext,
     chart_rows, chart_x_key, chart_y_keys, chart_x_value, coerce_number,
+    cap_chart_categories,
     short_generated_at, insight_icon_to_emoji,
 )
 from app.services.artifacts.exporters._theme import (
@@ -550,6 +551,10 @@ def _add_chart_slide(prs, layout, payload: ReportCardPayload,
     y_keys = chart_y_keys(payload)
     if not rows or not y_keys:
         return
+
+    # Shared data-prep cap: top-8 categories by value + "Other" bucket.
+    x_key = chart_x_key(payload)
+    rows = cap_chart_categories(rows, x_key, y_keys)
 
     chart_type = (payload.chart.type or "bar").lower()
     chart_data = CategoryChartData()
