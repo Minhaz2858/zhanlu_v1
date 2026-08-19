@@ -69,6 +69,22 @@ def _extract_tables(parsed: exp.Expression) -> set[str]:
     return {t.name for t in parsed.find_all(exp.Table) if t.name}
 
 
+# Introspection statements execute natively on the engine; the structural
+# validator has nothing to check for them (blocking SHOW/DESCRIBE/EXPLAIN
+# previously made the agent burn its tool-loop budget on retries).
+_INTROSPECTION_CLASSES = (
+    exp.Show,
+    exp.Describe,  # also covers EXPLAIN in the mysql dialect
+    exp.Analyze,
+    exp.Pragma,
+    exp.Command,  # catch-all for engine-native statements (CALL, USE, ...)
+)
+
+
+def _is_introspection_statement(parsed: exp.Expression) -> bool:
+    return isinstance(parsed, _INTROSPECTION_CLASSES)
+
+
 def _extract_alias_map(parsed: exp.Expression) -> dict[str, str]:
     """Map lowercase alias -> real table name.
 
@@ -126,6 +142,11 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     except Exception as exc:
         logger.warning("schema_validator: unparseable SQL: %s", exc)
         return {"is_valid": False, "errors": ["unparseable SQL"], "available_columns": {}}
+
+    if _is_introspection_statement(parsed):
+        # SHOW/DESCRIBE/EXPLAIN/PRAGMA/ANALYZE run natively on the engine —
+        # no structural validation applies.
+        return {"is_valid": True, "errors": [], "warnings": [], "available_columns": {}}
 
     tables = _extract_tables(parsed)
     if not tables:
