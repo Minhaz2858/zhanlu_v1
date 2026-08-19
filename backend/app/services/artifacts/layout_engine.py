@@ -44,7 +44,14 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
 
-from app.services.artifacts.exporters._chart_helpers import cap_chart_categories
+# chart helpers — sibling-first (sandbox), fallback to in-process dotted path.
+# Matches the dual-context pattern at _apply_chart_theme / _render_chart
+# below; the sandbox runner vendors `_chart_helpers.py` alongside this
+# module under /input/skill/, so the sibling import resolves there.
+try:
+    from _chart_helpers import cap_chart_categories
+except Exception:
+    from app.services.artifacts.exporters._chart_helpers import cap_chart_categories
 
 
 logger = logging.getLogger(__name__)
