@@ -367,6 +367,7 @@ class NLAnswerService:
         project_id: str | None = None,
         errors: list[str] | None = None,
         available_columns: dict | None = None,
+        available_suggestions: list[str] | None = None,
         endpoint: LLMEndpoint | None = None,
     ) -> str | None:
         """One self-correct retry: re-generate SQL with validator feedback.
@@ -382,6 +383,10 @@ class NLAnswerService:
             correction.append("Available columns (use only these):")
             for table, cols in available_columns.items():
                 correction.append(f"- {table}: {', '.join(cols)}")
+        if available_suggestions:
+            correction.append("Validator suggestions:")
+            for s in available_suggestions:
+                correction.append(f"- {s}")
         note = "\n".join(correction)
         augmented = f"{schema_text}\n\n{note}" if schema_text else note
         try:
@@ -438,6 +443,7 @@ class NLAnswerService:
             project_id=project_id,
             errors=problems or warnings,
             available_columns=vres.get("available_columns", {}),
+            available_suggestions=vres.get("available_suggestions", []),
             endpoint=endpoint,
         )
         if corrected and corrected != sql:
