@@ -30,6 +30,7 @@ handled by the post-processing step in agents.py.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -41,6 +42,36 @@ from app.services.tool_registry import registry
 from app.services.synexia.contracts import ReportCardPayload
 
 logger = logging.getLogger(__name__)
+
+# Ceiling for long synchronous file-format renders / preview conversions
+# (PPTX/DOCX/PDF rendering can take 10-120s). These run via
+# asyncio.to_thread so the event loop stays free to pump the SSE heartbeat;
+# anything slower than the ceiling is treated as a stall we fail over
+# instead of blocking the stream (which previously dropped the connection).
+ARTIFACT_RENDER_TIMEOUT_S = 120
+
+
+async def _run_blocking(fn, *args, **kwargs):
+    """Run a long synchronous call off the event loop, bounded by a timeout.
+
+    File-format renders / preview conversions (10-120s) must never be awaited
+    directly on the loop: they would block the SSE heartbeat and the browser
+    would drop the stream ("connection interrupted"). ``asyncio.to_thread``
+    keeps the loop free to pump heartbeats, and ``asyncio.wait`` bounds the
+    wait so a stalled render raises ``asyncio.TimeoutError`` (caught by
+    callers to fail over gracefully). Note a timed-out worker thread keeps
+    running in the background (threads cannot be killed), but the loop is
+    never blocked.
+    """
+    task = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+    done, _ = await asyncio.wait({task}, timeout=ARTIFACT_RENDER_TIMEOUT_S)
+    if not done:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        raise asyncio.TimeoutError(
+            f"blocking call timed out after {ARTIFACT_RENDER_TIMEOUT_S}s"
+        )
+    return task.result()
 
 
 # Valid types and the corresponding exporters / handlers
@@ -570,35 +601,51 @@ async def _create_artifact_tool(
         if not version:
             return {"success": False, "error": "Failed to create artifact version"}
 
-        # 3. Render the file bytes
+        # 3. Render the file bytes. Long sync renders MUST be offloaded to a
+        #    worker thread (_run_blocking) so the SSE heartbeat keeps flowing;
+        #    a stalled render fails over instead of dropping the stream.
         ext = _TYPE_EXT[artifact_type]
         mime = _TYPE_MIME[artifact_type]
         file_name = _safe_filename(title, ext)
 
-        if artifact_type == "html":
-            html_content = payload.get("html_content", "")
-            if isinstance(html_content, dict):
-                html_content = str(html_content)
-            if not html_content:
-                return {"success": False, "error": "html_content is required for html type"}
-            data = html_content.encode("utf-8")
-        elif artifact_type == "pptx":
-            from app.services.artifacts.exporters.pptx_export import render as _render_pptx
-            rcp = _payload_to_reportcard(payload, title)
-            data, mime, ext = _render_pptx(rcp)
-            file_name = _safe_filename(title, ext)
-        elif artifact_type == "docx":
-            from app.services.artifacts.exporters.docx_export import render as _render_docx
-            rcp = _payload_to_reportcard(payload, title)
-            data, mime, ext = _render_docx(rcp)
-            file_name = _safe_filename(title, ext)
-        elif artifact_type == "pdf":
-            from app.services.artifacts.exporters.pdf_export import render as _render_pdf
-            rcp = _payload_to_reportcard(payload, title)
-            data, mime, ext = _render_pdf(rcp)
-            file_name = _safe_filename(title, ext)
-        else:
-            return {"success": False, "error": f"Unknown artifact type: {artifact_type}"}
+        try:
+            if artifact_type == "html":
+                html_content = payload.get("html_content", "")
+                if isinstance(html_content, dict):
+                    html_content = str(html_content)
+                if not html_content:
+                    return {"success": False, "error": "html_content is required for html type"}
+                data = html_content.encode("utf-8")
+            elif artifact_type == "pptx":
+                from app.services.artifacts.exporters.pptx_export import render as _render_pptx
+                rcp = _payload_to_reportcard(payload, title)
+                data, mime, ext = await _run_blocking(_render_pptx, rcp)
+                file_name = _safe_filename(title, ext)
+            elif artifact_type == "docx":
+                from app.services.artifacts.exporters.docx_export import render as _render_docx
+                rcp = _payload_to_reportcard(payload, title)
+                data, mime, ext = await _run_blocking(_render_docx, rcp)
+                file_name = _safe_filename(title, ext)
+            elif artifact_type == "pdf":
+                from app.services.artifacts.exporters.pdf_export import render as _render_pdf
+                rcp = _payload_to_reportcard(payload, title)
+                data, mime, ext = await _run_blocking(_render_pdf, rcp)
+                file_name = _safe_filename(title, ext)
+            else:
+                return {"success": False, "error": f"Unknown artifact type: {artifact_type}"}
+        except asyncio.TimeoutError:
+            logger.error(
+                "artifact render timed out after %ss: %s",
+                ARTIFACT_RENDER_TIMEOUT_S, file_name,
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Rendering {file_name} timed out after "
+                    f"{ARTIFACT_RENDER_TIMEOUT_S}s; the file format is too "
+                    "complex - try a simpler artifact."
+                ),
+            }
 
         # 4. Store the original blob
         service.store_blob(
@@ -609,9 +656,12 @@ async def _create_artifact_tool(
             data=data,
         )
 
-        # 5. Generate and store preview
+        # 5. Generate and store preview (offloaded too - preview conversion is
+        #    also multi-second and must not block the heartbeat).
         has_preview = False
-        preview_result = convert_to_preview(data, file_name, artifact_type)
+        preview_result = await _run_blocking(
+            convert_to_preview, data, file_name, artifact_type,
+        )
         if preview_result:
             preview_data, preview_name, preview_mime = preview_result
             service.store_blob(
@@ -626,7 +676,7 @@ async def _create_artifact_tool(
             if preview_mime == "application/pdf":
                 try:
                     from app.services.artifacts.preview_builder import generate_thumbnail
-                    thumb = generate_thumbnail(preview_data)
+                    thumb = await _run_blocking(generate_thumbnail, preview_data)
                     if thumb:
                         service.store_blob(
                             version_id=version.id,
@@ -652,7 +702,8 @@ async def _create_artifact_tool(
         if artifact_type in ("docx", "pptx", "xlsx"):
             try:
                 rcp_for_sidecar = _payload_to_reportcard(payload, title)
-                preview_artifact_id = _create_sidecar_preview(
+                preview_artifact_id = await _run_blocking(
+                    _create_sidecar_preview,
                     service,
                     artifact,
                     rcp_for_sidecar,
@@ -1003,42 +1054,58 @@ async def _edit_artifact_tool(
         if not version:
             return {"success": False, "error": "Failed to create artifact version"}
 
-        # 5. Re-render the file bytes
+        # 5. Re-render the file bytes. Long sync renders MUST be offloaded to
+        #    a worker thread (_run_blocking) so the SSE heartbeat keeps
+        #    flowing; a stalled render fails over instead of dropping the stream.
         ext = _TYPE_EXT.get(artifact_type, ".pptx")
         mime = _TYPE_MIME.get(artifact_type, _TYPE_MIME["pptx"])
         file_name = _safe_filename(new_title, ext)
 
-        if artifact_type == "html":
-            html_content = modified_payload.get("html_content", "")
-            if isinstance(html_content, dict):
-                html_content = str(html_content)
-            if not html_content:
-                # Keep the old html_content if the edit didn't change it
-                html_content = current_payload.get("html_content", "")
+        try:
+            if artifact_type == "html":
+                html_content = modified_payload.get("html_content", "")
                 if isinstance(html_content, dict):
                     html_content = str(html_content)
-            if not html_content:
-                html_content = "<html><body><h1>{}</h1></body></html>".format(
-                    _esc(new_title)
-                )
-            data = html_content.encode("utf-8")
-        elif artifact_type == "pptx":
-            from app.services.artifacts.exporters.pptx_export import render as _render_pptx
-            rcp = _payload_to_reportcard(modified_payload, new_title)
-            data, mime, ext = _render_pptx(rcp)
-            file_name = _safe_filename(new_title, ext)
-        elif artifact_type == "docx":
-            from app.services.artifacts.exporters.docx_export import render as _render_docx
-            rcp = _payload_to_reportcard(modified_payload, new_title)
-            data, mime, ext = _render_docx(rcp)
-            file_name = _safe_filename(new_title, ext)
-        elif artifact_type == "pdf":
-            from app.services.artifacts.exporters.pdf_export import render as _render_pdf
-            rcp = _payload_to_reportcard(modified_payload, new_title)
-            data, mime, ext = _render_pdf(rcp)
-            file_name = _safe_filename(new_title, ext)
-        else:
-            return {"success": False, "error": f"Unknown artifact type: {artifact_type}"}
+                if not html_content:
+                    # Keep the old html_content if the edit didn't change it
+                    html_content = current_payload.get("html_content", "")
+                    if isinstance(html_content, dict):
+                        html_content = str(html_content)
+                if not html_content:
+                    html_content = "<html><body><h1>{}</h1></body></html>".format(
+                        _esc(new_title)
+                    )
+                data = html_content.encode("utf-8")
+            elif artifact_type == "pptx":
+                from app.services.artifacts.exporters.pptx_export import render as _render_pptx
+                rcp = _payload_to_reportcard(modified_payload, new_title)
+                data, mime, ext = await _run_blocking(_render_pptx, rcp)
+                file_name = _safe_filename(new_title, ext)
+            elif artifact_type == "docx":
+                from app.services.artifacts.exporters.docx_export import render as _render_docx
+                rcp = _payload_to_reportcard(modified_payload, new_title)
+                data, mime, ext = await _run_blocking(_render_docx, rcp)
+                file_name = _safe_filename(new_title, ext)
+            elif artifact_type == "pdf":
+                from app.services.artifacts.exporters.pdf_export import render as _render_pdf
+                rcp = _payload_to_reportcard(modified_payload, new_title)
+                data, mime, ext = await _run_blocking(_render_pdf, rcp)
+                file_name = _safe_filename(new_title, ext)
+            else:
+                return {"success": False, "error": f"Unknown artifact type: {artifact_type}"}
+        except asyncio.TimeoutError:
+            logger.error(
+                "artifact re-render timed out after %ss: %s",
+                ARTIFACT_RENDER_TIMEOUT_S, file_name,
+            )
+            return {
+                "success": False,
+                "error": (
+                    f"Rendering {file_name} timed out after "
+                    f"{ARTIFACT_RENDER_TIMEOUT_S}s; the file format is too "
+                    "complex - try a simpler edit."
+                ),
+            }
 
         # 6. Store the new blob
         service.store_blob(
@@ -1049,9 +1116,12 @@ async def _edit_artifact_tool(
             data=data,
         )
 
-        # 7. Generate and store preview
+        # 7. Generate and store preview (offloaded too - preview conversion is
+        #    also multi-second and must not block the heartbeat).
         has_preview = False
-        preview_result = convert_to_preview(data, file_name, artifact_type)
+        preview_result = await _run_blocking(
+            convert_to_preview, data, file_name, artifact_type,
+        )
         if preview_result:
             preview_data, preview_name, preview_mime = preview_result
             service.store_blob(
@@ -1066,7 +1136,7 @@ async def _edit_artifact_tool(
             if preview_mime == "application/pdf":
                 try:
                     from app.services.artifacts.preview_builder import generate_thumbnail
-                    thumb = generate_thumbnail(preview_data)
+                    thumb = await _run_blocking(generate_thumbnail, preview_data)
                     if thumb:
                         service.store_blob(
                             version_id=version.id,
