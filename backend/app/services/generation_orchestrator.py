@@ -104,6 +104,31 @@ def _artifact_matches_requested_format(artifact_id: str, doc_format: str, db) ->
     return atype == expected
 
 
+def _artifact_satisfies_deliverable(artifact_id: str, doc_format: str, db) -> bool:  # noqa: ANN001
+    """Goal-Contract content gate: True only when the stored Artifact both
+    matches the requested format AND carries a non-empty, non-failed payload
+    (a build actually produced it).
+
+    A report card (html_report) never satisfies an explicit doc deliverable,
+    and a ``failed`` artifact or one with no built version (``current_version_id``
+    is None) is treated as "not delivered" so the fallback still produces the
+    user's deliverable instead of a dead file. Flag-gated by
+    ``GOAL_CONTRACT_ENABLED`` at the call site.
+    """
+    if not _artifact_matches_requested_format(artifact_id, doc_format, db):
+        return False
+    try:
+        artifact = db.get(Artifact, artifact_id)
+    except Exception:  # noqa: BLE001 — db is best-effort here
+        return False
+    if artifact is None:
+        return False
+    if (artifact.status or "").lower() == "failed":
+        return False
+    # No current version ⇒ nothing was actually built (empty deliverable).
+    return bool(artifact.current_version_id)
+
+
 def _marker_to_artifact_args(kind: str, payload: dict, filename: str) -> Optional[dict]:
     """Translate a parsed marker into ``_create_artifact_tool`` args.
 
@@ -714,7 +739,21 @@ async def ensure_artifact_for_doc_request(
         return None
 
     if already_created:
-        return None  # a marker already produced one
+        if not settings.GOAL_CONTRACT_ENABLED:
+            return None  # a marker already produced one (legacy)
+        # Contract mode: only an artifact of the requested kind with a
+        # non-empty, non-failed payload counts as satisfaction. A report card
+        # or a failed artifact never satisfies an explicit doc deliverable.
+        expected = _FORMAT_TO_ARTIFACT_TYPE.get(doc_format)
+        if any(
+            isinstance(a, dict)
+            and bool(a.get("success"))
+            and expected is not None
+            and (a.get("type") or "").lower().strip() == expected
+            for a in already_created
+        ):
+            return None
+        # None matched — fall through so the user still gets the deliverable.
 
     if artifact_ids:
         if not settings.DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED:
@@ -725,11 +764,20 @@ async def ensure_artifact_for_doc_request(
         # Strict mode: only artifacts whose stored type matches the
         # requested format count as satisfaction. A report card (html_report)
         # never satisfies an explicit pptx/docx/xlsx/dashboard request.
-        if any(
-            _artifact_matches_requested_format(aid, doc_format, db)
-            for aid in artifact_ids
-        ):
-            return None
+        if settings.GOAL_CONTRACT_ENABLED:
+            # Contract mode adds the content gate: the payload must actually
+            # exist (non-empty, non-failed build) — not just match by type.
+            if any(
+                _artifact_satisfies_deliverable(aid, doc_format, db)
+                for aid in artifact_ids
+            ):
+                return None
+        else:
+            if any(
+                _artifact_matches_requested_format(aid, doc_format, db)
+                for aid in artifact_ids
+            ):
+                return None
         # None matched — fall through to the fallback so the user still gets
         # the deliverable they asked for.
 

@@ -441,6 +441,15 @@ class Settings(BaseSettings):
     # Fix 5: consonant-skeleton fuzzy match so "Dashbord"-class typos still
     # route to the dashboard machinery across all four intent detectors.
     DASHBOARD_FUZZY_MATCH_ENABLED: bool = False
+    # ── GOAL CONTRACT (shared agent loop) ─────────────────────────────────
+    # A machine-checkable Goal Contract is built once per turn from the
+    # user's message and updated at runtime from tool results. Before ANY
+    # loop exit the contract is checked; unmet criteria force remediation
+    # steps (artifact tool, re-query with distinct values, announced tool),
+    # bounded by GOAL_CONTRACT_MAX_FORCES. Off = bit-for-bit current
+    # behavior (all detectors/guards run their legacy paths).
+    GOAL_CONTRACT_ENABLED: bool = False
+    GOAL_CONTRACT_MAX_FORCES: int = 3
 
     # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
     # Post-FINALIZE semantic quality layer: a combined completeness +

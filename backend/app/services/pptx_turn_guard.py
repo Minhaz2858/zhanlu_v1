@@ -48,9 +48,16 @@ _PPTX_NUDGE_CAP = 2
 def is_pptx_request(user_content: str | None) -> bool:
     """True when the user asked for a PPT/PPTX deliverable.
 
-    Reuses ``detect_file_intent`` (EN + ZH aware): 'make a sales overview
-    PPT', 'PowerPoint', '做一份销售总览PPT' → True.
+    Goal-Contract mode delegates to the typo-tolerant normalizer (the single
+    source of truth). Legacy reuses ``detect_file_intent`` (EN + ZH aware):
+    'make a sales overview PPT', 'PowerPoint', '做一份销售总览PPT' → True.
     """
+    if not user_content:
+        return False
+    if getattr(settings, "GOAL_CONTRACT_ENABLED", False):
+        from app.services.goal_contract import normalize_deliverable_intent
+
+        return normalize_deliverable_intent(user_content) == "pptx"
     return detect_file_intent(user_content) == "pptx"
 
 

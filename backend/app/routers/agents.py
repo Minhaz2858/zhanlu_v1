@@ -128,6 +128,7 @@ from app.services.memory_consolidation import consolidate_turn_memory  # noqa: E
 # _create_artifact_tool pipeline so they produce the same preview/links as
 # LLM-driven create_artifact tool calls. Stripped from visible text.
 from app.services.synexia.intent_router import detect_file_intent  # noqa: E402
+from app.services.goal_contract import build_goal_contract  # noqa: E402 — Goal-Contract closed loop
 from app.services.answer_verification import (  # noqa: E402 — universal self-eval gate
     build_gap_disclosure,
     build_replan_nudge,
@@ -340,6 +341,13 @@ def _is_dashboard_request(user_content: str) -> bool:
     """Heuristic: does the user's message ask for a dashboard?"""
     if not user_content:
         return False
+    # Goal-Contract mode: the typo-tolerant normalizer is the single source
+    # of truth (catches dashboard / Dashbord / dahsboard / 看板 / 仪表盘 /
+    # 仪表板 / 数据面板 / 数据看板 / 大屏). Flag-off keeps the legacy path.
+    if getattr(settings, "GOAL_CONTRACT_ENABLED", False):
+        from app.services.goal_contract import normalize_deliverable_intent
+
+        return normalize_deliverable_intent(user_content) == "dashboard"
     low = user_content.lower()
     if any(kw in low for kw in ("dashboard", "看板", "仪表盘", "数据面板")):
         return True
@@ -7441,6 +7449,29 @@ async def add_message_stream(
             None, user_content or "", is_automation=_auto_flag,
         )
         _schema_edges_seen = False
+        # ── Goal-Contract closed loop (flag-gated) ────────────────────
+        # A machine-checkable contract for this turn: what deliverable (if
+        # any) the user asked for, whether data is required, and whether the
+        # model promised a follow-up tool call in prose. Built ONCE per turn
+        # here, updated at runtime from tool results, and checked FIRST in
+        # the no-tool-calls exit branch. When GOAL_CONTRACT_ENABLED is off,
+        # ``_contract`` stays None and every legacy guard below runs
+        # bit-for-bit as before (flag-off = current behavior).
+        _contract = None
+        _contract_force_tool = None  # remediation force armed by the exit checker
+        if settings.GOAL_CONTRACT_ENABLED:
+            try:
+                _contract = build_goal_contract(
+                    user_content or "",
+                    agent_config={
+                        "tools": _tool_names_from_schemas(tools),
+                        "bound_kb_ids": data_ctx_extras.get("bound_kb_ids") or [],
+                    },
+                    max_forces=settings.GOAL_CONTRACT_MAX_FORCES,
+                )
+            except Exception as _gc_err:  # noqa: BLE001 — contract must never break the loop
+                logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
+                _contract = None
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -7454,11 +7485,26 @@ async def add_message_stream(
             # via the T-3 wrap-up nudge below, and we break here if it
             # keeps going. MAX_TOOL_ITERATIONS still bounds the range.
             if iteration >= _effective_budget:
-                logger.info(
-                    "v3 stream: dynamic per-turn budget reached (%d) for conv=%s; wrapping up",
-                    _effective_budget, conversation_id,
-                )
-                break
+                # Goal-Contract soft-cap suppression: when the turn contract
+                # still has unmet criteria (deliverable unproduced / zero-row
+                # re-query / announced tool), skip the soft-cap break so the
+                # exit-checker force machinery below can fire. The hard cap
+                # MAX_TOOL_ITERATIONS still bounds the loop.
+                if (
+                    settings.GOAL_CONTRACT_ENABLED
+                    and _contract is not None
+                    and bool(_contract.unmet(_tool_names_from_schemas(tools)))
+                ):
+                    logger.info(
+                        "v3 stream: soft-cap reached but goal-contract unmet (conv=%s, iter=%d); continuing",
+                        conversation_id, iteration,
+                    )
+                else:
+                    logger.info(
+                        "v3 stream: dynamic per-turn budget reached (%d) for conv=%s; wrapping up",
+                        _effective_budget, conversation_id,
+                    )
+                    break
             # --- Mid-turn steer drain (P2) ---
             # Pick up any user steer messages enqueued by the POST /steer
             # endpoint since the last iteration. Inject them into the LLM
@@ -7623,10 +7669,36 @@ async def add_message_stream(
                 _pptx_forced = True
                 _pptx_force_next_iteration = False  # consume the one-shot force
 
+            # Goal-Contract force (flag-gated): the exit checker armed a
+            # remediation force (unmet deliverable / zero-row re-query /
+            # announced-but-unexecuted tool). Override tool_choice so the next
+            # LLM turn MUST emit the required tool. Tool-presence was already
+            # verified inside contract.unmet(); dashboard/pptx guard forcing
+            # above takes precedence via the finish-line guard flag below.
+            _contract_forced = False
+            if (
+                settings.GOAL_CONTRACT_ENABLED
+                and _contract is not None
+                and _contract_force_tool is not None
+                and _contract_force_tool in _tool_names
+            ):
+                logger.info(
+                    "v3 stream: goal-contract forcing %s (conv=%s, iter=%d)",
+                    _contract_force_tool, conversation_id, iteration,
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": _contract_force_tool},
+                }
+                _contract_forced = True
+                _contract_force_tool = None  # consume the one-shot force
+
             # Finish line: on the final iteration force tool_choice="none" so
-            # the LLM must answer in text. Guard forcing (dashboard + pptx) wins.
+            # the LLM must answer in text. Guard forcing (dashboard + pptx +
+            # goal-contract) wins.
             tool_choice = _finish_line_tool_choice(
-                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced or _pptx_forced, tool_choice,
+                iteration, MAX_TOOL_ITERATIONS - 1,
+                dashboard_forced or _pptx_forced or _contract_forced, tool_choice,
             )
 
             # ── Gap 1: true token streaming ───────────────────────────
@@ -7833,6 +7905,30 @@ async def add_message_stream(
                 yield f'data: {json.dumps({"type": "reasoning_done", "reasoning": final_reasoning, "step_count": len(tool_calls_for_frontend)})}\n\n'
 
             if not raw_tool_calls:
+                # ── Goal-Contract exit checker (flag-gated) ──────────
+                # FIRST in the exit branch: if the turn contract has unmet
+                # criteria (deliverable unproduced / zero-rows-with-text-
+                # filters / an announced-but-unexecuted tool), inject the
+                # remediation nudge and arm the tool_choice force for the
+                # next iteration, then continue the loop. When the contract
+                # is satisfied (or the force budget is exhausted) the legacy
+                # guardrail → verify-on-stop → pptx-guard → self-eval chain
+                # below runs unchanged (flag-off = current behavior).
+                if settings.GOAL_CONTRACT_ENABLED and _contract is not None:
+                    _gc_unmet = _contract.unmet(_tool_names_from_schemas(tools))
+                    if _gc_unmet:
+                        _gc_crit = _gc_unmet[0]
+                        _contract.record_force()
+                        _contract_force_tool = _gc_crit.force_tool
+                        llm_messages.append({"role": "assistant", "content": assistant_content})
+                        llm_messages.append({"role": "user", "content": _gc_crit.message})
+                        logger.info(
+                            "v3 stream: goal-contract unmet (%s) → forcing %s "
+                            "(conv=%s, iter=%d, forces=%d/%d)",
+                            _gc_crit.code, _gc_crit.force_tool, conversation_id,
+                            iteration, _contract.forces_used, _contract.max_forces,
+                        )
+                        continue
                 guardrail_result = _check_hallucination_guardrail(
                     user_content, data_ctx_extras, tool_calls_for_frontend,
                     iteration, guardrail_retries,
@@ -8431,6 +8527,39 @@ async def add_message_stream(
                 if tool_name in INTERNAL_TOOLS:
                     tool_call_record["display_projection"] = _internal_tool_projection(tool_name)
                 tool_calls_for_frontend.append(tool_call_record)
+
+                # ── Goal-Contract runtime updates (flag-gated) ───────
+                # Feed tool outcomes into the turn contract so the exit
+                # checker can verify the goal was actually achieved (artifact
+                # produced from non-empty data, query rows returned, announced
+                # tool executed). Pure in-memory work; no new I/O.
+                if _contract is not None and isinstance(result, dict):
+                    _contract.record_tool_executed(tool_name)
+                    # Query results: only a real rows payload counts (a bare
+                    # sql key without rows must not register a zero-row event).
+                    if isinstance(result.get("rows"), list):
+                        _contract.record_query_result(
+                            result.get("rows"), result.get("sql"),
+                        )
+                    # Artifacts / dashboards: any successful produce call
+                    # satisfies the deliverable; kind is mapped to the contract
+                    # canonical form so _deliverable_produced() can match.
+                    _gc_produced = bool(
+                        result.get("artifact_id")
+                        or result.get("dashboard")
+                        or result.get("dashboard_app")
+                    )
+                    if result.get("success") and _gc_produced:
+                        if result.get("dashboard") or result.get("dashboard_app"):
+                            _gc_kind = "dashboard"
+                        else:
+                            _gc_kind = result.get("kind") or result.get("type") or tool_name
+                        _gc_rows = result.get("rows")
+                        _contract.record_artifact(
+                            kind=str(_gc_kind).lower(),
+                            ok=True,
+                            rows=(len(_gc_rows) if isinstance(_gc_rows, list) else None),
+                        )
 
                 # ── Dynamic budget upgrade ───────────────────────────
                 # describe_schema revealed schema-graph join edges: widen

@@ -50,6 +50,18 @@ def fuzzy_dashboard_request(user_content: str | None) -> bool:
     """
     if not user_content:
         return False
+    # Goal-Contract mode: the typo-tolerant normalizer is the single source
+    # of truth — it catches the exact keyword, Dashbord-class typos AND the
+    # Chinese variants, so the fuzzy path is a superset of the skeleton match.
+    try:
+        from app.config import settings
+
+        if getattr(settings, "GOAL_CONTRACT_ENABLED", False):
+            from app.services.goal_contract import normalize_deliverable_intent
+
+            return normalize_deliverable_intent(user_content) == "dashboard"
+    except Exception:
+        pass
     for token in re.split(r"[^a-zA-Z-]+", user_content.lower()):
         if _fuzzy_dashboard_word(token):
             return True

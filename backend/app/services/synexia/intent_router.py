@@ -78,6 +78,21 @@ def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
     """
     if not text:
         return None
+    # Goal-Contract mode: the typo-tolerant normalizer is the single source
+    # of truth for file-format intent (dashboard-first priority, EN+ZH,
+    # Dashbord-class typos). Fall back to the legacy patterns only when it
+    # returns None so edge phrasing never regresses.
+    try:
+        from app.config import settings
+
+        if getattr(settings, "GOAL_CONTRACT_ENABLED", False):
+            from app.services.goal_contract import normalize_deliverable_intent
+
+            fmt = normalize_deliverable_intent(text)
+            if fmt in {"docx", "pptx", "xlsx", "pdf", "md", "html", "dashboard"}:
+                return fmt
+    except Exception:
+        pass
     # Iterate in priority order — first hit wins.
     for fmt, pattern in _COMPILED.items():
         if pattern.search(text):
