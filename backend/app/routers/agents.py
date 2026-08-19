@@ -129,7 +129,11 @@ from app.services.memory_consolidation import consolidate_turn_memory  # noqa: E
 # LLM-driven create_artifact tool calls. Stripped from visible text.
 from app.services.synexia.intent_router import detect_file_intent  # noqa: E402
 from app.services.goal_contract import (  # noqa: E402 — Goal-Contract closed loop
+    RESULT_QUALITY_ASSUMED_OK,
+    RESULT_QUALITY_NO_DATA,
     build_goal_contract,
+    is_effective_empty,
+    is_metadata_only_rows,
     pending_action_phrase,
 )
 from app.services.answer_verification import (  # noqa: E402 — universal self-eval gate
@@ -646,10 +650,45 @@ def _is_long_running_tool(tool_name: str) -> bool:
     return tool_name in _LONG_RUNNING_TOOLS
 
 
+def _start_finalize_offloaded(db, finalize_kwargs: dict) -> asyncio.Task:
+    """Run ``finalize_into_artifact`` off the event loop with heartbeat coverage.
+
+    ``finalize_into_artifact`` calls ``run_sandbox_skill_sync`` which blocks
+    the event loop for 30-120s while a Docker container renders PPTX/DOCX.
+    Running it directly inside the SSE generator starves the 5s heartbeat and
+    the browser shows "connection interrupted". This helper commits the caller's
+    session, then spawns the work in a thread with its own ``SessionLocal`` so
+    the event loop stays free for heartbeats.
+    """
+    from app.database import SessionLocal as _FinalizeSessionLocal
+
+    # Make conversation/message rows visible to the thread's new session before
+    # we hand off.
+    try:
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    def _threaded_finalize():
+        _fdb = _FinalizeSessionLocal()
+        try:
+            result = finalize_into_artifact(_fdb, **finalize_kwargs)
+            _fdb.commit()
+            return result
+        except Exception:
+            _fdb.rollback()
+            raise
+        finally:
+            _fdb.close()
+
+    return asyncio.ensure_future(asyncio.to_thread(_threaded_finalize))
+
+
 async def _emit_tool_progress_while_waiting(
     task: asyncio.Task,
     parsed_calls: list,
-    interval: float = 15.0,
+    interval: float = 5.0,
 ):
     """Yield ``tool_progress`` SSE frames while ``task`` is still running.
 
@@ -703,6 +742,45 @@ async def _sse_with_heartbeat(agen, interval: float = _SSE_HEARTBEAT_INTERVAL):
             pending.cancel()
         try:
             await agen.aclose()
+        except Exception:
+            pass
+
+
+async def _guarantee_done(agen):
+    """Guarantee a final ``done`` SSE frame reaches the client.
+
+    The v3 stream only commits the assistant message on the ``done``
+    frame. Any unhandled exception between the report-card render and the
+    done emission (DB error, serialization crash, provider hiccup) used to
+    kill the generator without ``done`` → the frontend showed "Sorry, the
+    connection was interrupted" even though the answer/report card had
+    already rendered. Draining the inner generator here lets us emit a
+    minimal ``done`` (with the generic fallback content) before closing
+    cleanly, so the client always unblocks and never shows the
+    interrupted error.
+
+    Cancellation (client disconnect) and GeneratorExit (``aclose``) are
+    re-raised untouched — the client is gone, emitting is pointless.
+    """
+    try:
+        async for frame in agen:
+            yield frame
+    except (asyncio.CancelledError, GeneratorExit, StopAsyncIteration):
+        raise
+    except BaseException as exc:  # noqa: BLE001 — must never drop the client
+        logger.error(
+            "v3 stream: unhandled generator error; emitting fallback done: %s",
+            exc,
+        )
+        try:
+            yield (
+                'data: ' + json.dumps({
+                    "type": "done",
+                    "content": _GENERIC_EMPTY_CONTENT_FALLBACK,
+                    "trace": [],
+                    "conversation": {},
+                }) + '\n\n'
+            )
         except Exception:
             pass
 
@@ -7498,6 +7576,14 @@ async def add_message_stream(
     # the text BETWEEN two ask_data_agent calls can be checked for retry
     # hints (an explicit re-query supersedes the earlier result).
     _ask_data_content_len = [0]
+    # Smart-retry budget (LLM-driven broadening) for empty ask_data_agent
+    # results with a file-format intent. Mutable list so the nested
+    # generator can decrement it without declaring nonlocal.
+    _smart_retry_budget = [2]
+    # Set True when the no-data branch renders a card-only outcome (no
+    # empty PPTX/DOCX). The post-loop artifact fallback must be skipped
+    # for that turn — an empty file is worse than a clear no-data card.
+    _orch_no_data = [False]
 
     async def event_stream():
         nonlocal assistant_content, guardrail_retries, messages, conv
@@ -7617,6 +7703,7 @@ async def add_message_stream(
         # bit-for-bit as before (flag-off = current behavior).
         _contract = None
         _contract_force_tool = None  # remediation force armed by the exit checker
+        _contract_force_synthesis = False  # same, but forces tool_choice="none" for synthesis
         if settings.GOAL_CONTRACT_ENABLED:
             try:
                 _bound_kb_ids = data_ctx_extras.get("bound_kb_ids") or []
@@ -7632,6 +7719,7 @@ async def add_message_stream(
             except Exception as _gc_err:  # noqa: BLE001 — contract must never break the loop
                 logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
                 _contract = None
+        _loop_exit_monotonic = None
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -7852,6 +7940,23 @@ async def add_message_stream(
                 }
                 _contract_forced = True
                 _contract_force_tool = None  # consume the one-shot force
+
+            # Goal-Contract force-synthesis: the exit checker armed a
+            # forced-synthesis (usable data already retrieved; the model just
+            # needs to write the answer). Override tool_choice="none" so the
+            # model must answer in prose.
+            if (
+                settings.GOAL_CONTRACT_ENABLED
+                and _contract is not None
+                and _contract_force_synthesis
+            ):
+                logger.info(
+                    "v3 stream: goal-contract forcing synthesis (conv=%s, iter=%d)",
+                    conversation_id, iteration,
+                )
+                tool_choice = "none"
+                _contract_forced = True
+                _contract_force_synthesis = False  # consume the one-shot force
 
             # Finish line: on the final iteration force tool_choice="none" so
             # the LLM must answer in text. Guard forcing (dashboard + pptx +
@@ -8105,13 +8210,18 @@ async def add_message_stream(
                     if _gc_unmet:
                         _gc_crit = _gc_unmet[0]
                         _contract.record_force()
-                        _contract_force_tool = _gc_crit.force_tool
+                        if _gc_crit.force_synthesis:
+                            _contract_force_synthesis = True
+                        else:
+                            _contract_force_tool = _gc_crit.force_tool
                         llm_messages.append({"role": "assistant", "content": assistant_content})
                         llm_messages.append({"role": "user", "content": _gc_crit.message})
                         logger.info(
                             "v3 stream: goal-contract unmet (%s) → forcing %s "
                             "(conv=%s, iter=%d, forces=%d/%d)",
-                            _gc_crit.code, _gc_crit.force_tool, conversation_id,
+                            _gc_crit.code,
+                            "synthesis" if _gc_crit.force_synthesis else _gc_crit.force_tool,
+                            conversation_id,
                             iteration, _contract.forces_used, _contract.max_forces,
                         )
                         continue
@@ -8608,6 +8718,54 @@ async def add_message_stream(
                     paused_for_approval = True
                     break
 
+                # ── Smart retry: empty ask_data_agent result + doc intent ─
+                # The query ran to completion but returned 0 rows. Before
+                # finalizing a no-data card, ask the LLM to propose a
+                # broader question and re-run the data agent (strict
+                # budget: max 2 attempts). If data comes back, `result`
+                # is replaced so the normal data path below synthesizes
+                # and finalizes a real artifact.
+                if (
+                    tool_name == "ask_data_agent"
+                    and isinstance(result, dict)
+                    and result.get("rows") == []
+                    and _orch_doc_format
+                    and _smart_retry_budget[0] > 0
+                ):
+                    try:
+                        async def _retry_llm_call(_sys, _msgs, _ep=effective_llm.endpoint):
+                            _r = await _call_synthesis_llm(_sys, _msgs, endpoint=_ep)
+                            return _r.get("content", "") if isinstance(_r, dict) else ""
+
+                        async def _retry_execute(_q):
+                            return await execute_tool(
+                                "ask_data_agent", {"question": _q},
+                                db, user.id if user else None, context=ctx,
+                            )
+
+                        from app.services.synexia.smart_retry import llm_driven_retry_ask_data
+                        _retried = await llm_driven_retry_ask_data(
+                            question=user_content,
+                            failed_result=result,
+                            call_llm_fn=_retry_llm_call,
+                            execute_ask_data_fn=_retry_execute,
+                            max_attempts=2,
+                        )
+                    except Exception as _retry_err:
+                        logger.warning(
+                            "v3 smart retry failed (non-fatal) for conv=%s: %s",
+                            conversation_id, _retry_err,
+                        )
+                        _retried = None
+                    if _retried is not None and _retried.get("rows"):
+                        _smart_retry_budget[0] -= 1
+                        result = _retried
+                        logger.info(
+                            "v3 SMART RETRY: recovered %d rows for conv=%s (question=%s)",
+                            len(_retried.get("rows", [])), conversation_id,
+                            _retried.get("retried_question", "")[:80],
+                        )
+
                 # ── Report synthesis: enrich ask_data_agent results ──────
                 if tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
                     try:
@@ -8634,16 +8792,36 @@ async def add_message_stream(
                             # user asked for DOCX).  We MUST re-serialize
                             # the payload AFTER finalize so the mutated
                             # field reaches the frontend.
-                            artifact, file_exports = finalize_into_artifact(
+                            # Offload finalize to a thread: the sandbox
+                            # render can block 30-120s; if we await it
+                            # directly the SSE heartbeat starves and the
+                            # connection drops. Commit the caller's session
+                            # first, then run with heartbeat coverage.
+                            _finalize_task = _start_finalize_offloaded(
                                 db,
-                                conversation_id=conversation_id,
-                                agent_name=agent_name,
-                                user_message=user_content,
-                                source=result.get("source_name"),
-                                sql=result.get("sql"),
-                                payload=synth_result.report_card_payload,
-                                message_id=assistant_msg_id,
+                                {
+                                    "conversation_id": conversation_id,
+                                    "agent_name": agent_name,
+                                    "user_message": user_content,
+                                    "source": result.get("source_name"),
+                                    "sql": result.get("sql"),
+                                    "payload": synth_result.report_card_payload,
+                                    "message_id": assistant_msg_id,
+                                },
                             )
+                            async for _hb in _emit_tool_progress_while_waiting(
+                                _finalize_task,
+                                [
+                                    {
+                                        "tool_call_id": "finalize-artifact",
+                                        "tool_name": "create_artifact",
+                                        "args_str": "",
+                                        "args": {},
+                                    }
+                                ],
+                            ):
+                                yield _hb
+                            artifact, file_exports = _finalize_task.result()
                             # Re-serialize AFTER finalize so user_signal
                             # reflects any change (e.g. "export_docx").
                             result["report_card_payload"] = synth_result.report_card_payload.model_dump()
@@ -8673,48 +8851,35 @@ async def add_message_stream(
                         )
                 elif tool_name == "ask_data_agent" and _should_finalize_no_data(result, _orch_doc_format):
                     # ── Empty rows + file-format intent ──────────────────
-                    # The query ran but returned 0 rows. Without this
-                    # branch the report/artifact chain dies here (the rich
-                    # gate above requires truthy rows). Finalize a graceful
-                    # "no data" report deterministically so the user still
-                    # receives the requested file with a clear narrative.
+                    # After the smart retry (above) exhausted its budget the
+                    # query still returned 0 rows. Per the user's rule ("if
+                    # there's no data, how would the agent make the file?"),
+                    # we do NOT render an empty PPTX/DOCX — an empty artifact
+                    # misleads and confuses. Instead we emit a clear no-data
+                    # report card + narrative and mark the turn so the
+                    # post-loop artifact fallback is skipped (an empty file
+                    # generated from the generic fallback text is worse than
+                    # a clean "no data" card).
                     try:
                         no_data_payload = build_no_data_payload(
                             user_message=user_content,
                             source=result.get("source_name"),
                             sql=result.get("sql"),
                         )
-                        artifact, file_exports = finalize_into_artifact(
-                            db,
-                            conversation_id=conversation_id,
-                            agent_name=agent_name,
-                            user_message=user_content,
-                            source=result.get("source_name"),
-                            sql=result.get("sql"),
-                            payload=no_data_payload,
-                            message_id=assistant_msg_id,
-                        )
                         result["report_card_payload"] = no_data_payload.model_dump()
                         result["no_data"] = True
-
-                        if file_exports:
-                            result["file_exports"] = file_exports
-                            primary_fmt = next(iter(file_exports))
-                            export_artifact_id = file_exports[primary_fmt].get("artifact_id")
-                            if export_artifact_id:
-                                result["artifact_id"] = export_artifact_id
-                                artifact_ids.append(export_artifact_id)
-                        if artifact is not None and not file_exports:
-                            result["artifact_id"] = artifact.id
-                            artifact_ids.append(artifact.id)
+                        result["synthesis_text"] = (
+                            no_data_payload.summary
+                            or "No data was found for the requested filters/time period."
+                        )
+                        _orch_no_data[0] = True
                         logger.info(
-                            "v3 FINALIZE (no-data): artifact_id=%s attached for conv=%s (doc_format=%s)",
-                            getattr(artifact, 'id', None) if artifact else None,
+                            "v3 NO-DATA (card only, no empty file): conv=%s (doc_format=%s)",
                             conversation_id, _orch_doc_format,
                         )
                     except Exception as no_data_err:
                         logger.warning(
-                            "v3 No-data finalize failed (non-fatal) for conv=%s: %s",
+                            "v3 No-data card failed (non-fatal) for conv=%s: %s",
                             conversation_id, no_data_err,
                         )
 
@@ -8746,7 +8911,26 @@ async def add_message_stream(
                 # produced from non-empty data, query rows returned, announced
                 # tool executed). Pure in-memory work; no new I/O.
                 if _contract is not None and isinstance(result, dict):
-                    _contract.record_tool_executed(tool_name)
+                    # A query tool call that returned no usable rows (empty /
+                    # all-null / metadata-only snapshot, or a failed call with
+                    # no rows payload) must NOT count as fulfilling an
+                    # announced action — pass the quality down so
+                    # _announced_executed stays unset and the pending-action
+                    # (now: _executed_seq is not stamped, so _armed_seq >
+                    # _executed_seq on exit)
+                    # remediation can still fire on exit.
+                    _query_rows = result.get("rows")
+                    _query_quality = (
+                        RESULT_QUALITY_NO_DATA
+                        if (
+                            is_effective_empty(_query_rows)
+                            or is_metadata_only_rows(_query_rows)
+                        )
+                        else RESULT_QUALITY_ASSUMED_OK
+                    )
+                    _contract.record_tool_executed(
+                        tool_name, result_quality=_query_quality
+                    )
                     # Query results: only a real rows payload counts (a bare
                     # sql key without rows must not register a zero-row event).
                     if isinstance(result.get("rows"), list):
@@ -9086,6 +9270,7 @@ async def add_message_stream(
                 return
 
         # --- Stream the final response ---
+        _loop_exit_monotonic = time.monotonic()
         # Use the ``assistant_content`` already captured by the main loop's
         # last non-streaming ``_call_llm_with_tools`` call. DO NOT re-call
         # the LLM here: when the message history still contains assistant
@@ -9144,16 +9329,19 @@ async def add_message_stream(
 
         # ── Activity step: "Generating response" done ──
         _step_counter[0] += 1
-        _gen_dur = int((time.monotonic() - _step_start_times.get(_step_counter[0] - 1, time.monotonic())) * 1000)
+        if _loop_exit_monotonic is not None:
+            _gen_dur = int((time.monotonic() - _loop_exit_monotonic) * 1000)
+        else:
+            _gen_dur = None
         yield _emit_activity_step(
             _step_counter[0], "Generating response", "done",
-            duration_ms=_gen_dur,
+            duration_ms=_gen_dur if _gen_dur is not None else 0,
         )
         _activity_steps.append({
             "number": _step_counter[0],
             "description": "Generating response",
             "status": "done",
-            "duration_ms": _gen_dur,
+            "duration_ms": _gen_dur if _gen_dur is not None else 0,
         })
 
         # ── Marker contract: ◤MD_DOCX◤ / ◤HTML_DOCX◤ / ◤PPTX◤ ──
@@ -9240,21 +9428,22 @@ async def add_message_stream(
                     "v3 stream: refusal guardrail raised (non-fatal): %s",
                     _rg_err,
                 )
-            _fallback = await ensure_artifact_for_doc_request(
-                doc_format=_orch_doc_format,
-                assistant_content=assistant_content,
-                already_created=_orch_created,
-                tool_calls_for_frontend=tool_calls_for_frontend,
-                artifact_ids=artifact_ids,
-                db=db,
-                context={
-                    "conversation_id": conversation_id,
-                    "agent_app_id": agent_app_id,
-                    "user_message": user_content,
-                },
-            )
-            if _fallback:
-                _orch_created = list(_orch_created) + [_fallback]
+            if not _orch_no_data[0]:
+                _fallback = await ensure_artifact_for_doc_request(
+                    doc_format=_orch_doc_format,
+                    assistant_content=assistant_content,
+                    already_created=_orch_created,
+                    tool_calls_for_frontend=tool_calls_for_frontend,
+                    artifact_ids=artifact_ids,
+                    db=db,
+                    context={
+                        "conversation_id": conversation_id,
+                        "agent_app_id": agent_app_id,
+                        "user_message": user_content,
+                    },
+                )
+                if _fallback:
+                    _orch_created = list(_orch_created) + [_fallback]
         except Exception as _marker_outer_err:
             logger.warning(
                 "v3 Marker parsing block failed (non-fatal): %s",
@@ -9674,7 +9863,7 @@ async def add_message_stream(
         _discard_steer(conversation_id)
 
     return StreamingResponse(
-        _sse_with_heartbeat(event_stream()),
+        _sse_with_heartbeat(_guarantee_done(event_stream())),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
