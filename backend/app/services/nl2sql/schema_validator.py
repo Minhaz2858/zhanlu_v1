@@ -11,6 +11,7 @@ keywords.
 
 from __future__ import annotations
 
+import difflib
 import logging
 import re
 
@@ -18,6 +19,7 @@ from sqlalchemy.orm import Session
 import sqlglot
 from sqlglot import expressions as exp
 
+from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 from app.services.db.schema_graph import _map_dialect
 from app.services.db.schema_service import SchemaService
@@ -165,13 +167,41 @@ def _cte_output_columns(cte: exp.CTE) -> list[str]:
     return cols
 
 
+def _suggest_table_matches(service: SchemaService, kb_id: str, name: str) -> list[str]:
+    """Up to 5 closest catalog table names for ``name`` (fuzzy, generic)."""
+    try:
+        listing = service.list_tables(kb_id)
+    except Exception as exc:  # noqa: BLE001 — catalog lookup is best-effort
+        logger.debug("schema_validator: list_tables failed: %s", exc)
+        return []
+    pool = listing.get("tables") or []
+    return difflib.get_close_matches(name, [str(t) for t in pool], n=5, cutoff=0.5)
+
+
+def _suggest_column_matches(col_names: list[str], name: str) -> list[str]:
+    """Up to 5 closest known columns for ``name`` (fuzzy, generic)."""
+    return difflib.get_close_matches(
+        name, [str(c) for c in col_names], n=5, cutoff=0.5
+    )
+
+
+def _format_column_suggestion(prefix: str, matches: list[str]) -> str:
+    text = prefix
+    if matches:
+        text += " — did you mean: " + ", ".join(matches) + "?"
+    return text
+
+
 def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     """Validate ``sql`` against the schema of KnowledgeBase ``kb_id``.
 
     Returns:
         ``{"is_valid": bool, "errors": [str, ...],
            "warnings": [str, ...],
-           "available_columns": {table: [col, ...]}}``.
+           "available_columns": {table: [col, ...]},
+           "available_suggestions": [str, ...]}``
+        ``available_suggestions`` is additive (flag-gated) — consumers that
+        ignore it fall back to legacy behavior.
 
     ``warnings`` never affect ``is_valid`` (structural validity is intact);
     they flag cardinality risks (fan-out) that callers may choose to act on.
@@ -216,6 +246,8 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
 
     available_columns: dict[str, list[str]] = {}
     errors: list[str] = []
+    suggestions: list[str] = []
+    suggest = settings.SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED
     for t in sorted(tables):
         if t.lower() in cte_columns:
             available_columns[t] = list(cte_columns[t.lower()])
@@ -229,6 +261,13 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
         available_columns[t] = cols
         if not cols:
             errors.append(f"table '{t}' does not exist or has no columns")
+            if suggest:
+                matches = _suggest_table_matches(service, kb_id, t)
+                text = f"table '{t}' not found"
+                if matches:
+                    text += " — did you mean: " + ", ".join(matches) + "?"
+                text += " Use describe_schema to list available tables."
+                suggestions.append(text)
 
     for col in parsed.find_all(exp.Column):
         name = col.name
@@ -246,11 +285,24 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
                 continue
             if resolved in available_columns and name not in available_columns[resolved]:
                 errors.append(f"column '{name}' not found in table '{resolved}'")
+                if suggest:
+                    suggestions.append(_format_column_suggestion(
+                        f"column '{name}' not found in table '{resolved}'",
+                        _suggest_column_matches(available_columns[resolved], name),
+                    ))
         else:
             # Unqualified column: valid if present in any referenced table
             # (real tables + CTE projections).
             if not any(name in cols for cols in available_columns.values()):
                 errors.append(f"column '{name}' not found in any referenced table")
+                if suggest:
+                    all_cols = {
+                        c for cols in available_columns.values() for c in cols
+                    }
+                    suggestions.append(_format_column_suggestion(
+                        f"column '{name}' not found in any referenced table",
+                        _suggest_column_matches(sorted(all_cols), name),
+                    ))
 
     warning: str | None = None
     try:
@@ -263,4 +315,5 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
         "errors": errors,
         "warnings": [warning] if warning else [],
         "available_columns": available_columns,
+        "available_suggestions": suggestions,
     }

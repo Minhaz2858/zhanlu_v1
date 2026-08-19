@@ -707,6 +707,11 @@ class Settings(BaseSettings):
     #   before executing generated SQL; on failure return available_columns
     #   feedback for one retry.
     SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED: bool = False
+    # SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED: when the structural validator
+    #   rejects a query for unknown tables/columns, include up to 5 fuzzy
+    #   "did you mean" suggestions (difflib vs the catalog) plus FK-master
+    #   hints so the agent self-corrects in one retry.
+    SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED: bool = False
     # SCHEMA_GRAPH_AUTOJOIN_THRESHOLD: minimum edge confidence for the agent
     #   to auto-join silently (FK or value-overlap); below this it must ask
     #   (except automation runs, which never ask).
