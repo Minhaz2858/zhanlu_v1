@@ -439,6 +439,14 @@ async def _execute_query(
     max_rows = int(args.get("max_rows", 1000))
     timeout_s = int(args.get("timeout_s", 10))
 
+    # Read-only gate: this KB never accepts write/DDL statements. Runs before
+    # the data-access-policy check so the rejection reason is unambiguous.
+    from app.services.nl2sql.schema_validator import check_read_only_sql
+
+    ro_error = check_read_only_sql(sql)
+    if ro_error:
+        return {"success": False, "error": ro_error, "sql": sql}
+
     # Per-user access policy: reject queries against denied tables BEFORE
     # execution (closes the gap where QueryService.execute had no validation).
     policy = _resolve_user_policy(db, user_id, context)
@@ -475,6 +483,7 @@ async def _execute_query(
                     "success": False,
                     "error": "Query references unknown tables/columns: " + "; ".join(str(e) for e in errors),
                     "available_columns": vres.get("available_columns", {}),
+                    "available_suggestions": vres.get("available_suggestions", []),
                     "sql": sql,
                 }
         except Exception as exc:
