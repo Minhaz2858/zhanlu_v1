@@ -85,6 +85,50 @@ def _is_introspection_statement(parsed: exp.Expression) -> bool:
     return isinstance(parsed, _INTROSPECTION_CLASSES)
 
 
+# Write/DDL statement classes — this KB is read-only, so none may execute.
+# NOTE: sqlglot parses TRUNCATE TABLE to ``exp.TruncateTable`` (there is no
+# ``exp.Truncate``) in this version.
+_WRITE_OR_DDL_CLASSES = (
+    exp.Insert,
+    exp.Update,
+    exp.Delete,
+    exp.Drop,
+    exp.Create,
+    exp.Alter,
+    exp.Merge,
+    exp.TruncateTable,
+)
+
+
+def _is_write_or_ddl(parsed: exp.Expression) -> bool:
+    """True when the statement tree contains any write/DDL expression."""
+    return any(
+        next(parsed.find_all(cls_), None) is not None
+        for cls_ in _WRITE_OR_DDL_CLASSES
+    )
+
+
+_READ_ONLY_ERROR = (
+    "query contains write/DDL statements; this knowledge base is read-only"
+)
+
+
+def check_read_only_sql(sql: str, dialect: str = "mysql") -> str | None:
+    """Return the read-only error string when ``sql`` contains write/DDL.
+
+    Defensive gate for callers that run the validator path (db_tools).
+    Returns ``None`` for read-only statements and for anything sqlglot
+    cannot parse (the parse error is surfaced by the validator itself).
+    """
+    try:
+        parsed = sqlglot.parse_one(sql, dialect=dialect)
+    except Exception:
+        return None
+    if _is_write_or_ddl(parsed):
+        return _READ_ONLY_ERROR
+    return None
+
+
 def _extract_alias_map(parsed: exp.Expression) -> dict[str, str]:
     """Map lowercase alias -> real table name.
 
@@ -142,6 +186,14 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     except Exception as exc:
         logger.warning("schema_validator: unparseable SQL: %s", exc)
         return {"is_valid": False, "errors": ["unparseable SQL"], "available_columns": {}}
+
+    if _is_write_or_ddl(parsed):
+        # Read-only gate: never let write/DDL statements reach the connector.
+        return {
+            "is_valid": False,
+            "errors": [_READ_ONLY_ERROR],
+            "available_columns": {},
+        }
 
     if _is_introspection_statement(parsed):
         # SHOW/DESCRIBE/EXPLAIN/PRAGMA/ANALYZE run natively on the engine —
