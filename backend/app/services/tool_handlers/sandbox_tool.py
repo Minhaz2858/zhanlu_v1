@@ -222,6 +222,7 @@ def _build_runner_modules() -> dict[str, str]:
     """
     sandbox_dir = Path(__file__).parent.parent / "sandbox"
     sidebar_charts = Path(__file__).parent.parent / "artifacts" / "charts"
+    exporters_dir = Path(__file__).parent.parent / "artifacts" / "exporters"
     targets = {
         "skill_driven_runner.py": sandbox_dir / "skill_driven_runner.py",
         "llm_client.py":          sandbox_dir / "llm_client.py",
@@ -232,6 +233,14 @@ def _build_runner_modules() -> dict[str, str]:
         # `import layout_engine` / `import branded_charts` from /input/skill/.
         "layout_engine.py":       sandbox_dir.parent / "artifacts" / "layout_engine.py",
         "branded_charts.py":      sidebar_charts / "branded_charts.py",
+        # Sandbox-portability (2026-08-19): layout_engine.py now imports
+        # ``cap_chart_categories`` from this pure-Python module (no app.*
+        # dependencies) instead of ``_common.py`` (which carries the heavy
+        # ``from app.services.synexia.contracts import …`` at module top).
+        # Vendor it alongside layout_engine.py so the sandbox container can
+        # resolve ``from _chart_helpers import cap_chart_categories`` without
+        # ``No module named 'app'``.
+        "_chart_helpers.py":      exporters_dir / "_chart_helpers.py",
     }
     out: dict[str, str] = {}
     for filename, path in targets.items():

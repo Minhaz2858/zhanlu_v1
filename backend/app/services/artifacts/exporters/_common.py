@@ -24,6 +24,22 @@ from app.services.synexia.contracts import (
     ReportCardPayload,
 )
 
+# --- Re-exports for back-compat (sandbox-portability refactor 2026-08-19) -----
+# The pure-Python chart-prep helpers (``coerce_number``,
+# ``CHART_CATEGORY_CAP``, ``OTHER_BUCKET_LABEL``, ``cap_chart_categories``)
+# moved to ``_chart_helpers.py`` so the sandbox runner can vendor them
+# alongside ``layout_engine.py`` without dragging in the synexia.contracts
+# import. In-process renderers (``pptx_export.py`` / ``docx_export.py`` /
+# ``pdf_export.py`` / ``html_export.py``) keep importing from ``_common``;
+# the shim below preserves their existing import paths. Anything new should
+# import from ``_chart_helpers`` directly.
+from app.services.artifacts.exporters._chart_helpers import (  # noqa: E402,F401
+    CHART_CATEGORY_CAP,
+    OTHER_BUCKET_LABEL,
+    cap_chart_categories,
+    coerce_number,
+)
+
 
 @dataclass
 class ExportContext:

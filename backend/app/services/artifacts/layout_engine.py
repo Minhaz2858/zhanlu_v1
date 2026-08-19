@@ -44,7 +44,7 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE
 
-from app.services.artifacts.exporters._common import cap_chart_categories
+from app.services.artifacts.exporters._chart_helpers import cap_chart_categories
 
 
 logger = logging.getLogger(__name__)
