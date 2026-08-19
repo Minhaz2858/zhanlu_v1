@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
+from app.services.goal_contract import pending_action_phrase
 
 logger = logging.getLogger(__name__)
 
@@ -785,6 +786,13 @@ def _evaluate_answer_inner(
     if _detect_placeholder_text(assistant_text):
         signals.append("placeholder")
         gaps.append("the draft answer is placeholder text, not real data")
+
+    if pending_action_phrase(assistant_text):
+        signals.append("pending_action")
+        gaps.append(
+            "the draft answer announces a future action instead of answering "
+            "with the retrieved data"
+        )
 
     missing = _detect_dimension_coverage(
         user_message, results, assistant_text, catalog_meta=catalog_meta,
