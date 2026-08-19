@@ -609,6 +609,14 @@ STREAM_TOKEN_DELTAS = os.environ.get("ZHANLU_STREAM_TOKEN_DELTAS", "1") not in (
 # Override via the ZHANLU_SSE_HEARTBEAT_S env var for tuning.
 _SSE_HEARTBEAT_INTERVAL = max(1.0, float(os.environ.get("ZHANLU_SSE_HEARTBEAT_S", "5")))
 
+# Ceiling for the post-tool experience / response-cache hook. get_embedding()
+# (LLM API call) inside _store_turn_cache can take 30-60s; running it on the
+# event loop starved the SSE heartbeat and made the frontend see "connection
+# interrupted" before the `done` frame was emitted (2026-08-19). Offloaded to
+# a worker thread; anything slower than this ceiling is logged and skipped so
+# the `done` frame always fires.
+EXPERIENCE_HOOK_TIMEOUT_S = float(os.environ.get("ZHANLU_EXPERIENCE_HOOK_TIMEOUT_S", "60"))
+
 # ── tool_progress heartbeat during long tool execution ──────────────────
 # Delegation / sub-agent tools (ask_perception, ask_intelligence,
 # ask_diagnosis, ask_perception_intelligence_diagnosis, ask_data_agent, …)
@@ -9586,27 +9594,83 @@ async def add_message_stream(
             logger.warning("v3 stream quality eval failed (non-fatal): %s", _qe_err)
 
         # --- Experience layer (Phase A/B): recipe + profile + cache store ---
+        # BUG FIX (post-tool offload, follows f435531): get_embedding() inside
+        # _store_turn_cache is a sync LLM API call (5-60s); running it inline
+        # on the event loop starved the SSE heartbeat pings in
+        # _sse_with_heartbeat() so the `done` frame below was never emitted
+        # before nginx/proxy idle-killed the connection. Offload the whole
+        # experience hook to a worker thread, bounded by a ceiling so a stalled
+        # embedding service fails over gracefully instead of hanging the stream.
+        # The offloaded work opens its own DB session (SQLAlchemy Session is
+        # not thread-safe across threads; see the established pattern at
+        # line 5522). Best-effort: any failure is logged and skipped, so the
+        # `done` frame below always fires.
         try:
-            _record_turn_experience(
-                agent_app_id=agent_app_id,
-                user_id=getattr(user, "id", None),
-                user_content=user_content,
-                assistant_content=assistant_content,
-                tool_sequence=tool_calls_for_frontend,
-                iterations=len(tool_calls_for_frontend or []),
+            def _experience_work() -> None:
+                from app.database import SessionLocal
+                _record_turn_experience(
+                    agent_app_id=agent_app_id,
+                    user_id=getattr(user, "id", None),
+                    user_content=user_content,
+                    assistant_content=assistant_content,
+                    tool_sequence=tool_calls_for_frontend,
+                    iterations=len(tool_calls_for_frontend or []),
+                )
+                cache_db = SessionLocal()
+                try:
+                    _store_turn_cache(
+                        cache_db,
+                        agent_app_id=agent_app_id,
+                        user_id=getattr(user, "id", None),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        artifact_ids=(
+                            assistant_msg.get("artifact_ids")
+                            if isinstance(assistant_msg, dict) else None
+                        ),
+                    )
+                finally:
+                    try:
+                        cache_db.close()
+                    except Exception:
+                        pass
+
+            await asyncio.wait_for(
+                asyncio.to_thread(_experience_work),
+                timeout=EXPERIENCE_HOOK_TIMEOUT_S,
             )
-            _store_turn_cache(
-                db,
-                agent_app_id=agent_app_id,
-                user_id=getattr(user, "id", None),
-                user_content=user_content,
-                assistant_content=assistant_content,
-                artifact_ids=assistant_msg.get("artifact_ids") if isinstance(assistant_msg, dict) else None,
+        except asyncio.TimeoutError:
+            logger.warning(
+                "v3 stream experience hook timed out after %ss (non-fatal)",
+                EXPERIENCE_HOOK_TIMEOUT_S,
             )
         except Exception as _xp_err:  # noqa: BLE001 — best-effort
             logger.warning("experience: turn-end hook failed (non-fatal): %s", _xp_err)
 
-        yield f'data: {json.dumps({"type": "done", "content": assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
+        # ── Always emit the `done` frame last ──
+        # BUG FIX: the `done` frame is the only signal the frontend uses to
+        # commit the assistant message; if any earlier step raised something
+        # the outer try/excepts didn't catch (e.g. BaseException subclasses
+        # like asyncio.CancelledError from a proxy timeout, or a generator
+        # close mid-stream), the frontend would see a dropped connection
+        # without ever receiving `done`. Wrap the post-tool section in a
+        # try/finally so `done` is yielded regardless. (See f435531 — the
+        # artifact-render fix already offloaded the long sync work; this
+        # guards the remaining path.)
+        try:
+            yield f'data: {json.dumps({"type": "done", "content": assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
+        except (GeneratorExit, StopIteration):
+            raise
+        except Exception as _done_err:
+            logger.error(
+                "v3 stream: failed to serialize `done` frame (non-fatal): %s",
+                _done_err,
+            )
+            # Emit a minimal fallback `done` so the frontend at least unblocks.
+            try:
+                yield f'data: {json.dumps({"type": "done", "content": assistant_content or "", "trace": [], "conversation": {}})}\n\n'
+            except Exception:
+                logger.error("v3 stream: fallback done frame also failed")
         _discard_steer(conversation_id)
 
     return StreamingResponse(
