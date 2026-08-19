@@ -2286,8 +2286,8 @@ export default function Chat() {
           }
         } else if (evt.type === 'artifact_created' && evt.artifact) {
           // Live artifact (Claude-style side panel): the moment an artifact
-          // exists mid-turn, attach it to the message and auto-open the
-          // preview pane for the first one — no waiting for `done`.
+          // exists mid-turn, attach it to the message. The preview pane is
+          // only opened when the user clicks "Open" on the artifact card.
           const art = evt.artifact;
           const artId = art.artifact_id || art.id;
           if (artId && !finalArtifacts.some((a) => (a.artifact_id || a.id) === artId)) {
@@ -2297,9 +2297,6 @@ export default function Chat() {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id ? { ...m, artifacts: [...finalArtifacts] } : m
             ));
-            // Auto-open only the FIRST live artifact; later ones don't
-            // yank the pane away if the user already opened/closed one.
-            setOpenArtifact((cur) => cur || art);
           }
         } else if (evt.type === 'trace_step' && evt.step) {
           // P0: incremental trace_step from the v3 SSE. Append to the
@@ -2363,7 +2360,15 @@ export default function Chat() {
             });
           }
         } else if (evt.type === 'done') {
-          fullContent = typeof evt.content === 'string' ? evt.content : fullContent;
+          // Defensive merge (2026-08-20): the `done` event's content is the
+          // server-authoritative message, but in multi-iteration turns it can
+          // carry only the LAST iteration's prose. Prefer the LONGER of
+          // (locally-streamed delta accumulation, server content) so earlier
+          // iterations' text (tables, findings, recommendations) is never
+          // wiped from the visible bubble.
+          if (typeof evt.content === 'string' && evt.content.length > (fullContent?.length || 0)) {
+            fullContent = evt.content;
+          }
           // The done event carries the authoritative assistant message
           // (with full tool_calls + artifacts) inside evt.conversation.
           // Extract them so charts (report_card_payload in tool_calls) and
@@ -2408,7 +2413,6 @@ export default function Chat() {
                 setMessages((prev) => prev.map((m) => (
                   m.id === aiMsg.id ? { ...m, artifacts: [...finalArtifacts] } : m
                 )));
-                setOpenArtifact((cur) => cur || artifact);
               },
               onRefresh: () => { },
             });

@@ -232,8 +232,14 @@ def _build_schema_graph(db: Session, kb_id: str, tables, cte_columns):
         return None
 
 
-def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
+def validate_against_schema(
+    sql: str, kb_id: str, db: Session, did_you_mean: bool | None = None
+) -> dict:
     """Validate ``sql`` against the schema of KnowledgeBase ``kb_id``.
+
+    ``did_you_mean`` overrides the ``SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED``
+    setting per call (agent-level opt-in).  ``None`` → fall back to the
+    setting.
 
     Returns:
         ``{"is_valid": bool, "errors": [str, ...],
@@ -288,7 +294,11 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     errors: list[str] = []
     suggestions: list[str] = []
     fk_errors: list[tuple[str, str]] = []  # (resolved table, unknown column)
-    suggest = settings.SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED
+    suggest = (
+        settings.SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED
+        if did_you_mean is None
+        else did_you_mean
+    )
     for t in sorted(tables):
         if t.lower() in cte_columns:
             available_columns[t] = list(cte_columns[t.lower()])

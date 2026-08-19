@@ -204,7 +204,16 @@ class TestMetadataHaltSubLoop(unittest.TestCase):
         args = {"question": "top materials by revenue", "data_source_id": "kb-1"}
         if max_iterations is not None:
             args["max_iterations"] = max_iterations
+
+        # The sub-loop self-eval gate (SELF_EVAL_REPLAN_ENABLED=true in .env)
+        # runs its own verification path which appends a gap disclosure to the
+        # answer — that would pollute these assertions. Disable it so the tests
+        # exercise ONLY the metadata-halt behavior deterministically.
+        async def fake_gate(*args, **kwargs):
+            return "", ""
+
         with patch.object(delegation_tools, "_call_llm", side_effect=fake_call_llm), \
+             patch.object(delegation_tools, "_sub_loop_answer_gate", side_effect=fake_gate), \
              patch.object(agent_tools, "execute_tool", side_effect=fake_execute_tool):
             result = asyncio.run(delegation_tools._ask_data_agent(
                 args=args,

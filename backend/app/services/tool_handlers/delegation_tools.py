@@ -38,6 +38,7 @@ from app.services.answer_verification import (  # universal self-eval gate
     build_replan_nudge,
     evaluate_answer,
 )
+from app.services.goal_contract import is_metadata_only_rows
 from app.services.tool_handlers import db_tools  # ensure DB tools registered
 from app.services.tool_registry import registry
 from app.services.sub_agent_reliability import (
@@ -162,6 +163,13 @@ async def _ask_data_agent(
     sub_context["bound_kb_ids"] = bound_kb_ids
     if preferred_kb:
         sub_context["data_source_id"] = preferred_kb
+    # Agent-level opt-in for the schema validator (NOT a global flag flip):
+    # the Data Agent's execute_query calls get did-you-mean suggestions + FK
+    # master hints as structured error context, so it self-corrects instead
+    # of silently degrading after a bad query.  The validator is feedback,
+    # not a gate — it never blocks valid SQL.
+    sub_context["schema_validator_enabled"] = True
+    sub_context["did_you_mean_enabled"] = True
 
     iterations = 0
     _gate_attempts = 0  # universal self-eval re-plan nudges this sub-loop turn
@@ -468,9 +476,31 @@ async def _ask_data_agent(
         if kb:
             state["source_name"] = kb.name
 
+    # --- Metadata-only honesty gate -----------------------------------------
+    # If the sub-agent's last query returned ONLY date-range / row-count
+    # aggregates (MIN/MAX/COUNT with no business dimensions), that is not a
+    # real answer. Return a STRUCTURED failure so the calling agent sees
+    # honest context ("query returned only metadata") instead of a
+    # "success with metadata rows" that it would render as real data. The
+    # rows are still passed through so the main loop's GoalContract can
+    # count the metadata-only shape and force a real query on exit.
+    _metadata_only = is_metadata_only_rows(state.get("last_rows"))
+    if _metadata_only:
+        final_text = (
+            "The Data Agent's query returned only metadata (date range / "
+            "row-count aggregates such as MIN/MAX/COUNT) without business "
+            "data rows. Re-run the query selecting the actual business "
+            "columns instead of wrapping them in MIN/MAX/COUNT."
+        )
+        _metadata_err = (
+            "query returned only metadata (date range / row count) without "
+            "business data rows"
+        )
+
     return {
-        "success": _initial_llm_failure is None,
-        "error": _initial_llm_failure,
+        "success": _initial_llm_failure is None and not _metadata_only,
+        "error": (_metadata_err if _metadata_only else _initial_llm_failure),
+        "error_kind": "metadata_only" if _metadata_only else None,
         "answer": final_text,
         "rows": state["last_rows"],
         "sql": state["last_sql"],

@@ -211,7 +211,12 @@ export default function MobileChatPage() {
             ));
           }
         } else if (evt.type === 'done') {
-          fullContent = typeof evt.content === 'string' ? evt.content : fullContent;
+          // Defensive merge (2026-08-20): prefer the LONGER of
+          // (locally-streamed deltas, server `done` content) so multi-iter
+          // turns keep earlier iterations' prose in the visible bubble.
+          if (typeof evt.content === 'string' && evt.content.length > (fullContent?.length || 0)) {
+            fullContent = evt.content;
+          }
           const convMsgs = evt.conversation?.messages || [];
           const lastAssistant = [...convMsgs].reverse().find((m) => m?.role === 'assistant');
           if (Array.isArray(lastAssistant?.tool_calls) && lastAssistant.tool_calls.length) {

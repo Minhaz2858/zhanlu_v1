@@ -261,68 +261,9 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
     })
     : null;
 
-  // ── Early open side panel when user_signal starts with `export_` ──
-  // BEFORE the sandbox finishes and file_exports arrives.  This shows
-  // the panel immediately with a "Generating preview…" spinner so the
-  // user knows something is happening.  When file_exports later
-  // populates the ready-effect below replaces the pending artifact.
-  const _pendingOpenedRef = useRef(new Set());
-  useEffect(() => {
-    const userSig = reportToolResult?.results?.user_signal;
-    if (!userSig || !userSig.startsWith('export_')) return;
-    // If file_exports already arrived, let the ready-effect handle it
-    if (reportToolResult?.results?.file_exports) return;
-    if (!onArtifactPreview) return;
-    if (_pendingOpenedRef.current.has(message.id)) return;
-    _pendingOpenedRef.current.add(message.id);
-
-    const fmt = userSig.replace('export_', '');
-    const title = reportToolResult.results.report_card_payload?.title || 'Report';
-    onArtifactPreview({
-      id: `pending-${message.id}`,
-      type: fmt,
-      title,
-      file_name: null,
-      preview_url: null,
-      file_url: null,
-      has_preview: false,
-      file_size: null,
-      is_pending: true,
-    });
-  }, [reportToolResult?.results?.user_signal, reportToolResult?.results?.file_exports, message.id, onArtifactPreview]);
-
-  // ── Auto-open side panel when the backend auto-generates a ──────
-  // DOCX/PPTX/XLSX/PDF file (file_exports in the tool result).
-  // Keyed by message id so opening/closing the panel doesn't re-trigger.
-  const _autoOpenedRef = useRef(new Set());
-  useEffect(() => {
-    if (!reportToolResult?.results?.file_exports) return;
-    if (!onArtifactPreview) return;
-    if (_autoOpenedRef.current.has(message.id)) return;
-    _autoOpenedRef.current.add(message.id);
-
-    const exports = reportToolResult.results.file_exports;
-    // Pick the first format (docx > pptx > xlsx > pdf > md)
-    const fmt = Object.keys(exports)[0];
-    if (!fmt) return;
-    const entry = exports[fmt];
-    const artifactId = entry.artifact_id;
-    if (!artifactId) return;
-
-    // Build a minimal artifact object matching ArtifactPreviewSheet's
-    // expected shape so the side panel renders the preview+download.
-    const artifactObj = {
-      id: artifactId,
-      type: fmt,
-      title: reportToolResult.results.report_card_payload?.title || 'Report',
-      file_name: `${(reportToolResult.results.report_card_payload?.title || 'report').replace(/\s+/g, '_')}.${fmt}`,
-      preview_url: entry.preview_url || null,
-      file_url: entry.download_url || null,
-      has_preview: !!entry.preview_url,
-      file_size: null,
-    };
-    onArtifactPreview(artifactObj);
-  }, [reportToolResult?.results?.file_exports, message.id, onArtifactPreview]);
+  // Artifact previews are NOT auto-opened: the user explicitly clicks
+  // "Open" on the artifact card (ArtifactPreviewCard) to open the
+  // right-anchored preview pane.
 
   // Pending export in progress — user_signal starts with export_ but
   // the sandbox hasn't returned file_exports yet.
@@ -365,7 +306,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
     : null;
 
   return (
-    <div className={`flex animate-slide-up gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
+    <div data-testid={isUser ? 'msg-user' : 'msg-assistant'} className={`flex animate-slide-up gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
       <div
         className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-full ${isUser
             ? 'bg-primary text-primary-foreground'

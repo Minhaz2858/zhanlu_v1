@@ -229,6 +229,7 @@ export default function PlusMenu({
         type="file"
         className="hidden"
         multiple
+        data-testid="file-upload-input"
         accept=".pdf,.docx,.pptx,.ppt,.xlsx,.xls,.csv,.txt,.md,.json,.html,.htm,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff,.tif,.mp3,.m4a,.wav,.mp4,.mov,.webm"
         onChange={handleFileChange}
       />

@@ -172,6 +172,7 @@ export default function ChatInput({
           <textarea
             ref={inputRef}
             data-chat-input="true"
+            data-testid="chat-textarea"
             value={value}
             onChange={(e) => onChange(e.target.value)}
             onPaste={handlePaste}
@@ -368,6 +369,7 @@ export default function ChatInput({
                     type="button"
                     onClick={handleSend}
                     disabled={disabled || !value.trim()}
+                    data-testid="btn-send"
                     title={t.common.send}
                     aria-label={t.common.send}
                     className="inline-flex h-8 w-8 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-violet-600 text-white shadow-md shadow-indigo-500/25 transition-all hover:from-indigo-600 hover:to-violet-700 hover:shadow-indigo-500/40 active:scale-95 disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"

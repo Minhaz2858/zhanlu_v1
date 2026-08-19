@@ -21,6 +21,28 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "llm: test requires a live LLM backend (DeepSeek)")
 
 
+# --- Synthetic shop-db fixture (real SQLite + catalog/graph mocks) ---------
+# Registered here (top-level) so any test under backend/tests/ can request
+# ``shop_db_path`` / ``shop_catalog_meta_fixture``. Builders live in
+# tests/fixtures/shop_db/conftest.py.
+from tests.fixtures.shop_db.conftest import (  # noqa: E402
+    build_shop_db as _build_shop_db,
+    shop_catalog_meta as _shop_catalog_meta,
+)
+
+
+@pytest.fixture(scope="module")
+def shop_db_path():
+    """Real SQLite file with the English snake_case shop schema + data."""
+    return _build_shop_db()
+
+
+@pytest.fixture(scope="module")
+def shop_catalog_meta_fixture():
+    """catalog_meta dict mock derived from the shop fixture's schema."""
+    return _shop_catalog_meta()
+
+
 def pytest_collection_modifyitems(config, items):
     """Auto-skip LLM tests when --no-llm is passed or LLM is unavailable."""
     skip_llm = config.getoption("--no-llm", default=False)

@@ -1968,7 +1968,7 @@ def get_forecast_chart(
     history_rows = _read_product_history_rows(product_id)
 
     # 2. Forecast runs — fetch ALL (not just 2) for step-function AI review
-    target_key = PRODUCT_FORECAST_TARGET_KEY.get(product_id)
+    target_key = PRODUCT_FORECAST_TARGET_KEY.get(product_id.strip().lower())
     forecast_curves: dict[str, list[float]] = {}
     previous_ai_series: dict[str, Optional[float]] = {}
     prev_ai_low_series: dict[str, Optional[float]] = {}
@@ -2255,7 +2255,7 @@ def get_forecast_analysis(
     from app.models.forecasting import ForecastTarget, ForecastRun
     from app.schemas.market_dashboard import ForecastAnalysisMeta  # noqa: F401
 
-    target_key = PRODUCT_FORECAST_TARGET_KEY.get(product_id)
+    target_key = PRODUCT_FORECAST_TARGET_KEY.get(product_id.strip().lower())
     if not target_key:
         return None
 

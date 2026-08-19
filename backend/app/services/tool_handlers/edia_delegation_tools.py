@@ -784,31 +784,131 @@ for _name, _schema, _handler, _desc in (
     ),
     (
         "ask_knowledge_graph",
-        _make_schema(
-            "ask_knowledge_graph",
-            "Query the EDIA Knowledge Graph to discover product relationships (upstream/downstream), substitution chains, and market dependencies across the 12 C5/C9 products. Use this for product-resolution and chain-impact questions.",
-            "Knowledge Graph Agent",
-        ),
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_knowledge_graph",
+                "description": "Query the EDIA Knowledge Graph to discover product relationships (upstream/downstream), substitution chains, and market dependencies across the 12 C5/C9 products. Use this for product-resolution and chain-impact questions.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "question": {
+                            "type": "string",
+                            "description": "Natural-language query (e.g. 'what are upstream products of isoprene?')",
+                        },
+                        "product": {
+                            "type": "string",
+                            "description": "Product name or ID to scope the query (e.g. 'isoprene', 'dcpd')",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["auto", "upstream", "downstream", "chain", "summary", "resolve"],
+                            "description": "Query mode. Default: 'auto' (auto-detect from question)",
+                        },
+                        "async": {
+                            "type": "boolean",
+                            "description": "If true, enqueue for background execution. Default: false.",
+                        },
+                    },
+                    "required": ["question"],
+                },
+            },
+        },
         _ask_knowledge_graph,
         "Query the knowledge graph for product relationships.",
     ),
     (
         "ask_decision",
-        _make_schema(
-            "ask_decision",
-            "Ask the EDIA Decision Agent to produce a structured decision recommendation: evaluate pricing alternatives, apply critic gates, run the decision audit trail, and output a final decision with rationale, risks, and triggers.",
-            "Decision Agent",
-        ),
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_decision",
+                "description": "Ask the EDIA Decision Agent to produce a structured decision recommendation: evaluate pricing alternatives, apply critic gates, run the decision audit trail, and output a final decision with rationale, risks, and triggers.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product": {
+                            "type": "string",
+                            "description": "Product ID or name (e.g. 'isoprene', 'piperylene', 'dcpd', 'c5_resin', 'sis')",
+                        },
+                        "perception": {
+                            "type": "object",
+                            "description": "Optional perception snapshot dict from ask_perception",
+                        },
+                        "diagnosis": {
+                            "type": "object",
+                            "description": "Optional diagnosis dict from ask_diagnosis",
+                        },
+                        "forecast": {
+                            "type": "object",
+                            "description": "Optional forecast dict from forecast_brief",
+                        },
+                        "pricing_decision": {
+                            "type": "object",
+                            "description": "Optional pricing decision dict from ask_pricing",
+                        },
+                        "mode": {
+                            "type": "string",
+                            "enum": ["full", "dry_run"],
+                            "description": "Mode: 'full' (default) or 'dry_run' (critic only)",
+                        },
+                        "async": {
+                            "type": "boolean",
+                            "description": "If true, enqueue for background execution. Default: false.",
+                        },
+                    },
+                    "required": ["product"],
+                },
+            },
+        },
         _ask_decision,
         "Ask the EDIA Decision Agent for a decision recommendation.",
     ),
     (
         "ask_macro_override",
-        _make_schema(
-            "ask_macro_override",
-            "Apply a macro-level override to any pricing recommendation — e.g. 'add 5% for naphtha due to crude disruption' or 'cap at ceiling for styrene'. Registers the override in the audit trail.",
-            "Macro Override",
-        ),
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_macro_override",
+                "description": "Manage the active macro override (naphtha shock). Modes: get (read current), set (apply a ±4%-capped shock), clear (deactivate). Used to inject real-time macro events into the pricing ladder.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "mode": {
+                            "type": "string",
+                            "enum": ["get", "set", "clear"],
+                            "description": "Operation: get current override, set new override, or clear. Default: 'get'",
+                        },
+                        "naphtha_shock_pct": {
+                            "type": "number",
+                            "description": "% shock to naphtha (e.g. 2.5 = +2.5%, capped at ±4%). Required when mode=set.",
+                        },
+                        "crude_shock_pct": {
+                            "type": "number",
+                            "description": "% crude shock for mode=set. Default: 0",
+                        },
+                        "event_type": {
+                            "type": "string",
+                            "enum": ["crude_spike", "tariff_shock", "force_majeure", "manual"],
+                            "description": "Event type for mode=set. Default: manual",
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Free-text description for mode=set",
+                        },
+                        "ttl_hours": {
+                            "type": "integer",
+                            "description": "Hours until auto-expiry for mode=set. Default: 24",
+                        },
+                        "async": {
+                            "type": "boolean",
+                            "description": "If true, enqueue for background execution. Default: false.",
+                        },
+                    },
+                    "required": ["mode"],
+                },
+            },
+        },
         _ask_macro_override,
         "Apply a macro-level pricing override.",
     ),
@@ -834,21 +934,73 @@ for _name, _schema, _handler, _desc in (
     ),
     (
         "ask_erp_kpi",
-        _make_schema(
-            "ask_erp_kpi",
-            "Query ERP KPIs (sales volume, revenue, margin, inventory) for a given product and period from the EDIA MySQL mirror. Use this for data-backed reporting and decision context.",
-            "ERP KPI Agent",
-        ),
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_erp_kpi",
+                "description": "Query ERP KPIs (sales volume, revenue, margin, inventory) for a given product and period from the EDIA MySQL mirror. Use this for data-backed reporting and decision context.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product": {
+                            "type": "string",
+                            "description": "Product ID or name (e.g. 'isoprene', 'piperylene', 'dcpd', 'c5_resin', 'sis')",
+                        },
+                        "days": {
+                            "type": "integer",
+                            "description": "Lookback period in days (default: 30)",
+                        },
+                        "async": {
+                            "type": "boolean",
+                            "description": "If true, enqueue for background execution. Default: false.",
+                        },
+                    },
+                    "required": ["product"],
+                },
+            },
+        },
         _ask_erp_kpi,
         "Query ERP KPIs from the EDIA data warehouse.",
     ),
     (
         "ask_erp_writeback",
-        _make_schema(
-            "ask_erp_writeback",
-            "Write a confirmed pricing decision or override back to the ERP system. Requires a decision_id or explicit pricing parameters. Records the writeback in the audit trail.",
-            "ERP Writeback Agent",
-        ),
+        {
+            "type": "function",
+            "function": {
+                "name": "ask_erp_writeback",
+                "description": "Stage a pricing recommendation for ERP review. Human-in-the-loop: recommendations are 'pending' until admin approves. Records the writeback in the audit trail.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "product": {
+                            "type": "string",
+                            "description": "Product ID or name (e.g. 'isoprene', 'piperylene')",
+                        },
+                        "recommended_price": {
+                            "type": "number",
+                            "description": "Recommended price in CNY/ton",
+                        },
+                        "valid_from": {
+                            "type": "string",
+                            "description": "Start date (YYYY-MM-DD, default: today)",
+                        },
+                        "valid_until": {
+                            "type": "string",
+                            "description": "End date (YYYY-MM-DD, optional)",
+                        },
+                        "rationale": {
+                            "type": "string",
+                            "description": "Free-text justification for the recommendation",
+                        },
+                        "async": {
+                            "type": "boolean",
+                            "description": "If true, enqueue for background execution. Default: false.",
+                        },
+                    },
+                    "required": ["product", "recommended_price"],
+                },
+            },
+        },
         _ask_erp_writeback,
         "Write a pricing decision back to ERP.",
     ),

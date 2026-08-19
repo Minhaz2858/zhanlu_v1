@@ -203,7 +203,7 @@ async def _forecast_run(
         seasonal_period (int): Expected seasonal cycle (default 7).
     """
     target_id = args.get("target_id")
-    product_id = args.get("product_id")
+    product_id = (args.get("product_id") or "").strip().lower() or None
     horizons = [int(h) for h in (args.get("horizons") or [3, 7, 30])]
     seasonal_period = int(args.get("seasonal_period", 7))
     org_id, _app_id = _resolve_org_context(context)
@@ -384,7 +384,7 @@ async def _forecast_list_skus(
         product_id  (str): The dashboard product_id (e.g. 'c5_resin',
                            'raffinate_c5').
     """
-    product_id = args.get("product_id")
+    product_id = (args.get("product_id") or "").strip().lower()
     if not product_id:
         return {"success": False, "error": "product_id is required."}
 
@@ -978,7 +978,7 @@ async def _forecast_brief(
     Optional args:
         day         (int): Forecast horizon in days (default 7).
     """
-    product_id = args.get("product_id")
+    product_id = (args.get("product_id") or "").strip().lower()
     if not product_id:
         return {"success": False, "error": "product_id is required."}
     day = int(args.get("day", 7))

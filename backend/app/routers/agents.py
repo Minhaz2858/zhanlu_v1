@@ -7720,6 +7720,15 @@ async def add_message_stream(
                 logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
                 _contract = None
         _loop_exit_monotonic = None
+        # Multi-iter content accumulator (2026-08-20):
+        # The v3 loop resets `assistant_content = ""` at the top of every
+        # iteration. Without this accumulator, the persisted assistant_msg
+        # and the `done` event's content field end up carrying ONLY the
+        # LAST iteration's prose — all earlier iterations' content (tables,
+        # key findings, recommendations) is silently lost. We capture each
+        # iter's content BEFORE the reset and join them post-loop.
+        _v3_iter_contents: list[str] = []
+        accumulated_content: str = ""  # post-loop computed; safe default for early-exit paths
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -7973,6 +7982,14 @@ async def add_message_stream(
             # reassembles fragmented tool_calls so agent tool execution
             # continues to work. When the flag is off, fall back to the
             # legacy buffered _call_llm_with_tools path (unchanged).
+            #
+            # Multi-iter content capture (2026-08-20):
+            # If a previous iteration produced prose (assistant_content is
+            # non-empty), append it to the accumulator BEFORE resetting for
+            # the next iter. Without this, multi-iter turns lose all but the
+            # LAST iter's prose in the persisted message + `done` event.
+            if assistant_content:
+                _v3_iter_contents.append(assistant_content)
             assistant_content = ""
             raw_tool_calls: list = []
             final_reasoning = ""
@@ -9629,10 +9646,26 @@ async def add_message_stream(
                 if _art.get("artifact_id") and _art["artifact_id"] not in artifact_ids:
                     artifact_ids.append(_art["artifact_id"])
 
+        # Multi-iter content accumulation (2026-08-20):
+        # Capture the FINAL iteration's `assistant_content` (the per-iter
+        # reset at the top of the loop only captures iter 1..N-1; iter N's
+        # content survives in `assistant_content` after the loop). After
+        # this append, `_v3_iter_contents` holds every iteration's prose
+        # in order. We join with `\n\n` (markdown paragraph break) and
+        # filter empty entries (tool-only iters with no prose) so the
+        # result reads naturally as a single flowing response.
+        if assistant_content:
+            _v3_iter_contents.append(assistant_content)
+        accumulated_content = "\n\n".join(c for c in _v3_iter_contents if c).strip()
+        # Edge case: if no iter produced any prose (all-tool turn), fall
+        # back to whatever assistant_content holds (fallback text or "").
+        if not accumulated_content and assistant_content:
+            accumulated_content = assistant_content
+
         # Save the final assistant message
         assistant_msg = {
             "id": assistant_msg_id, "role": "assistant",
-            "content": assistant_content,
+            "content": accumulated_content,
             "created_date": datetime.now(timezone.utc).isoformat(),
         }
         if tool_calls_for_frontend:
@@ -9775,6 +9808,24 @@ async def add_message_stream(
                 _qe_result = await asyncio.wait_for(_run_qe(), timeout=15.0)
                 if _qe_result.final_text and _qe_result.final_text != assistant_content:
                     assistant_content = _qe_result.final_text
+                    # Multi-iter content re-sync (2026-08-20):
+                    # Quality eval revised `assistant_content` POST-LOOP.
+                    # The accumulator's LAST entry holds the pre-revision
+                    # final-iter content — replace it so the revision is
+                    # preserved while earlier iterations stay intact.
+                    # Then re-compute `accumulated_content` and sync the
+                    # in-memory `assistant_msg["content"]` so the `done`
+                    # event's conversation payload reflects the revision
+                    # (DB commit at the final-write block already happened
+                    # with pre-revision content; this is a pre-existing
+                    # inconsistency, not introduced by this fix).
+                    if _v3_iter_contents:
+                        _v3_iter_contents[-1] = assistant_content
+                    else:
+                        _v3_iter_contents.append(assistant_content)
+                    accumulated_content = "\n\n".join(c for c in _v3_iter_contents if c).strip()
+                    if isinstance(assistant_msg, dict):
+                        assistant_msg["content"] = accumulated_content
                 # Emit quality eval verdict as SSE event
                 yield f'data: {json.dumps({"type": "quality_eval", "quality_eval": _qe_result.to_dict()})}\n\n'
         except asyncio.TimeoutError:
@@ -9847,7 +9898,7 @@ async def add_message_stream(
         # artifact-render fix already offloaded the long sync work; this
         # guards the remaining path.)
         try:
-            yield f'data: {json.dumps({"type": "done", "content": assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
+            yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
         except (GeneratorExit, StopIteration):
             raise
         except Exception as _done_err:
@@ -9857,7 +9908,7 @@ async def add_message_stream(
             )
             # Emit a minimal fallback `done` so the frontend at least unblocks.
             try:
-                yield f'data: {json.dumps({"type": "done", "content": assistant_content or "", "trace": [], "conversation": {}})}\n\n'
+                yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content or "", "trace": [], "conversation": {}})}\n\n'
             except Exception:
                 logger.error("v3 stream: fallback done frame also failed")
         _discard_steer(conversation_id)

@@ -40,6 +40,7 @@ def _llm_enabled() -> bool:
 
 def _latest_run(product_id: str, db):
     from app.models.forecasting import ForecastRun, ForecastTarget
+    product_id = product_id.strip().lower()
     target_key = mds.PRODUCT_FORECAST_TARGET_KEY.get(product_id)
     if not target_key:
         return None
@@ -57,6 +58,7 @@ def _latest_run(product_id: str, db):
 
 
 def _build_pack_for(product_id: str, day: int, run) -> dict:
+    product_id = product_id.strip().lower()
     labels = PRODUCT_LABELS.get(product_id, {})
     upstream_histories = {
         up: mds.read_product_history_rows(up)

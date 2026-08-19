@@ -469,10 +469,24 @@ async def _execute_query(
 
     # ── Structural schema validation (flag-gated): feedback, not a gate ──
     # Returns available-columns so the LLM self-corrects in the agent loop.
-    if settings.SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED:
+    # Enabled globally via SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED OR per-agent via
+    # context["schema_validator_enabled"] (the ask_data_agent sub-agent opts
+    # in so its queries get early did-you-mean / FK-master hints).
+    _ctx = context or {}
+    _schema_validation_enabled = bool(
+        settings.SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED
+        or _ctx.get("schema_validator_enabled")
+    )
+    _did_you_mean_enabled = bool(
+        settings.SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED
+        or _ctx.get("did_you_mean_enabled")
+    )
+    if _schema_validation_enabled:
         try:
             from app.services.nl2sql.schema_validator import validate_against_schema
-            vres = validate_against_schema(sql, kb_id, db)
+            vres = validate_against_schema(
+                sql, kb_id, db, did_you_mean=_did_you_mean_enabled
+            )
             if not vres.get("is_valid", True):
                 errors = vres.get("errors") or ["query references unknown tables/columns"]
                 logger.warning(
