@@ -110,7 +110,13 @@ async def test_fallback_creates_artifact_when_none_produced():
 
 @pytest.mark.asyncio
 async def test_fallback_skipped_when_marker_already_created():
-    with patch.object(orch, "_create_artifact_tool", new=AsyncMock()) as m:
+    from app.config import settings
+
+    # Legacy marker path: any marker-produced artifact suppresses the fallback
+    # (the goal-contract content gate is a separate, flag-gated behavior).
+    with patch.object(settings, "GOAL_CONTRACT_ENABLED", False), patch.object(
+        orch, "_create_artifact_tool", new=AsyncMock()
+    ) as m:
         result = await orch.ensure_artifact_for_doc_request(
             doc_format="pptx",
             assistant_content="deck",
@@ -284,9 +290,9 @@ async def test_fallback_skipped_when_artifact_matches_doc_format():
     from app.config import settings
 
     fake_db = _FakeDB({"p1": _FakeArtifact("pptx")})
-    with patch.object(settings, "DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED", True), patch.object(
-        orch, "_create_artifact_tool", new=AsyncMock()
-    ) as m:
+    with patch.object(settings, "GOAL_CONTRACT_ENABLED", False), patch.object(
+        settings, "DOC_REQUEST_STRICT_ARTIFACT_MATCH_ENABLED", True
+    ), patch.object(orch, "_create_artifact_tool", new=AsyncMock()) as m:
         result = await orch.ensure_artifact_for_doc_request(
             doc_format="pptx",
             assistant_content="deck",
@@ -615,7 +621,11 @@ async def test_fallback_dashboard_with_no_rows_renders_empty_state():
 async def test_fallback_dashboard_skipped_when_already_created():
     """Duplicate-safety: a finalizer that already attached an artifact this
     turn must suppress the dashboard fallback (no double artifact)."""
-    with patch.object(orch, "_create_artifact_tool", new=AsyncMock()) as m:
+    from app.config import settings
+
+    with patch.object(settings, "GOAL_CONTRACT_ENABLED", False), patch.object(
+        orch, "_create_artifact_tool", new=AsyncMock()
+    ) as m:
         result = await orch.ensure_artifact_for_doc_request(
             doc_format="dashboard",
             assistant_content="done",

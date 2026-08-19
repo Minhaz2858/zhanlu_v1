@@ -450,6 +450,11 @@ class Settings(BaseSettings):
     # behavior (all detectors/guards run their legacy paths).
     GOAL_CONTRACT_ENABLED: bool = False
     GOAL_CONTRACT_MAX_FORCES: int = 3
+    # Fix 1c: cap on turn-end "verify on stop" nudges. Shares the goal-contract
+    # force budget when the contract is active (a nudge is bounded by
+    # min(VERIFY_NUDGE_MAX, GOAL_CONTRACT_MAX_FORCES)); otherwise used as the
+    # standalone nudge cap. Default 2 matches the historical hardcoded value.
+    VERIFY_NUDGE_MAX: int = 2
 
     # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
     # Post-FINALIZE semantic quality layer: a combined completeness +

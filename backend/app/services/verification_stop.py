@@ -18,13 +18,17 @@ import logging
 from pathlib import Path
 from typing import Any, Iterable, TYPE_CHECKING
 
+from app.config import settings
+
 if TYPE_CHECKING:
     from app.services.coding_context import ProjectFacts
 
 logger = logging.getLogger(__name__)
 
 _MAX_CHANGED_PATHS_IN_NUDGE = 8
-_DEFAULT_MAX_ATTEMPTS = 2
+# Fix 1c: nudge cap is config-driven (VERIFY_NUDGE_MAX), so it can share a
+# single force budget with the goal contract instead of a hardcoded constant.
+_DEFAULT_MAX_ATTEMPTS = settings.VERIFY_NUDGE_MAX
 
 # Non-code file extensions whose edits carry no verifiable runtime behavior.
 # When a turn touches ONLY these, verify-on-stop has nothing to check.

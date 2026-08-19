@@ -325,41 +325,72 @@ def _title_from_user_request(user_message: str, fallback: str) -> str:
     return text[:120] if text else fallback
 
 
-def _mine_ask_data_result(tool_calls_for_frontend: list[dict]) -> Optional[dict]:
-    """Return the richest ``ask_data_agent`` result dict from this turn.
+def _mine_ask_data_result(
+    tool_calls_for_frontend: list[dict], *, skip_superseded: bool = True,
+) -> Optional[dict]:
+    """Return the richest non-superseded ``ask_data_agent`` result dict.
 
     Prefers a result carrying this turn's synthesized ``report_card_payload``;
-    otherwise the last result that has rows and/or an answer. Returns None
-    when no data call happened this turn.
+    otherwise the non-superseded result with the most rows (the overview is
+    more likely to carry the deliverable's verified payload than a drill-down
+    with fewer rows/columns). Returns None when no data call happened this
+    turn.
+
+    ``skip_superseded=True`` (default) drops results marked ``__superseded``
+    by the v3 loop (an empty/error query replaced by a later re-query on the
+    same bound KB). Superseded results must never shape a deck/card because
+    they cite data that was already discarded.
     """
     if not tool_calls_for_frontend:
         return None
     best: Optional[dict] = None
+    best_rows = -1
+    best_cols = -1
     for tc in tool_calls_for_frontend:
         if tc.get("name") != "ask_data_agent":
+            continue
+        if skip_superseded and tc.get("__superseded"):
             continue
         res = tc.get("results") or {}
         if not isinstance(res, dict):
             continue
         if isinstance(res.get("report_card_payload"), dict) and res["report_card_payload"]:
             return res  # jackpot: this turn's own synthesized payload
-        if res.get("rows") or res.get("answer"):
-            best = res
+        rows = res.get("rows")
+        n_rows = len(rows) if isinstance(rows, list) else 0
+        n_cols = (
+            len(rows[0]) if (
+                isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            ) else 0
+        )
+        if n_rows or res.get("answer"):
+            # Prefer the overview (more rows/columns) over a drill-down so
+            # the closing card reflects the deliverable, not the last query.
+            if best is None or (n_rows, n_cols) > (best_rows, best_cols):
+                best = res
+                best_rows, best_cols = n_rows, n_cols
     return best
 
 
-def _mine_ask_data_rows(tool_calls_for_frontend: list[dict]) -> list[dict]:
-    """Pull row dicts out of any ``ask_data_agent`` tool call in this turn.
+def _mine_ask_data_rows(
+    tool_calls_for_frontend: list[dict], *, skip_superseded: bool = True,
+) -> list[dict]:
+    """Pull row dicts out of non-superseded ``ask_data_agent`` calls.
 
     Honors the cap the platform documents for embedded data: anything beyond
     ``_DASHBOARD_MAX_ROWS`` is dropped (a fully pre-aggregated sample is
     preferable to a 100 MB HTML file).
+
+    ``skip_superseded=True`` (default) drops results marked ``__superseded``
+    so a stale empty/error query never contaminates the artifact payload.
     """
     if not tool_calls_for_frontend:
         return []
     rows: list[dict] = []
     for tc in tool_calls_for_frontend:
         if tc.get("name") != "ask_data_agent":
+            continue
+        if skip_superseded and tc.get("__superseded"):
             continue
         res = tc.get("results") or {}
         if not isinstance(res, dict):
@@ -874,7 +905,10 @@ async def ensure_artifact_for_doc_request(
     # non-chatter prose — never "I'm going to build …" meta-sentences.
     user_message = (context or {}).get("user_message") or ""
     fallback_title = f"{doc_format}-export"
-    data_result = _mine_ask_data_result(tool_calls_for_frontend or [])
+    # Fix 2a/3: only non-superseded ask_data_agent results shape the artifact
+    # payload — a stale empty/error query (replaced by a later re-query on the
+    # same bound KB) must never leak rows, citations, or methodology.
+    data_result = _mine_ask_data_result(tool_calls_for_frontend or [], skip_superseded=True)
 
     payload: dict[str, Any] | None = None
     title: Optional[str] = None
@@ -887,13 +921,24 @@ async def ensure_artifact_for_doc_request(
         title = payload.get("title") or None
 
     if payload is None:
-        rows = _mine_ask_data_rows(tool_calls_for_frontend or [])
+        rows = _mine_ask_data_rows(tool_calls_for_frontend or [], skip_superseded=True)
         answer = ((data_result or {}).get("answer") or "").strip()
         summary = answer or _prose_to_summary(assistant_content)
+        source_name = (data_result or {}).get("source_name") or "assistant-reply"
+        sql = ((data_result or {}).get("sql") or "").strip()
+        # Fix 2b: methodology cites only the final non-superseded source
+        # (name + clipped SQL + row count), never a merged list that could
+        # include a superseded query's dead source.
+        methodology = (
+            f"Data sourced from {source_name}"
+            + (f" (SQL: {sql[:80]}\u2026)" if sql else "")
+            + f" returning {len(rows)} rows."
+        )
         payload = {
             "summary": summary,
-            "source": (data_result or {}).get("source_name") or "assistant-reply",
+            "source": source_name,
             "user_signal": "export",
+            "methodology": methodology,
         }
         if rows:
             kpis = _rows_to_kpis(rows)
@@ -908,7 +953,6 @@ async def ensure_artifact_for_doc_request(
                     "y_keys": [value_col],
                     "data": rows[:50],
                 }
-        sql = ((data_result or {}).get("sql") or "").strip()
         if sql:
             payload["sql"] = sql
 

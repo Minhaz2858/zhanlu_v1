@@ -187,6 +187,84 @@ Known pre-existing failure (NOT caused by this work, verified via `git stash`):
 but `_stream_llm_with_tools` only retries by popping `tool_choice`. Separate
 follow-up.
 
+## Addendum: Four degradation-mode fixes (2026-08-19)
+
+Observed in a live goal-contract-enabled turn (conv 86d8861c, 718.5s): a PPT
+with real data was built but degraded by phantom-dimension flags, artifact
+contamination from superseded queries, card bias toward the last tool result,
+and an unclean exit with unexecuted promises.
+
+### Fix 1 — Phantom-dimension verification loop
+- `backend/app/services/answer_verification.py`:
+  - Added `_VERB_STOPWORDS`, `_FORMAT_STOPWORDS`, `_TIME_STOPWORDS` frozensets
+    next to `_ASPECT_STOPWORDS`/`_CONTAINER_STOPWORDS`; included in
+    `_detect_dimension_coverage`'s token filter (so "make a sales overview PPT
+    for last month" extracts zero phantom dimensions).
+  - `_detect_dimension_coverage(user_message, results, assistant_text, *,
+    catalog_meta=None)`: when `catalog_meta` is provided, a `missing` token is
+    kept only if it maps to a real catalog column (case-insensitive) or appears
+    in a column's `value_samples`; unmappable tokens are dropped. Plumbed from
+    `evaluate_answer` → `_evaluate_answer_inner` → `_check_answer_verification_gate`
+    in `agents.py` (`data_ctx_extras`).
+  - `_is_rebutted(missing_tok, assistant_text)`: suppression-only rebuttal
+    regex (`not in the catalog|no such dimension|doesn't exist|...`) within
+    ±40 chars of the token; applied to `missing` before flag emission.
+- `backend/app/config.py`: `VERIFY_NUDGE_MAX: int = 2`.
+- `backend/app/services/verification_stop.py`: `_DEFAULT_MAX_ATTEMPTS` replaced
+  with `settings.VERIFY_NUDGE_MAX`.
+- `backend/app/routers/agents.py`: verify-nudge call site now respects the
+  **shared force budget** — a nudge is issued only while
+  `_contract.forces_used < min(VERIFY_NUDGE_MAX, GOAL_CONTRACT_MAX_FORCES)`,
+  then `_contract.record_force()`.
+
+### Fix 2 — Artifact context contamination (superseded marker)
+- `backend/app/routers/agents.py`: after each `ask_data_agent` result is
+  processed, prior same-KB results that are empty/error (or were followed by
+  retry hints `retry|re-query|重试|重新|再查|rerun` in assistant text) get
+  `"__superseded": True` on the `tool_calls_for_frontend` entry.
+- `backend/app/services/generation_orchestrator.py`:
+  - `_mine_ask_data_rows` / `_mine_ask_data_result` gained
+    `skip_superseded: bool = True` and skip `__superseded` entries.
+  - Fallback payload's `methodology` now cites only the final non-superseded
+    source (source name + clipped SQL + row count), never a merged list.
+
+### Fix 3 — Final-card last-tool-result bias
+- `_mine_ask_data_rows(tool_calls_for_frontend, skip_superseded=True)` at the
+  L890 fallback so the closing card synthesizes from the deliverable's verified
+  payload, not the last drill-down tool result; superseded drill-downs excluded.
+
+### Fix 4 — Clean exit on budget exhaustion
+- `backend/app/routers/agents.py`:
+  - `_strip_trailing_pending(text, pending_sentence)` helper strips the trailing
+    sentence containing a pending-action phrase (mirrors
+    `goal_contract.pending_action_phrase` sentence split).
+  - In the no-tool-calls exit branch, when
+    `_contract.forces_used >= _contract.max_forces` and
+    `pending_action_phrase(assistant_content)` matches, the trailing pending
+    sentence is stripped and an explicit limitation note is appended
+    ("this turn ended before completing the additional verification described
+    above…"), so the closing text never promises work the budget can no longer
+    perform.
+
+### Tests (new, all passing)
+- `tests/test_answer_verification_stopwords.py` — zero phantom flags; verbs/formats
+  never extracted; "by region" with catalog still flags.
+- `tests/test_answer_verification_catalog_gate.py` — unmappable suppressed;
+  mappable kept; no catalog → legacy.
+- `tests/test_answer_verification_rebuttal.py` — rebuttal suppresses; partial
+  rebuttal only suppresses rebutted tokens.
+- `tests/test_verification_stop_budget.py` — `VERIFY_NUDGE_MAX` cap + shared
+  budget with `GOAL_CONTRACT_MAX_FORCES`; `record_force` increments.
+- `tests/test_generation_orchestrator_superseded.py` — superseded filtered;
+  methodology cites final table only.
+- `tests/test_generation_orchestrator_card_bias.py` — card numbers match
+  artifact, not last drill-down; superseded drill-down excluded.
+- `tests/test_agents_clean_exit.py` — budget-exhausted + pending-action →
+  stripped + limitation note; budget not exhausted → untouched.
+- 3 legacy skip-tests in `tests/test_generation_orchestrator.py` pinned
+  `GOAL_CONTRACT_ENABLED=False` (they asserted legacy flag-off behavior).
+- Targeted suite: **199 passed**.
+
 ## Notes for future work
 
 - True video transcription requires `ffmpeg` in Docker (extract audio track →

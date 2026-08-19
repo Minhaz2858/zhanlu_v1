@@ -100,6 +100,68 @@ _CONTAINER_STOPWORDS = frozenset({
     "title", "titles", "label", "labels",
 })
 
+# Action verbs that describe the REQUEST, not a data dimension. "make/show the
+# sales by region" asks for a breakdown — the verb itself is never a dimension
+# the results must enumerate (Fix 1a: cuts "make a sales overview PPT" phantom
+# flags on the verb).
+_VERB_STOPWORDS = frozenset({
+    "make", "create", "show", "give", "build", "generate", "tell", "produce",
+    "provide", "run", "write", "pull", "fetch", "get", "prepare", "compile",
+    "compute", "display", "present", "render", "draft", "deliver", "output",
+    "list", "find", "need", "want", "please", "help", "answer", "explain",
+    "summarize", "analyze", "calculate", "count",
+})
+
+# Output-format / deliverable words — the container of the answer, not a
+# content dimension. "make a sales overview PPT" must not flag "ppt".
+_FORMAT_STOPWORDS = frozenset({
+    "ppt", "pptx", "excel", "xlsx", "xls", "csv", "dashboard", "html", "file",
+    "deck", "report", "overview", "summary", "presentation", "slide", "slides",
+    "document", "docx", "pdf", "spreadsheet", "chart", "charts", "graph",
+    "graphs", "table", "tables", "export", "attachment",
+})
+
+# Time-window words — the query's temporal scope, not a dimension that results
+# must enumerate. "for last month" must not flag "month" (Fix 1a).
+_TIME_STOPWORDS = frozenset({
+    "month", "months", "last", "year", "years", "week", "weeks", "daily",
+    "weekly", "monthly", "yearly", "annual", "quarter", "quarters", "quarterly",
+    "recent", "yesterday", "today", "tomorrow", "date", "dates", "period",
+    "time", "now", "current", "latest",
+})
+
+# Rebuttal detection (Fix 1c). When the assistant explicitly rebuts a
+# candidate dimension ("no such column in the catalog", "not available"),
+# the token is NOT a phantom flag — the model already explained why the
+# dimension cannot be returned. Suppresses only the rebutted tokens; it
+# never invents new flags.
+_REBUTTAL_RE = re.compile(
+    r"\b(not\s+in\s+(?:the\s+)?catalog|no\s+such\s+(?:dimension|column|field|attribute)"
+    r"|(?:doesn'?t|does\s+not)\s+exist|not\s+available|not\s+present|none\s+of)\b",
+    re.IGNORECASE,
+)
+_REBUTTAL_WINDOW_CHARS = 40
+
+
+def _is_rebutted(missing_tok: str, assistant_text: str) -> bool:
+    """True when ``assistant_text`` contains a rebuttal pattern within a short
+    window around ``missing_tok`` (case-insensitive).
+
+    The window keeps the match tight: "no such column" two sentences away from
+    the token is not a rebuttal of that token. Only proximity counts.
+    """
+    if not missing_tok or not assistant_text:
+        return False
+    text_l = assistant_text.lower()
+    tok_l = missing_tok.lower()
+    for m in _REBUTTAL_RE.finditer(text_l):
+        start = max(0, m.start() - _REBUTTAL_WINDOW_CHARS)
+        end = min(len(text_l), m.end() + _REBUTTAL_WINDOW_CHARS)
+        if tok_l in text_l[start:end]:
+            return True
+    return False
+
+
 # Overscope detection (Entity Master Filter). User asks for a specific subset
 # (category/type/quantity/qualified noun) but the tool results look like a
 # full-table dump of a fact table with no filtering evidence.
@@ -311,9 +373,19 @@ def _payload_text(results: list[dict]) -> str:
 
 
 def _detect_dimension_coverage(
-    user_message: str, results: list[dict], assistant_text: str
+    user_message: str, results: list[dict], assistant_text: str,
+    *,
+    catalog_meta: dict | None = None,
 ) -> list[str]:
-    """Return user-requested aspect tokens absent from tool results + answer."""
+    """Return user-requested aspect tokens absent from tool results + answer.
+
+    ``catalog_meta`` (optional) maps catalog column name -> list of sample
+    values, e.g. ``{"region": ["east", "west"]}``. When provided, a candidate
+    token is only kept if it maps to an actual catalog column name
+    (case-insensitive) OR appears inside a column's ``value_samples`` —
+    unmappable tokens (usually hallucinated or non-data words) are silently
+    dropped instead of phantom-flagging the turn.
+    """
     if not results or not user_message:
         return []
     requested = {
@@ -322,12 +394,36 @@ def _detect_dimension_coverage(
         if tok.lower() not in _STOPWORDS
         and _normalize_token(tok) not in _ASPECT_STOPWORDS
         and _normalize_token(tok) not in _CONTAINER_STOPWORDS
+        and _normalize_token(tok) not in _VERB_STOPWORDS
+        and _normalize_token(tok) not in _FORMAT_STOPWORDS
+        and _normalize_token(tok) not in _TIME_STOPWORDS
     }
     if not requested:
         return []
+    if catalog_meta:
+        requested = {
+            tok for tok in requested
+            if _maps_to_catalog(tok, catalog_meta)
+        }
+        if not requested:
+            return []
     corpus = _normalize_token(_payload_text(results) + " " + (assistant_text or ""))
     missing = [tok for tok in sorted(requested) if tok not in corpus]
     return missing
+
+
+def _maps_to_catalog(token: str, catalog_meta: dict) -> bool:
+    """True when ``token`` names a catalog column or appears in value_samples."""
+    token_l = token.lower()
+    for col_name, samples in catalog_meta.items():
+        if str(col_name).lower() == token_l:
+            return True
+        for s in samples or []:
+            if s is None:
+                continue
+            if token_l == str(s).strip().lower():
+                return True
+    return False
 
 
 def _is_blank_value(value: Any) -> bool:
@@ -516,6 +612,7 @@ def evaluate_answer(
     attempts: int = 0,
     budget_remaining: int = 100,
     endpoint: str | None = None,
+    catalog_meta: dict | None = None,
 ) -> VerificationResult:
     """Run the verification gate.
 
@@ -532,6 +629,7 @@ def evaluate_answer(
             attempts=attempts,
             budget_remaining=budget_remaining,
             endpoint=endpoint,
+            catalog_meta=catalog_meta,
         )
     except Exception as exc:  # TOTAL invariant
         logger.exception("answer_verification gate raised (non-fatal): %s", exc)
@@ -663,6 +761,7 @@ def _evaluate_answer_inner(
     attempts: int,
     budget_remaining: int,
     endpoint: str | None,
+    catalog_meta: dict | None = None,
 ) -> VerificationResult:
     if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
         return VerificationResult(status="COMPLETE", signals=["disabled"])
@@ -687,7 +786,13 @@ def _evaluate_answer_inner(
         signals.append("placeholder")
         gaps.append("the draft answer is placeholder text, not real data")
 
-    missing = _detect_dimension_coverage(user_message, results, assistant_text)
+    missing = _detect_dimension_coverage(
+        user_message, results, assistant_text, catalog_meta=catalog_meta,
+    )
+    # Fix 1c: suppress dimensions the assistant already rebutted (e.g. "no
+    # such column"). Rebuttal only removes; it never adds new flags.
+    if missing:
+        missing = [tok for tok in missing if not _is_rebutted(tok, assistant_text)]
     if missing:
         signals.append("coverage")
         gaps.append(

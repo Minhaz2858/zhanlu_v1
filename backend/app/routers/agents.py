@@ -128,7 +128,10 @@ from app.services.memory_consolidation import consolidate_turn_memory  # noqa: E
 # _create_artifact_tool pipeline so they produce the same preview/links as
 # LLM-driven create_artifact tool calls. Stripped from visible text.
 from app.services.synexia.intent_router import detect_file_intent  # noqa: E402
-from app.services.goal_contract import build_goal_contract  # noqa: E402 — Goal-Contract closed loop
+from app.services.goal_contract import (  # noqa: E402 — Goal-Contract closed loop
+    build_goal_contract,
+    pending_action_phrase,
+)
 from app.services.answer_verification import (  # noqa: E402 — universal self-eval gate
     build_gap_disclosure,
     build_replan_nudge,
@@ -359,6 +362,81 @@ def _is_dashboard_request(user_content: str) -> bool:
 def _tool_was_called(tool_calls_for_frontend: list[dict], tool_name: str) -> bool:
     """Check whether a specific tool was called during this turn."""
     return any(tc.get("name") == tool_name for tc in tool_calls_for_frontend)
+
+
+# Retry hints that indicate an earlier ask_data_agent result was superseded
+# by a re-query in the same turn (Fix 2a).
+_ASK_DATA_RETRY_HINT_RE = re.compile(
+    r"\b(retry|re-query|rerun|重试|重新|再查|重新查询)\b", re.IGNORECASE,
+)
+
+
+def _mark_superseded_ask_data_priors(
+    tool_calls_for_frontend: list[dict],
+    current_result: dict,
+    inter_call_text: str,
+) -> None:
+    """Mark earlier ask_data_agent results as superseded (Fix 2a).
+
+    A prior ask_data_agent result is superseded when:
+      1. it returned no rows (or errored) AND the current result targets the
+         same bound KB (matching ``source_id``/``kb_id``); or
+      2. the assistant text between the two calls contains retry hints.
+
+    Superseded results are excluded from deck/card generation so a stale
+    empty/error query never contaminates the artifact's data or citations.
+    """
+    if not isinstance(current_result, dict):
+        return
+    current_kb = current_result.get("source_id") or current_result.get("kb_id")
+    has_retry_hint = bool(_ASK_DATA_RETRY_HINT_RE.search(inter_call_text or ""))
+    for tc in tool_calls_for_frontend:
+        if tc.get("name") != "ask_data_agent":
+            continue
+        if tc.get("__superseded"):
+            continue
+        res = tc.get("results") or {}
+        if not isinstance(res, dict):
+            continue
+        rows = res.get("rows")
+        prior_empty = not isinstance(rows, list) or not rows
+        prior_error = bool(res.get("error")) or res.get("success") is False
+        if not (prior_empty or prior_error):
+            continue  # prior returned real data — keep it
+        prior_kb = res.get("source_id") or res.get("kb_id")
+        if current_kb and prior_kb and current_kb != prior_kb:
+            continue  # different bound KB — not superseded
+        if prior_empty or prior_error:
+            tc["__superseded"] = True
+            tc.setdefault("results", {})["__superseded_note"] = (
+                "superseded by a later ask_data_agent result in this turn"
+            )
+        elif has_retry_hint:
+            tc["__superseded"] = True
+            tc.setdefault("results", {})["__superseded_note"] = (
+                "superseded by an explicit retry between calls"
+            )
+
+
+def _strip_trailing_pending(text: str, pending_sentence: str) -> str:
+    """Remove the trailing sentence containing a pending-action phrase (Fix 4).
+
+    Mirrors ``goal_contract.pending_action_phrase``'s sentence split so the
+    sentence dropped is exactly the one the exit check flagged. Returns the
+    original text when nothing matches (the caller then decides whether the
+    limitation note is still warranted). When the pending sentence is the
+    whole reply, an empty string is returned — the caller's appended note
+    becomes the entire closing statement.
+    """
+    if not text or not pending_sentence:
+        return text
+    stripped = (text or "").strip()
+    sentences = re.split(r"(?<=[.!?。！？])\s+", stripped)
+    if not sentences or not sentences[-1].strip():
+        return text
+    if pending_sentence.strip() not in sentences[-1]:
+        return text
+    return " ".join(s.strip() for s in sentences[:-1] if s.strip())
 
 
 def _compact_report_card(rcp: dict) -> str:
@@ -2313,6 +2391,7 @@ async def _check_answer_verification_gate(
     *,
     attempts: int,
     budget_remaining: int,
+    catalog_meta: dict | None = None,
 ) -> _AnswerGateResult:
     """Universal Self-Evaluation & Re-Planning gate.
 
@@ -2340,6 +2419,7 @@ async def _check_answer_verification_gate(
                 assistant_content,
                 attempts=attempts,
                 budget_remaining=budget_remaining,
+                catalog_meta=catalog_meta,
             ),
             timeout=timeout_s,
         )
@@ -3601,6 +3681,7 @@ async def add_message(
                     assistant_content,
                     attempts=_gate_attempts,
                     budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                    catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
                 )
                 if _gate_result.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -4920,6 +5001,7 @@ async def resume_conversation(
                 assistant_content,
                 attempts=_gate_attempts,
                 budget_remaining=_final_iteration - iteration,
+                catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
             )
             if _gate_result.action == "nudge":
                 llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -7404,6 +7486,10 @@ async def add_message_stream(
     # overflow (see the stream error handler).
     _stream_compaction_attempted = False
     assistant_content = ""
+    # Fix 2a: assistant_content length at the last ask_data_agent result, so
+    # the text BETWEEN two ask_data_agent calls can be checked for retry
+    # hints (an explicit re-query supersedes the earlier result).
+    _ask_data_content_len = [0]
 
     async def event_stream():
         nonlocal assistant_content, guardrail_retries, messages, conv
@@ -7988,6 +8074,25 @@ async def add_message_stream(
                     # from user_content alone. Only runs in the no-tool-calls
                     # exit branch (cheap; the criterion matters at exit).
                     _contract.refresh_pending_action(assistant_content)
+                    # Fix 4: clean exit — when the force budget is exhausted
+                    # AND the model's last sentence still announces a pending
+                    # action ("Let me check the live tables..."), strip that
+                    # trailing sentence and append an explicit limitation note
+                    # so the turn closes cleanly instead of promising work it
+                    # can no longer perform. The note is the final sentence,
+                    # so a re-check of pending_action_phrase() after the append
+                    # returns None by construction.
+                    if _contract.forces_used >= _contract.max_forces:
+                        _pending_phrase = pending_action_phrase(assistant_content)
+                        if _pending_phrase:
+                            assistant_content = _strip_trailing_pending(
+                                assistant_content, _pending_phrase,
+                            )
+                        assistant_content = (
+                            assistant_content + "\n\nNote: this turn ended before completing the "
+                            "additional verification described above. The current answer is based "
+                            "on the data already returned."
+                        ).strip()
                     _gc_unmet = _contract.unmet(_tool_names_from_schemas(tools))
                     if _gc_unmet:
                         _gc_crit = _gc_unmet[0]
@@ -8016,11 +8121,23 @@ async def add_message_stream(
                     break
                 # No guardrail trigger — stream the final response
                 # P2.1: Verification-on-stop
+                # Fix 1c: the verify-nudge shares the goal-contract force budget.
+                # When the contract is active, a nudge is only issued while
+                # forces_used < min(VERIFY_NUDGE_MAX, GOAL_CONTRACT_MAX_FORCES);
+                # issuing one records a force so a nudge can never extend the
+                # turn beyond the global force budget. Contract inactive (flag
+                # off) → standalone cap via settings.VERIFY_NUDGE_MAX.
                 _verify_nudge = build_verify_on_stop_nudge(llm_messages, attempts=_verify_attempts)
+                if _verify_nudge and _contract is not None and _contract.forces_used >= min(
+                    settings.VERIFY_NUDGE_MAX, settings.GOAL_CONTRACT_MAX_FORCES,
+                ):
+                    _verify_nudge = None
                 if _verify_nudge:
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": _verify_nudge})
                     _verify_attempts += 1
+                    if _contract is not None:
+                        _contract.record_force()
                     continue
                 # P2.1.5: PPTX turn-guard (v3 loop) — if the user asked for a
                 # PPT deck and the model ended its turn with text only (no tool
@@ -8059,6 +8176,7 @@ async def add_message_stream(
                     assistant_content,
                     attempts=_gate_attempts,
                     budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                    catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
                 )
                 if _gate_result.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -8600,6 +8718,19 @@ async def add_message_stream(
                 if tool_name in INTERNAL_TOOLS:
                     tool_call_record["display_projection"] = _internal_tool_projection(tool_name)
                 tool_calls_for_frontend.append(tool_call_record)
+
+                # ── Fix 2a: superseded-marker detection ──────────────
+                # After each ask_data_agent result, mark earlier empty/error
+                # results (same bound KB) as superseded so deck/card
+                # generation never cites a stale/dead query. Also marks a
+                # prior result superseded when the assistant text between
+                # the two calls contains explicit retry hints.
+                if tool_name == "ask_data_agent" and isinstance(result, dict):
+                    inter_call_text = assistant_content[_ask_data_content_len[0]:]
+                    _mark_superseded_ask_data_priors(
+                        tool_calls_for_frontend, result, inter_call_text,
+                    )
+                    _ask_data_content_len[0] = len(assistant_content)
 
                 # ── Goal-Contract runtime updates (flag-gated) ───────
                 # Feed tool outcomes into the turn contract so the exit

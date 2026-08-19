@@ -122,6 +122,48 @@ def _load_bound_kb_meta(db: Session, kb_ids: list[str]) -> list[dict]:
     ]
 
 
+def _load_catalog_meta(db: Session, kb_ids: list[str]) -> dict:
+    """Build ``{column_name: [sample_values]}`` for the bound KBs (best-effort).
+
+    Feeds the answer-verification gate's catalog validation (Fix 1b): a
+    candidate dimension token is only kept when it names a real catalog
+    column or appears inside a column's sampled values.  Any failure returns
+    ``{}`` — the gate then degrades to lexical-only behavior.
+    """
+    if not kb_ids:
+        return {}
+    try:
+        from app.models.knowledge_catalog import KBColumnMeta, KBTableMeta
+
+        rows = (
+            db.query(
+                KBColumnMeta.column_name,
+                KBColumnMeta.sample_values,
+                KBTableMeta.kb_id,
+            )
+            .join(KBTableMeta, KBTableMeta.id == KBColumnMeta.table_meta_id)
+            .filter(KBTableMeta.kb_id.in_(kb_ids))
+            .all()
+        )
+    except Exception:  # noqa: BLE001 — catalog is best-effort
+        logger.info("catalog_meta load failed; answer-verification uses lexical mode")
+        return {}
+    meta: dict = {}
+    for col_name, samples, _kb_id in rows:
+        key = str(col_name or "")
+        if not key:
+            continue
+        values: list[str] = []
+        if isinstance(samples, dict):
+            # {value: count} — column name match alone is already the primary
+            # signal; sampled values are a secondary vocabulary bridge.
+            values = [str(v) for v in samples.keys() if str(v).strip()]
+        elif isinstance(samples, list):
+            values = [str(v) for v in samples if str(v).strip()]
+        meta.setdefault(key, values)
+    return meta
+
+
 def _build_data_source_prompt_section(
     bound_meta: list[dict], has_weekly_report: bool = False,
 ) -> str:
@@ -613,6 +655,7 @@ def prepare_data_source_runtime(
         "user_id": user_id,
         "resource_type": resource_type,
         "resource_id": resource_id,
+        "catalog_meta": _load_catalog_meta(db, bound_ids),
     }
 
     return augmented_tools, new_prompt, ctx_extras
