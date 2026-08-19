@@ -192,6 +192,46 @@ def _format_column_suggestion(prefix: str, matches: list[str]) -> str:
     return text
 
 
+def _fk_master_hint(graph, table: str, col: str) -> str | None:
+    """Return a JOIN hint when ``col`` is an FK to a master table.
+
+    Uses ``SchemaGraph.find_master_for_fk`` (generic, role-based — no
+    hardcoded names). Returns ``None`` when the lookup fails or finds no
+    master, so callers never add noise to the suggestions.
+    """
+    try:
+        master = graph.find_master_for_fk(table, col)
+    except Exception as exc:  # noqa: BLE001 — best-effort hint
+        logger.debug("schema_validator: find_master_for_fk failed: %s", exc)
+        return None
+    if not master:
+        return None
+    master_table, master_join_col, _fk_col = master
+    return (
+        f"{col} is an FK to {master_table}.{master_join_col} — "
+        "JOIN that table first."
+    )
+
+
+def _build_schema_graph(db: Session, kb_id: str, tables, cte_columns):
+    """Lazy SchemaGraph for FK-master hints; ``None`` on any failure.
+
+    Only built when the flag is on AND a qualified-column error occurred, so
+    valid queries never pay for the graph (row counts/samples are connector
+    round-trips and are cached per SchemaService TTL).
+    """
+    try:
+        from app.services.db.schema_graph import SchemaGraph
+
+        graph = SchemaGraph(db, kb_id)
+        candidates = [t for t in tables if t.lower() not in cte_columns]
+        graph.build(candidates)
+        return graph
+    except Exception as exc:  # noqa: BLE001 — best-effort
+        logger.debug("schema_validator: schema graph build failed: %s", exc)
+        return None
+
+
 def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     """Validate ``sql`` against the schema of KnowledgeBase ``kb_id``.
 
@@ -247,6 +287,7 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
     available_columns: dict[str, list[str]] = {}
     errors: list[str] = []
     suggestions: list[str] = []
+    fk_errors: list[tuple[str, str]] = []  # (resolved table, unknown column)
     suggest = settings.SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED
     for t in sorted(tables):
         if t.lower() in cte_columns:
@@ -290,6 +331,7 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
                         f"column '{name}' not found in table '{resolved}'",
                         _suggest_column_matches(available_columns[resolved], name),
                     ))
+                    fk_errors.append((resolved, name))
         else:
             # Unqualified column: valid if present in any referenced table
             # (real tables + CTE projections).
@@ -303,6 +345,14 @@ def validate_against_schema(sql: str, kb_id: str, db: Session) -> dict:
                         f"column '{name}' not found in any referenced table",
                         _suggest_column_matches(sorted(all_cols), name),
                     ))
+
+    if suggest and fk_errors:
+        graph = _build_schema_graph(db, kb_id, tables, cte_columns)
+        if graph is not None:
+            for resolved, name in fk_errors:
+                hint = _fk_master_hint(graph, resolved, name)
+                if hint:
+                    suggestions.append(hint)
 
     warning: str | None = None
     try:
