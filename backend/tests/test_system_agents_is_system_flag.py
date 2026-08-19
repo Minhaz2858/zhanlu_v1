@@ -23,11 +23,22 @@ as production would use them.
 
 import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app.models.agent_app import AgentApp
 from app.services.system_agents import ensure_system_agents
+
+
+# DashboardApp.spec (and any other JSONB column registered on Base) is
+# PostgreSQL-only; SQLite cannot compile it natively. Render it as plain
+# JSON/TEXT so Base.metadata.create_all() works on the in-memory test DB.
+# Same recipe as tests/services/dashboard_app/*.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(type_, compiler, **kw):
+    return "JSON"
 
 
 # ---------------------------------------------------------------------------

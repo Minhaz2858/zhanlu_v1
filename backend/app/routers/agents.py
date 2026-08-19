@@ -2391,6 +2391,70 @@ def _tool_names_from_schemas(tools: list | None) -> list[str]:
     return out
 
 
+# ── Goal-Contract live table-coverage probe ──────────────────────────
+# The zero-row remediation message tells the model to "probe MAX(date) per
+# candidate table".  When exactly ONE bound database KB exists, we can run
+# that probe OURSELVES (cheap COUNT(*)) and hand the model concrete facts
+# instead of a generic instruction.  Multi-KB turns are ambiguous (we don't
+# track which KB a given SQL ran against) → return None and fall back to
+# the static hint text.
+_GC_SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _make_goal_contract_table_executor(
+    db: object,
+    kb_ids: list[str] | None,
+    timeout_s: int = 3,
+) -> object | None:
+    """Build a live ``table -> coverage`` probe for goal-contract feedback.
+
+    Runs ``SELECT COUNT(*) FROM <table>`` against the FIRST bound KB and
+    returns a human summary like ``"12 rows"``, or ``""`` on any failure.
+    Results are memoized per table so repeated ``unmet()`` checks within a
+    turn don't hammer the database.  Returns ``None`` when the probe target
+    is ambiguous (0 or >1 bound KBs) or the KB id is missing — callers then
+    degrade to the static hint text.
+    """
+    if not kb_ids or len(kb_ids) != 1:
+        return None
+    kb_id = kb_ids[0]
+    if not kb_id:
+        return None
+    cache: dict[str, str] = {}
+
+    def _probe(table: str) -> str:
+        if not table:
+            return ""
+        if table in cache:
+            return cache[table]
+        # Defense in depth: only plain identifiers may be interpolated.
+        if not _GC_SAFE_IDENT.match(table):
+            cache[table] = ""
+            return ""
+        cov = ""
+        try:
+            from app.services.db.query_service import QueryService
+
+            svc = QueryService(db)
+            res = svc.execute(
+                kb_id,
+                f"SELECT COUNT(*) AS __gc_cnt FROM {table}",
+                max_rows=1,
+                timeout_s=timeout_s,
+            )
+            rows = res.get("rows") or []
+            cnt = rows[0].get("__gc_cnt") if rows else 0
+            if cnt is not None:
+                cov = f"{int(cnt)} row(s)"
+        except Exception as exc:  # noqa: BLE001 — coverage is best-effort
+            logger.info("goal-contract table probe failed for %s: %s", table, exc)
+            cov = ""
+        cache[table] = cov
+        return cov
+
+    return _probe
+
+
 def _compute_tool_choice(
     user_message: str,
     data_ctx_extras: dict,
@@ -7461,13 +7525,15 @@ async def add_message_stream(
         _contract_force_tool = None  # remediation force armed by the exit checker
         if settings.GOAL_CONTRACT_ENABLED:
             try:
+                _bound_kb_ids = data_ctx_extras.get("bound_kb_ids") or []
                 _contract = build_goal_contract(
                     user_content or "",
                     agent_config={
                         "tools": _tool_names_from_schemas(tools),
-                        "bound_kb_ids": data_ctx_extras.get("bound_kb_ids") or [],
+                        "bound_kb_ids": _bound_kb_ids,
                     },
                     max_forces=settings.GOAL_CONTRACT_MAX_FORCES,
+                    table_executor=_make_goal_contract_table_executor(db, _bound_kb_ids),
                 )
             except Exception as _gc_err:  # noqa: BLE001 — contract must never break the loop
                 logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
@@ -7915,6 +7981,13 @@ async def add_message_stream(
                 # guardrail → verify-on-stop → pptx-guard → self-eval chain
                 # below runs unchanged (flag-off = current behavior).
                 if settings.GOAL_CONTRACT_ENABLED and _contract is not None:
+                    # Re-evaluate the pending-action marker from the model's
+                    # latest prose. The announce-but-don't-execute pattern
+                    # ("Let me check the live tables...") only surfaces in
+                    # assistant_content at exit — the turn-start value comes
+                    # from user_content alone. Only runs in the no-tool-calls
+                    # exit branch (cheap; the criterion matters at exit).
+                    _contract.refresh_pending_action(assistant_content)
                     _gc_unmet = _contract.unmet(_tool_names_from_schemas(tools))
                     if _gc_unmet:
                         _gc_crit = _gc_unmet[0]

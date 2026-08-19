@@ -7,8 +7,11 @@ import pytest
 from app.services.goal_contract import (
     GoalContract,
     build_goal_contract,
+    catalog_oracle_feedback,
     distinct_values_feedback,
+    extract_tables_from_sql,
     extract_text_filters,
+    is_effective_empty,
     normalize_deliverable_intent,
     pending_action_phrase,
 )
@@ -153,6 +156,112 @@ def test_extract_text_filters_none() -> None:
     assert extract_text_filters(None) == []
 
 
+# ── is_effective_empty ───────────────────────────────────────────────────
+
+
+def test_is_effective_empty_no_rows() -> None:
+    assert is_effective_empty([]) is True
+    assert is_effective_empty(None) is True
+
+
+def test_is_effective_empty_all_null_numeric() -> None:
+    # The "header-only snapshot": rows exist but every measure is null.
+    rows = [
+        {"product": None, "quantity": None, "revenue": None},
+        {"product": None, "quantity": None, "revenue": None},
+        {"product": None, "quantity": None, "revenue": None},
+    ]
+    assert is_effective_empty(rows) is True
+
+
+def test_is_effective_empty_all_zero_numeric() -> None:
+    rows = [
+        {"product": "", "quantity": 0, "revenue": "0.0"},
+        {"product": "", "quantity": 0, "revenue": 0},
+    ]
+    assert is_effective_empty(rows) is True
+
+
+def test_is_effective_empty_partial_signal_is_not_empty() -> None:
+    # ANY non-null/non-zero/non-empty value means the payload has signal.
+    assert is_effective_empty([{"quantity": 0, "revenue": 5}]) is False
+    assert is_effective_empty([{"quantity": None, "revenue": "乙烯"}]) is False
+    assert is_effective_empty([{"quantity": 1}]) is False
+
+
+# ── extract_tables_from_sql ──────────────────────────────────────────────
+
+
+def test_extract_tables_from_sql_simple_from() -> None:
+    assert extract_tables_from_sql("SELECT * FROM erp_t_sal_outstock LIMIT 5") == [
+        "erp_t_sal_outstock"
+    ]
+
+
+def test_extract_tables_from_sql_with_join() -> None:
+    sql = (
+        "SELECT a.quantity, b.contract_price FROM erp_t_sal_outstock a "
+        "JOIN erp_product_sales_details b ON a.material_id = b.material_id"
+    )
+    tables = extract_tables_from_sql(sql)
+    assert "erp_t_sal_outstock" in tables
+    assert "erp_product_sales_details" in tables
+
+
+def test_extract_tables_from_sql_none() -> None:
+    assert extract_tables_from_sql(None) == []
+    assert extract_tables_from_sql("") == []
+
+
+def test_record_query_result_records_candidate_tables() -> None:
+    c = GoalContract(requires_data=True, expects_rows=True, max_forces=3)
+    c.record_query_result(rows=[], sql="SELECT * FROM erp_v_sale_orderentry LIMIT 5")
+    assert c.candidate_tables == ["erp_v_sale_orderentry"]
+
+
+def test_record_query_result_all_null_numeric_counts_as_zero_row() -> None:
+    c = GoalContract(requires_data=True, expects_rows=True, max_forces=3)
+    header_only = [{"quantity": None, "revenue": None}, {"quantity": None, "revenue": None}]
+    c.record_query_result(rows=header_only, sql="SELECT * FROM t LIMIT 5")
+    assert c.zero_row_events == 1
+    assert c.unmet(granted_tools=["execute_query"])  # remediation fires
+
+
+# ── catalog_oracle_feedback ──────────────────────────────────────────────
+
+
+def test_catalog_oracle_feedback_combines_filters_and_tables() -> None:
+    def distinct_executor(col: str):
+        return ["乙烯", "丙烯"]
+
+    def table_executor(table: str) -> str:
+        return f"{table}: last date 2026-07-31"
+
+    lines = catalog_oracle_feedback(
+        [("fname", "乙烯")],
+        ["erp_t_sal_outstock"],
+        distinct_executor=distinct_executor,
+        table_executor=table_executor,
+    )
+    # Distinct feedback present...
+    assert any("乙烯" in l for l in lines)
+    # Table coverage is only emitted when there are NO filters.
+    assert not any("erp_t_sal_outstock" in l for l in lines)
+
+    lines_no_filter = catalog_oracle_feedback(
+        [],
+        ["erp_t_sal_outstock"],
+        distinct_executor=distinct_executor,
+        table_executor=table_executor,
+    )
+    assert any("erp_t_sal_outstock" in l for l in lines_no_filter)
+    assert any("2026-07-31" in l for l in lines_no_filter)
+
+
+def test_catalog_oracle_feedback_degrades_without_executors() -> None:
+    assert catalog_oracle_feedback([], ["t1"]) == []
+
+
 # ── distinct_values_feedback ─────────────────────────────────────────────
 
 
@@ -232,10 +341,30 @@ def test_unmet_zero_rows_with_filters_forces_requery() -> None:
     assert "zzz" in unmet[0].message  # distinct values injected
 
 
-def test_unmet_zero_rows_without_filters_no_force() -> None:
+def test_unmet_zero_rows_without_filters_forces_requery() -> None:
+    # P4: zero_rows now fires even WITHOUT a text filter — an all-null/all-zero
+    # snapshot or empty result must trigger remediation, not dead-end.
     c = GoalContract(requires_data=True, expects_rows=True, max_forces=3)
     c.record_query_result(rows=[], sql="SELECT * FROM t LIMIT 5")
-    assert c.unmet(granted_tools=["execute_query"]) == []
+    unmet = c.unmet(granted_tools=["execute_query"])
+    assert unmet and unmet[0].code == "zero_rows"
+    assert unmet[0].force_tool == "execute_query"
+
+
+def test_unmet_zero_rows_no_filters_with_table_coverage_forces_requery() -> None:
+    # No text filters → table-coverage hint from table_executor must be injected.
+    def table_executor(table: str) -> str:
+        return f"MAX(date)={table}:2026-07-31"
+
+    c = GoalContract(
+        requires_data=True, expects_rows=True, max_forces=3,
+        table_executor=table_executor,
+    )
+    c.record_query_result(rows=[], sql="SELECT * FROM erp_t_sal_outstock LIMIT 5")
+    unmet = c.unmet(granted_tools=["execute_query"])
+    assert unmet and unmet[0].code == "zero_rows"
+    assert "erp_t_sal_outstock" in unmet[0].message
+    assert "2026-07-31" in unmet[0].message  # live coverage injected
 
 
 def test_unmet_zero_rows_resolved_by_nonempty() -> None:
@@ -282,3 +411,112 @@ def test_pending_action_cleared_after_announced_tool_runs() -> None:
     c = GoalContract(pending_action_phrase="Let me check the sales data", max_forces=3)
     c.record_tool_executed("execute_query")
     assert c.unmet(granted_tools=["execute_query"]) == []
+
+
+def test_pending_action_matches_live_tables_announcement() -> None:
+    # The exact sentence from the failed turn: assistant announces it will
+    # check the live tables but never calls a tool → contract must catch it.
+    sentence = (
+        "Let me check the live tables and confirm what data actually exists "
+        "before building the deck."
+    )
+    assert pending_action_phrase(sentence) is not None
+
+    c = build_goal_contract(sentence, agent_config={"tools": ["execute_query"]})
+    unmet = c.unmet(granted_tools=["execute_query"])
+    assert unmet and unmet[0].code == "pending_action"
+    assert unmet[0].force_tool == "execute_query"
+
+
+def test_pending_action_re_evaluates_from_assistant_text() -> None:
+    # Regression guard for the agents.py hook: a fresh announcement in the
+    # assistant's latest prose overrides the turn-start value.
+    c = GoalContract(max_forces=3)
+    assert c.pending_action_phrase is None
+    c.refresh_pending_action(
+        "Let me check the live tables and confirm what data actually exists."
+    )
+    assert c.pending_action_phrase is not None
+    unmet = c.unmet(granted_tools=["execute_query"])
+    assert unmet and unmet[0].code == "pending_action"
+
+
+def test_pending_action_refresh_ignores_past_tense() -> None:
+    c = GoalContract(pending_action_phrase="Let me check the sales data", max_forces=3)
+    c.refresh_pending_action("I checked the live tables already.")
+    # Past-tense closing does NOT clear the marker — the announcement is
+    # still unexecuted, so the contract must keep forcing it.
+    assert c.pending_action_phrase is not None
+    assert c.unmet(granted_tools=["execute_query"])
+
+
+# ── agents.py: _make_goal_contract_table_executor ─────────────────────────
+
+
+class _FakeQueryService:
+    """Minimal stand-in for QueryService with a scriptable execute()."""
+
+    def __init__(self, results=None, exc=None):
+        self._results = results if results is not None else [{"__gc_cnt": 0}]
+        self._exc = exc
+        self.calls = []
+
+    def execute(self, kb_id, sql, max_rows=1000, timeout_s=10):
+        self.calls.append({"kb_id": kb_id, "sql": sql})
+        if self._exc is not None:
+            raise self._exc
+        return {"rows": list(self._results), "row_count": len(self._results)}
+
+
+def test_table_executor_returns_none_without_single_bound_kb(monkeypatch) -> None:
+    import app.routers.agents as agents_mod
+
+    with monkeypatch.context() as m:
+        m.setattr(
+            "app.services.db.query_service.QueryService", _FakeQueryService,
+        )
+        assert agents_mod._make_goal_contract_table_executor(None, None) is None
+        assert agents_mod._make_goal_contract_table_executor(None, []) is None
+        assert (
+            agents_mod._make_goal_contract_table_executor(None, ["kb1", "kb2"]) is None
+        )
+        assert agents_mod._make_goal_contract_table_executor(None, [""]) is None
+
+
+def test_table_executor_probes_count_and_memoizes(monkeypatch) -> None:
+    import app.routers.agents as agents_mod
+
+    fake = _FakeQueryService(results=[{"__gc_cnt": 12}])
+    with monkeypatch.context() as m:
+        m.setattr("app.services.db.query_service.QueryService", lambda db: fake)
+        probe = agents_mod._make_goal_contract_table_executor(object(), ["kb-1"])
+        assert probe is not None
+        assert probe("orders") == "12 row(s)"
+        assert probe("orders") == "12 row(s)"  # memoized → still one query
+        assert len(fake.calls) == 1
+        assert "COUNT(*)" in fake.calls[0]["sql"] and "orders" in fake.calls[0]["sql"]
+        assert fake.calls[0]["kb_id"] == "kb-1"
+
+
+def test_table_executor_rejects_unsafe_identifiers(monkeypatch) -> None:
+    import app.routers.agents as agents_mod
+
+    fake = _FakeQueryService()
+    with monkeypatch.context() as m:
+        m.setattr("app.services.db.query_service.QueryService", lambda db: fake)
+        probe = agents_mod._make_goal_contract_table_executor(object(), ["kb-1"])
+        # Injection attempts must never reach the DB.
+        for bad in ["orders; DROP TABLE x", "a--b", "`orders`", '"orders"']:
+            assert probe(bad) == ""
+        assert fake.calls == []
+
+
+def test_table_executor_degrades_on_query_failure(monkeypatch) -> None:
+    import app.routers.agents as agents_mod
+
+    fake = _FakeQueryService(exc=RuntimeError("conn refused"))
+    with monkeypatch.context() as m:
+        m.setattr("app.services.db.query_service.QueryService", lambda db: fake)
+        probe = agents_mod._make_goal_contract_table_executor(object(), ["kb-1"])
+        assert probe is not None
+        assert probe("orders") == ""

@@ -131,6 +131,95 @@ def extract_text_filters(sql: Optional[str]) -> List[Tuple[str, str]]:
     return filters
 
 
+def is_effective_empty(rows: Optional[Sequence[dict]]) -> bool:
+    """True when ``rows`` carries no usable data: empty, OR every row is a
+    header-only snapshot where every cell is None / "" / 0 (numeric zero).
+
+    Conservative by design: ANY non-null, non-zero, non-empty value in ANY
+    row means the result has signal. This intentionally does not grade
+    quality — it only detects *clearly* empty payloads so the contract can
+    treat "rows returned but all measures null/zero" like a zero-row query.
+    """
+    rows = rows or []
+    if not rows:
+        return True
+    for row in rows:
+        if not isinstance(row, dict):
+            # Non-dict rows are unusual; assume signal so we never block on a
+            # shape we cannot inspect.
+            return False
+        for val in row.values():
+            if val is None:
+                continue
+            if isinstance(val, str) and val.strip() == "":
+                continue
+            if isinstance(val, (int, float)) and val == 0:
+                continue
+            # Numeric zero as a string ("0", "0.0") — common in CSV snapshots.
+            if isinstance(val, str):
+                try:
+                    if float(val) == 0:
+                        continue
+                except ValueError:
+                    pass
+            return False
+    return True
+
+
+def extract_tables_from_sql(sql: Optional[str]) -> List[str]:
+    """Table names referenced by ``FROM`` / ``JOIN`` clauses, in order,
+    deduplicated case-insensitively. Schema-qualified names are reduced to
+    the bare table name. Pure text extraction — no DB I/O."""
+    if not sql:
+        return []
+    from_re = re.compile(
+        r"\b(?:FROM|JOIN)\s+([a-zA-Z_][a-zA-Z0-9_.\"`]*)",
+        re.IGNORECASE,
+    )
+    tables: List[str] = []
+    for m in from_re.finditer(sql):
+        name = m.group(1).strip().strip('"`')
+        # Reduce schema.table → table (and strip trailing alias keywords if any).
+        name = name.split(".")[-1].strip().strip('"`')
+        name = re.split(r"\s+(?:AS\s+)?\w+$", name)[0].strip().strip('"`')
+        if not name:
+            continue
+        if name.lower() not in (t.lower() for t in tables):
+            tables.append(name)
+    return tables
+
+
+def catalog_oracle_feedback(
+    filters: Sequence[Tuple[str, str]],
+    tables: Sequence[str],
+    catalog_meta: Optional[dict] = None,
+    distinct_executor: Optional[Callable[[str], Sequence[str]]] = None,
+    table_executor: Optional[Callable[[str], str]] = None,
+    cap: int = 50,
+) -> List[str]:
+    """Unified remediation hints: distinct values for the filtered columns
+    PLUS live table-coverage feedback (e.g. MAX(date), row counts) for the
+    candidate tables the query referenced. Both sources are optional and
+    degrade gracefully to empty when unavailable."""
+    lines = list(
+        distinct_values_feedback(
+            filters,
+            catalog_meta=catalog_meta,
+            executor=distinct_executor,
+            cap=cap,
+        )
+    )
+    if not filters and tables and table_executor:
+        for table in tables:
+            try:
+                cov = table_executor(table)
+            except Exception:  # noqa: BLE001 — coverage is best-effort
+                cov = ""
+            if cov and str(cov).strip():
+                lines.append(f'Table "{table}" live coverage: {str(cov).strip()}.')
+    return lines
+
+
 def distinct_values_feedback(
     filters: Sequence[Tuple[str, str]],
     catalog_meta: Optional[dict] = None,
@@ -192,6 +281,8 @@ class GoalContract:
     max_forces: int = 3
     catalog_meta: Optional[dict] = None
     distinct_executor: Optional[Callable[[str], Sequence[str]]] = None
+    candidate_tables: List[str] = field(default_factory=list)
+    table_executor: Optional[Callable[[str], str]] = None
     _announced_executed: bool = field(default=False, repr=False)
 
     # ── runtime updates ──────────────────────────────────────────────────
@@ -204,11 +295,16 @@ class GoalContract:
             for entry in extract_text_filters(sql):
                 if entry not in self.text_filters_used:
                     self.text_filters_used.append(entry)
-        rows = rows or []
-        if rows:
-            self.zero_row_events = 0
-        else:
+            for table in extract_tables_from_sql(sql):
+                if table.lower() not in (t.lower() for t in self.candidate_tables):
+                    self.candidate_tables.append(table)
+        if is_effective_empty(rows):
+            # Empty rows AND all-null/all-zero snapshots both count as
+            # "no usable data" — a header-only result must not reset the
+            # counter just because it returned 3 rows of None.
             self.zero_row_events += 1
+        else:
+            self.zero_row_events = 0
 
     def record_tool_executed(self, tool_name: Optional[str]) -> None:
         tool = (tool_name or "").lower()
@@ -217,6 +313,16 @@ class GoalContract:
 
     def record_force(self) -> None:
         self.forces_used += 1
+
+    def refresh_pending_action(self, assistant_text: Optional[str]) -> None:
+        """Re-evaluate the pending-action marker from the assistant's latest
+        prose (the announce-but-don't-execute pattern only surfaces in the
+        model's own text, not the user's). A fresh first-person-future marker
+        overrides the turn-start value; past-tense closing statements leave
+        the marker untouched (the announcement is still unexecuted)."""
+        phrase = pending_action_phrase(assistant_text)
+        if phrase:
+            self.pending_action_phrase = phrase
 
     # ── exit checker ─────────────────────────────────────────────────────
 
@@ -263,25 +369,41 @@ class GoalContract:
         return []
 
     def _unmet_zero_rows(self, tools: set) -> List[UnmetCriterion]:
-        if self.requires_data and self.expects_rows and self.zero_row_events and self.text_filters_used:
-            tool = self._pick_query_tool(tools)
-            if tool:
-                literals = ", ".join(f'"{lit}"' for _col, lit in self.text_filters_used)
-                hints = distinct_values_feedback(
-                    self.text_filters_used,
-                    catalog_meta=self.catalog_meta,
-                    executor=self.distinct_executor,
+        if not (self.requires_data and self.expects_rows and self.zero_row_events):
+            return []
+        tool = self._pick_query_tool(tools)
+        if not tool:
+            return []
+        hints = catalog_oracle_feedback(
+            self.text_filters_used,
+            self.candidate_tables,
+            catalog_meta=self.catalog_meta,
+            distinct_executor=self.distinct_executor,
+            table_executor=self.table_executor,
+        )
+        hint_text = " ".join(hints) if hints else ""
+        if self.text_filters_used:
+            literals = ", ".join(f'"{lit}"' for _col, lit in self.text_filters_used)
+            if not hint_text:
+                hint_text = "The text filter may not match any stored value."
+            msg = (
+                f"A query with text filter(s) {literals} returned zero usable rows. "
+                f"{hint_text} "
+                f"Re-run the query with a value from that list (or drop the text filter)."
+            )
+        else:
+            if not hint_text:
+                hint_text = (
+                    "Verify the data source: the queried table may be stale, empty, "
+                    "or missing the requested time period."
                 )
-                hint_text = " ".join(hints) if hints else (
-                    "The text filter may not match any stored value."
-                )
-                msg = (
-                    f"A query with text filter(s) {literals} returned zero rows. "
-                    f"{hint_text} "
-                    f"Re-run the query with a value from that list (or drop the text filter)."
-                )
-                return [UnmetCriterion("zero_rows", msg, force_tool=tool)]
-        return []
+            msg = (
+                "A data query returned zero usable rows (empty or all-null/all-zero "
+                f"snapshot). {hint_text} "
+                "Re-run the query against a live table (e.g. probe MAX(date) per "
+                "candidate table) to confirm what data actually exists before building."
+            )
+        return [UnmetCriterion("zero_rows", msg, force_tool=tool)]
 
     def _unmet_pending_action(self, tools: set) -> List[UnmetCriterion]:
         if self.pending_action_phrase and not self._announced_executed:
@@ -315,6 +437,7 @@ def build_goal_contract(
     agent_config: Optional[dict] = None,
     catalog_meta: Optional[dict] = None,
     distinct_executor: Optional[Callable[[str], Sequence[str]]] = None,
+    table_executor: Optional[Callable[[str], str]] = None,
     max_forces: int = 3,
 ) -> GoalContract:
     """Build the GoalContract for a turn.  Greetings yield an empty contract
@@ -324,6 +447,7 @@ def build_goal_contract(
         max_forces=max_forces,
         catalog_meta=catalog_meta,
         distinct_executor=distinct_executor,
+        table_executor=table_executor,
     )
     if is_greeting(text):
         return contract

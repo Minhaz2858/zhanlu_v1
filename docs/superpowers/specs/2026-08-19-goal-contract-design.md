@@ -105,3 +105,93 @@ Run with `backend/venv/bin/python -m pytest`:
    (premature stop, missing deliverable, empty-data deliverable, zero-row
    dead end, greeting, "Dashbord" typo).
 3. Enable globally once green.
+
+---
+
+# Follow-up: Closed-Loop Remediation (same day, 2026-08-19)
+
+Trigger: the 2026-08-19 sales-overview automation turn dead-ended at an empty
+card. Diagnosis: the contract was documented-but-dormant, AND a
+header-only/all-null/all-zero query snapshot wrongly reset the zero-row
+counter, so a "zero usable rows" dead end never forced a re-query.
+
+## Changes (all flag-gated, flags now ON in `.env`)
+
+| Flag | Value in `.env` | Meaning |
+|---|---|---|
+| `GOAL_CONTRACT_ENABLED` | `true` | contract active in the v3 loop |
+| `GOAL_CONTRACT_MAX_FORCES` | `3` | remediation bound per turn |
+
+`backend/app/services/goal_contract.py`:
+- `is_effective_empty(rows)` — pure helper: empty/None rows OR every row has
+  only None/""/numeric-0/zero-string values → counts as a zero-row event.
+  ANY non-empty value → NOT empty (conservative).
+- `extract_tables_from_sql(sql)` — regex `FROM|JOIN` table extraction
+  (schema-qualified + quoted identifiers reduced to bare names).
+- `catalog_oracle_feedback(filters, tables, catalog_meta, distinct_executor,
+  table_executor, cap=50)` — distinct-value hints (existing) PLUS, only when
+  no text filters, per-table live-coverage lines via `table_executor`.
+- `GoalContract` gains `candidate_tables: list[str]` and
+  `table_executor: Callable[[str], str] | None`.
+- `record_query_result(rows, sql)` — records candidate tables from the SQL and
+  uses `is_effective_empty`: zero-row **or** all-null/all-zero snapshot
+  increments `zero_row_events` (previously only literal empty rows did); any
+  real signal resets it.
+- `_unmet_zero_rows(tools)` — fires on `requires_data and expects_rows and
+  zero_row_events` (the `text_filters_used` requirement is **removed**): the
+  remediation now also covers no-filter queries that returned only null/zero
+  snapshots. Message includes `catalog_oracle_feedback`; force tool is
+  `execute_query`.
+- `refresh_pending_action(assistant_text)` — at loop exit, re-evaluates the
+  pending-action ("let me…") marker from assistant prose; only a live
+  first-person-future announcement overrides it (past-tense text leaves it
+  untouched, so an announced-but-unexecuted tool still gets forced).
+- `build_goal_contract(...)` gains `table_executor` and forwards it.
+
+`backend/app/routers/agents.py`:
+- New `_make_goal_contract_table_executor(db, kb_ids)` — memoized live probe
+  `SELECT COUNT(*) FROM <table>` via `QueryService` against the bound KB;
+  only wired when **exactly one** bound KB exists (ambiguous multi-KB turns
+  degrade to static hints). Table names must match a plain-identifier regex
+  (injection-safe), best-effort with short timeout, failures → "".
+- Contract build call site passes `table_executor=_make_goal_contract_table_executor(db, _bound_kb_ids)`.
+- No-tool-calls exit branch calls `_contract.refresh_pending_action(assistant_content)`
+  BEFORE `_contract.unmet(...)` so the "announce but don't execute" pattern is
+  caught at exit.
+
+## Tests (71 in `tests/test_goal_contract.py`, all passing)
+
+Added/replaced:
+- `is_effective_empty` (no rows / all-null / all-zero / partial signal)
+- `extract_tables_from_sql` (FROM, JOIN, None)
+- `record_query_result` candidate-table recording + all-null-numeric zero-row
+- `catalog_oracle_feedback` (filters+tables combined, degrades without executors)
+- zero-rows WITHOUT filters now forces re-query (replaced the old
+  "no force without filters" test — behavior intentionally changed)
+- zero-rows + no filters + table-coverage → forces re-query
+- pending-action: live announcement match, re-evaluation from assistant text,
+  past-tense ignored
+- `_make_goal_contract_table_executor`: None on 0/>1 KBs, COUNT probe +
+  memoization, injection-safe identifier rejection, graceful failure
+
+Plus pre-existing regression suites:
+- `test_goal_contract.py` — **75 passed**
+- Batch: `test_agents_responder_bug.py`, `test_runtime_context_in_all_agents.py`,
+  `test_system_agents_is_system_flag.py` (+ JSONB-on-SQLite compile recipe
+  added to the last — pre-existing harness gap unrelated to goal-contract),
+  `test_persist_run_to_chat.py` — **95 passed**
+
+Known pre-existing failure (NOT caused by this work, verified via `git stash`):
+`test_agents_token_streaming.py::test_stream_retries_without_tools_when_provider_rejects_tools`
+— the test expects a 400 on a tool-bearing payload to retry with `tools=None`,
+but `_stream_llm_with_tools` only retries by popping `tool_choice`. Separate
+follow-up.
+
+## Notes for future work
+
+- True video transcription requires `ffmpeg` in Docker (extract audio track →
+  Whisper). Add a follow-up plan.
+- Vision-tool-based image description (`vision_tool.py`) is agent-driven; could
+  auto-describe at ingestion when `IMAGE_OCR_ENABLED=False` + vision LLM.
+- The `test_agents_token_streaming.py` tools-retry test/implementation mismatch
+  above.
