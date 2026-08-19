@@ -44,8 +44,13 @@ _DATA_QUESTION_RE = re.compile(
 )
 
 _PENDING_RE = re.compile(
-    r"\b(let me|i['’]?ll|i will|i['’]m going to|i am going to|let['’]s|"
-    r"i would like to|i['’]d like to|allow me to)\b",
+    r"\b(let me|i['']?ll|i will|i['']m going to|i am going to|let['']s|"
+    r"i would like to|i['']d like to|allow me to)\b",
+    re.IGNORECASE,
+)
+
+_PENDING_OFFER_RE = re.compile(
+    r"\b(let me know|feel free|don'?t hesitate)\b",
     re.IGNORECASE,
 )
 
@@ -67,6 +72,10 @@ QUERY_TOOLS = frozenset(
 )
 ARTIFACT_TOOLS = frozenset({"create_artifact", "run_sandbox_skill", "finalize_into_artifact"})
 DASHBOARD_TOOLS = frozenset({"create_fullstack_dashboard", "create_dashboard"})
+
+# Result-quality levels for GoalContract.record_tool_executed.
+RESULT_QUALITY_ASSUMED_OK = "assumed_ok"  # default / unknown quality (backward compat)
+RESULT_QUALITY_NO_DATA = "no_data"        # query returned no usable rows
 
 
 def normalize_deliverable_intent(text: Optional[str]) -> Optional[str]:
@@ -111,6 +120,8 @@ def pending_action_phrase(text: Optional[str]) -> Optional[str]:
     if not m:
         return None
     if _PENDING_PAST_RE.search(last):
+        return None
+    if _PENDING_OFFER_RE.search(last):
         return None
     return last
 
@@ -164,6 +175,46 @@ def is_effective_empty(rows: Optional[Sequence[dict]]) -> bool:
                     pass
             return False
     return True
+
+
+_METADATA_ONLY_COLUMN_RE = re.compile(
+    r"^(?:"
+    r"(?:min|max|count)"                    # bare word: count (psycopg2 unaliased)
+    r"|(?:min|max|count)_[a-z0-9_]*"        # prefix: min_date, max_fdate, count_rows
+    r"|(?:min|max|count)\s*\([^)]*\)"       # function: min(x), max(FDATE), count(*), count(1)
+    r")$",
+    re.IGNORECASE,
+)
+
+
+def is_metadata_only_rows(rows: Optional[Sequence[dict]]) -> bool:
+    """True when ``rows`` has the "metadata-only" shape: 1-2 rows where EVERY
+    column name is a MIN/MAX/COUNT aggregate (bare, ``min_*`` prefix, or
+    ``min(...)`` function form).
+
+    This catches `SELECT MIN(FDATE), MAX(FDATE) FROM t` — a query that only
+    returned the data's date range / row count instead of business rows —
+    without knowing what ``FDATE`` means (shape-only, no business content).
+
+    Conservative by design (Rule 2): ALL columns must match the aggregate
+    shape AND the row count must be <= 2. A result like
+    ``{product_name: "X", total_revenue: 100}`` is never flagged, and any
+    mixed aggregate + measure result is never flagged either.
+    """
+    rows = rows or []
+    if not rows or len(rows) > 2:
+        return False
+    saw_column = False
+    for row in rows:
+        if not isinstance(row, dict):
+            # Non-dict rows are unusual; assume signal so we never block on a
+            # shape we cannot inspect (mirrors is_effective_empty).
+            return False
+        for col in row.keys():
+            saw_column = True
+            if not _METADATA_ONLY_COLUMN_RE.match(str(col).strip()):
+                return False
+    return saw_column
 
 
 def extract_tables_from_sql(sql: Optional[str]) -> List[str]:
@@ -263,9 +314,10 @@ def distinct_values_feedback(
 
 @dataclass
 class UnmetCriterion:
-    code: str  # "deliverable" | "zero_rows" | "pending_action"
+    code: str  # "deliverable" | "zero_rows" | "metadata_only" | "pending_action"
     message: str
     force_tool: Optional[str] = None
+    force_synthesis: bool = False
 
 
 @dataclass
@@ -275,6 +327,7 @@ class GoalContract:
     expects_rows: bool = False
     text_filters_used: List[Tuple[str, str]] = field(default_factory=list)
     zero_row_events: int = 0
+    metadata_only_events: int = 0
     artifacts_produced: List[dict] = field(default_factory=list)
     pending_action_phrase: Optional[str] = None
     forces_used: int = 0
@@ -283,7 +336,11 @@ class GoalContract:
     distinct_executor: Optional[Callable[[str], Sequence[str]]] = None
     candidate_tables: List[str] = field(default_factory=list)
     table_executor: Optional[Callable[[str], str]] = None
-    _announced_executed: bool = field(default=False, repr=False)
+    _seq: int = field(default=0, repr=False)
+    _armed_seq: int = field(default=0, repr=False)
+    _executed_seq: int = field(default=0, repr=False)
+    _armed_by: Optional[str] = field(default=None, repr=False)  # "user" | "model"
+    _usable_results: int = field(default=0, repr=False)
 
     # ── runtime updates ──────────────────────────────────────────────────
 
@@ -305,11 +362,32 @@ class GoalContract:
             self.zero_row_events += 1
         else:
             self.zero_row_events = 0
+        if is_metadata_only_rows(rows):
+            # A pure MIN/MAX/COUNT snapshot (date range / row count) is a
+            # distinct degradation: it carries signal, so it is NOT counted as
+            # empty, but it is also NOT business data — it gets its own
+            # counter so the exit checker can force a real query.
+            self.metadata_only_events += 1
+        else:
+            self.metadata_only_events = 0
 
-    def record_tool_executed(self, tool_name: Optional[str]) -> None:
+    def record_tool_executed(
+        self, tool_name: Optional[str], result_quality: str = RESULT_QUALITY_ASSUMED_OK
+    ) -> None:
+        """Record that ``tool_name`` ran.
+
+        ``result_quality`` defaults to ``"assumed_ok"`` for backward compat.
+        Pass ``RESULT_QUALITY_NO_DATA`` when the tool result carried no usable
+        rows (empty / all-null / metadata-only): the announced action was NOT
+        actually fulfilled, so ``_executed_seq`` stays unchanged and the
+        pending-action remediation can still fire on exit.
+        """
         tool = (tool_name or "").lower()
         if tool in QUERY_TOOLS or tool in ARTIFACT_TOOLS or tool in DASHBOARD_TOOLS:
-            self._announced_executed = True
+            if result_quality != RESULT_QUALITY_NO_DATA:
+                self._seq += 1
+                self._executed_seq = self._seq
+                self._usable_results += 1
 
     def record_force(self) -> None:
         self.forces_used += 1
@@ -319,10 +397,26 @@ class GoalContract:
         prose (the announce-but-don't-execute pattern only surfaces in the
         model's own text, not the user's). A fresh first-person-future marker
         overrides the turn-start value; past-tense closing statements leave
-        the marker untouched (the announcement is still unexecuted)."""
+        the marker untouched (the announcement is still unexecuted).
+
+        Sequence-stamp semantics: arming stamps _armed_seq; if the model
+        produces clean prose (no pending marker) after a model-armed phrase,
+        the phrase is disarmed (prevents force loops after successful forced
+        synthesis). User-armed phrases are never disarmed by prose.
+        """
         phrase = pending_action_phrase(assistant_text)
         if phrase:
+            if phrase != self.pending_action_phrase:
+                self._seq += 1
+                self._armed_seq = self._seq
+                self._armed_by = "model"
             self.pending_action_phrase = phrase
+        else:
+            # No pending phrase in the model's prose.
+            if self._armed_by == "model":
+                # Model chose to deliver; disarm to prevent force loops.
+                self.pending_action_phrase = None
+                self._armed_by = None
 
     # ── exit checker ─────────────────────────────────────────────────────
 
@@ -405,24 +499,60 @@ class GoalContract:
             )
         return [UnmetCriterion("zero_rows", msg, force_tool=tool)]
 
+    def _unmet_metadata_only(self, tools: set) -> List[UnmetCriterion]:
+        if not (self.requires_data and self.expects_rows and self.metadata_only_events):
+            return []
+        tool = self._pick_query_tool(tools)
+        if not tool:
+            return []
+        msg = (
+            "A data query returned only metadata (date range / row-count "
+            "aggregates such as MIN/MAX/COUNT) without business data rows. "
+            f"Re-run the query with the `{tool}` tool returning actual "
+            "dimension + measure rows (SELECT the business columns directly "
+            "instead of wrapping them in MIN/MAX/COUNT)."
+        )
+        return [UnmetCriterion("metadata_only", msg, force_tool=tool)]
+
     def _unmet_pending_action(self, tools: set) -> List[UnmetCriterion]:
-        if self.pending_action_phrase and not self._announced_executed:
-            tool = self._pick_query_tool(tools)
-            if tool:
-                msg = (
-                    f"You announced: \"{self.pending_action_phrase}\" — execute it now "
-                    f"with the `{tool}` tool instead of stopping."
-                )
-                return [UnmetCriterion("pending_action", msg, force_tool=tool)]
+        if not self.pending_action_phrase:
+            return []
+        # Announcement-scoped: the promise fires iff it was armed AFTER the
+        # last qualifying execution. This fixes the turn-scoped bug where
+        # _announced_executed was set True by an EARLIER query.
+        if self._armed_seq <= self._executed_seq:
+            return []
+        # When usable data already exists, force synthesis (answer with
+        # existing data) instead of a wasteful re-query.
+        if self._usable_results > 0:
+            msg = (
+                f"You announced: \"{self.pending_action_phrase}\" — but you "
+                f"already have the data. Write the final answer now using the "
+                f"retrieved data. Do not announce future actions."
+            )
+            return [UnmetCriterion("pending_action", msg, force_tool=None, force_synthesis=True)]
+        tool = self._pick_query_tool(tools)
+        if tool:
+            msg = (
+                f"You announced: \"{self.pending_action_phrase}\" — execute it now "
+                f"with the `{tool}` tool instead of stopping."
+            )
+            return [UnmetCriterion("pending_action", msg, force_tool=tool)]
         return []
 
     def unmet(self, granted_tools: Optional[Iterable[str]] = None) -> List[UnmetCriterion]:
-        """Unmet criteria at exit, priority: deliverable > zero-rows > pending.
-        Returns [] when the force budget is exhausted."""
+        """Unmet criteria at exit, priority: deliverable > zero-rows >
+        metadata-only > pending.  Returns [] when the force budget is
+        exhausted."""
         if self.forces_used >= self.max_forces:
             return []
         tools = set(granted_tools or [])
-        for fn in (self._unmet_deliverable, self._unmet_zero_rows, self._unmet_pending_action):
+        for fn in (
+            self._unmet_deliverable,
+            self._unmet_zero_rows,
+            self._unmet_metadata_only,
+            self._unmet_pending_action,
+        ):
             crits = fn(tools)
             if crits:
                 return crits
@@ -459,4 +589,8 @@ def build_goal_contract(
         contract.requires_data = looks_like_data_question(text)
         contract.expects_rows = contract.requires_data
     contract.pending_action_phrase = pending_action_phrase(text)
+    if contract.pending_action_phrase:
+        contract._seq += 1
+        contract._armed_seq = contract._seq
+        contract._armed_by = "user"
     return contract
