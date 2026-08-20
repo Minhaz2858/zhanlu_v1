@@ -6,6 +6,7 @@ Outlook (both strip ``<style>`` blocks). A plain-text fallback mirrors the HTML.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from html import escape
@@ -52,7 +53,7 @@ def build_email_text(ctx: EmailContext) -> str:
     if ctx.is_success and ctx.summary:
         lines.append("")
         lines.append("Summary:")
-        lines.append(ctx.summary)
+        lines.append(_strip_markdown(ctx.summary))
     if ctx.file_note:
         lines.append("")
         lines.append(ctx.file_note)
@@ -93,7 +94,7 @@ def build_email_html(ctx: EmailContext) -> str:
     if ctx.is_success and ctx.summary:
         blocks.append(
             f"<h3 style='margin:20px 0 6px;font-size:14px;color:#334155;'>Summary</h3>"
-            f"<div style='color:#475569;font-size:13px;line-height:1.6;'>{_e(ctx.summary)}</div>"
+            f"<div style='color:#334155;font-size:13px;line-height:1.6;'>{_render_markdown(ctx.summary)}</div>"
         )
 
     if ctx.file_note:
@@ -127,6 +128,55 @@ def build_email_html(ctx: EmailContext) -> str:
           "</div>"
     )
     return body
+
+
+def _render_markdown(text: str) -> str:
+    """Render Markdown to email-safe HTML (tables + fenced code).
+
+    Raw HTML in the source is escaped first so LLM-generated summaries can
+    never inject markup into the email; the ``markdown`` library then renders
+    the safe subset into semantic tags. Inline styles are added to tables and
+    code blocks because Gmail and Outlook strip ``<style>`` blocks.
+    """
+    import markdown  # bundled dependency, also used by artifact previews
+
+    body = markdown.markdown(
+        escape(str(text), quote=False),
+        extensions=["tables", "fenced_code"],
+    )
+    body = body.replace(
+        "<table>",
+        "<table style='border-collapse:collapse;width:100%;margin:10px 0;'>",
+    )
+    body = body.replace(
+        "<th>",
+        "<th style='border:1px solid #E2E8F0;padding:6px 8px;background:#F8FAFC;text-align:left;'>",
+    )
+    body = body.replace(
+        "<td>",
+        "<td style='border:1px solid #E2E8F0;padding:6px 8px;text-align:left;'>",
+    )
+    body = body.replace(
+        "<pre>",
+        "<pre style='background:#F8FAFC;padding:10px;border-radius:6px;overflow-x:auto;'>",
+    )
+    return body
+
+
+def _strip_markdown(text: str) -> str:
+    """Lightweight Markdown → plain text for the text/plain fallback."""
+    out: list[str] = []
+    for line in str(text).splitlines():
+        line = re.sub(r"^#{1,6}\s*", "", line)             # headings
+        line = re.sub(r"^\s*[-*]\s+", "• ", line)          # bullet lists
+        line = re.sub(r"^\s*\d+\.\s+", "", line)           # numbered lists
+        line = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", line)   # images
+        line = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)  # links → label
+        line = re.sub(r"\*\*([^*]+)\*\*", r"\1", line)     # bold
+        line = re.sub(r"\*([^*]+)\*", r"\1", line)         # italic
+        line = re.sub(r"`([^`]+)`", r"\1", line)           # inline code
+        out.append(line)
+    return "\n".join(out)
 
 
 def _table(rows: list[str]) -> str:

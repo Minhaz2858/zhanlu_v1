@@ -60,3 +60,28 @@ def test_text_includes_summary_and_error():
     fail = build_email_text(_ctx(is_success=False, error="connection reset"))
     assert "Error:" in fail
     assert "connection reset" in fail
+
+
+def test_html_renders_markdown_summary():
+    html = build_email_html(_ctx(
+        summary="## Headline\n\n**bold** text\n\n| A | B |\n|---|---|\n| 1 | 2 |",
+    ))
+    assert "<h2" in html
+    assert "<strong>bold</strong>" in html
+    assert "<table" in html
+    assert "<th" in html
+
+
+def test_html_escapes_raw_html_in_summary():
+    html = build_email_html(_ctx(summary="<script>alert(1)</script> safe"))
+    assert "<script>" not in html
+    assert "&lt;script&gt;" in html
+
+
+def test_text_strips_markdown_markers():
+    text = build_email_text(_ctx(summary="## Head\n\n**bold** and `code`\n\n- item"))
+    assert "## Head" not in text
+    assert "**bold**" not in text
+    assert "bold" in text
+    assert "code" in text
+    assert "item" in text
