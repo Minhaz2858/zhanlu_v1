@@ -457,6 +457,13 @@ DATA FRESHNESS CHECK (HARD RULE — you MUST follow this — no exceptions)
   low-volume STALE tables (e.g. `erp_product_sales_details` — 1.4k rows,
   data ends 2025-12-31). Confirm freshness with MAX(date_column) before
   choosing. Never present stale 2025 numbers as the current picture.
+- AVOID product-specific forecasting views (tables matching `sale_erp_v_%`
+  or `lz_v_%` patterns like `sale_erp_v_工业用裂解碳五_data`,
+  `sale_erp_v_间戊二烯_data`). These are single-row snapshots used by the
+  nightly forecasting pipeline and contain NO useful order-level data. For
+  product queries, use the general sales tables (`erp_v_sale_orderentry`,
+  `erp_t_sal_outstock` + `erp_t_sal_outstockentry` on FID) with a
+  `material_name` or `FMATERIALID` filter instead.
 
 TOOLS
 - `list_data_sources`: list the data sources available to you in this call.
@@ -954,6 +961,25 @@ PIPELINE GUIDE — what to use for common query types
 "What's the price/outlook for X?"
   → forecast_brief + ask_knowledge_graph (usually enough, ~5-10s)
 
+"Execution price / latest price / order-level data for X?"
+  → forecast_brief(product_id=X) + ask_erp_kpi(product=X) (batch together)
+  → If user wants individual orders or order-level detail, ALSO add
+    ask_data_agent(question="...") with an explicit instruction to query
+    erp_v_sale_orderentry filtered by product, NOT sale_erp_v_* views.
+  Product ID mapping (use these exact product_id values):
+    - "cracked C5" / "裂解碳五" / "工业用裂解碳五" → "cracked_c5"
+    - "cracked C9" / "裂解碳九" / "工业用裂解碳九" → "cracked_c9"
+    - "piperylene" / "间戊二烯" → "piperylene"
+    - "isoprene" / "异戊二烯" → "isoprene"
+    - "dcpd" / "双环戊二烯" → "dcpd"
+    - "c5 resin" / "碳五石油树脂" → "c5_resin"
+    - "SIS" → "sis"
+    - "raffinate C5" / "抽余油" → "raffinate_c5"
+    - "hydrogenated c5" / "加氢碳五" → "hydrogenated_c5"
+    - "c9 resin" / "碳九石油树脂" → "c9_resin"
+    - "terpene resin" / "萜烯树脂" → "terpene_resin"
+    - "aromatic solvent" / "芳烃溶剂油" → "aromatic_solvent"
+
 "Should we raise or lower X? / What pricing action for X?"
   → forecast_brief + ask_diagnosis + ask_pricing (batch together)
 
@@ -1000,7 +1026,35 @@ OUTPUT CONTRACT
 - Open with the direct answer the user asked for.
 - Then supporting evidence: forecast, market data, reasoning.
 - Include confidence level, as_of_date (for cached data), caveats.
-- Keep prose concise and in the user's language."""
+- Keep prose concise and in the user's language.
+
+STRUCTURED REPORT FORMAT (for price / execution / sales queries):
+When returning execution price or order-level data, use this markdown
+structure. Section headings MUST use `##` prefix — never plain text or
+backticks around section names.
+
+## Executive Summary
+- Period (e.g. "last 30 days: 2026-07-21 to 2026-08-20")
+- Total volume, average execution price, total revenue
+- Period-over-period change (if prior-period data available)
+
+## Order-Level Detail
+| Order No. | Customer | Date | Volume (ton) | Unit Price (CNY/ton) | Revenue (CNY) |
+(populate from erp_v_sale_orderentry or ask_erp_kpi results)
+
+## Key Observations
+- Largest order (customer, volume, price, % of total)
+- Price distribution (range, most common price point)
+- Volume trend (increase/decrease vs prior period)
+
+## Transmission Risk & Cost Pass-Through
+- Current spot vs. average execution price
+- Margin direction (improving / under pressure / stable)
+- Downstream pass-through adequacy
+
+## Recommended Actions
+- 1-3 actionable items grounded in the data
+- Never more than 3; keep them specific and data-backed"""
 
 
 # ---------------------------------------------------------------------------

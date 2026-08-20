@@ -557,16 +557,31 @@ def _empty_answer_needs_force(
     forces_used: int,
     has_usable_data: bool,
 ) -> bool:
-    """Fix 2: the model ended the turn with no prose at all, but usable
-    data was retrieved — force ONE re-synthesis pass instead of letting
-    the generic empty-content fallback fire."""
-    return (
-        not assistant_content
-        and not content_streamed
-        and not accumulated_prose
-        and forces_used < 1
-        and has_usable_data
-    )
+    """Fix 2: the model ended the turn with no prose at all (or only
+    promise narration like "Let me verify..."), but usable data was
+    retrieved — force ONE re-synthesis pass instead of letting the
+    generic empty-content fallback fire.
+
+    The check now also fires when accumulated_prose contains ONLY
+    pending-action phrases (promise text), since that's not a real
+    answer — the model announced an action but never executed it.
+    """
+    if forces_used >= 1 or not has_usable_data:
+        return False
+    if content_streamed:
+        return False
+    if not assistant_content and not accumulated_prose:
+        return True
+    # Extended check: if accumulated prose contains ONLY pending-action
+    # phrases (no substantive answer), treat it as effectively empty.
+    if not assistant_content and accumulated_prose:
+        from app.services.goal_contract import pending_action_phrase
+        for _prose in accumulated_prose:
+            if _prose and _prose.strip() and not pending_action_phrase(_prose):
+                return False  # Found substantive prose — not empty
+        # All prose entries are pending-action promises → effectively empty
+        return True
+    return False
 
 
 def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None, selected_skill_id: str | None) -> str:
@@ -7876,6 +7891,7 @@ async def add_message_stream(
         _contract_force_synthesis = False  # same, but forces tool_choice="none" for synthesis
         _empty_answer_forces = 0          # Fix 2: cap of one re-synthesis per turn
         _empty_answer_force_next = False  # Fix 2: armed by the exit-branch net
+        _last_iter_prose = ""            # Fix 3: last iter's prose for promise-as-answer check
         if settings.GOAL_CONTRACT_ENABLED:
             try:
                 _bound_kb_ids = data_ctx_extras.get("bound_kb_ids") or []
@@ -7926,11 +7942,56 @@ async def add_message_stream(
                 # re-query / announced tool), skip the soft-cap break so the
                 # exit-checker force machinery below can fire. The hard cap
                 # MAX_TOOL_ITERATIONS still bounds the loop.
-                if (
-                    settings.GOAL_CONTRACT_ENABLED
-                    and _contract is not None
-                    and bool(_contract.unmet(_tool_names_from_schemas(tools)))
-                ):
+                _gc_soft_continue = False
+                if settings.GOAL_CONTRACT_ENABLED and _contract is not None:
+                    # Fix 3a: update pending action from last iter's prose
+                    # BEFORE checking unmet, so the sequence-stamp state is
+                    # current even when the model produced promise text
+                    # alongside tool calls (the exit branch only calls
+                    # refresh_pending_action on text-only responses).
+                    if _last_iter_prose:
+                        _contract.refresh_pending_action(_last_iter_prose)
+                    if bool(_contract.unmet(_tool_names_from_schemas(tools))):
+                        _gc_soft_continue = True
+                    else:
+                        # Fix 3b: promise-as-answer gap — the model produced
+                        # promise text ("Let me verify…") alongside tool calls
+                        # in a prior iteration. refresh_pending_action arms the
+                        # pending action, but record_tool_executed (called
+                        # during tool execution AFTER arming) advances
+                        # _executed_seq past _armed_seq, so _unmet_pending_action
+                        # returns [] and unmet() misses it. Direct check
+                        # bypasses the sequence-stamp logic.
+                        _last_pending = pending_action_phrase(_last_iter_prose)
+                        if (
+                            _last_pending
+                            and _contract._usable_results > 0
+                            and _contract.forces_used < _contract.max_forces
+                        ):
+                            _gc_soft_continue = True
+                            _contract.record_force()
+                            _contract_force_synthesis = True
+                            _nudge_msg = (
+                                f"You announced: \"{_last_pending}\" — but you "
+                                f"already have the data. Write the final answer now "
+                                f"using the retrieved data. Do not announce future actions."
+                            )
+                            llm_messages.append({"role": "assistant", "content": _last_iter_prose})
+                            llm_messages.append({"role": "user", "content": _nudge_msg})
+                            # Pop the last iter content so re-synthesis replaces
+                            # it instead of appending alongside the promise text.
+                            if _v3_iter_contents:
+                                _v3_iter_contents.pop()
+                            assistant_content = ""
+                            _nudge_replacement_pending = True
+                            logger.info(
+                                "v3 stream: promise-as-answer at soft-cap → forcing synthesis "
+                                "(conv=%s, iter=%d, phrase=%s, forces=%d/%d)",
+                                conversation_id, iteration, _last_pending[:60],
+                                _contract.forces_used, _contract.max_forces,
+                            )
+
+                if _gc_soft_continue:
                     logger.info(
                         "v3 stream: soft-cap reached but goal-contract unmet (conv=%s, iter=%d); continuing",
                         conversation_id, iteration,
@@ -8203,6 +8264,7 @@ async def add_message_stream(
             # LAST iter's prose in the persisted message + `done` event.
             if assistant_content:
                 _v3_iter_contents.append(assistant_content)
+                _last_iter_prose = assistant_content  # Fix 3: save for promise-as-answer check
             assistant_content = ""
             raw_tool_calls: list = []
             final_reasoning = ""
@@ -8432,25 +8494,32 @@ async def add_message_stream(
                     # from user_content alone. Only runs in the no-tool-calls
                     # exit branch (cheap; the criterion matters at exit).
                     _contract.refresh_pending_action(assistant_content)
-                    # Fix 4: clean exit — when the force budget is exhausted
-                    # AND the model's last sentence still announces a pending
-                    # action ("Let me check the live tables..."), strip that
-                    # trailing sentence and append an explicit limitation note
-                    # so the turn closes cleanly instead of promising work it
-                    # can no longer perform. The note is the final sentence,
-                    # so a re-check of pending_action_phrase() after the append
-                    # returns None by construction.
-                    if _contract.forces_used >= _contract.max_forces:
-                        _pending_phrase = pending_action_phrase(assistant_content)
-                        if _pending_phrase:
-                            assistant_content = _strip_trailing_pending(
-                                assistant_content, _pending_phrase,
-                            )
-                        assistant_content = (
-                            assistant_content + "\n\nNote: this turn ended before completing the "
-                            "additional verification described above. The current answer is based "
-                            "on the data already returned."
-                        ).strip()
+                    # Fix 4 (extended): clean exit — whenever the model's last
+                    # sentence announces a pending action ("Let me verify…"),
+                    # strip that trailing sentence. Previously this only fired
+                    # when forces_used >= max_forces, but the promise-as-answer
+                    # bug also happens when the model exits normally with
+                    # promise text after producing a valid artifact — the user
+                    # sees the artifact AND the misleading "Let me verify…"
+                    # appended to it. Now we ALWAYS strip + append the note.
+                    _pending_phrase = pending_action_phrase(assistant_content)
+                    _stripped_promise = False
+                    if _pending_phrase:
+                        _stripped_promise = True
+                        assistant_content = _strip_trailing_pending(
+                            assistant_content, _pending_phrase,
+                        )
+                        # Only append the limitation note if the stripped
+                        # content is non-empty (the rest of the answer is
+                        # real content that stands on its own). When the
+                        # pending sentence IS the whole reply, the empty-
+                        # answer net below will handle it.
+                        if assistant_content.strip():
+                            assistant_content = (
+                                assistant_content + "\n\nNote: this turn ended before completing the "
+                                "additional verification described above. The current answer is based "
+                                "on the data already returned."
+                            ).strip()
                     _gc_unmet = _contract.unmet(_tool_names_from_schemas(tools))
                     if _gc_unmet:
                         _gc_crit = _gc_unmet[0]
@@ -8482,6 +8551,57 @@ async def add_message_stream(
                         assistant_content = ""
                         _nudge_replacement_pending = True
                         continue
+                # ── Promise-stripped force synthesis (Fix 5b) ───────────
+                # When the model's FINAL reply was ONLY a pending-action
+                # promise ("Let me get a clean view…"), we stripped it above.
+                # The user has already received the promise text via SSE, but
+                # the persisted message is now empty. The empty-answer net
+                # below would refuse to fire because content_streamed=True —
+                # but the content that was streamed was a PROMISE, not an
+                # answer. Force one re-synthesis pass so the persisted
+                # message becomes a real answer. The frontend's content_replace
+                # event will swap the promise bubble for the real answer.
+                _has_usable_data = (
+                    (_contract is not None and _contract._usable_results > 0)
+                    if settings.GOAL_CONTRACT_ENABLED
+                    else any(
+                        tc.get("status") == "completed"
+                        for tc in tool_calls_for_frontend
+                    )
+                )
+                if (
+                    _stripped_promise
+                    and not assistant_content.strip()
+                    and _has_usable_data
+                    and _empty_answer_forces < 1
+                    and settings.GOAL_CONTRACT_ENABLED
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    _contract.record_force()
+                    _contract_force_synthesis = True
+                    _nudge_msg = (
+                        "You announced a follow-up action but did not execute it. "
+                        "The data you need is already in your context. "
+                        "Write the final answer now using the retrieved data. "
+                        "Do not announce future actions."
+                    )
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _nudge_msg})
+                    if _v3_iter_contents:
+                        _v3_iter_contents.pop()
+                    # Tell the frontend to swap the streamed promise text
+                    # for the upcoming synthesis bubble.
+                    yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.info(
+                        "v3 stream: stripped promise at exit → forcing synthesis "
+                        "(conv=%s, iter=%d, forces=%d/%d)",
+                        conversation_id, iteration,
+                        _empty_answer_forces, 1,
+                    )
+                    continue
                 # ── Empty-answer safety net (Fix 2) ─────────────────────
                 # Model stopped with NO visible prose (reasoning-budget
                 # exhaustion) but usable data was retrieved → force one
@@ -10021,6 +10141,24 @@ async def add_message_stream(
         # back to whatever assistant_content holds (fallback text or "").
         if not accumulated_content and assistant_content:
             accumulated_content = assistant_content
+
+        # Post-loop promise-text cleanup (Fix 5): if the accumulated
+        # content ends with a pending-action sentence ("Let me verify…"),
+        # strip it. This handles the case where the model produced promise
+        # text alongside tool calls (not in the exit branch) and the loop
+        # broke at the budget cap without the exit checker ever seeing it.
+        if accumulated_content and settings.GOAL_CONTRACT_ENABLED:
+            _post_pending = pending_action_phrase(accumulated_content)
+            if _post_pending:
+                accumulated_content = _strip_trailing_pending(
+                    accumulated_content, _post_pending,
+                )
+                if accumulated_content.strip():
+                    accumulated_content = (
+                        accumulated_content + "\n\nNote: this turn ended before completing the "
+                        "additional verification described above. The current answer is based "
+                        "on the data already returned."
+                    ).strip()
 
         # Save the final assistant message
         assistant_msg = {

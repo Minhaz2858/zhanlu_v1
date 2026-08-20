@@ -167,7 +167,43 @@ def _md_to_html(md: str) -> str:
 
     Handles headings, bold, italic, inline code, code blocks, unordered/
     ordered lists, blockquotes, and pipe tables.
+
+    Heuristic recovery: when a short line (≤ 60 chars, no terminal
+    punctuation) is preceded by a blank line (or is line 0) and followed
+    by a longer content line, promote it to ``<h2>``. This salvages
+    reports where the LLM forgot to add the ``##`` prefix on section
+    names (e.g. "Executive summary", "Key Observations").
     """
+    # Pre-pass: identify orphan section headers to promote.
+    _SECTION_MAX = 60
+    _lines = (md or "").splitlines()
+    _promoted: set[int] = set()
+    for _idx, _line in enumerate(_lines):
+        _stripped = _line.strip()
+        if not _stripped or len(_stripped) > _SECTION_MAX:
+            continue
+        # Skip lines that already have markdown heading prefix.
+        if _stripped.startswith("#"):
+            continue
+        # Skip lines ending with terminal punctuation.
+        if _stripped.endswith((".", ",", ":", ";", "!", "?")):
+            continue
+        # Must be preceded by a blank line (or be first non-blank line).
+        # Check the immediately preceding line — it must be blank or
+        # this must be line 0. We don't walk past multiple blank lines
+        # to find earlier content; only the adjacent line matters.
+        if _idx > 0 and _lines[_idx - 1].strip():
+            continue  # line directly above is not blank
+        # Must be followed by a non-empty longer line (substantive content).
+        _n = _idx + 1
+        while _n < len(_lines) and not _lines[_n].strip():
+            _n += 1
+        if _n >= len(_lines):
+            continue
+        if len(_lines[_n].strip()) <= len(_stripped):
+            continue
+        _promoted.add(_idx)
+
     out: list[str] = []
     in_code = False
     in_table = False
@@ -258,7 +294,10 @@ def _md_to_html(md: str) -> str:
             out.append("<hr/>")
         else:
             flush_table()
-            out.append(f"<p>{_inline(stripped)}</p>")
+            if i in _promoted:
+                out.append(f"<h2>{_inline(stripped)}</h2>")
+            else:
+                out.append(f"<p>{_inline(stripped)}</p>")
         i += 1
     flush_table()
     return "\n".join(out)
