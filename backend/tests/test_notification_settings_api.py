@@ -18,13 +18,36 @@ os.chdir(_BACKEND_ROOT)
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import delete
 
-from app.database import SessionLocal
+from app.database import SessionLocal, engine
 from app.models.automation_execution import AutomationExecution
 from app.models.automation_file import AutomationFile
 from app.models.automation_task import AutomationTask
+from app.models.base import Base
 from app.routers import automation_api
 from app.services.notification_gateway import generate_download_token
+
+
+@pytest.fixture(autouse=True)
+def _clean_slate():
+    """Fresh schema + empty automation rows for every test.
+
+    The shared in-memory SQLite database persists across the whole session
+    (StaticPool), so tables must be created once and rows cleaned per test.
+    ``app.database`` compiles PostgreSQL JSONB to plain JSON on SQLite so the
+    full ``Base.metadata`` is safe to create here.
+    """
+    Base.metadata.create_all(engine)
+    db = SessionLocal()
+    try:
+        db.execute(delete(AutomationFile))
+        db.execute(delete(AutomationExecution))
+        db.execute(delete(AutomationTask))
+        db.commit()
+    finally:
+        db.close()
+    yield
 
 
 def _make_app(db):

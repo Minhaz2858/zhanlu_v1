@@ -25,6 +25,17 @@ if settings.is_sqlite:
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.close()
 
+    # PostgreSQL JSONB has no native SQLite equivalent; compiling it to the
+    # generic JSON type lets ``Base.metadata.create_all`` work in the shared
+    # in-memory SQLite test DB (otherwise any test building the full schema
+    # fails on dashboard_apps.spec).
+    from sqlalchemy.dialects.postgresql import JSONB
+    from sqlalchemy.ext.compiler import compiles
+
+    @compiles(JSONB, "sqlite")
+    def _compile_jsonb_sqlite(type_, compiler, **kw):
+        return "JSON"
+
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
