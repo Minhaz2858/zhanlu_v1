@@ -170,6 +170,12 @@ async def _ask_data_agent(
     # not a gate — it never blocks valid SQL.
     sub_context["schema_validator_enabled"] = True
     sub_context["did_you_mean_enabled"] = True
+    # Enable schema linker + schema graph for the Data Agent so it gets
+    # join edges + FK relationships automatically.  These are agent-level
+    # opt-ins (NOT global flag flips) — _describe_schema checks context
+    # in addition to settings flags.
+    sub_context["schema_linking_enabled"] = True
+    sub_context["schema_graph_enabled"] = True
 
     iterations = 0
     _gate_attempts = 0  # universal self-eval re-plan nudges this sub-loop turn
@@ -582,21 +588,42 @@ you are writing SQL against the Ecisco BI warehouse):
 - COLUMN NAMES: There is NO `material_name` column. Product names live in
   `FNAME` (Chinese names, e.g. 碳五/碳九). Product codes live in `F_PAEZ_JC`
   and `FMATERIALID`. `material_model` is DEPRECATED and STALE — never use it.
+- HEADER/ENTRY TABLE STRUCTURE: Many ERP tables follow a header + entry
+  pattern. For sales: `erp_t_sal_outstock` is the HEADER (has FDATE,
+  FCUSTOMERID, FDOCUMENTSTATUS) and `erp_t_sal_outstockentry` is the
+  ENTRY/LINE (has FMATERIALID, FREALQTY, FBASEUNITQTY, F_PAEZ_BHSAMOUNT,
+  F_PAEZ_HSDJ). They JOIN on FID. FDATE is ONLY on the header — NEVER
+  reference FDATE from the entry table. To query sales with dates, you MUST
+  join: `SELECT h.FDATE, e.FMATERIALID, e.FREALQTY, e.F_PAEZ_BHSAMOUNT
+  FROM erp_t_sal_outstock h JOIN erp_t_sal_outstockentry e ON h.FID = e.FID
+  WHERE h.FDATE >= '...'`.
 - DISCOVER VALUES BEFORE FILTERING: before filtering a product portfolio
   (e.g. C5/C9), run `SELECT DISTINCT FNAME, F_PAEZ_JC FROM <table> LIMIT 200`
   and match against the ACTUAL values returned. Never filter with English
   literals (e.g. `FNAME LIKE '%C5%'`) — the stored names are Chinese and the
   query will silently return zero rows.
 - TABLE PREFERENCE: prefer the LIVE high-volume tables `erp_t_sal_outstock`
-  and `erp_v_sale_orderentry` (~90k rows, current through 2026) over the
-  stale `erp_product_sales_details` (1.4k rows, ends 2025-12-31). Confirm
-  with MAX(date_column) before choosing.
+  + `erp_t_sal_outstockentry` (joined, ~90k rows, current through 2026) over
+  the stale `erp_product_sales_details` (1.4k rows, ends 2025-12-31) and
+  `erp_v_sale_orderentry` (very sparse data). Confirm freshness with
+  MAX(date_column) before choosing.
 - PORTFOLIO RULE: when the question covers a product portfolio (e.g.
   "C5/C9 products"), query ALL products in ONE query grouped by product
   name — never single-product views one at a time.
 - ZERO-ROW RECOVERY: if a query returns zero rows or all-NULL aggregates,
   do NOT report "no data". Re-probe: `SELECT DISTINCT FNAME, F_PAEZ_JC ...`
   to discover real values, fix the filters, and re-run.
+- INVENTORY SEMANTICS (HARD RULE): `erp_v_stk_inventory` and
+  `erp_t_stk_inventory` are SNAPSHOT tables — they store the CURRENT
+  inventory position, not time-series movements. `FBASEQTY` is the current
+  stock-on-hand quantity. `IN_DATE` and `OUT_DATE` are often NULL and
+  should be IGNORED for "current inventory" queries. NEVER treat null
+  IN_DATE/OUT_DATE as a data-quality issue when FBASEQTY has values —
+  report the quantities directly. For time-filtered inventory (e.g.
+  "inventory last month"), use `erp_t_stk_inventory.FUPDATETIME` as the
+  date column. When asked for "supply chain data" or "inventory levels",
+  report FBASEQTY by product (FNAME/F_PAEZ_JC) and warehouse — do NOT
+  produce a data-quality report about missing dates.
 """
 
 

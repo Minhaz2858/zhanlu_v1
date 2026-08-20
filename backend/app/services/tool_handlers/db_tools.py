@@ -340,6 +340,18 @@ async def _describe_schema(
     full = bool(args.get("full", False))
     max_tables = int(args.get("max_tables", 30))
 
+    # Data Agent auto-escalation: when the caller has schema_validator_enabled
+    # in context (the Data Agent sub-agent always does), default to returning
+    # columns so the agent doesn't guess column names.  Without this, the
+    # default path returns only table names, and the agent invents columns
+    # like FDATE on the wrong table — causing 30+ second validator-rejection
+    # loops before eventually falling back to stale tables.
+    _ctx = context or {}
+    if not full and not table and _ctx.get("schema_validator_enabled"):
+        full = True
+        if max_tables < 50:
+            max_tables = 50
+
     policy = _resolve_user_policy(db, user_id, context)
     if policy.is_kb_fully_denied(kb_id):
         logger.warning("describe_schema: KB %s denied for user %s", kb_id, user_id)
@@ -350,7 +362,17 @@ async def _describe_schema(
     # ── Schema linker path (flag-gated) — runs before _do_work ──
     # Skip when the KB is policy-restricted: the catalog slice is a free-text
     # blob we can't reliably filter, so fall back to the filtered describe path.
-    if not restricted and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+    # The Data Agent sub-context sets schema_linking_enabled / schema_graph_enabled
+    # as agent-level opt-ins (in addition to global settings flags).
+    _linker_enabled = (
+        settings.SCHEMA_LINKING_ENABLED
+        or _ctx.get("schema_linking_enabled")
+    ) and settings.SEMANTIC_CATALOG_ENABLED
+    _graph_enabled = (
+        settings.SCHEMA_GRAPH_ENABLED
+        or _ctx.get("schema_graph_enabled")
+    )
+    if not restricted and _linker_enabled:
         try:
             from app.services.knowledge_graph.schema_linker import link_schema
             question = args.get("question", "") or (context or {}).get("user_query", "") or ""
@@ -367,7 +389,7 @@ async def _describe_schema(
             ]
 
             # ── SchemaGraph path (flag-gated): structural view + join edges ──
-            if settings.SCHEMA_GRAPH_ENABLED and candidate_tables:
+            if _graph_enabled and candidate_tables:
                 try:
                     from app.services.db.schema_graph import SchemaGraph
                     graph = await asyncio.to_thread(
@@ -493,11 +515,33 @@ async def _execute_query(
                     "execute_query: schema validation failed on KB %s: %s",
                     kb_id, "; ".join(str(e) for e in errors),
                 )
+                # Build human-readable fix guidance so the LLM can self-correct.
+                # Without this, the agent sees raw available_columns dict and
+                # ignores it, retrying with the same wrong column names.
+                available = vres.get("available_columns", {})
+                suggestions = vres.get("available_suggestions", [])
+                fix_guidance = ""
+                if available:
+                    fix_guidance += "\n\nAVAILABLE COLUMNS on referenced tables:\n"
+                    for tbl, cols in available.items():
+                        shown = cols[:25] if isinstance(cols, list) else []
+                        fix_guidance += f"  - {tbl}: {', '.join(str(c) for c in shown)}"
+                        if isinstance(cols, list) and len(cols) > 25:
+                            fix_guidance += f" (+{len(cols)-25} more)"
+                        fix_guidance += "\n"
+                if suggestions:
+                    fix_guidance += "\nFIX SUGGESTIONS:\n"
+                    for s in suggestions[:8]:
+                        fix_guidance += f"  - {s}\n"
                 return {
                     "success": False,
-                    "error": "Query references unknown tables/columns: " + "; ".join(str(e) for e in errors),
-                    "available_columns": vres.get("available_columns", {}),
-                    "available_suggestions": vres.get("available_suggestions", []),
+                    "error": (
+                        "Query references unknown tables/columns: "
+                        + "; ".join(str(e) for e in errors)
+                        + fix_guidance
+                    ),
+                    "available_columns": available,
+                    "available_suggestions": suggestions,
                     "sql": sql,
                 }
         except Exception as exc:

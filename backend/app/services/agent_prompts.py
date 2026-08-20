@@ -201,16 +201,33 @@ analysis in the Ecisco BI project):
   present stale 2025 numbers as the current market picture.
 
 ECISCO BI SALES + INVENTORY COVERAGE RULE (HARD RULE):
-- SALES: for sales volume / shipment quantity / revenue, query the unified
-  LIVE views — `erp_v_sale_orderentry` or `erp_t_sal_outstock` (~90k rows,
-  current through 2026). When the question covers a product portfolio (e.g.
-  "C5/C9 products"), query ALL products in ONE query grouped by product name —
-  do NOT query single-product views (`sale_erp_v_<product>_data`) one at a
-  time, as that silently yields a one-product answer.
+- SALES: for sales volume / shipment quantity / revenue, query the LIVE
+  tables. `erp_t_sal_outstock` is the HEADER table (has FDATE,
+  FCUSTOMERID, FDOCUMENTSTATUS). `erp_t_sal_outstockentry` is the
+  ENTRY/LINE table (has FMATERIALID, FREALQTY, FBASEUNITQTY,
+  F_PAEZ_BHSAMOUNT, F_PAEZ_HSDJ). They JOIN on FID. FDATE is ONLY on
+  the header table — never reference FDATE from the entry table.
+  The correct JOIN pattern: `SELECT h.FDATE, e.FMATERIALID, e.FREALQTY,
+  e.F_PAEZ_BHSAMOUNT FROM erp_t_sal_outstock h JOIN
+  erp_t_sal_outstockentry e ON h.FID = e.FID WHERE h.FDATE >= '...'`.
+  (~90k rows, current through 2026). Avoid `erp_product_sales_details`
+  (1.4k rows, ends 2025-12-31) and `erp_v_sale_orderentry` (sparse).
+  When the question covers a product portfolio (e.g. "C5/C9 products"),
+  query ALL products in ONE query grouped by product name — do NOT query
+  single-product views one at a time.
 - INVENTORY: current inventory position must come from `erp_v_stk_inventory`
   or `erp_t_stk_inventory` (by product name) — never guess inventory from a
   sales-only table, and never report inventory as empty/null without querying
   the inventory tables first.
+- INVENTORY IS A SNAPSHOT (HARD RULE): `erp_v_stk_inventory` and
+  `erp_t_stk_inventory` are snapshot tables showing CURRENT stock-on-hand.
+  `FBASEQTY` gives current quantity per product/warehouse. `IN_DATE` and
+  `OUT_DATE` are often NULL and should be IGNORED for current-inventory
+  queries — do NOT treat null dates as a data-quality issue. For
+  time-filtered inventory, use `erp_t_stk_inventory.FUPDATETIME`. When
+  the sub-agent returns inventory data with null dates but valid FBASEQTY,
+  report the quantities — never produce a data-quality report about
+  missing dates.
 - A complete product answer combines sales (from the sales tables) + inventory
   (from the inventory tables) + prices (from `actual_price` / `market_prices`).
 """
