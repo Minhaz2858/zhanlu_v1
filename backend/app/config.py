@@ -144,6 +144,20 @@ class Settings(BaseSettings):
     SMTP_USE_SSL: bool = True  # True = SSL (465); False = STARTTLS (587)
     SMTP_FROM_NAME: str = "Zhanlu System"
 
+    # ── Email Notification Gateway (automation run results) ───────────────
+    # Master switch. When False, no automation run ever sends email, even if
+    # a task has recipients configured. Enable first, then add per-task emails.
+    NOTIFICATION_GATEWAY_ENABLED: bool = False
+    # Max attachment size in bytes before the gateway falls back to a signed
+    # download link (8 MB default, matching the plan's "file > 8 MB → link").
+    EMAIL_ATTACH_MAX_BYTES: int = 8_388_608
+    # Lifetime of the HMAC-signed download link, in days.
+    EMAIL_DOWNLOAD_LINK_TTL_DAYS: int = 7
+    # Retry policy for SMTP transport errors. EMAIL_MAX_RETRIES attempts with
+    # exponential backoff (1s/2s/4s by default). Permanent errors (bad address)
+    # fail fast and do not retry.
+    EMAIL_MAX_RETRIES: int = 3
+
     # Public-facing URL — used to build absolute URLs for third-party
     # previewers like Microsoft Word Online.  Empty disables those tiers.
     APP_PUBLIC_URL: str = ""
@@ -415,6 +429,7 @@ class Settings(BaseSettings):
     # Synthesis-boundary nudge (cap 1/turn) + T-3 tool_choice forcing toward
     # create_artifact(type="pptx"); the dashboard guard takes precedence.
     PPT_TURN_GUARD_ENABLED: bool = False
+    FILE_TURN_GUARD_ENABLED: bool = False
     # Phase 1B: layout-engine / data-table tuning (all defaults safe-off).
     LAYOUT_ENGINE_TEMPLATE_PATH: str = ""
     PPTX_DARK_THEME_PATH: str = ""
@@ -487,6 +502,18 @@ class Settings(BaseSettings):
     SELF_EVAL_MAX_REPLANS: int = 3
     # Timeout for the synchronous LLM evaluator call (mirrors quality_eval).
     SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 15.0
+
+    # D4 (2026-08-20): deterministic category-subset coverage check for the
+    # verification gate. When True, an answer to a category/portfolio request
+    # whose query results only cover a PROPER SUBSET of the catalog's known
+    # members for that category (from catalog_meta sample_values) is flagged
+    # INCOMPLETE and nudged to re-query the unified table. Default OFF.
+    CATEGORY_SUBSET_CHECK_ENABLED: bool = False
+    # D5 (2026-08-20): deterministic arithmetic-consistency gate. When True,
+    # stated arithmetic claims in the draft answer ("X of Y leaving Z",
+    # "X/Y ≈ Z months", "X% of Y") are recomputed; mismatches >2% flag
+    # INCOMPLETE. Default OFF.
+    ARITHMETIC_CONSISTENCY_ENABLED: bool = False
 
     # Phase 1 response grounding: char cap for the findings block injected
     # into the FINALIZE response prompt (spec §3.3). Metadata is preserved

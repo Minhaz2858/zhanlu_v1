@@ -68,3 +68,7 @@ class AutomationExecution(TimestampedBase):
         doc="Parent execution when spawned via execute_automation; "
             "NULL for top-level runs. Caps recursion depth.",
     )
+    # When the email notification gateway sent the run's result email
+    # (success or failure). NULL when no email was sent (disabled, no
+    # recipients, or notify_on mismatch). Used for dedup + observability.
+    email_notified_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)

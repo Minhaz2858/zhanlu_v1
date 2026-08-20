@@ -1,5 +1,5 @@
 import {
-  AlertTriangle, CheckCircle2, Circle, CircleDashed, Loader2, MinusCircle, XCircle,
+  AlertTriangle, CheckCircle2, Circle, CircleDashed, Loader2, Mail, MinusCircle, XCircle,
 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 
@@ -150,10 +150,23 @@ export default function RunChecklist({ steps, status, className = '' }) {
 
       <ol role="list" aria-label={listLabel} className="space-y-1.5">
         {safeSteps.map((step, idx) => {
-          const meta = STATUS_META[normalizeStatus(step.status)];
-          const Icon = meta.Icon;
+          const norm = normalizeStatus(step.status);
+          const meta = STATUS_META[norm];
+          let Icon = meta.Icon;
+          let iconClass = meta.iconClass;
+          // Email-gateway steps (appended by the notification gateway worker) use
+          // an envelope icon on success and a warning icon on failure.
+          if (step.step_type === 'email_notification') {
+            if (norm === 'done') {
+              Icon = Mail;
+              iconClass = 'text-emerald-600';
+            } else if (norm === 'failed') {
+              Icon = AlertTriangle;
+              iconClass = 'text-amber-500';
+            }
+          }
           const stepNumber = step.number ?? idx + 1;
-          const isCurrent = normalizeStatus(step.status) === 'running';
+          const isCurrent = norm === 'running';
           return (
             <li
               key={stepNumber}
@@ -165,7 +178,7 @@ export default function RunChecklist({ steps, status, className = '' }) {
               }`}
             >
               <span
-                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center ${meta.iconClass}`}
+                className={`mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center ${iconClass}`}
                 aria-hidden="true"
               >
                 <Icon className="h-4 w-4" />

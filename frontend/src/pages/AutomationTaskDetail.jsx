@@ -14,6 +14,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Button } from '@/components/ui/button';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import SkillsSection from '@/components/agent/SkillsSection';
+import NotificationSettingsCard from '@/components/automation/NotificationSettingsCard';
 import { coerceStringArray } from '@/lib/jsonArray';
 
 import { formatShortDateTime } from '@/lib/time';
@@ -415,6 +416,8 @@ export default function AutomationTaskDetail() {
               )}
             </div>
           </Section>
+
+          <NotificationSettingsCard task={task} onSaved={load} />
         </div>
       </div>
     </div>

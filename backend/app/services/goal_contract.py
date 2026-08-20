@@ -50,7 +50,7 @@ _PENDING_RE = re.compile(
 )
 
 _PENDING_OFFER_RE = re.compile(
-    r"\b(let me know|feel free|don'?t hesitate)\b",
+    r"\b(let me know|feel free|don'?t hesitate|want me to)\b",
     re.IGNORECASE,
 )
 

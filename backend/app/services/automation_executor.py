@@ -41,6 +41,7 @@ from app.models.agent_app import AgentApp
 from app.models.agent_conversation import AgentConversation
 from app.models.user import User
 from app.lib.timezone import format_cst
+from app.services.notification_gateway import notify_run_finished
 
 logger = logging.getLogger(__name__)
 
@@ -645,6 +646,16 @@ def _mark_failed_no_retry(db: Session, execution: AutomationExecution, error: st
             _notify_chat_failure(db, t, execution, execution.output_text or "")
     except Exception as ne:
         logger.warning("_mark_failed_no_retry: failure notify failed: %s", ne)
+
+    # Phase 4b: email notification gateway (fire-and-forget).
+    try:
+        if t:
+            files = db.query(AutomationFile).filter(
+                AutomationFile.execution_id == execution.id
+            ).all()
+            notify_run_finished(db, t, execution, files, is_success=False)
+    except Exception as ne:
+        logger.warning("_mark_failed_no_retry: email notify failed: %s", ne)
 
 
 # ---------------------------------------------------------------------------
@@ -1398,6 +1409,12 @@ def execute_automation(execution_id: str) -> None:
             "execute_automation: %s completed (%d files) for task %s",
             execution.id, len(files), task.id,
         )
+        # Phase 4b: email notification gateway. Fire-and-forget — never blocks
+        # the run, and a delivery failure never fails the automation.
+        try:
+            notify_run_finished(db, task, execution, files, is_success=True)
+        except Exception as ne:
+            logger.warning("execute_automation: email notify failed: %s", ne)
     except Exception as e:
         logger.exception("execute_automation: unhandled error: %s", e)
         try:
@@ -1464,6 +1481,15 @@ def _mark_failed(db: Session, execution: AutomationExecution, error: str) -> Non
                 _notify_chat_failure(db, task, execution, execution.output_text or "")
             except Exception as ne:
                 logger.warning("_mark_failed: failure notify failed: %s", ne)
+
+        # Phase 4b: email notification gateway (fire-and-forget; final failure only).
+        try:
+            files = db.query(AutomationFile).filter(
+                AutomationFile.execution_id == execution.id
+            ).all()
+            notify_run_finished(db, task, execution, files, is_success=False)
+        except Exception as ne:
+            logger.warning("_mark_failed: email notify failed: %s", ne)
 
 
 def _mark_cancelled(db: Session, execution: AutomationExecution) -> bool:

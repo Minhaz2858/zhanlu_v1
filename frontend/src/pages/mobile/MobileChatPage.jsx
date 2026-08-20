@@ -185,6 +185,17 @@ export default function MobileChatPage() {
             ));
             scrollToBottom();
           }
+        } else if (evt.type === 'content_replace' && typeof evt.content === 'string') {
+          // D2 (2026-08-20): post-nudge re-synthesis. REPLACE the whole
+          // bubble instead of appending so leaked nudge-reply prose never
+          // shows; the `done` event carries the authoritative final content.
+          fullContent = evt.content;
+          if (genNow === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+            ));
+            scrollToBottom();
+          }
         } else if (evt.type === 'reasoning_done' && typeof evt.reasoning === 'string') {
           reasoningText = evt.reasoning;
           if (genNow === genRef.current) {

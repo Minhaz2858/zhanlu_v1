@@ -1090,6 +1090,44 @@ def download_file(
     )
 
 
+@router.get("/email-download/{file_id}")
+def email_download_file(
+    file_id: str,
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Serve a generated file via a time-limited HMAC-signed link (no auth).
+
+    Used by the email notification gateway when the output file is too large to
+    attach (or attachments are disabled). The token is minted by
+    ``notification_gateway.download_link.generate_download_token`` and is bound
+    to ``file_id`` with a 7-day expiry, so email recipients who are not logged-in
+    users can still download the result.
+    """
+    from app.services.notification_gateway import verify_download_token
+
+    if not token or not verify_download_token(token, file_id):
+        raise HTTPException(status_code=401, detail="Invalid or expired download link")
+
+    file_row = db.query(AutomationFile).filter(
+        AutomationFile.id == file_id,
+        AutomationFile.is_deleted == False,  # noqa: E712
+    ).first()
+    if not file_row:
+        raise HTTPException(status_code=404, detail="File not found")
+
+    path = Path(file_row.file_path or "")
+    if not path.exists():
+        raise HTTPException(status_code=410, detail="File no longer exists on disk")
+
+    return FileResponse(
+        path=str(path),
+        media_type=file_row.mime_type or mimetypes.guess_type(file_row.name)[0]
+        or "application/octet-stream",
+        filename=file_row.name,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Status toggle
 # ---------------------------------------------------------------------------
@@ -1231,6 +1269,62 @@ def bootstrap_nightly_forecast(
     db.commit()
     db.refresh(task)
     return {"task_id": task.id, "status": "created", "cron": cron}
+
+
+class NotificationSettingsRequest(BaseModel):
+    notify_enabled: bool = False
+    notify_emails: list[str] = []
+    notify_on: str = "always"  # "always" | "on_success" | "on_failure"
+    attach_file: bool = True
+
+
+@router.patch("/{task_id}/notification-settings")
+def update_notification_settings(
+    task_id: str,
+    req: NotificationSettingsRequest,
+    db: Session = Depends(get_db),
+):
+    """Persist per-task email notification settings with server-side validation.
+
+    Rejects malformed addresses and unknown ``notify_on`` values with 422 so the
+    UI can surface inline errors without a round-trip to the SMTP server.
+    """
+    from app.services.notification_gateway import is_valid_email
+
+    task = db.query(AutomationTask).filter(
+        AutomationTask.id == task_id,
+        AutomationTask.is_deleted == False,  # noqa: E712
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Automation task not found")
+
+    emails = [e.strip().lower() for e in req.notify_emails if e and e.strip()]
+    invalid = [e for e in emails if not is_valid_email(e)]
+    if invalid:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid email address(es): {', '.join(invalid)}",
+        )
+    if req.notify_on not in ("always", "on_success", "on_failure"):
+        raise HTTPException(
+            status_code=422,
+            detail="notify_on must be one of: always, on_success, on_failure",
+        )
+
+    task.notify_enabled = req.notify_enabled
+    task.notify_emails = emails
+    task.notify_on = req.notify_on
+    task.attach_file = req.attach_file
+    task.updated_date = datetime.now(timezone.utc)
+    db.commit()
+    db.refresh(task)
+    return {
+        "success": True,
+        "notify_enabled": task.notify_enabled,
+        "notify_emails": task.notify_emails,
+        "notify_on": task.notify_on,
+        "attach_file": task.attach_file,
+    }
 
 
 __all__ = ["router"]

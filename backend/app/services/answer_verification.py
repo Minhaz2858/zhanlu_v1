@@ -87,6 +87,14 @@ _ASPECT_STOPWORDS = frozenset({
     "count", "status", "detail", "details", "trend", "trends", "breakdown",
     "split", "sample", "full", "new", "old", "please", "help", "result",
     "results", "report", "reports", "metric", "metrics", "figure", "figures",
+    # Automation task metadata — describe the TASK or its DELIVERY, not a data
+    # dimension. The "Daily Sales Data Sync" prompt contains words like
+    # "incremental", "anomaly", "alerts", "outcome" that previously triggered
+    # phantom missing-dimension flags, nudging the model to re-emit the entire
+    # report (2026-08-20).
+    "outcome", "incremental", "anomaly", "anomalies", "alert", "alerts",
+    "alerting", "successful", "success", "failure", "failures", "error",
+    "errors", "ok", "pending", "running", "scheduled",
 })
 
 # Generic container/category words — not content dimensions. Excluded so a
@@ -107,7 +115,10 @@ _CONTAINER_STOPWORDS = frozenset({
 # flags on the verb).
 _VERB_STOPWORDS = frozenset({
     "make", "create", "show", "give", "build", "generate", "tell", "produce",
-    "provide", "run", "write", "pull", "fetch", "get", "prepare", "compile",
+    "provide", "run", "running", "sync", "syncing", "synced", "automate",
+    "automating", "automated", "schedule", "scheduled", "scheduling",
+    "execute", "executing", "trigger", "triggered", "triggering",
+    "write", "pull", "fetch", "get", "prepare", "compile",
     "compute", "display", "present", "render", "draft", "deliver", "output",
     "list", "find", "need", "want", "please", "help", "answer", "explain",
     "summarize", "analyze", "calculate", "count",
@@ -120,6 +131,12 @@ _FORMAT_STOPWORDS = frozenset({
     "deck", "report", "overview", "summary", "presentation", "slide", "slides",
     "document", "docx", "pdf", "spreadsheet", "chart", "charts", "graph",
     "graphs", "table", "tables", "export", "attachment",
+    # Format-adjacent words that appear in automation format guidance (e.g.
+    # "Markdown table inside the HTML report") and in user prompts ("create a
+    # web page", "deliverable is the artifact"). Previously passed through and
+    # were flagged as missing dimensions (2026-08-20).
+    "markdown", "web", "page", "pages", "artifact", "artifacts", "deliverable",
+    "deliverables", "format",
 })
 
 # Time-window words — the query's temporal scope, not a dimension that results
@@ -129,6 +146,28 @@ _TIME_STOPWORDS = frozenset({
     "weekly", "monthly", "yearly", "annual", "quarter", "quarters", "quarterly",
     "recent", "yesterday", "today", "tomorrow", "date", "dates", "period",
     "time", "now", "current", "latest",
+})
+
+# Automation-task metadata words. The "Run Automation Task" prompt template
+# embeds runtime descriptors ("Data Sync", "Output format: Web page (html)",
+# "incremental updates", "anomaly alerts", "running") that the dimension
+# detector previously flagged as missing dimensions, triggering a re-iteration
+# that duplicated the entire report (2026-08-20). These are NEVER data
+# dimensions in any catalog. Note: most of these are also caught by
+# _ASPECT_STOPWORDS / _VERB_STOPWORDS / _FORMAT_STOPWORDS via the -ing
+# normalization fix; this set is a second-line filter for the specific
+# automation-context words that don't fit those categories.
+_AUTOMATION_STOPWORDS = frozenset({
+    "automation", "automated", "task", "sync", "pipeline",
+    "schedule", "scheduled", "cron", "trigger",
+    "incremental", "delta", "deltas", "update", "updates",
+    "alert", "alerts", "alerting", "anomaly", "anomalies",
+    "outcome", "successful", "failure",
+    # From the live automation wrapper template ("Run Automation Task:"):
+    # these wrapper words describe the task envelope, not data dimensions.
+    "data_sync", "type", "name", "description", "project",
+    "business", "appropriate", "track", "watch", "use",
+    "ecisco", "erp",
 })
 
 # Rebuttal detection (Fix 1c). When the assistant explicitly rebuts a
@@ -226,7 +265,22 @@ def _normalize_token(tok: str) -> str:
         t = t[:-3] + "y"
     elif t.endswith("ss"):
         pass
-    elif t.endswith("s"):
+    elif t.endswith("ing") and len(t) > 5:
+        # Strip -ing suffix so inflected verbs ("running", "syncing") map to
+        # their stem ("run", "sync") and hit the stopword sets. Only strip
+        # when the stem is >= 3 chars to avoid over-stripping ("king" → "k").
+        stem = t[:-3]
+        # Undo doubled-final-consonant pattern: running → runn → run,
+        # swimming → swimmi → swim, getting → getti → get. If the stem has
+        # a doubled consonant (last char == second-to-last), drop one.
+        if len(stem) >= 3 and stem[-1] == stem[-2]:
+            t = stem[:-1]
+        else:
+            t = stem
+    elif t.endswith("s") and len(t) > 3 and not t.endswith("ss"):
+        # Strip plural -s but preserve words ending in -ss (class, business,
+        # status) and short words (≤ 3 chars: "as", "is", "us"). Pre-existing
+        # behaviour (2026-08-20): "runs" → "run", "tables" → "table".
         t = t[:-1]
     return t
 
@@ -398,6 +452,7 @@ def _detect_dimension_coverage(
         and _normalize_token(tok) not in _VERB_STOPWORDS
         and _normalize_token(tok) not in _FORMAT_STOPWORDS
         and _normalize_token(tok) not in _TIME_STOPWORDS
+        and _normalize_token(tok) not in _AUTOMATION_STOPWORDS
     }
     if not requested:
         return []
@@ -754,6 +809,193 @@ def _detect_total_drift(results: list[dict]) -> list[str]:
     return []
 
 
+# ---------------------------------------------------------------------------
+# D4 (2026-08-20): category-subset coverage check
+# ---------------------------------------------------------------------------
+# The system prompt HARD RULE says to use unified tables for category /
+# portfolio questions. LLMs can ignore prompt rules, so this deterministic
+# post-hoc check catches the case: when the user asks about a whole category
+# and the query results only cover a proper subset of the catalog's known
+# members (per-product view instead of the unified table), flag INCOMPLETE.
+
+_CATEGORY_REQUEST_RE = re.compile(
+    r"\b(all|every|each|whole|full|entire|portfolio|family|category|"
+    r"combined|consolidated|overview|complete|supply chain|dashboard|"
+    r"product line|product lines)\b",
+    re.IGNORECASE,
+)
+
+
+def _column_present_in_results(column: str, results: list[dict]) -> bool:
+    """Case-insensitive presence check of a catalog column in the results."""
+    lowered = column.lower()
+    for r in results:
+        for col in r.get("columns") or []:
+            if str(col).lower() == lowered:
+                return True
+        rows = r.get("rows") or []
+        if rows and isinstance(rows[0], dict):
+            for key in rows[0].keys():
+                if str(key).lower() == lowered:
+                    return True
+    return False
+
+
+def _covered_member_values(column: str, results: list[dict]) -> set[str]:
+    """Distinct, non-empty cell values for ``column`` across all results."""
+    lowered = column.lower()
+    covered: set[str] = set()
+    for r in results:
+        columns = [str(c) for c in (r.get("columns") or [])]
+        idx = next(
+            (i for i, c in enumerate(columns) if c.lower() == lowered), None
+        )
+        for row in r.get("rows") or []:
+            if isinstance(row, dict):
+                for key, val in row.items():
+                    if str(key).lower() == lowered and val is not None:
+                        s = str(val).strip()
+                        if s:
+                            covered.add(s)
+            elif idx is not None and isinstance(row, (list, tuple)) and idx < len(row):
+                s = str(row[idx]).strip()
+                if s:
+                    covered.add(s)
+    return covered
+
+
+def _detect_category_subset(
+    user_message: str,
+    results: list[dict],
+    assistant_text: str,
+    catalog_meta: dict | None = None,
+) -> list[str]:
+    """Return ``["category_subset"]`` when the user asked about a category /
+    portfolio and the query results only cover a PROPER SUBSET of the
+    catalog's known members for that category (from ``catalog_meta`` column
+    sample_values — the member-enumerating name columns).
+
+    Flag-gated by ``CATEGORY_SUBSET_CHECK_ENABLED`` (default False).
+    """
+    if not getattr(settings, "CATEGORY_SUBSET_CHECK_ENABLED", False):
+        return []
+    if not user_message or not results or not catalog_meta:
+        return []
+    lowered = user_message.lower()
+    if not _CATEGORY_REQUEST_RE.search(lowered):
+        return []
+    for col_name, samples in catalog_meta.items():
+        known = {
+            str(s).strip().lower()
+            for s in (samples or [])
+            if s is not None and str(s).strip()
+        }
+        if len(known) < 2:
+            continue  # not a member-enumerating category column
+        if not _column_present_in_results(str(col_name), results):
+            continue
+        covered = {v.lower() for v in _covered_member_values(str(col_name), results)}
+        if not covered:
+            continue
+        if covered < known:  # proper subset → partial portfolio coverage
+            return ["category_subset"]
+    return []
+
+
+# ---------------------------------------------------------------------------
+# D5 (2026-08-20): deterministic arithmetic-consistency gate
+# ---------------------------------------------------------------------------
+# Extract stated arithmetic claims from the draft answer, recompute each, and
+# flag mismatches >2%. Pure regex + float math — no LLM call. Flag-gated by
+# ARITHMETIC_CONSISTENCY_ENABLED (default False).
+
+_ARITH_SUBTRACT_RE = re.compile(
+    r"(\d[\d,.]*)\s+of\s+(\d[\d,.]*)\s+([^.;!?\n]{0,80}?)\s+leaving\s+(\d[\d,.]*)",
+    re.IGNORECASE,
+)
+_ARITH_ADDITION_RE = re.compile(
+    r"(\d[\d,.]*)\s*\+\s*(\d[\d,.]*)\s*=\s*(\d[\d,.]*)", re.IGNORECASE,
+)
+_ARITH_TOTAL_RE = re.compile(
+    r"(\d[\d,.]*)\s+and\s+(\d[\d,.]*)\s+(?:total|add up to|sum to)\s+(\d[\d,.]*)",
+    re.IGNORECASE,
+)
+_ARITH_PERCENT_OF_RE = re.compile(
+    r"(\d[\d,.]*)\s*%\s+of\s+(\d[\d,.]*)\s*(?:is|equals|=)\s*(\d[\d,.]*)",
+    re.IGNORECASE,
+)
+_ARITH_RATIO_MONTHS_RE = re.compile(
+    r"(\d[\d,.]*)\s*(?:tons?|units?|items?|kg)?\s*[≈~]\s*(\d[\d,.]*)\s*months?",
+    re.IGNORECASE,
+)
+_ARITH_RATE_RE = re.compile(
+    r"(\d[\d,.]*)\s*(?:tons?|units?|items?|kg)?\s*(?:per\s+month|/month|a\s+month)",
+    re.IGNORECASE,
+)
+
+_ARITH_MAX_REL_DIFF = 0.02
+
+
+def _arith_num(text: str) -> float | None:
+    try:
+        return float(text.replace(",", ""))
+    except (TypeError, ValueError):
+        return None
+
+
+def _detect_arithmetic_inconsistency(assistant_text: str) -> list[str]:
+    """Return ``["arithmetic_inconsistency"]`` when any stated arithmetic
+    claim in the draft answer contradicts its own recomputation by >2%.
+
+    Verifies: subtraction ("A of B ... leaving C"), addition ("A + B = C",
+    "A and B total C"), percentage ("A% of B is C") and coverage ratio
+    ("A tons ≈ N months" against a stated "R per month" run rate).
+    """
+    if not getattr(settings, "ARITHMETIC_CONSISTENCY_ENABLED", False):
+        return []
+    if not assistant_text:
+        return []
+
+    run_rate: float | None = None
+    rate_match = _ARITH_RATE_RE.search(assistant_text)
+    if rate_match:
+        run_rate = _arith_num(rate_match.group(1))
+
+    claims: list[tuple[float, float, str]] = []  # (recomputed, claimed, label)
+
+    for m in _ARITH_SUBTRACT_RE.finditer(assistant_text):
+        x, y, z = (_arith_num(m.group(i)) for i in (1, 2, 4))
+        if x is not None and y is not None and z is not None:
+            claims.append((y - x, z, "subtraction"))
+
+    for m in _ARITH_ADDITION_RE.finditer(assistant_text):
+        x, y, z = (_arith_num(m.group(i)) for i in (1, 2, 3))
+        if x is not None and y is not None and z is not None:
+            claims.append((x + y, z, "addition"))
+
+    for m in _ARITH_TOTAL_RE.finditer(assistant_text):
+        x, y, z = (_arith_num(m.group(i)) for i in (1, 2, 3))
+        if x is not None and y is not None and z is not None:
+            claims.append((x + y, z, "addition"))
+
+    for m in _ARITH_PERCENT_OF_RE.finditer(assistant_text):
+        pct, base, claimed = (_arith_num(m.group(i)) for i in (1, 2, 3))
+        if pct is not None and base is not None and claimed is not None:
+            claims.append((pct / 100.0 * base, claimed, "percentage"))
+
+    if run_rate and run_rate > 0:
+        for m in _ARITH_RATIO_MONTHS_RE.finditer(assistant_text):
+            qty, months = _arith_num(m.group(1)), _arith_num(m.group(2))
+            if qty is not None and months is not None and months > 0:
+                claims.append((qty / run_rate, months, "ratio"))
+
+    for recomputed, claimed, _label in claims:
+        denom = max(abs(recomputed), abs(claimed), 1e-9)
+        if denom > 0 and abs(recomputed - claimed) / denom > _ARITH_MAX_REL_DIFF:
+            return ["arithmetic_inconsistency"]
+    return []
+
+
 def _evaluate_answer_inner(
     user_message: str,
     tool_results: list[dict],
@@ -812,6 +1054,32 @@ def _evaluate_answer_inner(
         gaps.append(
             "the query returned a large unfiltered dump from a fact table even "
             "though the request asked for a specific subset (category/type/quantity)"
+        )
+
+    # D4 (2026-08-20): category/portfolio requests must cover the WHOLE
+    # category. Per-product/per-category views that only cover a subset of the
+    # catalog's known members are flagged and nudged back to the unified table.
+    if _detect_category_subset(
+        user_message, results, assistant_text, catalog_meta=catalog_meta,
+    ):
+        signals.append("category_subset")
+        gaps.append(
+            "the query results only cover a subset of the category's known "
+            "members even though the request asked about the whole category "
+            "(portfolio/family) — re-query against the unified table that "
+            "aggregates all members instead of a per-product/per-category view"
+        )
+
+    # D5 (2026-08-20): stated arithmetic claims must recompute correctly
+    # (catches e.g. "5,565 of 11,028 delivered, leaving 6,183 outstanding" —
+    # 11,028 − 5,565 = 5,463 ≠ 6,183, or "121.31 tons ≈ 2.3 months" when the
+    # run rate implies ≈0.32 months).
+    if _detect_arithmetic_inconsistency(assistant_text):
+        signals.append("arithmetic_inconsistency")
+        gaps.append(
+            "the draft answer contains an arithmetic claim that contradicts "
+            "its own numbers — recompute it from the tool results before "
+            "presenting"
         )
 
     blank_cols = _detect_blank_dimension_columns(results)
@@ -933,6 +1201,23 @@ def _suggested_fix(signals: list[str], results: list[dict]) -> str:
             "count, id+name+category columns, tagged table_role: entity_master), "
             "filter it to the relevant entity IDs, then re-query the fact table "
             "with WHERE <entity_id> IN (...) before answering."
+        )
+    if "category_subset" in signals:
+        return (
+            "The query results only cover a subset of the category's known "
+            "members (e.g. a per-product/per-category view) even though the "
+            "request asked about the whole category/portfolio. Re-query against "
+            "the unified table that aggregates ALL members of the category, then "
+            "answer with the complete portfolio picture (do not report a partial "
+            "set as if it were the full category)."
+        )
+    if "arithmetic_inconsistency" in signals:
+        return (
+            "Recompute the arithmetic in the draft answer from the tool results "
+            "before presenting: verify 'A of B leaving C' with C = B − A, "
+            "'A% of B' with A% × B, and 'N months of cover' with N = quantity ÷ "
+            "monthly run rate. Correct any number that does not reconcile; do "
+            "not report unverified arithmetic."
         )
     if "part_whole" in signals or "total_drift" in signals:
         return (

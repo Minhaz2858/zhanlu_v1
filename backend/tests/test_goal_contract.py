@@ -375,7 +375,11 @@ def test_unmet_zero_rows_resolved_by_nonempty() -> None:
 
 
 def test_unmet_pending_action_forces_announced_tool() -> None:
-    c = GoalContract(pending_action_phrase="Let me check the sales data", max_forces=3)
+    # Seq-stamp API: user-armed via build_goal_contract (like agents.py does).
+    c = build_goal_contract(
+        "Let me check the sales data",
+        agent_config={"tools": ["execute_query", "create_artifact"]},
+    )
     unmet = c.unmet(granted_tools=["execute_query", "create_artifact"])
     assert unmet and unmet[0].code == "pending_action"
     assert unmet[0].force_tool == "execute_query"
@@ -442,10 +446,14 @@ def test_pending_action_re_evaluates_from_assistant_text() -> None:
 
 
 def test_pending_action_refresh_ignores_past_tense() -> None:
-    c = GoalContract(pending_action_phrase="Let me check the sales data", max_forces=3)
+    c = build_goal_contract(
+        "Let me check the sales data",
+        agent_config={"tools": ["execute_query"]},
+    )
     c.refresh_pending_action("I checked the live tables already.")
-    # Past-tense closing does NOT clear the marker — the announcement is
-    # still unexecuted, so the contract must keep forcing it.
+    # Past-tense closing does NOT clear the marker (user-armed is never
+    # disarmed by prose) — the announcement is still unexecuted, so the
+    # contract must keep forcing it.
     assert c.pending_action_phrase is not None
     assert c.unmet(granted_tools=["execute_query"])
 

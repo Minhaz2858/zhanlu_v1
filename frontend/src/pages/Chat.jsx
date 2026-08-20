@@ -2328,6 +2328,19 @@ export default function Chat() {
             // Persist partial content so it survives page navigation
             stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, loading: true });
           }
+        } else if (evt.type === 'content_replace' && typeof evt.content === 'string') {
+          // D2 (2026-08-20): post-nudge re-synthesis. The server replaces the
+          // whole bubble (REPLACE, not append) so leaked nudge-reply prose
+          // never shows. Each event carries the full accumulated text; the
+          // `done` event still carries the authoritative final content.
+          fullContent = evt.content;
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+            ));
+            // Persist partial content so it survives page navigation
+            stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, loading: true });
+          }
         } else if (evt.type === 'error') {
           // Bug 1 fix: don't surface raw server error text in the chat.
           // Show a clean, localized message instead. The raw error is

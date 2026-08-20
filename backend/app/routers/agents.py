@@ -73,6 +73,11 @@ from app.services.pptx_turn_guard import (
     pptx_turn_guard,
     should_force_create_pptx,
 )
+from app.services.file_turn_guard import (
+    file_turn_guard,
+    should_force_create_file,
+    is_file_deliverable_request,
+)
 from app.services.tool_result_persistence import (
     persist_tool_result,
     apply_turn_budget,
@@ -318,6 +323,13 @@ def _choose_fallback(
         return _artifact_aware_fallback(titles)
     if _is_dashboard_request(user_content):
         return _DASHBOARD_REDIRECT_FALLBACK
+    # File-deliverable redirect: when the user asked for a file deliverable
+    # (html/docx/pdf/xlsx/md) but no artifact was created, return a
+    # format-specific message instead of the generic fallback.
+    _is_file, _fmt = is_file_deliverable_request(user_content)
+    if _is_file and _fmt:
+        from app.services.file_turn_guard import build_file_disclosure
+        return build_file_disclosure(_fmt)
     return _GENERIC_EMPTY_CONTENT_FALLBACK
 
 
@@ -3444,6 +3456,9 @@ async def add_message(
         # by the LAST allowed pptx nudge (pptx_turn_guard.force_next). Read at
         # the top of the next iteration next to should_force_create_pptx.
         _pptx_force_next_iteration = False
+        # File-deliverable turn guard variables (mirrors pptx).
+        _file_nudge_attempts = 0
+        _file_force_next_iteration = False
         # Finish-line state (UnboundLocalError discipline: initialized BEFORE
         # the loop so any post-loop read is safe). ``dashboard_forced`` tracks
         # whether the dashboard guard forced ``create_dashboard`` this turn;
@@ -3577,10 +3592,35 @@ async def add_message(
                 }
                 _pptx_forced = True
                 _pptx_force_next_iteration = False  # consume the one-shot force
+            # File-deliverable turn-guard: mirrors pptx for html/docx/pdf/xlsx/md.
+            _file_forced = False
+            if not _pptx_forced and not dashboard_forced and (
+                _file_force_next_iteration or should_force_create_file(
+                    user_content,
+                    tool_calls_for_frontend,
+                    iteration=iteration,
+                    max_iterations=MAX_TOOL_ITERATIONS,
+                    has_artifact_tool="create_artifact" in _tool_names,
+                    dashboard_forced=dashboard_forced,
+                    pptx_forced=_pptx_forced,
+                )
+            ):
+                logger.info(
+                    "v2 stream: forcing create_artifact for file deliverable "
+                    "(conv=%s, iter=%d, prior_tool_count=%d)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_artifact"},
+                }
+                _file_forced = True
+                _file_force_next_iteration = False
             # Finish line: on the final iteration force tool_choice="none" so
-            # the LLM must answer in text. Guard forcing (dashboard + pptx) wins.
+            # the LLM must answer in text. Guard forcing (dashboard + pptx + file) wins.
             tool_choice = _finish_line_tool_choice(
-                iteration, MAX_TOOL_ITERATIONS - 1, dashboard_forced or _pptx_forced, tool_choice,
+                iteration, MAX_TOOL_ITERATIONS - 1,
+                dashboard_forced or _pptx_forced or _file_forced, tool_choice,
             )
             try:
                 # P1.3: Pre-API deterministic tool result pruning (no LLM call)
@@ -3759,6 +3799,36 @@ async def add_message(
                         "appended (conv=%s, iter=%d)", conversation_id, iteration,
                     )
                     assistant_content = (assistant_content or "") + " " + _pptx_guard.message
+                # P2.1.6: File-deliverable turn-guard (v2 loop) — mirrors pptx
+                # guard for html/docx/pdf/xlsx/md.  Blocked when pptx already
+                # nudged/forced this iteration.
+                if _pptx_guard.action == "none":
+                    _file_guard = file_turn_guard(
+                        user_content,
+                        tool_calls_for_frontend,
+                        budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                        attempts=_file_nudge_attempts,
+                    )
+                    if _file_guard.action == "nudge":
+                        llm_messages.append({"role": "assistant", "content": assistant_content})
+                        llm_messages.append({"role": "user", "content": _file_guard.message})
+                        _file_nudge_attempts += 1
+                        if _file_guard.force_next:
+                            _file_force_next_iteration = True
+                        logger.info(
+                            "v2 stream: file turn-guard nudge injected "
+                            "(conv=%s, iter=%d, format=%s, force_next=%s)",
+                            conversation_id, iteration,
+                            _file_guard.detected_format, _file_guard.force_next,
+                        )
+                        continue
+                    if _file_guard.action == "disclose":
+                        logger.warning(
+                            "v2 stream: file deliverable not generated; disclosure "
+                            "appended (conv=%s, iter=%d, format=%s)",
+                            conversation_id, iteration, _file_guard.detected_format,
+                        )
+                        assistant_content = (assistant_content or "") + " " + _file_guard.message
                 # P2.2: Universal Self-Evaluation & Re-Planning gate (re-plan
                 # up to SELF_EVAL_MAX_REPLANS times before best-effort answer).
                 _gate_result = await _check_answer_verification_gate(
@@ -4932,6 +5002,9 @@ async def resume_conversation(
     conv_budget = IterationBudget(max_total=_max_iters)
     _verify_attempts = 0
     _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn (resume)
+    _pptx_force_next_iteration = False  # pptx guard one-shot force (resume)
+    _file_nudge_attempts = 0   # file turn-guard nudges this turn (resume)
+    _file_force_next_iteration = False  # file guard one-shot force
     # Finish-line state (UnboundLocalError discipline). The loop variable
     # shadows the outer ``iteration``, so capture the final value it will take
     # BEFORE the loop rebinds it.
@@ -5004,6 +5077,41 @@ async def resume_conversation(
                     "your final answer with what you have."
                 ),
             })
+        # PPTX T-3 forcing (resume loop): when budget closing + pptx requested
+        # + no artifact created, force create_artifact.
+        _pptx_forced = False
+        if _pptx_force_next_iteration or should_force_create_pptx(
+            user_content,
+            tool_calls_for_frontend,
+            iteration=iteration - (iteration - MAX_TOOL_ITERATIONS),  # normalize
+            max_iterations=MAX_TOOL_ITERATIONS,
+            has_artifact_tool="create_artifact" in _tool_names_from_schemas(tools),
+        ):
+            tool_choice = {
+                "type": "function",
+                "function": {"name": "create_artifact"},
+            }
+            _pptx_forced = True
+            _pptx_force_next_iteration = False
+        # File-deliverable T-3 forcing (resume loop): mirrors pptx for html/
+        # docx/pdf/xlsx/md.  Blocked when pptx already forced.
+        _file_forced = False
+        if not _pptx_forced and (
+            _file_force_next_iteration or should_force_create_file(
+                user_content,
+                tool_calls_for_frontend,
+                iteration=iteration - (iteration - MAX_TOOL_ITERATIONS),
+                max_iterations=MAX_TOOL_ITERATIONS,
+                has_artifact_tool="create_artifact" in _tool_names_from_schemas(tools),
+                pptx_forced=_pptx_forced,
+            )
+        ):
+            tool_choice = {
+                "type": "function",
+                "function": {"name": "create_artifact"},
+            }
+            _file_forced = True
+            _file_force_next_iteration = False
         tool_choice = _compute_tool_choice(
             user_content, data_ctx_extras, iteration,
             tool_names=_tool_names_from_schemas(tools),
@@ -5011,7 +5119,7 @@ async def resume_conversation(
         # Finish line: force tool_choice="none" on the final iteration so the
         # LLM must answer in text. No dashboard guard in this loop.
         tool_choice = _finish_line_tool_choice(
-            iteration, _final_iteration, False, tool_choice,
+            iteration, _final_iteration, _pptx_forced or _file_forced, tool_choice,
         )
         try:
             # P1.3: Pre-API deterministic tool result pruning
@@ -5080,6 +5188,35 @@ async def resume_conversation(
                     "appended (conv=%s, iter=%d)", conversation_id, iteration,
                 )
                 assistant_content = (assistant_content or "") + " " + _pptx_guard.message
+            # P2.1.6: File-deliverable turn-guard (resume loop) — mirrors pptx
+            # guard for html/docx/pdf/xlsx/md.  Blocked when pptx already nudged.
+            if _pptx_guard.action == "none":
+                _file_guard = file_turn_guard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    budget_remaining=_final_iteration - iteration,
+                    attempts=_file_nudge_attempts,
+                )
+                if _file_guard.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _file_guard.message})
+                    _file_nudge_attempts += 1
+                    if _file_guard.force_next:
+                        _file_force_next_iteration = True
+                    logger.info(
+                        "resume: file turn-guard nudge injected "
+                        "(conv=%s, iter=%d, format=%s, force_next=%s)",
+                        conversation_id, iteration,
+                        _file_guard.detected_format, _file_guard.force_next,
+                    )
+                    continue
+                if _file_guard.action == "disclose":
+                    logger.warning(
+                        "resume: file deliverable not generated; disclosure "
+                        "appended (conv=%s, iter=%d, format=%s)",
+                        conversation_id, iteration, _file_guard.detected_format,
+                    )
+                    assistant_content = (assistant_content or "") + " " + _file_guard.message
             # P2.2: Universal Self-Evaluation & Re-Planning gate (resume loop)
             _gate_result = await _check_answer_verification_gate(
                 user_content,
@@ -7659,6 +7796,11 @@ async def add_message_stream(
         # the top of the next iteration next to should_force_create_pptx, so
         # prose deflection can never end the turn without a deck.
         _pptx_force_next_iteration = False
+        # File-deliverable turn guard: mirrors pptx guard for html/docx/pdf/
+        # xlsx/md.  Detects format from user prompt OR automation metadata.
+        _file_nudge_attempts = 0
+        _file_force_next_iteration = False
+        _output_format = body.get("output_format")  # automation runtime may pass
         # Initialize BEFORE the loop: the budget guard and the tool-call
         # loop guard can both ``break`` on the FIRST iteration, before the
         # in-loop assignment runs — the post-loop ``if not content_streamed``
@@ -7729,6 +7871,13 @@ async def add_message_stream(
         # iter's content BEFORE the reset and join them post-loop.
         _v3_iter_contents: list[str] = []
         accumulated_content: str = ""  # post-loop computed; safe default for early-exit paths
+        # D1/D2 (2026-08-20): once a gate nudges a re-synthesis, every
+        # subsequent streamed delta must REPLACE the bubble (content_replace
+        # SSE) instead of appending — otherwise the nudge-reply prose leaks
+        # into the final user-facing answer. Turn-scoped: once True it stays
+        # True for the rest of the turn (all post-nudge iterations are
+        # replacement content, only the last synthesis survives).
+        _nudge_replacement_pending = False
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -7925,6 +8074,35 @@ async def add_message_stream(
                 }
                 _pptx_forced = True
                 _pptx_force_next_iteration = False  # consume the one-shot force
+            # File-deliverable forcing (html/docx/pdf/xlsx/md): mirrors pptx
+            # guard but covers non-pptx formats.  Blocked when pptx/dashboard
+            # already forced.  For automation runs, detect output_format from
+            # the harness metadata passed through the v3 loop.
+            _file_forced = False
+            if not _pptx_forced and not dashboard_forced and (
+                _file_force_next_iteration or should_force_create_file(
+                    user_content,
+                    tool_calls_for_frontend,
+                    iteration=iteration,
+                    max_iterations=MAX_TOOL_ITERATIONS,
+                    has_artifact_tool="create_artifact" in _tool_names,
+                    dashboard_forced=dashboard_forced,
+                    pptx_forced=_pptx_forced,
+                    output_format=_output_format,
+                )
+            ):
+                logger.info(
+                    "v3 stream: forcing create_artifact for file deliverable "
+                    "(conv=%s, iter=%d, prior_tool_count=%d, format=%s)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                    getattr(should_force_create_file, '_last_fmt', '?'),
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_artifact"},
+                }
+                _file_forced = True
+                _file_force_next_iteration = False  # consume the one-shot force
 
             # Goal-Contract force (flag-gated): the exit checker armed a
             # remediation force (unmet deliverable / zero-row re-query /
@@ -8026,7 +8204,13 @@ async def add_message_stream(
                                 if ev_type == "delta":
                                     assistant_content += ev_data
                                     content_streamed = True
-                                    yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
+                                    if _nudge_replacement_pending:
+                                        # D1/D2: post-nudge re-synthesis replaces
+                                        # the whole bubble instead of appending, so
+                                        # leaked nudge-reply prose never shows.
+                                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                    else:
+                                        yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
                                 elif ev_type == "reasoning":
                                     final_reasoning += ev_data
                                 elif ev_type == "tool_calls":
@@ -8110,7 +8294,12 @@ async def add_message_stream(
                         logger.info("stream: fallback to model %s succeeded", _fb_model)
                         if assistant_content:
                             content_streamed = True
-                            yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
+                            if _nudge_replacement_pending:
+                                # D1/D2: full-content emit must replace the
+                                # bubble when a re-synthesis is in flight.
+                                yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                            else:
+                                yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
                         # Fall through to the post-try flow (reasoning_done,
                         # tool-call handling) instead of failing the turn.
                     else:
@@ -8241,6 +8430,18 @@ async def add_message_stream(
                             conversation_id,
                             iteration, _contract.forces_used, _contract.max_forces,
                         )
+                        # Pop the just-captured iter content: the next iter
+                        # will re-emit (corrected) prose and we don't want
+                        # to accumulate both copies in `_v3_iter_contents`.
+                        if _v3_iter_contents:
+                            _v3_iter_contents.pop()
+                        # D1/D2: nudge-reply prose must never be visible. Clear
+                        # it (the top-of-loop append skips it) and mark the
+                        # next iteration's stream as a bubble replacement.
+                        if content_streamed and assistant_content:
+                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        assistant_content = ""
+                        _nudge_replacement_pending = True
                         continue
                 guardrail_result = _check_hallucination_guardrail(
                     user_content, data_ctx_extras, tool_calls_for_frontend,
@@ -8250,6 +8451,12 @@ async def add_message_stream(
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": guardrail_result.message})
                     guardrail_retries += 1
+                    # D1/D2: guardrail nudge-reply must not leak into the
+                    # final answer (same clear + content_replace pattern).
+                    if content_streamed and assistant_content:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
                     continue
                 elif guardrail_result.action == "fallback":
                     assistant_content = guardrail_result.message
@@ -8273,6 +8480,12 @@ async def add_message_stream(
                     _verify_attempts += 1
                     if _contract is not None:
                         _contract.record_force()
+                    # D1/D2: verify nudge-reply must not leak into the final
+                    # answer (same clear + content_replace pattern).
+                    if content_streamed and assistant_content:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
                     continue
                 # P2.1.5: PPTX turn-guard (v3 loop) — if the user asked for a
                 # PPT deck and the model ended its turn with text only (no tool
@@ -8297,6 +8510,18 @@ async def add_message_stream(
                         "v3 stream: pptx turn-guard nudge injected (conv=%s, iter=%d, force_next=%s)",
                         conversation_id, iteration, _pptx_guard.force_next,
                     )
+                    # Pop captured iter content: nudge injects assistant_content
+                    # to llm_messages so the LLM sees it as context; the next
+                    # iter's re-emit replaces it (avoid duplicating the entire
+                    # response in `_v3_iter_contents`).
+                    if _v3_iter_contents:
+                        _v3_iter_contents.pop()
+                    # D1/D2: pptx nudge-reply must not leak into the final
+                    # answer (same clear + content_replace pattern).
+                    if content_streamed and assistant_content:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
                     continue
                 if _pptx_guard.action == "disclose":
                     logger.warning(
@@ -8304,6 +8529,50 @@ async def add_message_stream(
                         "appended (conv=%s, iter=%d)", conversation_id, iteration,
                     )
                     assistant_content = (assistant_content or "") + " " + _pptx_guard.message
+                # P2.1.6: File-deliverable turn-guard (v3 loop) — mirrors pptx
+                # guard for html/docx/pdf/xlsx/md.  When the user asked for a
+                # file deliverable (or automation output_format), nudge the
+                # model to call create_artifact.  Blocked when pptx guard
+                # already nudged/forced this iteration.
+                if _pptx_guard.action == "none":
+                    _file_guard = file_turn_guard(
+                        user_content,
+                        tool_calls_for_frontend,
+                        budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                        attempts=_file_nudge_attempts,
+                        output_format=_output_format,
+                    )
+                    if _file_guard.action == "nudge":
+                                        llm_messages.append({"role": "assistant", "content": assistant_content})
+                                        llm_messages.append({"role": "user", "content": _file_guard.message})
+                                        _file_nudge_attempts += 1
+                                        if _file_guard.force_next:
+                                            _file_force_next_iteration = True
+                                        logger.info(
+                                            "v3 stream: file turn-guard nudge injected "
+                                            "(conv=%s, iter=%d, format=%s, force_next=%s)",
+                                            conversation_id, iteration,
+                                            _file_guard.detected_format, _file_guard.force_next,
+                                        )
+                                        # Pop captured iter content: see pptx nudge site above
+                                        # for rationale. Prevents the report from being appended
+                                        # twice to `_v3_iter_contents` after the agent re-emits.
+                                        if _v3_iter_contents:
+                                            _v3_iter_contents.pop()
+                                        # D1/D2: file-guard nudge-reply must not
+                                        # leak into the final answer.
+                                        if content_streamed and assistant_content:
+                                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                        assistant_content = ""
+                                        _nudge_replacement_pending = True
+                                        continue
+                    if _file_guard.action == "disclose":
+                        logger.warning(
+                            "v3 stream: file deliverable not generated; disclosure "
+                            "appended (conv=%s, iter=%d, format=%s)",
+                            conversation_id, iteration, _file_guard.detected_format,
+                        )
+                        assistant_content = (assistant_content or "") + " " + _file_guard.message
                 # P2.2: Universal Self-Evaluation & Re-Planning gate (v3 loop)
                 _gate_result = await _check_answer_verification_gate(
                     user_content,
@@ -8317,6 +8586,22 @@ async def add_message_stream(
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": _gate_result.message})
                     _gate_attempts += 1
+                    # Pop captured iter content: the gate nudged because it
+                    # thinks a dimension is missing; the next iter's prose
+                    # will replace this entry instead of duplicating it
+                    # (the user's repro: "Daily Sales Data Sync" produced
+                    # the report twice because markdown/outcome/running
+                    # triggered a re-iteration).
+                    if _v3_iter_contents:
+                        _v3_iter_contents.pop()
+                    # D1/D2: gate nudge-reply prose must never be visible.
+                    # Clear it so the top-of-loop append skips it; the next
+                    # iteration's stream replaces the bubble instead of
+                    # appending (leakage fix).
+                    if content_streamed and assistant_content:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
                     continue
                 if _gate_result.action == "disclose":
                     assistant_content = (assistant_content or "") + _gate_result.message

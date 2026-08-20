@@ -193,3 +193,53 @@ def test_pending_action_phrase_keeps_action_promise() -> None:
     result = pending_action_phrase("Let me query the live sales table now.")
     assert result is not None
     assert "query" in result.lower()
+
+
+# ── D3 (2026-08-20): exact user-trace sentence "let me re-run a single
+# ── clean aggregation" must be detected as a pending action ────────────────
+
+
+def test_pending_action_phrase_keeps_rerun_aggregation_promise() -> None:
+    """Exact trace sentence: matches _PENDING_RE via 'let me', is NOT excluded
+    by _PENDING_OFFER_RE ('let me know'/'feel free'/'want me to') nor by
+    _PENDING_PAST_RE ('ran' ≠ 're-run'), so pending_action_phrase() MUST
+    return the sentence."""
+    result = pending_action_phrase(
+        "Let me re-run a single clean aggregation to confirm the totals are "
+        "internally consistent across all metrics."
+    )
+    assert result is not None, "trace sentence must be detected as pending action"
+    assert "re-run" in result.lower()
+
+
+def test_two_ok_queries_then_rerun_aggregation_promise_fires() -> None:
+    """Full turn-shape repro: two OK queries already executed, then the exit
+    branch arms a promise with the EXACT trace sentence. The sequence-stamp
+    check (_armed_seq > _executed_seq) MUST fire remediation with
+    force_synthesis=True (usable data already retrieved)."""
+    c = build_goal_contract("Give me supply chain data for last 30 days")
+    c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
+    c.record_query_result([{"product_name": "C5", "revenue": 1000}])
+    c.record_tool_executed("ask_data_agent", result_quality=RESULT_QUALITY_ASSUMED_OK)
+    c.record_query_result([{"product_name": "C9", "revenue": 5000}])
+    c.refresh_pending_action(
+        "Let me re-run a single clean aggregation to confirm the totals are "
+        "internally consistent across all metrics."
+    )
+    crits = c.unmet(granted_tools={"ask_data_agent"})
+    assert crits, "pending-action remediation MUST fire (this is the D3 repro)"
+    assert crits[0].code == "pending_action"
+    assert crits[0].force_synthesis is True, "data already retrieved — force synthesis"
+    assert crits[0].force_tool is None
+
+
+# ── _PENDING_OFFER_RE: "want me to" offers must not force ──────────────────
+
+
+def test_pending_action_phrase_excludes_want_me_to() -> None:
+    """'Let me … if you want me to' is a conditional OFFER (matched by both
+    _PENDING_RE and the expanded _PENDING_OFFER_RE), so it must be excluded."""
+    result = pending_action_phrase(
+        "Here is the summary. Let me re-query the live tables if you want me to."
+    )
+    assert result is None, "'want me to' offer must be excluded by _PENDING_OFFER_RE"

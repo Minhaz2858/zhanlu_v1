@@ -6,7 +6,7 @@ expression (or human-readable schedule) and the dispatcher in
 ``app/services/automation_dispatcher.py`` picks it up at the next run time.
 """
 
-from sqlalchemy import String, Text, JSON, ForeignKey, DateTime
+from sqlalchemy import String, Text, JSON, ForeignKey, DateTime, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -96,3 +96,17 @@ class AutomationTask(TimestampedBase):
     # `load_skill_body` tool. Nullable to match agent_apps.skills; read paths
     # normalize None -> [] so legacy rows behave like "no skills enabled".
     skills: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # ── Email notification gateway (per-task settings) ───────────────────
+    # notify_enabled: per-task master switch. When False (default) no email is
+    #   sent regardless of the other fields; the user must explicitly opt in.
+    # notify_emails: JSON array of recipient addresses. Empty/None disables
+    #   email for this task (the gateway itself is gated by
+    #   NOTIFICATION_GATEWAY_ENABLED at the settings level).
+    # notify_on: "always" (default) | "on_success" | "on_failure".
+    # attach_file: when True (default), attach the run's output file if it is
+    #   under EMAIL_ATTACH_MAX_BYTES; otherwise (or when the file is too big)
+    #   a time-limited HMAC-signed download link is included instead.
+    notify_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
+    notify_emails: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    notify_on: Mapped[str | None] = mapped_column(String(20), nullable=True, default="always")
+    attach_file: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
