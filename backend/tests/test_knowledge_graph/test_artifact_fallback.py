@@ -176,6 +176,18 @@ class TestFixDContextCondensing:
         # KPI digest present, but truncated to top 6 with ellipsis marker.
         assert "k0=0" in out and "…" in out
 
+    def test_condensation_idempotent_when_always_on(self):
+        # Fix 1 runs condensation before EVERY LLM call, not just the
+        # finish line. A second call must be a no-op (idempotent).
+        big = self._big_rcp_result()
+        messages = [{"role": "tool", "tool_call_id": "t1", "content": big}]
+        _condense_data_agent_results(messages)
+        condensed = messages[0]["content"]
+        _condense_data_agent_results(messages)
+        assert messages[0]["content"] == condensed
+        assert len(condensed) < 1200
+        assert "Big Report" in condensed
+
     def test_small_result_left_untouched(self):
         small = json.dumps({"report_card_payload": {"title": "Tiny"}})
         messages = [{"role": "tool", "tool_call_id": "t1", "content": small}]

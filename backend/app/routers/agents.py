@@ -550,6 +550,25 @@ def _condense_data_agent_results(
             logger.warning("condense report card failed: %s", exc)
 
 
+def _empty_answer_needs_force(
+    assistant_content: str,
+    content_streamed: bool,
+    accumulated_prose: list,
+    forces_used: int,
+    has_usable_data: bool,
+) -> bool:
+    """Fix 2: the model ended the turn with no prose at all, but usable
+    data was retrieved — force ONE re-synthesis pass instead of letting
+    the generic empty-content fallback fire."""
+    return (
+        not assistant_content
+        and not content_streamed
+        and not accumulated_prose
+        and forces_used < 1
+        and has_usable_data
+    )
+
+
 def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None, selected_skill_id: str | None) -> str:
     """Build a hard runtime instruction block for a chat-selected skill."""
     if not selected_skill and not selected_skill_id:
@@ -6133,6 +6152,7 @@ async def _stream_llm_with_tools(
     full_content = ""
     reasoning_acc = ""
     tc_buffer: dict[int, dict] = {}
+    last_finish_reason: str | None = None  # Fix 3: diagnostics for empty content
 
     def _merge_tc_fragment(frag: dict) -> None:
         """Accumulate a streamed tool_call fragment by ``index``.
@@ -6169,7 +6189,7 @@ async def _stream_llm_with_tools(
         error message is preserved — the previous "body unreadable"
         silent failure masked every DeepSeek 400.
         """
-        nonlocal full_content, reasoning_acc
+        nonlocal full_content, reasoning_acc, last_finish_reason
         try:
             async with stream_client.stream(
                 "POST", _stream_url, headers=_stream_headers, json=payload,
@@ -6201,6 +6221,9 @@ async def _stream_llm_with_tools(
                     choices = chunk.get("choices", [])
                     if not choices:
                         continue
+                    fr = choices[0].get("finish_reason")
+                    if fr:
+                        last_finish_reason = fr
                     delta = choices[0].get("delta", {}) or {}
                     token = delta.get("content", "")
                     if token:
@@ -6300,6 +6323,11 @@ async def _stream_llm_with_tools(
         assembled = [tc_buffer[i] for i in sorted(tc_buffer)]
         yield ("tool_calls", assembled)
     else:
+        if not full_content:
+            logger.warning(
+                "LLM returned empty content (finish_reason=%s, conv=%s)",
+                last_finish_reason or "unknown", conversation_id,
+            )
         yield ("done", full_content)
 
 
@@ -7846,6 +7874,8 @@ async def add_message_stream(
         _contract = None
         _contract_force_tool = None  # remediation force armed by the exit checker
         _contract_force_synthesis = False  # same, but forces tool_choice="none" for synthesis
+        _empty_answer_forces = 0          # Fix 2: cap of one re-synthesis per turn
+        _empty_answer_force_next = False  # Fix 2: armed by the exit-branch net
         if settings.GOAL_CONTRACT_ENABLED:
             try:
                 _bound_kb_ids = data_ctx_extras.get("bound_kb_ids") or []
@@ -8131,19 +8161,24 @@ async def add_message_stream(
             # Goal-Contract force-synthesis: the exit checker armed a
             # forced-synthesis (usable data already retrieved; the model just
             # needs to write the answer). Override tool_choice="none" so the
-            # model must answer in prose.
+            # model must answer in prose. Fix 2's empty-answer net arms the
+            # same one-shot force (via _empty_answer_force_next).
             if (
-                settings.GOAL_CONTRACT_ENABLED
-                and _contract is not None
-                and _contract_force_synthesis
+                (
+                    settings.GOAL_CONTRACT_ENABLED
+                    and _contract is not None
+                    and _contract_force_synthesis
+                )
+                or _empty_answer_force_next
             ):
                 logger.info(
-                    "v3 stream: goal-contract forcing synthesis (conv=%s, iter=%d)",
+                    "v3 stream: forcing synthesis (conv=%s, iter=%d)",
                     conversation_id, iteration,
                 )
                 tool_choice = "none"
                 _contract_forced = True
                 _contract_force_synthesis = False  # consume the one-shot force
+                _empty_answer_force_next = False   # consume the one-shot force
 
             # Finish line: on the final iteration force tool_choice="none" so
             # the LLM must answer in text. Guard forcing (dashboard + pptx +
@@ -8177,11 +8212,15 @@ async def add_message_stream(
                 # P1.3: Pre-API deterministic tool result pruning
                 prune_tool_results_only(llm_messages, model=get_model())
                 sanitize_messages(llm_messages)
-                # Fix D: on the final text-only iteration, condense oversized
-                # ask_data_agent report cards so the synthesis LLM keeps its
-                # output budget (prevents empty-content synthesis).
-                if tool_choice == "none":
-                    _condense_data_agent_results(llm_messages)
+                # Fix D (always-on): condense oversized ask_data_agent report
+                # cards before EVERY LLM call, not just the forced-synthesis
+                # finish line. A reasoning model can exhaust its output budget
+                # on reasoning_content mid-loop and return empty content on the
+                # very next call; shrinking the report card early prevents that.
+                # Idempotent: once condensed, content drops below the 6000-char
+                # threshold, so re-condensing is a no-op. Full payload stays in
+                # tool_calls_for_frontend (frontend report-card rendering).
+                _condense_data_agent_results(llm_messages)
                 if STREAM_TOKEN_DELTAS:
                     # ── Streaming path ────────────────────────────────
                     # Iterate the generator: deltas → client immediately;
@@ -8443,6 +8482,42 @@ async def add_message_stream(
                         assistant_content = ""
                         _nudge_replacement_pending = True
                         continue
+                # ── Empty-answer safety net (Fix 2) ─────────────────────
+                # Model stopped with NO visible prose (reasoning-budget
+                # exhaustion) but usable data was retrieved → force one
+                # synthesis retry (tool_choice="none" next iteration, which
+                # also runs Fix 1 condensation so the retry has a real
+                # chance of producing a prose answer).
+                _has_usable_data = (
+                    (_contract is not None and _contract._usable_results > 0)
+                    if settings.GOAL_CONTRACT_ENABLED
+                    else any(
+                        tc.get("status") == "completed"
+                        for tc in tool_calls_for_frontend
+                    )
+                )
+                if _empty_answer_needs_force(
+                    assistant_content, content_streamed, _v3_iter_contents,
+                    _empty_answer_forces, _has_usable_data,
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous response was empty. You already have "
+                            "the data needed to answer. Write the final answer "
+                            "now in prose, using the tool results above. Do not "
+                            "call any tools."
+                        ),
+                    })
+                    logger.warning(
+                        "v3 stream: empty final answer with usable data; forcing "
+                        "one synthesis retry (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                    continue
                 guardrail_result = _check_hallucination_guardrail(
                     user_content, data_ctx_extras, tool_calls_for_frontend,
                     iteration, guardrail_retries,
