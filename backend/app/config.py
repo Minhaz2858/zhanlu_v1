@@ -185,11 +185,14 @@ class Settings(BaseSettings):
 
     # Models that ignore or reject a caller-supplied ``temperature`` value.
     # Reasoning models like Moonshot kimi-k2.6 only accept temperature=1, and
-    # OpenAI o1/o3 reject the field outright. For these, the temperature key is
-    # omitted from chat/completions requests so the provider's own default is
-    # used (otherwise a valid key surfaces as a misleading HTTP 400). Comma-
-    # separated substrings matched case-insensitively against the model id.
-    LLM_FIXED_TEMPERATURE_MODELS: str = "kimi-k2,o1,o3"
+    # OpenAI o1/o3 reject the field outright. Qwen3-family models served via
+    # vLLM run in thinking mode by default and likewise reject any temperature
+    # other than 1 (HTTP 400 "invalid temperature: only 1 is allowed for this
+    # model"). For these, the temperature key is omitted from chat/completions
+    # requests so the provider's own default (temperature=1) is used (otherwise
+    # a valid key surfaces as a misleading HTTP 400). Comma-separated substrings
+    # matched case-insensitively against the model id.
+    LLM_FIXED_TEMPERATURE_MODELS: str = "kimi-k2,o1,o3,qwen3"
 
     # ── Document ingestion — audio / image / video ────────────────────────
     # Audio: transcribe uploads via an OpenAI-compatible Whisper endpoint
@@ -657,6 +660,28 @@ class Settings(BaseSettings):
     # fallback (catches external writers that never NOTIFY). Non-Postgres
     # backends always use interval polling. Default False.
     DASHBOARD_PG_LISTEN_ENABLED: bool = False
+    # T12: per-turn cap on describe_schema calls when the user request is
+    # dashboard-shaped. Prevents the agent from exhausting its tool-loop
+    # budget on redundant schema exploration instead of calling
+    # create_fullstack_dashboard. Default 2 (matches SKILL.md "at most two
+    # exploratory calls before building"). Set to 0 to disable the cap.
+    MAX_DESCRIBE_SCHEMA_PER_DASHBOARD_TURN: int = 2
+
+    # Fix 3: total-exploration cap per dashboard turn. Counts describe_schema
+    # + execute_query + execute_sql + sql_query COMBINED so a weak model
+    # cannot burn the whole tool budget on query exploration instead of
+    # calling the build tool. Fires independently of the describe_schema cap
+    # above (whichever trips first). Set to 0 to disable.
+    MAX_DASHBOARD_EXPLORATION_PER_TURN: int = 8
+
+    # Fix 6: dashboard-narration nudge guard. When the model exits the v3
+    # loop with ONLY narration ("I'll build you an ERP dashboard...") and no
+    # tool call on a dashboard-shaped turn, inject a hard nudge naming the
+    # exact next workflow step and continue the loop. Default False.
+    DASHBOARD_NARRATION_NUDGE_ENABLED: bool = False
+    # Cap on narration nudges per turn — a weak model cannot be nudged
+    # forever; after the cap the narration-only exit is accepted. Default 1.
+    MAX_DASHBOARD_NARRATION_NUDGES: int = 1
 
     # ── Experience layer (self-learning agent) ──────────────────────────
     # 3-layer additive system on the main chat loop (backend/app/routers/agents.py):

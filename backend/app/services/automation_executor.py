@@ -457,6 +457,47 @@ def _resolve_bound_data_source_ids(
     return sorted(bound)
 
 
+def _pinned_inspection_preflight_error(
+    db, task, agent, project_id, project_name: str | None = None,
+) -> Optional[str]:
+    """Fail-fast preflight for pinned ``agent_inspection`` tasks.
+
+    When a task pins a specific ``data_source_id`` the run MUST NOT
+    proceed if that source can't be resolved to a bound KB — otherwise
+    the v3 stream's data tools silently see zero sources and the LLM
+    answers "no data sources bound" instead of inspecting the database.
+
+    Uses ``_resolve_bound_data_source_ids`` (the same chain the chat tool
+    runtime uses) so the preflight can never disagree with what the
+    agent's data tools would see. Returns a human, retryable error
+    message, or None when the pin resolves / the task isn't pinned
+    (data_sync keeps its own preflight). INFO-logs the resolved set every
+    run so a future empty-bound case is greppable in production logs.
+    """
+    task_type = (getattr(task, "type", "") or "").strip().lower()
+    if task_type != "agent_inspection":
+        return None
+    pinned = getattr(task, "data_source_id", None)
+    if not pinned:
+        return None
+    bound = _resolve_bound_data_source_ids(
+        db, agent, project_id,
+        project_name=project_name,
+        pinned_data_source_id=pinned,
+    )
+    logger.info(
+        "execute_automation: agent_inspection preflight task=%s pinned=%s "
+        "resolved bound=%s", getattr(task, "id", ""), pinned, bound,
+    )
+    if pinned not in bound:
+        return (
+            f"Pinned data source {pinned} is not bound to this task's "
+            "project/agent — bind it in My Space → your project → "
+            "Resources, then re-run."
+        )
+    return None
+
+
 def _probe_db_source(kb, timeout_seconds: float) -> dict | None:
     """SELECT 1 through the canonical connector layer, bounded by a wrapper
     timeout (driver defaults are 10s+). Returns a failure dict or None."""
@@ -1009,6 +1050,20 @@ def execute_automation(execution_id: str) -> None:
                         f"Data source unreachable — {_detail}",
                     )
                 return
+
+        # Pinned agent_inspection preflight (fail-fast): a task that pins
+        # a specific data_source_id must NOT silently run with an empty
+        # bound set (the LLM would answer "no data sources bound"). The
+        # helper resolves the same effective bound set the chat tool
+        # runtime would see and returns a retryable error when the pin
+        # can't be bound. data_sync has its own preflight above; tasks
+        # without a pin keep today's behavior.
+        _pin_error = _pinned_inspection_preflight_error(
+            db, task, agent, project_id, project_name=project_name,
+        )
+        if _pin_error:
+            _mark_failed(db, execution, _pin_error)
+            return
 
         # Per-project memory: read recent ledger entries for cross-run
         # continuity (the runtime agent builds project knowledge over time).
@@ -1831,6 +1886,33 @@ def _should_fail_for_total_tool_failure(output_text: str, outcome: dict) -> bool
     return not text or text == "(no response)" or _is_canned_fallback_output(text)
 
 
+def _heal_conv_agent_name(conv, agent) -> bool:
+    """Heal a fallback automation conversation's agent identity.
+
+    ``ensure_task_chat_session`` creates fallback conversations with
+    ``agent_name=None`` (see automation_sessions.py). The v3 pre-FSM
+    data-source block in agents.py gates the entire
+    ``prepare_data_source_runtime`` call on ``if conv.agent_name:`` — a
+    falsy value silently skips the block, so ``_v3_data_ctx_extras = {}``
+    and the agent runs with ``bound_kb_ids=[]`` → "This agent has no data
+    sources bound" even when the task pins a ``data_source_id``.
+
+    Sets the identity ONLY when falsy — origin sessions keep their real
+    agent identity (e.g. ``automation_agent``), which also satisfies the
+    ``general_assistant`` zero-guard in data_source_runtime.py: assigning
+    the task's real agent (e.g. ``ecisco_bi_assistant``) bypasses that
+    guard's "no project → empty" branch for automation runs.
+
+    Returns True when a heal happened.
+    """
+    if conv is None:
+        return False
+    if getattr(conv, "agent_name", None):
+        return False
+    conv.agent_name = agent.name
+    return True
+
+
 def _run_agent_in_conversation(
     task: AutomationTask,
     agent: AgentApp,
@@ -1992,6 +2074,18 @@ def _run_agent_in_conversation(
             conv.metadata_ = merged_meta
             if conv.project_id != project_id:
                 conv.project_id = project_id
+            # Heal a fallback conv's agent identity (agent_name=None set
+            # by ensure_task_chat_session): without this the v3 pre-FSM
+            # data-source block silently skips prepare_data_source_runtime
+            # and the agent runs with bound_kb_ids=[] → "This agent has
+            # no data sources bound" despite a pinned data_source_id.
+            # Only falsy values are healed — origin sessions keep their
+            # real agent identity (e.g. automation_agent).
+            if _heal_conv_agent_name(conv, agent):
+                logger.info(
+                    "_run_agent_in_conversation: healed fallback conv %s "
+                    "agent_name=%s for task %s", conv.id, agent.name, task.id,
+                )
             # Touch updated_date so Recent Chats re-sorts this entry to
             # the top (it had previously been pushed off the page by the
             # per-run duplicates).

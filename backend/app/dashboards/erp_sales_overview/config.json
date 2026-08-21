@@ -1,0 +1,100 @@
+{
+  "name": "ERP Sales Overview",
+  "slug": "erp-sales-overview",
+  "description": "Live ERP sales dashboard: revenue, volume, top products, top customers, inventory snapshot, and 6-month sales trend.",
+  "theme": "light",
+  "refresh_interval_seconds": 60,
+  "design_system_ref": "design-system/default-org/MASTER.md",
+  "metrics": [
+    {
+      "id": "total_revenue_30d",
+      "title": "Revenue (Last 30 Days)",
+      "type": "kpi",
+      "options": {
+        "unit": "CNY",
+        "subtitle": "vs prior 30 days"
+      }
+    },
+    {
+      "id": "total_volume_30d",
+      "title": "Sales Volume (Last 30 Days)",
+      "type": "kpi",
+      "options": {
+        "unit": "tons",
+        "subtitle": "shipped quantity"
+      }
+    },
+    {
+      "id": "avg_exec_price",
+      "title": "Avg Execution Price",
+      "type": "kpi",
+      "options": {
+        "unit": "CNY/ton",
+        "subtitle": "weighted average"
+      }
+    },
+    {
+      "id": "active_orders",
+      "title": "Active Orders (30d)",
+      "type": "kpi",
+      "options": {
+        "unit": "orders",
+        "subtitle": "audited shipments"
+      }
+    },
+    {
+      "id": "revenue_trend_6m",
+      "title": "Monthly Revenue Trend (6 Months)",
+      "type": "area",
+      "options": {
+        "x": "month",
+        "y": "revenue",
+        "unit": "CNY"
+      }
+    },
+    {
+      "id": "volume_by_product",
+      "title": "Sales Volume by Product",
+      "type": "bar",
+      "options": {
+        "x": "product",
+        "y": "volume",
+        "unit": "tons"
+      }
+    },
+    {
+      "id": "revenue_by_customer",
+      "title": "Revenue by Customer (Top 10)",
+      "type": "bar",
+      "options": {
+        "x": "customer",
+        "y": "revenue",
+        "unit": "CNY"
+      }
+    },
+    {
+      "id": "inventory_snapshot",
+      "title": "Current Inventory by Product",
+      "type": "bar",
+      "options": {
+        "x": "product",
+        "y": "stock",
+        "unit": "tons"
+      }
+    },
+    {
+      "id": "recent_orders",
+      "title": "Recent Shipments",
+      "type": "table",
+      "options": {
+        "columns": [
+          "order_no",
+          "customer",
+          "date",
+          "volume",
+          "revenue"
+        ]
+      }
+    }
+  ]
+}

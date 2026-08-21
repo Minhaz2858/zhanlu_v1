@@ -19,12 +19,18 @@ class TestEmptyAnswerNeedsForce:
     def test_no_force_when_content_exists(self):
         assert _empty_answer_needs_force("answer", False, [], 0, True) is False
 
-    def test_no_force_when_content_streamed(self):
-        # content_streamed=True means real "delta" events delivered prose.
-        assert _empty_answer_needs_force("", True, [], 0, True) is False
+    def test_forces_even_when_content_streamed(self):
+        # content_streamed=True means deltas were delivered, but those
+        # deltas were intermediate narration (promises), not a real answer.
+        # The net now fires regardless — streamed promise text is not a
+        # substitute for a synthesized final answer.
+        assert _empty_answer_needs_force("", True, [], 0, True) is True
 
-    def test_no_force_when_earlier_prose_exists(self):
-        assert _empty_answer_needs_force("", False, ["earlier"], 0, True) is False
+    def test_forces_even_when_earlier_prose_exists(self):
+        # Earlier iterations may have produced prose (promise narration,
+        # partial findings). The final reply is what matters — if it's
+        # empty, force synthesis.
+        assert _empty_answer_needs_force("", False, ["earlier"], 0, True) is True
 
     def test_no_force_when_budget_spent(self):
         # Cap is 1 force per turn; a second empty answer falls through.

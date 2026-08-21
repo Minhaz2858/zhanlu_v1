@@ -68,6 +68,16 @@ from app.services.dashboard_turn_guard import (
     contract_confirmation_needed,
     dashboard_build_tool,
     fuzzy_dashboard_request,
+    describe_schema_cap_reached,
+    DASHBOARD_SCHEMA_CAP_TOOLS,
+    DASHBOARD_ANTITOOLS,
+    dashboard_antitools_should_block,
+    DASHBOARD_EXPLORATION_TOOLS,
+    dashboard_exploration_cap_reached,
+    parse_artifact_title,
+    dashboard_narration_needs_nudge,
+    build_dashboard_narration_nudge_message,
+    dashboard_orchestrator_should_block,
 )
 from app.services.pptx_turn_guard import (
     pptx_turn_guard,
@@ -568,18 +578,12 @@ def _empty_answer_needs_force(
     """
     if forces_used >= 1 or not has_usable_data:
         return False
-    if content_streamed:
-        return False
-    if not assistant_content and not accumulated_prose:
-        return True
-    # Extended check: if accumulated prose contains ONLY pending-action
-    # phrases (no substantive answer), treat it as effectively empty.
-    if not assistant_content and accumulated_prose:
-        from app.services.goal_contract import pending_action_phrase
-        for _prose in accumulated_prose:
-            if _prose and _prose.strip() and not pending_action_phrase(_prose):
-                return False  # Found substantive prose — not empty
-        # All prose entries are pending-action promises → effectively empty
+    # When the model's FINAL reply is empty and usable data exists, force
+    # synthesis regardless of content_streamed or accumulated prose. The
+    # streamed text from earlier iterations was intermediate narration
+    # (promises, "let me check…"), not a real answer. The user expects a
+    # synthesized final response, not a collection of partial narrations.
+    if not assistant_content:
         return True
     return False
 
@@ -2481,6 +2485,16 @@ def _check_hallucination_guardrail(
         "Any data in your response must come from the tool result. Call "
         "`ask_data_agent` now."
     ))
+
+
+class _OrchGuardSkipped(Exception):
+    """Internal control-flow sentinel (Fix C).
+
+    Raised inside the finalize-phase orchestrator ``try`` block when the
+    dashboard-orchestrator guard fired, so the ENTIRE post-loop orchestrator
+    (marker fulfillment + ``ensure_artifact_for_doc_request``) is skipped on a
+    dashboard-intent turn where the build tool was never called. Caught by a
+    dedicated ``except _OrchGuardSkipped`` clause (no log noise)."""
 
 
 class _AnswerGateResult(NamedTuple):
@@ -7155,6 +7169,14 @@ async def add_message_stream(
                     AgentApp.is_deleted == False,
                 ).first()
                 if _v3_agent_for_dsr is not None:
+                    # Thread the conv's pinned data_source_id (set by the
+                    # automation executor on task-pinned runs) so the
+                    # data-source runtime's union logic can bind the pinned
+                    # KB even when it's absent from agent.knowledge_bases.
+                    # Interactive chats have no pin → identical behavior.
+                    _v3_pinned_dsr_id = (conv.metadata_ or {}).get(
+                        "data_source_id"
+                    )
                     _, _, _v3_data_ctx_extras = prepare_data_source_runtime(
                         _dsr_db,
                         _v3_agent_for_dsr,
@@ -7162,8 +7184,23 @@ async def add_message_stream(
                         "",
                         selected_project_id=_v3_effective_pid,
                         selected_project_name=_v3_effective_pname,
+                        pinned_data_source_id=_v3_pinned_dsr_id,
                         user_id=user.id if user else None,
                     )
+                    _v3_bound = _v3_data_ctx_extras.get("bound_kb_ids") or []
+                    logger.info(
+                        "v3 pre-FSM data ctx: conv=%s agent=%s project=%s "
+                        "pinned=%s bound=%d",
+                        conv.id, conv.agent_name, _v3_effective_pid,
+                        _v3_pinned_dsr_id, len(_v3_bound),
+                    )
+                    if _v3_pinned_dsr_id and not _v3_bound:
+                        logger.warning(
+                            "v3 pre-FSM data ctx: pinned data source %s "
+                            "resolved to zero bound KBs for conv=%s agent=%s "
+                            "— the agent may report 'no data sources bound'",
+                            _v3_pinned_dsr_id, conv.id, conv.agent_name,
+                        )
         finally:
             _dsr_db.close()
     except Exception as _v3_dsr_err:
@@ -7878,6 +7915,23 @@ async def add_message_stream(
             None, user_content or "", is_automation=_auto_flag,
         )
         _schema_edges_seen = False
+        # T12: per-turn describe_schema cap (dashboard turns). The agent can
+        # burn its whole tool-loop budget re-inspecting the schema instead of
+        # shipping the dashboard; once the cap fires we block further
+        # describe_schema calls, freeze the budget-upgrade hook (so the soft
+        # cap stops widening), and nudge the model to build NOW.
+        _describe_schema_count = 0
+        _schema_budget_frozen = False
+        _v3_executed_tool_names: list[str] = []
+        # Fix 4: titles of create_artifact calls already executed this turn,
+        # so a second identical static page is blocked (always waste).
+        _create_artifact_titles: set[str] = set()
+        # Fix 6: narration-nudge guard counter. The model sometimes exits the
+        # v3 loop with ONLY narration (no tool call) on a dashboard-shaped
+        # turn; each nudge forces the EXACT next workflow step and continues
+        # the loop. Capped by MAX_DASHBOARD_NARRATION_NUDGES so a weak model
+        # cannot be nagged forever.
+        _dashboard_narration_nudges: int = 0
         # ── Goal-Contract closed loop (flag-gated) ────────────────────
         # A machine-checkable contract for this turn: what deliverable (if
         # any) the user asked for, whether data is required, and whether the
@@ -8632,6 +8686,12 @@ async def add_message_stream(
                             "call any tools."
                         ),
                     })
+                    # Replace any previously streamed text (promise narration
+                    # from earlier iterations) with the upcoming synthesis.
+                    if content_streamed and assistant_content:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
                     logger.warning(
                         "v3 stream: empty final answer with usable data; forcing "
                         "one synthesis retry (conv=%s, iter=%d)",
@@ -8800,6 +8860,52 @@ async def add_message_stream(
                     continue
                 if _gate_result.action == "disclose":
                     assistant_content = (assistant_content or "") + _gate_result.message
+                # ── Fix 6: dashboard-narration nudge guard ─────────────
+                # The model exited with ONLY narration ("I'll build you an ERP
+                # dashboard...") and no tool call. None of the six guards above
+                # fired because narration IS content (empty-answer net skips),
+                # no data was retrieved (promise-strip skips), and no tools ran
+                # (self-eval returns "none"). When the flag is on and the build
+                # tool hasn't been called yet, inject a hard nudge naming the
+                # EXACT next workflow step and continue the loop (capped per
+                # turn). Confirmation questions after describe_schema are
+                # allowed by the prompt HARD RULE and are skipped here.
+                if (
+                    getattr(settings, "DASHBOARD_NARRATION_NUDGE_ENABLED", False)
+                    and dashboard_narration_needs_nudge(
+                        user_content,
+                        _v3_executed_tool_names,
+                        _dashboard_narration_nudges,
+                        settings.MAX_DASHBOARD_NARRATION_NUDGES,
+                        narration=assistant_content,
+                    )
+                ):
+                    _nudge_message = build_dashboard_narration_nudge_message(
+                        _v3_executed_tool_names, _dash_build_tool,
+                    )
+                    _dashboard_narration_nudges += 1
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _nudge_message})
+                    logger.info(
+                        "v3 stream: dashboard narration nudge injected "
+                        "(conv=%s, iter=%d, nudge=%d/%d)",
+                        conversation_id, iteration,
+                        _dashboard_narration_nudges,
+                        settings.MAX_DASHBOARD_NARRATION_NUDGES,
+                    )
+                    # Pop captured iter content: see file-guard nudge site for
+                    # rationale — the re-emitted iteration must replace the
+                    # narration bubble instead of appending a duplicate.
+                    if _v3_iter_contents:
+                        _v3_iter_contents.pop()
+                    # D1/D2: the nudge reply must never leak into the final
+                    # answer (same content_replace SSE pattern as the other
+                    # nudge sites).
+                    if content_streamed and assistant_content:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    continue
                 break
 
             # Parse and execute tool calls (parallel for multiple)
@@ -8882,6 +8988,331 @@ async def add_message_stream(
                         if not _non_build:
                             yield (f'data: {json.dumps({"type": "tool_call", "name": "data_contract_gate", "args": {"blocked": _dash_build_tool}})}\n\n')
                             continue
+
+            # ── T12: describe_schema per-turn cap (dashboard turns) ──────
+            # Re-inspecting the schema costs a whole tool iteration each time
+            # AND widens the soft budget via the edge-discovery hook, letting
+            # the agent explore forever instead of shipping the dashboard.
+            # Once the cap is reached, block further describe_schema calls,
+            # freeze the budget-upgrade hook, and steer the model to
+            # create_fullstack_dashboard NOW.
+            _max_describe_cap = getattr(
+                settings, "MAX_DESCRIBE_SCHEMA_PER_DASHBOARD_TURN", 2
+            )
+            if (
+                _max_describe_cap > 0
+                and any(
+                    p["tool_name"] in DASHBOARD_SCHEMA_CAP_TOOLS
+                    for p in parsed_calls
+                )
+                and describe_schema_cap_reached(
+                    user_content,
+                    _v3_executed_tool_names,
+                    _max_describe_cap,
+                )
+            ):
+                _cap_blocked = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in DASHBOARD_SCHEMA_CAP_TOOLS
+                ]
+                _schema_budget_frozen = True
+                logger.warning(
+                    "v3 stream: describe_schema cap reached (%d/%d) for "
+                    "dashboard turn (conv=%s, iter=%d); blocking %d further "
+                    "describe_schema call(s) and freezing budget upgrade.",
+                    _describe_schema_count, _max_describe_cap,
+                    conversation_id, iteration, len(_cap_blocked),
+                )
+                for _blk in _cap_blocked:
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": _blk["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": _blk["tool_name"],
+                                "arguments": _blk["args_str"],
+                            },
+                        }],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": _blk["tool_call_id"],
+                        "content": (
+                            "BLOCKED: the schema has already been inspected "
+                            f"{_describe_schema_count} times this turn (cap "
+                            f"{_max_describe_cap}). STOP exploring the schema "
+                            "— you have enough information to build the "
+                            f"dashboard. Call {_dash_build_tool} NOW with the "
+                            "widgets you have planned, even if you only have a "
+                            "few columns. The dashboard renders inline in the "
+                            "chat."
+                        ),
+                    })
+                    tool_calls_for_frontend.append({
+                        "id": f"schema_cap_{uuid.uuid4()}",
+                        "name": "describe_schema_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": _blk["tool_name"],
+                            "reason": (
+                                f"describe_schema called "
+                                f"{_describe_schema_count} times "
+                                f"(cap {_max_describe_cap}); build now"
+                            ),
+                        },
+                    })
+                parsed_calls = [
+                    p for p in parsed_calls
+                    if p["tool_name"] not in DASHBOARD_SCHEMA_CAP_TOOLS
+                ]
+                if not parsed_calls:
+                    tool_calls_for_frontend.append({
+                        "id": f"schema_cap_redirect_{uuid.uuid4()}",
+                        "name": "describe_schema_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "all_calls",
+                            "reason": "cap reached; redirect to build tool",
+                        },
+                    })
+                    yield (f'data: {json.dumps({"type": "tool_call", "name": "describe_schema_cap", "args": {"blocked": "describe_schema"}})}\n\n')
+                    continue
+
+            # ── Fix 2: hard-block anti-tools on dashboard turns ──────────
+            # Before the full-stack build tool has run, create_artifact and
+            # the legacy create_dashboard are bypasses that silently ship a
+            # static page instead of the real-time dashboard. Block them and
+            # nudge the model to call the build tool NOW with the queries it
+            # already ran. The ACTIVE build tool itself is never blocked (in
+            # legacy mode create_dashboard IS the build tool).
+            if dashboard_antitools_should_block(
+                user_content, _v3_executed_tool_names
+            ):
+                _anti_blocked = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in DASHBOARD_ANTITOOLS
+                    and p["tool_name"] != _dash_build_tool
+                ]
+                if _anti_blocked:
+                    logger.warning(
+                        "v3 stream: dashboard anti-tools blocked %s on "
+                        "dashboard turn (conv=%s, iter=%d); steering to %s.",
+                        [b["tool_name"] for b in _anti_blocked],
+                        conversation_id, iteration, _dash_build_tool,
+                    )
+                    for _blk in _anti_blocked:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _blk["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _blk["tool_name"],
+                                    "arguments": _blk["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _blk["tool_call_id"],
+                            "content": (
+                                "BLOCKED: this turn is a dashboard build. "
+                                "Static HTML artifacts and the legacy "
+                                f"dashboard tool are disabled here. Call "
+                                f"{_dash_build_tool} NOW with the queries and "
+                                "schema you already gathered — the dashboard "
+                                "renders inline in the chat."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"antitool_{uuid.uuid4()}",
+                            "name": "dashboard_antitool",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _blk["tool_name"],
+                                "reason": (
+                                    "static/legacy dashboard build blocked; "
+                                    "use create_fullstack_dashboard"
+                                ),
+                            },
+                        })
+                    _anti_blocked_names = {b["tool_name"] for b in _anti_blocked}
+                    parsed_calls = [
+                        p for p in parsed_calls
+                        if p["tool_name"] not in _anti_blocked_names
+                    ]
+                    if not parsed_calls:
+                        tool_calls_for_frontend.append({
+                            "id": f"antitool_redirect_{uuid.uuid4()}",
+                            "name": "dashboard_antitool",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": "all_calls",
+                                "reason": "anti-tool blocked; redirect to build tool",
+                            },
+                        })
+                        yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_antitool", "args": {"blocked": "anti_tools"}})}\n\n')
+                        continue
+
+            # ── Fix 3: total-exploration cap (dashboard turns) ────────────
+            # describe_schema + execute_query + execute_sql + sql_query
+            # combined. Fires independently of the T12 describe_schema cap:
+            # whichever trips first blocks further exploration, freezes the
+            # budget-upgrade hook, and steers the model to the build tool.
+            _max_explore = getattr(
+                settings, "MAX_DASHBOARD_EXPLORATION_PER_TURN", 8
+            )
+            if (
+                _max_explore > 0
+                and any(
+                    p["tool_name"] in DASHBOARD_EXPLORATION_TOOLS
+                    for p in parsed_calls
+                )
+                and dashboard_exploration_cap_reached(
+                    user_content,
+                    _v3_executed_tool_names,
+                    _max_explore,
+                )
+            ):
+                _explore_blocked = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in DASHBOARD_EXPLORATION_TOOLS
+                ]
+                _schema_budget_frozen = True
+                logger.warning(
+                    "v3 stream: dashboard exploration cap reached (%d/%d) for "
+                    "dashboard turn (conv=%s, iter=%d); blocking %d further "
+                    "exploration call(s) and freezing budget upgrade.",
+                    len(_v3_executed_tool_names), _max_explore,
+                    conversation_id, iteration, len(_explore_blocked),
+                )
+                for _blk in _explore_blocked:
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": _blk["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": _blk["tool_name"],
+                                "arguments": _blk["args_str"],
+                            },
+                        }],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": _blk["tool_call_id"],
+                        "content": (
+                            "BLOCKED: total schema exploration + query "
+                            f"execution has hit the cap of {_max_explore} "
+                            "this turn. STOP exploring — you have enough "
+                            f"information. Call {_dash_build_tool} NOW with "
+                            "the widgets you have planned."
+                        ),
+                    })
+                    tool_calls_for_frontend.append({
+                        "id": f"explore_cap_{uuid.uuid4()}",
+                        "name": "dashboard_exploration_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": _blk["tool_name"],
+                            "reason": (
+                                "total exploration cap "
+                                f"({_max_explore}) reached; build now"
+                            ),
+                        },
+                    })
+                parsed_calls = [
+                    p for p in parsed_calls
+                    if p["tool_name"] not in DASHBOARD_EXPLORATION_TOOLS
+                ]
+                if not parsed_calls:
+                    tool_calls_for_frontend.append({
+                        "id": f"explore_cap_redirect_{uuid.uuid4()}",
+                        "name": "dashboard_exploration_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "all_calls",
+                            "reason": "exploration cap reached; redirect to build tool",
+                        },
+                    })
+                    yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_exploration_cap", "args": {"blocked": "exploration"}})}\n\n')
+                    continue
+
+            # ── Fix 4: duplicate create_artifact titles (all turns) ───────
+            # A second create_artifact call with the same title in one turn is
+            # always waste (duplicate static pages). Applies to ALL turns.
+            # Titles are recorded here (check-then-add) because every
+            # create_artifact remaining in parsed_calls is destined to run.
+            _dup_blocked = []
+            for _p in parsed_calls:
+                if _p["tool_name"] != "create_artifact":
+                    continue
+                _art_title = parse_artifact_title(_p.get("args_str"))
+                if not _art_title:
+                    continue
+                if _art_title in _create_artifact_titles:
+                    _dup_blocked.append(_p)
+                else:
+                    _create_artifact_titles.add(_art_title)
+            if _dup_blocked:
+                logger.warning(
+                    "v3 stream: duplicate create_artifact title(s) blocked "
+                    "(conv=%s, iter=%d): %s",
+                    conversation_id, iteration,
+                    [b.get("args_str", "") for b in _dup_blocked],
+                )
+                for _blk in _dup_blocked:
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": _blk["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": _blk["tool_name"],
+                                "arguments": _blk["args_str"],
+                            },
+                        }],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": _blk["tool_call_id"],
+                        "content": (
+                            "BLOCKED: an artifact with this title already "
+                            "exists this turn. Duplicate static artifacts are "
+                            "not created — update or iterate on the existing "
+                            "one instead."
+                        ),
+                    })
+                    tool_calls_for_frontend.append({
+                        "id": f"dup_artifact_{uuid.uuid4()}",
+                        "name": "create_artifact_dedup",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "create_artifact",
+                            "reason": "duplicate artifact title this turn",
+                        },
+                    })
+                _dup_ids = {id(b) for b in _dup_blocked}
+                parsed_calls = [
+                    p for p in parsed_calls if id(p) not in _dup_ids
+                ]
+                if not parsed_calls:
+                    tool_calls_for_frontend.append({
+                        "id": f"dup_artifact_redirect_{uuid.uuid4()}",
+                        "name": "create_artifact_dedup",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "all_calls",
+                            "reason": "duplicate artifact blocked",
+                        },
+                    })
+                    yield (f'data: {json.dumps({"type": "tool_call", "name": "create_artifact_dedup", "args": {"blocked": "duplicate_artifact"}})}\n\n')
+                    continue
 
             if parsed_calls:
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
@@ -9194,6 +9625,16 @@ async def add_message_stream(
                 args_str = call["args_str"]
                 tool_call_id = call["tool_call_id"]
                 display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
+                # T12: count describe_schema executions + record executed tool
+                # names (canonical) so the pre-execution interception zone can
+                # enforce the per-turn cap on the NEXT iteration.
+                _v3_executed_tool_names.append(tool_name)
+                if tool_name == "describe_schema":
+                    _describe_schema_count += 1
+                if tool_name == "create_artifact":
+                    _art_title = parse_artifact_title(args_str)
+                    if _art_title:
+                        _create_artifact_titles.add(_art_title)
 
                 if isinstance(result, dict) and result.get("requires_approval"):
                     tool_call_record = {
@@ -9458,8 +9899,14 @@ async def add_message_stream(
                 # describe_schema revealed schema-graph join edges: widen
                 # the per-turn soft cap so the agent can explore the joins
                 # instead of being nudged to wrap up too early. Idempotent
-                # (runs once, on the first edge-bearing result).
-                if not _schema_edges_seen and tool_name == "describe_schema":
+                # (runs once, on the first edge-bearing result). T12: once
+                # the describe_schema cap fires for a dashboard turn, the
+                # upgrade is frozen so the soft cap stops widening.
+                if (
+                    not _schema_budget_frozen
+                    and not _schema_edges_seen
+                    and tool_name == "describe_schema"
+                ):
                     _edge_count = _schema_edge_count(result)
                     if _edge_count:
                         _schema_edges_seen = True
@@ -9781,6 +10228,13 @@ async def add_message_stream(
         # the Agent Builder. The non-streaming ``add_message`` v2 path
         # already does this correctly (uses the content the main loop
         # produced with no second LLM call), so we mirror that here.
+        # BUGFIX (Fix A): `_orch_created` must exist before the fallback
+        # reference above can evaluate it. It is (re)assigned by the
+        # orchestrator block below; this early init provides a safe empty
+        # default when the orchestrator is skipped (fallback path, error
+        # path, or the dashboard-orchestrator guard).
+        _orch_created: list[dict] = []
+
         # BUGFIX: skip fallback if deltas were already streamed — otherwise
         # the user sees "detailed report" + "I gathered some information..."
         # as a confusing double-message.
@@ -9849,9 +10303,41 @@ async def add_message_stream(
         # artifacts). Also runs the server-driven doc-request fallback (Q1) so
         # a confirmed file request always yields an artifact. Best-effort: a
         # marker/fallback failure must never break the SSE stream.
-        _orch_created: list[dict] = []
         # (_orch_doc_format was computed before the tool loop.)
+        # ── Fix C: dashboard-orchestrator guard ────────────────────────────
+        # On dashboard-intent turns where the build tool was never called,
+        # the post-loop orchestrator would auto-create a static HTML
+        # "Dashboard" artifact (ensure_artifact_for_doc_request with
+        # doc_format="dashboard"), bypassing DASHBOARD_ANTITOOLS — the exact
+        # routing conflict observed on caeeda3b. Skip the whole orchestrator
+        # block and surface a synthetic BLOCKED record so the UI shows why
+        # no artifact appeared.
+        _orch_guard_should_block = dashboard_orchestrator_should_block(
+            user_content, _v3_executed_tool_names,
+        )
+        if _orch_guard_should_block:
+            logger.warning(
+                "v3 stream: dashboard-orchestrator guard blocked post-loop "
+                "artifact creation on dashboard turn (conv=%s); build tool "
+                "never called — skipping orchestrator.",
+                conversation_id,
+            )
+            tool_calls_for_frontend.append({
+                "id": f"orchguard_{uuid.uuid4()}",
+                "name": "dashboard_orchestrator_guard",
+                "status": "blocked",
+                "results": {
+                    "blocked": "orchestrator",
+                    "reason": (
+                        "post-loop orchestrator skipped on dashboard turn; "
+                        "the dashboard should be built with "
+                        "create_fullstack_dashboard"
+                    ),
+                },
+            })
         try:
+            if _orch_guard_should_block:
+                raise _OrchGuardSkipped()
             from app.services.generation_orchestrator import (
                 ensure_artifact_for_doc_request,
                 fulfill_markers,
@@ -9941,6 +10427,8 @@ async def add_message_stream(
                 )
                 if _fallback:
                     _orch_created = list(_orch_created) + [_fallback]
+        except _OrchGuardSkipped:
+            pass  # Fix C: dashboard-orchestrator guard fired — orchestrator skipped
         except Exception as _marker_outer_err:
             logger.warning(
                 "v3 Marker parsing block failed (non-fatal): %s",

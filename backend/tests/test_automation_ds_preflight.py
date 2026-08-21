@@ -6,6 +6,15 @@ if _BACKEND_ROOT not in sys.path:
     sys.path.insert(0, _BACKEND_ROOT)
 os.chdir(_BACKEND_ROOT)
 
+# Ensure the shared in-memory SQLite schema exists before the DB-backed
+# tests below run (the DB tests are order-independent this way — the
+# shared engine keeps tables created here for the whole session).
+from app.database import engine  # noqa: E402
+from app.models.base import Base  # noqa: E402
+import app.models.knowledge_base  # noqa: E402,F401  (registers tables)
+import app.models.project  # noqa: E402,F401
+Base.metadata.create_all(engine)
+
 
 def test_resolve_composes_all_three_binding_sources(monkeypatch):
     from app.services import automation_executor as ax

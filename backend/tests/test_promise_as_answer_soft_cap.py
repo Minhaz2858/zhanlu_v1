@@ -222,8 +222,9 @@ def test_empty_answer_needs_force_with_only_promise_prose():
 
 
 def test_empty_answer_needs_force_with_substantive_prose():
-    """When accumulated_prose contains substantive prose alongside a promise,
-    _empty_answer_needs_force should NOT fire — there is a real answer."""
+    """When the model's final reply is empty but earlier iterations produced
+    substantive prose, the net now fires — earlier prose is intermediate
+    narration, not a substitute for a synthesized final answer."""
     from app.routers.agents import _empty_answer_needs_force
     result = _empty_answer_needs_force(
         assistant_content="",
@@ -235,7 +236,7 @@ def test_empty_answer_needs_force_with_substantive_prose():
         forces_used=0,
         has_usable_data=True,
     )
-    assert not result, "should NOT force when substantive prose exists"
+    assert result, "should force even when earlier prose exists — final reply is empty"
 
 
 def test_empty_answer_needs_force_no_data():

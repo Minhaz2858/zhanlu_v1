@@ -68,7 +68,11 @@ ALL_TOOL_NAMES = [
     "skill_provenance", "skill_usage", "Skill",
     # Artifacts
     "create_artifact", "edit_artifact", "load_skill_body",
-    # Dashboards (Phase 11 — live DB dashboards)
+    # Dashboards — full-stack real-time pipeline (primary,
+    # FULLSTACK_DASHBOARD_ENABLED; handlers registered in dashboard_tools.py)
+    "create_fullstack_dashboard", "update_fullstack_dashboard",
+    "revert_fullstack_dashboard", "list_fullstack_dashboards",
+    # Dashboards — legacy rollback pipeline (LEGACY_DASHBOARD_ENABLED)
     "create_dashboard", "update_dashboard", "undo_dashboard_edit",
     # Companion design intelligence for professional dashboards / visual artifacts
     "uiux_search", "uiux_design_system",
