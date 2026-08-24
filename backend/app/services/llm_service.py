@@ -398,6 +398,16 @@ async def call_llm(
         )
         return cached
 
+    # ── P1-5: per-model tool-output cap (before pre-flight) ──
+    # Apply the model's per-message tool-output cap to oversized tool
+    # results.  Cheap, deterministic, no LLM call.  Runs before the
+    # pre-flight so that the payload-vs-context check sees the post-cap
+    # messages and can downgrade max_tokens or fall back instead of
+    # raising 502.
+    from app.services.compaction.pre_api_prune import smart_truncate
+    built_messages = smart_truncate(built_messages, model=routed_model)
+    payload["messages"] = built_messages
+
     # ── Pre-flight: estimate total payload vs. model's context window ──
     # The total LLM payload is (system prompt + messages + tools).  A user
     # on a small-context model (e.g. qwen3.6-27b, 65,536 tokens) can

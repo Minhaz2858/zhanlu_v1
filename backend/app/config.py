@@ -328,6 +328,37 @@ class Settings(BaseSettings):
     # False (default), no injection — behaviour is unchanged.
     LLM_PARALLEL_TOOL_CALLS_ENABLED: bool = False
 
+    # ── P1-5 context economics: per-model tool-output caps ──────────────
+    # Each entry caps the *content* of a single tool-role message at the
+    # given token count.  Smaller caps for small-context models prevent a
+    # single big tool result from blowing the whole window.  Sorted-key
+    # longest-prefix matching (deepseek-* before deepseek).
+    # 4 chars/token is the conservative floor; we use it directly here
+    # so the cap is the same regardless of any padding heuristics.
+    TOOL_OUTPUT_CAP_BY_MODEL: str = (
+        '{"qwen3.6-27b":12288,'
+        '"deepseek-v4-flash":24576,'
+        '"deepseek-chat":24576,'
+        '"gpt-4o":16384,'
+        '"gpt-4o-mini":16384,'
+        '"claude-sonnet":32768,'
+        '"claude-opus":32768,'
+        '"claude-3-5-sonnet":32768}'
+    )
+
+    # P1-5 escalation ladder: tier index → action.  Called by the
+    # agents loop when ``get_context_window`` is about to overflow.
+    # The actions are:
+    #   0 compact                 — run auto_compact_if_needed
+    #   1 truncate_tool_outputs   — apply per-model tool-output caps
+    #   2 drop_old_tool_messages  — drop the oldest tool-role messages
+    #   3 fallback_to_different_model — switch to a model with a larger
+    #                                   context window
+    CONTEXT_ESCALATION_LADDER: str = (
+        '["compact","truncate_tool_outputs",'
+        '"drop_old_tool_messages","fallback_to_different_model"]'
+    )
+
     # ── Rate Limiting ───────────────────────────────────────────────────
     RATE_LIMIT_ENABLED: bool = False
     RATE_LIMIT_RPM: int = 60  # max requests per minute per user+app
@@ -818,6 +849,12 @@ class Settings(BaseSettings):
     ECISCO_BI_RESPONSE_CACHE_ENABLED: bool = False    # Layer 2
     ECISCO_BI_FEEDBACK_ENABLED: bool = False          # Phase C wiring
     ECISCO_BI_AUTOMATION_FASTPATH_ENABLED: bool = False  # DISABLED — automation only via UI "New Automation Task" button
+
+    # ── Data Execution cache / cleanup / intent router ───────────────────
+    # All default False — safe to ship; enable per phase after tests pass.
+    DATA_EXECUTION_CACHE_ENABLED: bool = False      # Persistent session cache for DataExecution
+    DATA_EXECUTION_CLEANUP_ENABLED: bool = False    # Scheduled TTL + per-session cap cleanup for DataExecution
+    INTENT_ROUTER_ENABLED: bool = False             # Intent classification routing for data-execution flows
 
     # ── Role-based personalization ───────────────────────────────────────
     # ROLE_PERSONALIZATION_ENABLED: inject the user's free-text
