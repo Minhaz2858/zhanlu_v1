@@ -59,6 +59,31 @@ def test_narrative_missing_forecast():
     assert "观望" in s
 
 
+def test_one_liner_below_naive():
+    """P0.4: below_naive downgrade shows 'no edge' message, not 'insufficient data'."""
+    s = build_one_liner(
+        action="watch", p_rise=None, expected_change_pct=0.0,
+        below_naive=True,
+    )
+    assert "模型暂无统计优势" in s
+    assert "数据不足" not in s
+
+
+def test_narrative_below_naive():
+    """P0.4: below_naive downgrade narrative mentions MAPE comparison."""
+    s = build_narrative(
+        name_zh="发泡剂", day=7, current_price=8500.0, forecast_base=8500.0,
+        expected_change_pct=0.0, p_rise=None, action="watch", confidence="low",
+        directional_accuracy=None, intel_event_count=0, intel_bias="neutral",
+        volatility_regime="NORMAL", below_naive=True,
+        ensemble_mape_h7=8.8, naive_mape_h7=8.6,
+    )
+    assert "模型暂无统计优势" in s
+    assert "8.8%" in s     # ensemble MAPE
+    assert "8.6%" in s     # naive MAPE
+    assert "数据不足" not in s
+
+
 def test_narrative_direction_from_prices_when_pct_missing():
     """expected_change_pct=None must not default to 'rise'; use forecast vs current."""
     s = build_narrative(

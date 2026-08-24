@@ -66,6 +66,7 @@ class NLAnswerService:
         resolved_policy=None,
         project_id: str | None = None,
         endpoint: LLMEndpoint | None = None,
+        skip_narrate: bool = False,
     ) -> dict:
         """Return a structured + prose answer for a user question.
 
@@ -132,13 +133,61 @@ class NLAnswerService:
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
 
-        # 1. Pull schema — try semantic catalog first, fall back to M-Schema.
-        # `schema_info` keeps the describe_all-shaped dict (used for db_type
-        # and citations); `schema_text` is the pre-rendered prompt context
-        # (the linker slice when available, else M-Schema with value sampling).
+        # 1. Pull schema — TWO-PHASE approach:
+        #   Phase A: Show LLM a full table-of-contents (ALL tables) so it can
+        #            choose the most relevant ones.  This fixes the #1 cause of
+        #            empty-row results: the vector-based schema linker picking
+        #            the wrong tables.
+        #   Phase B: Feed the LLM full DDL for only the selected tables so it
+        #            can generate accurate SQL.
+        # Fallback: if Phase A fails, fall back to the original RRF top_k=8
+        #           schema linker → M-Schema path.
         schema_info: dict | None = None
         schema_text: str | None = None
+        _selected_via_toc = False  # track whether Phase A succeeded
+
+        # ── Phase A: Full table-of-contents → LLM selects tables ──
         if settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+            try:
+                from app.services.knowledge_graph.schema_linker import (
+                    build_full_toc,
+                    format_toc_text,
+                    get_selected_tables_ddl,
+                )
+                toc = build_full_toc(self._db, [kb_id])
+                if toc:
+                    toc_text = format_toc_text(toc, token_budget=1200)
+                    # Ask the LLM which tables are relevant
+                    selected_names = await self._select_tables_from_toc(
+                        question, toc_text, len(toc), endpoint=endpoint,
+                    )
+                    if selected_names:
+                        logger.info(
+                            "NLAnswer: TOC phase selected %d tables: %s",
+                            len(selected_names), selected_names,
+                        )
+                        # Phase B: get full DDL for selected tables only
+                        ddl_text = await asyncio.to_thread(
+                            get_selected_tables_ddl,
+                            self._db, [kb_id], selected_names,
+                        )
+                        if ddl_text and ddl_text.strip():
+                            schema_info = _schema_info_from_toc_selection(
+                                self._db, kb_id, selected_names, schema_svc,
+                            )
+                            schema_text = ddl_text
+                            _selected_via_toc = True
+                            logger.debug(
+                                "NLAnswer: using TOC-selected DDL (%d tables)",
+                                len(selected_names),
+                            )
+            except Exception as e:
+                logger.warning(
+                    "NLAnswer: TOC phase failed (falling back to schema linker): %s", e,
+                )
+
+        # ── Fallback: original RRF-based schema linker ──
+        if not _selected_via_toc and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
             try:
                 from app.services.knowledge_graph.schema_linker import link_schema
                 linker_result = await link_schema(
@@ -283,14 +332,106 @@ class NLAnswerService:
 
         _shadow_validate_and_log(kb_id, question, sql, live_success=True)
 
+        # 3b. Zero-row auto-correction: if the SQL returned 0 rows, try once
+        # more with the full TOC approach (or a re-selection if we already
+        # used TOC).  The most common cause of empty rows is the schema
+        # linker selecting the wrong table; the TOC phase fixes this.
+        exec_rows = exec_result.get("rows", [])
+        if not exec_rows and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+            logger.info(
+                "NLAnswer: SQL returned 0 rows — attempting zero-row correction "
+                "with full TOC re-selection for KB %s", kb_id,
+            )
+            try:
+                from app.services.knowledge_graph.schema_linker import (
+                    build_full_toc,
+                    format_toc_text,
+                    get_selected_tables_ddl,
+                )
+                # Build error context for the re-selection prompt
+                failed_context = (
+                    f"Previous SQL attempt returned 0 rows:\n"
+                    f"```sql\n{sql}\n```\n"
+                    f"Please choose DIFFERENT tables that are more likely to "
+                    f"contain the data for: {question}"
+                )
+                toc = build_full_toc(self._db, [kb_id])
+                if toc:
+                    toc_text = format_toc_text(toc, token_budget=1200)
+                    selected_names = await self._select_tables_from_toc(
+                        question, toc_text, len(toc),
+                        error_context=failed_context,
+                        endpoint=endpoint,
+                    )
+                    if selected_names:
+                        logger.info(
+                            "NLAnswer: zero-row correction selected %d tables: %s",
+                            len(selected_names), selected_names,
+                        )
+                        ddl_text = await asyncio.to_thread(
+                            get_selected_tables_ddl,
+                            self._db, [kb_id], selected_names,
+                        )
+                        if ddl_text and ddl_text.strip():
+                            schema_info = _schema_info_from_toc_selection(
+                                self._db, kb_id, selected_names, schema_svc,
+                            )
+                            schema_text = ddl_text
+                            # Re-generate SQL with new tables
+                            sql2 = await self._text_to_sql(
+                                question, schema_info, schema_text=schema_text,
+                                project_id=project_id, endpoint=endpoint,
+                            )
+                            if sql2:
+                                sql2, _ = await self._correct_sql_with_validator_feedback(
+                                    sql2, question, kb_id, schema_info,
+                                    schema_text=schema_text, project_id=project_id,
+                                    endpoint=endpoint,
+                                )
+                                if sql2:
+                                    try:
+                                        exec_result = await asyncio.to_thread(
+                                            query_svc.execute, kb_id, sql2
+                                        )
+                                        exec_rows = exec_result.get("rows", [])
+                                        if exec_rows:
+                                            logger.info(
+                                                "NLAnswer: zero-row correction "
+                                                "SUCCEEDED — got %d rows",
+                                                len(exec_rows),
+                                            )
+                                            sql = sql2
+                                        else:
+                                            logger.info(
+                                                "NLAnswer: zero-row correction "
+                                                "still returned 0 rows"
+                                            )
+                                    except Exception as e2:
+                                        logger.warning(
+                                            "NLAnswer: zero-row correction "
+                                            "execute failed: %s", e2,
+                                        )
+            except Exception as e:
+                logger.warning(
+                    "NLAnswer: zero-row correction failed (non-fatal): %s", e,
+                )
+
         # 4. Narrate
-        try:
-            answer_text = await self._narrate(question, exec_result, endpoint=endpoint)
-        except Exception as e:
-            logger.debug("NLAnswer: narrate failed (non-fatal): %s", e)
-            # If narration fails, fall back to a tiny template so the
-            # caller still gets a useful string.
+        # PERF 2026-08-24: skip_narrate lets deliverable-turn callers bypass
+        # this LLM call — the main agent's post-loop synthesize_report writes
+        # the final CEO narrative from ALL merged datasets (more data than
+        # narrate ever sees), so this call is pure duplication on those turns.
+        if skip_narrate:
+            logger.info("NLAnswer: skipping narrate LLM call (caller synthesizes)")
             answer_text = _fallback_narrative(question, exec_result)
+        else:
+            try:
+                answer_text = await self._narrate(question, exec_result, endpoint=endpoint)
+            except Exception as e:
+                logger.debug("NLAnswer: narrate failed (non-fatal): %s", e)
+                # If narration fails, fall back to a tiny template so the
+                # caller still gets a useful string.
+                answer_text = _fallback_narrative(question, exec_result)
 
         return {
             "success": True,
@@ -356,8 +497,77 @@ class NLAnswerService:
             {"role": "system", "content": _SQL_GEN_SYSTEM_PROMPT},
             {"role": "user", "content": user_content},
         ]
-        text = await _chat(messages, temperature=0.0, endpoint=endpoint)
+        text = await _chat(messages, temperature=0.0, endpoint=endpoint, max_tokens=3072)
         return _strip_sql_fences(text)
+
+    async def _select_tables_from_toc(
+        self,
+        question: str,
+        toc_text: str,
+        total_tables: int,
+        error_context: str | None = None,
+        endpoint: LLMEndpoint | None = None,
+    ) -> list[str]:
+        """Phase A of two-phase NL2SQL: ask the LLM to pick relevant tables
+        from the full table-of-contents.
+
+        Returns a list of table names, or [] on failure.
+        """
+        system_msg = (
+            "You are a database expert. The user will ask a data question. "
+            "You will see a catalog of ALL tables in the database. "
+            "Your job is to choose the 1-4 most relevant tables for answering "
+            "the question. Return ONLY a JSON array of table names, nothing else.\n\n"
+            "Rules:\n"
+            "- Choose tables that actually contain the data the user is asking about.\n"
+            "- If the user mentions 'sales', look for tables with names or descriptions "
+            "related to sales, orders, transactions, or revenue.\n"
+            "- If the user mentions specific metrics (volume, revenue, margin), "
+            "choose fact/transaction tables that typically contain such data.\n"
+            "- Prefer fact tables over dimension tables for metrics.\n"
+            "- Include dimension tables if the user asks for breakdowns by "
+            "product, region, partner, etc.\n"
+            "- Do NOT choose more than 4 tables.\n"
+            "- Return the table names EXACTLY as they appear in the catalog.\n\n"
+            "Example response: [\"sales_table\", \"partner_table\"]"
+        )
+        user_msg = f"{toc_text}\n\nQuestion: {question}"
+        if error_context:
+            user_msg += f"\n\n{error_context}"
+
+        messages = [
+            {"role": "system", "content": system_msg},
+            {"role": "user", "content": user_msg},
+        ]
+        try:
+            text = await _chat(messages, temperature=0.0, endpoint=endpoint, max_tokens=2048)
+            # Parse JSON array from LLM response
+            text = text.strip()
+            # Strip markdown fences if present
+            if text.startswith("```"):
+                lines = text.split("\n")
+                lines = [l for l in lines if not l.startswith("```")]
+                text = "\n".join(lines).strip()
+            selected = json.loads(text)
+            if isinstance(selected, list) and all(isinstance(s, str) for s in selected):
+                # Validate: table names must exist in the TOC
+                known_names = set()
+                for line in toc_text.split("\n"):
+                    line = line.strip()
+                    if line and not line.startswith("--"):
+                        # First word (before comma or parenthesis) is the table name
+                        name = line.split(",")[0].split("(")[0].strip()
+                        if name:
+                            known_names.add(name)
+                validated = [s for s in selected if s in known_names]
+                if validated:
+                    return validated[:4]
+                # If no exact match, return the raw list (LLM may use full qualified names)
+                return selected[:4]
+            return []
+        except (json.JSONDecodeError, Exception) as e:
+            logger.warning("NLAnswer: TOC table selection failed: %s", e)
+            return []
 
     async def _text_to_sql_with_correction(
         self,
@@ -471,7 +681,7 @@ class NLAnswerService:
                 ),
             },
         ]
-        return await _chat(messages, temperature=0.2, endpoint=endpoint)
+        return await _chat(messages, temperature=0.2, endpoint=endpoint, max_tokens=4096)
 
     # ------------------------------------------------------------------
     # M-Schema fallback (replaces describe_all)
@@ -559,6 +769,54 @@ def _schema_info_from_linker(
                     "default": None,
                 }
                 for c in t.get("columns", [])
+            ],
+        })
+    return {
+        "source": {"id": kb.id, "name": kb.name, "db_type": kb.db_type},
+        "tables": tables,
+    }
+
+
+def _schema_info_from_toc_selection(
+    db: Session, kb_id: str, selected_table_names: list[str],
+    schema_svc: SchemaService,
+) -> dict:
+    """Build a describe_all-shaped dict from TOC-selected table names.
+
+    Similar to _schema_info_from_linker but queries the DB for full
+    column metadata for the selected tables only.
+    """
+    from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta
+    kb = schema_svc._load_kb(kb_id)
+    tables = []
+    for name in selected_table_names:
+        meta = (
+            db.query(KBTableMeta)
+            .filter(
+                KBTableMeta.kb_id == kb_id,
+                KBTableMeta.table_name == name,
+            )
+            .first()
+        )
+        if not meta:
+            continue
+        cols = (
+            db.query(KBColumnMeta)
+            .filter(KBColumnMeta.table_meta_id == meta.id)
+            .order_by(KBColumnMeta.ordinal)
+            .all()
+        )
+        tables.append({
+            "table": meta.table_name,
+            "columns": [
+                {
+                    "name": c.column_name,
+                    "type": c.data_type or "",
+                    "nullable": c.is_nullable,
+                    "pk": bool(c.is_primary_key),
+                    "default": None,
+                }
+                for c in cols
             ],
         })
     return {
@@ -805,6 +1063,7 @@ async def _chat(
     messages: list[dict],
     temperature: float = 0.0,
     endpoint: LLMEndpoint | None = None,
+    max_tokens: int | None = None,
 ) -> str:
     """Single-turn chat call to the configured LLM.
 
@@ -826,6 +1085,8 @@ async def _chat(
         "messages": messages,
         "temperature": temperature,
     }
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     async with httpx.AsyncClient(timeout=120.0) as client:
         resp = await client.post(_url, headers=_headers, json=payload)
         resp.raise_for_status()

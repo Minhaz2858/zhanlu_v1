@@ -449,20 +449,36 @@ def _cap_table_rows(
 
 
 def _layout_cover(slide, sp, theme, idx, total) -> None:
-    """Cover slide: brand bar + title + subtitle + meta line."""
+    """Cover slide: brand bar + title + period + subtitle + CEO meta line."""
     title = _assertify_headline(sp.get("title", ""), "cover")
     subtitle = sp.get("subtitle", "")
+    period = sp.get("period", "")
     _add_rect(slide, 0, 0, SLIDE_W_IN, 0.25, fill=_rgb(theme, "primary", "#2563EB"))
     _add_textbox(
         slide, MARGIN_IN, 2.0, SLIDE_W_IN - 2 * MARGIN_IN, 1.6,
         title, TITLE_PT + 8, bold=True,
         color=_rgb(theme, "text", "#0F172A"),
     )
+    # Report period line (e.g. "July 2026 · vs June 2026").
+    meta_y = 3.7
+    if period:
+        _add_textbox(
+            slide, MARGIN_IN, 3.55, SLIDE_W_IN - 2 * MARGIN_IN, 0.5,
+            period, SUBTITLE_PT + 2, bold=True,
+            color=_rgb(theme, "primary", "#2563EB"),
+        )
+        meta_y = 4.15
     if subtitle:
         _add_textbox(
-            slide, MARGIN_IN, 3.7, SLIDE_W_IN - 2 * MARGIN_IN, 0.6,
+            slide, MARGIN_IN, meta_y, SLIDE_W_IN - 2 * MARGIN_IN, 0.6,
             subtitle, SUBTITLE_PT, color=_rgb(theme, "muted", "#64748B"),
         )
+    # CEO review line — the primary audience for this deck.
+    _add_textbox(
+        slide, MARGIN_IN, SLIDE_H_IN - 0.9, SLIDE_W_IN - 2 * MARGIN_IN, 0.5,
+        "Prepared for CEO Review", CAPTION_PT, bold=True,
+        color=_rgb(theme, "muted", "#64748B"),
+    )
 
 
 def _layout_agenda(slide, sp, theme, idx, total) -> None:
@@ -489,6 +505,12 @@ def _layout_kpi_grid(slide, sp, theme, idx, total) -> None:
         cols, rows = 3, 2
     available_w = SLIDE_W_IN - 2 * MARGIN_IN
     available_h = SLIDE_H_IN - 1.8 - 0.4
+    # Reserve space at the bottom for risk/opportunity callouts.
+    callouts = sp.get("callouts", []) or []
+    callout_reserve = 0.0
+    if callouts:
+        callout_reserve = 1.15
+        available_h -= callout_reserve
     cell_w = (available_w - (cols - 1) * 0.2) / cols
     cell_h = min(2.2, (available_h - (rows - 1) * 0.2) / rows)
     for i, k in enumerate(kpis[: cols * rows]):
@@ -540,6 +562,71 @@ def _layout_kpi_grid(slide, sp, theme, idx, total) -> None:
             p3.runs[0].font.size = Pt(CAPTION_PT)
             p3.runs[0].font.color.rgb = _rgb(theme, "muted", "#64748B")
 
+    # ── Risk / opportunity callouts (CEO executive-summary style) ─────────
+    # Rendered as colored boxes at the bottom of the KPI slide.
+    if callouts:
+        n_call = len(callouts)
+        call_w = (available_w - (n_call - 1) * 0.25) / n_call
+        call_top = SLIDE_H_IN - callout_reserve + 0.15
+        for i, call in enumerate(callouts[:3]):
+            ctype = (call.get("type") or "info").lower()
+            ctext = call.get("text", "")
+            if ctype == "risk":
+                fill = _rgb(theme, "risk_bg", "#FEF2F2")
+                border = _rgb(theme, "risk", "#DC2626")
+                label = "⚠ RISK"
+            elif ctype == "opportunity":
+                fill = _rgb(theme, "opp_bg", "#ECFDF5")
+                border = _rgb(theme, "opportunity", "#059669")
+                label = "▲ OPPORTUNITY"
+            else:
+                fill = _rgb(theme, "kpi_bg", "#F1F5F9")
+                border = _rgb(theme, "border", "#E2E8F0")
+                label = "NOTE"
+            left = MARGIN_IN + i * (call_w + 0.25)
+            box = _add_rect(
+                slide, left, call_top, call_w, callout_reserve - 0.3,
+                fill=fill, border=border, rounded=True, radius_in=0.08,
+            )
+            tf = box.text_frame
+            tf.word_wrap = True
+            tf.margin_left = Inches(0.15)
+            tf.margin_right = Inches(0.15)
+            tf.margin_top = Inches(0.08)
+            p0 = tf.paragraphs[0]
+            p0.text = label
+            p0.runs[0].font.size = Pt(CAPTION_PT)
+            p0.runs[0].font.bold = True
+            p0.runs[0].font.color.rgb = border
+            p1 = tf.add_paragraph()
+            p1.text = ctext
+            p1.runs[0].font.size = Pt(BODY_PT - 2)
+            p1.runs[0].font.color.rgb = _rgb(theme, "text", "#0F172A")
+
+
+def _chart_type_const(chart_kind: str):
+    """Map a planner chart_type string to a python-pptx XL_CHART_TYPE.
+
+    Supports the extended set: line, pie/donut, bar/column,
+    grouped_bar/grouped_column (COLUMN_CLUSTERED / BAR_CLUSTERED), and
+    stacked_bar/stacked_column (COLUMN_STACKED / BAR_STACKED).
+    """
+    kind = (chart_kind or "bar").lower()
+    if kind in ("line", "area"):
+        return XL_CHART_TYPE.LINE
+    if kind in ("pie", "donut"):
+        return XL_CHART_TYPE.PIE
+    if kind in ("grouped_bar", "bar_clustered"):
+        return XL_CHART_TYPE.BAR_CLUSTERED
+    if kind in ("stacked_bar", "bar_stacked"):
+        return XL_CHART_TYPE.BAR_STACKED
+    if kind in ("stacked_column", "column_stacked"):
+        return XL_CHART_TYPE.COLUMN_STACKED
+    if kind in ("grouped_column", "column_clustered"):
+        return XL_CHART_TYPE.COLUMN_CLUSTERED
+    # Default: clustered column (best fit for categorical comparisons).
+    return XL_CHART_TYPE.COLUMN_CLUSTERED
+
 
 def _layout_chart_full(slide, sp, theme, idx, total) -> None:
     _section_title(slide, _assertify_headline(sp.get("title", "Chart"), "chart_full"), theme)
@@ -559,21 +646,11 @@ def _layout_chart_full(slide, sp, theme, idx, total) -> None:
     for y in y_keys:
         cd.add_series(str(y), [_coerce(r.get(y)) for r in rows])
     chart_kind = (chart_spec.get("chart_type") or "bar").lower()
-    if chart_kind == "line":
-        cs = slide.shapes.add_chart(
-            XL_CHART_TYPE.LINE, Inches(MARGIN_IN), Inches(1.7),
-            Inches(SLIDE_W_IN - 2 * MARGIN_IN), Inches(5.3), cd,
-        )
-    elif chart_kind == "pie":
-        cs = slide.shapes.add_chart(
-            XL_CHART_TYPE.PIE, Inches(MARGIN_IN), Inches(1.7),
-            Inches(SLIDE_W_IN - 2 * MARGIN_IN), Inches(5.3), cd,
-        )
-    else:
-        cs = slide.shapes.add_chart(
-            XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(MARGIN_IN), Inches(1.7),
-            Inches(SLIDE_W_IN - 2 * MARGIN_IN), Inches(5.3), cd,
-        )
+    chart_type_const = _chart_type_const(chart_kind)
+    cs = slide.shapes.add_chart(
+        chart_type_const, Inches(MARGIN_IN), Inches(1.7),
+        Inches(SLIDE_W_IN - 2 * MARGIN_IN), Inches(5.3), cd,
+    )
     cs.chart.has_title = False
     # Defer import to avoid a circular dep at module load.  Prefer the
     # vendored flat module (sandbox container has no ``app`` package); fall
@@ -602,11 +679,7 @@ def _layout_chart_with_bullets(slide, sp, theme, idx, total) -> None:
         for y in y_keys:
             cd.add_series(str(y), [_coerce(r.get(y)) for r in rows])
         chart_kind = (chart_spec.get("chart_type") or "bar").lower()
-        chart_type_const = (
-            XL_CHART_TYPE.LINE if chart_kind == "line"
-            else XL_CHART_TYPE.PIE if chart_kind == "pie"
-            else XL_CHART_TYPE.COLUMN_CLUSTERED
-        )
+        chart_type_const = _chart_type_const(chart_kind)
         cs = slide.shapes.add_chart(
             chart_type_const, Inches(MARGIN_IN), Inches(1.7),
             Inches(6.8), Inches(5.0), cd,

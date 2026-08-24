@@ -30,10 +30,17 @@ os.chdir(_BACKEND_ROOT)
 # ---------------------------------------------------------------------------
 
 def _make_execute_query_result(rows):
+    # NOTE: a business-shaped SQL (not `SELECT * FROM t`) is intentional —
+    # since 2026-08-22, `SELECT *` without WHERE/GROUP BY is classified as a
+    # trivial probe and its rows are deliberately NOT captured in `last_rows`
+    # (they trigger an NL2SQL retry instead). These tests verify the
+    # synthesis-failure / empty-answer behaviors, so the fake result must
+    # exercise the real business-query path.
     return {
         "success": True,
         "rows": rows,
-        "sql": "SELECT * FROM t",
+        "sql": "SELECT material_name, SUM(total_revenue) AS total_revenue "
+               "FROM sales GROUP BY material_name",
         "source": {"id": "kb-1", "name": "db_zhanlu_no1"},
     }
 

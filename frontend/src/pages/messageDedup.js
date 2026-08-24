@@ -18,6 +18,18 @@
  * slice at agents.py:5330. First occurrence wins so callers can
  * control priority by ordering (e.g. server-confirmed state first).
  *
+ * COLLAPSE IS CONSECUTIVE-ONLY. Only messages that are ADJACENT in the
+ * input (same fingerprint as the immediately preceding KEPT message)
+ * are dropped. Cross-store copies of the same logical message are
+ * written in the same turn (timestamps ms apart), so after the caller
+ * sorts by `created_date` they sit side by side and still collapse.
+ * A genuine repeat — the user re-asking the SAME question after a
+ * failed turn — is separated by the assistant response, so both user
+ * bubbles must survive. A global seen-set would wrongly collapse the
+ * second identical prompt (plain user messages carry no
+ * `phase.execution_id`, so their fingerprints are identical), which is
+ * exactly the reported "user input missing from the agent chat" bug.
+ *
  * Execution-scoped messages: when a message carries
  * `phase.execution_id` (set by automation_executor for the synthetic
  * "Run Automation Task" user card + the empty assistant bubble that
@@ -32,15 +44,17 @@
  */
 export function dedupeMessagesByFingerprint(msgs) {
   if (!Array.isArray(msgs) || msgs.length === 0) return [];
-  const seenFingerprints = new Set();
   const result = [];
+  let lastKeptFp = null;
   for (const m of msgs) {
     if (!m) continue;
     const phase = m.phase && typeof m.phase === 'object' ? m.phase : null;
     const execId = phase && phase.execution_id ? String(phase.execution_id) : '';
     const fp = `${m.role || ''}::${(m.content || '').slice(0, 4000)}::${execId}`;
-    if (seenFingerprints.has(fp)) continue;
-    seenFingerprints.add(fp);
+    // Drop ONLY consecutive identical fingerprints (cross-store copies).
+    // Repeated questions are separated by other messages → kept.
+    if (fp === lastKeptFp) continue;
+    lastKeptFp = fp;
     result.push(m);
   }
   return result;

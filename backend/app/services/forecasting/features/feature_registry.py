@@ -50,13 +50,38 @@ def _walk_upstream_chain(product_id: str, graph: KnowledgeGraph, visited: set[st
     return chain
 
 
-def derive_feature_spec(product_key: str, graph: KnowledgeGraph, feedstock_lags: list[int] | None = None) -> FeatureSpec:
+def derive_feature_spec(
+    product_key: str,
+    graph: KnowledgeGraph,
+    feedstock_lags: list[int] | None = None,
+    override_exog_features: list[str] | None = None,
+) -> FeatureSpec:
     """Derive exogenous feature requirements for a product from the KG.
 
     Walks upstream_of() transitively. Returns feedstock chain, spread pairs between
     adjacent feedstocks, FX flag (True if chain touches CRUDE/FEEDSTOCK), and calendar
     request. For unknown products returns an empty spec.
+
+    If *override_exog_features* is provided (typically from
+    ``target.model_config["exog_features"]``), the KG walk is skipped and
+    those features are used directly.  This allows domain experts to
+    force-include specific exogenous features per product.
     """
+    if override_exog_features:
+        logger.info(
+            "Using override exog_features for %s: %s (KG walk skipped)",
+            product_key, override_exog_features,
+        )
+        return FeatureSpec(
+            product_key=product_key,
+            feedstock_keys=override_exog_features,
+            feedstock_lags=feedstock_lags or list(_DEFAULT_FEEDSTOCK_LAGS),
+            spread_pairs=[],
+            use_fx=False,
+            use_event_flags=True,
+            calendar_features=True,
+        )
+
     node = graph.get_node(product_key)
     if node is None:
         return FeatureSpec(

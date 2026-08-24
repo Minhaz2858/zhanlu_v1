@@ -171,9 +171,6 @@ vi.mock('@/components/chat/ArtifactPanel', () => ({
 vi.mock('@/components/chat/ArtifactPreviewPane', () => ({
   default: () => React.createElement('div', { 'data-testid': 'artifact-preview-pane' }),
 }));
-vi.mock('@/components/chat/TracePanel', () => ({
-  default: () => React.createElement('div', { 'data-testid': 'trace-panel' }),
-}));
 vi.mock('@/components/chat/ReportSidePanel', () => ({
   default: () => React.createElement('div', { 'data-testid': 'report-side-panel' }),
 }));
@@ -219,6 +216,7 @@ function makeStream(events) {
 // ---------------------------------------------------------------------------
 const { default: Chat } = await import('@/pages/Chat');
 const { ChatSessionProvider } = await import('@/lib/ChatSessionContext');
+const { PersistentStreamProvider } = await import('@/lib/PersistentStreamContext');
 
 function renderChat() {
   // Chat.jsx now reads session state from ChatSessionContext (the
@@ -233,7 +231,7 @@ function renderChat() {
       React.createElement(
         ChatSessionProvider,
         null,
-        React.createElement(Chat),
+        React.createElement(PersistentStreamProvider, null, React.createElement(Chat)),
       ),
     )
   );

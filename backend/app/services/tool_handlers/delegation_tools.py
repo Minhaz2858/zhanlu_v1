@@ -25,7 +25,9 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
+import time
 import uuid
 from typing import Any, Optional
 
@@ -55,6 +57,16 @@ from app.services.sub_agent_reliability import (
 logger = logging.getLogger(__name__)
 
 
+# Hard wall-clock budget for a single data-agent delegation (env-tunable).
+# The sub-agent loop is capped at this many seconds regardless of how many
+# iterations remain — a slow warehouse query or a rambling sub-model must
+# never hold the user's turn hostage. On timeout we return whatever rows
+# were captured so far (with `truncated: True`).
+DATA_AGENT_BUDGET_SECONDS = float(
+    os.environ.get("DATA_AGENT_BUDGET_SECONDS", "90")
+)
+
+
 # Tools the Data Agent sub-loop is allowed to use.
 _DATA_AGENT_TOOLS = [
     "list_data_sources",
@@ -67,10 +79,105 @@ _DATA_AGENT_TOOLS = [
 
 # Tools it is NOT allowed to call (prevent loops and writes).
 _DATA_AGENT_DENIED = {
-    "ask_data_agent", "delegate_task", "memory", "send_message",
+    "ask_data_agent", "fetch_data_batch", "delegate_task", "memory", "send_message",
     "create_agent", "update_agent", "create_skill", "update_skill",
     "create_automation", "update_automation",
 }
+
+# ── Trivial-probe / garbage-data detection ──────────────────────────────────
+# Patterns that indicate a schema probe rather than a real business query.
+_TRIVIAL_PROBE_RE = re.compile(
+    r"\bselect\s+\*\s+from\s+\S+\s+limit\s+(1|5|10)\b",
+    re.IGNORECASE,
+)
+
+# Internal ID columns that should NEVER appear as KPI/chart values.
+# Pattern: F-prefixed uppercase ending in ID (common in ERP systems), or
+# common generic ID names. Detected dynamically by _is_internal_id_column().
+_INTERNAL_ID_PATTERNS = frozenset({
+    "id", "ID", "rowid", "ROWID", "uid", "UID", "uuid",
+    "pk", "PK",
+})
+
+# Business-meaningful column name fragments (case-insensitive match).
+# Generic terms found in business databases across industries.
+_BUSINESS_COL_FRAGMENTS = frozenset({
+    "amount", "revenue", "quantity", "qty", "price", "cost", "profit",
+    "margin", "name", "product", "material", "customer", "region",
+    "date", "total", "sum", "count", "volume", "weight", "unit",
+    "tax", "discount", "subtotal", "grand", "net", "gross",
+    "sales", "order", "invoice", "payment", "receipt",
+    "inventory", "stock", "warehouse", "shipment", "delivery",
+})
+
+
+def _is_trivial_probe(sql: str | None) -> bool:
+    """Return True if the SQL looks like a schema probe (LIMIT N without
+    aggregation, WHERE, or GROUP BY) rather than a real business query."""
+    if not sql:
+        return False
+    s = sql.strip().lower()
+    # SELECT * FROM table LIMIT 1/5/10 without WHERE or GROUP BY
+    if _TRIVIAL_PROBE_RE.search(s):
+        if "where" not in s and "group by" not in s:
+            return True
+    # Any SELECT * without aggregation on a large table
+    if re.search(r"\bselect\s+\*\s+from\b", s) and "group by" not in s and "where" not in s and "limit" not in s:
+        return True
+    return False
+
+
+def _is_garbage_business_data(rows: list | None) -> bool:
+    """Return True when the rows contain ONLY internal ID columns and no
+    business-meaningful columns. This catches the case where the sub-agent
+    ran `SELECT * FROM table LIMIT 1` and got back FENTRYID/FID garbage."""
+    if not rows:
+        return False  # empty is not garbage, just empty
+    if not isinstance(rows, list) or len(rows) == 0:
+        return False
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    if not first:
+        return False
+    cols = set(first.keys())
+    # If ALL columns are internal IDs, it's garbage
+    # Use _is_internal_id_column() for dynamic F-prefix + _id detection
+    if cols and all(
+        c in _INTERNAL_ID_PATTERNS or
+        (len(c) > 2 and c[0] == "F" and c[1].isupper() and c.endswith("ID")) or
+        c.endswith("_id") or c.endswith("_ID")
+        for c in cols
+    ):
+        return True
+    # If no column contains any business fragment, it's likely garbage
+    has_business = any(
+        any(frag in col.lower() for frag in _BUSINESS_COL_FRAGMENTS)
+        for col in cols
+    )
+    return not has_business
+
+
+def _rows_have_business_data(rows: list | None) -> bool:
+    """Return True when rows contain at least one business-meaningful column
+    AND at least one row has non-null values in business columns."""
+    if not rows or not isinstance(rows, list) or len(rows) == 0:
+        return False
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    if not first:
+        return False
+    cols = set(first.keys())
+    business_cols = {
+        c for c in cols
+        if any(frag in c.lower() for frag in _BUSINESS_COL_FRAGMENTS)
+    }
+    if not business_cols:
+        return False
+    # Check at least one row has a non-null business value
+    for row in rows[:20]:
+        if isinstance(row, dict):
+            for bc in business_cols:
+                if row.get(bc) is not None:
+                    return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +245,8 @@ async def _ask_data_agent(
     # so the loop below runs as fallback.
     if settings.DATA_AGENT_FASTPATH_ENABLED:
         fastpath_result = await _try_nl_fastpath(
-            question, preferred_kb, bound_kb_ids, db, endpoint=endpoint
+            question, preferred_kb, bound_kb_ids, db, endpoint=endpoint,
+            skip_narrate=bool((context or {}).get("main_agent_will_synthesize")),
         )
         if fastpath_result is not None:
             return fastpath_result
@@ -179,15 +287,22 @@ async def _ask_data_agent(
 
     iterations = 0
     _gate_attempts = 0  # universal self-eval re-plan nudges this sub-loop turn
-    # Default 4 iterations (was 2). The Data Agent now follows a
-    # schema-discover -> query -> correct -> synthesize pattern: (1) call
-    # `describe_schema`, (2) execute the query, (3) detect bad/null data and
-    # re-query with corrected columns, (4) write the prose answer. A budget
-    # of 2 leaves no room for self-correction, which caused the agent to
-    # report "date coverage: None" instead of re-querying. The cap of 10 is
-    # preserved for complex multi-table queries.
+    # Default 2 iterations. The Data Agent's loop is now optimized so a
+    # schema-discover -> execute_query pair is the common case: the calling
+    # agent embeds a compact [schema: ...] hint in the question when it can,
+    # so the sub-agent skips describe_schema entirely and needs only ONE
+    # iteration to run the query. A budget of 4+ encouraged the sub-model to
+    # keep "refining" long past the point of usefulness (the 162.6s turns
+    # users saw). The wall-clock cap (DATA_AGENT_BUDGET_SECONDS) still
+    # bounds total time; the hard cap is 6 for genuinely complex multi-table
+    # questions.
     max_iterations = min(args.get("max_iterations", 4), 10)
     final_text = ""
+    # P0: wall-clock + per-phase timing for the delegation.
+    _delegation_start = time.monotonic()
+    _llm_total_s = 0.0
+    _sql_total_s = 0.0
+    _truncated = False
     # Distinguish two failure modes:
     #   _initial_llm_failure: set ONLY when the FIRST _call_llm in the
     #     sub-loop raises. No rows are guaranteed, so the whole call is
@@ -219,9 +334,24 @@ async def _ask_data_agent(
             break
         iterations += 1
 
+        # P0: wall-clock budget — hard cap on the sub-agent's total time.
+        # Even if iterations remain, a slow warehouse query or a rambling
+        # sub-model must not hold the user's turn hostage. On truncation we
+        # break out and return whatever rows were captured (see the
+        # directive fallback below), tagged `truncated: True`.
+        if time.monotonic() - _delegation_start > DATA_AGENT_BUDGET_SECONDS:
+            logger.warning(
+                "ask_data_agent wall-clock budget exceeded (%.1fs > %.1fs), truncating",
+                time.monotonic() - _delegation_start,
+                DATA_AGENT_BUDGET_SECONDS,
+            )
+            _truncated = True
+            break
+
         # P1.3/P2: pre-API pruning + message sanitization
         pre_call_prep(messages)
 
+        _llm_t0 = time.monotonic()
         try:
             llm_response = await _call_llm_with_retry(messages, tool_schemas, endpoint=endpoint)
         except Exception as e:
@@ -234,6 +364,7 @@ async def _ask_data_agent(
             # synthesis / fallback path.
             _initial_llm_failure = str(e)
             break
+        _llm_total_s += time.monotonic() - _llm_t0
 
         content = llm_response.get("content", "") or ""
         raw_tool_calls = llm_response.get("tool_calls", []) or []
@@ -262,7 +393,7 @@ async def _ask_data_agent(
             break
 
         # Append assistant message
-        messages.append({
+        assistant_msg = {
             "role": "assistant",
             "content": content,
             "tool_calls": [
@@ -276,19 +407,32 @@ async def _ask_data_agent(
                 }
                 for tc in raw_tool_calls
             ],
-        })
+        }
+        _reasoning = (llm_response.get("reasoning") or "").strip()
+        if _reasoning:
+            assistant_msg["reasoning_content"] = _reasoning
+        messages.append(assistant_msg)
 
         # P0: per-tool guardrail + per-result persistence
         batch_ids: list[str] = []
         batch_names: list[str] = []
 
-        # --- Parallel execution for independent schema-discovery tools ---
+        # --- Parallel execution for independent read-only tools ---
         # When the LLM emits multiple tool calls in a single turn (e.g.
-        # list_data_sources + describe_schema), run them concurrently via
-        # asyncio.gather instead of sequentially. This cuts 1-2 turns of
-        # latency for schema-discovery questions. Only read-only tools
-        # that don't depend on each other's results are parallelized.
-        _PARALLEL_SAFE_TOOLS = {"list_data_sources", "describe_schema", "search_documents"}
+        # list_data_sources + describe_schema, or several independent
+        # execute_query calls for different metrics), run them concurrently
+        # via asyncio.gather instead of sequentially. This cuts 1-2 turns of
+        # latency for schema-discovery questions AND turns multi-metric
+        # queries (volume + revenue + margin) into a single parallel burst.
+        # Only read-only tools that don't depend on each other's results are
+        # parallelized; execute_query is read-only (SELECT-only enforced by
+        # the query validator).
+        _PARALLEL_SAFE_TOOLS = {
+            "list_data_sources",
+            "describe_schema",
+            "search_documents",
+            "execute_query",
+        }
 
         # Pre-parse all tool calls for this batch
         _parsed_calls: list[tuple[str, dict, str]] = []
@@ -319,7 +463,9 @@ async def _ask_data_agent(
                 return await execute_tool(tn, ta, db, uid, context=ctx)
 
             _coros = [_run_one(tn, ta, db, user_id, sub_context) for tn, ta, _ in _parsed_calls]
+            _sql_t0 = time.monotonic()
             _results = await asyncio.gather(*_coros, return_exceptions=True)
+            _sql_total_s += time.monotonic() - _sql_t0
 
             for (tn, ta, tcid), result in zip(_parsed_calls, _results):
                 batch_ids.append(tcid)
@@ -360,9 +506,11 @@ async def _ask_data_agent(
                     # Route through the same execute_tool path the runtime uses
                     # — so permissions, hooks, and logging all work uniformly.
                     from app.services.agent_tools import execute_tool
+                    _sql_t0 = time.monotonic()
                     result = await execute_tool(
                         tool_name, tool_args, db, user_id, context=sub_context
                     )
+                    _sql_total_s += time.monotonic() - _sql_t0
                     _maybe_capture_execute_result(tool_name, result, state)
 
                 # P0: Layer 2 per-result persistence (large results → disk preview)
@@ -402,13 +550,105 @@ async def _ask_data_agent(
 
     metrics.record_budget(conv_budget.used, conv_budget.max_total)
 
+    # P0: one instrumentation line per delegation — wall time, iterations
+    # used, LLM vs SQL split, truncation flag, row count. Lets ops answer
+    # "why is the data turn slow" from a single log line.
+    logger.info(
+        "ask_data_agent delegation summary: conv=%s wall=%.1fs iters=%d "
+        "llm=%.1fs sql=%.1fs truncated=%s rows=%d final_len=%d",
+        (context or {}).get("conversation_id"),
+        time.monotonic() - _delegation_start,
+        iterations,
+        _llm_total_s,
+        _sql_total_s,
+        _truncated,
+        len(state["last_rows"]) if state.get("last_rows") else 0,
+        len(final_text),
+    )
+
+    # ── NL2SQL auto-retry for trivial probes / garbage data ─────────────────
+    # When the sub-agent ran trivial probes (SELECT * FROM table LIMIT 1) or
+    # returned garbage data (ID-only columns), fall back to the NL2SQL
+    # pipeline (NLAnswerService.answer) which has two-phase table selection
+    # and zero-row auto-correction. This satisfies the requirement:
+    # "prioritize NL2SQL services over knowledge graph or memory".
+    _needs_nl2sql_retry = (
+        state.get("trivial_probe_detected")
+        or state.get("garbage_rows_detected")
+        or (
+            state.get("last_rows") is None
+            and state.get("last_metadata_rows") is not None
+            and not _truncated
+        )
+    )
+    if _needs_nl2sql_retry and not final_text:
+        logger.info(
+            "ask_data_agent: detected trivial probe / garbage data, "
+            "retrying with NL2SQL pipeline (trivial=%s, garbage=%s)",
+            state.get("trivial_probe_detected"),
+            state.get("garbage_rows_detected"),
+        )
+        try:
+            _nl2sql_result = await _try_nl_fastpath(
+                question, preferred_kb, bound_kb_ids, db, endpoint=endpoint,
+                skip_narrate=bool((context or {}).get("main_agent_will_synthesize")),
+            )
+            if _nl2sql_result is not None and _nl2sql_result.get("success"):
+                _nl2sql_rows = _nl2sql_result.get("rows") or []
+                if _rows_have_business_data(_nl2sql_rows):
+                    # NL2SQL retry succeeded with real business data
+                    state["last_rows"] = _nl2sql_rows
+                    state["last_sql"] = _nl2sql_result.get("sql")
+                    if _nl2sql_result.get("source_id"):
+                        state["source_id"] = _nl2sql_result["source_id"]
+                    if _nl2sql_result.get("source_name"):
+                        state["source_name"] = _nl2sql_result["source_name"]
+                    final_text = (
+                        f"DATA READY: Retrieved {len(_nl2sql_rows)} row(s) from "
+                        f"{_nl2sql_result.get('source_name', 'the bound data source')}. "
+                        f"Here are the first {min(len(_nl2sql_rows), _CONDENSED_MAX_ROWS)} rows:\n"
+                        f"{_condensed_row_text(_nl2sql_rows)}\n"
+                        "Use these rows to answer the user's question directly. "
+                        "Do NOT reply with 'I had trouble' / 'I gathered some information "
+                        "but...' — the data is here, write a concise answer now."
+                    )
+                    state["trivial_probe_detected"] = False
+                    state["garbage_rows_detected"] = False
+                    logger.info(
+                        "ask_data_agent: NL2SQL retry succeeded with %d rows",
+                        len(_nl2sql_rows),
+                    )
+                else:
+                    logger.info(
+                        "ask_data_agent: NL2SQL retry returned rows but no "
+                        "business data, keeping original"
+                    )
+            else:
+                logger.info(
+                    "ask_data_agent: NL2SQL retry failed: %s",
+                    (_nl2sql_result or {}).get("error", "no result"),
+                )
+        except Exception as _nl2sql_err:
+            logger.warning(
+                "ask_data_agent: NL2SQL retry raised (non-fatal): %s",
+                _nl2sql_err,
+            )
+
     # --- Empty-answer guarantee ---------------------------------------------
     # If the LLM stopped with tool_calls and the loop terminated without
     # the LLM writing any prose (common: it called execute_query, then
     # ran out of iterations), force one final synthesis call with NO
     # tools. This makes the `answer` field non-empty so the calling
     # agent always has prose to render in the chat bubble.
-    if not final_text and state.get("last_rows") is not None:
+    #
+    # When the wall-clock budget was hit (`_truncated`), skip the extra
+    # synthesis LLM call — we are already over budget; the directive
+    # fallback below fills `answer` from the captured rows instead.
+    if (
+        not final_text
+        and not _truncated
+        and state.get("last_rows") is not None
+    ):
         logger.info(
             "ask_data_agent: forcing synthesis turn (rows=%d, prior iters=%d)",
             len(state["last_rows"]) if state["last_rows"] else 0,
@@ -450,11 +690,25 @@ async def _ask_data_agent(
     # initial LLM call failed, use a user-friendly message that the
     # calling LLM can quote verbatim (so it doesn't hallucinate
     # "I queried the database and found nothing").
+    #
+    # Two directive texts (NOT status messages): the calling model reads
+    # `answer` and decides whether to synthesize. A passive status like
+    # "Retrieved N row(s)" reads as a failure and produces the generic
+    # "I had trouble putting it all together" apology. These directives
+    # tell the calling model the data is ready (with actual values) and
+    # instruct it to synthesize — never to apologize.
     if not final_text:
         if state.get("last_rows"):
+            _rows = state["last_rows"]
+            _src = state.get("source_name") or "the bound data source"
+            _condensed = _condensed_row_text(_rows)
             final_text = (
-                f"Retrieved {len(state['last_rows'])} row(s) from "
-                f"{state.get('source_name') or 'the bound data source'}."
+                f"DATA READY: Retrieved {len(_rows)} row(s) from {_src}. "
+                f"Here are the first {min(len(_rows), _CONDENSED_MAX_ROWS)} rows:\n"
+                f"{_condensed}\n"
+                "Use these rows to answer the user's question directly. "
+                "Do NOT reply with 'I had trouble' / 'I gathered some information "
+                "but...' — the data is here, write a concise answer now."
             )
         elif _initial_llm_failure:
             # Truncate the underlying error to avoid leaking internals.
@@ -469,7 +723,14 @@ async def _ask_data_agent(
                 "business data. Please retry or rephrase your question."
             )
         else:
-            final_text = "The Data Agent did not return a final answer."
+            final_text = (
+                "The Data Agent could not retrieve any business data rows. "
+                "Possible reasons: (1) no data matches the filter criteria, "
+                "(2) the table/column names may be incorrect, or (3) the "
+                "query timed out. Tell the user specifically which of these "
+                "is most likely and suggest a concrete next step. Do NOT say "
+                "'I had trouble putting it all together' — that is not helpful."
+            )
 
     # Resolve source name from the bound KB list
     if state["source_id"]:
@@ -503,6 +764,14 @@ async def _ask_data_agent(
             "business data rows"
         )
 
+    # Data quality metadata for the calling agent
+    _data_quality = {
+        "has_business_data": _rows_have_business_data(state.get("last_rows")),
+        "trivial_probe_detected": state.get("trivial_probe_detected", False),
+        "garbage_rows_detected": state.get("garbage_rows_detected", False),
+        "row_count": len(state["last_rows"]) if state.get("last_rows") else 0,
+    }
+
     return {
         "success": _initial_llm_failure is None and not _metadata_only,
         "error": (_metadata_err if _metadata_only else _initial_llm_failure),
@@ -513,6 +782,8 @@ async def _ask_data_agent(
         "source_id": state["source_id"],
         "source_name": state["source_name"],
         "iterations": iterations,
+        "truncated": _truncated,
+        "data_quality": _data_quality,
     }
 
 
@@ -526,6 +797,7 @@ async def _try_nl_fastpath(
     bound_kb_ids: list[str],
     db: Session,
     endpoint=None,
+    skip_narrate: bool = False,
 ) -> dict | None:
     """One-shot NL2SQL fast path for a single bound database source.
 
@@ -551,7 +823,7 @@ async def _try_nl_fastpath(
 
     try:
         from app.services.db import NLAnswerService
-        result = await NLAnswerService(db).answer(kb_id, question, endpoint=endpoint)
+        result = await NLAnswerService(db).answer(kb_id, question, endpoint=endpoint, skip_narrate=skip_narrate)
     except Exception as e:
         logger.warning("ask_data_agent fast path raised (falling back to loop): %s", e)
         return None
@@ -581,49 +853,41 @@ async def _try_nl_fastpath(
 # like 碳五/碳九, codes live in `F_PAEZ_JC`/`FMATERIALID`) — without this it
 # invents columns (e.g. `material_name`) and filters with English literals
 # (`FNAME LIKE '%C5%'`), silently returning zero rows.
-_ECISCO_DATA_AGENT_HINT_BLOCK = """
+_GENERIC_DATA_AGENT_HINT_BLOCK = """
 
-ECISCO BI SUB-AGENT HARD RULES (the calling agent is `ecisco_bi_assistant`;
-you are writing SQL against the Ecisco BI warehouse):
-- COLUMN NAMES: There is NO `material_name` column. Product names live in
-  `FNAME` (Chinese names, e.g. 碳五/碳九). Product codes live in `F_PAEZ_JC`
-  and `FMATERIALID`. `material_model` is DEPRECATED and STALE — never use it.
-- HEADER/ENTRY TABLE STRUCTURE: Many ERP tables follow a header + entry
-  pattern. For sales: `erp_t_sal_outstock` is the HEADER (has FDATE,
-  FCUSTOMERID, FDOCUMENTSTATUS) and `erp_t_sal_outstockentry` is the
-  ENTRY/LINE (has FMATERIALID, FREALQTY, FBASEUNITQTY, F_PAEZ_BHSAMOUNT,
-  F_PAEZ_HSDJ). They JOIN on FID. FDATE is ONLY on the header — NEVER
-  reference FDATE from the entry table. To query sales with dates, you MUST
-  join: `SELECT h.FDATE, e.FMATERIALID, e.FREALQTY, e.F_PAEZ_BHSAMOUNT
-  FROM erp_t_sal_outstock h JOIN erp_t_sal_outstockentry e ON h.FID = e.FID
-  WHERE h.FDATE >= '...'`.
-- DISCOVER VALUES BEFORE FILTERING: before filtering a product portfolio
-  (e.g. C5/C9), run `SELECT DISTINCT FNAME, F_PAEZ_JC FROM <table> LIMIT 200`
-  and match against the ACTUAL values returned. Never filter with English
-  literals (e.g. `FNAME LIKE '%C5%'`) — the stored names are Chinese and the
-  query will silently return zero rows.
-- TABLE PREFERENCE: prefer the LIVE high-volume tables `erp_t_sal_outstock`
-  + `erp_t_sal_outstockentry` (joined, ~90k rows, current through 2026) over
-  the stale `erp_product_sales_details` (1.4k rows, ends 2025-12-31) and
-  `erp_v_sale_orderentry` (very sparse data). Confirm freshness with
-  MAX(date_column) before choosing.
-- PORTFOLIO RULE: when the question covers a product portfolio (e.g.
-  "C5/C9 products"), query ALL products in ONE query grouped by product
-  name — never single-product views one at a time.
-- ZERO-ROW RECOVERY: if a query returns zero rows or all-NULL aggregates,
-  do NOT report "no data". Re-probe: `SELECT DISTINCT FNAME, F_PAEZ_JC ...`
-  to discover real values, fix the filters, and re-run.
-- INVENTORY SEMANTICS (HARD RULE): `erp_v_stk_inventory` and
-  `erp_t_stk_inventory` are SNAPSHOT tables — they store the CURRENT
-  inventory position, not time-series movements. `FBASEQTY` is the current
-  stock-on-hand quantity. `IN_DATE` and `OUT_DATE` are often NULL and
-  should be IGNORED for "current inventory" queries. NEVER treat null
-  IN_DATE/OUT_DATE as a data-quality issue when FBASEQTY has values —
-  report the quantities directly. For time-filtered inventory (e.g.
-  "inventory last month"), use `erp_t_stk_inventory.FUPDATETIME` as the
-  date column. When asked for "supply chain data" or "inventory levels",
-  report FBASEQTY by product (FNAME/F_PAEZ_JC) and warehouse — do NOT
-  produce a data-quality report about missing dates.
+ZERO-ROW RECOVERY (HARD RULE — applies to ALL databases):
+- If a query returns zero rows or all-NULL aggregates, do NOT report "no data"
+  immediately. The data may exist in a different table or under different
+  column names that you haven't discovered yet.
+- The MOST COMMON cause of zero-row results is querying a STALE table (one
+  whose data is outdated or only covers an older time period). ALWAYS check
+  the FULL TABLE CATALOG in the schema output — it lists ALL tables with
+  their row counts and coverage dates. Prefer tables with MORE rows and
+  MORE RECENT coverage dates.
+- Recovery steps:
+  1. Look at the FULL TABLE CATALOG section in the schema output. It lists
+     ALL tables with row counts and coverage dates. If the table you queried
+     has few rows or old coverage (e.g. data ends 2025-12-31), try a DIFFERENT
+     table that has more rows and newer coverage.
+  2. Check data freshness: `SELECT MAX(<date_column>) FROM <table>` on the
+     tables you queried — they may be stale or empty.
+  3. Try alternative tables from the FULL TABLE CATALOG that could contain
+     the requested data. Look for tables with:
+     - Higher row counts (more data)
+     - More recent coverage dates (e.g. data through 2026 vs 2025)
+     - Names suggesting the right domain (sales → look for "sal", "order",
+       "outstock" in table names; inventory → look for "inv", "stk")
+  4. If values like product names or categories are filtering out rows, run
+     `SELECT DISTINCT <column> FROM <table> LIMIT 200` to discover the
+     actual stored values before filtering.
+- NEVER assume you know all the tables in the database. Any database can have
+  views, summary tables, or alternative schemas that contain the data you need.
+- Different databases use different naming conventions. A column could be
+  named `material_name`, `FNAME`, `product_title`, or anything else — always
+  verify with `describe_schema`.
+- IMPORTANT: When writing SQL, do NOT use reserved words as aliases (e.g.
+  `rows`, `year`, `month`, `date`, `group`, `order`). Use safe aliases like
+  `row_count`, `yr`, `mo`, `dt` instead. MySQL will reject reserved-word aliases.
 """
 
 
@@ -648,10 +912,25 @@ def _build_sub_agent_prompt(
 
     prompt = DATA_AGENT_PROMPT + bound_section
 
-    # Ecisco BI: the main agent delegates SQL writing to this sub-loop, so the
-    # schema/product-naming rules must be visible to the SQL writer itself.
-    if caller == "ecisco_bi_assistant":
-        prompt = prompt + _ECISCO_DATA_AGENT_HINT_BLOCK
+    # P4: if the caller embedded a compact `[schema: ...]` block in the
+    # question (see _build_schema_slice in data_source_runtime), surface it
+    # as a supplementary schema hint. The sub-agent MUST still call
+    # describe_schema first (mandatory), but the hint can help it focus on
+    # the right tables and resolve ambiguities faster.
+    schema_match = re.search(r"\[schema:[^\]]{0,1200}\]", question or "")
+    if schema_match:
+        prompt = (
+            prompt
+            + "\n\nSCHEMA HINT (supplementary — provided by the caller):\n"
+            + schema_match.group(0)
+            + "\nThis hint may help you identify relevant tables, but you MUST still "
+            "call describe_schema first to verify actual column names and discover "
+            "additional tables not covered by the hint."
+        )
+
+    # All callers: append the generic zero-row recovery rules so the
+    # sub-agent knows to re-discover schema when queries return empty.
+    prompt = prompt + _GENERIC_DATA_AGENT_HINT_BLOCK
 
     return prompt
 
@@ -695,22 +974,77 @@ def _is_metadata_query(sql: str | None) -> bool:
     return False
 
 
+# Keys that carry no user-facing business value and would only bloat the
+# condensed row summary (FK/surrogate ids, row markers).
+_SKIP_COLS = frozenset({"FID", "fid", "id", "ID", "rowid", "ROWID"})
+
+# How many rows go into the condensed summary inside the `answer` field.
+_CONDENSED_MAX_ROWS = 5
+
+
+def _condensed_row_text(rows: list, max_rows: int = _CONDENSED_MAX_ROWS, max_chars: int = 500) -> str:
+    """First N rows as compact key=value pairs.
+
+    This is what the calling model actually sees in the `answer` field —
+    even when the full tool-result JSON is persisted to disk (1,500-char
+    preview), the condensed values ride along with `answer` so the caller
+    always has real numbers to synthesize from.
+    """
+    if not rows:
+        return "(no rows)"
+    lines: list[str] = []
+    for row in rows[:max_rows]:
+        if isinstance(row, dict):
+            pairs = [
+                f"{k}={v}"
+                for k, v in row.items()
+                if k not in _SKIP_COLS and v is not None and v != ""
+            ]
+            lines.append("{" + ", ".join(pairs) + "}")
+        else:
+            lines.append(str(row))
+    out = "\n".join(lines)
+    if len(out) > max_chars:
+        out = out[:max_chars] + "…"
+    return out
+
+
 def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> None:
     """If this tool produced rows, remember them for the caller.
 
     Metadata/schema queries are stored separately so they do NOT poison
     `last_rows` and trigger the empty-answer synthesis fallback.
+
+    Trivial probes (SELECT * FROM table LIMIT 1) and garbage data (rows
+    containing only internal ID columns) are tracked separately so the
+    empty-answer guarantee can detect them and trigger an NL2SQL retry.
     """
     if not isinstance(result, dict) or not result.get("success"):
         return
     sql = result.get("sql")
     is_meta = _is_metadata_query(sql)
+    rows = result.get("rows")
+
+    # Detect trivial probes and garbage business data
+    is_trivial = _is_trivial_probe(sql) if sql else False
+    is_garbage = _is_garbage_business_data(rows) if rows else False
+
     if tool_name == "execute_query":
-        if is_meta:
-            state["last_metadata_rows"] = result.get("rows")
+        if is_meta or is_trivial:
+            # Schema/metadata queries AND trivial probes go to metadata bucket
+            state["last_metadata_rows"] = rows
             state["last_metadata_sql"] = sql
+            if is_trivial:
+                state["trivial_probe_detected"] = True
+                state["trivial_probe_sql"] = sql
+        elif is_garbage:
+            # Garbage data (ID-only columns) — track but don't use as real rows
+            state["garbage_rows_detected"] = True
+            state["garbage_rows"] = rows
+            state["garbage_sql"] = sql
+            # Don't set last_rows — let the loop retry
         else:
-            state["last_rows"] = result.get("rows")
+            state["last_rows"] = rows
             state["last_sql"] = sql
         src = result.get("source") or {}
         if src.get("id"):
@@ -719,10 +1053,10 @@ def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> 
             state["source_name"] = src["name"]
     elif tool_name == "answer_from_database":
         if is_meta:
-            state["last_metadata_rows"] = result.get("rows")
+            state["last_metadata_rows"] = rows
             state["last_metadata_sql"] = sql
         else:
-            state["last_rows"] = result.get("rows")
+            state["last_rows"] = rows
             state["last_sql"] = sql
         if result.get("source_id"):
             state["source_id"] = result["source_id"]
@@ -934,14 +1268,29 @@ ASK_DATA_AGENT_SCHEMA = {
             "one of your bound data sources. The Data Agent is a specialist "
             "that inspects schema, writes SQL, and returns a structured "
             "payload (answer, rows, sql, source_id). Use it for any "
-            "question that needs live database data."
+            "question that needs live database data.\n"
+            "QUESTION FORMAT: pass a SHORT natural-language question "
+            "(1-2 sentences). Do NOT embed raw SQL, full column lists, or "
+            "join hints in the question — the Data Agent discovers the "
+            "schema and writes its own SQL.\n"
+            "PARALLEL OPTIMIZATION (HARD): if you need MULTIPLE independent "
+            "data sets (e.g. sales volume AND revenue AND margin AND inventory "
+            "for the same period), emit MULTIPLE ask_data_agent calls IN THE "
+            "SAME response (one per independent question) — they execute in "
+            "parallel and finish in the time of one call instead of N. This "
+            "turns a 5-minute multi-query report into an ~80s one. Only "
+            "serialize calls that genuinely depend on each other's output."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "question": {
                     "type": "string",
-                    "description": "The natural-language question to answer.",
+                    "description": (
+                        "The natural-language question to answer. Keep it short "
+                        "(1-2 sentences). The Data Agent will automatically "
+                        "discover the schema before writing SQL."
+                    ),
                 },
                 "data_source_id": {
                     "type": "string",
@@ -952,7 +1301,7 @@ ASK_DATA_AGENT_SCHEMA = {
                 },
                 "max_iterations": {
                     "type": "integer",
-                    "description": "Max tool-calling iterations for the Data Agent (default 4, max 10).",
+                    "description": "Max tool-calling iterations for the Data Agent (default 4, max 10). Needs at least 4 to allow schema discovery + query + zero-row recovery.",
                     "default": 4,
                 },
             },
@@ -968,4 +1317,243 @@ registry.register(
     category="delegation",
     enabled_by_default=False,  # only enabled when KBs are bound
     description="Ask the builtin Data Agent a database question.",
+)
+
+
+# ===========================================================================
+# fetch_data_batch — Direct parallel SQL execution (no sub-agent loop)
+# ===========================================================================
+
+async def _fetch_data_batch(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Execute multiple SQL queries in parallel against bound data sources.
+
+    This is the FAST path: no LLM sub-agent loop, just direct SQL execution.
+    Use ONLY when the Data Concepts catalog provides the exact table and column
+    names. Falls back to ask_data_agent if schema is unknown or queries fail.
+    """
+    import re as _re_sql
+
+    queries = args.get("queries", [])
+    if not queries:
+        return {"success": False, "error": "queries list is required"}
+
+    if len(queries) > 8:
+        return {"success": False, "error": "Maximum 8 queries per batch"}
+
+    _ctx = context or {}
+
+    # Reject template/placeholder SQL tokens. These appear when the LLM
+    # copies documentation syntax ([table], [field]) into SQL. Such queries
+    # always return wrong data and waste compute. Fail fast and redirect to
+    # ask_data_agent which discovers the real schema.
+    _PLACEHOLDER_PATTERNS = [
+        (r'\[field\]',  'placeholder "[field]" — replace with actual column name from the catalog'),
+        (r'\[table\]',  'placeholder "[table]" — replace with actual table name from the catalog'),
+        (r'\[column\]', 'placeholder "[column]" — replace with actual column name'),
+        (r'\[name\]',   'placeholder "[name]" — replace with actual identifier'),
+        (r'\[value\]',  'placeholder "[value]" — replace with actual value'),
+        (r'\bXXX\b',    'placeholder "XXX" — replace with actual identifier'),
+        (r'\bTODO\b',   'placeholder "TODO" — replace with actual identifier'),
+    ]
+
+    # Validate each query: must be SELECT-only and reference known tables
+    from app.services.nl2sql.schema_validator import check_read_only_sql
+    from app.services.tool_handlers.db_tools import _execute_query, _require_kb_id
+
+    validated: list[dict] = []
+    for i, q in enumerate(queries):
+        sql = (q.get("sql") or "").strip()
+        data_source_id = q.get("data_source_id") or _ctx.get("kb_id")
+        label = q.get("label") or f"query_{i+1}"
+
+        if not sql:
+            validated.append({"label": label, "valid": False, "error": "empty SQL"})
+            continue
+
+        # Reject template/placeholder syntax
+        placeholder_err = None
+        for pat, desc in _PLACEHOLDER_PATTERNS:
+            if _re_sql.search(pat, sql, _re_sql.IGNORECASE):
+                placeholder_err = desc
+                break
+        if placeholder_err:
+            validated.append({
+                "label": label,
+                "valid": False,
+                "error": f"SQL contains {placeholder_err}",
+                "sql": sql,
+                "hint": "Use ask_data_agent — it discovers the correct schema automatically.",
+            })
+            continue
+
+        # Read-only check
+        ro_error = check_read_only_sql(sql)
+        if ro_error:
+            validated.append({"label": label, "valid": False, "error": ro_error, "sql": sql})
+            continue
+
+        # Require a data source
+        if not data_source_id:
+            # Try to get from bound KBs in context
+            bound_ids = _ctx.get("bound_kb_ids", [])
+            if len(bound_ids) == 1:
+                data_source_id = bound_ids[0]
+            else:
+                validated.append({"label": label, "valid": False, "error": "data_source_id required (multiple bound data sources)"})
+                continue
+
+        validated.append({
+            "label": label,
+            "valid": True,
+            "sql": sql,
+            "data_source_id": data_source_id,
+            "max_rows": int(q.get("max_rows", 500)),
+        })
+
+    valid_queries = [v for v in validated if v.get("valid")]
+    if not valid_queries:
+        any_placeholder = any(
+            "placeholder" in (v.get("error") or "")
+            for v in validated
+        )
+        return {
+            "success": False,
+            "error": "No valid queries after validation",
+            "validation": validated,
+            "hint": (
+                "SQL contained template placeholders like [field] or [table]. "
+                "These come from documentation syntax, not real schema. "
+                "Use ask_data_agent instead — it discovers correct tables/columns."
+            ) if any_placeholder else (
+                "Use ask_data_agent instead when table/column names are unknown."
+            ),
+        }
+
+    # Execute all valid queries in parallel
+    async def _run_one(q: dict) -> dict:
+        start = time.monotonic()
+        try:
+            result = await _execute_query(
+                args={
+                    "sql": q["sql"],
+                    "data_source_id": q["data_source_id"],
+                    "max_rows": q["max_rows"],
+                    "timeout_s": 15,
+                },
+                db=db,
+                user_id=user_id,
+                context={**_ctx, "kb_id": q["data_source_id"]},
+            )
+            elapsed = time.monotonic() - start
+            return {
+                "label": q["label"],
+                "success": result.get("success", False),
+                "rows": result.get("rows", []),
+                "columns": result.get("columns", []),
+                "sql": q["sql"],
+                "row_count": len(result.get("rows", [])),
+                "elapsed_s": round(elapsed, 1),
+                "error": result.get("error"),
+            }
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            logger.warning("fetch_data_batch query '%s' failed: %s", q["label"], exc)
+            return {
+                "label": q["label"],
+                "success": False,
+                "error": str(exc),
+                "elapsed_s": round(elapsed, 1),
+            }
+
+    results = await asyncio.gather(*[_run_one(q) for q in valid_queries])
+
+    # Build summary
+    total_rows = sum(r.get("row_count", 0) for r in results)
+    success_count = sum(1 for r in results if r.get("success"))
+    failed_count = len(results) - success_count
+    total_elapsed = max(r.get("elapsed_s", 0) for r in results)
+
+    return {
+        "success": success_count > 0,
+        "results": results,
+        "validation": validated,
+        "summary": {
+            "total_queries": len(queries),
+            "valid_queries": len(valid_queries),
+            "successful": success_count,
+            "failed": failed_count,
+            "total_rows": total_rows,
+            "wall_clock_s": round(total_elapsed, 1),
+        },
+        "hint": "If any queries failed, use ask_data_agent for schema discovery and retry." if failed_count > 0 else None,
+    }
+
+
+FETCH_DATA_BATCH_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "fetch_data_batch",
+        "description": (
+            "Execute multiple SQL queries in parallel against bound data sources. "
+            "This is the FAST path (1-5s total) — no sub-agent loop. "
+            "Use ONLY when the Data Concepts catalog lists the exact table and column names "
+            "you need. Example: if the catalog shows 'sales→sales_table, "
+            "volume→qty_col, revenue→amount_col', you can write SQL directly "
+            "using those names. If schema is unknown, use ask_data_agent instead.\n"
+            "BENEFIT: 50-100x faster than ask_data_agent for known schemas.\n"
+            "RULES: SELECT only, max 8 queries per call, max 500 rows per query."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "queries": {
+                    "type": "array",
+                    "description": (
+                        "List of SQL queries to execute in parallel. Each query must "
+                        "reference tables and columns from the Data Concepts catalog."
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "sql": {
+                                "type": "string",
+                                "description": "SELECT statement. Tables/columns must match the Data Concepts catalog.",
+                            },
+                            "data_source_id": {
+                                "type": "string",
+                                "description": "ID of the bound data source. Omit if only one data source is bound.",
+                            },
+                            "label": {
+                                "type": "string",
+                                "description": "Short label for this query (e.g. 'sales_volume_july').",
+                            },
+                            "max_rows": {
+                                "type": "integer",
+                                "description": "Max rows to return (default 500).",
+                                "default": 500,
+                            },
+                        },
+                        "required": ["sql", "label"],
+                    },
+                    "minItems": 1,
+                    "maxItems": 8,
+                },
+            },
+            "required": ["queries"],
+        },
+    },
+}
+
+registry.register(
+    name="fetch_data_batch",
+    schema=FETCH_DATA_BATCH_SCHEMA,
+    handler=_fetch_data_batch,
+    category="delegation",
+    enabled_by_default=False,  # only enabled when KBs are bound
+    description="Execute multiple SQL queries in parallel (fast path, no sub-agent).",
 )

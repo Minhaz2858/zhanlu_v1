@@ -249,6 +249,52 @@ function LlmModelDialog({ editing, initialForm, providerKey, onProviderChange, o
           />
           </div>
 
+          {/* Model Capabilities — per-model limits so users can add any model */}
+          <div className="rounded-xl border border-border bg-muted/30 p-4">
+            <p className="mb-3 text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">Model Capabilities</p>
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-foreground">Max Output Tokens</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={form.max_output_tokens ?? ''}
+                  onChange={(e) => setForm({ ...form, max_output_tokens: e.target.value === '' ? null : Number(e.target.value) })}
+                  placeholder="2048"
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+              <div>
+                <label className="mb-1.5 block text-xs font-medium text-foreground">Context Window</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={form.context_window ?? ''}
+                  onChange={(e) => setForm({ ...form, context_window: e.target.value === '' ? null : Number(e.target.value) })}
+                  placeholder="16384"
+                  className="w-full rounded-lg border border-border bg-background px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary/20"
+                />
+              </div>
+            </div>
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              Leave empty to use the provider default / global cap. Set these for self-hosted models
+              (e.g. vLLM) whose real context window is smaller than the model card claims.
+            </p>
+            <label className="mt-3 inline-flex cursor-pointer items-center gap-2">
+              <input
+                type="checkbox"
+                checked={form.supports_structured_tool_calls}
+                onChange={(e) => setForm({ ...form, supports_structured_tool_calls: e.target.checked })}
+                className="h-4 w-4 rounded border-border text-primary focus:ring-primary"
+              />
+              <span className="text-sm text-muted-foreground">Supports Structured Tool Calls</span>
+            </label>
+            <p className="mt-1 text-[11px] text-muted-foreground">
+              Uncheck for vLLM served WITHOUT <code>--enable-auto-tool-choice</code> — tool calls arrive
+              as XML in the message text and are recovered automatically.
+            </p>
+          </div>
+
           {/* Toggles */}
           <div className="flex flex-wrap items-center gap-4 pt-1">
             <label className="inline-flex cursor-pointer items-center gap-2">
@@ -684,7 +730,7 @@ function LlmModelsSection({ user }) {
   function openAdd() {
     setEditing(null);
     setProviderKey('deepseek'); // default to a sensible preset
-    setForm({ name: '', model_id: '', provider: 'DeepSeek', base_url: PROVIDER_PRESETS.deepseek.baseUrl, api_key: '', is_private: false, is_default: false, enabled: true });
+    setForm({ name: '', model_id: '', provider: 'DeepSeek', base_url: PROVIDER_PRESETS.deepseek.baseUrl, api_key: '', is_private: false, is_default: false, enabled: true, context_window: null, max_output_tokens: null, supports_structured_tool_calls: true });
     setSaveError('');
     setShowDialog(true);
   }
@@ -698,6 +744,8 @@ function LlmModelsSection({ user }) {
       name: m.name, model_id: m.model_id, provider: m.provider,
       base_url: m.base_url, api_key: '', is_private: m.is_private,
       is_default: m.is_default, enabled: m.enabled,
+      context_window: m.context_window ?? null, max_output_tokens: m.max_output_tokens ?? null,
+      supports_structured_tool_calls: m.supports_structured_tool_calls ?? true,
     });
     setSaveError('');
     setShowDialog(true);
@@ -795,6 +843,7 @@ function LlmModelsSection({ user }) {
                 <th className="px-4 py-3 text-left font-medium text-foreground">{cat.name}</th>
                 <th className="px-4 py-3 text-left font-medium text-foreground">{cat.modelId}</th>
                 <th className="px-4 py-3 text-left font-medium text-foreground">{cat.provider}</th>
+                <th className="px-4 py-3 text-left font-medium text-foreground">{cat.capabilities || 'Capabilities'}</th>
                 <th className="px-4 py-3 text-center font-medium text-foreground w-16">{cat.enabled}</th>
                 <th className="px-4 py-3 text-right font-medium text-foreground w-24"></th>
               </tr>
@@ -814,6 +863,16 @@ function LlmModelsSection({ user }) {
                       </td>
                       <td className="px-4 py-3 font-mono text-xs text-muted-foreground">{m.model_id}</td>
                       <td className="px-4 py-3 text-muted-foreground">{m.provider}</td>
+                      <td className="px-4 py-3 text-xs text-muted-foreground">
+                        {m.context_window ? (
+                          <span className="font-mono">{m.context_window.toLocaleString()} ctx</span>
+                        ) : (
+                          <span className="text-muted-foreground/60">default</span>
+                        )}
+                        <span className="ml-1 text-muted-foreground/60">
+                          · {m.supports_structured_tool_calls ? 'tools' : 'xml-tools'}
+                        </span>
+                      </td>
                       <td className="px-4 py-3 text-center">{m.enabled ? <div className="mx-auto h-2.5 w-2.5 rounded-full bg-green-500" /> : <div className="mx-auto h-2.5 w-2.5 rounded-full bg-border" />}</td>
                       <td className="px-4 py-3 text-right">
                         <div className="flex items-center justify-end gap-1">

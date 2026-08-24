@@ -51,6 +51,7 @@ const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
 const UITest = lazy(() => import('@/pages/UITest'));
 const DashboardView = lazy(() => import('@/pages/DashboardView'));
 const MarketDashboardLayout = lazy(() => import('@/pages/MarketDashboard/MarketDashboardLayout'));
+const ForecastAccuracyPage = lazy(() => import('@/pages/ForecastAccuracy/ForecastAccuracyPage'));
 
 // Shared fallback for any suspended lazy route — matches the app's loading
 // spinner so navigation feels seamless instead of flashing blank content.
@@ -167,6 +168,7 @@ const AuthenticatedApp = () => {
         <Route path="/from-personal" element={<FromPersonalPage />} />
         <Route path="/from-company" element={<FromCompanyPage />} />
         <Route path="/market-dashboard/:section" element={<MarketDashboardLayout />} />
+        <Route path="/forecast-accuracy" element={<ForecastAccuracyPage />} />
       </Route>
     </Route>
   );

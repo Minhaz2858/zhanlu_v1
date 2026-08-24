@@ -135,18 +135,35 @@ produce a COMPREHENSIVE, WELL-STRUCTURED analytical report — not a thin
 summary and definitely not just the raw table.
 
 OUTPUT FORMAT (strict — the frontend parses this):
-- Write a 3-5 sentence executive summary as the `assistant_content` (the
-  user's spoken text answer).  Name the top performer, its share, the
-  time period covered, any anomaly or standout pattern, and at least one
-  comparison (MoM, YoY, vs-mean, or vs-benchmark).
+- Write the `assistant_content` (the user's spoken text answer). This is the
+  TEXT the user reads in the chat bubble BEFORE the artifact card. It must
+  always be a COMPREHENSIVE analytical narrative — NEVER a thin one-liner.
+- When the user requests a file deliverable (PPT, DOCX, PDF), the
+  `assistant_content` is what they read before seeing the file card, so it
+  must give them the full analytical picture:
+  * Restate what they asked for in your own words (1 sentence)
+  * Summarize the key numbers from the rows (2-3 sentences with specific
+    figures, percentages, or rankings drawn from the actual data)
+  * Highlight 1-2 notable patterns or anomalies (1-2 sentences)
+  * End with one concrete follow-up suggestion (1 sentence)
+- For data-rich queries (multiple metrics, comparisons, many rows), provide
+  a thorough analytical narrative: name key figures, rank top performers,
+  highlight anomalies, compare periods, and flag risks or opportunities.
+- NEVER fabricate data not present in the rows below.
+- NEVER end `assistant_content` with "see the file" or "see below" — the
+  artifact card is rendered separately, the prose must stand on its own
+  as a complete analytical answer.
+  * 3+ metrics or 10+ rows → 5-10 sentences covering top findings + comparison
+  * Complex multi-table analysis → full structured narrative (15+ sentences)
+  Always include at least one concrete number from the data in the text.
 - Append a single fenced JSON block ```json ... ``` that matches the
   ReportCardPayload schema:
 
   {
-    "title": "Sales report — top materials by revenue",  // string
-    "source": "erp_v_sale_orderentry · db_zhanlu_no1",     // string, may be empty
-    "summary": "Top 7 materials generated 189.3M CNY (76% of total). 碳五石油树脂 leads at 66.2M (35% share, 3x the runner-up). Month-over-month, carbon five declined 12% while solvent oil surged 28%.",  // 3-5 sentences
-    "methodology": "Data sourced from erp_v_sale_orderentry (table db_zhanlu_no1) covering June–July 2026. Rows aggregated by material_name with SUM(revenue) and SUM(quantity). Top-N analysis includes the 7 highest-revenue materials; tail is grouped as 'Other.' All figures are in CNY unless noted.",  // REQUIRED — 2-4 sentences
+    "title": "Sales report — top items by revenue",  // string
+    "source": "database_table · data_source_name",     // string, may be empty — use actual source from rows
+    "summary": "Top 7 items generated 189.3M (76% of total). Item A leads at 66.2M (35% share, 3x the runner-up). Month-over-month, Category X declined 12% while Category Y surged 28%.",  // 3-8 sentences, depth proportional to data
+    "methodology": "Data sourced from the connected database covering the requested period. Rows aggregated by the relevant dimension with SUM(revenue) and SUM(quantity). Top-N analysis includes the highest-value items; tail is grouped as 'Other.'",  // REQUIRED — 2-4 sentences
     "kpis": [
       {"label": "Total revenue", "value": "189.3M CNY", "caption": "Top 7 materials · Jun–Jul 2026"},
       {"label": "Total quantity", "value": "11,210 tons", "caption": "Jun–Jul 2026"},
@@ -199,6 +216,25 @@ NARRATIVE part, not the chart part):
 4. If the rows are empty, set `kpis` to a single "no data" tile,
    `insights` to [{"icon": "info", "text": "No data found for this query."}],
    and `next_step` to "Try a different scope (region, time period, or product)."
+   HOWEVER — if the user explicitly requested a file deliverable (PPT, DOCX,
+   PDF) AND rows are empty, DO NOT just say "no data". Instead write a 5-7
+   sentence `assistant_content` narrative that:
+   (a) restates what the user asked for in your own words (e.g. "You asked
+   for a July 2026 sales report covering volume, revenue, margin, and
+   inventory delivered as PowerPoint"),
+   (b) describes what was attempted (which data sources were queried, which
+   time window was used, which dimensions were explored),
+   (c) explains the gap honestly ("the bound data source returned no rows
+   matching these filters — possibly because the table only holds data from
+   a different period, or the column names differ from what was assumed"),
+   (d) lists 3-5 concrete next-step suggestions the user can try (different
+   time window, broader filters, alternate data source),
+   (e) ends with a one-line recommendation for follow-up.
+   Set `methodology` to describe the attempted query in plain English so it
+   shows up in the file. Set `summary` to a single sentence acknowledging
+   the gap. Set `kpis` to a single "no data" tile and `next_step` to one
+   concrete retry suggestion. The file artifact is still produced even with
+   no rows so the user has something to download.
 5. EMIT AT LEAST 5 insights and AT LEAST 2 key_findings and AT LEAST 2
    recommendations.  Thin reports with <5 insights are rejected.
 6. ALWAYS include `methodology` (2-4 sentences covering data source,
@@ -224,6 +260,52 @@ CHART RULES (these prevent the "all bars = 1" degenerate chart):
 11. If after inspection the snapshot has no meaningful numeric
     measure (e.g. it's a list of names only), set `"chart": null`
     and prefer textual insights instead.
+
+CEO-GRADE 6-SECTION STRUCTURE (your report is read by the company CEO —
+write it like an executive briefing, NOT a data dump):
+
+The `assistant_content` must be organized as a 6-section narrative that
+stands alone as a complete executive briefing. Use clear headings or
+paragraph breaks for each section (Markdown formatting is rendered):
+
+SECTION 1 — EXECUTIVE SUMMARY (2-3 sentences): Lead with the single most
+important number of the period (total revenue / volume / headline metric),
+the period-over-period change, and one strategic takeaway. Write like a
+CEO's one-page brief opener — confident, specific, forward-looking.
+
+SECTION 2 — KEY METRICS: Present the main metrics (revenue, volume,
+margin, inventory, etc.) with concrete figures. Name the top performer
+and its share. Use the numbers from the PRE-COMPUTED ANALYSIS block
+below — they are exact aggregates computed from ALL rows.
+
+SECTION 3 — BREAKDOWN BY DIMENSION: For EVERY dimension the user asked
+about (e.g. "by product, by customer, by region"), give a ranked
+breakdown: the top 3-5 items, each with its value and share, plus the
+tail. Cover ALL requested dimensions — do not stop at product if the
+user also asked for customer and region. If only one dimension was
+requested, still give a top-N ranking.
+
+SECTION 4 — ANOMALIES & RISKS (2-3 items): Flag data-quality issues
+(nulls, negative values, outliers), concentration risk, margin alerts,
+or data coverage gaps. Quote exact figures from the data.
+
+SECTION 5 — RECOMMENDED ACTIONS (2-3 items): Executive-actionable
+recommendations tied to the numbers above. Each must name the metric
+it addresses.
+
+SECTION 6 — APPENDIX NOTE (1-2 sentences): State the data source, time
+period covered, and any caveats about data coverage (e.g. "Latest data
+available is 2025-12-31; analysis uses the available data.").
+
+Aim for 12-25 sentences total in the `assistant_content` for multi-
+metric queries. Thin 1-paragraph answers are rejected.
+
+MULTI-DIMENSION RULE (HARD): When the user asks for a breakdown "by X,
+by Y, by Z" (e.g. "by product, by customer, by region"), you MUST cover
+EVERY requested dimension in SECTION 3, each with its own ranked
+breakdown. Never collapse a multi-dimensional request into a single
+dimension. The PRE-COMPUTED ANALYSIS block contains top-N breakdowns
+for each detected dimension — use them.
 
 LANGUAGE: write the prose and insights in the same language the user
 used.  If the user message is in English, respond in English.  If in
@@ -738,6 +820,27 @@ def _safe_payload_from_dict(d: dict, *, default_title: str) -> ReportCardPayload
     return payload
 
 
+def merge_answer_rows(datasets: list[dict] | None) -> list[dict]:
+    """Concatenate rows from every answer-tagged dataset into one list.
+
+    Later queries refine earlier ones, so row order follows dataset record
+    order and identical row dicts (JSON-key stable) are deduplicated while
+    preserving first-seen position.  This is the deterministic merge behind
+    multi-dataset synthesis — a degenerate final query (e.g. a 1-row
+    data-quality check) can no longer starve the report of the earlier,
+    richer datasets.
+    """
+    merged: list[dict] = []
+    seen: set[str] = set()
+    for ds in datasets or []:
+        for row in ds.get("rows") or []:
+            key = json.dumps(row, sort_keys=True, default=str, ensure_ascii=False)
+            if key not in seen:
+                seen.add(key)
+                merged.append(row)
+    return merged
+
+
 async def synthesize_report(
     *,
     user_message: str,
@@ -749,6 +852,7 @@ async def synthesize_report(
     user_signal: Optional[str] = None,
     skill_name: Optional[str] = None,
     skill_methodology: Optional[str] = None,
+    datasets: list[dict] | None = None,
 ) -> FinalizeResult:
     """Run the synthesis LLM turn and return a FinalizeResult.
 
@@ -760,18 +864,41 @@ async def synthesize_report(
     user_signal = user_signal or detect_user_signal(user_message)
     task_type = _detect_task_type(user_message)
     rows = rows or []
+    if datasets and not rows:
+        # Safety net: if the caller only passed the answer datasets, derive
+        # the merged row set here so the payload is never built from a single
+        # (possibly degenerate) dataset.
+        rows = merge_answer_rows(datasets)
     warnings: list[str] = []
 
     if not rows:
         warnings.append("Data agent returned 0 rows — synthesis is based on an empty snapshot.")
 
     # Cap the rows we ship to the LLM (avoid blowing context on 10k rows).
-    MAX_ROWS_FOR_LLM = 100
+    # We now ALSO ship a pre-computed aggregate summary (computed from ALL
+    # rows), so the synthesizer interprets exact numbers instead of doing
+    # mental arithmetic over a raw sample.
+    MAX_ROWS_FOR_LLM = 300
     rows_for_llm = rows[:MAX_ROWS_FOR_LLM]
     if len(rows) > MAX_ROWS_FOR_LLM:
         warnings.append(
-            f"Snapshot had {len(rows)} rows; synthesis used the first {MAX_ROWS_FOR_LLM}."
+            f"Snapshot had {len(rows)} rows; synthesis used the first {MAX_ROWS_FOR_LLM} "
+            "plus pre-computed aggregates over all rows."
         )
+
+    # ── Pre-aggregation (compute exact aggregates over ALL rows) ────────
+    # This is the key P0 improvement: instead of asking the LLM to compute
+    # totals/breakdowns from a 100-row sample, we compute them here (pure
+    # Python, milliseconds) and hand the LLM the answers to interpret.
+    preagg_block = ""
+    try:
+        from app.services.synexia.pre_aggregation import pre_aggregate
+
+        preagg = pre_aggregate(rows)
+        preagg_block = preagg.to_prompt_block()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Pre-aggregation failed (continuing without it): %s", e)
+        preagg_block = ""
 
     # ── Data-shape guard ─────────────────────────────────────────────
     # Enrich the user payload with shape warnings when the snapshot is
@@ -841,12 +968,41 @@ async def synthesize_report(
             f"{clipped}"
         )
 
+    datasets_overview = ""
+    if datasets:
+        overview_lines = [
+            f"─── MULTI-DATASET CONTEXT ({len(datasets)} queries executed this turn) ───"
+        ]
+        for i, ds in enumerate(datasets, 1):
+            ds_rows = list(ds.get("rows") or [])
+            cols = list(ds_rows[0].keys()) if ds_rows else []
+            overview_lines.append(
+                f"Dataset {i}/{len(datasets)}: source={ds.get('source_name') or 'unknown'} "
+                f"(id={ds.get('source_id') or 'n/a'}), rows={len(ds_rows)}, columns={cols}"
+            )
+            ds_sql = ds.get("sql")
+            if ds_sql:
+                overview_lines.append(f"  sql: {ds_sql}")
+        overview_lines.append(
+            "The rows below are the MERGED rows from ALL datasets above "
+            "(later queries refine earlier ones; identical rows deduplicated). "
+            "Synthesize from the full multi-query picture — do not restrict "
+            "your analysis to any single query."
+        )
+        datasets_overview = "\n".join(overview_lines) + "\n\n"
+
     user_payload = (
         f"User message: {user_message}\n\n"
         f"Source: {source_name or 'unknown'} (id={source_id or 'n/a'})\n"
         f"SQL run: {sql or '(not provided)'}\n"
         f"Row count: {len(rows)}\n\n"
-        f"Rows (JSON):\n```json\n{json.dumps(rows_for_llm, default=str, ensure_ascii=False)}\n```\n\n"
+        + (f"{preagg_block}\n\n" if preagg_block else "")
+        + (
+            "Rows (JSON sample, first "
+            f"{min(len(rows_for_llm), 100)} of {len(rows_for_llm)} shown — "
+            "use the PRE-COMPUTED ANALYSIS above for exact totals/breakdowns):\n"
+            f"```json\n{json.dumps(rows_for_llm[:100], default=str, ensure_ascii=False)}\n```\n\n"
+        )
         + (
             f"Selected skill: {skill_name}\n"
             "Honor the selected skill's methodology when composing the summary, methodology, KPIs, key findings, recommendations, and final instructions.\n\n"
@@ -857,6 +1013,7 @@ async def synthesize_report(
             + "\n".join(shape_warnings) + "\n\n"
             if shape_warnings else ""
         )
+        + datasets_overview
         + "Now write the synthesis in the format described in the system prompt."
     )
 

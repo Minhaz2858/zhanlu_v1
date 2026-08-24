@@ -1,11 +1,16 @@
-"""DashboardAppManager — mounts/unmounts generated dashboard sub-routers.
+"""DashboardAppManager — tracks generated dashboard apps (state + pollers).
+
+T17: the per-app `app.mount(StaticFiles)` + router-include was removed. Serving
+is now done by GLOBAL catch-all routes in `backend/app/routers/dashboards.py`
+that resolve the on-disk app dir / generated module per-request. This manager
+only owns DB state, the poller lifecycle, and on-disk path resolution.
 
 Lifecycle:
     init_app(app)          → bind the FastAPI app (called in lifespan startup)
     create_app(record)     → persist DashboardApp row (status=building)
-    mount(slug)            → import generated module + include_router
+    mount(slug)            → warm the generated module + start its poller
     start_poller(slug)     → launch the generated realtime.poll_loop task
-    unmount(slug)          → stop poller + strip router routes
+    unmount(slug)          → stop the poller
     regenerate(slug, spec) → re-generate files, reload module, remount (hot-reload)
     shutdown()             → stop all pollers (lifespan shutdown)
 
@@ -17,6 +22,7 @@ import asyncio
 import importlib
 import logging
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,7 +30,7 @@ from fastapi import FastAPI
 
 from app.database import SessionLocal
 from app.models.dashboard_app import DashboardApp
-from app.services.dashboard_app.generator import module_name
+from app.services.dashboard_app.generator import get_generator, module_name
 from app.services.dashboard_app.versioning import consume_latest, snapshot_app_dir
 
 logger = logging.getLogger(__name__)
@@ -34,19 +40,18 @@ MODULE_NAMES = ("api", "queries", "realtime")
 
 
 class DashboardAppManager:
-    """Tracks generated dashboard apps and their mounted routers + pollers."""
+    """Tracks generated dashboard apps: DB state + pollers + on-disk path resolution."""
 
     def __init__(self) -> None:
         self._app: Optional[FastAPI] = None
         self._tasks: Dict[str, asyncio.Task] = {}
-        self._mounted: Dict[str, str] = {}  # slug -> prefix
 
     # ── lifecycle hooks ──
     def init_app(self, app: FastAPI) -> None:
         self._app = app
 
     def load_persisted_apps(self) -> int:
-        """Mount every persisted app with status=running and start its poller. Returns count."""
+        """Start every persisted app with status=running and start its poller. Returns count."""
         count = 0
         try:
             db = SessionLocal()
@@ -60,7 +65,6 @@ class DashboardAppManager:
         for app in apps:
             try:
                 self.mount(app.slug)
-                self.start_poller(app.slug)
                 count += 1
             except Exception:
                 logger.exception("load_persisted_apps: failed for %s", app.slug)
@@ -71,48 +75,38 @@ class DashboardAppManager:
         for slug in list(self._tasks):
             self.stop_poller(slug)
         self._tasks.clear()
-        self._mounted.clear()
 
     # ── mounting / unmounting ──
     def mount(self, slug: str) -> None:
-        """Import the generated module, register its router, and serve its static dist (idempotent)."""
-        if self._app is None:
-            raise RuntimeError("DashboardAppManager.init_app(app) must be called before mount()")
-        if slug in self._mounted:
-            return
-        module = importlib.import_module(f"{APP_PACKAGE}.{module_name(slug)}.api")
-        router = getattr(module, "router", None)
-        if router is None:
-            raise RuntimeError(f"generated module {slug}.api has no router")
-        self._app.include_router(router)
-        prefix = f"/api/dashboards/apps/{slug}"
-        # Serve the pre-built React dist (relative base: './' so it works at any sub-path).
-        from app.services.dashboard_app.generator import get_generator
-        dist = get_generator().app_dir(slug) / "dist"
-        if dist.exists():
-            try:
-                from fastapi.staticfiles import StaticFiles
-                self._app.mount(
-                    prefix,
-                    StaticFiles(directory=str(dist), html=True),
-                    name=f"dash_{slug}",
-                )
-            except Exception:
-                logger.exception("failed to serve static dist for %s", slug)
-        self._mounted[slug] = prefix
+        """Warm the generated module (so the global routes can import it later) and start its poller."""
+        try:
+            importlib.import_module(f"{APP_PACKAGE}.{module_name(slug)}.api")
+        except Exception:
+            logger.warning("mount(%s): generated module not importable yet", slug)
+        self.start_poller(slug)
         logger.info("dashboard app mounted: %s", slug)
 
     def unmount(self, slug: str) -> None:
-        """Stop the poller and strip every route registered under the app prefix."""
+        """Stop the poller for a slug. Static/REST/WS are served by global routes."""
         self.stop_poller(slug)
-        if self._app is None:
-            return
-        prefix = self._mounted.pop(slug, f"/api/dashboards/apps/{slug}")
-        self._app.router.routes = [
-            r for r in self._app.router.routes
-            if not getattr(r, "path", "").startswith(prefix)
-        ]
         logger.info("dashboard app unmounted: %s", slug)
+
+    def resolve_app_dir(self, slug: str) -> Optional[Path]:
+        """Resolve the on-disk directory for a dashboard app (the single source of truth).
+
+        Cached per-process keyed on the ``dist`` directory mtime so hot apps pay
+        no syscall on every request; a regenerate bumps the mtime and invalidates
+        the cache. Works for apps created after process start (cache miss → recompute).
+        """
+        app_dir = get_generator().app_dir(slug)
+        dist = app_dir / "dist"
+        mtime = dist.stat().st_mtime if dist.exists() else 0.0
+        return self._resolve_app_dir_cached(slug, round(mtime, 3))
+
+    @lru_cache(maxsize=1024)
+    def _resolve_app_dir_cached(self, slug: str, mtime: float) -> Optional[Path]:
+        app_dir = get_generator().app_dir(slug)
+        return app_dir if app_dir.exists() else None
 
     def regenerate(self, slug: str, spec: Dict[str, Any]) -> None:
         """Hot-reload: regenerate files, drop cached modules, remount, restart poller."""

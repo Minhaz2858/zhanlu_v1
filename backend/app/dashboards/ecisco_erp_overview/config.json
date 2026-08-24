@@ -1,0 +1,90 @@
+{
+  "name": "Ecisco ERP Overview",
+  "slug": "ecisco-erp-overview",
+  "description": "Overall ERP sales, revenue, and inventory dashboard for Ecisco C5/C9 petrochemical products.",
+  "theme": "light",
+  "refresh_interval_seconds": 60,
+  "design_system_ref": "design-system/Ecisco BI/MASTER.md",
+  "metrics": [
+    {
+      "id": "kpi_total_revenue",
+      "title": "Total Revenue (MTD)",
+      "type": "kpi",
+      "options": {
+        "unit": "CNY",
+        "compare_column": "value"
+      }
+    },
+    {
+      "id": "kpi_total_qty",
+      "title": "Sales Volume (MTD)",
+      "type": "kpi",
+      "options": {
+        "unit": "units"
+      }
+    },
+    {
+      "id": "kpi_inventory",
+      "title": "Current Inventory",
+      "type": "kpi",
+      "options": {
+        "unit": "units"
+      }
+    },
+    {
+      "id": "kpi_top_product",
+      "title": "Top Product by Revenue",
+      "type": "kpi",
+      "options": {
+        "unit": "CNY"
+      }
+    },
+    {
+      "id": "trend_revenue",
+      "title": "Revenue Trend (6 months)",
+      "type": "line",
+      "options": {
+        "unit": "CNY",
+        "show_markers": true
+      }
+    },
+    {
+      "id": "trend_volume",
+      "title": "Sales Volume Trend (6 months)",
+      "type": "line",
+      "options": {
+        "unit": "units",
+        "show_markers": true
+      }
+    },
+    {
+      "id": "bar_top_products",
+      "title": "Top Products by Revenue (MTD)",
+      "type": "bar",
+      "options": {
+        "unit": "CNY"
+      }
+    },
+    {
+      "id": "bar_inventory",
+      "title": "Inventory by Product (Top 10)",
+      "type": "bar",
+      "options": {
+        "unit": "units"
+      }
+    },
+    {
+      "id": "table_sales_detail",
+      "title": "Sales Detail (Last 30 days)",
+      "type": "table",
+      "options": {
+        "columns": [
+          "date",
+          "material",
+          "qty",
+          "revenue"
+        ]
+      }
+    }
+  ]
+}

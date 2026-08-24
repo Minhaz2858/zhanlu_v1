@@ -32,6 +32,7 @@ cached for 5 seconds so a tight agent loop doesn't hammer the DB.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from sqlalchemy import func, or_
@@ -164,8 +165,322 @@ def _load_catalog_meta(db: Session, kb_ids: list[str]) -> dict:
     return meta
 
 
+_NUMERIC_TYPE_HINTS = (
+    "int", "float", "double", "decimal", "number", "numeric",
+    "bigint", "smallint", "tinyint", "money", "real",
+)
+
+
+def _looks_like_date_column(col_name: str, data_type: str) -> bool:
+    name = (col_name or "").lower()
+    if "date" in name or "time" in name or "period" in name or "month" in name:
+        return True
+    dt = (data_type or "").lower()
+    return "date" in dt or "time" in dt or "timestamp" in dt
+
+
+_INTERNAL_TABLE_RE = re.compile(
+    r"^(auth_|access_|cockpit_|dataset_|data_source|alembic_|agent_|chat_|kb_|"
+    r"task_|automation_|alert_|report_|artifact|notification|integration|"
+    r"model_|llm_|project_|session_|settings|token|audit|job_|sandbox)",
+    re.IGNORECASE,
+)
+
+
+def _is_internal_table(name: str) -> bool:
+    return bool(_INTERNAL_TABLE_RE.match(name))
+
+
+def _build_schema_slice(db: Session, kb_ids: list[str]) -> dict[str, str]:
+    """Build a compact per-KB ``[schema: ...]`` hint (<800 chars each).
+
+    Format (facts only, deterministic, from the catalog at prompt-build time)::
+
+        [schema: sales_header*(销售出库单; id*,dt=date_col)→sales_entry(出库明细; id*→h.id);
+         measures: qty(实发数量),amount(不含税金额)]
+
+    Column descriptions (``description_zh``) are appended in parentheses so the
+    calling agent can map business terms like "volume" → ``qty`` without
+    needing ``describe_schema``. This saves one full Data Agent iteration
+    (~40-50s) per delegation. Any failure returns ``{}`` and the Data Agent
+    falls back to its own schema discovery.
+    """
+    if not kb_ids:
+        return {}
+    try:
+        from app.models.knowledge_catalog import (
+            KBColumnMeta,
+            KBTableMeta,
+            KBTableRelation,
+        )
+
+        tables = (
+            db.query(KBTableMeta)
+            .filter(
+                KBTableMeta.kb_id.in_(kb_ids),
+                KBTableMeta.table_type == "TABLE",
+            )
+            .all()
+        )
+        if not tables:
+            return {}
+        # Filter out app-internal tables so the limited slice
+        # advertises ERP business tables, not auth_user / cockpit_definitions.
+        tables = [t for t in tables if not _is_internal_table(t.table_name)]
+        if not tables:
+            return {}
+        table_by_id = {t.id: t for t in tables}
+
+        cols_by_table: dict[str, list[KBColumnMeta]] = {}
+        col_rows = (
+            db.query(KBColumnMeta)
+            .filter(KBColumnMeta.table_meta_id.in_(list(table_by_id)))
+            .order_by(KBColumnMeta.ordinal.asc())
+            .all()
+        )
+        for c in col_rows:
+            cols_by_table.setdefault(c.table_meta_id, []).append(c)
+
+        rel_edges: list[tuple[str, str, str, str]] = []
+        rel_rows = (
+            db.query(KBTableRelation)
+            .filter(
+                KBTableRelation.source_table_meta_id.in_(list(table_by_id)),
+                KBTableRelation.target_table_meta_id.in_(list(table_by_id)),
+            )
+            .all()
+        )
+        for r in rel_rows:
+            s_tab = table_by_id[r.source_table_meta_id].table_name
+            t_tab = table_by_id[r.target_table_meta_id].table_name
+            for sc, tc in zip(r.source_columns or [], r.target_columns or []):
+                rel_edges.append((s_tab, sc, t_tab, tc))
+
+        out: dict[str, str] = {}
+        for kb_id in kb_ids:
+            kb_tables = [t for t in tables if t.kb_id == kb_id]
+            if not kb_tables:
+                continue
+            parts: list[str] = []
+            measures: list[str] = []
+            seen_measures: set[str] = set()
+            for t in kb_tables:
+                cols = cols_by_table.get(t.id, [])
+                pk_cols = [c.column_name for c in cols if c.is_primary_key]
+                date_cols = [
+                    c.column_name for c in cols
+                    if _looks_like_date_column(c.column_name, c.data_type)
+                ]
+                toks: list[str] = []
+                if pk_cols:
+                    toks.append(",".join(f"{p}*" for p in pk_cols[:2]))
+                if date_cols:
+                    toks.append("dt=" + date_cols[0])
+                role_mark = "*" if t.table_role in ("fact", "entity_master") else ""
+                # Add table description (e.g. "销售出库单") if available
+                tab_desc = (t.description_zh or "").strip()
+                header = f"{t.table_name}{role_mark}"
+                if tab_desc:
+                    header += f"({tab_desc};"
+                else:
+                    header += "("
+                if toks:
+                    header += ",".join(toks)
+                header += ")"
+                parts.append(header)
+                # Collect measure columns (numeric types) from FACT tables
+                # only, excluding primary/foreign-key ids.
+                # Include description_zh so the LLM can map business terms.
+                if t.table_role in ("fact", "entity_master"):
+                    for c in cols:
+                        if c.is_primary_key:
+                            continue
+                        dt = (c.data_type or "").lower()
+                        if any(h in dt for h in _NUMERIC_TYPE_HINTS):
+                            if c.column_name not in seen_measures:
+                                seen_measures.add(c.column_name)
+                                col_desc = (c.description_zh or "").strip()
+                                if col_desc:
+                                    measures.append(f"{c.column_name}({col_desc})")
+                                else:
+                                    measures.append(c.column_name)
+
+            edges = [
+                f"{src}.{sc}→{tgt}.{tc}"
+                for src, sc, tgt, tc in rel_edges
+            ]
+            if edges:
+                parts.append("joins:" + ",".join(edges[:3]))
+            if measures:
+                parts.append("measures:" + ",".join(measures[:8]))
+
+            slice_str = "[schema: " + "; ".join(parts) + "]"
+            if len(slice_str) > 800:
+                slice_str = slice_str[:800] + "…]"
+            out[kb_id] = slice_str
+        return out
+    except Exception:  # noqa: BLE001 — catalog is best-effort
+        logger.info("schema_slice build failed; Data Agent will self-discover", exc_info=True)
+        return {}
+
+
+def _build_concept_catalog(db: Session, kb_ids: list[str]) -> dict[str, str]:
+    """Build a per-KB concept→table mapping from catalog descriptions.
+
+    Format::
+
+        - **Sales (销售)**: sales_header + sales_entry
+          Volume→qty, Revenue excl.tax→amount
+        - **Inventory (库存)**: inventory_view
+          Qty→qty
+
+    This lets the parent LLM map business terms ("volume", "revenue")
+    directly to column names without needing the Data Agent to discover
+    them via ``describe_schema``, saving ~40-50s per query.
+    """
+    if not kb_ids:
+        return {}
+    try:
+        from app.models.knowledge_catalog import (
+            KBColumnMeta,
+            KBTableMeta,
+            KBTableRelation,
+        )
+
+        tables = (
+            db.query(KBTableMeta)
+            .filter(
+                KBTableMeta.kb_id.in_(kb_ids),
+                KBTableMeta.table_type == "TABLE",
+                KBTableMeta.table_role.in_(("fact", "entity_master")),
+            )
+            .all()
+        )
+        if not tables:
+            return {}
+        tables = [t for t in tables if not _is_internal_table(t.table_name)]
+        if not tables:
+            return {}
+        table_by_id = {t.id: t for t in tables}
+
+        cols_by_table: dict[str, list[KBColumnMeta]] = {}
+        col_rows = (
+            db.query(KBColumnMeta)
+            .filter(KBColumnMeta.table_meta_id.in_(list(table_by_id)))
+            .order_by(KBColumnMeta.ordinal.asc())
+            .all()
+        )
+        for c in col_rows:
+            cols_by_table.setdefault(c.table_meta_id, []).append(c)
+
+        # Find child tables (FK pointing to a fact/entity_master)
+        child_map: dict[str, list[str]] = {}
+        rel_rows = (
+            db.query(KBTableRelation)
+            .filter(
+                KBTableRelation.source_table_meta_id.in_(list(table_by_id)),
+            )
+            .all()
+        )
+        for r in rel_rows:
+            src = table_by_id.get(r.source_table_meta_id)
+            if src:
+                child_map.setdefault(src.table_name, []).append(
+                    r.target_table_meta_id
+                )
+
+        out: dict[str, str] = {}
+        for kb_id in kb_ids:
+            kb_tables = [t for t in tables if t.kb_id == kb_id]
+            if not kb_tables:
+                continue
+            # FIX 2026-08-22: separate described from undescribed tables
+            # so we can cap the catalog size and avoid blowing the
+            # subagent's 20s prompt budget.  Emitting a full column dump
+            # for every table in a 100+ table warehouse made every
+            # subagent call hit 20.1s exactly (timeout) and return no
+            # data, so the post-loop fallback fired.
+            described_lines: list[str] = []
+            undescribed_lines: list[str] = []
+            for t in kb_tables:
+                tab_desc_zh = (t.description_zh or "").strip()
+                tab_desc_en = (t.description_en or "").strip()
+                # Use Chinese description as primary label, English as fallback
+                label = tab_desc_zh or tab_desc_en or t.table_name
+                cols = cols_by_table.get(t.id, [])
+                # Collect measure columns with descriptions
+                measure_parts: list[str] = []
+                # Only collect column names for tables with a description.
+                # The LLM can't usefully map a query to a table without
+                # a description anyway, so undumped column lists for
+                # undescribed tables lose nothing — and skipping them
+                # saves a lot of prompt tokens.
+                all_col_names: list[str] = []
+                _has_description = bool(tab_desc_zh or tab_desc_en)
+                if _has_description:
+                    for c in cols:
+                        if c.is_primary_key:
+                            continue
+                        dt = (c.data_type or "").lower()
+                        all_col_names.append(c.column_name)
+                        if any(h in dt for h in _NUMERIC_TYPE_HINTS):
+                            col_desc = (c.description_zh or "").strip()
+                            col_desc_en = (c.description_en or "").strip()
+                            desc = col_desc or col_desc_en
+                            if desc:
+                                measure_parts.append(f"{desc}→{c.column_name}")
+                # Collect date columns
+                date_cols = [
+                    c.column_name for c in cols
+                    if _looks_like_date_column(c.column_name, c.data_type)
+                ]
+                # Find child table names via FK
+                child_names: list[str] = []
+                for cid in child_map.get(t.table_name, []):
+                    child_t = table_by_id.get(cid)
+                    if child_t:
+                        child_names.append(child_t.table_name)
+                table_list = t.table_name
+                if child_names:
+                    table_list += " + " + " + ".join(child_names)
+                line = f"- **{label}**: {table_list}"
+                if measure_parts:
+                    line += "\n  Measures: " + ", ".join(measure_parts[:10])
+                # Only emit column list for described tables (see above)
+                if all_col_names:
+                    shown = all_col_names[:30]
+                    suffix = f" (+{len(all_col_names)-30} more)" if len(all_col_names) > 30 else ""
+                    line += f"\n  Columns: {', '.join(shown)}{suffix}"
+                if date_cols:
+                    line += f"\n  Date column: {date_cols[0]}"
+                if _has_description:
+                    described_lines.append(line)
+                else:
+                    undescribed_lines.append(line)
+            # Emit described tables first (most relevant), then undescribed,
+            # with a hard cap of 30 tables so the catalog never blows the
+            # subagent budget.
+            _CATALOG_MAX_TABLES = 30
+            combined = described_lines + undescribed_lines
+            concept_lines = combined[:_CATALOG_MAX_TABLES]
+            if len(combined) > _CATALOG_MAX_TABLES:
+                omitted = len(combined) - _CATALOG_MAX_TABLES
+                concept_lines.append(
+                    f"\n... (+{omitted} more tables — use "
+                    f"`describe_schema(table_name)` to inspect specific tables)"
+                )
+            if concept_lines:
+                out[kb_id] = "\n".join(concept_lines)
+        return out
+    except Exception:  # noqa: BLE001 — catalog is best-effort
+        logger.info("concept_catalog build failed; skipping", exc_info=True)
+        return {}
+
+
 def _build_data_source_prompt_section(
     bound_meta: list[dict], has_weekly_report: bool = False,
+    schema_slices: dict[str, str] | None = None,
+    concept_catalogs: dict[str, str] | None = None,
 ) -> str:
     """Compose the 'Bound Data Sources' section appended to the system prompt.
 
@@ -197,6 +512,30 @@ def _build_data_source_prompt_section(
             label += ")"
             lines.append(label)
         lines.append("")
+        if schema_slices:
+            for kb in db_meta:
+                sl = (schema_slices or {}).get(kb["id"])
+                if sl:
+                    lines.append(
+                        f"  Schema hint for `{kb['name']}`: `{sl}`"
+                    )
+            lines.append("")
+        # Data Concepts: business-term → table/column mapping
+        if concept_catalogs:
+            for kb in db_meta:
+                cc = (concept_catalogs or {}).get(kb["id"])
+                if cc:
+                    lines.append("  **Data Concepts** (business term → table.column):")
+                    for concept_line in cc.splitlines():
+                        lines.append(f"  {concept_line}")
+                    lines.append("")
+                    lines.append(
+                        "  Use these mappings to pick the right tables and columns in your "
+                        "`ask_data_agent` question. For example, if the user asks for "
+                        "\"sales volume\", mention the column from the concept map so the "
+                        "Data Agent queries the correct column directly."
+                    )
+                    lines.append("")
 
     if file_meta:
         lines.append("### Document sources")
@@ -211,11 +550,41 @@ def _build_data_source_prompt_section(
         lines.append("")
 
     lines.extend([
-        "**MANDATORY TOOL FOR DATA ACCESS — call the function whose name is exactly `ask_data_agent`.**",
-        "This is the ONLY way to reach the bound data sources (database OR document).",
-        "You do not have direct SQL or vector-search access; you delegate to the Data",
-        "Agent, which picks the right internal tool (SQL for databases, vector",
-        "retrieval for documents) based on each source's `source_kind`.",
+        "**FAST PATH: `fetch_data_batch` — Direct Parallel SQL (1-5s, 50-100x faster)**",
+        "When the Data Concepts catalog above lists the exact table and column names you need,",
+        "use `fetch_data_batch` to run SQL queries directly — no sub-agent loop, no schema",
+        "discovery. All queries execute in parallel. This is dramatically faster than",
+        "`ask_data_agent` for known schemas.",
+        "",
+        "⚠ IMPORTANT: Only use REAL table and column names from the Data Concepts catalog.",
+        "NEVER use placeholder syntax like [field], [table], [column] in SQL — those are",
+        "documentation conventions, not real identifiers. If you don't know the exact column",
+        "name, use `ask_data_agent` instead.",
+        "",
+        "```",
+        "fetch_data_batch(",
+        "    queries: [",
+        "        {sql: \"SELECT SUM(quantity) AS volume FROM sales_table WHERE date >= '2026-07-01'\", label: 'sales_volume'},",
+        "        {sql: \"SELECT SUM(revenue) AS revenue FROM sales_table WHERE date >= '2026-07-01'\", label: 'sales_revenue'},",
+        "    ]",
+        ")",
+        "```",
+        "",
+        "**Note:** The SQL above uses generic placeholder names for illustration only. You MUST",
+        "replace `sales_table`, `quantity`, `revenue`, `date` with REAL table and column names",
+        "from the Data Concepts catalog above. NEVER use placeholder or invented names.",
+        "",
+        "**When to use `fetch_data_batch` vs `ask_data_agent`:**",
+        "- fetch_data_batch: Data Concepts catalog shows the exact tables/columns, and you can write",
+        "  valid SQL using those names. Best for structured reports with 2+ metrics.",
+        "- ask_data_agent: Schema is unknown, question is exploratory, or you're unsure which tables",
+        "  to query. The Data Agent discovers the schema for you (but takes ~100s).",
+        "- **Best practice**: For multi-metric reports (e.g., 'volume, revenue, margin, inventory'),",
+        "  combine ALL metrics into FEWER `fetch_data_batch` calls (1-2 calls with multi-column SELECTs)",
+        "  rather than one call per metric.",
+        "",
+        "**SLOW PATH: `ask_data_agent` — Sub-Agent Schema Discovery (~100s)**",
+        "When schema is unknown, call the function whose name is exactly `ask_data_agent`.",
         "",
         "**Function signature (use the exact `name` field when calling):**",
         "```",
@@ -232,6 +601,8 @@ def _build_data_source_prompt_section(
         "- Any time a downstream step (report, chart, summary) requires real numbers — fetch them via `ask_data_agent` first.",
         "- Any time the user asks about content in an uploaded document (PDF, DOCX, CSV, etc.).",
         "- For monthly/weekly/quarterly report requests, make ONE consolidated `ask_data_agent` call that asks for the full reporting dataset: current period totals, comparison period totals, product/customer breakdowns, available margin/cost fields, and any inventory snapshot needed. Do NOT split one report into serial data-agent calls unless the first call fails.",
+        "- If a schema hint (a `[schema: ...]` block) or Data Concepts map is listed above, include the relevant table and column names in your `question` argument. This lets the Data Agent skip schema discovery and run the query directly, cutting response time by ~50%. Example: 'Sales volume and revenue for July 2026 from [table_name from Data Concepts]'",
+        "- Keep `question` SHORT (1-2 sentences) and natural-language. Do NOT paste raw SQL, full column lists, or join hints into it — the Data Agent writes its own SQL from the schema hint + your question.",
     ])
     lines.extend([
         "",
@@ -615,9 +986,18 @@ def prepare_data_source_runtime(
         entry = registry.get_entry("ask_data_agent")
         if entry:
             augmented_tools.append(entry.schema)
+    if "fetch_data_batch" not in existing_names:
+        entry = registry.get_entry("fetch_data_batch")
+        if entry:
+            augmented_tools.append(entry.schema)
 
     bound_meta = _load_bound_kb_meta(db, bound_ids)
-    section = _build_data_source_prompt_section(bound_meta, has_weekly_report=False)
+    schema_slices = _build_schema_slice(db, bound_ids)
+    concept_catalogs = _build_concept_catalog(db, bound_ids)
+    section = _build_data_source_prompt_section(
+        bound_meta, has_weekly_report=False, schema_slices=schema_slices,
+        concept_catalogs=concept_catalogs,
+    )
 
     # PREPEND the critical anti-hallucination directive so it's the first
     # thing the LLM reads. The detailed "Bound Data Sources" section and

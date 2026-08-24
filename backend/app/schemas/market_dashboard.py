@@ -116,6 +116,7 @@ class TrustTierMeta(BaseModel):
     badge_label_en: str
     reason_zh: Optional[str] = None
     reason_en: Optional[str] = None
+    reason_codes: list[str] = []  # P0.4: machine-readable flags e.g. "below_naive_baseline", "sparse_data"
 
 
 class ProbabilityOverlayMeta(BaseModel):

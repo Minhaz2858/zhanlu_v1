@@ -7,12 +7,20 @@ Adds four layers on top of the original binary ensemble-vs-naive check:
 4. Stale-data guard — flags when last observed data is too old
 
 All features are opt-in; with defaults off, behavior matches evaluate_guard().
+
+P2.14: Volatility thresholds imported from forecast_policy_service (single source of truth).
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
 from datetime import datetime, timezone
+
+# P2.14: canonical volatility thresholds (single source of truth)
+from app.services.forecasting.forecast_policy_service import (
+    HIGH_VOL_THRESHOLD,
+    MODERATE_VOL_THRESHOLD,
+)
 
 import numpy as np
 import pandas as pd
@@ -89,10 +97,10 @@ def evaluate_guard_advanced(
     # Step 3: Volatility-regime blending
     blend_factor: float | None = None
     if vol_regime_blend and daily_returns_std is not None and not base.below_naive_baseline:
-        # Thresholds: 5% daily std = high vol, 3% = moderate
-        if daily_returns_std >= 5.0:
+        # P2.14: Use canonical thresholds from forecast_policy_service
+        if daily_returns_std >= HIGH_VOL_THRESHOLD:
             blend_factor = min(daily_returns_std / 20.0, 0.7)  # Blend up to 70% toward naive
-        elif daily_returns_std >= 3.0:
+        elif daily_returns_std >= MODERATE_VOL_THRESHOLD:
             blend_factor = 0.2  # Mild blend
 
         if blend_factor is not None:

@@ -329,6 +329,7 @@ class GoalContract:
     zero_row_events: int = 0
     metadata_only_events: int = 0
     artifacts_produced: List[dict] = field(default_factory=list)
+    collected_datasets: List[dict] = field(default_factory=list)
     pending_action_phrase: Optional[str] = None
     forces_used: int = 0
     max_forces: int = 3
@@ -370,6 +371,71 @@ class GoalContract:
             self.metadata_only_events += 1
         else:
             self.metadata_only_events = 0
+
+    # ── deferred deliverable: dataset collection ─────────────────────────
+
+    def record_dataset(
+        self,
+        *,
+        rows: Optional[Sequence[dict]],
+        sql: Optional[str] = None,
+        source_name: Optional[str] = None,
+        source_id: Optional[str] = None,
+        purpose: Optional[str] = None,
+        tool_call_id: Optional[str] = None,
+    ) -> None:
+        """Collect a query result during the loop.
+
+        Only ``answer``-tagged datasets may later feed the deliverable;
+        ``probe`` / ``auxiliary`` results are recorded for audit but never
+        finalized. The deliverable is built ONCE post-loop from the
+        answer-tagged set (deferred single emission).
+        """
+        self.collected_datasets.append(
+            {
+                "rows": list(rows or []),
+                "sql": sql,
+                "source_name": source_name,
+                "source_id": source_id,
+                "purpose": purpose,
+                "tool_call_id": tool_call_id,
+            }
+        )
+
+    def answer_datasets(self) -> List[dict]:
+        """The answer-tagged datasets — the only ones eligible for the
+        deliverable. Latest query wins on synthesis (later queries refine
+        earlier ones); ordering matches record order."""
+        return [d for d in self.collected_datasets if d.get("purpose") == "answer"]
+
+    def has_answer_data(self) -> bool:
+        """True when >= 1 answer-tagged dataset carries usable rows."""
+        for d in self.answer_datasets():
+            if not is_effective_empty(d.get("rows")):
+                return True
+        return False
+
+    def collection_complete(self) -> bool:
+        """Deterministic post-loop readiness: data criteria met AND >= 1
+        answer-tagged dataset exists. Never derived from model prose.
+
+        The deliverable criterion is intentionally NOT checked here — the
+        artifact is deferred to the post-loop deliverable phase, so it does
+        not exist yet when this runs. Structural (finalize moved post-loop)
+        + data criteria + answer data = complete.
+        """
+        if self.requires_data:
+            if not self.has_answer_data():
+                return False
+            if self.expects_rows and self.zero_row_events:
+                return False
+            if self.expects_rows and self.metadata_only_events:
+                return False
+        # An announced-but-unexecuted action means the agent still owes an
+        # answer step before the deliverable can be considered collected.
+        if self.pending_action_phrase and self._armed_seq > self._executed_seq:
+            return False
+        return True
 
     def record_tool_executed(
         self, tool_name: Optional[str], result_quality: str = RESULT_QUALITY_ASSUMED_OK

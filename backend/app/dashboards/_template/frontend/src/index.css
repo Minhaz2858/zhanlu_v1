@@ -2,6 +2,58 @@
 @tailwind components;
 @tailwind utilities;
 
+/*
+ * Design-token defaults — matching the legacy slate palette so dashboards that
+ * have no persisted design system render exactly as before. When config.design
+ * is present, useDesignTokens.js overwrites these with the ui-ux-pro-max values.
+ */
+:root {
+  --ds-primary: #2563eb;
+  --ds-primary-rgb: 37 99 235;
+  --ds-on-primary: #ffffff;
+  --ds-on-primary-rgb: 255 255 255;
+  --ds-secondary: #64748b;
+  --ds-secondary-rgb: 100 116 139;
+  --ds-accent: #f59e0b;
+  --ds-accent-rgb: 245 158 11;
+  --ds-background: #f8fafc;
+  --ds-background-rgb: 248 250 252;
+  --ds-foreground: #0f172a;
+  --ds-foreground-rgb: 15 23 42;
+  --ds-muted: #f1f5f9;
+  --ds-muted-rgb: 241 245 249;
+  --ds-border: #e2e8f0;
+  --ds-border-rgb: 226 232 240;
+  --ds-destructive: #ef4444;
+  --ds-destructive-rgb: 239 68 68;
+  --ds-ring: #2563eb;
+  --ds-ring-rgb: 37 99 235;
+  --ds-chart-1: #2563eb;
+  --ds-chart-1-rgb: 37 99 235;
+  --ds-chart-2: #10b981;
+  --ds-chart-2-rgb: 16 185 129;
+  --ds-chart-3: #f59e0b;
+  --ds-chart-3-rgb: 245 158 11;
+  --ds-chart-4: #ef4444;
+  --ds-chart-4-rgb: 239 68 68;
+  --ds-chart-5: #8b5cf6;
+  --ds-chart-5-rgb: 139 92 246;
+  --ds-chart-6: #06b6d4;
+  --ds-chart-6-rgb: 6 182 212;
+  --ds-card-radius: 8px;
+  --ds-font-heading: 'Inter', sans-serif;
+  --ds-font-body: 'Inter', sans-serif;
+
+  --ds-background-dark: #020617;
+  --ds-background-dark-rgb: 2 6 23;
+  --ds-foreground-dark: #f8fafc;
+  --ds-foreground-dark-rgb: 248 250 252;
+  --ds-muted-dark: #1e293b;
+  --ds-muted-dark-rgb: 30 41 59;
+  --ds-border-dark: #334155;
+  --ds-border-dark-rgb: 51 65 85;
+}
+
 html,
 body,
 #root {
@@ -9,7 +61,23 @@ body,
 }
 
 body {
-  @apply bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100;
+  @apply bg-background text-foreground;
+}
+
+::selection {
+  background: rgb(var(--ds-primary-rgb) / 0.2);
+}
+
+/* Dark mode: swap the surface palette via the .dark class. */
+.dark {
+  --ds-background: var(--ds-background-dark);
+  --ds-background-rgb: var(--ds-background-dark-rgb);
+  --ds-foreground: var(--ds-foreground-dark);
+  --ds-foreground-rgb: var(--ds-foreground-dark-rgb);
+  --ds-muted: var(--ds-muted-dark);
+  --ds-muted-rgb: var(--ds-muted-dark-rgb);
+  --ds-border: var(--ds-border-dark);
+  --ds-border-rgb: var(--ds-border-dark-rgb);
 }
 
 ::-webkit-scrollbar {
@@ -17,7 +85,7 @@ body {
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  @apply rounded bg-slate-300 dark:bg-slate-700;
+  @apply rounded bg-border;
 }
 ::-webkit-scrollbar-track {
   background: transparent;

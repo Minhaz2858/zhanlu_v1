@@ -81,6 +81,12 @@ class LLMEndpoint:
     is_private: bool = False
     bypass_hallucination_guardrail: bool = False
     provider: str = ""
+    context_window: Optional[int] = None
+    """Real context window in tokens (e.g. 16384 for small vLLM). None = heuristic default."""
+    max_output_tokens: Optional[int] = None
+    """Per-model output token cap. None = use user setting / global hard cap."""
+    supports_structured_tool_calls: bool = True
+    """False for vLLM without --enable-auto-tool-choice (tool calls arrive as XML in content)."""
 
 
 def resolve_message_project_id(
@@ -180,6 +186,9 @@ def resolve_effective_llm(
                 is_private=default.is_private,
                 bypass_hallucination_guardrail=default.bypass_hallucination_guardrail,
                 provider=default.provider,
+                context_window=default.context_window,
+                max_output_tokens=default.max_output_tokens,
+                supports_structured_tool_calls=default.supports_structured_tool_calls,
             )
             logger.debug(
                 "System-agent short-circuit: agent=%s → default model=%s",
@@ -287,6 +296,9 @@ def resolve_effective_llm(
         is_private=resolved.is_private,
         bypass_hallucination_guardrail=resolved.bypass_hallucination_guardrail,
         provider=resolved.provider,
+        context_window=resolved.context_window,
+        max_output_tokens=resolved.max_output_tokens,
+        supports_structured_tool_calls=resolved.supports_structured_tool_calls,
     )
 
     logger.debug(

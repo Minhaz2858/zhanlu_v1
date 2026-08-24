@@ -62,15 +62,22 @@ STAGES: dict[str, dict] = {
         "prompt_hint": "The user is asking about predictions, forecasts, or future values.",
         "matching_keywords": ["predict", "forecast", "future", "will be", "trend", "outlook", "预测", "预估", "将会"],
     },
-    "pricing": {
+    "what_if": {
         "order": 5,
+        "name": "What-If",
+        "description": "Scenario simulation — hypothetical changes to upstream prices (Brent/Naphtha)",
+        "prompt_hint": "The user wants to simulate a hypothetical scenario or upstream price shock.",
+        "matching_keywords": ["what if", "scenario", "simulate", "simulation", "shock", "hypothetical", "假设", "情景", "模拟", "如果"],
+    },
+    "pricing": {
+        "order": 6,
         "name": "Pricing",
         "description": "Recommend prices, margins, or pricing strategy",
         "prompt_hint": "The user is asking about pricing, margins, or pricing strategy.",
         "matching_keywords": ["price", "pricing", "margin", "discount", "cost", "价格", "定价", "折扣"],
     },
     "decision": {
-        "order": 6,
+        "order": 7,
         "name": "Decision",
         "description": "Final decision recommendation or action plan",
         "prompt_hint": "The user wants a recommendation, decision, or action plan.",
@@ -235,6 +242,7 @@ def stage_to_tools(stage: str) -> list[str]:
         "resolve_product": ["resolve_product", "product_lookup", "knowledge_graph"],
         "diagnosis": ["ask_diagnosis", "ask_rag", "analyze_data"],
         "forecast": ["ask_forecast", "forecast_tool", "analyze_data"],
+        "what_if": ["forecast_what_if", "ask_forecast", "forecast_tool"],
         "pricing": ["ask_pricing", "ask_decision", "pricing_calculator"],
         "decision": ["ask_decision", "ask_report", "generate_report"],
     }

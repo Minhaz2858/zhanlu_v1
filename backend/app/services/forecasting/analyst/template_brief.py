@@ -276,6 +276,13 @@ def _upstream_macro_context(p: dict) -> str:
 
 def _forecast(p: dict) -> str:
     """价格预测 — range [bear,bull] + directional signal + confidence + action advice."""
+    # P0.4: distinct message for below_naive vs truly sparse data
+    below_naive = "below_naive_baseline" in (p.get("reason_codes") or [])
+    if below_naive:
+        return (
+            f"价格预测:{p.get('name_zh', '')}当前模型弱于简单基准,"
+            f"展示保守基线,建议观望。"
+        )
     if p.get("forecast_base") is None or p.get("current_price") is None:
         return f"价格预测:{p.get('name_zh', '')}当前预测数据不足,建议观望。"
     arrow, label = _directional_signal(p)

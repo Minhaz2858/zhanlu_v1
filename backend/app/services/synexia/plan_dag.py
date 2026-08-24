@@ -299,20 +299,32 @@ def _build_skill_directive_block(task_spec: dict) -> str:
 
 
 def _build_selected_skill_directive_block(task_spec: dict) -> str:
-    """Return a hard-directive prompt block for an explicit user-selected skill."""
+    """Return a hard-directive prompt block for an explicit user-selected skill.
+
+    FIX 2026-08-23: now includes the skill's SKILL.md methodology body so
+    the planner sees what the skill actually does, not just its name.
+    """
     selected = task_spec.get("selected_skill") or {}
     skill_name = task_spec.get("selected_skill_name") or selected.get("name")
     skill_id = task_spec.get("selected_skill_id") or selected.get("id")
+    skill_methodology = task_spec.get("selected_skill_methodology")
     if not skill_name and not skill_id:
         return ""
     id_hint = f" (id={skill_id})" if skill_id else ""
-    return (
+    block = (
         "\n[HARD DIRECTIVE — EXPLICIT USER SELECTION]\n"
         f"The user explicitly selected the runtime skill '{skill_name or skill_id}'{id_hint}. "
         "You MUST begin the plan with a `node_type: \"skill\"` step that loads this exact skill. "
         "Preserve the selected skill id/name in the step inputs so execution can load the exact skill body. "
         "Do NOT substitute a default skill, post-router skill, or generic format skill.\n"
     )
+    if skill_methodology:
+        block += (
+            f"\n<selected_skill_methodology>\n{skill_methodology}\n</selected_skill_methodology>\n"
+            "The plan steps MUST follow this methodology. Read each section above and "
+            "emit a plan step for each major phase the skill defines.\n"
+        )
+    return block
 
 
 def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
@@ -548,6 +560,24 @@ def _format_plan_context_block(conv_ctx: dict, task_spec: dict) -> str:
             for a in artifacts[:5]
         ]
         parts.append("Recent artifacts:\n" + "\n".join(art_lines))
+    # Prior datasets: when reuse_prior_data is set, the planner should
+    # generate a synthesis-only plan (no data_query nodes needed).
+    prior_datasets = conv_ctx.get("prior_datasets") or task_spec.get("prior_datasets")
+    reuse = task_spec.get("reuse_prior_data", False)
+    if prior_datasets:
+        ds_summary = []
+        for i, ds in enumerate(prior_datasets[:3]):
+            nrows = len(ds.get("rows", []))
+            src = ds.get("source_name") or ds.get("source_id") or "?"
+            ds_summary.append(f"  - Dataset {i+1}: {nrows} rows from {src}")
+        parts.append("Prior datasets (already collected):\n" + "\n".join(ds_summary))
+        if reuse:
+            parts.append(
+                "IMPORTANT: This request is a follow-up refinement (e.g. 'a summary', "
+                "'break it down'). Prior datasets cover the scope. Do NOT generate "
+                "data_query nodes — generate a synthesis-only plan that answers the "
+                "user's question using the prior datasets."
+            )
     if len(parts) == 1:
         return ""
     return "\n".join(parts) + "\n"

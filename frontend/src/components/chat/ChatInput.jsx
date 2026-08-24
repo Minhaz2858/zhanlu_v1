@@ -8,6 +8,7 @@ import VoiceInput from './VoiceInput';
 import AgentSuggestions from './AgentSuggestions';
 import FilePreviewModal from './FilePreviewModal';
 import EffectiveModelBadge from './EffectiveModelBadge';
+import SkillPreviewPopover from './SkillPreviewPopover';
 
 // Pick an icon for an attachment chip based on its extension. Falls back
 // to a generic File icon. Used by the chip-strip below so each queued
@@ -274,18 +275,7 @@ export default function ChatInput({
                 agentName={activeAgent?.name}
               />
               {activeSkill && (
-                <span className="inline-flex max-w-[10rem] items-center gap-1.5 rounded-full border border-primary/40 bg-primary/5 px-2.5 py-1 text-xs font-medium text-primary">
-                  <Wrench className="h-3 w-3 shrink-0" />
-                  <span className="truncate">/{activeSkill.name}</span>
-                  <button
-                    type="button"
-                    onClick={onRemoveSkill}
-                    className="shrink-0 transition-colors hover:text-primary/70"
-                    aria-label={lang === 'en' ? 'Remove skill' : '移除技能'}
-                  >
-                    <X className="h-3 w-3" />
-                  </button>
-                </span>
+                <SkillPreviewPopover skill={activeSkill} onRemove={onRemoveSkill} />
               )}
               {attachments.map((a, i) => {
                 const Icon = attachmentIcon(a.name);

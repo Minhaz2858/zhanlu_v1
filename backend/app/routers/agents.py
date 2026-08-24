@@ -79,6 +79,11 @@ from app.services.dashboard_turn_guard import (
     build_dashboard_narration_nudge_message,
     dashboard_orchestrator_should_block,
 )
+from app.services.dashboard_intent import (
+    dashboard_intent,
+    set_dashboard_intent,
+    reset_dashboard_intent,
+)
 from app.services.pptx_turn_guard import (
     pptx_turn_guard,
     should_force_create_pptx,
@@ -113,6 +118,42 @@ from app.services.background_review import spawn_background_review, DEFAULT_REVI
 # P3: prompt caching
 from app.services.prompt_caching import apply_cache_control
 
+# P2-12: shared agent-loop core extracted from this router (pure refactor).
+# The tool-execution mechanics, SSE event builders, guardrails and canned
+# fallback text live in ``app.services.agent_loop``; we re-import them here
+# so every existing call site and ``from app.routers.agents import ...``
+# consumer keeps working unchanged.
+from app.services.agent_loop import (
+    # tool_executor
+    emit_tool_progress_while_waiting,
+    execute_tool_batch,
+    is_long_running_tool,
+    # guardrails
+    maybe_force_finish_line,
+    # sse_builders
+    LIVE_EVENT_TEMPLATES,
+    PHASE_HEADLINES,
+    _DATA_OFFER_MAX_COLS,
+    _DATA_OFFER_MAX_ROWS,
+    _LIVE_EVENT_CAP,
+    _LIVE_EVENT_FORBIDDEN_RE,
+    _LIVE_EVENT_SAFE_FALLBACK,
+    _build_live_event,
+    _emit_activity_step,
+    _emit_live_event,
+    _emit_phase,
+    _sample_rows_from_payload,
+    _sanitize_live_event_params,
+    _sanitize_value,
+    _sse_live_event,
+    # fallbacks
+    _APOLOGY_PATTERN_RE,
+    _BOUNCE_BACK_PATTERN_RE,
+    _DASHBOARD_REDIRECT_FALLBACK,
+    _EMPTY_CONTENT_FALLBACK,
+    _GENERIC_EMPTY_CONTENT_FALLBACK,
+)
+
 # P4: metrics + provider fallback
 from app.services.agent_metrics import metrics
 from app.services.provider_fallback import with_fallback
@@ -125,13 +166,13 @@ import app.services.tool_handlers  # noqa: F401
 
 # Synexia report pipeline — synthesize_report enriches ask_data_agent results
 # with a rich ReportCardPayload (KPIs, chart, insights, actions).
-from app.services.synexia.report_synthesis import synthesize_report  # noqa: E402
+from app.services.synexia.report_synthesis import synthesize_report, merge_answer_rows  # noqa: E402
 from app.services.synexia.finalize import finalize_into_artifact, build_no_data_payload  # noqa: E402
 
 # Planning layer: should_trigger_planning classifies the user message and
 # SynexiaFSM runs the cognitive loop (GOAL→PLAN→GATE→ACT→OBSERVE→VERIFY).
 # Gated by is_fsm_enabled() (settings.SYNEXIA_FSM_ENABLED, default False).
-from app.services.planning_trigger import should_trigger_planning, is_followup_refinement, PlanTrigger  # noqa: E402
+from app.services.planning_trigger import should_trigger_planning, is_followup_refinement, PlanTrigger, _is_non_data_intent  # noqa: E402
 from app.services.synexia.fsm import ExecutionRequest, SynexiaFSM, is_fsm_enabled  # noqa: E402
 from app.services.synexia.context_assembler import build_conversation_context, format_followup_context_block  # noqa: E402
 from app.services import steer_bus  # noqa: E402 — P2 mid-turn steer
@@ -147,9 +188,14 @@ from app.services.goal_contract import (  # noqa: E402 — Goal-Contract closed 
     RESULT_QUALITY_ASSUMED_OK,
     RESULT_QUALITY_NO_DATA,
     build_goal_contract,
+    extract_tables_from_sql,
     is_effective_empty,
     is_metadata_only_rows,
     pending_action_phrase,
+)
+from app.services.query_purpose import (  # noqa: E402 — query-purpose classifier
+    TableRoleResolver,
+    classify_query_purpose,
 )
 from app.services.answer_verification import (  # noqa: E402 — universal self-eval gate
     build_gap_disclosure,
@@ -202,21 +248,10 @@ TOOL_CALL_HARD_CAP = 10
 # truth: automation_executor compares run output against this constant to
 # detect "the agent produced nothing real" — do not change the wording
 # without updating it there too.
-_EMPTY_CONTENT_FALLBACK = (
-    "I've completed the requested changes. "
-    "Please review the agent configuration above."
-)
-
-_GENERIC_EMPTY_CONTENT_FALLBACK = (
-    "I gathered some information but had trouble putting it all together. "
-    "Could you try again with a more specific request?"
-)
-
-_DASHBOARD_REDIRECT_FALLBACK = (
-    "I gathered some information but had trouble putting it all together. "
-    "Could you try again with a more specific request? "
-    "If you asked me to build a dashboard, please say 'create dashboard' and I'll try again."
-)
+#
+# P2-12: the constants + apology/bounce-back regexes below are defined in
+# ``app.services.agent_loop.fallbacks`` and re-exported at the top of this
+# module (see the ``from app.services.agent_loop import ...`` block).
 
 
 def _collect_artifact_titles(
@@ -278,13 +313,37 @@ def _artifact_aware_fallback(titles: list[str]) -> str:
     with empty assistant text but an artifact WAS produced — the artifact is
     the real deliverable, so the message should point at it instead of
     claiming the agent "had trouble putting it together".
+
+    FIX 2026-08-23: previously returned a thin one-liner that started with
+    "I've completed your request. Here's the artifact: …". That text
+    *hid* the analysis the user actually wanted and was indistinguishable
+    from a generic LLM fallback. Now we emit a more substantive opener
+    that invites the user to scroll into the artifact / ask for
+    clarification, while still naming the artifact.
     """
+    if not titles:
+        return (
+            "Your deliverable is attached above. Open it for the full "
+            "data, tables, and charts. If anything looks off, tell me "
+            "what you'd like to refine (time range, grouping, metric) "
+            "and I'll re-run."
+        )
     if len(titles) == 1:
         return (
-            f"I've completed your request. Here's the artifact: **{titles[0]}**."
+            f"Your deliverable — **{titles[0]}** — is attached above. "
+            f"It contains the full data, tables, and charts I pulled "
+            f"from your warehouse. Open the artifact for the complete "
+            f"view; if any number, ranking, or chart needs a different "
+            f"angle, tell me which one to refine."
         )
     joined = ", ".join(f"**{t}**" for t in titles)
-    return f"I've completed your request. Here are the artifacts: {joined}."
+    return (
+        f"Your deliverables — {joined} — are attached above. "
+        f"They contain the full data, tables, and charts I pulled from "
+        f"your warehouse. Open the artifacts for the complete view; if "
+        f"any number, ranking, or chart needs a different angle, tell "
+        f"me which one to refine."
+    )
 
 
 def _data_summary_fallback(titles: list[str], user_content: str = "") -> str:
@@ -320,12 +379,24 @@ def _choose_fallback(
     4. Otherwise → ``_GENERIC_EMPTY_CONTENT_FALLBACK``
     """
     titles = _collect_artifact_titles(tool_calls_for_frontend, orch_created)
-    # Check if any data-agent report cards were produced
+    # Check if any data-agent report cards or raw rows were produced
+    from app.services.goal_contract import is_metadata_only_rows  # lazy
     has_report_card = False
+    has_rows = False
     for tc in (tool_calls_for_frontend or []):
         result = tc.get("results") or {}
-        if isinstance(result, dict) and result.get("report_card_payload"):
+        if not isinstance(result, dict):
+            continue
+        if result.get("report_card_payload"):
             has_report_card = True
+        if result.get("rows"):
+            rows = result["rows"]
+            # Metadata-only rows (MIN_DATE/MAX_DATE/ENTRY_COUNT) don't
+            # count as real business data.
+            if isinstance(rows, list) and len(rows) > 0 and is_metadata_only_rows(rows):
+                continue
+            has_rows = True
+        if has_report_card and has_rows:
             break
     if has_report_card and titles:
         return _data_summary_fallback(titles, user_content)
@@ -333,14 +404,368 @@ def _choose_fallback(
         return _artifact_aware_fallback(titles)
     if _is_dashboard_request(user_content):
         return _DASHBOARD_REDIRECT_FALLBACK
+    # FIX 2026-08-24: check has_rows BEFORE the file-deliverable redirect.
+    # Previously the file-disclosure ("The requested HTML report could not
+    # be generated…") fired first even when real data rows HAD been
+    # retrieved — the user saw "could not be generated" while the data sat
+    # unused. Now: if rows exist, show them; the file-disclosure only
+    # fires when there is truly nothing to show.
+    if has_rows:
+        return _data_rows_fallback(tool_calls_for_frontend)
+    # FIX 2026-08-24 (probe-only): when data queries DID run but every
+    # result was metadata-only (SELECT COUNT(*) / MIN / MAX probes), the
+    # generic file-disclosure ("could not be generated… tool budget") is
+    # misleading — the budget wasn't the problem, the queries never
+    # fetched business rows. Say that explicitly so the user knows to
+    # rephrase instead of just retrying.
+    _probe_only = False
+    for tc in (tool_calls_for_frontend or []):
+        if tc.get("name") not in DATA_PRODUCING_TOOLS:
+            continue
+        _pr = tc.get("results") or {}
+        if not isinstance(_pr, dict):
+            continue
+        _prows = _pr.get("rows")
+        if (
+            isinstance(_prows, list)
+            and _prows
+            and len(_prows) <= 2
+            and is_metadata_only_rows(_prows)
+        ):
+            _probe_only = True
+            break
+    if _probe_only:
+        return (
+            "I queried your warehouse, but the data agent only ran summary "
+            "probes (row counts / date ranges) instead of fetching actual "
+            "business rows, so there is nothing to build the report from. "
+            "Please try again — I will query specific business columns "
+            "(revenue, volume, margin, inventory) directly this time."
+        )
     # File-deliverable redirect: when the user asked for a file deliverable
-    # (html/docx/pdf/xlsx/md) but no artifact was created, return a
-    # format-specific message instead of the generic fallback.
+    # (html/docx/pdf/xlsx/md) but no artifact was created AND no data rows
+    # were retrieved, return a format-specific message instead of the
+    # generic fallback.
     _is_file, _fmt = is_file_deliverable_request(user_content)
     if _is_file and _fmt:
         from app.services.file_turn_guard import build_file_disclosure
         return build_file_disclosure(_fmt)
     return _GENERIC_EMPTY_CONTENT_FALLBACK
+
+
+_SYS_COL_PREFIXES = ("FENTRYID", "FID", "FCUSTMATID", "FCUSTMATNAME")
+
+
+def _is_degenerate_dataset(rows: list[dict] | None) -> bool:
+    """True when every row has zero / None / "" in all apparent measure columns.
+
+    A 'measure' column is any key that looks monetary (revenue, margin, amount,
+    price, total, sales) but NOT a count/quantity column (line_count, qty,
+    quantity, count, orders) which may legitimately be non-zero while the money
+    columns are broken.  Used to prevent building a report card around a query
+    that mapped the wrong column (e.g. revenue = 0 for every row).
+    """
+    rows = rows or []
+    if not rows:
+        return True
+    _measure_re = re.compile(
+        r"^(revenue|margin|amount|price|total|sales|income|profit|cost)$",
+        re.IGNORECASE,
+    )
+    _count_re = re.compile(r"^(line_count|qty|quantity|count|orders|num)$", re.IGNORECASE)
+    measure_cols: set[str] = set()
+    for row in rows:
+        if isinstance(row, dict):
+            for k in row:
+                if _measure_re.search(k) and not _count_re.search(k):
+                    measure_cols.add(k)
+    if not measure_cols:
+        return False  # no measure columns to judge by
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for col in measure_cols:
+            v = row.get(col)
+            if v not in (None, "", 0, 0.0):
+                return False
+    return True
+
+
+def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
+    """Direct fallback built from the actual retrieved rows (no LLM).
+
+    Renders a clean markdown table (≤10 rows), hiding system columns
+    (FENTRYID, FCUSTMATID, …) and all-empty columns. Never surfaces
+    raw "Sample values: FENTRYID=…" junk.
+    """
+    from app.services.goal_contract import is_metadata_only_rows  # lazy
+    for tc in (tool_calls_for_frontend or []):
+        if tc.get("name") not in DATA_PRODUCING_TOOLS:
+            continue
+        result = tc.get("results")
+        if not isinstance(result, dict):
+            continue
+        rows = result.get("rows")
+        if not rows:
+            continue
+        src = result.get("source_name") or "the data source"
+        if isinstance(rows, (list, tuple)):
+            n = len(rows)
+            # Flatten to dict rows
+            dict_rows = [r for r in rows if isinstance(r, dict)]
+            if not dict_rows:
+                continue
+            # Metadata-only rows (MIN_DATE/MAX_DATE/ENTRY_COUNT) are not
+            # meaningful business data — show a targeted message instead.
+            if is_metadata_only_rows(dict_rows):
+                return (
+                    f"The query against {src} returned only summary metadata "
+                    f"(date range / row count) rather than actual business data. "
+                    f"Please try rephrasing your request with more specific "
+                    f"dimensions (e.g. by product, customer, or time period) "
+                    f"so I can retrieve the detailed figures you need."
+                )
+            # Hide system columns
+            hide_cols = {
+                k for k in dict_rows[0]
+                if k.startswith(_SYS_COL_PREFIXES) or k in _SYS_COL_PREFIXES
+            }
+            # Hide all-empty columns
+            for k in dict_rows[0]:
+                if all(
+                    r.get(k) in (None, "", 0, 0.0)
+                    for r in dict_rows
+                ):
+                    hide_cols.add(k)
+            visible = [k for k in dict_rows[0] if k not in hide_cols]
+            if not visible:
+                visible = [k for k in dict_rows[0]]  # fallback: show at least something
+            lines: list[str] = []
+            lines.append("| " + " | ".join(visible) + " |")
+            lines.append("|" + "|".join(" --- " for _ in visible) + "|")
+            for r in dict_rows[:10]:
+                lines.append(
+                    "| " + " | ".join(str(r.get(k, "")) for k in visible) + " |"
+                )
+            # FIX 2026-08-22: return a neutral placeholder instead of a
+            # markdown table so the user doesn't see raw data mid-stream.
+            # The synthesis step replaces this with the final narrative
+            # (which may include a summary table).  The frontend
+            # DataTableCard (gated by !isStreaming) still renders the
+            # data after streaming if synthesis didn't run.
+            return f"Analyzing {len(rows)} rows of data…"
+    return _GENERIC_EMPTY_CONTENT_FALLBACK
+
+
+def _build_column_summary(rows: list[dict]) -> str:
+    """Build a short text summary of columns and their value ranges.
+
+    Used inside the forced-synthesis LLM prompt so the model has concrete
+    numbers to write about. This does NOT generate the final answer — the
+    LLM does that.
+    """
+    if not rows:
+        return "(no rows)"
+    sample = rows[:20]
+    cols = list(sample[0].keys()) if sample else []
+    lines: list[str] = []
+    for c in cols[:12]:  # cap at 12 columns
+        vals = [r.get(c) for r in sample if r.get(c) is not None]
+        if not vals:
+            continue
+        # Try numeric summary
+        nums = []
+        for v in vals:
+            try:
+                nums.append(float(v))
+            except (ValueError, TypeError):
+                pass
+        if nums:
+            lines.append(
+                f"  {c}: min={min(nums):.2f}, max={max(nums):.2f}, "
+                f"sum={sum(nums):.2f} ({len(nums)} values)"
+            )
+        else:
+            uniq = set(str(v) for v in vals[:8])
+            lines.append(f"  {c}: {', '.join(str(u) for u in list(uniq)[:5])}")
+    return "\n".join(lines) if lines else "(no numeric columns found)"
+
+
+async def _force_llm_synthesis(
+    user_msg: str,
+    rows: list[dict],
+    synth_call_fn,
+    conversation_history: list[dict],
+    max_retries: int = 2,
+) -> str:
+    """Force the LLM to write a comprehensive analysis using the data rows.
+
+    This replaces the old hardcoded _build_data_driven_answer. The LLM is
+    essential because:
+    - Different users have different databases (ERP, CRM, HR, etc.)
+    - Different schemas need domain-specific interpretation
+    - Only the LLM can understand business context from column names
+    - A hardcoded builder would produce generic, wrong answers
+
+    Args:
+        user_msg: The user's original question
+        rows: The data rows from the database
+        synth_call_fn: Async callable that takes (prompt, history) → dict
+        conversation_history: The conversation messages for context
+        max_retries: How many forced attempts (default 2)
+
+    Returns:
+        The LLM's analysis text, or "" if all attempts fail
+    """
+    if not rows:
+        return ""
+
+    col_summary = _build_column_summary(rows)
+    rows_sample = json.dumps(rows[:8], default=str, ensure_ascii=False)[:2000]
+
+    # ── Pre-aggregation (P0) ───────────────────────────────────────────
+    # Compute aggregates from ALL rows so the LLM has concrete numbers to
+    # interpret instead of doing mental arithmetic on a tiny sample.
+    preagg_block = ""
+    try:
+        from app.services.synexia.pre_aggregation import pre_aggregate
+
+        preagg = pre_aggregate(rows)
+        preagg_block = preagg.to_prompt_block()
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("Pre-aggregation failed in force_llm_synthesis: %s", e)
+        preagg_block = ""
+
+    for attempt in range(max_retries):
+        if attempt == 0:
+            prompt = (
+                "You are a data analyst. The user asked: "
+                f"\"{user_msg[:200]}\"\n\n"
+                f"The database returned {len(rows)} rows of real business data.\n\n"
+                "Write a COMPREHENSIVE 5-8 sentence analysis that:\n"
+                "1. Restates what was asked and what data was found\n"
+                "2. Summarizes key totals, figures, and trends (use SPECIFIC "
+                "numbers from the data — compute sums, averages, top items)\n"
+                "3. Identifies top performers, key patterns, or rankings\n"
+                "4. Highlights any anomalies or notable findings\n"
+                "5. Ends with one concrete follow-up suggestion\n\n"
+                "CRITICAL RULES:\n"
+                "- NEVER say 'I've completed your request' or 'Here is the "
+                "artifact' or 'The data has been retrieved'\n"
+                "- NEVER just describe the data structure or list column names\n"
+                "- Your answer must be USEFUL even WITHOUT the attached file\n"
+                "- Write REAL analysis with REAL numbers computed from the data\n"
+                "- Respond in the same language as the user's question\n\n"
+                f"{preagg_block}\n\n"
+                f"Column summary (value ranges):\n{col_summary}\n\n"
+                f"Data sample (first 8 rows):\n{rows_sample}"
+            )
+        else:
+            # Attempt 2: even more explicit
+            prompt = (
+                "IMPORTANT: Your previous attempt did not produce a real "
+                "analysis. You MUST write actual content now.\n\n"
+                "The user asked: " + f"\"{user_msg[:200]}\"\n\n"
+                f"You have {len(rows)} rows of real data. "
+                "DO NOT describe the data structure. "
+                "DO NOT say 'I have completed'. "
+                "Instead, WRITE 5-8 SENTENCES OF ACTUAL ANALYSIS. "
+                "Include specific numbers (totals, averages, top items). "
+                "Treat this as if you are presenting findings to a manager.\n\n"
+                f"{preagg_block}\n\n"
+                f"Column summary:\n{col_summary}\n\n"
+                f"Data sample:\n{rows_sample}\n\n"
+                "Start your answer directly with the analysis. No preamble."
+            )
+
+        try:
+            result = await synth_call_fn(prompt, conversation_history)
+            text = (result.get("content", "") or "").strip()
+            # Check it's a real answer, not another placeholder
+            _is_bad = (
+                not text
+                or len(text) < 100
+                or text.startswith("I've completed your request")
+                or text.startswith("Here is the artifact")
+                or text.startswith("The data has been retrieved")
+                or _APOLOGY_PATTERN_RE.search(text)
+                or _BOUNCE_BACK_PATTERN_RE.search(text)
+            )
+            if not _is_bad:
+                return text
+            logger.info(
+                "force_llm_synthesis attempt %d produced bad answer "
+                "(len=%d, apology=%s), retrying",
+                attempt + 1, len(text),
+                bool(_APOLOGY_PATTERN_RE.search(text)),
+            )
+        except Exception as e:
+            logger.warning(
+                "force_llm_synthesis attempt %d failed: %s",
+                attempt + 1, e,
+            )
+
+    return ""  # all attempts failed
+
+
+def _resolve_skill_for_synthesis(
+    tool_calls_for_frontend: list[dict] | None,
+    selected_skill: dict | None,
+    selected_skill_id: str | None,
+    db,
+) -> tuple[str | None, str | None]:
+    """Return (skill_name, skill_methodology) for the synthesis LLM.
+
+    Priority:
+      1. Latest successful ``load_skill_body`` tool observation (reflects
+         the skill the LLM actually loaded this turn).
+      2. DB lookup by ``selected_skill_id`` (when no observation yet —
+         e.g. early synthesis or skill loaded via system-prompt injection).
+      3. (None, None) — no skill context.
+
+    Mirrors the pattern in capability_router.py:689-692.
+    """
+    # 1. Check tool observations for load_skill_body
+    if tool_calls_for_frontend:
+        for tc in reversed(tool_calls_for_frontend):
+            if tc.get("name") == "load_skill_body" and tc.get("result"):
+                res = tc["result"]
+                if isinstance(res, dict):
+                    name = res.get("name")
+                    body = res.get("body")
+                    if name and body:
+                        return name, body[:5000]
+
+    # 2. DB lookup by selected_skill_id
+    if selected_skill_id and db:
+        try:
+            from app.models.tool import Tool
+            tool_row = db.query(Tool).filter(Tool.id == selected_skill_id).first()
+            if tool_row and tool_row.skill_md:
+                name = (tool_row.name
+                        or (selected_skill or {}).get("name", ""))
+                return name, tool_row.skill_md[:5000]
+        except Exception:
+            pass  # Best-effort
+
+    return None, None
+
+
+def _has_data_rows(tool_calls_for_frontend: list[dict]) -> bool:
+    """True if any data-producing tool call returned actual business rows
+    this turn. Metadata-only rows (MIN_DATE/MAX_DATE/ENTRY_COUNT) don't
+    count — they indicate the query returned schema info, not data."""
+    from app.services.goal_contract import is_metadata_only_rows  # lazy
+    for tc in (tool_calls_for_frontend or []):
+        if tc.get("name") not in DATA_PRODUCING_TOOLS:
+            continue
+        result = tc.get("results")
+        if isinstance(result, dict) and result.get("rows"):
+            rows = result["rows"]
+            if isinstance(rows, list) and len(rows) > 0 and is_metadata_only_rows(rows):
+                continue  # metadata-only → not real data
+            return True
+    return False
 
 
 def _schema_edge_count(result) -> int:
@@ -463,6 +888,142 @@ def _strip_trailing_pending(text: str, pending_sentence: str) -> str:
     if pending_sentence.strip() not in sentences[-1]:
         return text
     return " ".join(s.strip() for s in sentences[:-1] if s.strip())
+
+
+# ── Post-loop internal-reference hygiene (Bug 3 fix) ────────────────────
+# The final bubble must not reference internal loop iterations the user
+# never saw: "the discrepancy", "you're right", "as I mentioned earlier",
+# "let me re-query...", "I'll double-check...". These are trailing
+# promises/regrets of verification — deterministic strip, no LLM.
+_INTERNAL_REFERENCE_SENTENCE_RE = re.compile(
+    r"(?:"
+    r"the\s+discrepancy|"
+    r"you['’]?re\s+right|you\s+are\s+right|"
+    r"as\s+I\s+(?:mentioned|said|noted|discussed|explained)\s+earlier|"
+    # "query" (bare) added 2026-08-21: the live traces' narration was
+    # "Let me query the warehouse…" — the old re[- ]?query alternation
+    # only caught "re-query", so the promise narration survived.
+    r"let\s+me\s+(?:verify|re[- ]?query|query|double[- ]?check|check|look\s+into|"
+    r"get\s+back|pull|run|fetch|retry|fix|correct|resolve|re[- ]?run)|"
+    r"I['’]?ll\s+(?:re[- ]?query|double[- ]?check|verify|get\s+back|retry)|"
+    r"I\s+will\s+(?:re[- ]?query|double[- ]?check|verify|retry)|"
+    # ── Chinese internal-reference residue ─────────────────────────────
+    r"让我\s*(?:再|重新)?\s*(?:核实|查询|查|确认|验证|检查|看看|试|重试)|"
+    r"我再\s*(?:核实|查询|查|确认|验证|检查|看看|试|重试)|"
+    r"(?:核实|复核|重查|重新查询|重新查|再查|确认一下|验证一下|检查一下)|"
+    r"数据差异|"
+    r"(?:我|刚才|前面|之前)(?:说|提)(?:过|到)|"
+    r"你(?:说|讲)?得?对|"
+    r"(?:我)?(?:回头|稍后)(?:再|继续|我)?"
+    r")",
+    re.IGNORECASE,
+)
+
+
+def _strip_internal_references(text: str) -> str:
+    """Deterministically strip TRAILING sentences that reference internal
+    loop iterations the user never saw (Bug 3 fix).
+
+    Applied to ``accumulated_content`` post-loop, AFTER the promise-strip.
+    Keeps stripping while the trailing sentence matches an internal-reference
+    pattern, then trims dangling connectors. Never raises; on degenerate
+    input the original text is returned unchanged.
+    """
+    if not text or not text.strip():
+        return text
+    stripped = (text or "").strip()
+    # Split on English punctuation + whitespace AND Chinese sentence-ending
+    # punctuation followed directly by the next sentence (no whitespace in
+    # CJK text). Zero-width lookarounds keep the delimiters attached.
+    sentences = re.split(r"(?<=[.!?。！？])\s+|(?<=[。！？])(?=\S)", stripped)
+    while sentences and _INTERNAL_REFERENCE_SENTENCE_RE.search(sentences[-1]):
+        sentences.pop()
+    if not sentences:
+        # Everything was internal-reference narration. Return "" — the
+        # post-loop empty-bubble guarantee (2026-08-21) replaces the empty
+        # result with a real fallback message, so we no longer keep the
+        # original narration as a "remnant" (it leaked promise text into
+        # the final bubble in the failing traces).
+        return ""
+    result = " ".join(s.strip() for s in sentences if s.strip())
+    # Trim dangling connectors left behind by a removed sentence.
+    result = re.sub(r"\s+(?:and|but|so|because|however|then|also)\s*$", "", result)
+    result = re.sub(r"\s+[—\-–:;，,]\s*$", "", result)
+    return result.strip()
+
+
+# ── SQL / plan-narration strip (2026-08-21) ────────────────────────────
+# The model sometimes narrates the SQL it intends to run (fenced blocks or
+# bare SELECT paragraphs) and emits an empty "JSON Report Card" section —
+# internal artifacts the user must never see in the final bubble.
+_SQL_FENCE_RE = re.compile(
+    r"```(?:sql)?\s*\n\s*(?:SELECT|WITH)\b.*?```",
+    re.IGNORECASE | re.DOTALL,
+)
+_JSON_SECTION_HEADING_RE = re.compile(
+    r"^[ \t]{0,3}#{1,6}[ \t]+(?:JSON\s+Report\s+Card|Report\s+Card\s+JSON|"
+    r"Raw\s+JSON|JSON\s+Payload)[ \t]*$",
+    re.IGNORECASE,
+)
+
+
+def _strip_sql_narration(text: str) -> str:
+    """Deterministically remove SQL plan-narration artifacts from assistant
+    prose ("leaking SQL data before final answer", 2026-08-21).
+
+    Removes: (1) fenced ``sql`` / SELECT-leading code fences, (2) paragraphs
+    that are bare SQL statements, (3) "JSON Report Card"-style markdown
+    sections (heading plus a body of only fences/blank/brace lines).
+    Never raises; degenerate input is returned unchanged.
+    """
+    if not text or not text.strip():
+        return text
+    # 1) Fenced SQL blocks.
+    out = _SQL_FENCE_RE.sub("", text)
+    # 2) Bare-SQL paragraphs (split on blank lines; drop SQL statements).
+    paragraphs = re.split(r"\n\s*\n", out)
+    kept = []
+    for para in paragraphs:
+        stripped_para = para.strip()
+        if (
+            stripped_para
+            and re.match(r"^(?:SELECT|WITH)\b", stripped_para, re.IGNORECASE)
+            and re.search(r"\bFROM\b", stripped_para, re.IGNORECASE)
+        ):
+            continue  # bare SQL statement — drop
+        kept.append(para)
+    out = "\n\n".join(kept)
+    # 3) "JSON Report Card"-style sections: skip the heading and any body
+    #    that is only fences / blank lines / brace JSON — stop skipping at
+    #    the next heading or at real prose (never eat legitimate content).
+    lines = out.split("\n")
+    result_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if _JSON_SECTION_HEADING_RE.match(line):
+            i += 1
+            while i < len(lines):
+                nxt = lines[i]
+                if re.match(r"^[ \t]{0,3}#{1,6}[ \t]+", nxt):
+                    break  # next heading ends the section
+                if nxt.strip().startswith("```"):
+                    i += 1
+                    while i < len(lines) and not lines[i].strip().startswith("```"):
+                        i += 1
+                    i += 1  # past the closing fence
+                    continue
+                if not nxt.strip() or nxt.lstrip().startswith(("{", "[")):
+                    i += 1
+                    continue
+                break  # real prose — section body ended before it
+            continue
+        result_lines.append(line)
+        i += 1
+    out = "\n".join(result_lines)
+    # Collapse 3+ consecutive newlines left by removals.
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out
 
 
 def _compact_report_card(rcp: dict) -> str:
@@ -626,6 +1187,45 @@ def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None
         + "</selected_runtime_skill>\n"
     )
 
+# Data-producing tools whose row payloads feed the deferred deliverable
+# pipeline (purpose tagging + contract dataset collection). The agent may
+# collect data via ask_data_agent (delegated) OR via direct SQL tools
+# (execute_query / execute_sql / sql_query); forecast_brief returns rows
+# for market reads. Anything not listed here is skipped by the structural
+# `result.get("rows")` gate anyway — the set only widens classification.
+DATA_PRODUCING_TOOLS: frozenset = frozenset({
+    "ask_data_agent",
+    "execute_query",
+    "execute_sql",
+    "sql_query",
+    "forecast_brief",
+})
+
+# FIX 2026-08-24: sub-agent tools that return a `prompt_text` formatted
+# answer (not rows). Without harvesting their text, market-report turns
+# collapse to the generic "I gathered some information" fallback because
+# the row pipeline ignores them entirely.
+TEXT_PRODUCING_TOOLS: frozenset = frozenset({
+    "ask_perception",
+    "ask_intelligence",
+    "ask_diagnosis",
+    "ask_decision",
+    "ask_pricing",
+    "ask_forecast_pricing",
+})
+
+
+def _harvest_text_answer(result: dict) -> str | None:
+    """Extract a formatted text answer from a market-research sub-agent."""
+    if not isinstance(result, dict):
+        return None
+    for key in ("prompt_text", "answer", "summary", "narrative"):
+        v = result.get(key)
+        if isinstance(v, str) and v.strip():
+            return v.strip()
+    return None
+
+
 # Per-tool overrides for the loop guard. ``memory`` is idempotent-write —
 # one identical call is already a loop. ``ask_data_agent`` is capped per turn
 # by name. For report creation, repeated serial data-agent calls are the
@@ -634,6 +1234,7 @@ def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None
 TOOL_CALL_CAPS: dict[str, int] = {
     "memory": 1,
     "ask_data_agent": 2,
+    "fetch_data_batch": 3,  # direct SQL fast path; each call can have up to 8 queries
     # Defense-in-depth against the interrupt leak: if an agent re-enables the
     # interrupt tool via tool_config, cap it at 2 calls/turn so it can never
     # eat the budget the way `interrupt(action=check)` polling did.
@@ -641,7 +1242,7 @@ TOOL_CALL_CAPS: dict[str, int] = {
     # clarify is a UX handoff tool; repeated calls signal a stuck agent.
     "clarify": 3,
 }
-_NAME_ONLY_KEYED_TOOLS: set[str] = {"ask_data_agent"}
+_NAME_ONLY_KEYED_TOOLS: set[str] = {"ask_data_agent", "fetch_data_batch"}
 
 # Stream-then-buffer kill-switch (Gap 1). When True, the v3 agentic loop
 # streams LLM tokens to the client as they arrive via ``_stream_llm_with_tools``
@@ -697,7 +1298,7 @@ _LONG_RUNNING_TOOLS = frozenset({
 
 def _is_long_running_tool(tool_name: str) -> bool:
     """True if ``tool_name`` may run for tens of seconds or minutes."""
-    return tool_name in _LONG_RUNNING_TOOLS
+    return is_long_running_tool(tool_name, _LONG_RUNNING_TOOLS)
 
 
 def _start_finalize_offloaded(db, finalize_kwargs: dict) -> asyncio.Task:
@@ -723,6 +1324,13 @@ def _start_finalize_offloaded(db, finalize_kwargs: dict) -> asyncio.Task:
     def _threaded_finalize():
         _fdb = _FinalizeSessionLocal()
         try:
+            # FIX B (2026-08-22): keep attribute values resident after
+            # commit so the returned Artifact row stays readable once this
+            # session closes.  The default expire_on_commit=True expires
+            # every attribute at commit; reading any field (e.g.
+            # `artifact.id`) on the detached row then raises
+            # DetachedInstanceError in the caller.
+            _fdb.expire_on_commit = False
             result = finalize_into_artifact(_fdb, **finalize_kwargs)
             _fdb.commit()
             return result
@@ -748,20 +1356,13 @@ async def _emit_tool_progress_while_waiting(
     frontend already renders ``tool_progress`` events and treats entries
     without a ``results`` key as in-flight.
     """
-    running_calls = [
-        {
-            "id": c.get("tool_call_id", ""),
-            "name": TOOL_DISPLAY_NAMES.get(c.get("tool_name", ""), c.get("tool_name", "")),
-            "arguments_string": c.get("args_str", ""),
-            "status": "running",
-        }
-        for c in parsed_calls
-    ]
-    while not task.done():
-        done, _pending = await asyncio.wait({task}, timeout=interval)
-        if done:
-            break
-        yield f'data: {json.dumps({"type": "tool_progress", "tool_calls": running_calls})}\n\n'
+    async for frame in emit_tool_progress_while_waiting(
+        task,
+        parsed_calls,
+        interval=interval,
+        display_names=TOOL_DISPLAY_NAMES,
+    ):
+        yield frame
 
 
 async def _sse_with_heartbeat(agen, interval: float = _SSE_HEARTBEAT_INTERVAL):
@@ -818,9 +1419,13 @@ async def _guarantee_done(agen):
     except (asyncio.CancelledError, GeneratorExit, StopAsyncIteration):
         raise
     except BaseException as exc:  # noqa: BLE001 — must never drop the client
+        # exc_info=True (2026-08-21): the fully-empty-page failures left no
+        # diagnosable trace — the message alone was not enough to locate the
+        # dying frame. Full traceback from now on.
         logger.error(
             "v3 stream: unhandled generator error; emitting fallback done: %s",
             exc,
+            exc_info=True,
         )
         try:
             yield (
@@ -835,9 +1440,82 @@ async def _guarantee_done(agen):
             pass
 
 
+def _estimate_ask_data_agent_cap(user_content: str) -> int:
+    """Estimate how many ``ask_data_agent`` calls the query likely needs.
+
+    Uses simple heuristics based on the number of distinct data concepts
+    (sales, inventory, etc.) and metrics mentioned in the user message.
+
+    Returns an integer between 2 and 8.
+
+    Examples::
+
+        "sales report"                     → 2
+        "sales report (volume, revenue)"   → 3
+        "volume, revenue, margin, inventory" → 5
+        "sales + inventory + margin + cost"  → 6
+    """
+    import re as _re
+
+    cap = 2  # minimum: even simple queries need at least 2
+
+    # Count distinct data concept keywords
+    _CONCEPT_PATTERNS = [
+        r'(?i)sales|sale|销售|订单|出库|出货|volume|出货量',
+        r'(?i)inventory|stock|库存|入库|存货|qty|数量',
+        r'(?i)purchase|procurement|采购|进货',
+        r'(?i)margin|profit|利润|毛利|毛利率',
+        r'(?i)revenue|turnover|营收|收入|销售额',
+        r'(?i)cost|expense|成本|费用|支出',
+        r'(?i)payment|receivable|应收|应付|回款',
+        r'(?i)production|manufacturing|生产|制造',
+        r'(?i)logistics|shipping|物流|发货|运输',
+    ]
+    concepts_found = sum(
+        1 for pat in _CONCEPT_PATTERNS if _re.search(pat, user_content)
+    )
+    # Each additional concept beyond the first adds 1 to cap
+    cap += max(0, concepts_found - 1)
+
+    # Count explicit metrics listed in parentheses
+    # e.g., "(volume, revenue, margin, inventory)" → 4 metrics
+    metrics_match = _re.search(r'\(([^)]+)\)', user_content)
+    if metrics_match:
+        metrics = [
+            m.strip() for m in metrics_match.group(1).split(',')
+            if m.strip() and not _re.match(r'(?i)\d{4}', m.strip())  # skip years
+        ]
+        if metrics:
+            cap = max(cap, len(metrics) + 1)  # +1 for header/discovery
+
+    # Also check for comma-separated or "/" separated metric-like items
+    # outside parentheses: "volume, revenue, margin, inventory"
+    _METRIC_WORDS = {
+        'volume', 'revenue', 'margin', 'inventory', 'qty', 'quantity',
+        'amount', 'cost', 'profit', 'turnover', 'sales',
+        '销量', '营收', '利润', '库存', '毛利', '成本', '数量', '金额',
+    }
+    # Split on commas or "and" or "/" between 2+ word phrases
+    _metric_candidates = _re.split(r'[,/]|\s+[Aa][Nn][Dd]\s+', user_content)
+    _metric_count = sum(
+        1 for mc in _metric_candidates
+        if mc.strip().lower() in _METRIC_WORDS
+    )
+    if _metric_count >= 3:
+        cap = max(cap, _metric_count + 1)
+
+    # Count "and" / "/" separators between concept-like terms
+    and_splits = _re.split(r'\s+[Aa][Nn][Dd]\s+|/', user_content)
+    if len(and_splits) > 2:
+        cap = max(cap, min(len(and_splits), 6))
+
+    return min(cap, 8)  # hard ceiling
+
+
 def _detect_tool_call_loop(
     llm_messages: list[dict],
     start_idx: int = 0,
+    dynamic_caps: dict[str, int] | None = None,
 ) -> tuple[str, int] | None:
     """Return ``(tool_name, count)`` if a single tool+arguments
     combination has been called ``TOOL_CALL_HARD_CAP`` or more times in
@@ -914,7 +1592,9 @@ def _detect_tool_call_loop(
             bucket = counts.setdefault(key, [0, 0])
             bucket[0 if ok else 1] += 1
     for (name, _), (succ, fail) in counts.items():
-        cap = TOOL_CALL_CAPS.get(name, TOOL_CALL_HARD_CAP)
+        # Dynamic caps (computed from user message complexity) override
+        # the static TOOL_CALL_CAPS for specific tools like ask_data_agent.
+        cap = (dynamic_caps or {}).get(name, TOOL_CALL_CAPS.get(name, TOOL_CALL_HARD_CAP))
         if succ >= cap or fail >= cap + 1:
             return name, succ + fail
     return None
@@ -1234,83 +1914,6 @@ def _format_activity_description(tool_name: str, args: dict | None = None) -> st
     except Exception:
         return template
 
-def _emit_activity_step(step_num: int, description: str, status: str,
-                        tool_name: str | None = None,
-                        detail: str | None = None,
-                        command: str | None = None,
-                        output_preview: str | None = None,
-                        artifact_id: str | None = None,
-                        duration_ms: int | None = None) -> str:
-    """Return an SSE ``activity_step`` payload as a formatted SSE string.
-
-    The optional ``command`` / ``output_preview`` fields power the
-    Claude-style expandable step detail in the frontend: clicking a step
-    reveals WHAT the tool was invoked with (command/code/query) and a
-    short preview of what came back (output/error).
-
-    ``duration_ms`` is the wall-clock time in milliseconds for this step,
-    from the start of the LLM call or tool execution to the point where
-    the step result is emitted. It is rendered in the frontend as a
-    small "X.Xs" label next to the step status icon.
-    """
-    step = {
-        "number": step_num,
-        "description": description,
-        "status": status,
-    }
-    if tool_name:
-        step["tool_name"] = tool_name
-    if detail:
-        step["detail"] = detail
-    if command:
-        step["command"] = command
-    if output_preview:
-        step["output_preview"] = output_preview
-    if artifact_id:
-        step["artifact_id"] = artifact_id
-    if duration_ms is not None:
-        step["duration_ms"] = duration_ms
-    return f'data: {json.dumps({"type": "activity_step", "step": step})}\n\n'
-
-
-# ── Claude-style phase headlines ──────────────────────────────────────
-# Each phase of a turn gets a short verb + descriptive clause, rendered
-# as a spinner-with-headline at the top of the activity section (the
-# "✳ Fathoming…" / "✳ Fabricating…" pattern). Verb vocabulary is
-# deliberately evocative-but-honest: it names the moment, not magic.
-PHASE_HEADLINES: dict[str, tuple[str, str]] = {
-    "init":     ("Fathoming",     "Reading your request"),
-    "goal":     ("Fathoming",     "Understanding what you need"),
-    "context":  ("Orienting",     "Gathering the right context"),
-    "plan":     ("Orchestrating", "Laying out the plan"),
-    "gate":     ("Checking",      "Running policy checks"),
-    "act":      ("Fabricating",   "Building your deliverable"),
-    "observe":  ("Watching",      "Recording the results"),
-    "verify":   ("Validating",    "Checking the outputs"),
-    "finalize": ("Crystallizing", "Wrapping everything up"),
-    "done":     ("Done",          "All finished"),
-    "fail":     ("Stopped",       "Something went wrong"),
-}
-
-
-def _emit_phase(state: str, detail: str | None = None) -> str:
-    """Return an SSE ``phase`` payload — the current Claude-style headline.
-
-    Additive SSE event type; existing consumers filter on ``event.type``
-    and ignore unknown types, so this is backward-compatible. The
-    frontend renders the latest phase as a headline above the activity
-    steps (spinner + verb + title).
-
-    Args:
-        state: FSM state name or ReAct milestone (``"goal"`` at turn
-            start, ``"act"`` on the first tool batch, ``"finalize"``
-            when composing the response).
-        detail: Optional override for the descriptive clause.
-    """
-    verb, title = PHASE_HEADLINES.get(state, ("Working", state.replace("_", " ").title()))
-    payload: dict = {"type": "phase", "state": state, "verb": verb, "title": detail or title}
-    return f'data: {json.dumps(payload)}\n\n'
-
 
 # ── Tool command / output summarizers (expandable step detail) ────────
 # Arg keys that best answer "what did the tool run with", in priority
@@ -1322,6 +1925,26 @@ _OUTPUT_KEYS = ("output", "stdout", "text", "preview", "summary",
                 "message", "content")
 _MAX_COMMAND_CHARS = 600
 _MAX_OUTPUT_CHARS = 500
+
+# Regex to strip raw SQL/DB internals from displayed command text.
+# Matches [Schema: ...] blocks and common ERP-style internal column IDs
+# (F-prefixed uppercase like FMATERIALID, FREALQTY, etc.).
+# NOTE: We intentionally do NOT strip generic table/column names since
+# different databases use different naming conventions. Only strip clearly
+# internal/technical identifiers that users wouldn't understand.
+_SQL_HINT_PATTERN = re.compile(
+    r"\[Schema:[^\]]*\]"            # [Schema: ...] blocks
+    r"|\bF[A-Z][A-Z0-9_]+\b",      # F-prefixed internal IDs (FMATERIALID, etc.)
+    re.IGNORECASE,
+)
+
+
+def _strip_sql_hints(text: str) -> str:
+    """Remove raw SQL table/column names from a command string for display."""
+    cleaned = _SQL_HINT_PATTERN.sub("", text)
+    # Collapse whitespace left behind
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    return cleaned
 
 
 def _summarize_tool_command(tool_name: str, args: dict | None) -> str | None:
@@ -1338,6 +1961,9 @@ def _summarize_tool_command(tool_name: str, args: dict | None) -> str | None:
         val = args.get(key)
         if isinstance(val, str) and val.strip():
             val = val.strip()
+            # For ask_data_agent, strip raw SQL/ERP internals before display
+            if tool_name == "ask_data_agent":
+                val = _strip_sql_hints(val)
             if len(val) > _MAX_COMMAND_CHARS:
                 val = val[:_MAX_COMMAND_CHARS] + "…"
             return val
@@ -2409,7 +3035,7 @@ def _is_data_question(text: str | None) -> bool:
 #   action="none"     → guardrail did not trigger, accept the response
 #   action="nudge"    → inject the message and retry the LLM call
 #   action="fallback" → replace the hallucinated content with the message and break
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 
 class _GuardrailResult(NamedTuple):
@@ -2787,9 +3413,9 @@ def _finish_line_tool_choice(
         ``"none"`` on the final iteration (unless dashboard-forced), else the
         incoming ``tool_choice`` unchanged.
     """
-    if iteration >= final_iteration and not dashboard_forced:
-        return "none"
-    return tool_choice
+    return maybe_force_finish_line(
+        iteration, final_iteration, dashboard_forced, tool_choice
+    )
 
 
 @router.get("/agents/runtime")
@@ -3057,6 +3683,12 @@ async def add_message(
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
     user_model_v2: str | None = body.get("model")
+    # FIX 2026-08-23: extract selected skill from chip so
+    # _build_selected_skill_runtime_block can inject SKILL.md
+    selected_skill_v2 = body.get("selected_skill") if isinstance(body.get("selected_skill"), dict) else None
+    selected_skill_id_v2 = body.get("selected_skill_id") or (selected_skill_v2 or {}).get("id")
+    if selected_skill_v2 and selected_skill_id_v2 and not selected_skill_v2.get("id"):
+        selected_skill_v2["id"] = selected_skill_id_v2
 
     # ── Hierarchical LLM resolution ─────────────────────────────────
     # Honor the per-message body project_id (the frontend sends the
@@ -3200,6 +3832,21 @@ async def add_message(
                     conversation_id,
                 )
                 _plan_trigger = PlanTrigger(True, 1.0, {"followup": 1}, source="followup-override")
+            # Data-bound override (same logic as v3 path): when the agent
+            # has knowledge bases bound, OR the conversation has a pinned
+            # data source, route through SynexiaFSM so quality gates are
+            # enforced. Non-data intents (greeting/thanks) stay on the
+            # direct path.
+            _v2_bound_count = len(agent_app.knowledge_bases) if (agent_app and agent_app.knowledge_bases) else 0
+            _v2_pinned = bool((conv.metadata_ or {}).get("data_source_id")) if conv else False
+            _v2_has_data_ctx = _v2_bound_count > 0 or _v2_pinned
+            if not _plan_trigger and _v2_has_data_ctx and not _is_non_data_intent(user_content):
+                logger.info(
+                    "v2 add_message: data-bound override — bound=%d pinned=%s, "
+                    "routing to SynexiaFSM (conv=%s)",
+                    _v2_bound_count, _v2_pinned, conversation_id,
+                )
+                _plan_trigger = PlanTrigger(True, 1.0, {"data_bound": _v2_bound_count, "pinned": int(_v2_pinned)}, source="data-bound-override")
             if _plan_trigger and is_fsm_enabled():
                 logger.info(
                     "v2 add_message: planning trigger fired "
@@ -3399,6 +4046,18 @@ async def add_message(
                     )
             except Exception:
                 pass  # Catalog injection is best-effort
+
+            # FIX 2026-08-23: inject the user-selected skill's SKILL.md
+            # body as a hard runtime directive so the LLM follows it.
+            _sel_skill_block = _build_selected_skill_runtime_block(
+                db, selected_skill_v2, selected_skill_id_v2,
+            )
+            if _sel_skill_block:
+                system_prompt += "\n\n" + _sel_skill_block
+                logger.info(
+                    "v2 selected_runtime_skill injected for conv=%s, skill_id=%s",
+                    conversation_id, selected_skill_id_v2,
+                )
 
         # Get tool definitions (uses registry if tool_config is set)
         tools = get_tools(agent_name, tool_config, agent_app)
@@ -4159,37 +4818,18 @@ async def add_message(
             # return_exceptions=True ensures one failure doesn't cancel siblings
             # (which would leave un-replied tool_use blocks that the LLM API rejects).
             # P0: guardrail before_call checks for loop patterns before executing.
-            if len(parsed_calls) == 1:
-                call = parsed_calls[0]
-                _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-                if _gd.allows_execution:
-                    results = [await execute_tool(
-                        call["tool_name"], call["args"], db,
-                        user.id if user else None, context=ctx,
-                    )]
-                else:
-                    results = [json.loads(_guardrail_synthetic_result(_gd))]
-            else:
-                async def _exec_one(call):
-                    _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-                    if _gd.allows_execution:
-                        return await execute_tool(
-                            call["tool_name"], call["args"], db,
-                            user.id if user else None, context=ctx,
-                        )
-                    return json.loads(_guardrail_synthetic_result(_gd))
-                raw_results = await asyncio.gather(
-                    *[_exec_one(c) for c in parsed_calls],
-                    return_exceptions=True,
+            # P2-12: shared core in app.services.agent_loop.tool_executor.
+            async def _invoke(tool_name, args):
+                return await execute_tool(
+                    tool_name, args, db, user.id if user else None, context=ctx,
                 )
-                # Convert exceptions to error dicts so processing is uniform
-                results = []
-                for i, r in enumerate(raw_results):
-                    if isinstance(r, Exception):
-                        logger.warning("Tool '%s' raised exception: %s", parsed_calls[i]["tool_name"], r)
-                        results.append({"success": False, "error": f"{type(r).__name__}: {r}"})
-                    else:
-                        results.append(r)
+
+            results = await execute_tool_batch(
+                parsed_calls,
+                before_call=guard_ctrl.before_call,
+                invoke=_invoke,
+                blocked_result_factory=_guardrail_synthetic_result,
+            )
 
             # Process results in original order, building frontend records + LLM messages.
             # If any result requires approval, pause the loop after recording the
@@ -4245,6 +4885,13 @@ async def add_message(
                                 system_prompt, msgs, endpoint=_ep
                             )
 
+                        # FIX 2026-08-23: resolve skill context for synthesis
+                        _v2_skill_name, _v2_skill_method = _resolve_skill_for_synthesis(
+                            tool_calls_for_frontend,
+                            selected_skill_v2,
+                            selected_skill_id_v2,
+                            db,
+                        )
                         synth_result = await synthesize_report(
                             user_message=user_content,
                             rows=result.get("rows"),
@@ -4252,38 +4899,55 @@ async def add_message(
                             source_name=result.get("source_name"),
                             source_id=result.get("source_id"),
                             call_llm_fn=_synth_call,
+                            skill_name=_v2_skill_name,
+                            skill_methodology=_v2_skill_method,
                         )
                         if synth_result.report_card_payload is not None:
-                            # ── FINALIZE: persist Artifact row + HTML blob ──
-                            artifact, file_exports = finalize_into_artifact(
-                                db,
-                                conversation_id=conversation_id,
-                                agent_name=agent_name,
-                                user_message=user_content,
-                                source=result.get("source_name"),
-                                sql=result.get("sql"),
-                                payload=synth_result.report_card_payload,
-                                message_id=assistant_msg_id,
-                            )
+                            # Always attach payload + synthesis text so the
+                            # frontend can suppress DataTableCard and show
+                            # the narrative.
                             result["report_card_payload"] = synth_result.report_card_payload.model_dump()
                             result["synthesis_text"] = synth_result.assistant_content
+                            # ── FINALIZE: persist Artifact row + HTML blob ──
+                            # FIX 2026-08-22: only create an artifact card
+                            # when the user explicitly asked for a file
+                            # deliverable. For simple data questions the
+                            # synthesis text IS the answer — no card needed.
+                            if _orch_doc_format:
+                                artifact, file_exports = finalize_into_artifact(
+                                    db,
+                                    conversation_id=conversation_id,
+                                    agent_name=agent_name,
+                                    user_message=user_content,
+                                    source=result.get("source_name"),
+                                    sql=result.get("sql"),
+                                    payload=synth_result.report_card_payload,
+                                    message_id=assistant_msg_id,
+                                )
 
-                            if file_exports:
-                                result["file_exports"] = file_exports
-                                primary_fmt = next(iter(file_exports))
-                                export = file_exports[primary_fmt]
-                                export_artifact_id = export.get("artifact_id")
-                                if export_artifact_id:
-                                    result["artifact_id"] = export_artifact_id
-                                    artifact_ids.append(export_artifact_id)
-                            if artifact is not None:
-                                if not file_exports:
-                                    result["artifact_id"] = artifact.id
-                                    artifact_ids.append(artifact.id)
-                            logger.info(
-                                "FINALIZE: artifact_id=%s attached to tool result for conv=%s",
-                                getattr(artifact, 'id', None) if artifact else None, conversation_id,
-                            )
+                                if file_exports:
+                                    result["file_exports"] = file_exports
+                                    primary_fmt = next(iter(file_exports))
+                                    export = file_exports[primary_fmt]
+                                    export_artifact_id = export.get("artifact_id")
+                                    if export_artifact_id:
+                                        result["artifact_id"] = export_artifact_id
+                                        artifact_ids.append(export_artifact_id)
+                                if artifact is not None:
+                                    if not file_exports:
+                                        result["artifact_id"] = artifact.id
+                                        artifact_ids.append(artifact.id)
+                                logger.info(
+                                    "FINALIZE: artifact_id=%s attached to tool result for conv=%s",
+                                    getattr(artifact, 'id', None) if artifact else None, conversation_id,
+                                )
+                            else:
+                                artifact = None
+                                file_exports = {}
+                                logger.info(
+                                    "FINALIZE: skipped artifact creation (no file intent) for conv=%s",
+                                    conversation_id,
+                                )
 
                             logger.info(
                                 "Synthesized report card for conv=%s (title=%r, kpis=%d, insights=%d)",
@@ -4304,45 +4968,70 @@ async def add_message(
                     # gate above requires truthy rows). Finalize a graceful
                     # "no data" report deterministically so the user still
                     # receives the requested file with a clear narrative.
+                    #
+                    # FIX 2026-08-24: if a previous turn successfully fetched
+                    # data, skip the no-data artifact here and let the post-loop
+                    # deferred finalize reuse the historical rows instead of
+                    # producing a useless warning-filled file.
+                    _has_historical_data = False
                     try:
-                        no_data_payload = build_no_data_payload(
-                            user_message=user_content,
-                            source=result.get("source_name"),
-                            sql=result.get("sql"),
+                        from app.services.generation_orchestrator import (
+                            _mine_historical_answer_rows,
                         )
-                        artifact, file_exports = finalize_into_artifact(
-                            db,
-                            conversation_id=conversation_id,
-                            agent_name=agent_name,
-                            user_message=user_content,
-                            source=result.get("source_name"),
-                            sql=result.get("sql"),
-                            payload=no_data_payload,
-                            message_id=assistant_msg_id,
+                        _has_historical_data = bool(
+                            _mine_historical_answer_rows(messages)
                         )
-                        result["report_card_payload"] = no_data_payload.model_dump()
-                        result["no_data"] = True
-
-                        if file_exports:
-                            result["file_exports"] = file_exports
-                            primary_fmt = next(iter(file_exports))
-                            export_artifact_id = file_exports[primary_fmt].get("artifact_id")
-                            if export_artifact_id:
-                                result["artifact_id"] = export_artifact_id
-                                artifact_ids.append(export_artifact_id)
-                        if artifact is not None and not file_exports:
-                            result["artifact_id"] = artifact.id
-                            artifact_ids.append(artifact.id)
+                    except Exception:
+                        pass
+                    if _has_historical_data:
                         logger.info(
-                            "FINALIZE (no-data): artifact_id=%s attached for conv=%s (doc_format=%s)",
-                            getattr(artifact, 'id', None) if artifact else None,
-                            conversation_id, _orch_doc_format,
+                            "MID-LOOP no-data skipped: historical data exists "
+                            "from previous turn (conv=%s)",
+                            conversation_id,
                         )
-                    except Exception as no_data_err:
-                        logger.warning(
-                            "No-data finalize failed (non-fatal) for conv=%s: %s",
-                            conversation_id, no_data_err,
-                        )
+                        # Mark the result so the frontend shows a pending state
+                        # rather than a completed no-data card.
+                        result["awaiting_historical_reuse"] = True
+                    else:
+                        try:
+                            no_data_payload = build_no_data_payload(
+                                user_message=user_content,
+                                source=result.get("source_name"),
+                                sql=result.get("sql"),
+                            )
+                            artifact, file_exports = finalize_into_artifact(
+                                db,
+                                conversation_id=conversation_id,
+                                agent_name=agent_name,
+                                user_message=user_content,
+                                source=result.get("source_name"),
+                                sql=result.get("sql"),
+                                payload=no_data_payload,
+                                message_id=assistant_msg_id,
+                            )
+                            result["report_card_payload"] = no_data_payload.model_dump()
+                            result["no_data"] = True
+
+                            if file_exports:
+                                result["file_exports"] = file_exports
+                                primary_fmt = next(iter(file_exports))
+                                export_artifact_id = file_exports[primary_fmt].get("artifact_id")
+                                if export_artifact_id:
+                                    result["artifact_id"] = export_artifact_id
+                                    artifact_ids.append(export_artifact_id)
+                            if artifact is not None and not file_exports:
+                                result["artifact_id"] = artifact.id
+                                artifact_ids.append(artifact.id)
+                            logger.info(
+                                "FINALIZE (no-data): artifact_id=%s attached for conv=%s (doc_format=%s)",
+                                getattr(artifact, 'id', None) if artifact else None,
+                                conversation_id, _orch_doc_format,
+                            )
+                        except Exception as no_data_err:
+                            logger.warning(
+                                "No-data finalize failed (non-fatal) for conv=%s: %s",
+                                conversation_id, no_data_err,
+                            )
 
                 tool_call_record = {
                     "id": tool_call_id,
@@ -5381,21 +6070,16 @@ async def resume_conversation(
                 return conv.to_dict()
             # Sanitiser rejected — fall through to normal flow.
 
-        if len(parsed_calls) == 1:
-            call = parsed_calls[0]
-            _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-            if _gd.allows_execution:
-                results = [await execute_tool(call["tool_name"], call["args"], db, user.id if user else None, context=ctx)]
-            else:
-                results = [json.loads(_guardrail_synthetic_result(_gd))]
-        else:
-            async def _exec_one_resume(call):
-                _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-                if _gd.allows_execution:
-                    return await execute_tool(call["tool_name"], call["args"], db, user.id if user else None, context=ctx)
-                return json.loads(_guardrail_synthetic_result(_gd))
-            raw_results = await asyncio.gather(*[_exec_one_resume(c) for c in parsed_calls], return_exceptions=True)
-            results = [{"success": False, "error": f"{type(r).__name__}: {r}"} if isinstance(r, Exception) else r for r in raw_results]
+        # P2-12: shared core in app.services.agent_loop.tool_executor.
+        async def _invoke_resume(tool_name, args):
+            return await execute_tool(tool_name, args, db, user.id if user else None, context=ctx)
+
+        results = await execute_tool_batch(
+            parsed_calls,
+            before_call=guard_ctrl.before_call,
+            invoke=_invoke_resume,
+            blocked_result_factory=_guardrail_synthetic_result,
+        )
 
         # Check for approval pause again (a resumed conversation could hit another write tool)
         paused_again = False
@@ -5845,25 +6529,48 @@ async def _call_synthesis_llm(
     payload = {
         "model": _model,
         "messages": full_messages,
+        "max_tokens": getattr(settings, "LLM_SYNTH_MAX_TOKENS", 6144),
     }
     if not model_has_fixed_temperature(_model):
         payload["temperature"] = 0.7
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            resp = await client.post(_url, headers=_headers, json=payload)
-            resp.raise_for_status()
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(
-            status_code=e.response.status_code,
-            detail=f"LLM API error: {e.response.text}",
-        )
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"LLM request failed: {str(e)}")
 
-    data = resp.json()
-    choice = data["choices"][0]
-    message = choice.get("message", {})
-    return {"content": message.get("content", "") or ""}
+    async def _try_call(trim_rows: bool = False) -> dict:
+        _payload = dict(payload)
+        if trim_rows:
+            # Trim visible rows in user messages to first 30 to reduce context
+            _payload["messages"] = [
+                {**m, "content": m["content"][:8000]}
+                if m.get("role") == "user" and isinstance(m.get("content"), str)
+                else m
+                for m in _payload["messages"]
+            ]
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            resp = await client.post(_url, headers=_headers, json=_payload)
+            _sc = getattr(resp, "status_code", 0)
+            if isinstance(_sc, int) and _sc >= 400:
+                logger.warning(
+                    "Synthesis LLM HTTP %s body: %s",
+                    _sc, resp.text[:500],
+                )
+            resp.raise_for_status()
+        data = resp.json()
+        choice = data["choices"][0]
+        message = choice.get("message", {})
+        return {"content": message.get("content", "") or ""}
+
+    try:
+        return await _try_call()
+    except (httpx.HTTPStatusError, httpx.RequestError) as e:
+        logger.warning("Synthesis LLM failed, retrying with trimmed context: %s", e)
+        try:
+            return await _try_call(trim_rows=True)
+        except httpx.HTTPStatusError as e2:
+            raise HTTPException(
+                status_code=e2.response.status_code,
+                detail=f"LLM API error: {e2.response.text}",
+            )
+        except httpx.RequestError as e2:
+            raise HTTPException(status_code=502, detail=f"LLM request failed: {str(e2)}")
 
 
 async def _call_llm_with_tools(
@@ -5918,11 +6625,16 @@ async def _call_llm_with_tools(
     }
     if not model_has_fixed_temperature(_model):
         payload["temperature"] = temperature if temperature is not None else 0.7
-    if max_tokens is not None:
-        payload["max_tokens"] = max_tokens
+    # Per-model context-aware clamp (replaces the old global hard-cap hack).
+    _clamped_max = _clamp_max_tokens_for_context(max_tokens, endpoint, messages=messages, tools=tools)
+    if _clamped_max is not None:
+        payload["max_tokens"] = _clamped_max
     if tools:
         payload["tools"] = tools
-    if tool_choice:
+    # Proactively skip tool_choice for models that reject it (vLLM without
+    # --enable-auto-tool-choice). Tool calls are recovered from content text.
+    _skip_tool_choice = _should_skip_tool_choice(endpoint)
+    if tool_choice and not _skip_tool_choice:
         payload["tool_choice"] = tool_choice
 
     try:
@@ -5966,6 +6678,15 @@ async def _call_llm_with_tools(
     message = choice["message"]
     content = message.get("content", "") or ""
     raw_tool_calls = message.get("tool_calls", [])
+    # Fallback: models like qwen3 (without vLLM --enable-auto-tool-choice)
+    # embed tool calls in content text instead of the structured field.
+    if not raw_tool_calls and content:
+        extracted = _extract_tool_calls_from_content(content)
+        if extracted:
+            logger.info("extracted %d tool_call(s) from content (model=%s)",
+                        len(extracted), model_override or "default")
+            raw_tool_calls = extracted
+            content = _strip_tool_call_markup(content) or content
     # P0: surface provider reasoning (DeepSeek-R1 reasoning_content,
     # Claude thinking, OpenAI o1 reasoning). Returns "" when absent —
     # the v3 SSE emitter treats absence as a no-op.
@@ -5976,6 +6697,292 @@ async def _call_llm_with_tools(
         "tool_calls": raw_tool_calls,
         "reasoning": reasoning or "",
     }
+
+
+# ---------------------------------------------------------------------------
+# Helper: extract tool_calls from assistant content (qwen3, hermes, etc.)
+# ---------------------------------------------------------------------------
+
+import uuid as _uuid
+
+
+def _should_skip_tool_choice(endpoint: "LLMEndpoint | None") -> bool:
+    """Proactively omit ``tool_choice`` for models that reject it.
+
+    vLLM served WITHOUT ``--enable-auto-tool-choice`` rejects the
+    ``tool_choice`` field with HTTP 400. We used to find out reactively (one
+    full round-trip wasted per forced-tool iteration). When the resolved
+    endpoint declares ``supports_structured_tool_calls=False`` we just skip the
+    field — the model still emits tool calls (as XML in content), which
+    ``_extract_tool_calls_from_content`` recovers afterwards.
+    """
+    if endpoint is not None and not endpoint.supports_structured_tool_calls:
+        return True
+    return False
+
+
+def _estimate_input_tokens(
+    messages: list[dict],
+    tools: list[dict] | None = None,
+) -> int:
+    """Rough token estimate for messages + tool definitions.
+
+    Uses ~3.5 chars/token (slightly conservative for mixed EN/CJK) and
+    accounts for tool JSON schemas which are sent outside ``messages`` but
+    still consume context tokens.  Adds a flat +200 overhead for system
+    prompt structural tokens (role markers, special tokens, etc.).
+    """
+    total_chars = sum(
+        len(m.get("content", "")) + len(m.get("role", ""))
+        for m in messages if isinstance(m, dict)
+    )
+    msg_tokens = max(1, total_chars // 4)  # 4 chars/token for messages (role overhead is small)
+
+    # Tool definitions: each tool schema is typically 200-600 tokens.
+    # Use json-length / 3.5 as a rough estimate.
+    tool_tokens = 0
+    if tools:
+        tool_chars = sum(len(str(t)) for t in tools)
+        tool_tokens = max(0, tool_chars // 4)
+
+    # Flat overhead for system/structural tokens (role markers, special tokens, chat template)
+    overhead = 200
+
+    return msg_tokens + tool_tokens + overhead
+
+
+def _clamp_max_tokens_for_context(
+    max_tokens: int | None,
+    endpoint: "LLMEndpoint | None",
+    *,
+    messages: list[dict] | None = None,
+    tools: list[dict] | None = None,
+) -> int | None:
+    """Clamp ``max_tokens`` so input + output stays within the model's context.
+
+    Three clamping layers (applied in order):
+
+    1. **Per-model max_output_tokens** (``LlmModel.max_output_tokens`` →
+       ``LLMEndpoint.max_output_tokens``): hard ceiling regardless of input.
+    2. **Dynamic context headroom**: when ``messages`` is provided, estimates
+       input tokens (including tool definitions) and reserves a 512-token
+       safety buffer so ``input + max_tokens ≤ context_window``.
+       Falls back to the old static 20% heuristic when messages are not available.
+    3. **Legacy static 20% headroom**: used as a safety net when the caller
+       does not provide ``messages``.
+
+    Returns the (possibly reduced) ``max_tokens``, or ``None`` when no
+    clamping is possible (missing endpoint / context_window).
+    """
+    if max_tokens is None or endpoint is None or endpoint.context_window is None:
+        # Even without context_window, apply per-model max_output_tokens.
+        if max_tokens is not None and endpoint is not None and endpoint.max_output_tokens is not None:
+            if max_tokens > endpoint.max_output_tokens:
+                logger.info(
+                    "clamped max_tokens %d → %d (per-model max_output_tokens for model=%s)",
+                    max_tokens, endpoint.max_output_tokens, endpoint.model_id,
+                )
+                return endpoint.max_output_tokens
+        return max_tokens
+
+    effective = max_tokens
+
+    # Layer 1: per-model max_output_tokens ceiling
+    if endpoint.max_output_tokens is not None and effective > endpoint.max_output_tokens:
+        logger.info(
+            "clamped max_tokens %d → %d (per-model max_output_tokens for model=%s)",
+            effective, endpoint.max_output_tokens, endpoint.model_id,
+        )
+        effective = endpoint.max_output_tokens
+
+    # Layer 2: dynamic headroom based on actual input size
+    if messages is not None:
+        input_est = _estimate_input_tokens(messages, tools=tools)
+        # 512-token safety buffer: covers tokenizer differences, special tokens,
+        # and chat-template overhead that our rough estimate misses.
+        dynamic_max = max(256, endpoint.context_window - input_est - 512)
+        if effective > dynamic_max:
+            logger.info(
+                "clamped max_tokens %d → %d (input_est=%d, context_window=%d for model=%s)",
+                effective, dynamic_max, input_est, endpoint.context_window, endpoint.model_id,
+            )
+            effective = dynamic_max
+    else:
+        # Layer 3: static 20% headroom fallback
+        safe_max = max(256, int(endpoint.context_window * 0.8))
+        if effective > safe_max:
+            logger.info(
+                "clamped max_tokens %d → %d (context_window=%d for model=%s)",
+                effective, safe_max, endpoint.context_window, endpoint.model_id,
+            )
+            effective = safe_max
+
+    return effective
+
+
+def _extract_tool_calls_from_content(content: str) -> list[dict]:
+    """Parse tool calls embedded in assistant content text.
+
+    Some models (e.g. qwen3 without ``--enable-auto-tool-choice`` on vLLM)
+    return tool calls as text markup instead of structured ``tool_calls``.
+    Supported formats:
+
+    1. **qwen3 XML-style**::
+
+           <function=func_name>
+           <parameter=param1>
+           value1
+           </parameter>
+           <parameter=param2>
+           value2
+           </parameter>
+           </function>
+
+    2. **Hermes / Qwen standard**::
+
+           ✅
+           {"name": "func_name", "arguments": {"param1": "value1"}}
+
+    3. **Qwen native**::
+
+           Function: func_name
+           Arguments: {"param1": "value1"}
+
+    Returns a list of OpenAI-shaped tool_calls dicts, or ``[]`` if none found.
+    The caller should only use this when the LLM response has no structured
+    ``tool_calls``.
+    """
+    if not content:
+        return []
+
+    tool_calls = []
+
+    # ── Format 1: qwen3 XML-style <function=…><parameter=…>… ──
+    xml_pattern = re.compile(
+        r"<function=(?P<name>\w+)>(?P<params>.*?)</function>",
+        re.DOTALL,
+    )
+    for m in xml_pattern.finditer(content):
+        fn_name = m.group("name")
+        params_text = m.group("params")
+        args = {}
+        param_pattern = re.compile(
+            r"<parameter=(?P<key>\w+)>(?P<value>.*?)</parameter>",
+            re.DOTALL,
+        )
+        for pm in param_pattern.finditer(params_text):
+            val = pm.group("value").strip()
+            try:
+                val = json.loads(val)
+            except Exception:
+                pass
+            args[pm.group("key")] = val
+        tool_calls.append({
+            "id": f"call_{_uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {
+                "name": fn_name,
+                "arguments": json.dumps(args, ensure_ascii=False),
+            },
+        })
+
+    if tool_calls:
+        return tool_calls
+
+    # ── Format 2: Hermes-style ✅{…} ──
+    hermes_pattern = re.compile(
+        r"✅\s*\n?\s*(\{.*?\})",
+        re.DOTALL,
+    )
+    for m in hermes_pattern.finditer(content):
+        raw = m.group(1).strip()
+        try:
+            obj = json.loads(raw)
+            fn_name = obj.get("name", "")
+            fn_args = obj.get("arguments", {})
+            if fn_name:
+                tool_calls.append({
+                    "id": f"call_{_uuid.uuid4().hex[:24]}",
+                    "type": "function",
+                    "function": {
+                        "name": fn_name,
+                        "arguments": json.dumps(fn_args, ensure_ascii=False)
+                            if isinstance(fn_args, dict) else str(fn_args),
+                    },
+                })
+        except Exception:
+            logger.debug("hermes tool_call parse failed for: %s", raw[:120])
+
+    if tool_calls:
+        return tool_calls
+
+    # ── Format 3: Qwen native Function: / Arguments: ──
+    qwen_native = re.compile(
+        r"Function:\s*(?P<name>\w+)\s*\n\s*Arguments:\s*(?P<args>\{.*?\})",
+        re.DOTALL,
+    )
+    for m in qwen_native.finditer(content):
+        fn_name = m.group("name")
+        raw_args = m.group("args").strip()
+        try:
+            fn_args = json.loads(raw_args)
+        except Exception:
+            fn_args = {}
+        tool_calls.append({
+            "id": f"call_{_uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {
+                "name": fn_name,
+                "arguments": json.dumps(fn_args, ensure_ascii=False)
+                    if isinstance(fn_args, dict) else raw_args,
+            },
+        })
+
+    return tool_calls
+
+
+def _strip_tool_call_markup(content: str) -> str:
+    """Remove tool-call markup and thinking preamble from content text.
+
+    When models (e.g. qwen3 without vLLM --enable-auto-tool-choice) embed
+    tool calls as text, the content before the tool call is usually a long
+    chain-of-thought monologue.  We strip that preamble when tool calls are
+    present because:
+    - It wastes context budget if appended to conversation history.
+    - It is NOT the user-facing answer (the tool result will produce that).
+    - It confuses the answer-verification system.
+
+    The heuristic: if after stripping markup the remaining text is ≤60 chars
+    or looks like a thinking monologue (no sentence-ending punctuation in a
+    long block), replace it with an empty string so the tool-call iteration
+    proceeds with a clean ``assistant_content``.
+    """
+    # 1) Strip tool-call markup blocks
+    clean = re.sub(r"<function=\w+>.*?</function>", "", content, flags=re.DOTALL).strip()
+    clean = re.sub(r"✅\s*\n?\s*\{.*?\}", "", clean, flags=re.DOTALL).strip()
+    clean = re.sub(r"Function:\s*\w+\s*\n\s*Arguments:\s*\{.*?\}", "", clean, flags=re.DOTALL).strip()
+
+    # 2) If the remaining text is very short, keep it as-is (could be a
+    #    real greeting/preamble the user should see).
+    if len(clean) <= 60:
+        return clean
+
+    # 3) If the text looks like a thinking monologue (many lines, no clear
+    #    user-facing answer), truncate it.  Heuristic: >5 newlines or
+    #    contains self-referential markers ("I should", "Let me",
+    #    "I will", "Wait,", "Proceeding") → strip entirely.
+    thinking_markers = re.compile(
+        r"I should|I will|Let me|Wait,|Self-Correction|Proceeding|"
+        r"Tool call generation|✅|I'll just call it|I need to",
+        re.IGNORECASE,
+    )
+    newline_count = clean.count("\n")
+    if newline_count > 5 or thinking_markers.search(clean):
+        # Thinking preamble — don't keep it in assistant_content.
+        # Return empty so the tool-call iteration is clean.
+        return ""
+
+    return clean
 
 
 # ---------------------------------------------------------------------------
@@ -6151,11 +7158,16 @@ async def _stream_llm_with_tools(
     }
     if not model_has_fixed_temperature(_model):
         base_payload["temperature"] = temperature if temperature is not None else 0.7
-    if max_tokens is not None:
-        base_payload["max_tokens"] = max_tokens
+    # Per-model context-aware clamp (replaces the old global hard-cap hack).
+    _clamped_max = _clamp_max_tokens_for_context(max_tokens, endpoint, messages=messages, tools=tools)
+    if _clamped_max is not None:
+        base_payload["max_tokens"] = _clamped_max
     if tools:
         base_payload["tools"] = tools
-    if tool_choice:
+    # Proactively skip tool_choice for models that reject it (vLLM without
+    # --enable-auto-tool-choice). Tool calls are recovered from content text.
+    _skip_tool_choice = _should_skip_tool_choice(endpoint)
+    if tool_choice and not _skip_tool_choice:
         base_payload["tool_choice"] = tool_choice
 
     # DeepSeek thinking-mode quirk: when the configured model returns
@@ -6298,7 +7310,7 @@ async def _stream_llm_with_tools(
                 async for ev in _attempt(client, base_payload):
                     yield ev
             except httpx.HTTPStatusError:
-                if not tool_choice:
+                if not tool_choice or _skip_tool_choice:
                     raise
                 logger.warning(
                     "LLM stream with tool_choice failed; retrying without it",
@@ -6317,7 +7329,7 @@ async def _stream_llm_with_tools(
                     async for ev in _attempt(prod_client, base_payload):
                         yield ev
                 except httpx.HTTPStatusError:
-                    if not tool_choice:
+                    if not tool_choice or _skip_tool_choice:
                         raise
                     logger.warning(
                         "LLM stream with tool_choice failed; retrying without it",
@@ -6352,6 +7364,15 @@ async def _stream_llm_with_tools(
         assembled = [tc_buffer[i] for i in sorted(tc_buffer)]
         yield ("tool_calls", assembled)
     else:
+        # Fallback: models like qwen3 (without vLLM --enable-auto-tool-choice)
+        # embed tool calls in content text instead of streaming tool_call deltas.
+        if full_content:
+            extracted = _extract_tool_calls_from_content(full_content)
+            if extracted:
+                logger.info("stream: extracted %d tool_call(s) from content", len(extracted))
+                full_content = _strip_tool_call_markup(full_content) or full_content
+                yield ("tool_calls", extracted)
+                return
         if not full_content:
             logger.warning(
                 "LLM returned empty content (finish_reason=%s, conv=%s)",
@@ -7224,6 +8245,63 @@ async def add_message_stream(
                 conversation_id,
             )
             _v3_plan_trigger = PlanTrigger(True, 1.0, {"followup": 1}, source="followup-override")
+        # Data-bound override: when the agent has bound data sources
+        # (bound_kb_ids non-empty) OR the conversation has a pinned
+        # data source, always route through SynexiaFSM so quality gates
+        # (degenerate-result retry, wrong-grain detection, coverage check,
+        # bounce-back guard) are enforced. Exception: non-data intents
+        # (greeting/thanks/help/capability) stay on the direct path for
+        # speed. No domain keywords — works for any customer's schema
+        # and in Chinese.
+        _has_data_context = bool(_v3_bound) or bool(_v3_pinned_dsr_id)
+        if (
+            not _v3_plan_trigger
+            and _has_data_context
+            and not _is_non_data_intent(user_content)
+        ):
+            logger.info(
+                "v3 add_message_stream: data-bound override — bound=%d pinned=%s, "
+                "routing to SynexiaFSM (conv=%s, msg=%.60s)",
+                len(_v3_bound), bool(_v3_pinned_dsr_id),
+                conversation_id, user_content[:60],
+            )
+            _v3_plan_trigger = PlanTrigger(
+                True, 1.0,
+                {"data_bound": len(_v3_bound), "pinned": int(bool(_v3_pinned_dsr_id))},
+                source="data-bound-override",
+            )
+        # Data-tool override: when the agent's tool list contains data tools
+        # (ask_data_agent / execute_query / execute_sql / sql_query), the agent
+        # is data-capable even if bound_kb_ids is empty (e.g. project-scoped
+        # KBs haven't been materialized yet).  Route data queries through the
+        # FSM so the quality gates / no-JSON prompt / bounce-back guard fire.
+        # Conservative: only fires for unambiguous data intent (≥ 6 words OR
+        # contains data/analytics keywords).
+        if not _v3_plan_trigger and is_fsm_enabled() and not _is_non_data_intent(user_content):
+            from app.services.synexia.data_intent import (
+                _DATA_TOOL_NAMES,
+                _is_unambiguous_data_query,
+                _agent_has_data_tool,
+            )
+            _agent_tool_names = set(
+                (tool.get("name") or tool.get("type") or "")
+                for tool in (body.get("tools") or [])
+            )
+            if (
+                _agent_has_data_tool(_agent_tool_names | _DATA_TOOL_NAMES)
+                and _is_unambiguous_data_query(user_content)
+            ):
+                logger.info(
+                    "v3 add_message_stream: data-tool override — agent has "
+                    "data tools, message is data query → routing to SynexiaFSM "
+                    "(conv=%s, msg=%.60s)",
+                    conversation_id, user_content[:60],
+                )
+                _v3_plan_trigger = PlanTrigger(
+                    True, 1.0,
+                    {"data_tools": 1},
+                    source="data-tool-override",
+                )
         # Automation force-planning (Phase 5 — Manus parity): when the caller
         # sets ``force_planning`` in the body (the automation executor does
         # this for every scheduled run), bypass the classifier and route
@@ -7256,10 +8334,29 @@ async def add_message_stream(
                 the same token-streaming UX as ReAct turns.
                 """
                 collected: list[str] = []
+                # Typed live-activity events for this turn: appended alongside
+                # their SSE frames so the assistant Message persists the same
+                # structured feed (collapsed summary on reload).
+                live_events: list[dict] = []
+                _live_event_count = [0]
+
+                def _push_live(event_type: str, label_key: str, params: dict | None = None) -> None:
+                    """Build a live event, append its SSE frame, record for persistence."""
+                    _ev = _build_live_event(event_type, label_key, params, count=_live_event_count)
+                    if _ev is not None:
+                        collected.append(_sse_live_event(_ev))
+                        live_events.append(_ev)
 
                 def _on_state(state: str) -> None:
                     collected.append(_emit_fsm_state(state))
                     collected.append(_emit_phase(state))
+                    # Live feed: typed phase_enter for every FSM transition.
+                    _push_live("phase_enter", f"phase_enter.{state}")
+                    # FINALIZE is only entered after VERIFY succeeds — surface
+                    # the pass + the finalize start as typed feed events.
+                    if state == "finalize":
+                        _push_live("verify_passed", "verify_passed")
+                        _push_live("finalize_started", "finalize_started")
 
                 _v3_agent_name = conv.agent_name or "general_assistant"
                 _v3_org_id = getattr(conv, "org_id", None) or "default-org"
@@ -7323,6 +8420,32 @@ async def add_message_stream(
                             tool_name=tool_name,
                             detail=detail,
                         ))
+                        # Live feed: typed tool events for tool/skill nodes —
+                        # spinner on start, checkmark (or failure/retry) on
+                        # terminal status. Structured params only.
+                        if ntype in ("tool", "skill"):
+                            if status == "running":
+                                _push_live("tool_call_started", "tool_call_started", {"tool_label": name})
+                            elif status == "completed":
+                                _push_live("tool_call_finished", "tool_call_finished", {"tool_label": name})
+                            elif status in ("failed", "denied", "skipped"):
+                                _push_live("tool_call_failed", "tool_call_failed", {"tool_label": name})
+                            elif status == "replanning":
+                                _push_live("retry", "retry", {"target": name})
+                        elif ntype == "plan" and status == "running":
+                            # Plan summary card. Step labels come from
+                            # node_dict.children[*].name when the plan DAG is
+                            # available; otherwise we emit just the count.
+                            _children = (node_dict or {}).get("children") or []
+                            _step_names = [
+                                str(c.get("name") or c.get("description") or "").strip()
+                                for c in _children if isinstance(c, dict)
+                            ]
+                            _step_names = [s for s in _step_names if s]
+                            _push_live(
+                                "plan_summary", "plan_summary",
+                                {"n": len(_step_names) or 1, "steps": _step_names[:8]},
+                            )
                     except Exception as _cb_err:  # noqa: BLE001 — observability only
                         logger.debug("on_plan_node SSE emit failed (non-fatal): %s", _cb_err)
 
@@ -7347,6 +8470,13 @@ async def add_message_stream(
                 # frontend can render the decomposed execution plan
                 # (nodes, status) before the final response streams in.
                 if fsm_result.plan_summary:
+                    _le_plan = _build_live_event(
+                        "plan_preview", "plan_preview",
+                        {"n": len(fsm_result.plan_summary)}, count=_live_event_count,
+                    )
+                    if _le_plan is not None:
+                        live_events.append(_le_plan)
+                        yield _sse_live_event(_le_plan)
                     yield f'data: {json.dumps({"type": "plan_summary", "plan": fsm_result.plan_summary})}\n\n'
 
                 # Stream the FINALIZE response token-by-token (like ReAct turns).
@@ -7395,6 +8525,7 @@ async def add_message_stream(
                             agent_name=_v3_agent_name,
                             trace=fsm_result.plan_summary or {},
                             reasoning=None,
+                            live_events=live_events or None,
                         )
                         db.add(msg)
                         db.commit()
@@ -7490,6 +8621,7 @@ async def add_message_stream(
                     "fsm_quality_gate": fsm_result.quality_gate,
                     "fsm_plan_summary": fsm_result.plan_summary,
                 }
+                _push_live("finalize_done", "finalize_done")
                 yield f'data: {json.dumps(done_payload)}\n\n'
 
             return StreamingResponse(
@@ -7702,6 +8834,19 @@ async def add_message_stream(
         except Exception:
             pass
 
+    # FIX 2026-08-23: inject the user-selected skill's SKILL.md body
+    # as a hard runtime directive (same pattern as v2 path above).
+    if selected_skill_id:
+        _sel_skill_block_v3 = _build_selected_skill_runtime_block(
+            db, selected_skill, selected_skill_id,
+        )
+        if _sel_skill_block_v3:
+            system_prompt += "\n\n" + _sel_skill_block_v3
+            logger.info(
+                "v3 selected_runtime_skill injected for conv=%s, skill_id=%s",
+                conversation_id, selected_skill_id,
+            )
+
     tools = get_tools(agent_name, tool_config, agent_app)
 
     # Reuse the pre-computed data-source runtime from above (avoids a
@@ -7723,6 +8868,36 @@ async def add_message_stream(
     except Exception as e:
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
     data_ctx_extras = _v3_data_ctx_extras or {}
+
+    # Concise-mode rule for data turns (2026-08-21): the model narrated the
+    # SQL it planned to run and pasted raw results into the final answer —
+    # long latency + internal artifacts in the bubble. Demand tool-first
+    # behavior and a clean synthesized answer.
+    try:
+        _tool_names = {
+            (t.get("function") or {}).get("name")
+            for t in (tools or [])
+            if isinstance(t, dict)
+        }
+    except Exception:
+        _tool_names = set()
+    if _tool_names & DATA_PRODUCING_TOOLS:
+        system_prompt += (
+            "\n\n## RESPONSE DISCIPLINE (data turns)\n"
+            "- Call the data tool FIRST. Do NOT narrate the SQL you plan to "
+            "run, and do NOT write out query text or column lists in prose.\n"
+            "- When you call `ask_data_agent`, include the `[schema: ...]` "
+            "block from the Bound Data Sources section in your question, and "
+            "keep the question SHORT (1-2 sentences). Do NOT paste raw SQL "
+            "or join hints — the Data Agent writes its own SQL.\n"
+            "- Do NOT paste raw query output (raw IDs, wide tables, JSON) "
+            "into your final answer. The platform renders data cards "
+            "automatically.\n"
+            "- Do NOT include a 'JSON Report Card' section or any raw JSON "
+            "payload in the final answer.\n"
+            "- After the data returns, answer with a short executive "
+            "summary: key numbers, trends, and one recommendation.\n"
+        )
 
     llm_messages = [{"role": "system", "content": system_prompt}]
     for msg in messages:
@@ -7786,8 +8961,13 @@ async def add_message_stream(
     tool_calls_for_frontend: list[dict] = []
     guardrail_retries = 0
     # Phase 1: one reactive-compaction pass per turn on stream context
-    # overflow (see the stream error handler).
-    _stream_compaction_attempted = False
+    # overflow (see the stream error handler). NOTE: must be a mutable list
+    # so the nested event_stream generator can flip it without declaring
+    # nonlocal — assigning the bare name inside event_stream() would make
+    # it local to event_stream, turning every earlier read into
+    # UnboundLocalError and killing the SSE stream (same trap as
+    # llm_messages, guardrail_retries, etc.).
+    _stream_compaction_attempted = [False]
     assistant_content = ""
     # Fix 2a: assistant_content length at the last ask_data_agent result, so
     # the text BETWEEN two ask_data_agent calls can be checked for retry
@@ -7804,6 +8984,13 @@ async def add_message_stream(
 
     async def event_stream():
         nonlocal assistant_content, guardrail_retries, messages, conv
+
+        # T18: mark this turn as dashboard-intent so the artifact persistence
+        # layer can drop stray analytics-path artifacts (e.g. a static "Web
+        # page" written from the agent's narration sentence) that would land on
+        # the same thread as the real dashboard app. Reset in the finally below
+        # so the flag never leaks across turns.
+        _dash_intent_token = set_dashboard_intent(bool(_is_dashboard_request(user_content)))
 
         # CRITICAL: FastAPI's ``get_db`` dependency closes the injected
         # ``db`` session in its ``finally`` block as soon as this endpoint
@@ -7841,8 +9028,28 @@ async def add_message_stream(
         _emitted_phases: set[str] = {"goal"}  # phase headlines already sent this turn
         reasoning_acc: list[str] = []  # P0: accumulate reasoning across iterations for final assistant_msg
 
+        # ── Typed live-activity feed (inline per-message stream) ──
+        # Parallel to the legacy numbered steps: structured events
+        # {type, label_key, params, ts} surfaced to the frontend's
+        # LiveActivityStream and persisted on the assistant message.
+        _live_events: list[dict] = []
+        _live_event_count = [0]
+
+        def _push_live_event(event_type: str, label_key: str, params: dict | None = None) -> str | None:
+            """Build a live event, record for persistence, return its SSE frame."""
+            _ev = _build_live_event(event_type, label_key, params, count=_live_event_count)
+            if _ev is not None:
+                _live_events.append(_ev)
+                return _sse_live_event(_ev)
+            return None
+
         # Claude-style phase headline: the turn always opens in "Fathoming".
         yield _emit_phase("goal")
+        # NOTE: the typed live feed deliberately does NOT emit phase_enter.goal
+        # here. The feed only materializes once the turn proves tool-bound
+        # (first tool batch) — chitchat turns that never call a tool render no
+        # activity box at all. The goal event is fired alongside the first
+        # act batch below.
 
         # Emit "Understanding your request" step (running → done)
         _step_counter[0] += 1
@@ -7893,6 +9100,23 @@ async def add_message_stream(
         # cross-turn repetitions (e.g. re-running the same automation via
         # "Run Now" every day) trip the in-turn guard on iteration 0.
         _turn_start_idx = max(0, len(llm_messages) - 1)
+        # Phase 3: dynamic tool budget — estimate how many ask_data_agent
+        # calls this query needs based on concept/metric count.
+        _dynamic_tool_caps: dict[str, int] = {}
+        if user_content:
+            _data_cap = _estimate_ask_data_agent_cap(user_content)
+            if _data_cap > TOOL_CALL_CAPS.get("ask_data_agent", 2):
+                _dynamic_tool_caps["ask_data_agent"] = _data_cap
+                logger.info(
+                    "Dynamic tool cap: ask_data_agent=%d (query complexity from '%s…')",
+                    _data_cap,
+                    user_content[:60],
+                )
+            # fetch_data_batch gets a proportional cap (each call can contain
+            # multiple parallel queries, so fewer calls needed)
+            _fetch_cap = max(2, _data_cap // 2)
+            if _fetch_cap > TOOL_CALL_CAPS.get("fetch_data_batch", 3):
+                _dynamic_tool_caps["fetch_data_batch"] = _fetch_cap
         # Finish-line state (UnboundLocalError discipline: initialized BEFORE
         # the loop). ``dashboard_forced`` tracks whether the dashboard guard
         # forced ``create_dashboard`` this turn; ``_wrapup_nudged`` ensures
@@ -7923,6 +9147,11 @@ async def add_message_stream(
         _describe_schema_count = 0
         _schema_budget_frozen = False
         _v3_executed_tool_names: list[str] = []
+        # T19: tools that were CALLED this turn but FAILED (returned
+        # {"success": False} or threw). Lets the dashboard-orchestrator guard
+        # distinguish "build tool ran OK" from "build tool crashed" — a failed
+        # build must NOT unlock the static-artifact fallback.
+        _v3_failed_tool_names: set[str] = set()
         # Fix 4: titles of create_artifact calls already executed this turn,
         # so a second identical static page is blocked (always waste).
         _create_artifact_titles: set[str] = set()
@@ -7961,6 +9190,25 @@ async def add_message_stream(
             except Exception as _gc_err:  # noqa: BLE001 — contract must never break the loop
                 logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
                 _contract = None
+        # ── Query-purpose resolver (flag-gated, Bug 2 fix) ─────────────
+        # Resolves catalog table roles ONCE per turn (memoized) so every
+        # ask_data_agent result can be tagged probe/auxiliary/answer before
+        # it may feed the deliverable. Fail-open: on any init error the
+        # resolver stays None and classification degrades to shape-only.
+        _purpose_resolver = None
+        if settings.QUERY_PURPOSE_TAGGING_ENABLED:
+            try:
+                _purpose_resolver = TableRoleResolver(
+                    db,
+                    kb_ids=(data_ctx_extras or {}).get("bound_kb_ids") or [],
+                    project_id=_v3_effective_pid,
+                )
+            except Exception as _purpose_init_err:  # noqa: BLE001
+                logger.warning(
+                    "query-purpose resolver init failed (shape-only fallback): %s",
+                    _purpose_init_err,
+                )
+                _purpose_resolver = None
         _loop_exit_monotonic = None
         # Multi-iter content accumulator (2026-08-20):
         # The v3 loop resets `assistant_content = ""` at the top of every
@@ -7970,6 +9218,14 @@ async def add_message_stream(
         # key findings, recommendations) is silently lost. We capture each
         # iter's content BEFORE the reset and join them post-loop.
         _v3_iter_contents: list[str] = []
+        # Recovery buffer: when a nudge site pops good content from the
+        # accumulator, we save the longest popped entry here. If the loop
+        # exits with empty/stale content (nudge failed, max iterations),
+        # we recover this best prior iteration instead of falling back to
+        # generic "I had trouble..." or raw data rows. (Bug 2026-08-23)
+        # Wrapped in a list so nested event_stream can mutate without
+        # nonlocal (same pattern as _stream_compaction_attempted).
+        _v3_recovered_best = [None]  # type: ignore[var-annotated]
         accumulated_content: str = ""  # post-loop computed; safe default for early-exit paths
         # D1/D2 (2026-08-20): once a gate nudges a re-synthesis, every
         # subsequent streamed delta must REPLACE the bubble (content_replace
@@ -7978,6 +9234,13 @@ async def add_message_stream(
         # True for the rest of the turn (all post-nudge iterations are
         # replacement content, only the last synthesis survives).
         _nudge_replacement_pending = False
+        # UX FIX (2026-08-24): When the user asked for a file deliverable
+        # (docx, pptx, xlsx, pdf, html, md), suppress ALL intermediate text
+        # in the chat bubble until the turn is fully complete. Without this
+        # the user sees streaming analysis that gets replaced/collapsed by
+        # the final synthesis — jarring "make-then-collapse" UX. We only
+        # show the FINAL accumulated_content in the very last SSE event.
+        _suppress_chat_deltas = bool(_orch_doc_format)
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -8034,8 +9297,13 @@ async def add_message_stream(
                             llm_messages.append({"role": "user", "content": _nudge_msg})
                             # Pop the last iter content so re-synthesis replaces
                             # it instead of appending alongside the promise text.
+                            # BUGFIX 2026-08-23: save popped good content so we
+                            # can recover it if the nudge fails (max iter / loop
+                            # exit with empty content).
                             if _v3_iter_contents:
-                                _v3_iter_contents.pop()
+                                _popped = _v3_iter_contents.pop()
+                                if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                                    _v3_recovered_best[0] = _popped
                             assistant_content = ""
                             _nudge_replacement_pending = True
                             logger.info(
@@ -8082,7 +9350,7 @@ async def add_message_stream(
             # Scoped to the CURRENT turn: repetitions from earlier turns
             # (e.g. the user re-running the same automation) are legitimate
             # and must not trip the in-turn guard.
-            loop_info = _detect_tool_call_loop(llm_messages, start_idx=_turn_start_idx)
+            loop_info = _detect_tool_call_loop(llm_messages, start_idx=_turn_start_idx, dynamic_caps=_dynamic_tool_caps)
             if loop_info is not None:
                 looped_tool, looped_n = loop_info
                 # Internal LLM-facing nudge: tells the model to stop
@@ -8363,13 +9631,33 @@ async def add_message_stream(
                                         # D1/D2: post-nudge re-synthesis replaces
                                         # the whole bubble instead of appending, so
                                         # leaked nudge-reply prose never shows.
-                                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                        if not _suppress_chat_deltas:
+                                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                                     else:
-                                        yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
+                                        if not _suppress_chat_deltas:
+                                            yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
                                 elif ev_type == "reasoning":
                                     final_reasoning += ev_data
                                 elif ev_type == "tool_calls":
                                     raw_tool_calls = ev_data or []
+                                    # qwen3 content-based tool_call extraction:
+                                    # the thinking preamble was already streamed
+                                    # as deltas. Replace it with clean content
+                                    # so the chat bubble shows the tool result
+                                    # instead of raw thinking.
+                                    if content_streamed and assistant_content:
+                                        cleaned = _strip_tool_call_markup(assistant_content)
+                                        # Also strip SQL/plan narration
+                                        # ("SELECT …" fences, bare SQL
+                                        # paragraphs): this iteration is
+                                        # calling tools, so the prose is
+                                        # plan narration, not the answer
+                                        # ("SQL leak", 2026-08-21).
+                                        cleaned = _strip_sql_narration(cleaned)
+                                        if cleaned != assistant_content:
+                                            assistant_content = cleaned
+                                            if not _suppress_chat_deltas:
+                                                yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                                 elif ev_type == "done":
                                     # Generator's authoritative full text — use
                                     # it if we didn't accumulate (defensive; in
@@ -8452,9 +9740,11 @@ async def add_message_stream(
                             if _nudge_replacement_pending:
                                 # D1/D2: full-content emit must replace the
                                 # bubble when a re-synthesis is in flight.
-                                yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                if not _suppress_chat_deltas:
+                                    yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                             else:
-                                yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
+                                if not _suppress_chat_deltas:
+                                    yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
                         # Fall through to the post-try flow (reasoning_done,
                         # tool-call handling) instead of failing the turn.
                     else:
@@ -8468,11 +9758,11 @@ async def add_message_stream(
                 elif (
                     not content_streamed
                     and ce.should_compress
-                    and not _stream_compaction_attempted
+                    and not _stream_compaction_attempted[0]
                 ):
                     # Context overflow: one reactive compaction pass, then
                     # re-enter the iteration with compacted messages.
-                    _stream_compaction_attempted = True
+                    _stream_compaction_attempted[0] = True
                     try:
                         from app.services.compaction import (
                             AutoCompactState,
@@ -8595,12 +9885,15 @@ async def add_message_stream(
                         # Pop the just-captured iter content: the next iter
                         # will re-emit (corrected) prose and we don't want
                         # to accumulate both copies in `_v3_iter_contents`.
+                        # BUGFIX 2026-08-23: save popped good content for recovery.
                         if _v3_iter_contents:
-                            _v3_iter_contents.pop()
+                            _popped = _v3_iter_contents.pop()
+                            if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                                _v3_recovered_best[0] = _popped
                         # D1/D2: nudge-reply prose must never be visible. Clear
                         # it (the top-of-loop append skips it) and mark the
                         # next iteration's stream as a bubble replacement.
-                        if content_streamed and assistant_content:
+                        if content_streamed and assistant_content and not _suppress_chat_deltas:
                             yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                         assistant_content = ""
                         _nudge_replacement_pending = True
@@ -8642,8 +9935,11 @@ async def add_message_stream(
                     )
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": _nudge_msg})
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
                     if _v3_iter_contents:
-                        _v3_iter_contents.pop()
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
                     # Tell the frontend to swap the streamed promise text
                     # for the upcoming synthesis bubble.
                     yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
@@ -8652,6 +9948,74 @@ async def add_message_stream(
                     logger.info(
                         "v3 stream: stripped promise at exit → forcing synthesis "
                         "(conv=%s, iter=%d, forces=%d/%d)",
+                        conversation_id, iteration,
+                        _empty_answer_forces, 1,
+                    )
+                    continue
+                # ── Apology-guard (Fix 5) ────────────────────────────────
+                # Model "answered" with the generic apology ("I gathered some
+                # information but had trouble putting it all together") even
+                # though usable data was retrieved. This is NOT an empty
+                # answer — it's an unhelpful non-answer — so the empty-answer
+                # net below would miss it. Force one re-synthesis pass via the
+                # same _empty_answer_force machinery (capped at 1/turn).
+                if (
+                    _APOLOGY_PATTERN_RE.search(assistant_content or "")
+                    and _has_usable_data
+                    and _empty_answer_forces < 1
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous reply was an apology, not an answer — "
+                            "but you already have the data needed to answer. "
+                            "Write the final answer now in prose, using the tool "
+                            "results above. Do not apologize and do not call tools."
+                        ),
+                    })
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.warning(
+                        "v3 stream: apology detected with usable data → forcing "
+                        "synthesis retry (conv=%s, iter=%d, forces=%d/%d)",
+                        conversation_id, iteration,
+                        _empty_answer_forces, 1,
+                    )
+                    continue
+                # ── Bounce-back guard (Fix 7) ──────────────────────────────
+                # The agent retrieved data but instead of answering, it dumped
+                # a table + "You can ask me for a summary". This is NOT an
+                # answer — force one re-synthesis pass (same cap as apology).
+                if (
+                    _BOUNCE_BACK_PATTERN_RE.search(assistant_content or "")
+                    and _has_usable_data
+                    and _empty_answer_forces < 1
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous reply just dumped raw data instead of "
+                            "answering the user's question. The user asked a real "
+                            "question and expects a real answer. Write a comprehensive "
+                            "answer now using the data you already have. Do NOT invite "
+                            "the user to ask again and do NOT call tools."
+                        ),
+                    })
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.warning(
+                        "v3 stream: bounce-back detected with usable data → forcing "
+                        "synthesis retry (conv=%s, iter=%d, forces=%d/%d)",
                         conversation_id, iteration,
                         _empty_answer_forces, 1,
                     )
@@ -8688,7 +10052,7 @@ async def add_message_stream(
                     })
                     # Replace any previously streamed text (promise narration
                     # from earlier iterations) with the upcoming synthesis.
-                    if content_streamed and assistant_content:
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -8708,7 +10072,7 @@ async def add_message_stream(
                     guardrail_retries += 1
                     # D1/D2: guardrail nudge-reply must not leak into the
                     # final answer (same clear + content_replace pattern).
-                    if content_streamed and assistant_content:
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -8737,7 +10101,7 @@ async def add_message_stream(
                         _contract.record_force()
                     # D1/D2: verify nudge-reply must not leak into the final
                     # answer (same clear + content_replace pattern).
-                    if content_streamed and assistant_content:
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -8769,11 +10133,14 @@ async def add_message_stream(
                     # to llm_messages so the LLM sees it as context; the next
                     # iter's re-emit replaces it (avoid duplicating the entire
                     # response in `_v3_iter_contents`).
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
                     if _v3_iter_contents:
-                        _v3_iter_contents.pop()
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
                     # D1/D2: pptx nudge-reply must not leak into the final
                     # answer (same clear + content_replace pattern).
-                    if content_streamed and assistant_content:
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -8812,11 +10179,14 @@ async def add_message_stream(
                                         # Pop captured iter content: see pptx nudge site above
                                         # for rationale. Prevents the report from being appended
                                         # twice to `_v3_iter_contents` after the agent re-emits.
+                                        # BUGFIX 2026-08-23: save popped good content for recovery.
                                         if _v3_iter_contents:
-                                            _v3_iter_contents.pop()
+                                            _popped = _v3_iter_contents.pop()
+                                            if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                                                _v3_recovered_best[0] = _popped
                                         # D1/D2: file-guard nudge-reply must not
                                         # leak into the final answer.
-                                        if content_streamed and assistant_content:
+                                        if content_streamed and assistant_content and not _suppress_chat_deltas:
                                             yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                                         assistant_content = ""
                                         _nudge_replacement_pending = True
@@ -8847,13 +10217,16 @@ async def add_message_stream(
                     # (the user's repro: "Daily Sales Data Sync" produced
                     # the report twice because markdown/outcome/running
                     # triggered a re-iteration).
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
                     if _v3_iter_contents:
-                        _v3_iter_contents.pop()
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
                     # D1/D2: gate nudge-reply prose must never be visible.
                     # Clear it so the top-of-loop append skips it; the next
                     # iteration's stream replaces the bubble instead of
                     # appending (leakage fix).
-                    if content_streamed and assistant_content:
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -8896,12 +10269,15 @@ async def add_message_stream(
                     # Pop captured iter content: see file-guard nudge site for
                     # rationale — the re-emitted iteration must replace the
                     # narration bubble instead of appending a duplicate.
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
                     if _v3_iter_contents:
-                        _v3_iter_contents.pop()
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
                     # D1/D2: the nudge reply must never leak into the final
                     # answer (same content_replace SSE pattern as the other
                     # nudge sites).
-                    if content_streamed and assistant_content:
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -8988,6 +10364,76 @@ async def add_message_stream(
                         if not _non_build:
                             yield (f'data: {json.dumps({"type": "tool_call", "name": "data_contract_gate", "args": {"blocked": _dash_build_tool}})}\n\n')
                             continue
+
+            # ── Deliverable phase-lock gate (Bug 1/2 fix) ───────────────
+            # The model must NOT build the deliverable (create_artifact /
+            # run_sandbox_skill) before answer-tagged data has been
+            # collected. When the contract requires data and no answer
+            # dataset exists yet, block the build call and inject a
+            # synthetic tool result steering the agent to query first.
+            if (
+                settings.DELIVERABLE_PHASE_LOCK_ENABLED
+                and _contract is not None
+                and _contract.requires_data
+                and not _contract.has_answer_data()
+            ):
+                _phase_locked_calls = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in ("create_artifact", "run_sandbox_skill")
+                ]
+                if _phase_locked_calls:
+                    _phase_blocked_ids = {
+                        p["tool_call_id"] for p in _phase_locked_calls
+                    }
+                    _non_phase_locked = [
+                        p for p in parsed_calls
+                        if p["tool_call_id"] not in _phase_blocked_ids
+                    ]
+                    for _plc in _phase_locked_calls:
+                        logger.warning(
+                            "v3 stream: deliverable phase-lock blocked %s before "
+                            "data collection (conv=%s, iter=%d)",
+                            _plc["tool_name"], conversation_id, iteration,
+                        )
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _plc["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _plc["tool_name"],
+                                    "arguments": _plc["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _plc["tool_call_id"],
+                            "content": (
+                                "BLOCKED by the deliverable phase-lock: you tried to "
+                                "build the deliverable before collecting the data it "
+                                "needs. Query the data first (ask_data_agent / "
+                                "execute_query), WAIT for the returned rows, then build "
+                                "the deliverable from those rows. Never fabricate data "
+                                "or build on empty results."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"deliverable_gate_{uuid.uuid4()}",
+                            "name": "deliverable_phase_lock",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _plc["tool_name"],
+                                "reason": "deliverable requires data that has not been collected yet",
+                            },
+                        })
+                    parsed_calls = _non_phase_locked
+                    if not _non_phase_locked:
+                        yield (
+                            f'data: {json.dumps({"type": "tool_call", "name": "deliverable_phase_lock", "args": {"blocked": [p["tool_name"] for p in _phase_locked_calls]}})}\n\n'
+                        )
+                        continue
 
             # ── T12: describe_schema per-turn cap (dashboard turns) ──────
             # Re-inspecting the schema costs a whole tool iteration each time
@@ -9409,6 +10855,7 @@ async def add_message_stream(
                     "conversation_metadata": conv.metadata_ or {},
                     "chat_session_id": chat_session_id,
                     **(data_ctx_extras or {}),
+                    "main_agent_will_synthesize": bool(_orch_doc_format),
                 }
                 sibling_results: list[dict] = []
                 if sibling_calls:
@@ -9528,6 +10975,14 @@ async def add_message_stream(
             if "act" not in _emitted_phases:
                 _emitted_phases.add("act")
                 yield _emit_phase("act")
+                # Live feed: the turn is now proven tool-bound — open the
+                # feed with the goal headline, then the act headline.
+                _le_goal = _push_live_event("phase_enter", "phase_enter.goal")
+                if _le_goal:
+                    yield _le_goal
+                _le_act = _push_live_event("phase_enter", "phase_enter.act")
+                if _le_act:
+                    yield _le_act
 
             _tool_step_indices: list[int] = []
             # Count parallel calls per tool for index suffix
@@ -9548,6 +11003,18 @@ async def add_message_stream(
                 cmd = _summarize_tool_command(tn, pc.get("args"))
                 yield _emit_activity_step(_step_counter[0], desc, "running", tool_name=tn, command=cmd)
                 _step_start_times[_step_counter[0]] = time.monotonic()
+                _le_tool = _push_live_event("tool_call_started", "tool_call_started", {"tool_label": desc})
+                if _le_tool:
+                    yield _le_tool
+                # Sub-agent delegation badge: surfaces what the parent chat
+                # loop asked the sub-agent to do (e.g. ask_data_agent).
+                if tn.startswith("ask_"):
+                    _le_sub_inv = _push_live_event(
+                        "subagent_invoked", "subagent_invoked",
+                        {"agent_label": desc, "target": tn},
+                    )
+                    if _le_sub_inv:
+                        yield _le_sub_inv
                 _activity_steps.append({
                     "number": _step_counter[0],
                     "description": desc,
@@ -9565,6 +11032,10 @@ async def add_message_stream(
                 "chat_session_id": chat_session_id,
                 **(data_ctx_extras or {}),
                 "endpoint": effective_llm.endpoint,
+                # PERF 2026-08-24: deliverable turns synthesize post-loop;
+                # the data agent can skip its narrate LLM call (saves ~1 call
+                # per ask_data_agent). Simple Q&A turns keep narrate.
+                "main_agent_will_synthesize": bool(_orch_doc_format),
             }
 
             # ── Tool execution ──────────────────────────────────────────────
@@ -9575,35 +11046,19 @@ async def add_message_stream(
             # it executes, so the client sees liveness and proxies don't
             # idle-kill the connection.
             async def _run_tool_batch():
-                if len(parsed_calls) == 1:
-                    call = parsed_calls[0]
-                    _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-                    if _gd.allows_execution:
-                        return [await execute_tool(
-                            call["tool_name"], call["args"],
-                            db, user.id if user else None, context=ctx,
-                        )]
-                    return [json.loads(_guardrail_synthetic_result(_gd))]
-                async def _exec_one(call):
-                    _gd = guard_ctrl.before_call(call["tool_name"], call["args"])
-                    if _gd.allows_execution:
-                        return await execute_tool(
-                            call["tool_name"], call["args"], db,
-                            user.id if user else None, context=ctx,
-                        )
-                    return json.loads(_guardrail_synthetic_result(_gd))
-                raw_results = await asyncio.gather(
-                    *[_exec_one(c) for c in parsed_calls],
-                    return_exceptions=True,
+                # P2-12: shared core in app.services.agent_loop.tool_executor.
+                async def _invoke_v3(tool_name, args):
+                    return await execute_tool(
+                        tool_name, args, db,
+                        user.id if user else None, context=ctx,
+                    )
+
+                return await execute_tool_batch(
+                    parsed_calls,
+                    before_call=guard_ctrl.before_call,
+                    invoke=_invoke_v3,
+                    blocked_result_factory=_guardrail_synthetic_result,
                 )
-                results = []
-                for i, r in enumerate(raw_results):
-                    if isinstance(r, Exception):
-                        logger.warning("Tool '%s' raised: %s", parsed_calls[i]["tool_name"], r)
-                        results.append({"success": False, "error": f"{type(r).__name__}: {r}"})
-                    else:
-                        results.append(r)
-                return results
 
             if any(_is_long_running_tool(c["tool_name"]) for c in parsed_calls):
                 _tool_task = asyncio.ensure_future(_run_tool_batch())
@@ -9629,6 +11084,13 @@ async def add_message_stream(
                 # names (canonical) so the pre-execution interception zone can
                 # enforce the per-turn cap on the NEXT iteration.
                 _v3_executed_tool_names.append(tool_name)
+                # T19: record FAILED tool executions. `result` is already
+                # normalized here — exceptions were converted to
+                # {"success": False, "error": ...} by _run_tool_batch, and
+                # handlers signal failure via the same shape. Explicitly
+                # failed builds must not unlock the orchestrator fallback.
+                if isinstance(result, dict) and result.get("success") is False:
+                    _v3_failed_tool_names.add(tool_name)
                 if tool_name == "describe_schema":
                     _describe_schema_count += 1
                 if tool_name == "create_artifact":
@@ -9663,13 +11125,40 @@ async def add_message_stream(
                 # budget: max 2 attempts). If data comes back, `result`
                 # is replaced so the normal data path below synthesizes
                 # and finalizes a real artifact.
+                # FIX 2026-08-24: ALSO retry when the result is metadata-only
+                # (e.g. [{row_count: 14275}] from SELECT COUNT(*)) — such
+                # results are just as useless as 0 rows for building a
+                # deliverable, but the old check (rows == []) let them
+                # through to the synthesis pipeline untouched.
+                _rows_for_retry_check = result.get("rows") if isinstance(result, dict) else None
+                _needs_smart_retry = False
                 if (
                     tool_name == "ask_data_agent"
                     and isinstance(result, dict)
-                    and result.get("rows") == []
                     and _orch_doc_format
                     and _smart_retry_budget[0] > 0
                 ):
+                    if _rows_for_retry_check == []:
+                        _needs_smart_retry = True
+                    elif isinstance(_rows_for_retry_check, list) and _rows_for_retry_check:
+                        try:
+                            # NOTE: uses the module-level import (line ~193).
+                            # A local `from … import is_metadata_only_rows`
+                            # here shadowed the global for the WHOLE function
+                            # and crashed line ~11474 with UnboundLocalError
+                            # when this branch never executed.
+                            if len(_rows_for_retry_check) <= 2 and is_metadata_only_rows(
+                                _rows_for_retry_check
+                            ):
+                                _needs_smart_retry = True
+                                logger.info(
+                                    "v3 smart retry triggered: metadata-only rows "
+                                    "(%d rows) for conv=%s",
+                                    len(_rows_for_retry_check), conversation_id,
+                                )
+                        except Exception:
+                            pass
+                if _needs_smart_retry:
                     try:
                         async def _retry_llm_call(_sys, _msgs, _ep=effective_llm.endpoint):
                             _r = await _call_synthesis_llm(_sys, _msgs, endpoint=_ep)
@@ -9704,8 +11193,61 @@ async def add_message_stream(
                             _retried.get("retried_question", "")[:80],
                         )
 
-                # ── Report synthesis: enrich ask_data_agent results ──────
-                if tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
+                # ── Report synthesis / deferred collection (data tools) ────
+                # Any data-producing tool feeds the deferred pipeline:
+                # ask_data_agent (delegated), execute_query / execute_sql /
+                # sql_query (direct SQL), forecast_brief (market reads).
+                # Production bug (2026-08-21): the Ecisco BI agent collected
+                # 41 rows via execute_query, but record_dataset only fired
+                # for ask_data_agent → answer_datasets() stayed empty → the
+                # post-loop card never built → raw table + no deliverable.
+                # The legacy eager-synthesis elif below stays ask_data_agent-
+                # only so flag-OFF behavior is unchanged for other tools.
+                if (
+                    tool_name in DATA_PRODUCING_TOOLS
+                    and isinstance(result, dict)
+                    and result.get("rows")
+                    and settings.QUERY_PURPOSE_TAGGING_ENABLED
+                ):
+                    # Deferred deliverable pipeline (Bug 1/2 fix): tag the
+                    # query result purpose (probe/auxiliary/answer) and
+                    # collect answer datasets on the contract. NO synthesis
+                    # runs mid-loop — the card is built ONCE, post-loop,
+                    # from the final answer dataset.
+                    try:
+                        _purpose = classify_query_purpose(
+                            sql=result.get("sql"),
+                            rows=result.get("rows"),
+                            table_roles=(
+                                _purpose_resolver.roles_for(
+                                    extract_tables_from_sql(result.get("sql") or "")
+                                )
+                                if _purpose_resolver is not None
+                                else {}
+                            ),
+                        )
+                    except Exception as purpose_err:
+                        logger.warning(
+                            "v3 query-purpose classification failed (fail-open "
+                            "answer) conv=%s: %s", conversation_id, purpose_err,
+                        )
+                        _purpose = "answer"
+                    result["query_purpose"] = _purpose
+                    if _purpose == "answer" and _contract is not None:
+                        _contract.record_dataset(
+                            rows=result.get("rows"),
+                            sql=result.get("sql"),
+                            source_name=result.get("source_name"),
+                            source_id=result.get("source_id"),
+                            purpose=_purpose,
+                            tool_call_id=tool_call_id,
+                        )
+                    logger.info(
+                        "v3 query purpose=%s rows=%d conv=%s (card deferred to post-loop)",
+                        _purpose, len(result.get("rows", [])), conversation_id,
+                    )
+                elif tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
+                    # Legacy eager synthesis (flag OFF) — behavior unchanged.
                     try:
                         _synth_endpoint = effective_llm.endpoint
 
@@ -9714,74 +11256,143 @@ async def add_message_stream(
                                 system_prompt, msgs, endpoint=_ep
                             )
 
+                        # FIX 2026-08-24: merge rows from EVERY ask_data_agent
+                        # call so far this turn, not just the current one.
+                        # Previously rows=result.get("rows") meant multi-query
+                        # turns (sales + revenue + inventory) synthesized from
+                        # the LAST query only — the final answer ignored all
+                        # earlier datasets.
+                        # ALSO FIX: skip metadata-only datasets (SELECT COUNT(*)
+                        # probes) so the synthesis only sees real business rows.
+                        _merged_rows: list[dict] = []
+                        _merged_seen: set[str] = set()
+                        try:
+                            from app.services.goal_contract import (
+                                is_metadata_only_rows as _imor,
+                            )
+                        except Exception:
+                            _imor = None
+                        for _m_tc in tool_calls_for_frontend:
+                            if _m_tc.get("name") != "ask_data_agent":
+                                continue
+                            _m_res = _m_tc.get("results") or {}
+                            if not isinstance(_m_res, dict):
+                                continue
+                            _m_rows = _m_res.get("rows") or []
+                            # Skip this dataset if it is a metadata-only probe
+                            # (1-2 rows, every column a MIN/MAX/COUNT aggregate).
+                            if (
+                                _imor is not None
+                                and _m_rows
+                                and len(_m_rows) <= 2
+                                and _imor(_m_rows)
+                            ):
+                                continue
+                            for _m_row in _m_rows:
+                                if not isinstance(_m_row, dict):
+                                    continue
+                                _m_key = json.dumps(
+                                    _m_row, sort_keys=True, default=str,
+                                    ensure_ascii=False,
+                                )
+                                if _m_key not in _merged_seen:
+                                    _merged_seen.add(_m_key)
+                                    _merged_rows.append(_m_row)
+                        _synth_rows = _merged_rows or result.get("rows")
+
+                        # FIX 2026-08-23: resolve skill context for synthesis
+                        _v3e_skill_name, _v3e_skill_method = _resolve_skill_for_synthesis(
+                            tool_calls_for_frontend,
+                            selected_skill,
+                            selected_skill_id,
+                            db,
+                        )
                         synth_result = await synthesize_report(
                             user_message=user_content,
-                            rows=result.get("rows"),
+                            rows=_synth_rows,
                             sql=result.get("sql"),
                             source_name=result.get("source_name"),
                             source_id=result.get("source_id"),
                             call_llm_fn=_synth_call,
+                            skill_name=_v3e_skill_name,
+                            skill_methodology=_v3e_skill_method,
                         )
                         if synth_result.report_card_payload is not None:
-                            # ── FINALIZE: persist Artifact row + HTML blob ──
-                            # NOTE: finalize_into_artifact may mutate
-                            # `payload.user_signal` in-place when a
-                            # file-format intent is detected (e.g. the
-                            # user asked for DOCX).  We MUST re-serialize
-                            # the payload AFTER finalize so the mutated
-                            # field reaches the frontend.
-                            # Offload finalize to a thread: the sandbox
-                            # render can block 30-120s; if we await it
-                            # directly the SSE heartbeat starves and the
-                            # connection drops. Commit the caller's session
-                            # first, then run with heartbeat coverage.
-                            _finalize_task = _start_finalize_offloaded(
-                                db,
-                                {
-                                    "conversation_id": conversation_id,
-                                    "agent_name": agent_name,
-                                    "user_message": user_content,
-                                    "source": result.get("source_name"),
-                                    "sql": result.get("sql"),
-                                    "payload": synth_result.report_card_payload,
-                                    "message_id": assistant_msg_id,
-                                },
-                            )
-                            async for _hb in _emit_tool_progress_while_waiting(
-                                _finalize_task,
-                                [
-                                    {
-                                        "tool_call_id": "finalize-artifact",
-                                        "tool_name": "create_artifact",
-                                        "args_str": "",
-                                        "args": {},
-                                    }
-                                ],
-                            ):
-                                yield _hb
-                            artifact, file_exports = _finalize_task.result()
-                            # Re-serialize AFTER finalize so user_signal
-                            # reflects any change (e.g. "export_docx").
+                            # Always attach payload + synthesis text so the
+                            # frontend can suppress DataTableCard and show
+                            # the narrative.
                             result["report_card_payload"] = synth_result.report_card_payload.model_dump()
                             result["synthesis_text"] = synth_result.assistant_content
+                            # ── FINALIZE: persist Artifact row + HTML blob ──
+                            # FIX 2026-08-22: only create an artifact card
+                            # when the user explicitly asked for a file
+                            # deliverable. For simple data questions the
+                            # synthesis text IS the answer — no card needed.
+                            if _orch_doc_format:
+                                # NOTE: finalize_into_artifact may mutate
+                                # `payload.user_signal` in-place when a
+                                # file-format intent is detected (e.g. the
+                                # user asked for DOCX).  We MUST re-serialize
+                                # the payload AFTER finalize so the mutated
+                                # field reaches the frontend.
+                                # Offload finalize to a thread: the sandbox
+                                # render can block 30-120s; if we await it
+                                # directly the SSE heartbeat starves and the
+                                # connection drops. Commit the caller's session
+                                # first, then run with heartbeat coverage.
+                                _finalize_task = _start_finalize_offloaded(
+                                    db,
+                                    {
+                                        "conversation_id": conversation_id,
+                                        "agent_name": agent_name,
+                                        "user_message": user_content,
+                                        "source": result.get("source_name"),
+                                        "sql": result.get("sql"),
+                                        "payload": synth_result.report_card_payload,
+                                        "message_id": assistant_msg_id,
+                                    },
+                                )
+                                async for _hb in _emit_tool_progress_while_waiting(
+                                    _finalize_task,
+                                    [
+                                        {
+                                            "tool_call_id": "finalize-artifact",
+                                            "tool_name": "create_artifact",
+                                            "args_str": "",
+                                            "args": {},
+                                        }
+                                    ],
+                                ):
+                                    yield _hb
+                                artifact, file_exports = _finalize_task.result()
+                                # Re-serialize AFTER finalize so user_signal
+                                # reflects any change (e.g. "export_docx").
+                                result["report_card_payload"] = synth_result.report_card_payload.model_dump()
 
-                            if file_exports:
-                                result["file_exports"] = file_exports
-                                # Prefer the file-export artifact_id so
-                                # the frontend picks up the DOCX/PPTX
-                                # preview instead of the HTML artifact.
-                                primary_fmt = next(iter(file_exports))
-                                export = file_exports[primary_fmt]
-                                export_artifact_id = export.get("artifact_id")
-                                if export_artifact_id:
-                                    result["artifact_id"] = export_artifact_id
-                                    artifact_ids.append(export_artifact_id)
-                            if artifact is not None:
-                                # Keep the HTML artifact_id as a fallback
-                                # when no file export was generated.
-                                if not file_exports:
-                                    result["artifact_id"] = artifact.id
-                                    artifact_ids.append(artifact.id)
+                                if file_exports:
+                                    result["file_exports"] = file_exports
+                                    # Prefer the file-export artifact_id so
+                                    # the frontend picks up the DOCX/PPTX
+                                    # preview instead of the HTML artifact.
+                                    primary_fmt = next(iter(file_exports))
+                                    export = file_exports[primary_fmt]
+                                    export_artifact_id = export.get("artifact_id")
+                                    if export_artifact_id:
+                                        result["artifact_id"] = export_artifact_id
+                                        artifact_ids.append(export_artifact_id)
+                                if artifact is not None:
+                                    # Keep the HTML artifact_id as a fallback
+                                    # when no file export was generated.
+                                    if not file_exports:
+                                        result["artifact_id"] = artifact.id
+                                        artifact_ids.append(artifact.id)
+                            else:
+                                artifact = None
+                                file_exports = {}
+                                logger.info(
+                                    "FINALIZE: skipped artifact creation (no file intent) for conv=%s",
+                                    conversation_id,
+                                )
                     except Exception as synth_err:
                         logger.warning(
                             "Report synthesis failed (non-fatal) for conv=%s: %s",
@@ -9995,12 +11606,63 @@ async def add_message_stream(
                             if _step_art:
                                 s["artifact_id"] = _step_art
                             break
+                    _step_dur_ms = int((time.monotonic() - _step_start_times.get(step_num, time.monotonic())) * 1000)
                     yield _emit_activity_step(
                         step_num, step_desc, new_status, tool_name=tool_name,
                         command=_step_cmd, output_preview=_step_out,
                         artifact_id=_step_art,
-                        duration_ms=int((time.monotonic() - _step_start_times.get(step_num, time.monotonic())) * 1000),
+                        duration_ms=_step_dur_ms,
                     )
+                    # Live feed: typed tool-completion event with structured
+                    # counts/duration (content invariant enforced upstream).
+                    _le_rowcount = result.get("row_count") if isinstance(result, dict) else None
+                    if not isinstance(_le_rowcount, int) or _le_rowcount < 0:
+                        _le_rowcount = None
+                    _le_params: dict = {
+                        "tool_label": step_desc or tool_name,
+                        "duration": round(_step_dur_ms / 1000, 1),
+                    }
+                    if _le_rowcount is not None:
+                        _le_params["row_count"] = _le_rowcount
+                    _le_fin = _push_live_event(
+                        "tool_call_finished" if new_status == "done" else "tool_call_failed",
+                        "tool_call_finished" if new_status == "done" else "tool_call_failed",
+                        _le_params,
+                    )
+                    if _le_fin:
+                        yield _le_fin
+                    # Sub-agent return row — pairs with the invoked badge above
+                    # so the user can see the delegation's outcome + duration.
+                    if tn.startswith("ask_"):
+                        _le_sub_ret_params: dict = {
+                            "agent_label": step_desc or tool_name,
+                            "duration": round(_step_dur_ms / 1000, 1),
+                        }
+                        if _le_rowcount is not None:
+                            _le_sub_ret_params["row_count"] = _le_rowcount
+                        _le_sub_ret = _push_live_event(
+                            "subagent_returned", "subagent_returned",
+                            _le_sub_ret_params,
+                        )
+                        if _le_sub_ret:
+                            yield _le_sub_ret
+                    # Inline data peek attached to the matching tool row.
+                    # Only fires when the tool actually returned rows, so the
+                    # preview pane never shows up on non-data tools.
+                    if _le_rowcount and _le_rowcount > 0 and isinstance(result, dict):
+                        _sample = _sample_rows_from_payload(result)
+                        if _sample and _sample["columns"] and _sample["sample_rows"]:
+                            _le_offer = _push_live_event(
+                                "data_offer", "data_offer",
+                                {
+                                    "tool_label": step_desc or tool_name,
+                                    "row_count": _le_rowcount,
+                                    "columns": _sample["columns"],
+                                    "sample_rows": _sample["sample_rows"],
+                                },
+                            )
+                            if _le_offer:
+                                yield _le_offer
 
                 llm_messages.append({
                     "role": "assistant", "content": None,
@@ -10014,6 +11676,23 @@ async def add_message_stream(
                     "content": _result_str,
                 })
                 guard_ctrl.after_call(tool_name, call["args"], _result_str)
+                # FIX 2026-08-24: harvest rich-text answers from market-research
+                # sub-agents (ask_perception/ask_intelligence/ask_diagnosis/
+                # ask_decision/ask_pricing). These return prompt_text instead of
+                # rows; without this hook their text is silently discarded and
+                # the post-loop join produces nothing, so the user gets the
+                # generic "I gathered some information" fallback. Appending to
+                # _v3_iter_contents here means the post-loop join includes it in
+                # accumulated_content, the empty-bubble guarantee never fires,
+                # and the final content_replace shows the real report.
+                if tool_name in TEXT_PRODUCING_TOOLS:
+                    _harv = _harvest_text_answer(result)
+                    if _harv:
+                        _v3_iter_contents.append(_harv)
+                        logger.info(
+                            "v3 captured text answer from %s (%d chars, conv=%s)",
+                            tool_name, len(_harv), conversation_id,
+                        )
                 # P8: Record learning
                 try:
                     from app.services.learning_graph import record_learning as _rl
@@ -10277,6 +11956,14 @@ async def add_message_stream(
         if "finalize" not in _emitted_phases:
             _emitted_phases.add("finalize")
             yield _emit_phase("finalize")
+            # Live feed: the tool loop finished cleanly → verify_passed,
+            # then finalize_started marks the synthesis stage.
+            _le_vp = _push_live_event("verify_passed", "verify_passed")
+            if _le_vp:
+                yield _le_vp
+            _le_fs = _push_live_event("finalize_started", "finalize_started")
+            if _le_fs:
+                yield _le_fs
 
         # ── Activity step: "Generating response" done ──
         _step_counter[0] += 1
@@ -10313,7 +12000,7 @@ async def add_message_stream(
         # block and surface a synthetic BLOCKED record so the UI shows why
         # no artifact appeared.
         _orch_guard_should_block = dashboard_orchestrator_should_block(
-            user_content, _v3_executed_tool_names,
+            user_content, _v3_executed_tool_names, _v3_failed_tool_names,
         )
         if _orch_guard_should_block:
             logger.warning(
@@ -10441,7 +12128,7 @@ async def add_message_stream(
         # legacy buffered path (flag off) and fallback paths
         # (guardrail/loop-guard/error-recovery) still need this emit
         # because they set assistant_content without streaming.
-        if not content_streamed:
+        if not content_streamed and not _suppress_chat_deltas:
             yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
 
         # Surface orchestrator-created artifacts (marker fulfillment + the
@@ -10455,7 +12142,33 @@ async def add_message_stream(
         # user's response. Now we fall back to a clean, agent-aware
         # message only if the LLM didn't already produce a response
         # across the tool iterations.
-        if not (assistant_content or "").strip():
+        # FIX 2026-08-22: compute whether the deferred synthesis will run
+        # AFTER the loop, so we can skip the post-loop fallback placeholder
+        # when synthesis is coming.  The conditions mirror the full check
+        # at line ~12176.  Moving this earlier is safe because the tool loop
+        # has already completed and the contract's answer_datasets are final.
+        _deferred_answer = (
+            _contract.answer_datasets()[-1]
+            if (
+                settings.DELIVERABLE_PHASE_LOCK_ENABLED
+                and _contract is not None
+                and _contract.collection_complete()
+                and not _orch_no_data[0]
+                and not (
+                    _create_artifact_titles
+                    or "create_artifact" in _v3_executed_tool_names
+                    or "run_sandbox_skill" in _v3_executed_tool_names
+                )
+                and _contract.answer_datasets()
+            )
+            else None
+        )
+        # Skip the post-loop fallback when synthesis will run. The synthesis
+        # LLM is the authoritative source of the bubble text — falling back
+        # first and then having to overwrite later is brittle and (before
+        # the fix at ~12282) the "only replace if empty" condition meant
+        # the placeholder stuck, so the report card appeared to "vanish".
+        if not (assistant_content or "").strip() and _deferred_answer is None:
             try:
                 # Dashboard-specific rescue: if the user asked for a
                 # dashboard but the active build tool was never called,
@@ -10501,7 +12214,8 @@ async def add_message_stream(
                             if _ev_type == "delta":
                                 assistant_content += _ev_data
                                 content_streamed = True
-                                yield f'data: {json.dumps({"type": "delta", "content": _ev_data})}\n\n'
+                                if not _suppress_chat_deltas:
+                                    yield f'data: {json.dumps({"type": "delta", "content": _ev_data})}\n\n'
                             elif _ev_type == "tool_calls":
                                 raw_tool_calls = _ev_data or []
                         # If the rescue produced a build-tool call, execute it
@@ -10630,6 +12344,23 @@ async def add_message_stream(
         if not accumulated_content and assistant_content:
             accumulated_content = assistant_content
 
+        # BUGFIX 2026-08-23: recover best prior iteration if nudges
+        # discarded all good content. When a nudge fires, it pops the
+        # last iteration from the accumulator. If the loop then exits
+        # (max iterations / budget cap) before producing a real answer,
+        # accumulated_content becomes empty or just a promise phrase.
+        # We saved the longest popped entry in `_v3_recovered_best`.
+        if _v3_recovered_best[0]:
+            _cur_len = len(accumulated_content or "")
+            _rec_len = len(_v3_recovered_best[0])
+            if _rec_len > _cur_len and _rec_len > 200:
+                logger.info(
+                    "v3 post-loop: recovered best prior iter (%d chars) "
+                    "over current (%d chars, conv=%s)",
+                    _rec_len, _cur_len, conversation_id,
+                )
+                accumulated_content = _v3_recovered_best[0]
+
         # Post-loop promise-text cleanup (Fix 5): if the accumulated
         # content ends with a pending-action sentence ("Let me verify…"),
         # strip it. This handles the case where the model produced promise
@@ -10648,6 +12379,725 @@ async def add_message_stream(
                         "on the data already returned."
                     ).strip()
 
+        # Post-loop internal-reference hygiene (Bug 3 fix): drop trailing
+        # sentences that reference loop iterations the user never saw
+        # ("the discrepancy", "you're right", "as I mentioned earlier",
+        # "let me re-query…"). Deterministic, flag-gated.
+        if accumulated_content and settings.DELIVERABLE_PHASE_LOCK_ENABLED:
+            _hygiene_stripped = _strip_internal_references(accumulated_content)
+            if _hygiene_stripped != accumulated_content:
+                logger.info(
+                    "v3 internal-reference hygiene: stripped trailing residue "
+                    "(conv=%s, %d chars -> %d chars)",
+                    conversation_id, len(accumulated_content), len(_hygiene_stripped),
+                )
+                accumulated_content = _hygiene_stripped
+            # SQL/plan-narration strip (defense-in-depth for models that
+            # narrate SQL in the final iteration without emitting tool
+            # calls): ```sql fences, bare SELECT paragraphs, and empty
+            # "JSON Report Card" sections ("SQL leak", 2026-08-21).
+            _sql_stripped = _strip_sql_narration(accumulated_content)
+            if _sql_stripped != accumulated_content:
+                logger.info(
+                    "v3 sql-narration hygiene: stripped sql/json artifacts "
+                    "(conv=%s, %d chars -> %d chars)",
+                    conversation_id, len(accumulated_content), len(_sql_stripped),
+                )
+                accumulated_content = _sql_stripped
+
+        # ── Deferred deliverable: single post-loop synthesis + finalize ──
+        # Bug 1 fix: cards are built ONCE at the end of the turn, from the
+        # FINAL answer-tagged dataset (later queries refine earlier ones).
+        # Skipped when (a) flags off, (b) no contract / collection
+        # incomplete, (c) no answer dataset, (d) an artifact was already
+        # built this turn, or (e) the no-data card already fired.
+        # _deferred_answer was already computed above (line ~11947) so we can
+        # skip re-computing it here.  The early computation was added as part
+        # of the FIX 2026-08-22 to let the post-loop fallback guard work.
+        if _deferred_answer is not None:
+            # FIX A+C (2026-08-22): synthesize from the FULL answer-tagged
+            # dataset set, not just the last query.  The final query is often
+            # a degenerate refinement (e.g. a 1-row data-quality check) —
+            # the earlier totals/breakdown datasets must still feed the
+            # report.  Rows are merged deterministically (record order kept,
+            # identical rows deduplicated) and the payload carries a
+            # per-dataset overview so the LLM sees the whole query picture.
+            _all_answer_datasets = _contract.answer_datasets()
+            _last_rows = merge_answer_rows(_all_answer_datasets)
+
+            # ── Historical data fallback (follow-up file-format turns) ───
+            # When the user asks for a file format change (e.g. "give me in
+            # docx formate") in a follow-up turn, the agent re-queries the
+            # database. If that re-query returns 0 rows, we fall back to data
+            # that was successfully fetched in an earlier turn instead of
+            # producing a useless "no data" file.
+            _hist_rows: list[dict] = []
+            _hist_sql = ""
+            _hist_source = ""
+            if is_effective_empty(_last_rows):
+                from app.services.generation_orchestrator import (
+                    _mine_historical_answer_rows,
+                )
+                _hist_rows = _mine_historical_answer_rows(messages)
+                if _hist_rows:
+                    logger.info(
+                        "v3 deferred deliverable: using %d historical rows "
+                        "from previous turn (conv=%s)",
+                        len(_hist_rows), conversation_id,
+                    )
+                    # Also try to extract SQL / source from the historical
+                    # tool result so the methodology section is accurate.
+                    for _m in reversed(messages):
+                        if _m.get("role") != "tool":
+                            continue
+                        _c = _m.get("content")
+                        if not isinstance(_c, str):
+                            continue
+                        try:
+                            _p = json.loads(_c)
+                        except Exception:
+                            continue
+                        if not isinstance(_p, dict):
+                            continue
+                        _r = _p.get("result") or _p
+                        if not isinstance(_r, dict):
+                            continue
+                        _hr = _r.get("rows")
+                        if isinstance(_hr, list) and _hr:
+                            _hist_sql = _r.get("sql") or ""
+                            _hist_source = _r.get("source_name") or ""
+                            break
+                    _last_rows = _hist_rows
+
+            if is_effective_empty(_last_rows):
+                logger.info(
+                    "v3 deferred deliverable skipped: all answer datasets empty "
+                    "and no historical data (conv=%s)",
+                    conversation_id,
+                )
+            else:
+                # Data-quality gate: don't build an artifact from garbage data
+                # (e.g. rows that contain only internal IDs like FENTRYID, or
+                # rows that are MIN/MAX/COUNT aggregates like {row_count: 14275}).
+                from app.services.generation_orchestrator import (
+                    _validate_artifact_data_quality,
+                )
+                # NOTE: is_metadata_only_rows comes from the module-level
+                # import (line ~193). Do NOT re-import it locally — a local
+                # import shadows the global for the whole function scope and
+                # causes UnboundLocalError at earlier unconditional uses.
+                # FIX 2026-08-24: also reject MIN/MAX/COUNT-only result sets.
+                # `_validate_artifact_data_quality` accepts "count" as a
+                # business fragment (row_count contains "count"), so the shape
+                # check alone misses the common pattern of the data agent
+                # running SELECT COUNT(*) and treating the 1-row result as
+                # real business data.
+                _is_meta_only = (
+                    bool(_last_rows)
+                    and len(_last_rows) <= 2
+                    and is_metadata_only_rows(_last_rows)
+                )
+                _dq = _validate_artifact_data_quality(_last_rows, user_content)
+                if _is_meta_only:
+                    _dq = {
+                        "valid": False,
+                        "reason": (
+                            "the answer dataset contains only aggregate metadata "
+                            "(MIN/MAX/COUNT) instead of business rows — the data "
+                            "agent likely ran a row-count probe, not a real data "
+                            "query"
+                        ),
+                    }
+                if not _dq["valid"]:
+                    logger.warning(
+                        "v3 deferred deliverable skipped: data quality check failed "
+                        "(%s) (conv=%s)",
+                        _dq["reason"],
+                        conversation_id,
+                    )
+                    _no_data_msg = (
+                        f"I checked your warehouse for the data needed for your "
+                        f"request, but {_dq['reason']}. If you expected records "
+                        f"for this period, please verify the date range, table "
+                        f"names, or filters."
+                    )
+                    _acc_text = (accumulated_content or "").strip()
+                    _is_placeholder_now = (
+                        not _acc_text
+                        or _acc_text == _GENERIC_EMPTY_CONTENT_FALLBACK.strip()
+                        or _acc_text.startswith("(The requested")
+                        or _acc_text.startswith("Data retrieved (")
+                        or _acc_text.startswith("Analyzing ")
+                        or _acc_text.startswith("I gathered some information")
+                        or _acc_text.startswith("Based on the analysis of")
+                        or _acc_text.startswith("I've completed your request")
+                        or _acc_text.startswith("Your deliverable")
+                        or _acc_text.startswith("Here is the artifact")
+                    )
+                    if _is_placeholder_now:
+                        accumulated_content = _no_data_msg
+                        try:
+                            yield (
+                                'data: '
+                                + json.dumps({
+                                    "type": "content_replace",
+                                    "content": accumulated_content,
+                                })
+                                + '\n\n'
+                            )
+                        except Exception as _bubble_yield_err:
+                            logger.debug(
+                                "v3 deferred no-data bubble yield failed: %s",
+                                _bubble_yield_err,
+                            )
+                else:
+                    try:
+                        _synth_endpoint = effective_llm.endpoint
+
+                        async def _deferred_synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+                            return await _call_synthesis_llm(system_prompt, msgs, endpoint=_ep)
+
+                        # FIX 2026-08-23: resolve skill context for deferred synthesis
+                        _def_skill_name, _def_skill_method = _resolve_skill_for_synthesis(
+                            tool_calls_for_frontend,
+                            selected_skill,
+                            selected_skill_id,
+                            db,
+                        )
+                        # Prefer historical SQL/source when we fell back to
+                        # historical rows so the docx methodology is accurate.
+                        _use_sql = _deferred_answer.get("sql") or _hist_sql
+                        _use_source = _deferred_answer.get("source_name") or _hist_source
+                        _use_source_id = _deferred_answer.get("source_id")
+                        _deferred_synth = await synthesize_report(
+                            user_message=user_content,
+                            rows=_last_rows,
+                            sql=_use_sql,
+                            source_name=_use_source,
+                            source_id=_use_source_id,
+                            call_llm_fn=_deferred_synth_call,
+                            datasets=_all_answer_datasets if not _hist_rows else [],
+                            skill_name=_def_skill_name,
+                            skill_methodology=_def_skill_method,
+                        )
+                        # ── Synthesis prose guarantee (v2 — robust) ────────────
+                        # The synthesis LLM sometimes returns ONLY a JSON block
+                        # with no prose → _strip_json_block leaves empty prose →
+                        # assistant_content falls back to payload.summary which
+                        # is short → chat bubble shows generic fallback.
+                        # Fix: 3-tier guarantee:
+                        #   1. If prose < 150 chars → try forced LLM synthesis
+                        #   2. If forced synthesis also fails → build answer from data
+                        #   3. If no data rows → leave as-is (truly empty case)
+                        _synth_prose = (_deferred_synth.assistant_content or "").strip()
+
+                        # --- Tier 1: Forced LLM synthesis (when prose too short) ---
+                        if len(_synth_prose) < 150 and _last_rows:
+                            logger.info(
+                                "v3 synthesis prose too short (%d chars), forcing "
+                                "second synthesis (conv=%s)",
+                                len(_synth_prose), conversation_id,
+                            )
+                            try:
+                                _forced_prompt = (
+                                    "You are a data analyst. The user asked: "
+                                    f"\"{user_content}\"\n\n"
+                                    f"You queried the database and got {len(_last_rows)} "
+                                    f"rows of real business data.\n\n"
+                                    "Write a COMPREHENSIVE 5-8 sentence analysis that:\n"
+                                    "1. Restates what was asked and what data was found\n"
+                                    "2. Summarizes key totals and figures (use SPECIFIC "
+                                    "numbers from the data)\n"
+                                    "3. Identifies top performers or key patterns\n"
+                                    "4. Highlights any anomalies or notable findings\n"
+                                    "5. Ends with one concrete follow-up suggestion\n\n"
+                                    "IMPORTANT RULES:\n"
+                                    "- NEVER say 'I've completed your request' or "
+                                    "'Here is the artifact' or 'The data has been "
+                                    "retrieved'\n"
+                                    "- NEVER just describe the data structure. "
+                                    "Write REAL analysis with REAL numbers.\n"
+                                    "- Your answer must be useful even WITHOUT the "
+                                    "attached file.\n\n"
+                                    f"Data (first 5 rows):\n"
+                                    f"{json.dumps(_last_rows[:5], default=str, ensure_ascii=False)[:1200]}\n\n"
+                                    f"All {len(_last_rows)} rows column summary:\n"
+                                    f"{_build_column_summary(_last_rows)}"
+                                )
+                                _forced_synth = await _deferred_synth_call(
+                                    _forced_prompt,
+                                    [{"role": "user", "content": user_content}],
+                                )
+                                _forced_text = (_forced_synth.get("content", "") or "").strip()
+                                # Validate: don't accept another apology/placeholder
+                                _is_bad = (
+                                    not _forced_text
+                                    or len(_forced_text) < 100
+                                    or _APOLOGY_PATTERN_RE.search(_forced_text)
+                                    or _BOUNCE_BACK_PATTERN_RE.search(_forced_text)
+                                )
+                                if not _is_bad and len(_forced_text) > len(_synth_prose):
+                                    _deferred_synth.assistant_content = _forced_text
+                                    logger.info(
+                                        "v3 forced synthesis produced %d chars (was %d)",
+                                        len(_forced_text), len(_synth_prose),
+                                    )
+                                    _synth_prose = _forced_text
+                                elif _is_bad:
+                                    logger.info(
+                                        "v3 forced synthesis produced bad answer "
+                                        "(len=%d, apology=%s), will retry in Tier 2",
+                                        len(_forced_text),
+                                        bool(_APOLOGY_PATTERN_RE.search(_forced_text or "")),
+                                    )
+                            except Exception as _forced_err:
+                                logger.warning(
+                                    "v3 forced synthesis failed (non-fatal): %s",
+                                    _forced_err,
+                                )
+
+                        # --- Tier 2: Second LLM synthesis attempt (more explicit) ---
+                        # If after Tier 1 forced synthesis, prose is STILL too short,
+                        # try one more time with even more explicit instructions.
+                        # We ALWAYS use the LLM — never hardcoded answers — because
+                        # different users have different databases/schemas.
+                        _synth_prose = (_deferred_synth.assistant_content or "").strip()
+                        if len(_synth_prose) < 150 and _last_rows:
+                            logger.info(
+                                "v3 synthesis STILL too short (%d chars) after Tier 1, "
+                                "attempting Tier 2 LLM synthesis (conv=%s)",
+                                len(_synth_prose), conversation_id,
+                            )
+                            try:
+                                _tier2_answer = await _force_llm_synthesis(
+                                    user_content,
+                                    _last_rows,
+                                    synth_call_fn=_deferred_synth_call,
+                                    conversation_history=llm_messages,
+                                    max_retries=2,
+                                )
+                                if len(_tier2_answer) > len(_synth_prose):
+                                    _deferred_synth.assistant_content = _tier2_answer
+                                    logger.info(
+                                        "v3 Tier 2 LLM synthesis: %d chars (was %d)",
+                                        len(_tier2_answer), len(_synth_prose),
+                                    )
+                            except Exception as _tier2_err:
+                                logger.warning(
+                                    "v3 Tier 2 LLM synthesis failed (non-fatal): %s",
+                                    _tier2_err,
+                                )
+                        if _deferred_synth.report_card_payload is not None:
+                            _payload_dump = _deferred_synth.report_card_payload.model_dump()
+                            # FIX 2026-08-22: only create an artifact card when
+                            # the user explicitly asked for a file deliverable.
+                            # For simple data questions the synthesis text IS
+                            # the answer — no card needed.
+                            if _orch_doc_format:
+                                _deferred_task = _start_finalize_offloaded(
+                                    db,
+                                    {
+                                        "conversation_id": conversation_id,
+                                        "agent_name": agent_name,
+                                        "user_message": user_content,
+                                        "source": _deferred_answer.get("source_name"),
+                                        "sql": _deferred_answer.get("sql"),
+                                        "payload": _deferred_synth.report_card_payload,
+                                        "message_id": assistant_msg_id,
+                                    },
+                                )
+                                # FIX 2026-08-22: cap the offloaded finalize wait so
+                                # the SSE stream always closes. Without this, if the
+                                # sandbox container hangs the "Finalizing your answer"
+                                # activity step stays loading forever and nothing gets
+                                # persisted to the database.
+                                _DEFERRED_FINALIZE_TIMEOUT_S = 120
+                                try:
+                                    async with asyncio.timeout(_DEFERRED_FINALIZE_TIMEOUT_S):
+                                        async for _hb in _emit_tool_progress_while_waiting(
+                                            _deferred_task,
+                                            [{
+                                                "tool_call_id": "finalize-artifact-deferred",
+                                                "tool_name": "create_artifact",
+                                                "args_str": "",
+                                                "args": {},
+                                            }],
+                                        ):
+                                            yield _hb
+                                    _artifact_row, _file_exports = _deferred_task.result()
+                                except asyncio.TimeoutError:
+                                    logger.warning(
+                                        "v3 deferred finalize timed out after %ds "
+                                        "(sandbox render stuck). Continuing without "
+                                        "file export. (conv=%s)",
+                                        _DEFERRED_FINALIZE_TIMEOUT_S, conversation_id,
+                                    )
+                                    _deferred_task.cancel()
+                                    _artifact_row, _file_exports = None, {}
+                                except Exception as _deferred_err:
+                                    logger.error(
+                                        "v3 deferred finalize failed: %s (conv=%s)",
+                                        _deferred_err, conversation_id,
+                                    )
+                                    _artifact_row, _file_exports = None, {}
+                                # Re-serialize AFTER finalize so user_signal reflects
+                                # any mutation (e.g. "export_docx").
+                                _payload_dump = _deferred_synth.report_card_payload.model_dump()
+                            else:
+                                _artifact_row, _file_exports = None, {}
+                                logger.info(
+                                    "DEFERRED FINALIZE: skipped artifact creation "
+                                    "(no file intent) for conv=%s",
+                                    conversation_id,
+                                )
+                            # Attach the card payload + artifact to the answer
+                            # dataset's tool-call record (the frontend MessageBubble
+                            # reads report_card_payload from the persisted call).
+                            _tc_record = next(
+                                (
+                                    r for r in tool_calls_for_frontend
+                                    if r.get("id") == _deferred_answer.get("tool_call_id")
+                                ),
+                                None,
+                            )
+                            if _tc_record is None:
+                                # Fallback: attach to the last answer-tagged call
+                                # (the smart retry may have re-executed the query).
+                                _tc_record = next(
+                                    (
+                                        r for r in reversed(tool_calls_for_frontend)
+                                        if isinstance(r.get("results"), dict)
+                                        and r.get("results", {}).get("query_purpose") == "answer"
+                                    ),
+                                    None,
+                                )
+                            if _tc_record is not None:
+                                # Attach INSIDE results — MessageBubble's
+                                # reportToolResult reads tc.results.report_card_payload,
+                                # matching every legacy eager path
+                                # (result["report_card_payload"]). The first deferred
+                                # implementation wrote at the record top level, so the
+                                # ReportCard never rendered (final-answer layout bug,
+                                # 2026-08-21).
+                                _tc_results = _tc_record.get("results")
+                                if not isinstance(_tc_results, dict):
+                                    _tc_results = {}
+                                    _tc_record["results"] = _tc_results
+                                _tc_results["report_card_payload"] = _payload_dump
+                                _tc_results["synthesis_text"] = _deferred_synth.assistant_content
+                                # Bubble-text companion: when the turn produced
+                                # no prose (or the strips removed it all), show
+                                # the synthesis text as the bubble so the card
+                                # never arrives over a blank message. The
+                                # empty-bubble guarantee further below only
+                                # catches the no-card case.
+                                #
+                                # FIX 2026-08-22: also replace fallback placeholder
+                                # text (e.g. "Data retrieved (1 rows):" from the
+                                # post-loop fallback, or the generic "I gathered
+                                # some information…" message). The synthesis ran
+                                # and produced real prose — the user should see it,
+                                # not the placeholder. Without this override, the
+                                # synthesis text is attached only to
+                                # _tc_results["synthesis_text"] (which MessageBubble
+                                # ignores), and the bubble shows the stale raw-rows
+                                # fallback, so the report card appears to "vanish"
+                                # once the stream ends and the user re-reads the
+                                # conversation.
+                                _synth_text = (_deferred_synth.assistant_content or "").strip()
+                                _acc_text = (accumulated_content or "").strip()
+                                _is_fallback_placeholder = (
+                                    not _acc_text
+                                    or _acc_text == _GENERIC_EMPTY_CONTENT_FALLBACK.strip()
+                                    or _acc_text.startswith("(The requested")
+                                    or _acc_text.startswith("Data retrieved (")
+                                    or _acc_text.startswith("Analyzing ")
+                                    or _acc_text.startswith("I gathered some information")
+                                    or _acc_text.startswith("Based on the analysis of")
+                                    or _acc_text.startswith("I've completed your request")
+                                    or _acc_text.startswith("Your deliverable")
+                                    or _acc_text.startswith("Here is the artifact")
+                                )
+                                if _synth_text and _is_fallback_placeholder:
+                                    accumulated_content = _deferred_synth.assistant_content
+                                    try:
+                                        yield (
+                                            'data: '
+                                            + json.dumps({
+                                                "type": "content_replace",
+                                                "content": accumulated_content,
+                                            })
+                                            + '\n\n'
+                                        )
+                                    except Exception as _bubble_yield_err:
+                                        logger.debug(
+                                            "v3 deferred bubble yield failed "
+                                            "(client gone?): %s",
+                                            _bubble_yield_err,
+                                        )
+                                if _file_exports:
+                                    _tc_results["file_exports"] = _file_exports
+                                    _primary_fmt = next(iter(_file_exports))
+                                    _export = _file_exports[_primary_fmt]
+                                    _export_aid = _export.get("artifact_id")
+                                    if _export_aid:
+                                        _tc_results["artifact_id"] = _export_aid
+                                        if _export_aid not in artifact_ids:
+                                            artifact_ids.append(_export_aid)
+                                if _artifact_row is not None and not _file_exports:
+                                    _tc_results["artifact_id"] = _artifact_row.id
+                                    if _artifact_row.id not in artifact_ids:
+                                        artifact_ids.append(_artifact_row.id)
+                            # Emit artifact_created SSE (same shape as mid-loop).
+                            _deferred_aid = None
+                            if _file_exports:
+                                _deferred_aid = (
+                                    next(iter(_file_exports.values()), {}).get("artifact_id")
+                                    or (_artifact_row.id if _artifact_row is not None else None)
+                                )
+                            elif _artifact_row is not None:
+                                _deferred_aid = _artifact_row.id
+                            if _deferred_aid:
+                                _live_art = {
+                                    "artifact_id": _deferred_aid,
+                                    "version_id": (
+                                        getattr(_artifact_row, "version_id", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "version_number": (
+                                        getattr(_artifact_row, "version_number", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "file_url": (
+                                        getattr(_artifact_row, "file_url", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "preview_url": (
+                                        getattr(_artifact_row, "preview_url", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "title": (
+                                        getattr(_artifact_row, "title", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "type": (
+                                        getattr(_artifact_row, "type", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "file_name": (
+                                        getattr(_artifact_row, "file_name", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "mime_type": (
+                                        getattr(_artifact_row, "mime_type", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "file_size": (
+                                        getattr(_artifact_row, "file_size", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "has_preview": bool(
+                                        getattr(_artifact_row, "has_preview", False)
+                                        if _artifact_row is not None else False
+                                    ),
+                                }
+                                yield (
+                                    f'data: {json.dumps({"type": "artifact_created", "artifact": _live_art})}\n\n'
+                                )
+                            logger.info(
+                                "v3 DEFERRED deliverable: card emitted once post-loop (conv=%s, rows=%d)",
+                                conversation_id, len(_last_rows or []),
+                            )
+                    except Exception as deferred_err:
+                        logger.warning(
+                            "v3 deferred deliverable failed (non-fatal) for conv=%s: %s",
+                            conversation_id, deferred_err,
+                        )
+
+        # ── Empty-bubble guarantee (post-strip, post-deferred) ────────────
+        # The strips above (promise + internal-reference) can remove ALL
+        # accumulated prose when the model's only output was narration —
+        # exactly the failing traces of 2026-08-21 ("Let me query the
+        # warehouse… Let me check the tables…" as the entire response).
+        # The earlier post-loop fallback (~line 11108) skips itself when
+        # content_streamed=True ("the streamed deltas are the answer"),
+        # but those deltas were the narration we just stripped. Guarantee:
+        # NEVER persist an empty final bubble — a turn must always end
+        # with a real message (answer, card intro, or honest fallback).
+        #
+        # FIX 2026-08-23: synthesis-aware fallback. When the deferred
+        # deliverable path ran above and produced synthesis text + an
+        # artifact (PPT/DOCX/PDF), we MUST NOT fall back to
+        # `_choose_fallback → _artifact_aware_fallback` which would
+        # surface the misleading "I've completed your request. Here's
+        # the artifact: ..." text — that hides the actual analysis.
+        # Instead, prefer (in order):
+        #   1. `_deferred_synth.assistant_content` (the LLM's narrative)
+        #   2. A data-rows narrative built from `_last_rows` (the
+        #      comprehensive-table fallback, NOT a generic apology)
+        #   3. Only if BOTH are empty/missing → `_choose_fallback`
+        #      (which now will at least mention the artifact).
+        if not (accumulated_content or "").strip():
+            _synth_for_bubble = ""
+            try:
+                if "_deferred_synth" in locals() and _deferred_synth is not None:
+                    _synth_for_bubble = (
+                        getattr(_deferred_synth, "assistant_content", "") or ""
+                    ).strip()
+            except Exception:
+                _synth_for_bubble = ""
+            if _synth_for_bubble and not _synth_for_bubble.startswith(
+                ("I've completed your request", "Your deliverable", "Here is the artifact")
+            ):
+                # Synthesis produced real prose — use it. This is the
+                # same content the chat bubble should show.
+                accumulated_content = _synth_for_bubble
+                logger.info(
+                    "v3 empty-bubble guarantee: using deferred synthesis text "
+                    "(conv=%s, len=%d)",
+                    conversation_id, len(accumulated_content),
+                )
+            elif "_last_rows" in locals() and _last_rows:
+                # No (or weak) synthesis text but we DO have data rows.
+                # Use the LLM to write a comprehensive analysis — never
+                # hardcoded, because different users have different databases.
+                try:
+                    _llm_answer = await _force_llm_synthesis(
+                        user_content,
+                        _last_rows,
+                        synth_call_fn=_deferred_synth_call,
+                        conversation_history=llm_messages,
+                        max_retries=2,
+                    )
+                    if len(_llm_answer) > 50:
+                        accumulated_content = _llm_answer
+                        logger.info(
+                            "v3 empty-bubble: LLM answer (%d chars, conv=%s)",
+                            len(_llm_answer), conversation_id,
+                        )
+                    else:
+                        # LLM couldn't produce a real answer either
+                        accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+                except Exception:
+                    accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+            if not (accumulated_content or "").strip():
+                try:
+                    accumulated_content = _choose_fallback(
+                        tool_calls_for_frontend, _orch_created,
+                        user_content=user_content,
+                    )
+                except Exception as _guarantee_err:
+                    logger.warning(
+                        "v3 empty-bubble guarantee fallback failed: %s",
+                        _guarantee_err,
+                    )
+                    accumulated_content = _GENERIC_EMPTY_CONTENT_FALLBACK
+                logger.info(
+                    "v3 empty-bubble guarantee fired (conv=%s, streamed=%s, len=%d)",
+                    conversation_id,
+                    bool(locals().get("content_streamed")),
+                    len(accumulated_content),
+                )
+            else:
+                logger.info(
+                    "v3 empty-bubble guarantee: synthesis-aware replacement "
+                    "(conv=%s, streamed=%s, len=%d)",
+                    conversation_id,
+                    bool(locals().get("content_streamed")),
+                    len(accumulated_content),
+                )
+            try:
+                if locals().get("content_streamed"):
+                    # Swap the (already-blanked or stale narration) live
+                    # bubble for the guarantee text — same content_replace
+                    # pattern as every nudge site.
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "content_replace",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+                else:
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "delta",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+            except Exception as _yield_err:
+                logger.debug(
+                    "v3 empty-bubble guarantee yield failed (client gone?): %s",
+                    _yield_err,
+                )
+
+        # ── Apology-guard (post-loop, deterministic) ──────────────────────
+        # The in-loop check above should have caught an apology accompanied by
+        # usable data and forced a real re-synthesis. If it still slipped
+        # through (the forced retry ALSO apologized, or the loop ended before
+        # the net could fire), deterministically swap the apology/bounce-back
+        # for a data-aware message so the user NEVER sees "I had trouble
+        # putting it all together" or "I retrieved N rows… you can ask me for
+        # a summary" when rows were actually retrieved.
+        _is_bounce_back = _BOUNCE_BACK_PATTERN_RE.search(accumulated_content or "")
+        _is_apology = _APOLOGY_PATTERN_RE.search(accumulated_content or "")
+        if (_is_bounce_back or _is_apology) and _has_data_rows(tool_calls_for_frontend):
+            try:
+                # Use LLM to write a comprehensive answer instead of
+                # _data_rows_fallback. Different databases need the LLM
+                # to interpret data meaningfully.
+                _llm_ans = await _force_llm_synthesis(
+                    user_content,
+                    _last_rows if "_last_rows" in locals() else [],
+                    synth_call_fn=_deferred_synth_call,
+                    conversation_history=llm_messages,
+                    max_retries=2,
+                )
+                if len(_llm_ans) > 50:
+                    accumulated_content = _llm_ans
+                else:
+                    accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+            except Exception as _apology_err:
+                logger.warning("v3 apology/bounce-back fallback failed: %s", _apology_err)
+                try:
+                    accumulated_content = _choose_fallback(
+                        tool_calls_for_frontend, _orch_created,
+                        user_content=user_content,
+                    )
+                except Exception:
+                    accumulated_content = _GENERIC_EMPTY_CONTENT_FALLBACK
+            logger.info(
+                "v3 %s (post-loop): swapped for data-aware message "
+                "(conv=%s, len=%d)",
+                "bounce-back" if _is_bounce_back else "apology-guard",
+                conversation_id,
+                len(accumulated_content),
+            )
+            try:
+                if locals().get("content_streamed"):
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "content_replace",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+                else:
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "delta",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+            except Exception:
+                pass
+
         # Save the final assistant message
         assistant_msg = {
             "id": assistant_msg_id, "role": "assistant",
@@ -10662,6 +13112,10 @@ async def add_message_stream(
         # Attach activity_steps so they survive page refresh
         if _activity_steps:
             assistant_msg["activity_steps"] = _activity_steps
+        # Attach the typed live-activity feed so past turns render their
+        # collapsed summary on reload (LiveActivityStream).
+        if _live_events:
+            assistant_msg["live_events"] = _live_events
         # Surface create_artifact results as artifacts
         _artifacts = _collect_artifact_results(
             tool_calls_for_frontend, assistant_msg_id, conversation_id, db,
@@ -10884,6 +13338,24 @@ async def add_message_stream(
         # artifact-render fix already offloaded the long sync work; this
         # guards the remaining path.)
         try:
+            _le_fd = _push_live_event("finalize_done", "finalize_done")
+            if _le_fd:
+                yield _le_fd
+            # UX FIX (2026-08-24): When intermediate deltas were suppressed,
+            # emit the final accumulated content as a single content_replace
+            # BEFORE the done event. The frontend MessageBubble reads the
+            # content field from `done` for the persisted bubble, but many
+            # UI implementations only update live from streaming events —
+            # without this explicit content_replace the user would see an
+            # empty bubble even after the file is ready.
+            if _suppress_chat_deltas:
+                _final_bubble_text = (
+                    accumulated_content or assistant_content or ""
+                )
+                if _final_bubble_text:
+                    yield (
+                        f'data: {json.dumps({"type": "content_replace", "content": _final_bubble_text})}\n\n'
+                    )
             yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
         except (GeneratorExit, StopIteration):
             raise
@@ -10897,7 +13369,17 @@ async def add_message_stream(
                 yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content or "", "trace": [], "conversation": {}})}\n\n'
             except Exception:
                 logger.error("v3 stream: fallback done frame also failed")
-        _discard_steer(conversation_id)
+        finally:
+            # Clean up the steer bus for this conversation (best-effort).
+            try:
+                _discard_steer(conversation_id)
+            except Exception as _discard_err:
+                logger.warning("v3 stream: steer discard failed (non-fatal): %s", _discard_err)
+            # T18: clear the dashboard-intent flag set at event_stream entry.
+            try:
+                reset_dashboard_intent(_dash_intent_token)
+            except Exception as _reset_err:
+                logger.warning("v3 stream: reset dashboard intent failed (non-fatal): %s", _reset_err)
 
     return StreamingResponse(
         _sse_with_heartbeat(_guarantee_done(event_stream())),

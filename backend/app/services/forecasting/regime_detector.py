@@ -12,17 +12,16 @@ Flag-gated via FORECAST_REGIME_DETECTION_ENABLED (default false).
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
 
-_REGIME_DETECTION_ENABLED = os.getenv(
-    "FORECAST_REGIME_DETECTION_ENABLED", "false"
-).lower() in ("true", "1")
+_REGIME_DETECTION_ENABLED = settings.FORECAST_REGIME_DETECTION_ENABLED
 
 _LOOKBACK = 30        # rolling window length
 _TREND_THRESH = 0.02  # ±2% return over lookback = trend

@@ -12,7 +12,6 @@ import ForecastTrendChart from './components/ForecastTrendChart';
 import PriceTransmissionChain from './components/PriceTransmissionChain';
 import DecisionBoard from './components/DecisionBoard';
 import ReportView from './components/ReportView';
-import WeeklySummaryForecast from './components/WeeklySummaryForecast';
 
 const VALID_SECTIONS = ['overview', 'upstream', 'midstream', 'downstream', 'report', 'weekly-summary'];
 

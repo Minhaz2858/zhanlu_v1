@@ -50,6 +50,53 @@ def test_start_finalize_offloaded_runs_in_thread_with_own_session():
     fake_thread_db.close.assert_called_once()
 
 
+def test_threaded_finalize_disables_expire_on_commit_for_detached_reads():
+    """FIX B (2026-08-22): the Artifact row must stay readable after the
+    thread session closes.
+
+    Default ``expire_on_commit=True`` expires every attribute at commit, so
+    reading e.g. ``artifact.id`` on the returned (now detached) row raises
+    DetachedInstanceError in the caller.  The thread must disable expiry
+    before committing.
+    """
+
+    class SpySession:
+        expire_on_commit = True
+
+        def __init__(self):
+            self.committed = False
+
+        def commit(self):
+            assert (
+                self.expire_on_commit is False
+            ), "FIX B: expire_on_commit must be disabled before commit so the detached row stays readable"
+            self.committed = True
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    fake_db = MagicMock()
+    spy = SpySession()
+    fake_artifact = MagicMock()
+    fake_exports = {"pptx": {"artifact_id": "a1"}}
+
+    with patch("app.routers.agents.finalize_into_artifact", return_value=(fake_artifact, fake_exports)):
+        with patch("app.database.SessionLocal", return_value=spy):
+
+            async def _run():
+                task = agents._start_finalize_offloaded(fake_db, {})
+                return await task
+
+            result = asyncio.run(_run())
+
+    assert result == (fake_artifact, fake_exports)
+    assert spy.expire_on_commit is False
+    assert spy.committed
+
+
 def test_start_finalize_offloaded_rolls_back_on_error():
     """If finalize raises, the thread's session is rolled back and closed."""
     fake_db = MagicMock()

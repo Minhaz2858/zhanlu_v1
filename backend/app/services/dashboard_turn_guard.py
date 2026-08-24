@@ -15,6 +15,66 @@ _LIVE_DASHBOARD_EN_RE = re.compile(
 _LIVE_DASHBOARD_ZH = ("仪表盘", "看板", "数据面板", "数据看板", "仪表板")
 
 
+# ── Inline-analytics intent (bypasses Path 2 speculative forcing) ──
+# When the user clearly wants inline data analysis (not a dashboard),
+# the speculative dashboard forcing must NOT fire, regardless of
+# whether the agent has done schema/design prep.  These keywords are
+# checked against the raw user message (lower-cased, EN + ZH).
+_INLINE_ANALYTICS_EN_RE = re.compile(
+    r"(?:"
+    r"\bsales\s+report\b"
+    r"|\bsupply\s+chain\b|\bsupply-chain\b"
+    r"|\binventory\s+(?:data|report|level|status|check|overview)\b"
+    r"|\brevenue\s+(?:report|breakdown|by\s+\w+|data|overview)\b"
+    r"|\bgross\s+margin\b|\bmargin\s+analysis\b"
+    r"|\btop\s+\d+\b"
+    r"|\brank\s+(?:the\s+)?(?:customers?|products?|materials?|suppliers?|skus?)\b"
+    r"|\bskus?\b|\bsku\s+volume\b"
+    r"|\bwhat\s+were\b"
+    r"|\bdrill\s+(?:down|into)\b"
+    r"|\bgive\s+me\s+(?:a|an|the)?\b"
+    r"|\bshow\s+me\b|\btell\s+me\b"
+    r"|\blist\s+(?:the|all)\b"
+    r"|\bcompare\b|\bbreakdown\b|\btrend\b"
+    r"|\bmonth[- ]over[- ]month\b|\bYoY\b|\bQoQ\b"
+    r"|\blast\s+\d+\s+days?\b|\blast\s+quarter\b|\blast\s+month\b"
+    r"|\bJuly\s+\d{4}\b|\bJune\s+\d{4}\b|\bAugust\s+\d{4}\b"
+    r"|\b202[4-9]\b|\b203[0-9]\b"
+    r")",
+    re.IGNORECASE,
+)
+_INLINE_ANALYTICS_ZH = (
+    "销售报告", "销售报表", "销量", "库存", "供应链",
+    "营业收入", "毛利率", "营收",
+    "对比", "排名", "前几", "排行",
+    "明细", "清单", "汇总",
+    "告诉我", "给我", "看看",
+    "上个月", "过去", "最近", "产品收入", "客户收入", "月度",
+)
+
+
+def _is_inline_analytics_intent(user_content: str) -> bool:
+    """True when the user clearly wants inline data analysis, NOT a dashboard.
+
+    Returns True for queries like:
+      - "i want July 2026 sales report (volume, revenue, margin, inventory)"
+      - "give me supply chain data for last 30 days"
+      - "show me top 10 products by revenue"
+      - "compare June and July sales"
+
+    Returns False for queries like:
+      - "build a dashboard for sales"
+      - "create a dashboard showing KPIs"
+      - "open the inventory dashboard"
+    """
+    if not user_content:
+        return False
+    text = user_content.lower()
+    if _INLINE_ANALYTICS_EN_RE.search(text):
+        return True
+    return any(kw in user_content for kw in _INLINE_ANALYTICS_ZH)
+
+
 def _fuzzy_dashboard_word(token: str) -> bool:
     """Consonant-skeleton match for typo'd 'dashboard' (Fix 5).
 
@@ -153,7 +213,15 @@ def should_force_create_dashboard(
     # Path 2: speculative / project-context — the agent is prepping a
     # dashboard without being told. We've already loaded dashboard skills,
     # called describe_schema, and used ui-ux-pro-max. It's time to ship.
+    #
+    # Escape hatch: when the user CLEARLY wants inline data analysis
+    # (sales report, supply chain, revenue breakdown, top-N list, etc.),
+    # do NOT force a dashboard — the user wants prose + numbers, not a
+    # widget grid.  This preserves the original intent even when the
+    # agent speculatively loads dashboard skills.
     if is_dashboard_project and has_schema and has_design:
+        if _is_inline_analytics_intent(user_content):
+            return False
         return True
 
     return False
@@ -259,6 +327,7 @@ def dashboard_antitools_should_block(
 def dashboard_orchestrator_should_block(
     user_content: str | None,
     executed_names: list[str] | None,
+    failed_names: set[str] | None = None,
 ) -> bool:
     """True when the post-loop orchestrator must be skipped on this turn.
 
@@ -266,8 +335,13 @@ def dashboard_orchestrator_should_block(
 
     - Non-dashboard requests → always False (guard is dashboard-turn-scoped).
     - Build tool not flag-enabled → False (guard inert).
-    - Build tool already called this turn → False (post-build the orchestrator
-      may legitimately run marker fulfillment / static export).
+    - Build tool called AND succeeded this turn → False (post-build the
+      orchestrator may legitimately run marker fulfillment / static export).
+    - Build tool called but FAILED this turn (returned ``{"success": False}``
+      or threw) → True: the orchestrator must NOT fabricate a static artifact
+      on top of a crashed build (observed in smoke #5 — the 78 KB static
+      "Web page" artifact after ``create_fullstack_dashboard`` crashed with
+      ``NameError: name 'Path' is not defined``).
     - Otherwise → True: the orchestrator must not fabricate a dashboard
       artifact; the model should have used the build tool in-loop.
     """
@@ -277,8 +351,11 @@ def dashboard_orchestrator_should_block(
     if not build_tool:
         return False
     names = set(executed_names or [])
+    failed = set(failed_names or [])
     if build_tool in names:
-        return False  # already built this turn — orchestrator is allowed
+        if build_tool in failed:
+            return True  # build tool CRASHED — orchestrator must not fabricate
+        return False  # build succeeded — orchestrator is allowed
     return True
 
 
@@ -491,13 +568,13 @@ _CONTRACT_APPROVAL_EN_RE = re.compile(
 _CONTRACT_APPROVAL_ZH = ("确认", "可以", "同意", "没问题", "就用", "就按", "好的")
 
 # Entity-shaped token: snake_case identifiers or ALL_CAPS acronyms — the shape
-# of real table/column names (e.g. `erp_product_sales_details`, `FNAME`).
+# of real table/column names (e.g. `sales_table`, `PRODUCT_ID`).
 _ENTITY_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_]{2,}")
 
 
 def mentions_concrete_entities(user_content: str) -> bool:
     """True when the user request names concrete tables/columns (e.g.
-    ``erp_product_sales_details``, ``FNAME``, ``shipment_date``)."""
+    ``sales_table``, ``PRODUCT_ID``, ``shipment_date``)."""
     return any("_" in tok or tok.isupper() for tok in _ENTITY_TOKEN_RE.findall(user_content))
 
 

@@ -21,7 +21,6 @@ vi.mock('@/lib/LanguageProvider', () => ({
 }));
 vi.mock('@/components/chat/ClarifyOptions', () => ({ default: () => null }));
 vi.mock('@/components/chat/ClarifyBatchForm', () => ({ default: () => null }));
-vi.mock('@/components/chat/ReasoningSummary', () => ({ default: () => null }));
 vi.mock('@/components/chat/ActivitySteps', () => ({ default: () => null }));
 vi.mock('@/components/chat/ResultCard', () => ({ default: () => null }));
 vi.mock('@/components/chat/DataTableCard', () => ({ default: () => null }));

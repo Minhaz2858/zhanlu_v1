@@ -324,6 +324,36 @@ def validate_against_schema(
         name = col.name
         if not name or name == "*":
             continue
+
+        # Skip columns that are actually SELECT-expression aliases.
+        # sqlglot sometimes surfaces alias names as Column nodes (especially
+        # short aliases like `y`, `m`, `rows` in `SELECT ... AS y`).  These
+        # are NOT real table columns and should not be validated against the
+        # schema.  Also skip EXTRACT function parts (YEAR, MONTH, etc.)
+        # which sqlglot may parse as Column nodes.
+        parent = col.parent
+        if isinstance(parent, exp.Alias) and parent.alias == name:
+            continue
+        # Skip columns inside EXTRACT() — YEAR/MONTH/DAY etc. are not real columns
+        _anc = col
+        while _anc is not None:
+            if isinstance(_anc, (exp.Extract,)):
+                name = None  # mark for skip below
+                break
+            _anc = getattr(_anc, "parent", None)
+        if name is None:
+            continue
+
+        # Skip names that match any SELECT alias (handles cases where
+        # sqlglot surfaces the alias as a Column)
+        _select_aliases = set()
+        for sel in parsed.find_all(exp.Select):
+            for expr in (getattr(sel, "expressions", None) or []):
+                if isinstance(expr, exp.Alias) and expr.alias:
+                    _select_aliases.add(str(expr.alias).lower())
+        if name.lower() in _select_aliases:
+            continue
+
         qualifier = (col.table or "").lower()
 
         if qualifier:

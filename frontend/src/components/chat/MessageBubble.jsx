@@ -5,8 +5,7 @@ import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, C
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
 import ClarifyBatchForm from './ClarifyBatchForm';
-import ReasoningSummary from './ReasoningSummary';
-import ActivitySteps from './ActivitySteps';
+import LiveActivityStream from './LiveActivityStream';
 import ResultCard from './ResultCard';
 import DataTableCard from './DataTableCard';
 import ReportCard from './ReportCard';
@@ -218,18 +217,10 @@ function parseContent(content) {
   return parts;
 }
 
-export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onShowTrace, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating }) {
+export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating }) {
   const { lang } = useLanguage();
   const isUser = message.role === 'user';
   const parts = isUser ? null : parseContent(message.content || '');
-  const hasTrace = !isUser && (
-    (Array.isArray(message.trace_steps) && message.trace_steps.length > 0) ||
-    (Array.isArray(message.trace) && message.trace.length > 0)
-  );
-  // P0: prefer the live trace_steps (incremental) over the post-hoc trace
-  const traceForSummary = (Array.isArray(message.trace_steps) && message.trace_steps.length > 0)
-    ? message.trace_steps
-    : (message.trace || []);
   const hasReasoning = !isUser && typeof message.reasoning === 'string' && message.reasoning.length > 0;
   const htmlMatch = !isUser && !isStreaming ? (message.content || '').match(/```html\s*([\s\S]*?)```/i) : null;
   const hasResult = parts?.some((part) => part.type === 'result');
@@ -239,16 +230,27 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
   // list. Passing the full list to both rendered the same file twice.
   const { inline: inlineArtifacts, cards: cardArtifacts } = partitionArtifacts(message.artifacts);
 
-  // Detect ask_data_agent tool calls with rows in message.tool_calls
-  const dataToolResult = !isUser && Array.isArray(message.tool_calls)
-    ? message.tool_calls.find((tc) => {
+  // Detect ask_data_agent tool calls with rows in message.tool_calls.
+  // Recognize the direct-SQL tool family too, and prefer an answer-tagged
+  // dataset for the inline table — probe-tagged results (reference lookups
+  // / ID samples) are skipped so raw probe rows don't leak into the final
+  // answer (2026-08-21).
+  const dataToolCandidates = !isUser && Array.isArray(message.tool_calls)
+    ? message.tool_calls.filter((tc) => {
       if (!tc || !tc.results) return false;
       const name = tc.name || tc.tool_name || '';
-      const isDataTool = name === 'ask_data_agent' || name === 'Database Query';
+      const isDataTool = name === 'ask_data_agent'
+        || name === 'execute_query'
+        || name === 'execute_sql'
+        || name === 'sql_query'
+        || name === 'Database Query';
       const hasRows = Array.isArray(tc.results.rows) && tc.results.rows.length > 0;
       return isDataTool && hasRows;
     })
-    : null;
+    : [];
+  const dataToolResult = dataToolCandidates.find(
+    (tc) => (tc.results && tc.results.query_purpose) !== 'probe',
+  ) || null;
 
   // Detect Synexia report-card payload (preferred over DataTableCard for reports)
   const reportToolResult = !isUser && Array.isArray(message.tool_calls)
@@ -369,18 +371,16 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
           </div>
         ) : (
           <div ref={contentRef} className="min-w-0 break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
-            {/* Inline Claude-style numbered activity steps (+ phase headline).
-                The reasoning panel (model chain-of-thought) is rendered
-                INSIDE ActivitySteps — at the bottom of the expanded step
-                list — so it shares the same collapse/expand behavior as
-                the steps themselves. When the steps auto-collapse to a
-                one-line summary on a finalized message, the reasoning
-                disappears with them. The user sees both by clicking the
-                summary toggle. */}
-            <ActivitySteps
-              steps={message.activity_steps}
+            {/* Unified live activity feed (2026-08-22). The component itself
+                synthesizes `live_events` from legacy `activity_steps` when
+                present, so every assistant message — past or future — renders
+                through this single component with one visual design. */}
+            <LiveActivityStream
+              events={message.live_events}
+              legacySteps={message.activity_steps}
               phase={message.phase}
               reasoning={hasReasoning ? message.reasoning : undefined}
+              isStreaming={isStreaming}
             />
             {message.phase?.execution_id && onOpenRun && (
               <button
@@ -392,22 +392,15 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 Open run
               </button>
             )}
-            {reportToolResult && (
-              <ReportCard
-                payload={reportToolResult.results.report_card_payload}
-                artifactId={reportToolResult.results.artifact_id}
-                userSignal={reportToolResult.results.user_signal}
-                fileExports={reportToolResult.results.file_exports}
-                isPendingExport={isPendingExport}
-              />
-            )}
-            {reportToolResult && reportToolResult.results.artifact_id && isExportSignal(reportToolResult.results.user_signal) && (
-              <ArtifactPreviewCard
-                artifactId={reportToolResult.results.artifact_id}
-                onOpen={onArtifactPreview}
-              />
-            )}
-            {!reportToolResult && dataToolResult && (
+            {/* ReportCard and ArtifactPreviewCard removed — inline markdown
+                report is the primary deliverable; the preview card was
+                redundant and cluttered the chat. */}
+            {/* Suppress raw DataTableCard while the message is still streaming
+                AND when the message already carries a substantive synthesized
+                answer (markdown section headers signal a real inline report).
+                Raw data stays visible inside the collapsible activity steps
+                instead. Mid-flight: only step indicators should show. */}
+            {!isStreaming && !reportToolResult && dataToolResult && !(/##\s+/.test(message.content || '')) && (
               <DataTableCard
                 rows={dataToolResult.results.rows}
                 sql={dataToolResult.results.sql}
@@ -462,11 +455,14 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 <Eye className="h-3.5 w-3.5" /> {lang === 'en' ? 'Preview HTML in Artifacts' : '在产物中预览 HTML'}
               </button>
             )}
-            {hasTrace && <ReasoningSummary trace={traceForSummary} lang={lang} onOpen={() => onShowTrace?.(message)} />}
             {/** Artifact cards from create_artifact tool results — only
              * the non-inline subset (see partitionArtifacts); inline-bound
-             * artifacts render below via InlineArtifactPreview. */}
-            <ArtifactCardList artifacts={cardArtifacts} onPreview={onArtifactPreview} userRequestedFormat={userRequestedFormat} />
+             * artifacts render below via InlineArtifactPreview.
+             * Suppress while streaming to prevent mid-flight artifact card
+             * leaks (e.g. "Database inventory — schema overview" cards). */}
+            {!isStreaming && (
+              <ArtifactCardList artifacts={cardArtifacts} onPreview={onArtifactPreview} userRequestedFormat={userRequestedFormat} />
+            )}
             {/**
              * Manus-style inline deliverable: when a chat message attaches a
              * generated automation file (e.g. an HTML report dropped into the
@@ -474,8 +470,9 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
              * expandable preview so the user sees the deliverable next to the
              * assistant turn that produced it.  Falls back to ArtifactCardList
              * for ordinary chat-only artifacts.
+             * Suppress while streaming to prevent mid-flight artifact leaks.
              */}
-            {inlineArtifacts.length > 0 && (
+            {!isStreaming && inlineArtifacts.length > 0 && (
               <div className="mt-1 space-y-1">
                 {inlineArtifacts.map((artifact) =>
                   artifact.source === 'dashboard' ? (

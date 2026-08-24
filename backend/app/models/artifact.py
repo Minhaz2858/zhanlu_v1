@@ -60,6 +60,10 @@ class Artifact(TimestampedBase):
     # Evidence lineage — list of DataSnapshot IDs this artifact cites
     data_snapshot_ids: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     canonical_format: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # Origin of the artifact.  "agent" = normal analytics/tool path;
+    # "dashboard_app" = a fullstack dashboard app.  Used by the dashboard-turn
+    # guard (T18) to drop stray non-dashboard artifacts on a dashboard turn.
+    source: Mapped[str] = mapped_column(String(50), default="agent", nullable=False, index=True)
 
     versions: Mapped[list["ArtifactVersion"]] = relationship(
         back_populates="artifact", cascade="all, delete-orphan"

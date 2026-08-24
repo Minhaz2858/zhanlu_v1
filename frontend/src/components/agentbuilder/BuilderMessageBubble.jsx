@@ -2,7 +2,6 @@ import { useState } from 'react';
 import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, XCircle, Loader2, ShieldAlert, Sparkles, Wrench, ListChecks, FileText } from 'lucide-react';
 import AgentMarkdown from '@/components/agent/AgentMarkdown';
 import DecisionSummaryCard from '@/components/agentbuilder/DecisionSummaryCard';
-import ReasoningSummary from '@/components/chat/ReasoningSummary';
 import ReasoningPanel from '@/components/chat/ReasoningPanel';
 import ArtifactCardList from '@/components/chat/ArtifactCardList';
 
@@ -368,8 +367,6 @@ export default function BuilderMessageBubble({ message, onOptionSelect, conversa
               className="mt-3"
               testId="builder-reasoning-panel"
             />
-            {/* Always-on Reasoning & actions card */}
-            <ReasoningSummary trace={trace} lang="en" />
             {decision && (
               <div className="mt-2 w-full">
                 <DecisionSummaryCard

@@ -10,6 +10,7 @@ import { marketDashboardApi } from '@/api/marketDashboard';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ForecastFeedbackModal from './ForecastFeedbackModal';
 import { normalizeForecastPoints } from '../lib/forecastChartMath';
+import DynamicConfidenceBadge from './DynamicConfidenceBadge';
 
 // UI static strings for the decision board (zh / en). Data-driven fields
 // (action_label_zh, trust_label_zh, one_liner_zh, analyst_brief.*) stay as
@@ -70,6 +71,8 @@ import { normalizeForecastPoints } from '../lib/forecastChartMath';
       correctForecast: 'Correct Forecast',
       expand: 'Expand {name}',
       actual: 'Actual',
+      today: 'Today',
+      baseForecast: 'Base forecast',
       forecastN: '{d}-day forecast',
       chartLoading: 'Loading chart data…',
       watchTriggers: 'Watch Triggers',
@@ -99,14 +102,7 @@ const ACTION_STYLES = {
   watch: 'bg-amber-100 text-amber-700 border-amber-200 dark:bg-amber-900/40 dark:text-amber-300 dark:border-amber-800',
 };
 
-const TRUST_DOTS = {
-  green: 'bg-green-500',
-  yellow: 'bg-yellow-500',
-  orange: 'bg-orange-500',
-  red: 'bg-red-500',
-};
 
-// 7-section brief config (mirrors human weekly report structure).
 // `emphasis` sections get a highlighted background; `risk` sections get amber styling.
 const BRIEF_SECTIONS = [
   { key: 'market_update_zh', zh: '市场动态', en: 'Market Update' },
@@ -132,6 +128,52 @@ function fmtPctFraction(v) {
 function fmtProb(v) {
   if (v == null) return '—';
   return `${Math.round(v * 100)}%`;
+}
+
+/**
+ * Custom tooltip for the ExpandedCard mini-chart.
+ *
+ * The old code hardcoded the decision-board horizon (`day=7`) into the Line's
+ * `name`, so Recharts' default tooltip showed "7-day forecast" at EVERY hovered
+ * X position — even 30 days out. This tooltip derives the label from the
+ * hovered datum itself:
+ *   - actual series            -> t.actual
+ *   - base in 'forecast' zone  -> "{N}-day forecast" where N = days from the
+ *                                 today-anchor (first zone==='today' point)
+ *   - base in 'today'/past     -> t.today
+ *
+ * `points` is the already-normalized array (normalizeForecastPoints), so the
+ * anchor logic stays identical to ForecastTrendChart.
+ */
+export function ChartTooltip({ active, payload, label, points, t }) {
+  if (!active || !payload || !payload.length) return null;
+  const anchor = points?.find((p) => p.zone === 'today');
+  const DAY_MS = 86400000;
+  return (
+    <div className="rounded-md border border-slate-200 bg-white px-2.5 py-1.5 text-xs text-slate-700 shadow-md dark:border-slate-600 dark:bg-slate-800 dark:text-slate-200">
+      <div className="mb-0.5 font-medium text-slate-400 dark:text-slate-400">{label}</div>
+      {payload.map((entry) => {
+        const datum = entry.payload;
+        let label = t.actual;
+        if (entry.dataKey === 'base') {
+          if (datum?.zone === 'forecast' && anchor) {
+            const n = Math.round((new Date(datum.date) - new Date(anchor.date)) / DAY_MS);
+            label = n > 0 ? t.forecastN.replace('{d}', n) : t.today;
+          } else {
+            label = t.today;
+          }
+        }
+        return (
+          <div key={entry.dataKey || entry.name} className="flex items-center justify-between gap-4">
+            <span className="mr-2">{label}</span>
+            <span className="font-semibold tabular-nums">
+              {entry.value == null ? '—' : Number(entry.value).toLocaleString()}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // Localize the forecast window [generatedAt, generatedAt + day] as a short
@@ -261,6 +303,10 @@ function DecisionRow({ p, day, lang, t, group, isSelected, isExpanded, onSelect,
       : p.expected_change_pct >= 0
         ? 'text-red-600 dark:text-red-400'   // 涨=red (CN convention)
         : 'text-green-600 dark:text-green-400';
+  // P0.4: When p_rise is suppressed (honesty-gate downgrade) but data exists,
+  // also suppress expected_change_pct to avoid misleading "+0.0%" display.
+  const pRiseSuppressed = p.p_rise == null && p.forecast_base != null;
+  const displayChg = pRiseSuppressed ? null : p.expected_change_pct;
   return (
     <>
     <tr
@@ -278,7 +324,7 @@ function DecisionRow({ p, day, lang, t, group, isSelected, isExpanded, onSelect,
       <td className="px-2 py-2.5 text-right tabular-nums">{fmtPrice(p.current_price)}</td>
       <td className="px-2 py-2.5 text-right tabular-nums">{fmtPrice(p.forecast_base)}</td>
       <td className={`px-2 py-2.5 text-right tabular-nums ${chgCls}`}>
-        {fmtPctFraction(p.expected_change_pct)}
+        {fmtPctFraction(displayChg)}
       </td>
       <td className="px-2 py-2.5 text-right tabular-nums">{fmtProb(p.p_rise)}</td>
       <td className="px-2 py-2.5">
@@ -294,14 +340,7 @@ function DecisionRow({ p, day, lang, t, group, isSelected, isExpanded, onSelect,
         </button>
       </td>
         <td className="px-2 py-2.5">
-          {p.trust_label_zh ? (
-            <span className="inline-flex items-center gap-1.5 text-xs text-slate-500 dark:text-slate-400">
-              <span className={`h-2 w-2 rounded-full ${TRUST_DOTS[p.trust_color] || 'bg-slate-300'}`} />
-              {p.trust_label_zh}
-            </span>
-          ) : (
-            <span className="text-xs text-slate-400">—</span>
-          )}
+          <DynamicConfidenceBadge productKey={p.product_id} lang={lang} />
         </td>
       <td className="max-w-[220px] truncate px-2 py-2.5 text-xs text-slate-500 dark:text-slate-400">
         {p.one_liner_zh}
@@ -346,9 +385,9 @@ function ExpandedCard({ p, day, lang, t, group }) {
             <ComposedChart data={points} margin={{ top: 4, right: 8, bottom: 0, left: 8 }}>
               <XAxis dataKey="date" tick={{ fontSize: 10 }} tickFormatter={(d) => String(d).slice(5)} />
               <YAxis tick={{ fontSize: 10 }} domain={['auto', 'auto']} width={50} />
-              <Tooltip formatter={(v) => (v == null ? '—' : Number(v).toLocaleString())} />
+              <Tooltip content={<ChartTooltip points={points} t={t} />} />
               <Area type="monotone" dataKey="actual" stroke="#2563eb" fill="#bfdbfe" strokeWidth={1.5} name={t.actual} />
-              <Line type="monotone" dataKey="base" stroke="#f59e0b" strokeDasharray="4 2" dot={false} name={t.forecastN.replace('{d}', day)} />
+              <Line type="monotone" dataKey="base" stroke="#f59e0b" strokeDasharray="4 2" dot={false} name={t.baseForecast} />
             </ComposedChart>
           </ResponsiveContainer>
         ) : (

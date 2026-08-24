@@ -1,4 +1,14 @@
+from __future__ import annotations
+
 """Forecast Policy Service — adaptive bias correction and volatility scaling.
+
+P2.14: This module owns the SINGLE bias-correction path with a combined
+absolute cap of ±2.5%.  HITL author deltas are routed through the same
+budget (they compete for the cap, never compound on top).
+
+Canonical volatility thresholds (single source of truth):
+  HIGH_VOL_THRESHOLD = 5.0%   (daily std)
+  MODERATE_VOL_THRESHOLD = 1.5%  (daily std)
 
 Ported from EDIA 5.1.2 (service/forecast_policy_service.py) and adapted for
 Zhanlu's PostgreSQL-based ForecastAccuracyLog.
@@ -10,7 +20,10 @@ Provides:
 - horizon-scaled adjustments with caps
 """
 
-from __future__ import annotations
+# P2.14: Module-level constants for import by other modules / tests
+HIGH_VOL_THRESHOLD = 5.0     # 5% daily std (canonical source of truth)
+MODERATE_VOL_THRESHOLD = 1.5  # 1.5% daily std
+FORECAST_BIAS_CAP_PCT = 2.5  # combined ±2.5% absolute cap
 
 import logging
 import statistics
@@ -56,8 +69,9 @@ class ForecastPolicyService:
     """
 
     # Thresholds for volatility regime classification (daily std of returns)
-    HIGH_VOL_THRESHOLD = 0.05   # 5% daily std
-    MODERATE_VOL_THRESHOLD = 0.015  # 1.5% daily std
+    # P2.14: import from module-level canonical constants (single source of truth)
+    HIGH_VOL_THRESHOLD = HIGH_VOL_THRESHOLD   # 5% daily std
+    MODERATE_VOL_THRESHOLD = MODERATE_VOL_THRESHOLD  # 1.5% daily std
 
     # Volatility multiplier per regime
     VOL_MULTIPLIER = {
@@ -255,3 +269,36 @@ class ForecastPolicyService:
         }
 
         return adjusted, detail
+
+
+# ---------------------------------------------------------------------------
+# P2.14: Unified bias correction entry point
+# ---------------------------------------------------------------------------
+
+def apply_bias_correction(
+    forecast_value: float,
+    accuracy_log_bias_pct: float = 0.0,
+    hitl_delta_pct: float = 0.0,
+) -> float:
+    """Apply combined bias correction with single ±2.5% absolute cap.
+
+    Both the accuracy-log bias and HITL author delta compete for the same
+    budget; they never compound beyond the cap.
+
+    Parameters
+    ----------
+    forecast_value : float
+        The raw forecast value to adjust.
+    accuracy_log_bias_pct : float
+        Bias from ForecastAccuracyLog (damped signed error), already in pct.
+    hitl_delta_pct : float
+        Human-in-the-loop author override delta, in pct.
+
+    Returns
+    -------
+    float
+        Adjusted forecast value.
+    """
+    total_adj = accuracy_log_bias_pct + hitl_delta_pct
+    capped_adj = max(-FORECAST_BIAS_CAP_PCT, min(FORECAST_BIAS_CAP_PCT, total_adj))
+    return forecast_value * (1.0 + capped_adj / 100.0)

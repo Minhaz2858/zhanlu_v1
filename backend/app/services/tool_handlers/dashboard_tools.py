@@ -8,6 +8,7 @@ query time (never trusted) by the /query endpoint.
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 from typing import Optional
 
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -699,11 +700,25 @@ async def _create_fullstack_dashboard(
     from app.services.dashboard_app.manager import dashboard_app_manager
 
     spec = parsed.model_dump()
-    # 1) Write the app files FIRST — mount() imports the generated module and
-    #    serves its dist, so the generator must run before the record is marked
-    #    deployable. (Regression: create used to persist a record with no files,
-    #    making mount() fail with ModuleNotFoundError.)
+    # 1) Write the app files FIRST. T17: the global catch-all routes in
+    #    routers/dashboards.py resolve the on-disk app dir per-request, so we no
+    #    longer need a per-app mount. But we MUST verify the generator actually
+    #    produced the files before marking the app "running" — otherwise the
+    #    viewer's config.json fetch (and the whole app) is dead. Previously
+    #    mount() masked this; now we fail loudly.
     get_generator().generate(spec)
+    app_dir = get_generator().app_dir(parsed.slug)
+    missing = [
+        rel for rel in ("config.json", "api.py", str(Path("dist") / "index.html"))
+        if not (app_dir / rel).exists()
+    ]
+    if missing:
+        dashboard_app_manager.set_status(parsed.slug, "error")
+        logger.error("create_fullstack_dashboard: generate incomplete for %s — missing %s",
+                     parsed.slug, missing)
+        return {"success": False,
+                "error": "generate: missing " + ", ".join(missing)}
+
     # 2) T5: bind the chat thread that created this dashboard so My Files can
     #    offer "Open in chat" — the conversation id is the AgentConversation id
     #    the frontend deep-links via ?conv=<id>.
@@ -718,7 +733,6 @@ async def _create_fullstack_dashboard(
     )
     try:
         dashboard_app_manager.mount(parsed.slug)
-        dashboard_app_manager.start_poller(parsed.slug)
     except Exception as exc:
         logger.exception("create_fullstack_dashboard: deploy failed for %s", parsed.slug)
         dashboard_app_manager.set_status(parsed.slug, "error")
@@ -728,6 +742,23 @@ async def _create_fullstack_dashboard(
     dashboard_app_manager.set_status(parsed.slug, "running", app_url=app_url)
     # T6: first restore point — "undo" can bring the app back to its initial state.
     dashboard_app_manager.commit_version(parsed.slug, "create")
+    # T18: persist a real Artifact row with source="dashboard_app" so the live
+    #    dashboard shows up in My Files and passes the dashboard-turn guard
+    #    (which drops every OTHER artifact written on a dashboard turn).
+    try:
+        from app.services.artifacts.artifact_service import ArtifactService
+        svc = ArtifactService(db)
+        svc.create_artifact(
+            "dashboard", parsed.name,
+            conversation_id=chat_thread_id,
+            created_by_agent_id=user_id,
+            org_id=org_id,
+            source="dashboard_app",
+            description=f"Live dashboard app: {app_url}",
+        )
+    except Exception:
+        logger.exception("create_fullstack_dashboard: artifact persistence failed for %s",
+                          parsed.slug)
     logger.info("full-stack dashboard created: %s (%d metrics)", parsed.slug, len(parsed.metrics))
     return {
         "success": True,

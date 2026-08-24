@@ -226,14 +226,34 @@ def create_compact_boundary_message(metadata: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_post_compact_messages(result: CompactionResult) -> list[dict[str, Any]]:
-    """Rebuild the post-compact message list."""
+    """Rebuild the post-compact message list.
+
+    NOTE: the caller is responsible for re-inserting the system prompt at
+    index 0 (e.g. ``auto_compact_if_needed`` consumers in agents.py do
+    ``if not messages or messages[0].get("role") != "system":
+    messages.insert(0, {"role": "system", ...})``). This builder therefore
+    MUST NOT emit a system-role message anywhere in the list: the boundary
+    message (a ``user`` message) is first, and when a small conversation is
+    kept verbatim (``messages_to_keep``), the original system prompt would
+    otherwise land mid-list, producing two system messages after the
+    caller's insert. vLLM/OpenAI reject that with "System message must be at
+    the beginning."
+    """
     attachment_messages = [render_compact_attachment(a) for a in result.attachments]
-    return [
+    kept = [
         result.boundary_message,
         *result.summary_messages,
         *result.messages_to_keep,
         *attachment_messages,
     ]
+    if not kept:
+        return []
+    # Drop any system-role messages that slipped in via messages_to_keep.
+    # If the first message IS system (never expected here, but be safe),
+    # keep it at index 0; otherwise strip all system messages.
+    if kept[0].get("role") == "system":
+        return kept
+    return [m for m in kept if m.get("role") != "system"]
 
 
 class CompactionService:

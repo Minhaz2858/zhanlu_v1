@@ -15,9 +15,9 @@ _DRIFT_AUDIT_WINDOW_DAYS = 7
 
 
 def get_drift_blend_factor() -> float:
-    raw = os.environ.get("FORECAST_DRIFT_BLEND_FACTOR", "0.2")
     try:
-        f = float(raw)
+        from app.config import settings
+        f = float(getattr(settings, "FORECAST_DRIFT_BLEND_FACTOR", 0.2))
     except (TypeError, ValueError):
         f = 0.2
     return max(0.0, min(f, 0.5))

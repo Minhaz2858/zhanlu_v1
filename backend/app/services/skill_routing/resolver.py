@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 # ── built-in Zhanlu default skills (format → default skill name) ────────
 DEFAULT_SKILL_MAP: dict[str, str] = {
     "docx": "docx",
-    "pptx": "pptx",
+    "pptx": "ppt-design",  # FIX 2026-08-23: use professional design skill instead of bare python-pptx
     "pdf": "pdf",
     "html": "artifacts-builder",
     # "dashboard-generation" skill now carries the FULL-STACK dashboard

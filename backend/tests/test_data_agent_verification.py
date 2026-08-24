@@ -292,7 +292,16 @@ def test_loop_metadata_answer_triggers_replan(monkeypatch):
          patch.object(delegation_tools, "_call_llm_with_retry", side_effect=fake_call_llm), \
          patch.object(agent_tools, "execute_tool", side_effect=fake_execute_tool):
         result = _run(delegation_tools._ask_data_agent(
-            args={"question": "what is the price of material A", "data_source_id": "kb-1"},
+            args={
+                "question": "what is the price of material A",
+                "data_source_id": "kb-1",
+                # The replan flow needs 4 turns (discover schema, prose, re-plan
+                # query, real prose). The production default is 2 because the
+                # [schema: ...] hint (delegation Fix 4) lets the sub-agent skip
+                # describe_schema; this test exercises the fallback path where
+                # the hint is absent, so it requests a larger budget explicitly.
+                "max_iterations": 4,
+            },
             db=db, user_id="u-1", context={"bound_kb_ids": ["kb-1"]},
         ))
 

@@ -13,12 +13,13 @@ Never mutates y_raw — all cleaning is done on a copied y_work.
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -145,9 +146,7 @@ def preprocess_series(
 
     # ---- 2b. Ensemble anomaly detection (flag-gated) --------------------------
     anomaly_count = 0
-    anomaly_detection_enabled = os.getenv(
-        "FORECAST_ANOMALY_DETECTION_ENABLED", "false"
-    ).lower() == "true"
+    anomaly_detection_enabled = settings.FORECAST_ANOMALY_DETECTION_ENABLED
     if anomaly_detection_enabled:
         try:
             from app.services.forecasting.anomaly_detector import detect_anomalies

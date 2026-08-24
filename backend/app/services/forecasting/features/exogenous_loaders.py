@@ -125,17 +125,64 @@ class FeedstockLoader:
 # ---------------------------------------------------------------------------
 
 class FxLoader:
-    """Static FX loader — returns hardcoded USDCNY=7.10 for Phase 1.
+    """FX rate loader — dynamic with fallback chain.
 
-    In Phase 2, this may be replaced with a dynamic (e.g., ECB/SAFE) fetch.
+    P2.15: Tries to fetch the latest USDCNY from the intelligence/price
+    tables via the DB session.  Fallback chain: live DB → last cached →
+    hardcoded 7.10 (with warning log).
+
+    The existing ``load(window_start, window_end)`` instance method is
+    preserved for backward compatibility; the new ``FxLoader.load()`` class
+    method returns a single float for the current rate.
     """
 
-    FX_RATE: float = 7.10
+    FX_RATE_FALLBACK: float = 7.10  # P2.15: explicit fallback constant
+    FX_RATE: float = 7.10           # backward compat alias
 
-    def load(self, window_start: date, window_end: date) -> pd.DataFrame:
-        """Return a single-column DataFrame with FX rate per date."""
+    _cached_rate: float | None = None
+
+    @classmethod
+    def load(cls, session=None) -> float:
+        """Return the current USDCNY rate.
+
+        Fallback chain: live DB query → cached value → hardcoded 7.10.
+        """
+        # Try 1: live DB query
+        if session is not None:
+            try:
+                from sqlalchemy import text
+                row = session.execute(
+                    text("SELECT y FROM md_t_lz_price WHERE product_id = 'usdcny' ORDER BY ds DESC LIMIT 1")
+                ).first()
+                if row and row[0] and row[0] > 0:
+                    rate = float(row[0])
+                    cls._cached_rate = rate
+                    return rate
+            except Exception as exc:
+                logger.warning("FxLoader DB query failed: %s — using fallback", exc)
+
+        # Try 2: last cached value
+        if cls._cached_rate is not None and cls._cached_rate > 0:
+            logger.info("FxLoader using cached rate: %.4f", cls._cached_rate)
+            return cls._cached_rate
+
+        # Try 3: hardcoded fallback
+        logger.warning("FxLoader: no live/cached data — using hardcoded %.2f", cls.FX_RATE_FALLBACK)
+        return cls.FX_RATE_FALLBACK
+
+    def fetch(self, window_start: date, window_end: date, session=None) -> pd.DataFrame:
+        """Return a single-column DataFrame with FX rate per date (backward compat).
+
+        Uses the dynamic rate if available, else the fallback.
+        """
+        rate = FxLoader.load(session=session)
         dates = pd.date_range(window_start, window_end, freq="D")
-        return pd.DataFrame({"usdcny": self.FX_RATE}, index=dates)
+        return pd.DataFrame({"usdcny": rate}, index=dates)
+
+    # Backward compat: keep old signature working
+    def load_series(self, window_start: date, window_end: date) -> pd.DataFrame:
+        """Deprecated: use fetch() instead."""
+        return self.fetch(window_start, window_end)
 
 
 # ---------------------------------------------------------------------------

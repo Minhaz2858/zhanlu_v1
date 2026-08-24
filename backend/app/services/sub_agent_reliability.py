@@ -25,7 +25,7 @@ import httpx
 
 from app.config import settings
 from app.services.llm_router import LLMEndpoint
-from app.services.llm_service import llm_headers, llm_url, get_model
+from app.services.llm_service import llm_headers, llm_url, get_model, model_has_fixed_temperature
 from app.services.prompt_caching import apply_cache_control
 from app.services.api_error_classifier import classify_api_error
 from app.services.agent_metrics import metrics
@@ -102,14 +102,21 @@ async def call_llm_with_reliability(
             enabled=getattr(settings, "PROMPT_CACHE_ENABLED", False),
             cache_ttl=getattr(settings, "PROMPT_CACHE_TTL", "5m"),
         ),
-        "temperature": temperature,
     }
+    if not model_has_fixed_temperature(_model):
+        payload["temperature"] = temperature
     if tools:
         payload["tools"] = tools
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(_url, headers=_headers, json=payload)
+            _sc = getattr(resp, "status_code", 0)
+            if isinstance(_sc, int) and _sc >= 400:
+                logger.warning(
+                    "Sub-agent LLM HTTP %s body: %s",
+                    _sc, resp.text[:500],
+                )
             resp.raise_for_status()
     except Exception as e:
         # P1: structured error classification + metrics

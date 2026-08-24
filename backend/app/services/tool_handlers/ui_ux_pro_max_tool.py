@@ -1,7 +1,7 @@
 """ui-ux-pro-max tool — design intelligence wrapper.
 
 Wraps the upstream BM25 + regex search CLI shipped at
-``backend/skills/ui-ux-pro-max/src/ui-ux-pro-max/scripts/search.py`` so the
+``backend/skills/ui-ux-pro-max/scripts/search.py`` so the
 Zhanlu global agent can call it like any other tool.
 
 Two tools are exposed:
@@ -17,7 +17,12 @@ as the markdown response, and return a structured dict. Errors NEVER raise
 SynexiaFSM planner can react gracefully (mirroring ``loop_guard_v2``).
 
 The skill is not sandbox-required: ``search.py`` only reads local CSV files
-under ``src/ui-ux-pro-max/data/`` and prints results. No network, no DB.
+under ``scripts/data/`` and prints results. No network, no DB.
+
+When ``persist=True``, the tool writes ``MASTER.md`` (agent-readable) AND a
+``design-system.json`` sidecar (machine-readable tokens) so downstream
+generators (``create_fullstack_dashboard``) can inject the design system into
+the React frontend without parsing markdown.
 """
 
 from __future__ import annotations
@@ -42,7 +47,21 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SKILL_DIR = Path(__file__).resolve().parents[3] / "skills" / "ui-ux-pro-max"
-_SEARCH_PY = _SKILL_DIR / "src" / "ui-ux-pro-max" / "scripts" / "search.py"
+
+# The CLI is co-located with the skill's scripts/ directory. Older layouts
+# nested it one level deeper (src/ui-ux-pro-max/scripts/search.py); we probe
+# both so the tool keeps working across skill versions.
+def _resolve_search_py() -> Path:
+    for candidate in (
+        _SKILL_DIR / "scripts" / "search.py",
+        _SKILL_DIR / "src" / "ui-ux-pro-max" / "scripts" / "search.py",
+    ):
+        if candidate.is_file():
+            return candidate
+    return _SKILL_DIR / "scripts" / "search.py"
+
+
+_SEARCH_PY = _resolve_search_py()
 
 # Defensive: if the package layout ever changes, fall back to a module
 # import path that mirrors the upstream CLI.
@@ -88,8 +107,60 @@ def _builtin_fallback(query: str, *, domain: str | None = None, design_system: b
     Keeps dashboard generation moving in production images where the skill's
     Python search package is not installed. The guidance is intentionally
     conservative and aligned with the dashboard viewer's token system.
+
+    When ``design_system=True`` the result also carries a ``structured`` dict
+    with the same shape as the CLI's ``design_system.json`` sidecar, so
+    ``create_fullstack_dashboard`` can inject tokens even in fallback mode.
     """
     if design_system:
+        structured = {
+            "project_name": query,
+            "category": "dashboard",
+            "style": {
+                "name": "Enterprise Clean",
+                "type": "General",
+                "keywords": "clean, modern, structured, enterprise",
+                "best_for": "Operational BI dashboards",
+                "card_radius": "8px",
+            },
+            "colors": {
+                "primary": "#2563eb",
+                "on_primary": "#ffffff",
+                "secondary": "#64748b",
+                "accent": "#f59e0b",
+                "background": "#f8fafc",
+                "foreground": "#0f172a",
+                "muted": "#f1f5f9",
+                "border": "#e2e8f0",
+                "destructive": "#ef4444",
+                "ring": "#2563eb",
+                "chart_palette": [
+                    "#2563eb", "#10b981", "#f59e0b",
+                    "#ef4444", "#8b5cf6", "#06b6d4",
+                ],
+                "dark": {
+                    "background": "#020617",
+                    "foreground": "#f8fafc",
+                    "muted": "#1e293b",
+                    "border": "#334155",
+                },
+            },
+            "typography": {
+                "heading": "Inter",
+                "body": "Inter",
+                "mood": "modern, professional",
+                "google_fonts_url": "",
+                "css_import": "",
+            },
+            "spacing_scale": {
+                "xs": "2px", "sm": "4px", "md": "8px",
+                "lg": "12px", "xl": "16px", "2xl": "24px", "3xl": "32px",
+            },
+            "anti_patterns": (
+                "Avoid decorative hero layouts; keep charts near their KPI "
+                "context; do not exceed 6 chart colors."
+            ),
+        }
         result = f"""# Built-in Dashboard Design System
 
 Query: {query}
@@ -103,6 +174,7 @@ Query: {query}
 - Interaction: prefer dashboard filters/drilldowns over static explanatory text.
 """.strip()
     else:
+        structured = None
         topic = domain or "dashboard"
         result = f"""# Built-in UI UX Guidance
 
@@ -115,13 +187,16 @@ Domain: {topic}
 - Put customer/product breakdowns below trend context, with a table for exact values.
 - Avoid decorative hero layouts; this is an operational BI dashboard.
 """.strip()
-    return {
+    payload = {
         "success": True,
         "result": result,
         "fallback_used": True,
         "query": query,
         "domain": domain or ("design-system" if design_system else "auto"),
     }
+    if structured is not None:
+        payload["structured"] = structured
+    return payload
 
 
 def _run_cli(cmd: list[str]) -> dict:
@@ -240,37 +315,67 @@ async def _uiux_search(
     return result
 
 
-def _persist_design_system(result: dict, args: dict, project: Optional[str]) -> dict:
-    """When ``persist=True``, write the design-system markdown to disk.
+def _design_out_dir(args: dict) -> Path:
+    """Absolute directory where persisted design-system files are written.
 
-    Location: ``{generated_path}/{output_dir|'design-system'}/{org_id}/MASTER.md``.
-    Adds ``design_system_ref`` (relative path — referenced by DashboardSpec) and
+    Must be absolute: the CLI subprocess runs with ``cwd=_SKILL_DIR``, so a
+    relative ``settings.generated_path`` would land under the skill dir instead
+    of the real generated dir.
+    """
+    from app.config import settings
+
+    org_id = str(args.get("org_id") or context_org_id(args))
+    output_dir = str(args.get("output_dir") or "design-system").strip("/") or "design-system"
+    return (Path(settings.generated_path) / output_dir / org_id).resolve()
+
+
+def _persist_design_system(result: dict, args: dict, project: Optional[str]) -> dict:
+    """When ``persist=True``, write the design-system markdown + JSON to disk.
+
+    Location: ``{generated_path}/{output_dir|'design-system'}/{org_id}/MASTER.md``
+    plus a sibling ``design-system.json`` (machine-readable tokens, consumed by
+    ``create_fullstack_dashboard``). Adds ``design_system_ref`` (relative path —
+    referenced by DashboardSpec), ``design_system_json_ref`` and
     ``persisted_to`` (absolute path) to the result. Failures are logged, never
     raised — a successful generation without persistence is still usable.
     """
     if not args.get("persist") or not result.get("success"):
         return result
     text = (result.get("result") or "").strip()
-    if not text:
-        return result
     try:
+        import json as json_module
+
         from datetime import datetime, timezone
 
-        from app.config import settings
-
-        org_id = str(args.get("org_id") or context_org_id(args))
-        output_dir = str(args.get("output_dir") or "design-system").strip("/") or "design-system"
-        out_dir = Path(settings.generated_path) / output_dir / org_id
+        out_dir = _design_out_dir(args)
         out_dir.mkdir(parents=True, exist_ok=True)
-        master = out_dir / "MASTER.md"
-        header = (
-            f"# Design System — {project or result.get('query') or 'dashboard'}\n\n"
-            f"> Persisted by uiux_design_system (persist=True) on "
-            f"{datetime.now(timezone.utc).isoformat()}\n\n"
-        )
-        master.write_text(header + text + "\n", encoding="utf-8")
-        result["design_system_ref"] = f"{output_dir}/{org_id}/MASTER.md"
-        result["persisted_to"] = str(master)
+
+        if text:
+            master = out_dir / "MASTER.md"
+            header = (
+                f"# Design System — {project or result.get('query') or 'dashboard'}\n\n"
+                f"> Persisted by uiux_design_system (persist=True) on "
+                f"{datetime.now(timezone.utc).isoformat()}\n\n"
+            )
+            master.write_text(header + text + "\n", encoding="utf-8")
+            result["design_system_ref"] = (
+                f"{args.get('output_dir') or 'design-system'}/{context_org_id(args)}/MASTER.md"
+            )
+            result["persisted_to"] = str(master)
+
+        # Structured sidecar — from the builtin fallback (no CLI) or already
+        # written by the CLI via --json-out.
+        structured = result.get("structured")
+        json_path = out_dir / "design-system.json"
+        if structured:
+            json_path.write_text(
+                json_module.dumps(structured, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        if json_path.is_file():
+            result["design_system_json_ref"] = (
+                f"{args.get('output_dir') or 'design-system'}/{context_org_id(args)}/design-system.json"
+            )
     except Exception as exc:
         logger.warning("persist design system failed: %s", exc)
         result["persist_error"] = str(exc)
@@ -318,6 +423,9 @@ async def _uiux_design_system(
         argv_extra += ["--motion", str(motion)]
     if density is not None:
         argv_extra += ["--density", str(density)]
+    if args.get("persist"):
+        json_out = _design_out_dir(args) / "design-system.json"
+        argv_extra += ["--json-out", str(json_out)]
 
     try:
         cmd = _build_cli_argv(argv_extra, design_system=True)

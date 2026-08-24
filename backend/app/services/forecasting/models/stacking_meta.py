@@ -171,6 +171,72 @@ class StackingMetaLearner:
         return pd.Series(y_pred, index=idx, name="stacking")
 
     # ------------------------------------------------------------------
+    # Metrics
+    # ------------------------------------------------------------------
+
+    def compute_mape(self) -> float | None:
+        """Compute MAPE of the stacking meta-learner on the recorded fold data.
+
+        Uses leave-one-out prediction: for each fold, the meta-learner
+        trained on the *other* folds predicts the held-out fold.
+        This avoids over-optimistic in-sample MAPE.
+
+        Returns
+        -------
+        float | None
+            MAPE (as a percentage), or None if insufficient data.
+        """
+        if not hasattr(self, "_preds_list") or len(self._preds_list) < 2:
+            return None
+
+        X_all = pd.concat(self._preds_list, axis=0).astype(float).fillna(0.0)
+        y_all = np.concatenate(self._actuals_list).astype(float)
+
+        # Remove NaN actuals
+        valid = ~pd.isna(y_all)
+        if valid.sum() < 10:
+            return None
+        X_all = X_all[valid]
+        y_all = y_all[valid]
+
+        # Leave-one-fold-out cross-validation
+        fold_boundaries = np.cumsum([len(df) for df in self._preds_list])
+        n_total = len(y_all)
+
+        preds_loo = np.full(n_total, np.nan)
+        for i, end in enumerate(fold_boundaries):
+            start = 0 if i == 0 else fold_boundaries[i - 1]
+            # Train on everything except fold i
+            mask = np.ones(n_total, dtype=bool)
+            mask[start:end] = False
+
+            X_train_cv = X_all[mask].values
+            y_train_cv = y_all[mask]
+            X_val_cv = X_all[~mask].values
+
+            if len(y_train_cv) < 5 or X_val_cv.shape[0] == 0:
+                continue
+
+            try:
+                scaler_cv = StandardScaler().fit(X_train_cv)
+                X_tr = scaler_cv.transform(X_train_cv)
+                X_va = scaler_cv.transform(X_val_cv)
+                ridge_cv = Ridge(alpha=self._model.alpha, fit_intercept=True)
+                ridge_cv.fit(X_tr, y_train_cv)
+                preds_loo[start:end] = ridge_cv.predict(X_va)
+            except Exception:
+                continue
+
+        valid_loo = ~np.isnan(preds_loo) & (y_all != 0)
+        if valid_loo.sum() < 5:
+            return None
+
+        mape_val = float(np.mean(np.abs(
+            (y_all[valid_loo] - preds_loo[valid_loo]) / y_all[valid_loo]
+        )) * 100)
+        return mape_val if np.isfinite(mape_val) else None
+
+    # ------------------------------------------------------------------
     # Properties
     # ------------------------------------------------------------------
 

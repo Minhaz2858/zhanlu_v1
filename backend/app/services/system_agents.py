@@ -451,6 +451,8 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                         "ask_erp_kpi", "ask_erp_writeback",
                         # Direct forecast read path
                         "forecast_brief",
+                        # What-if scenario simulation (Brent/Naphtha shocks)
+                        "forecast_what_if",
                     ]
                 ))),
             },

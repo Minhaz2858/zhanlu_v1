@@ -41,6 +41,26 @@ The `refresh_tokens` + `revoked_tokens` tables are created by Alembic revision
 `031` (chains off `030`). Apply with `python -m alembic upgrade head` against
 the target database.
 
+### Deployment
+
+**HARD RULE — every backend deploy restarts BOTH backend containers:**
+
+```bash
+docker restart zhanlu-backend zhanlu-sandbox-worker
+```
+
+- Both containers bind-mount the same repo (`/home/ysk2025/zhanlu_7_30/backend` →
+  `/app`), but a bind-mount **never reloads a running process's imported modules** —
+  a process keeps the code it imported at startup until it is restarted.
+- `zhanlu-backend` runs the API + agent FSM + the dashboard pipeline
+  (`create_fullstack_dashboard` / `update_fullstack_dashboard` execute **in-process**
+  here via `DashboardAppGenerator` — they do NOT route through the sandbox).
+- `zhanlu-sandbox-worker` runs `python -m sandbox_worker.main`: it BRPOPs the Redis
+  `sandbox:queue` (jobs enqueued by `SandboxService` from `run_sandbox_skill`) and
+  spawns disposable Docker containers via the docker socket. A stale worker silently
+  runs old skill-runner code even though the repo is already updated.
+- Frontend-only changes need no restart (dist is bind-mounted `:ro`).
+
 ### Known follow-ups
 
 - The access/refresh tokens live in `localStorage` (constrained by the

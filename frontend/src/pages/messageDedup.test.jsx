@@ -219,4 +219,44 @@ describe('dedupeMessagesByFingerprint', () => {
     const out = dedupeMessagesByFingerprint([a, b, c, d]);
     expect(out).toHaveLength(1);
   });
+
+  // -------- Repeated-question regression (2026-08-22) --------
+  // User re-asks the SAME question after a failed turn (e.g. "Could you
+  // try again with a more specific request?"). The second user prompt has
+  // no phase.execution_id, so its fingerprint is identical to the first.
+  // A GLOBAL seen-set drops it — the second prompt silently disappears
+  // from the chat. Only CONSECUTIVE identical fingerprints are
+  // cross-store copies of the SAME logical message (written in the same
+  // turn, ms apart); a genuine repeat is separated by the assistant
+  // response and must be kept.
+
+  it('keeps identical user prompts separated by an assistant response (repeated question)', () => {
+    const user1 = { id: 'u1', role: 'user', content: 'Show me the latest intelligence events' };
+    const asst = {
+      id: 'a1',
+      role: 'assistant',
+      content:
+        'I gathered some information but had trouble putting it all together. Could you try again with a more specific request?',
+    };
+    const user2 = { id: 'u2', role: 'user', content: 'Show me the latest intelligence events' };
+    const out = dedupeMessagesByFingerprint([user1, asst, user2]);
+    expect(out).toHaveLength(3);
+    expect(out.map((m) => m.id)).toEqual(['u1', 'a1', 'u2']);
+  });
+
+  it('collapses adjacent cross-store copies but keeps repeated turns apart', () => {
+    // Chat.jsx merge order: [chat_messages copy, agent_conversations
+    // copy] are ADJACENT per turn (same logical message, timestamps ms
+    // apart); the repeated question is a NEW turn separated by the
+    // assistant response.
+    const user1Chat = { id: 'cm-1', role: 'user', content: 'hello', created_date: '2026-08-06T10:00:00.1' };
+    const user1Conv = { id: 'ac-1', role: 'user', content: 'hello', created_date: '2026-08-06T10:00:00.2' };
+    const asst = { id: 'a1', role: 'assistant', content: 'hi there', created_date: '2026-08-06T10:00:01.0' };
+    const user2Chat = { id: 'cm-2', role: 'user', content: 'hello', created_date: '2026-08-06T10:00:02.1' };
+    const user2Conv = { id: 'ac-2', role: 'user', content: 'hello', created_date: '2026-08-06T10:00:02.2' };
+    const out = dedupeMessagesByFingerprint([user1Chat, user1Conv, asst, user2Chat, user2Conv]);
+    // One bubble per turn — cross-store copies collapse within a turn,
+    // but the repeated question in the second turn must survive.
+    expect(out.map((m) => m.id)).toEqual(['cm-1', 'a1', 'cm-2']);
+  });
 });

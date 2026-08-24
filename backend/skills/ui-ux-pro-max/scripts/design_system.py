@@ -773,6 +773,14 @@ def persist_design_system(design_system: dict, page: str = None, output_dir: str
         f.write(master_content)
     created_files.append(str(master_file))
 
+    # Structured sidecar: machine-readable design tokens (colors, typography,
+    # spacing, style) so downstream generators (e.g. the Zhanlu fullstack
+    # dashboard pipeline) can inject the design system without parsing markdown.
+    json_file = design_system_dir / "design-system.json"
+    with open(json_file, 'w', encoding='utf-8') as f:
+        json.dump(design_system, f, indent=2, ensure_ascii=False)
+    created_files.append(str(json_file))
+
     # If page is specified, create page override file with intelligent content
     if page:
         page_file = pages_dir / f"{safe_slug(page, 'page')}.md"
@@ -785,6 +793,7 @@ def persist_design_system(design_system: dict, page: str = None, output_dir: str
         "status": "success",
         "design_system_dir": str(design_system_dir),
         "master_file": str(master_file),
+        "json_file": str(json_file),
         "created_files": created_files
     }
 

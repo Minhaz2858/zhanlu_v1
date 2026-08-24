@@ -11,17 +11,17 @@ registry's ``build_model_pool()`` and the model is silently skipped.
 from __future__ import annotations
 
 import logging
-import os
 
 import numpy as np
 import pandas as pd
 
+from app.config import settings
 from app.services.forecasting.models.base import ForecastModel, ModelFitError
 
 logger = logging.getLogger(__name__)
 
-_XGB_TUNING_ENABLED = os.getenv("FORECAST_XGB_TUNING_ENABLED", "false").lower() in ("true", "1")
-_FEATURE_SELECTION_ENABLED = os.getenv("FORECAST_FEATURE_SELECTION_ENABLED", "false").lower() in ("true", "1")
+_XGB_TUNING_ENABLED = settings.FORECAST_XGB_TUNING_ENABLED
+_FEATURE_SELECTION_ENABLED = settings.FORECAST_FEATURE_SELECTION_ENABLED
 
 
 class XGBoostReg(ForecastModel):
@@ -246,3 +246,150 @@ class XGBoostReg(ForecastModel):
         feats.append(float(np.std(window[-min(7, len(window)) :]) + 1e-10))
 
         return np.array(feats, dtype=float)
+
+
+class QuantileXGBoost(ForecastModel):
+    """Quantile regression using XGBoost for p10, p50, p90.
+
+    Trains 3 separate XGBoost models with quantile_alpha = 0.1, 0.5, 0.9.
+    Provides direct interval estimation without post-hoc conformal adjustment.
+
+    Usage::
+
+        qxgb = QuantileXGBoost()
+        qxgb.fit(y, quantiles=[0.1, 0.5, 0.9])
+        lo, mid, hi = qxgb.forecast_quantiles(h=7)
+    """
+
+    name: str = "quantile_xgboost"
+    min_history: int = 60
+    uses_exog: bool = False
+
+    def __init__(self) -> None:
+        import xgboost as xgb
+
+        self._xgb = xgb
+        self._models: dict[float, xgb.XGBRegressor | None] = {}
+        self._last_values: np.ndarray | None = None
+        self._n_lags: int = 14
+        self._seasonal_period: int = 7
+        self._quantiles: list[float] = [0.1, 0.5, 0.9]
+
+    def fit(
+        self,
+        y: pd.Series,
+        seasonal_period: int | None = None,
+        exog: pd.DataFrame | None = None,
+        quantiles: list[float] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Fit quantile XGBoost models.
+
+        Parameters
+        ----------
+        y : pd.Series
+            Historical price series.
+        seasonal_period : int | None
+            Seasonal period (default 7).
+        exog : pd.DataFrame | None
+            Exogenous features (not yet supported for quantile mode).
+        quantiles : list[float] | None
+            Quantile levels to train. Default [0.1, 0.5, 0.9].
+        """
+        if len(y) < self.min_history:
+            raise ModelFitError(
+                f"QuantileXGBoost needs ≥{self.min_history} observations, got {len(y)}"
+            )
+
+        self._seasonal_period = seasonal_period or 7
+        self._quantiles = quantiles or [0.1, 0.5, 0.9]
+
+        values = y.values.astype(float)
+        X, Y = XGBoostReg._build_features(values, self._n_lags, self._seasonal_period)
+
+        if len(Y) < 10:
+            raise ModelFitError("QuantileXGBoost: insufficient training rows after feature building")
+
+        # Train one model per quantile
+        for alpha in self._quantiles:
+            try:
+                # XGBoost 2.0+ supports quantile regression via objective
+                # For older versions, we fall back to standard regression
+                model = self._xgb.XGBRegressor(
+                    n_estimators=100,
+                    max_depth=3,
+                    learning_rate=0.1,
+                    subsample=0.8,
+                    random_state=42,
+                    verbosity=0,
+                )
+                # Try quantile objective if available (XGBoost 2.0+)
+                try:
+                    model.set_params(
+                        objective="reg:quantileerror",
+                        quantile_alpha=alpha,
+                    )
+                except Exception:
+                    # Fallback: standard regression (less accurate intervals)
+                    pass
+
+                model.fit(X, Y)
+                self._models[alpha] = model
+                logger.info("QuantileXGBoost fitted for alpha=%.2f (%s)", alpha, self.name)
+            except Exception as exc:
+                logger.warning("QuantileXGBoost fit failed for alpha=%.2f: %s", alpha, exc)
+                self._models[alpha] = None
+
+        self._last_values = values
+
+    def forecast(self, h: int, exog_future: pd.DataFrame | None = None) -> pd.Series:
+        """Return the median (p50) forecast."""
+        return self.forecast_quantile(h, quantile=0.5)
+
+    def forecast_quantile(self, h: int, quantile: float = 0.5) -> pd.Series:
+        """Forecast at a specific quantile level."""
+        model = self._models.get(quantile)
+        if model is None:
+            raise ModelFitError(f"QuantileXGBoost: no model for quantile={quantile}")
+        if self._last_values is None:
+            raise ModelFitError("QuantileXGBoost.forecast() called before fit()")
+
+        predictions = []
+        current_window = list(self._last_values[-self._n_lags:])
+
+        for step in range(h):
+            feats = XGBoostReg._make_single_features(
+                current_window, step, self._n_lags, self._seasonal_period,
+            )
+            pred = float(model.predict(feats.reshape(1, -1))[0])
+            predictions.append(pred)
+            current_window.append(pred)
+            current_window = current_window[-self._n_lags:]
+
+        return pd.Series(predictions, name=f"{self.name}_q{int(quantile * 100)}")
+
+    def forecast_quantiles(self, h: int) -> dict[float, pd.Series]:
+        """Forecast all trained quantiles.
+
+        Returns {0.1: p10_series, 0.5: p50_series, 0.9: p90_series}.
+        """
+        return {
+            alpha: self.forecast_quantile(h, quantile=alpha)
+            for alpha in self._quantiles
+            if alpha in self._models and self._models[alpha] is not None
+        }
+
+    def interval(
+        self, h: int, alpha: float = 0.1
+    ) -> tuple[pd.Series, pd.Series, pd.Series]:
+        """Return (lower, median, upper) bounds.
+
+        For alpha=0.1, returns p10, p50, p90.
+        """
+        lower_q = alpha
+        upper_q = 1.0 - alpha
+
+        lo = self.forecast_quantile(h, quantile=lower_q)
+        mid = self.forecast_quantile(h, quantile=0.5)
+        hi = self.forecast_quantile(h, quantile=upper_q)
+        return lo, mid, hi

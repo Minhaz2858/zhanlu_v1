@@ -22,8 +22,35 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.execution import Execution, Plan, PlanNode, ObservationRecord, FSM_STATES
+from app.services.planning_trigger import is_followup_refinement as _is_followup_refinement
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# File-intent detection — used in FINALIZE to decide whether to create an
+# artifact (only when user explicitly asked for a file).
+# ---------------------------------------------------------------------------
+_FILE_INTENT_KEYWORDS = (
+    # English — file formats and file-action verbs
+    "docx", "pptx", "pdf", "xlsx", "excel", "word",
+    "powerpoint", "slide", "deck", "document",
+    "download", "export", "as a file", "as a doc",
+    "as a deck", "save as", "send me the file",
+    # Chinese — file-action phrases
+    "做成", "生成", "导出", "下载", "存为", "发我",
+    "做成文件", "生成报告", "导出报表", "下载报告",
+)
+
+
+def _contains_file_intent(message: str) -> bool:
+    """True if the user explicitly asked for a file deliverable.
+
+    Conservative: returns True only when the message carries an unambiguous
+    file-format or file-action cue.  Inline data-analysis questions
+    ("i want July 2026 sales report") return False.
+    """
+    text = (message or "").lower()
+    return any(kw in text for kw in _FILE_INTENT_KEYWORDS)
 
 
 class FSMState(str, Enum):
@@ -291,10 +318,30 @@ class SynexiaFSM:
             request.agent_name,
             active_skill=request.selected_skill,
             conversation_context=conv_ctx or None,
+            db=self.db,
         )
+
+        # ── Follow-up reuse: if prior turn has answer datasets and the
+        # current request is a refinement (summary/breakdown/explain),
+        # set reuse_prior_data so PLAN generates a synthesis-only node
+        # (no re-query needed, ~5s instead of ~35s).
+        if conv_ctx and conv_ctx.get("prior_datasets"):
+            _is_refinement = _is_followup_refinement(request.user_message)
+            if _is_refinement:
+                task_spec["reuse_prior_data"] = True
+                task_spec["prior_datasets"] = conv_ctx["prior_datasets"]
+                logger.info(
+                    "GOAL: follow-up refinement detected — reuse_prior_data=True "
+                    "(%d prior datasets, conv=%s)",
+                    len(conv_ctx["prior_datasets"]),
+                    request.conversation_id,
+                )
+
         self.execution.task_spec = task_spec
         self.db.commit()
-        logger.info("TaskSpec parsed: task_kind=%s", task_spec.get("task_kind", "unknown"))
+        logger.info("TaskSpec parsed: task_kind=%s, reuse_prior_data=%s",
+                     task_spec.get("task_kind", "unknown"),
+                     task_spec.get("reuse_prior_data", False))
 
     def _run_context(self, request: ExecutionRequest):
         """CONTEXT state — assemble context manifest (memory, KB, attachments)."""
@@ -741,6 +788,23 @@ class SynexiaFSM:
             if obs.artifact_ids:
                 artifact_ids.extend(obs.artifact_ids)
 
+        # ── Gate: suppress artifacts when user did not request a file ──
+        # Inline data-analysis questions ("give me sales numbers") should
+        # NOT produce artifact cards / Preview buttons.  Only ship artifacts
+        # when the user explicitly asked for a file format (docx/pptx/…).
+        _user_requested_file = bool(
+            (task_spec.get("deliverable_format") if task_spec else None)
+            or _contains_file_intent(request.user_message)
+        )
+        if not _user_requested_file and artifact_ids:
+            logger.info(
+                "FINALIZE: suppressing %d artifact(s) — user did not request "
+                "a file (conv=%s, msg=%.60s)",
+                len(artifact_ids), request.conversation_id,
+                (request.user_message or "")[:60],
+            )
+            artifact_ids = []
+
         # ── File-format finalize: persist artifact + emit file_exports ──
         user_signal = task_spec.get("user_signal", "default")
         if user_signal.startswith("export_"):
@@ -780,14 +844,18 @@ class SynexiaFSM:
         # ── Non-file data tasks: surface the synthesize ReportCardPayload ──
         # File-export tasks already set report_card_payload from the artifact
         # finalize above. For analyze-data tasks (no export), surface the
-        # synthesize node's structured payload so the frontend renders a
-        # ReportCard (KPIs/chart/insights) instead of plain text. Spec §4.2.
-        from app.services.synexia.capability_router import (
-            _select_finalize_report_card_payload,
-        )
-        report_card_payload = _select_finalize_report_card_payload(
-            observations, report_card_payload,
-        )
+        # synthesize node's structured payload ONLY when the user explicitly
+        # requested a file. Inline data analysis should produce a natural-
+        # language markdown response, NOT a ReportCard/JSON card.
+        if _user_requested_file:
+            from app.services.synexia.capability_router import (
+                _select_finalize_report_card_payload,
+            )
+            report_card_payload = _select_finalize_report_card_payload(
+                observations, report_card_payload,
+            )
+        else:
+            report_card_payload = None
 
         # ── Selected-skill validation: check whether the generated payload
         # still satisfies the structure/signals implied by the user-selected
@@ -979,7 +1047,17 @@ User request: {request.user_message}{transcript_block}{followup_note}
 === Findings (from executed actions) ===
 {grounding}{criteria_block}
 
-Provide a concise, natural language response to the user. Reference the actual findings above by value (figures, names, counts) — do not narrate tool calls. Your response must satisfy every criterion listed under "You must satisfy" (if any). If actions were successful, summarize what was accomplished. If there were errors, explain what went wrong.
+Provide a thorough response that reflects the depth and scope of the findings. Match your response depth to the user's request:
+- **Data-rich queries** (multiple metrics, comparisons, tables): produce detailed analysis with sections, tables, key figures, and actionable insights. Present every significant number the findings contain — never omit data the user explicitly asked for.
+- **Simple questions**: be direct and brief.
+Reference the actual findings above by value (figures, names, counts) — do not narrate tool calls. Your response must satisfy every criterion listed under "You must satisfy" (if any). If actions were successful, summarize what was accomplished. If there were errors, explain what went wrong.
+
+OUTPUT FORMAT — STRICT RULES:
+- DO NOT output raw JSON, code fences, or structured payload objects (no `{{"title": ...}}` blocks in the answer).
+- If findings include structured data (KPIs, metrics, rankings), render it as a markdown TABLE with prose, NOT as a JSON dump.
+- Inline markdown only — never a code block containing a report-card JSON object. The user is a CEO, not an integration engineer.
+- When findings are substantial, organize into sections (##) with bold labels. Typical sections for data-rich queries: Executive Summary, Key Metrics, Detailed Findings (with tables), Notable Patterns/Anomalies, Recommendations.
+- NEVER fabricate data, metrics, or trends not present in the findings. If the data doesn't support a section (e.g., no clear anomalies), omit that section entirely rather than inventing content.
 
 Clarification policy: ask at most ONE clarifying question, and ONLY if the conversation history above does not already answer it. Never re-ask information the user already provided in a previous turn (topic, data, audience, style, slide count, etc.). If the request is a follow-up refinement, just do it. If the user granted open latitude ("any data you can use", "use fake/demo data", "you choose", "whatever works"), proceed with sensible defaults — generate clearly-marked demo data (label it indicative) instead of asking. If a choice genuinely matters, offer at most 3 numbered options with your recommendation marked; never a questionnaire."""
 

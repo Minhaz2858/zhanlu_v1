@@ -108,11 +108,9 @@ def _build_default_skills_block() -> str:
             "metric, call `update_fullstack_dashboard(slug=..., ...)` using the slug returned by "
             "`create_fullstack_dashboard` — the app hot-reloads. Do not answer such requests in "
             "chat alone.\n"
-            "Use at most two exploratory `execute_query` calls before building. Common schema "
-            "pitfall: the `erp_product_sales_details` table uses `FNAME` for product name "
-            "(NOT `material_name`), `material_id` / `FMATERIALID` for product IDs, `shipment_date`, "
-            "`shipment_quantity`, `contract_price`, `partner_name`, `shipment_grade`. "
-            "Always use `describe_schema` to confirm column names before writing SQL.\n\n",
+            "Use at most two exploratory `execute_query` calls before building. "
+            "Always use `describe_schema` to confirm table and column names before writing SQL — "
+            "never assume or guess column names.\n\n",
             "DATA-CONTRACT CONFIRMATION (HARD RULE — applies to every dashboard build): "
             "NEVER invent, guess, or fabricate table or column names. Every table and column in "
             "your SQL must come from `describe_schema` / the schema graph — if you have not "
@@ -137,13 +135,29 @@ def _build_default_skills_block() -> str:
             "  • `periodic_review` — recurring weekly / monthly / quarterly status review. Arc: cover → KPI grid(deltas) "
             "→ chart-full(trend) → insights-bullets → closing. Reflective, measured tone.\n"
             "Design-heavy decks (investor_deck / marketing, or when the user says \"beautiful\", \"polished\", \"pitch\", "
-            "\"investor\", \"stunning\", \"路演\", \"融资\", \"精美\") use the pptx html2pptx SKILL "
-            "(`skill_view(\"pptx\")` → author HTML slides → html2pptx) for full layout freedom. For data reports, "
-            "prefer the structured `create_artifact` path, which auto-plans, renders, audits, and polishes. "
+            "\"investor\", \"stunning\", \"路演\", \"融资\", \"精美\") — pick the BEST design skill via "
+            "`skill_view(\"<skill-name>\")` to read its workflow, then follow it:\n"
+            "  • knowledge-cat-ppt-skill — story-first router; 4 output lanes (native-pptx / html / image-first / review); "
+            "44-style template library + QA validators. Default for complex or high-stakes decks.\n"
+            "  • guizang-ppt-skill — single-file HTML horizontal deck; Magazine/e-ink or Swiss International style; 22 locked "
+            "layouts, 9 theme presets, speaker mode.\n"
+            "  • slide-maestro — 100+ style presets, viewport-safe HTML engineering, data-viz + copywriting formulas. Good for "
+            "style-rich marketing decks.\n"
+            "  • ppt-design — 1600×900 static HTML infographic slides with style picker; image-based PPTX export.\n"
+            "  • slide-skill — SVG-first pipeline producing fully-EDITABLE native .pptx. Use when the user needs an editable "
+            "PowerPoint file.\n"
+            "  • agentbuff-presentation — HTML deck as source of truth with pixel-identical PDF/PNG/PPTX export.\n"
+            "  • frontend-slides — animation-rich HTML presentations; converting existing PPT/PPTX to web.\n"
+            "  • kai-slide-creator — stable HTML presentation generator with speaker mode for product launches / tech talks.\n"
+            "For data reports, prefer the structured `create_artifact` path, which auto-plans, renders, audits, and polishes. "
             "Every deck must follow a clear narrative arc (hook → context → evidence → insight → action → closing) "
             "and end with a next-step or call-to-action slide.\n"
-            "PPTX DELIVERABLE (HARD RULE): the .pptx file IS the deliverable — you MUST call "
-            "`create_artifact(type=\"pptx\", ...)` (or the html2pptx skill path for design-heavy decks) "
+            "DELIVERABLE RULE: if the user explicitly wants a .pptx file, prefer a native-PPTX path (slide-skill, "
+            "knowledge-cat native-pptx lane, or html2pptx conversion). If the request is format-agnostic "
+            "(\"presentation\" / \"slides\" / \"deck\" without PowerPoint), an HTML deck delivered via "
+            "`create_artifact(type=\"html\")` is acceptable.\n"
+            "PPTX DELIVERABLE (HARD RULE): when the user explicitly wants PowerPoint, the .pptx file IS the deliverable — "
+            "you MUST call `create_artifact(type=\"pptx\", ...)` (or slide-skill / html2pptx for design-heavy decks) "
             "IN THIS TURN, after gathering the data. NEVER end the turn with a promise such as "
             "\"I'll build the PPT\" or a markdown-only summary — if you can describe the deck, you have "
             "enough data to build it. Do not spend the whole budget on exploratory queries: run at most "
@@ -191,43 +205,24 @@ analysis in the Ecisco BI project):
 - Before reporting "last 30 days" / "this month" / recent-period numbers,
   run `SELECT MAX(<date_column>) FROM <table>` on a real date column from
   `describe_schema` to confirm what the data actually covers.
-- TABLE PREFERENCE: prefer the LIVE, high-volume tables — `erp_t_sal_outstock`
-  and `erp_v_sale_orderentry` (~90k rows, current through 2026) — over the
-  low-volume STALE table `erp_product_sales_details` (1.4k rows, data ends
-  2025-12-31). Confirm with MAX(date_column) before choosing.
+- TABLE PREFERENCE: prefer LIVE, high-volume tables (check with
+  `SELECT COUNT(*) FROM table` or via `describe_schema` metadata) over
+  low-volume or stale tables. Confirm with MAX(date_column) before choosing.
 - If the freshest data is stale (>30 days old), state it explicitly in the
-  answer: "Latest data is from 2025-12-31; the analysis uses the available
+  answer: "Latest data is from [date]; the analysis uses the available
   data." NEVER claim the data covers a period it does not cover, and never
-  present stale 2025 numbers as the current market picture.
-
-ECISCO BI SALES + INVENTORY COVERAGE RULE (HARD RULE):
-- SALES: for sales volume / shipment quantity / revenue, query the LIVE
-  tables. `erp_t_sal_outstock` is the HEADER table (has FDATE,
-  FCUSTOMERID, FDOCUMENTSTATUS). `erp_t_sal_outstockentry` is the
-  ENTRY/LINE table (has FMATERIALID, FREALQTY, FBASEUNITQTY,
-  F_PAEZ_BHSAMOUNT, F_PAEZ_HSDJ). They JOIN on FID. FDATE is ONLY on
-  the header table — never reference FDATE from the entry table.
-  The correct JOIN pattern: `SELECT h.FDATE, e.FMATERIALID, e.FREALQTY,
-  e.F_PAEZ_BHSAMOUNT FROM erp_t_sal_outstock h JOIN
-  erp_t_sal_outstockentry e ON h.FID = e.FID WHERE h.FDATE >= '...'`.
-  (~90k rows, current through 2026). Avoid `erp_product_sales_details`
-  (1.4k rows, ends 2025-12-31) and `erp_v_sale_orderentry` (sparse).
-  When the question covers a product portfolio (e.g. "C5/C9 products"),
-  query ALL products in ONE query grouped by product name — do NOT query
-  single-product views one at a time.
-- INVENTORY: current inventory position must come from `erp_v_stk_inventory`
-  or `erp_t_stk_inventory` (by product name) — never guess inventory from a
-  sales-only table, and never report inventory as empty/null without querying
-  the inventory tables first.
-- INVENTORY IS A SNAPSHOT (HARD RULE): `erp_v_stk_inventory` and
-  `erp_t_stk_inventory` are snapshot tables showing CURRENT stock-on-hand.
-  `FBASEQTY` gives current quantity per product/warehouse. `IN_DATE` and
-  `OUT_DATE` are often NULL and should be IGNORED for current-inventory
-  queries — do NOT treat null dates as a data-quality issue. For
-  time-filtered inventory, use `erp_t_stk_inventory.FUPDATETIME`. When
-  the sub-agent returns inventory data with null dates but valid FBASEQTY,
-  report the quantities — never produce a data-quality report about
-  missing dates.
+  present stale numbers as the current picture.
+- When a database has header/entry (parent/child) table patterns, the date
+  column is typically ONLY on the header table. Always JOIN header↔entry
+  on their shared key (check `describe_schema` for FK relationships).
+- When the question covers a portfolio of items (e.g. "all products"),
+  query ALL items in ONE query grouped by the relevant dimension — do NOT
+  query single items one at a time.
+- For inventory queries, use the inventory-specific tables (not sales-only
+  tables). Snapshot inventory tables may have null dates but valid quantities
+  — do NOT treat null dates as a data-quality issue. Report the quantities.
+  For time-filtered inventory, check `describe_schema` for an update
+  timestamp column.
 - A complete product answer combines sales (from the sales tables) + inventory
   (from the inventory tables) + prices (from `actual_price` / `market_prices`).
 """

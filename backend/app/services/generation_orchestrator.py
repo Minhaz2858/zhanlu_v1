@@ -279,6 +279,39 @@ def _split_sentences(text: str) -> list[str]:
     return [re.sub(r"[#*_>`]", "", p).strip() for p in parts if p and p.strip()]
 
 
+def _validate_artifact_data_quality(rows: list[dict] | None, user_message: str) -> dict:
+    """Validate that the data is business-meaningful before creating an artifact.
+
+    Returns {"valid": True/False, "reason": "..."}.
+
+    Garbage data includes:
+    - Empty rows (no data at all)
+    - Rows containing ONLY internal ID columns (FID, FENTRYID, etc.)
+    - Rows with no business-meaningful columns
+    """
+    if not rows:
+        return {"valid": False, "reason": "no rows returned from query"}
+    if not isinstance(rows, list) or len(rows) == 0:
+        return {"valid": False, "reason": "empty row list"}
+
+    first = rows[0] if isinstance(rows[0], dict) else {}
+    if not first:
+        return {"valid": False, "reason": "rows contain no column data"}
+
+    cols = set(first.keys())
+
+    # Check if ALL columns are internal IDs
+    if cols and all(_is_internal_id_column(c) for c in cols):
+        return {"valid": False, "reason": f"all columns are internal IDs: {', '.join(sorted(cols))}"}
+
+    # Check if any column contains business-meaningful data
+    has_business = any(_is_business_column(c) for c in cols)
+    if not has_business:
+        return {"valid": False, "reason": f"no business-meaningful columns found: {', '.join(sorted(cols))}"}
+
+    return {"valid": True, "reason": ""}
+
+
 def _prose_to_summary(text: str, max_chars: int = 4000) -> str:
     """Condense assistant prose into a ReportCard summary string.
 
@@ -413,6 +446,100 @@ def _mine_ask_data_rows(
     return rows
 
 
+def _mine_historical_answer_rows(
+    conversation_messages: list[dict], *, skip_superseded: bool = True,
+) -> list[dict]:
+    """Pull row dicts out of ``ask_data_agent`` tool results from PREVIOUS
+    turns in the conversation history.
+
+    When a follow-up turn (e.g. "give me in docx formate") re-queries the
+    database and gets 0 rows, we can fall back to data that was successfully
+    fetched in an earlier turn instead of producing a useless "no data" file.
+    """
+    if not conversation_messages:
+        return []
+    rows: list[dict] = []
+    for msg in conversation_messages:
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        # The tool result may be wrapped in a standardized envelope
+        # {"result": {...}, "success": true, ...}
+        result = payload.get("result") or payload
+        if not isinstance(result, dict):
+            continue
+        if skip_superseded and result.get("__superseded"):
+            continue
+        # Extract rows — same logic as _mine_ask_data_rows
+        candidate = result.get("rows")
+        if not isinstance(candidate, list):
+            nested = result.get("data") or result.get("result")
+            if isinstance(nested, dict):
+                candidate = nested.get("rows")
+        if not isinstance(candidate, list):
+            continue
+        for r in candidate:
+            if isinstance(r, dict):
+                rows.append(r)
+            if len(rows) >= _DASHBOARD_MAX_ROWS:
+                return rows
+    return rows
+
+
+# Internal ID columns that should NEVER appear as KPI/chart values.
+# These are surrogate keys (FID, FENTRYID, etc.) that carry no business
+# meaning — showing them as KPIs produces garbage like "Total FENTRYID: 100102.0".
+# Pattern: F-prefixed uppercase ending in ID, or common generic ID names.
+_INTERNAL_ID_PATTERNS = frozenset({
+    "id", "ID", "rowid", "ROWID", "uid", "UID", "uuid",
+    "pk", "PK",
+})
+
+# Business-meaningful column name fragments for KPI detection.
+# These are generic terms found in business databases across industries.
+_BUSINESS_COL_FRAGMENTS = frozenset({
+    "amount", "revenue", "quantity", "qty", "price", "cost", "profit",
+    "margin", "name", "product", "material", "customer", "region",
+    "date", "total", "sum", "count", "volume", "weight", "unit",
+    "tax", "discount", "subtotal", "grand", "net", "gross",
+    "sales", "order", "invoice", "payment", "receipt",
+    "inventory", "stock", "warehouse", "shipment", "delivery",
+})
+
+
+def _is_internal_id_column(col: str) -> bool:
+    """Return True if the column name looks like an internal ID/surrogate key.
+
+    Detects:
+    - Common generic ID names (id, rowid, uid, pk, etc.)
+    - F-prefixed internal IDs (FMATERIALID, FENTRYID, etc. — common in ERP systems)
+    - Any column ending in _id or _ID (order_id, customer_id, etc.) when short
+    - Columns ending in just "ID" in uppercase (FID, FSTOCKID, etc.)
+    """
+    if col in _INTERNAL_ID_PATTERNS:
+        return True
+    # F-prefixed uppercase: common in Kingdee/ERP systems (FMATERIALID, FID, etc.)
+    if len(col) > 2 and col[0] == "F" and col[1].isupper() and col.endswith("ID"):
+        return True
+    # Any column ending in _id when it looks like a technical key
+    if col.endswith("_id") or col.endswith("_ID"):
+        return True
+    return False
+
+
+def _is_business_column(col: str) -> bool:
+    """Return True if the column name contains a business-meaningful fragment."""
+    return any(frag in col.lower() for frag in _BUSINESS_COL_FRAGMENTS)
+
+
 def _rows_to_kpis(rows: list[dict], max_kpis: int = 4) -> list[dict]:
     """Pick up to ``max_kpis`` numeric columns and compute sum/avg/max KPIs.
 
@@ -420,6 +547,9 @@ def _rows_to_kpis(rows: list[dict], max_kpis: int = 4) -> list[dict]:
     column order (insertion order of the first row) so the dashboard reads
     deterministically. Up to two aggregates per column (sum + max) keeps the
     tile count small even with many numeric columns.
+
+    Internal ID columns (FID, FENTRYID, etc.) are excluded — they carry no
+    business meaning and produce garbage KPIs like "Total FENTRYID: 100102.0".
     """
     if not rows:
         return []
@@ -434,6 +564,10 @@ def _rows_to_kpis(rows: list[dict], max_kpis: int = 4) -> list[dict]:
                 cols.append(k)
     kpis: list[dict] = []
     for col in cols:
+        # Skip internal ID columns — they carry no business meaning
+        if _is_internal_id_column(col):
+            continue
+        # Prefer business-meaningful columns over generic numeric columns
         nums: list[tuple[Any, float]] = []
         for r in rows:
             if not isinstance(r, dict):
@@ -477,6 +611,9 @@ def _pick_chart_columns(rows: list[dict]) -> tuple[Optional[str], Optional[str]]
 
     Heuristic: first non-numeric column as labels, first numeric column as
     values. Returns ``(None, None)`` if no suitable pair is found.
+
+    Internal ID columns (FID, FENTRYID, etc.) are excluded — they produce
+    meaningless charts with IDs on the axes.
     """
     if not rows:
         return None, None
@@ -492,6 +629,9 @@ def _pick_chart_columns(rows: list[dict]) -> tuple[Optional[str], Optional[str]]
     label_col: Optional[str] = None
     value_col: Optional[str] = None
     for col in cols:
+        # Skip internal ID columns — they produce meaningless charts
+        if _is_internal_id_column(col):
+            continue
         sample = next((r.get(col) for r in rows if isinstance(r, dict)), None)
         if sample is None:
             continue
@@ -926,35 +1066,69 @@ async def ensure_artifact_for_doc_request(
         summary = answer or _prose_to_summary(assistant_content)
         source_name = (data_result or {}).get("source_name") or "assistant-reply"
         sql = ((data_result or {}).get("sql") or "").strip()
-        # Fix 2b: methodology cites only the final non-superseded source
-        # (name + clipped SQL + row count), never a merged list that could
-        # include a superseded query's dead source.
-        methodology = (
-            f"Data sourced from {source_name}"
-            + (f" (SQL: {sql[:80]}\u2026)" if sql else "")
-            + f" returning {len(rows)} rows."
-        )
-        payload = {
-            "summary": summary,
-            "source": source_name,
-            "user_signal": "export",
-            "methodology": methodology,
-        }
-        if rows:
-            kpis = _rows_to_kpis(rows)
-            if kpis:
-                payload["kpis"] = kpis
-            label_col, value_col = _pick_chart_columns(rows)
-            if label_col and value_col:
-                payload["chart"] = {
-                    "type": "bar",
-                    "title": f"{value_col} by {label_col}",
-                    "x_key": label_col,
-                    "y_keys": [value_col],
-                    "data": rows[:50],
-                }
-        if sql:
-            payload["sql"] = sql
+
+        # ── Data quality gate ────────────────────────────────────────────
+        # Before building the artifact payload, validate that the data is
+        # business-meaningful (not just internal IDs or empty).
+        _dq = _validate_artifact_data_quality(rows, user_message)
+        if not _dq["valid"]:
+            logger.warning(
+                "orchestrator: artifact data quality check failed: %s "
+                "(rows=%d, reason=%s)",
+                user_message[:80], len(rows), _dq["reason"],
+            )
+            # Return a data-quality-warning artifact instead of garbage
+            payload = {
+                "summary": (
+                    f"Data quality issue detected: {_dq['reason']}. "
+                    f"The query returned {len(rows)} rows but they contain "
+                    f"only internal ID columns (no business metrics). "
+                    f"Please re-run with a proper aggregation query."
+                ),
+                "source": source_name,
+                "user_signal": "export",
+                "methodology": (
+                    f"Data sourced from {source_name} (SQL: {sql[:80]}…) "
+                    f"returning {len(rows)} rows — DATA QUALITY WARNING: "
+                    f"{_dq['reason']}"
+                ),
+                "data_quality_warning": True,
+            }
+            # Don't add KPIs or charts for garbage data
+            if sql:
+                payload["sql"] = sql
+            if not title:
+                title = user_message or fallback_title
+        else:
+            # Fix 2b: methodology cites only the final non-superseded source
+            # (name + clipped SQL + row count), never a merged list that could
+            # include a superseded query's dead source.
+            methodology = (
+                f"Data sourced from {source_name}"
+                + (f" (SQL: {sql[:80]}\u2026)" if sql else "")
+                + f" returning {len(rows)} rows."
+            )
+            payload = {
+                "summary": summary,
+                "source": source_name,
+                "user_signal": "export",
+                "methodology": methodology,
+            }
+            if rows:
+                kpis = _rows_to_kpis(rows)
+                if kpis:
+                    payload["kpis"] = kpis
+                label_col, value_col = _pick_chart_columns(rows)
+                if label_col and value_col:
+                    payload["chart"] = {
+                        "type": "bar",
+                        "title": f"{value_col} by {label_col}",
+                        "x_key": label_col,
+                        "y_keys": [value_col],
+                        "data": rows[:50],
+                    }
+            if sql:
+                payload["sql"] = sql
 
     if not title:
         title = _title_from_user_request(user_message, fallback="")

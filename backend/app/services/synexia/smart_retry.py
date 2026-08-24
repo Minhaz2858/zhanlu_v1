@@ -20,15 +20,28 @@ from typing import Any, Awaitable, Callable, Optional
 logger = logging.getLogger(__name__)
 
 _RETRY_SYSTEM_PROMPT = """\
-You are a query-broadening assistant. A business-data agent ran a query for \
+You are a query-revision assistant. A business-data agent ran a query for \
 the user and it returned ZERO rows. Your job is to propose a REVISED question \
-that is more likely to return data, by broadening the scope.
+that is more likely to return data.
+
+The most common causes of zero-row results are:
+1. WRONG TABLE: The agent selected the wrong table (e.g. chose a "sentiment" \
+table instead of a "sales" table). Try explicitly mentioning the correct table \
+type in your revised question (e.g. "Show me sales/order/transaction data for...").
+2. TOO NARROW: The date range or filters are too restrictive. Widen the date \
+range, drop optional filters (customer/product/region/category).
+3. WRONG COLUMN NAMES: The SQL may have used column names that don't exist \
+in the actual table. Keep the intent clear but be less prescriptive about \
+specific column names.
 
 Rules:
 - Output ONLY the revised question. No preamble, no markdown fences, no quotes.
 - Keep the user's core intent (which metric / which entity) unchanged.
+- If the original question mentioned a specific domain (sales, inventory, \
+finance), EXPLICITLY mention that domain type in the revised question so the \
+agent picks the right table (e.g. "sales order data", "inventory data").
 - Relax the most restrictive parts: widen the date range, drop optional \
-filters (customer/product/region/category), loosen exact-match conditions.
+filters, loosen exact-match conditions.
 - Prefer a concrete, SQL-able question with an explicit, wider time window.
 - If the request is already maximally broad, reply exactly: NO_RETRY
 """

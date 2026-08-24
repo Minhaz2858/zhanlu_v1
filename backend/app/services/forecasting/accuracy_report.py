@@ -2,25 +2,18 @@
 from __future__ import annotations
 
 import logging
-import os
 from dataclasses import dataclass, field
+
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-# ── Env-flag defaults ──────────────────────────────────────────────
-
-
-def _env_float(key: str, default: float) -> float:
-    val = os.getenv(key, "")
-    try:
-        return float(val)
-    except (ValueError, TypeError):
-        return default
+# ── Settings-backed defaults ──────────────────────────────────────
 
 
 @dataclass
 class AccuracyThreshold:
-    """Tiered accuracy thresholds configurable via env flags.
+    """Tiered accuracy thresholds configurable via settings flags.
 
     Defaults:
         excellent  = 8.0% MAPE  (FORECAST_ACCURACY_THRESHOLD_EXCELLENT)
@@ -29,13 +22,13 @@ class AccuracyThreshold:
     """
 
     excellent: float = field(
-        default_factory=lambda: _env_float("FORECAST_ACCURACY_THRESHOLD_EXCELLENT", 8.0)
+        default_factory=lambda: float(getattr(settings, "FORECAST_ACCURACY_THRESHOLD_EXCELLENT", 8.0))
     )
     acceptable: float = field(
-        default_factory=lambda: _env_float("FORECAST_ACCURACY_THRESHOLD_ACCEPTABLE", 15.0)
+        default_factory=lambda: float(getattr(settings, "FORECAST_ACCURACY_THRESHOLD_ACCEPTABLE", 15.0))
     )
     critical: float = field(
-        default_factory=lambda: _env_float("FORECAST_ACCURACY_THRESHOLD_CRITICAL", 25.0)
+        default_factory=lambda: float(getattr(settings, "FORECAST_ACCURACY_THRESHOLD_CRITICAL", 25.0))
     )
 
     def check(self, mape: float | None) -> str:

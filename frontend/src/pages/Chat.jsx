@@ -12,9 +12,7 @@ import { postMessageFeedback, postRoleFeedback } from '@/api/agentFeedback';
 import RelatedContent from '@/components/chat/RelatedContent';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
-import TracePanel from '@/components/chat/TracePanel';
-import ActivityRail from '@/components/chat/ActivityRail';
-import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock, Activity } from 'lucide-react';
+import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock } from 'lucide-react';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import ChatFilesModal from '@/components/chat/ChatFilesModal';
 import ScheduledPanel from '@/components/chat/ScheduledPanel';
@@ -223,12 +221,10 @@ export default function Chat() {
   const [activeAgent, setActiveAgent] = useState(null);
   const [previewResult, setPreviewResult] = useState(null);
   const [openArtifact, setOpenArtifact] = useState(null);
-  const [traceMsg, setTraceMsg] = useState(null);
   const [filesOpen, setFilesOpen] = useState(false);
   // Scheduled automation panel (Manus-style). Only shown when the current
   // session has an AutomationTask linked to it (session_id == task.session_id).
   const [scheduledOpen, setScheduledOpen] = useState(false);
-  const [activityRailOpen, setActivityRailOpen] = useState(false);
   // Number of KnowledgeBases the project's data_source_runtime will
   // inject into whichever agent is selected (see
   // _extend_with_project_kbs in data_source_runtime.py). Surfaced as
@@ -718,7 +714,6 @@ export default function Chat() {
     const _isNewSession = activeId && (!_s || !_s.conversation_id);
     setOpenArtifact(null);
     setPreviewResult(null);
-    setActivityRailOpen(false);
     setChips([]);
     setActiveSkill(null);
     if (!_isNewSession) setActiveAgent(null);
@@ -773,37 +768,6 @@ export default function Chat() {
       }
     } catch { /* SSR / test env */ }
   }, [activeId]);
-
-  // Derive live execution state from the latest assistant message's
-  // FSM metadata (set by the SSE handler: fsm_state, plan_summary,
-  // tool_calls). Used by ActivityRail to show the execution timeline.
-  const liveExecution = useMemo(() => {
-    if (!messages.length) return null;
-    // Walk backwards to find the latest assistant message with FSM data
-    for (let i = messages.length - 1; i >= 0; i--) {
-      const m = messages[i];
-      if (m.role !== 'assistant') continue;
-      const hasFsm = m.fsm_state || m.plan_summary || (m.tool_calls && m.tool_calls.length);
-      if (!hasFsm) continue;
-      // Derive observations from tool_calls
-      const observations = (m.tool_calls || []).map((tc) => ({
-        id: tc.id || tc.name,
-        tool: tc.name || tc.function?.name || 'unknown',
-        input: tc.arguments || tc.function?.arguments,
-        output: tc.result || tc.output || '',
-        status: tc.status || (tc.result ? 'done' : 'running'),
-        timestamp: tc.timestamp || tc.created_at,
-      }));
-      return {
-        current_state: m.fsm_state || 'init',
-        plan: m.plan_summary || null,
-        observations,
-        confidence_score: m.confidence_score ?? null,
-        confidence_factors: m.confidence_factors || null,
-      };
-    }
-    return null;
-  }, [messages]);
 
   // Deep-link restore: when the URL has ``?conv=<conversation_id>``
   // (typical after a page refresh on a chat deep link, or a shared
@@ -1161,10 +1125,10 @@ export default function Chat() {
                 ...existing,
                 content: pending.content,
                 tool_calls: pending.toolCalls || existing.tool_calls || null,
-                loading: pending.loading !== false && stream.isActive,
+                loading: pending.loading !== false && stream.isActiveForSession(sid),
               };
             }
-          } else if (pending.loading !== false && stream.isActive) {
+          } else if (pending.loading !== false && stream.isActiveForSession(sid)) {
             // The assistant message was never committed to the DB (brand-new
             // generation started while Chat was unmounted). Inject a placeholder
             // so the user sees the partial content immediately on return.
@@ -1309,7 +1273,9 @@ export default function Chat() {
     setLoading(true);
     // Single source of truth for the Stop button — must happen before any
     // await so the AbortController exists for the fetch / SSE call below.
-    stream.startSending();
+    // (sessionId, gen): scope the active-stream state to THIS session so
+    // other sessions' inputs stay interactive while this one streams.
+    stream.startSending(sid, gen);
     // --- Chat without an explicit agent: ALWAYS auto-select
     // ``general_assistant`` so the conversation runs through the agent
     // runtime (which injects the date anchor, project KBs, memory,
@@ -1402,7 +1368,7 @@ export default function Chat() {
     // --- P2 mid-turn steer: if a v3 agent stream is already in flight,
     // route the message through the steer endpoint instead of starting a
     // new stream. Falls through to the normal agent path otherwise.
-    if (effectiveAgent && stream.isActive && streamingConvId) {
+    if (effectiveAgent && stream.isActiveForSession(activeId) && streamingConvId) {
       return handleSteer(fullText);
     }
     // --- Agent mode: route through the v3 conversations endpoint so the
@@ -1632,8 +1598,11 @@ export default function Chat() {
         session_id: sid, role: 'assistant', content: '', order: current.length,
       });
       if (gen !== genRef.current) {
-        // A newer generation took over before SSE started.
-        stream.resetStream();
+        // A newer generation took over before SSE started. Only drain the
+        // shared stream state if no newer stream began (e.g. a session
+        // switch / clear bump). If a newer stream started, it owns the
+        // state — calling resetStream() here would abort ITS controller.
+        if (stream.streamGenRef.current === gen) stream.resetStream();
         return;
       }
       setMessages((prev) => [...prev, aiMsg]);
@@ -1646,7 +1615,7 @@ export default function Chat() {
       let fullContent = '';
       let aborted = false;
       try {
-        stream.startSending();
+        stream.startSending(sid, gen);
         const streamRes = await authFetch(`/api/apps/${appParams.appId}/integration-endpoints/Core/InvokeLLMStream`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -1732,7 +1701,9 @@ export default function Chat() {
         // also do this, but doing it here keeps the indicator honest if any
         // later step throws before the finally runs.
         stream.clearPendingMessage(sid);  // clear buffer on error fallback
-        if (stream.isActive) stream.complete();
+        // Guard with gen so a stale generation can't clear a newer
+        // session's active stream state.
+        if (gen === genRef.current && stream.isActive) stream.complete();
       }
 
       // --- Parse complete JSON response ---
@@ -2170,13 +2141,14 @@ export default function Chat() {
     let fullContent = '';
     let toolCalls = [];
     let activitySteps = [];
+    let liveEvents = [];      // typed live-activity feed ({type, label_key, params, ts})
     let currentPhase = null;  // latest Claude-style phase headline { state, verb, title }
     let liveTraceSteps = [];  // P0: accumulate trace_step events incrementally
     let reasoningText = '';   // P0: accumulate reasoning from reasoning_done
     let finalArtifacts = [];  // artifacts extracted from the done event's conversation
     let aborted = false;
     try {
-      stream.startSending();
+      stream.startSending(sid, gen);
       const selectedSkill = compactSelectedSkill(activeSkill);
       // Rename the inner stream variable to `streamGen` — the outer
       // `stream` (from usePersistentStream()) is shadowed by `const stream`
@@ -2232,9 +2204,12 @@ export default function Chat() {
       );
       for await (const evt of streamGen) {
         if (gen !== genRef.current) {
-          // A newer generation has taken over — drain our state so the
-          // Stop button doesn't stick around for the old generation.
-          stream.resetStream();
+          // A newer generation has taken over. If a newer stream began,
+          // IT owns the shared stream state — resetStream() here would
+          // abort the newer stream's controller. Only drain when we are
+          // still the last-started stream (a session switch / clear bump
+          // orphaned us without replacing the controller).
+          if (stream.streamGenRef.current === gen) stream.resetStream();
           return { convId, fullContent, toolCalls };
         }
         if (!evt || typeof evt !== 'object') continue;
@@ -2274,6 +2249,15 @@ export default function Chat() {
               m.id === aiMsg.id ? { ...m, activity_steps: [...activitySteps] } : m
             ));
           }
+        } else if (evt.type === 'live_event' && evt.event) {
+          // Typed live-activity feed: accumulate {type, label_key, params, ts}
+          // containers so LiveActivityStream renders the inline stream.
+          liveEvents.push(evt.event);
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, live_events: [...liveEvents] } : m
+            ));
+          }
         } else if (evt.type === 'phase' && evt.verb) {
           // Claude-style phase headline (Fathoming / Fabricating / …).
           // Keep the latest one on the message; ActivitySteps renders it
@@ -2300,7 +2284,7 @@ export default function Chat() {
           }
         } else if (evt.type === 'trace_step' && evt.step) {
           // P0: incremental trace_step from the v3 SSE. Append to the
-          // live trace; ReasoningSummary will render these.
+          // live trace (consumed by activity steps / reasoning panel).
           liveTraceSteps.push(evt.step);
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
@@ -2522,7 +2506,10 @@ export default function Chat() {
         ));
         // Clear pending buffer on error so stale partial content isn't injected on remount
         stream.clearPendingMessage(sid);
-        stream.complete();
+        // Only drain the shared stream state if this generation is still
+        // current — a stale stream must not clear a newer session's
+        // active stream state.
+        if (gen === genRef.current) stream.complete();
       }
     }
     // Persist the final assistant message + tool_calls + artifacts +
@@ -2532,6 +2519,7 @@ export default function Chat() {
         content: fullContent,
         ...(toolCalls.length ? { tool_calls: toolCalls } : {}),
         ...(activitySteps.length ? { activity_steps: activitySteps } : {}),
+        ...(liveEvents.length ? { live_events: liveEvents } : {}),
         ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
         ...(currentPhase ? { phase: currentPhase } : {}),
       });
@@ -2553,7 +2541,9 @@ export default function Chat() {
     setInputValue('');
     clearDraft('chat_input_draft');
     // Also abort any in-flight stream so the Stop button doesn't linger.
-    if (stream.isActive) stream.resetStream();
+    // Only when THIS session owns the active stream — another session's
+    // in-flight stream must keep running untouched.
+    if (stream.isActiveForSession(activeId)) stream.resetStream();
     stream.clearPendingMessage(activeId);
     if (activeId) {
       await base44.entities.ChatMessage.deleteMany({ session_id: activeId });
@@ -2603,9 +2593,12 @@ export default function Chat() {
   }
 
   // Combined busy flag for the chat input: true while either the SSE
-  // chat stream is active OR an automation run is in flight. Used to
-  // swap Send → Stop, disable typing, and route the Stop click.
-  const chatInputBusy = stream.isActive || isRunInFlight(latestExecution);
+  // chat stream is active FOR THIS SESSION OR an automation run is in
+  // flight. Scoped per session so navigating to a new chat while another
+  // session is still streaming leaves the new session's input enabled
+  // (concurrent chat support). Used to swap Send → Stop, disable typing,
+  // and route the Stop click.
+  const chatInputBusy = stream.isActiveForSession(activeId) || isRunInFlight(latestExecution);
 
   // For an in-flight automation run, the executor pre-creates an empty
   // assistant bubble (phase.execution_id = latestExecution.id) which
@@ -2877,20 +2870,6 @@ export default function Chat() {
                         {isEn ? 'Scheduled' : '定时任务'}
                       </button>
                     )}
-                    {/* Activity Rail toggle — shows execution timeline from FSM state */}
-                    {liveExecution && (
-                      <button
-                        onClick={() => setActivityRailOpen((v) => !v)}
-                        className={`inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium transition-colors ${activityRailOpen
-                          ? 'bg-primary/10 text-primary'
-                          : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
-                          }`}
-                        title={isEn ? 'Execution timeline' : '执行时间线'}
-                      >
-                        <Activity className="h-3.5 w-3.5" />
-                        {isEn ? 'Activity' : '活动'}
-                      </button>
-                    )}
                     <button onClick={() => setFilesOpen(true)} className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground">
                       <FolderOpen className="h-3.5 w-3.5" /> {t.chat.chatFiles.title}
                     </button>
@@ -2944,7 +2923,7 @@ export default function Chat() {
                           const isStreaming = m.id === streamingId;
                           const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
                           return (
-                            <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onShowTrace={setTraceMsg} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} />
+                            <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} />
                           );
                         })}
                       </div>
@@ -3051,18 +3030,7 @@ export default function Chat() {
             </Panel>
           </>
         )}
-        {activityRailOpen && liveExecution && (
-          <>
-            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
-            <Panel id="activity-rail-panel" order={6} defaultSize={28} minSize={18} maxSize={45}>
-              <div className="h-full overflow-y-auto p-3">
-                <ActivityRail execution={liveExecution} />
-              </div>
-            </Panel>
-          </>
-        )}
       </PanelGroup>
-      {traceMsg && <TracePanel message={traceMsg} onClose={() => setTraceMsg(null)} />}
       <ChatFilesModal sessionId={activeId} open={filesOpen} onOpenChange={setFilesOpen} />
     </div>
   );

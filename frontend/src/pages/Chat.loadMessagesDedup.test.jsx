@@ -80,17 +80,19 @@ describe('Chat.jsx cross-store dedup wiring', () => {
   });
 
   it('conv-rehydration useEffect wraps conv.messages in dedupeMessagesByFingerprint', () => {
-    // Pin the fix at the source of the second leak: the direct
-    // setMessages(conv.messages) call at the conv rehydration point
-    // (line ~413). Without this wrap, the state would be populated
-    // with cross-store duplicates and loadMessages' later dedup
-    // could only collapse them relative to the FRESH chat_messages
-    // fetch, not relative to the existing conv.messages entries
-    // that share a fingerprint with the fetched set.
+    // Pin the fix at the source of the second leak: the conv
+    // rehydration point. The dedup runs inside the setMessages
+    // functional updater (after the 2026-08-12 SESSION GUARD
+    // refactor), so match that form. Without this wrap, the state
+    // would be populated with cross-store duplicates and
+    // loadMessages' later dedup could only collapse them relative to
+    // the FRESH chat_messages fetch, not relative to the existing
+    // conv.messages entries that share a fingerprint with the
+    // fetched set.
     expect(
       SOURCE,
       'conv-rehydration must dedup before setMessages',
-    ).toMatch(/setMessages\(\s*dedupeMessagesByFingerprint\(/);
+    ).toMatch(/setMessages\(\s*\(prev\)\s*=>\s*\{[\s\S]*?return\s+dedupeMessagesByFingerprint\(/);
   });
 
   it('loadMessages uses dedupeMessagesByFingerprint on the merged list', () => {

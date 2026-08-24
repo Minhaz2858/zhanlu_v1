@@ -83,7 +83,7 @@ except OSError:
 # Deterministic office formats use the existing office/pptx images. The
 # separate ``zhanlu-sandbox-skill`` image is only for the optional slow
 # skill-driven runner, currently disabled by _SKILL_DRIVEN_FORMATS.
-_SKILL_DRIVEN_IMAGE = "zhanlu-sandbox-skill:latest"
+_SKILL_DRIVEN_IMAGE = "zhanlu-sandbox-pptx:latest"  # FIX 2026-08-23: use pptx image (has Node.js + Playwright for html2pptx)
 _IMAGE_BY_FORMAT = {
     "xlsx": "zhanlu-sandbox-office:latest",
     "pptx": "zhanlu-sandbox-pptx:latest",
@@ -98,7 +98,7 @@ _IMAGE_BY_FORMAT = {
 # sandbox timeout for ordinary weekly reports. The deterministic runner still
 # receives synthesized summary/methodology/KPIs/recommendations and produces
 # reliable DOCX/PPTX/PDF/XLSX artifacts.
-_SKILL_DRIVEN_FORMATS = frozenset()
+_SKILL_DRIVEN_FORMATS = frozenset({"pptx"})  # FIX 2026-08-23: enable skill-driven PPTX for professional quality
 
 
 def _format_supports_skill_driven(fmt: str) -> bool:

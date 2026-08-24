@@ -21,8 +21,12 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
+import { getChartPalette } from '../hooks/useDesignTokens.js';
 
-const PALETTE = ['#2563eb', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#06b6d4', '#ec4899', '#84cc16'];
+/** Active chart palette — design-system driven; falls back to slate defaults. */
+function palette() {
+  return getChartPalette();
+}
 
 /** Convert columnar SQL rows [[v1,v2],[v1,v2]] into objects keyed by column name. */
 export function rowsToObjects(columns, rows) {
@@ -47,20 +51,22 @@ function numericKeys(objects, xKey) {
 function tooltipStyle() {
   return {
     contentStyle: {
-      background: 'var(--tw-bg-opacity, 1)',
-      backgroundColor: '#fff',
-      border: '1px solid #e2e8f0',
-      borderRadius: '0.5rem',
+      backgroundColor: 'var(--ds-background)',
+      border: '1px solid var(--ds-border)',
+      borderRadius: 'var(--ds-card-radius)',
+      color: 'var(--ds-foreground)',
       fontSize: '12px',
     },
+    labelStyle: { color: 'var(--ds-foreground)' },
+    itemStyle: { color: 'var(--ds-foreground)' },
   };
 }
 
 function Card({ title, children, className = '', status }) {
   return (
-    <section className={`flex flex-col rounded-xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900 ${className}`}>
+    <section className={`flex flex-col rounded-card border border-border bg-background p-4 shadow-sm ${className}`}>
       <div className="mb-3 flex items-center justify-between">
-        <h2 className="truncate text-sm font-semibold text-slate-700 dark:text-slate-200">{title}</h2>
+        <h2 className="font-body truncate text-sm font-semibold text-foreground">{title}</h2>
         {status ? (
           <span className="ml-2 inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-500" title="live" />
         ) : null}
@@ -72,7 +78,7 @@ function Card({ title, children, className = '', status }) {
 
 function Empty({ error }) {
   return (
-    <div className="flex h-40 items-center justify-center text-xs text-slate-400 dark:text-slate-500">
+    <div className="flex h-40 items-center justify-center text-xs text-foreground/50">
       {error || 'No data'}
     </div>
   );
@@ -90,14 +96,14 @@ function KpiWidget({ objects, options }) {
     ? num.toLocaleString(undefined, { maximumFractionDigits: 2 })
     : String(value ?? '');
   const unit = options?.unit || '';
-  const color = options?.color || '#2563eb';
+  const color = options?.color || palette()[0];
   return (
     <div className="flex h-40 flex-col justify-center">
       <div className="text-3xl font-bold tracking-tight" style={{ color }}>
         {formatted}
-        {unit ? <span className="ml-1 text-base font-medium text-slate-400">{unit}</span> : null}
+        {unit ? <span className="ml-1 text-base font-medium text-foreground/50">{unit}</span> : null}
       </div>
-      <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{key}</div>
+      <div className="mt-1 text-xs text-foreground/60">{key}</div>
     </div>
   );
 }
@@ -112,19 +118,19 @@ function LineWidget({ objects, type, options }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <Chart data={objects} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" />
-        <XAxis dataKey={xKey} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: '#cbd5e1' }} />
-        <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={52} />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--ds-border)" />
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: 'var(--ds-foreground)' }} tickLine={false} axisLine={{ stroke: 'var(--ds-border)' }} />
+        <YAxis tick={{ fontSize: 11, fill: 'var(--ds-foreground)' }} tickLine={false} axisLine={false} width={52} />
         <Tooltip {...tooltipStyle()} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
+        <Legend wrapperStyle={{ fontSize: 12, color: 'var(--ds-foreground)' }} />
         {keys.map((k, i) =>
           type === 'area' ? (
             <Area
               key={k}
               type="monotone"
               dataKey={k}
-              stroke={options?.colors?.[i] || PALETTE[i % PALETTE.length]}
-              fill={options?.colors?.[i] || PALETTE[i % PALETTE.length]}
+              stroke={options?.colors?.[i] || palette()[i % palette().length]}
+              fill={options?.colors?.[i] || palette()[i % palette().length]}
               fillOpacity={0.12}
               strokeWidth={2}
             />
@@ -133,7 +139,7 @@ function LineWidget({ objects, type, options }) {
               key={k}
               type="monotone"
               dataKey={k}
-              stroke={options?.colors?.[i] || PALETTE[i % PALETTE.length]}
+              stroke={options?.colors?.[i] || palette()[i % palette().length]}
               strokeWidth={2}
               dot={false}
             />
@@ -152,13 +158,13 @@ function BarWidget({ objects, options }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <BarChart data={objects} margin={{ top: 8, right: 12, left: -8, bottom: 0 }}>
-        <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
-        <XAxis dataKey={xKey} tick={{ fontSize: 11 }} tickLine={false} axisLine={{ stroke: '#cbd5e1' }} />
-        <YAxis tick={{ fontSize: 11 }} tickLine={false} axisLine={false} width={52} />
+        <CartesianGrid strokeDasharray="3 3" stroke="var(--ds-border)" vertical={false} />
+        <XAxis dataKey={xKey} tick={{ fontSize: 11, fill: 'var(--ds-foreground)' }} tickLine={false} axisLine={{ stroke: 'var(--ds-border)' }} />
+        <YAxis tick={{ fontSize: 11, fill: 'var(--ds-foreground)' }} tickLine={false} axisLine={false} width={52} />
         <Tooltip {...tooltipStyle()} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
+        <Legend wrapperStyle={{ fontSize: 12, color: 'var(--ds-foreground)' }} />
         {keys.map((k, i) => (
-          <Bar key={k} dataKey={k} fill={options?.colors?.[i] || PALETTE[i % PALETTE.length]} radius={[4, 4, 0, 0]} />
+          <Bar key={k} dataKey={k} fill={options?.colors?.[i] || palette()[i % palette().length]} radius={[4, 4, 0, 0]} />
         ))}
       </BarChart>
     </ResponsiveContainer>
@@ -179,11 +185,11 @@ function PieWidget({ objects }) {
       <PieChart>
         <Pie data={data} dataKey="value" nameKey="name" innerRadius={45} outerRadius={80} paddingAngle={2}>
           {data.map((_, i) => (
-            <Cell key={i} fill={PALETTE[i % PALETTE.length]} />
+            <Cell key={i} fill={palette()[i % palette().length]} />
           ))}
         </Pie>
         <Tooltip {...tooltipStyle()} />
-        <Legend wrapperStyle={{ fontSize: 12 }} />
+        <Legend wrapperStyle={{ fontSize: 12, color: 'var(--ds-foreground)' }} />
       </PieChart>
     </ResponsiveContainer>
   );
@@ -192,12 +198,12 @@ function PieWidget({ objects }) {
 function TableWidget({ columns, rows }) {
   if (!rows || !rows.length) return <Empty />;
   return (
-    <div className="max-h-64 overflow-auto rounded-lg border border-slate-100 dark:border-slate-800">
+    <div className="max-h-64 overflow-auto rounded-lg border border-border">
       <table className="w-full text-left text-xs">
-        <thead className="sticky top-0 bg-slate-50 dark:bg-slate-800">
+        <thead className="sticky top-0 bg-muted">
           <tr>
             {columns.map((c) => (
-              <th key={c} className="px-3 py-2 font-semibold text-slate-500 dark:text-slate-300">
+              <th key={c} className="px-3 py-2 font-semibold text-foreground/70">
                 {c}
               </th>
             ))}
@@ -205,9 +211,9 @@ function TableWidget({ columns, rows }) {
         </thead>
         <tbody>
           {rows.map((r, i) => (
-            <tr key={i} className="border-t border-slate-100 dark:border-slate-800">
+            <tr key={i} className="border-t border-border">
               {columns.map((c, j) => (
-                <td key={c} className="px-3 py-1.5 text-slate-700 dark:text-slate-300">
+                <td key={c} className="px-3 py-1.5 text-foreground/80">
                   {r[j] == null ? '' : String(r[j])}
                 </td>
               ))}
@@ -225,19 +231,19 @@ function GaugeWidget({ objects, options }) {
   if (!keys.length) return <Empty />;
   const value = Number(objects[0][keys[0]]) || 0;
   const max = Number(options?.max) || 100;
-  const color = options?.color || PALETTE[0];
+  const color = options?.color || palette()[0];
   const data = [{ name: keys[0], value: Math.max(0, Math.min(value, max)) }];
   return (
     <div className="flex h-[220px] flex-col items-center">
       <ResponsiveContainer width="100%" height={170}>
         <RadialBarChart data={data} innerRadius="70%" outerRadius="100%" startAngle={210} endAngle={-30}>
           <PolarAngleAxis type="number" domain={[0, max]} angleAxisId={0} tick={false} />
-          <RadialBar dataKey="value" fill={color} background={{ fill: '#e2e8f0' }} cornerRadius={8} />
+          <RadialBar dataKey="value" fill={color} background={{ fill: 'var(--ds-border)' }} cornerRadius={8} />
         </RadialBarChart>
       </ResponsiveContainer>
       <div className="-mt-10 text-xl font-bold" style={{ color }}>
         {value.toLocaleString(undefined, { maximumFractionDigits: 1 })}
-        <span className="ml-1 text-xs font-medium text-slate-400">/ {max}</span>
+        <span className="ml-1 text-xs font-medium text-foreground/50">/ {max}</span>
       </div>
     </div>
   );
@@ -251,19 +257,19 @@ function RadarWidget({ objects }) {
   return (
     <ResponsiveContainer width="100%" height={220}>
       <RadarChart data={objects}>
-        <PolarGrid stroke="#e2e8f0" />
-        <PolarAngleAxis dataKey={xKey} tick={{ fontSize: 10 }} />
+        <PolarGrid stroke="var(--ds-border)" />
+        <PolarAngleAxis dataKey={xKey} tick={{ fontSize: 10, fill: 'var(--ds-foreground)' }} />
         {keys.map((k, i) => (
           <Radar
             key={k}
             name={k}
             dataKey={k}
-            stroke={PALETTE[i % PALETTE.length]}
-            fill={PALETTE[i % PALETTE.length]}
+            stroke={palette()[i % palette().length]}
+            fill={palette()[i % palette().length]}
             fillOpacity={0.18}
           />
         ))}
-        <Legend wrapperStyle={{ fontSize: 12 }} />
+        <Legend wrapperStyle={{ fontSize: 12, color: 'var(--ds-foreground)' }} />
         <Tooltip {...tooltipStyle()} />
       </RadarChart>
     </ResponsiveContainer>

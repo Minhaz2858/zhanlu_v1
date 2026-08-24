@@ -303,6 +303,12 @@ class SlidePlan(BaseModel):
     kpi_specs: list[KPISpecInSlide] = Field(default_factory=list)
     notes: str = ""
     narrative_role: str = "context"  # hook | context | evidence | insight | action | closing
+    # --- CEO-grade cover / summary extras (additive) ----------------------
+    # ``period`` renders on the cover as the report period line (e.g.
+    # "July 2026 · vs June 2026").  ``callouts`` renders risk (red) /
+    # opportunity (green) boxes on the kpi_grid / summary slide.
+    period: str = ""
+    callouts: list[dict[str, str]] = Field(default_factory=list)  # [{type: risk|opportunity, text}]
     # --- Phase 1B: assertion-style headline + body budgets (additive) ------
     headline_style: str = "topic"  # topic | assertion
     max_bullets: int = 5

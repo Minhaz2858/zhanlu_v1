@@ -35,3 +35,12 @@ class ChatMessage(TimestampedBase):
     # Persisted so it survives page refresh and can be rendered in the
     # ReasoningPanel.  NULL for models that do not emit reasoning.
     reasoning_content: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Typed live activity stream events (phase_enter, tool_call_started,
+    # tool_call_finished, artifact_progress, verify_passed, retry,
+    # finalize_started).  Each event is a structured dict:
+    #   {type, label_key, params, ts}
+    # Persisted so past turns render collapsed from history and the live
+    # turn resumes expanded via SSE reconnect.  Content invariant enforced
+    # at emission time — never contains SQL text, raw rows, or unverified
+    # totals — so this persisted log is safe by construction.
+    live_events: Mapped[list | None] = mapped_column(JSON, nullable=True)

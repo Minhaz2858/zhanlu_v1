@@ -92,6 +92,33 @@ export const translations = {
         fail:     { verb: '已中断', title: '执行过程出现问题' },
         working:  { verb: '处理中', title: '正在处理' },
       },
+      // Live activity stream: typed event label templates. The backend emits
+      // only {type, label_key, params}; we resolve human text here so the
+      // feed matches the user's selected language. {placeholders} are filled
+      // from structured params (never raw model text).
+      liveEvent: {
+        summary: '{n} 个事件 · {m} 已完成 · 共{s}秒',
+        expand: '展开', collapse: '收起', thinking: '思考', running: '进行中',
+        phase_enter: {
+          init: '正在准备执行', goal: '正在理解你的请求', context: '正在收集上下文', plan: '正在规划方案',
+          gate: '正在执行策略检查', act: '正在构建交付物', observe: '正在汇总结果',
+          verify: '正在校验结果', finalize: '正在生成最终答复', done: '全部完成',
+          fail: '出错了',
+        },
+        plan_preview: '计划已生成 · 共{n}步',
+        tool_call_started: '正在执行{tool_label}',
+        tool_call_finished: '{tool_label}完成 · {row_count}行 · {duration}秒',
+        tool_call_finished_short: '{tool_label}完成',
+        tool_call_failed: '{tool_label}执行失败',
+        artifact_progress: '正在构建{artifact_type} · {current}/{total}',
+        verify_passed: '校验通过',
+        retry: '正在修正{target}',
+        finalize_started: '正在生成最终答复',
+        subagent_invoked: '委托给{agent_label}',
+        subagent_returned: '{agent_label}已返回 · {duration}秒',
+        data_offer: '{row_count}行的样本',
+        plan_summary: '计划已就绪 · 共{n}步',
+      },
       models: {
         title: '模型选择',
         gpt4oMiniDesc: '轻量快速，日常任务',
@@ -870,6 +897,33 @@ export const translations = {
         done:     { verb: 'Done',          title: 'All finished' },
         fail:     { verb: 'Stopped',       title: 'Something went wrong' },
         working:  { verb: 'Working',       title: 'In progress' },
+      },
+      // Live activity stream: typed event label templates. The backend emits
+      // only {type, label_key, params}; we resolve human text here so the
+      // feed matches the user's selected language. {placeholders} are filled
+      // from structured params (never raw model text).
+      liveEvent: {
+        summary: '{n} events · {m} completed · {s}s',
+        expand: 'Expand', collapse: 'Collapse', thinking: 'Thinking', running: 'In progress',
+        phase_enter: {
+          init: 'Preparing the run', goal: 'Fathoming your request', context: 'Gathering the right context', plan: 'Laying out the plan',
+          gate: 'Running policy checks', act: 'Building your deliverable', observe: 'Recording the results',
+          verify: 'Checking the outputs', finalize: 'Wrapping everything up', done: 'All finished',
+          fail: 'Something went wrong',
+        },
+        plan_preview: 'Plan ready · {n} steps',
+        tool_call_started: 'Running {tool_label}',
+        tool_call_finished: '{tool_label} completed · {row_count} rows · {duration}s',
+        tool_call_finished_short: '{tool_label} completed',
+        tool_call_failed: '{tool_label} failed',
+        artifact_progress: 'Building {artifact_type} · {current} of {total}',
+        verify_passed: 'Verification passed',
+        retry: 'Correcting {target}',
+        finalize_started: 'Finalizing your answer',
+        subagent_invoked: 'Delegating to {agent_label}',
+        subagent_returned: '{agent_label} returned · {duration}s',
+        data_offer: 'Sample of {row_count} rows',
+        plan_summary: 'Plan ready · {n} steps',
       },
       models: {
         title: 'Select Model',

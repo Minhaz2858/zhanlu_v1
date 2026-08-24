@@ -16,6 +16,7 @@ Source: EDIA_5.1.2/backend/src/service/forecast_supervisor.py:150-283.
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -181,3 +182,62 @@ def classify_cadence(product_id: str, row_count: int | None) -> str:
     if product_id in _WEEKLY_CADENCE_PRODUCTS:
         return "weekly"
     return "daily"
+
+
+# ---------------------------------------------------------------------------
+# P2.15: Realized-metric trust tier classification
+# ---------------------------------------------------------------------------
+
+def classify_trust(
+    realized_mape: float | None = None,
+    naive_mape: float | None = None,
+    drift_status: str | None = None,
+    cadence_row_count: int | None = None,
+    product_id: str = "",
+) -> dict:
+    """Classify trust tier from realized metrics (when available).
+
+    When realized_mape and naive_mape are both available, the tier is
+    determined by how the model compares to naive:
+      - realized_mape < naive_mape * 0.7  →  "high"  (significant edge)
+      - realized_mape < naive_mape        →  "medium" (beats naive)
+      - realized_mape >= naive_mape       →  "directional" (no edge)
+      - drift_status = "degraded"         →  downgraded one tier
+
+    When realized metrics are not available, falls back to the static
+    product lists (cold-start only).
+    """
+    # Cold-start fallback: no realized metrics → use static lists
+    if realized_mape is None or naive_mape is None or not math.isfinite(realized_mape) or not math.isfinite(naive_mape):
+        if product_id in _HIGH_SKILL_PRODUCTS:
+            return {"tier": "high", "badge_color": "green", "reason_codes": ["cold_start_static"]}
+        return {"tier": "medium", "badge_color": "yellow", "reason_codes": ["cold_start_default"]}
+
+    # Data-driven classification
+    if realized_mape < naive_mape * 0.7:
+        tier = "high"
+        badge_color = "green"
+    elif realized_mape < naive_mape:
+        tier = "medium"
+        badge_color = "yellow"
+    else:
+        tier = "directional"
+        badge_color = "orange"
+
+    # Drift downgrade
+    reason_codes = ["realized_metrics"]
+    if drift_status == "degraded":
+        tier_order = {"high": "medium", "medium": "directional", "directional": "low"}
+        tier = tier_order.get(tier, "low")
+        badge_color = {"high": "yellow", "medium": "orange", "directional": "red"}.get(
+            tier, "red"
+        )
+        reason_codes.append("drift_degraded")
+
+    # Cadence adjustment
+    if cadence_row_count is not None and cadence_row_count < 60:
+        tier_order = {"high": "medium", "medium": "directional", "directional": "low", "low": "low"}
+        tier = tier_order.get(tier, tier)
+        reason_codes.append("sparse_cadence")
+
+    return {"tier": tier, "badge_color": badge_color, "reason_codes": reason_codes}

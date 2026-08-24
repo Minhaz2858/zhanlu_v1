@@ -67,9 +67,13 @@ def build_one_liner(
     action: str,
     p_rise: Optional[float],
     expected_change_pct: Optional[float],
+    below_naive: bool = False,
     intel_event_count: int = 0,
     intel_bias: str = "neutral",
 ) -> str:
+    # P0.4: Honesty-gate downgrade → honest "no edge" message, not "insufficient data"
+    if below_naive:
+        return "模型暂无统计优势,展示保守基线,建议观望"
     if p_rise is None and expected_change_pct is None:
         return "数据不足,建议观望"
     parts = []
@@ -99,6 +103,9 @@ def build_narrative(
     volatility_regime: Optional[str],
     basis_zh: str = "",
     action_logic_zh: str = "",
+    below_naive: bool = False,
+    ensemble_mape_h7: Optional[float] = None,
+    naive_mape_h7: Optional[float] = None,
 ) -> str:
     """Plain-language per-product narrative.
 
@@ -108,6 +115,15 @@ def build_narrative(
     what would change it. Otherwise it degrades to the legacy 3-sentence
     form.
     """
+    # P0.4: distinct message for honesty-gate downgrade vs truly sparse data
+    if below_naive:
+        mape_info = ""
+        if ensemble_mape_h7 is not None and naive_mape_h7 is not None:
+            mape_info = f"(模型回测误差 {ensemble_mape_h7:.1f}% vs 基线 {naive_mape_h7:.1f}%)"
+        return (
+            f"{name_zh}当前模型暂无统计优势{mape_info},"
+            f"展示保守基线预测,{_ACTION_ADVICE_ZH['watch']}。"
+        )
     if forecast_base is None or current_price is None:
         return f"{name_zh}当前预测数据不足,{_ACTION_ADVICE_ZH['watch']}。"
     # Direction: prefer expected_change_pct; fall back to forecast vs current.
@@ -273,6 +289,12 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
         intel_bias = intel.bias_direction if intel else "neutral"
         vol = policy.volatility_regime if policy else None
         name_zh = labels.get("label_zh", pid)
+
+        # P0.4: detect honesty-gate downgrade for distinct messaging
+        _below_naive = (
+            trust is not None
+            and "below_naive_baseline" in (trust.reason_codes or [])
+        )
         current = snap.price if snap else None
         base = (batch.base_by_product or {}).get(pid)
 
@@ -328,6 +350,17 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
                     "risk_zh", "source", "day", "generated_at")}
             )
         else:
+            # Extract per-horizon MAPEs for the narrative (from overlay, if available)
+            _ensemble_mape_h7 = None
+            _naive_mape_h7 = None
+            if overlay and hasattr(overlay, "model_detail") and overlay.model_detail:
+                md = overlay.model_detail if isinstance(overlay.model_detail, dict) else {}
+                emh = md.get("ensemble_mape_by_horizon", {})
+                nmh = md.get("naive_mape_by_horizon", {}) if "naive_mape_by_horizon" in md else {}
+                if 7 in emh:
+                    _ensemble_mape_h7 = emh[7]
+                if 7 in nmh:
+                    _naive_mape_h7 = nmh[7]
             narrative_zh = build_narrative(
                 name_zh=name_zh, day=day, current_price=current,
                 forecast_base=base, expected_change_pct=exp_chg, p_rise=p_rise,
@@ -336,6 +369,9 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
                 intel_event_count=intel_count, intel_bias=intel_bias,
                 volatility_regime=vol,
                 basis_zh=basis_zh, action_logic_zh=action_logic_zh,
+                below_naive=_below_naive,
+                ensemble_mape_h7=_ensemble_mape_h7,
+                naive_mape_h7=_naive_mape_h7,
             )
             brief_meta = None
 
@@ -370,6 +406,7 @@ def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResp
             volatility_regime=vol,
             one_liner_zh=build_one_liner(
                 action=action, p_rise=p_rise, expected_change_pct=exp_chg,
+                below_naive=_below_naive,
                 intel_event_count=intel_count, intel_bias=intel_bias,
             ),
             narrative_zh=narrative_zh,

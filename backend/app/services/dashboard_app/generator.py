@@ -134,8 +134,167 @@ class DashboardAppGenerator:
             "theme": spec.get("theme", "light"),
             "refresh_interval_seconds": int(spec.get("refresh_interval_seconds", 30)),
             "design_system_ref": spec.get("design_system_ref"),
+            # Machine-readable design tokens consumed by the React frontend.
+            # Empty dict when no design system is attached → frontend falls back
+            # to its built-in slate defaults (backward compatible).
+            "design": self._load_design_tokens(spec),
             "metrics": metrics,
         }
+
+    # ── design-system token loading ──
+
+    def _resolve_design_json(self, spec: Dict[str, Any]) -> Optional[Path]:
+        """Resolve the design-system.json sidecar path from the spec.
+
+        ``design_system_ref`` points at ``{generated_path}/{output_dir}/{org_id}/MASTER.md``.
+        The machine-readable sidecar is a sibling ``design-system.json``.
+        """
+        ref = spec.get("design_system_ref") or spec.get("design_system_json_ref")
+        if not ref:
+            return None
+        try:
+            from app.config import settings
+
+            ref_path = Path(str(ref))
+            if ref_path.is_absolute():
+                json_path = (
+                    ref_path.with_name("design-system.json")
+                    if ref_path.name == "MASTER.md"
+                    else ref_path
+                )
+            else:
+                base = Path(settings.generated_path)
+                json_path = base / ref_path
+                if ref_path.name == "MASTER.md":
+                    json_path = base / ref_path.parent / "design-system.json"
+            return json_path if json_path.is_file() else None
+        except Exception as exc:
+            logger.warning("resolve design-system.json failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _normalize_design(raw: Dict[str, Any]) -> Dict[str, Any]:
+        """Normalize a ui-ux-pro-max design_system dict into frontend tokens.
+
+        Produces a flat, CSS-friendly shape the React template consumes:
+        colors (incl. a derived chart_palette + dark overrides), typography,
+        spacing scale and a small style summary. Unknown/missing fields degrade
+        gracefully — the frontend applies whatever it can.
+        """
+        colors = raw.get("colors") or {}
+        style = raw.get("style") or {}
+        typography = raw.get("typography") or {}
+        spacing = raw.get("spacing_scale") or {}
+
+        def _hex(k: str, default: str = "") -> str:
+            v = str(colors.get(k) or "").strip()
+            return v if v.startswith("#") else default
+
+        def _luminance(hex_color: str) -> float:
+            h = hex_color.lstrip("#")
+            if len(h) != 6:
+                return 255.0
+            try:
+                r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+            except ValueError:
+                return 255.0
+            return 0.299 * r + 0.587 * g + 0.114 * b
+
+        background = _hex("background", "#f8fafc")
+        foreground = _hex("foreground", "#0f172a")
+
+        # Derive chart palette from the design's own colors first, then pad with
+        # tasteful defaults so multi-series charts stay readable. Colors that
+        # would be invisible on the design's background (near-white/near-black)
+        # are skipped so every series stays distinguishable.
+        def _contrasty(v: str) -> bool:
+            return abs(_luminance(v) - _luminance(background)) > 60
+
+        chart_palette: list[str] = []
+        for k in ("primary", "accent", "secondary", "destructive", "ring", "on_primary"):
+            v = _hex(k)
+            if v and _contrasty(v) and v not in chart_palette:
+                chart_palette.append(v)
+            if len(chart_palette) >= 6:
+                break
+        _DEFAULT_PALETTE = ["#2563eb", "#10b981", "#f59e0b", "#ef4444", "#8b5cf6", "#06b6d4"]
+        for v in _DEFAULT_PALETTE:
+            if len(chart_palette) >= 6:
+                break
+            if v not in chart_palette:
+                chart_palette.append(v)
+        chart_palette = chart_palette[:6]
+
+        # Dark-mode overrides: the sidecar has a single color set. If the design
+        # is natively dark we reuse it; otherwise provide conventional dark tokens.
+        explicit_dark = colors.get("dark") or {}
+        if _luminance(background) < 128:
+            dark = {
+                "background": background,
+                "foreground": foreground,
+                "muted": _hex("muted", "#1e293b"),
+                "border": _hex("border", "#334155"),
+            }
+        else:
+            dark = {
+                "background": explicit_dark.get("background", "#020617"),
+                "foreground": explicit_dark.get("foreground", "#f8fafc"),
+                "muted": explicit_dark.get("muted", "#1e293b"),
+                "border": explicit_dark.get("border", "#334155"),
+            }
+
+        return {
+            "colors": {
+                "primary": _hex("primary", "#2563eb"),
+                "on_primary": _hex("on_primary", "#ffffff"),
+                "secondary": _hex("secondary", "#64748b"),
+                "accent": _hex("accent", "#f59e0b"),
+                "background": background,
+                "foreground": foreground,
+                "muted": _hex("muted", "#f1f5f9"),
+                "border": _hex("border", "#e2e8f0"),
+                "destructive": _hex("destructive", "#ef4444"),
+                "ring": _hex("ring", "#2563eb"),
+                "chart_palette": chart_palette,
+                "dark": dark,
+            },
+            "typography": {
+                "heading": typography.get("heading") or "Inter",
+                "body": typography.get("body") or "Inter",
+                "google_fonts_url": typography.get("google_fonts_url") or "",
+                "css_import": typography.get("css_import") or "",
+            },
+            "spacing": {
+                "xs": spacing.get("xs") or "2px",
+                "sm": spacing.get("sm") or "4px",
+                "md": spacing.get("md") or "8px",
+                "lg": spacing.get("lg") or "12px",
+                "xl": spacing.get("xl") or "16px",
+                "2xl": spacing.get("2xl") or "24px",
+                "3xl": spacing.get("3xl") or "32px",
+            },
+            "style": {
+                "name": style.get("name") or "Enterprise Clean",
+                "keywords": style.get("keywords") or "",
+                "card_radius": "8px",
+            },
+        }
+
+    def _load_design_tokens(self, spec: Dict[str, Any]) -> Dict[str, Any]:
+        """Load + normalize design tokens, or return {} so the frontend falls back."""
+        # Direct structured payload (builtin fallback path, no disk I/O).
+        structured = spec.get("structured")
+        if structured:
+            return self._normalize_design(structured)
+        json_path = self._resolve_design_json(spec)
+        if json_path is None:
+            return {}
+        try:
+            raw = json.loads(json_path.read_text(encoding="utf-8"))
+            return self._normalize_design(raw)
+        except Exception as exc:
+            logger.warning("load design-system.json failed (%s): %s", json_path, exc)
+            return {}
 
     def _scaffold_gitignore(self, app_dir: Path) -> None:
         """Write a .gitignore so per-app versioning never tracks build artifacts.

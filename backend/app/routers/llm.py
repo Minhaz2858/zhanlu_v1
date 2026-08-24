@@ -38,6 +38,9 @@ class LlmModelCreate(BaseModel):
     is_default: bool = False
     enabled: bool = True
     bypass_hallucination_guardrail: bool = False
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_structured_tool_calls: bool = True
 
 
 class LlmModelUpdate(BaseModel):
@@ -50,6 +53,9 @@ class LlmModelUpdate(BaseModel):
     is_default: bool | None = None
     enabled: bool | None = None
     bypass_hallucination_guardrail: bool | None = None
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_structured_tool_calls: bool | None = None
 
 
 class TestConnectionBody(BaseModel):
@@ -72,6 +78,9 @@ class LlmModelOut(BaseModel):
     is_default: bool
     enabled: bool
     bypass_hallucination_guardrail: bool = False
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    supports_structured_tool_calls: bool = True
     created_date: str | None = None
     updated_date: str | None = None
     created_by_id: str | None = None
@@ -129,6 +138,9 @@ def _to_out(row: LlmModel) -> LlmModelOut:
         is_default=row.is_default,
         enabled=row.enabled,
         bypass_hallucination_guardrail=row.bypass_hallucination_guardrail,
+        context_window=row.context_window,
+        max_output_tokens=row.max_output_tokens,
+        supports_structured_tool_calls=row.supports_structured_tool_calls,
         created_date=row.created_date.isoformat() if row.created_date else None,
         updated_date=row.updated_date.isoformat() if row.updated_date else None,
         created_by_id=row.created_by_id,
@@ -191,6 +203,9 @@ def create_model(
         is_default=body.is_default,
         enabled=body.enabled,
         bypass_hallucination_guardrail=body.bypass_hallucination_guardrail,
+        context_window=body.context_window,
+        max_output_tokens=body.max_output_tokens,
+        supports_structured_tool_calls=body.supports_structured_tool_calls,
     )
     db.add(row)
     db.commit()
@@ -232,6 +247,12 @@ def update_model(
         row.enabled = body.enabled
     if body.bypass_hallucination_guardrail is not None:
         row.bypass_hallucination_guardrail = body.bypass_hallucination_guardrail
+    if body.context_window is not None:
+        row.context_window = body.context_window
+    if body.max_output_tokens is not None:
+        row.max_output_tokens = body.max_output_tokens
+    if body.supports_structured_tool_calls is not None:
+        row.supports_structured_tool_calls = body.supports_structured_tool_calls
 
     # is_default singleton
     if body.is_default is True:

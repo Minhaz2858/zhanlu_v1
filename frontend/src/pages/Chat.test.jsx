@@ -174,10 +174,6 @@ vi.mock('@/components/chat/ArtifactPreviewPane', () => ({
   default: () => React.createElement('div', { 'data-testid': 'artifact-preview-pane' }),
 }));
 
-vi.mock('@/components/chat/TracePanel', () => ({
-  default: () => React.createElement('div', { 'data-testid': 'trace-panel' }),
-}));
-
 vi.mock('@/components/chat/ChatFilesModal', () => ({
   default: () => React.createElement('div', { 'data-testid': 'chat-files-modal' }),
 }));
@@ -210,6 +206,7 @@ vi.mock('@/lib/utils', () => ({
 
 const { default: Chat } = await import('@/pages/Chat');
 const { ChatSessionProvider, useChatSession } = await import('@/lib/ChatSessionContext');
+const { PersistentStreamProvider } = await import('@/lib/PersistentStreamContext');
 const { base44 } = await import('@/api/base44Client');
 
 /**
@@ -255,7 +252,7 @@ function renderChat() {
       React.createElement(
         ChatSessionProvider,
         null,
-        React.createElement(Chat),
+        React.createElement(PersistentStreamProvider, null, React.createElement(Chat)),
         React.createElement(TestControls),
       ),
     )

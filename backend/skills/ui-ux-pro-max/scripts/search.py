@@ -102,6 +102,7 @@ if __name__ == "__main__":
     parser.add_argument("--page", type=str, default=None, help="Create page-specific override file in design-system/<project-slug>/pages/")
     parser.add_argument("--output-dir", "-o", type=str, default=None, help="Output directory for persisted files (default: current directory -- pass this explicitly, pointed at the project root)")
     parser.add_argument("--force", action="store_true", help="Overwrite an existing MASTER.md when persisting (default: skip if it already exists)")
+    parser.add_argument("--json-out", type=str, default=None, help="Write the structured design_system dict to this file as JSON (stdout still gets the human-readable markdown)")
     # Design dials (1-10), only applied with --design-system
     parser.add_argument("--variance", type=int, choices=range(1, 11), metavar="1-10", help="DESIGN_VARIANCE dial: 1=centered/minimal, 10=bold/asymmetric (only with --design-system)")
     parser.add_argument("--motion", type=int, choices=range(1, 11), metavar="1-10", help="MOTION_INTENSITY dial: 1=subtle, 10=complex; pulls a matching GSAP snippet from motion.csv (only with --design-system)")
@@ -123,6 +124,21 @@ if __name__ == "__main__":
             density=args.density,
             force=args.force,
         )
+
+        # Structured sidecar: write the machine-readable design_system dict to a
+        # separate JSON file while stdout stays human-readable markdown. This is
+        # what the Zhanlu dashboard generator reads to inject design tokens.
+        if args.json_out:
+            try:
+                from pathlib import Path as _Path
+                _out = _Path(args.json_out)
+                _out.parent.mkdir(parents=True, exist_ok=True)
+                _out.write_text(
+                    json_module.dumps(result["design_system"], indent=2, ensure_ascii=False),
+                    encoding="utf-8",
+                )
+            except Exception as exc:  # pragma: no cover - defensive
+                print(f"# WARNING: could not write --json-out {args.json_out}: {exc}", file=sys.stderr)
 
         if args.json:
             print(json_module.dumps(

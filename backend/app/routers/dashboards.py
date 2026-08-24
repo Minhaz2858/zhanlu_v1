@@ -1,5 +1,11 @@
 """Dashboards API — session-auth, org-scoped, fail-closed."""
-from fastapi import APIRouter, Depends, HTTPException, Query
+import importlib
+import logging
+import mimetypes
+from functools import lru_cache
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
@@ -7,13 +13,17 @@ from app.database import get_db
 from app.deps import get_current_user_required
 from app.models.dashboard import Dashboard
 from app.models.agent_conversation import AgentConversation
+from app.services.auth_service import auth_service
 from app.services.tool_handlers.dashboard_tools import _push_version
 from app.services.dashboard_query import (
     validate_widget_sql, clamp_refresh_interval, run_dashboard_query,
     _run_single_sql,
 )
 from app.services.dashboard_app.manager import dashboard_app_manager
+from app.services.dashboard_app.generator import module_name
 from app.models.dashboard_app import DashboardApp
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/dashboards", tags=["dashboards"])
 
@@ -226,6 +236,152 @@ def mark_dashboard_app_viewed(slug: str, db: Session = Depends(get_db), user=Dep
     db.commit()
     db.refresh(record)
     return _record_with_meta(record)
+
+
+# ── Full-stack dashboard app serving (T17) ──
+# These GLOBAL catch-all routes replace the per-app `app.mount(StaticFiles)`
+# that DashboardAppManager used to install at startup.  The old mount was
+# in-memory + per-worker: a file uploaded/created after startup (or on a
+# different worker than the one serving the request) could never be fetched,
+# so the viewer's `config.json` fetch 404'd and the WS badge sat on
+# "Reconnecting…" forever.
+#
+# The routes below resolve the app directory / generated module from disk+DB on
+# EVERY request, so they work on any worker, for any app, without a restart.
+# They are registered BEFORE the legacy `/{dashboard_id}` route (FastAPI
+# matches in registration order) so `/apps/...` never collides with it.
+def _resolve_module(slug: str):
+    """Import the generated module `app.dashboards.{slug}.api` for a slug.
+
+    Returns the module object (cached by importlib) or raises ImportError when
+    the app source directory does not exist / has not been generated yet.
+    """
+    return importlib.import_module(f"app.dashboards.{module_name(slug)}.api")
+
+
+def _media_type_for(name: str) -> str:
+    """Best-effort Content-Type for a served dashboard static file."""
+    mt, _ = mimetypes.guess_type(name)
+    if name.endswith(".js") or name.endswith(".mjs"):
+        return "application/javascript"
+    if name.endswith(".css"):
+        return "text/css"
+    if name.endswith(".json"):
+        return "application/json"
+    return mt or "application/octet-stream"
+
+
+@router.get("/apps/{slug}/metrics")
+def app_metrics(slug: str):
+    """List the metrics exposed by a generated dashboard app.
+
+    Resolves the generated module per-request (any worker, post-startup apps).
+    Restores the `/config`+`/metrics` REST surface the old mount used to
+    provide; the frontend app calls `./metrics/{id}` for the initial snapshot.
+    """
+    try:
+        mod = _resolve_module(slug)
+    except ImportError:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    if dashboard_app_manager.get_app(slug) is None:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    metrics = getattr(mod, "METRICS", [])
+    return {"metrics": [{"id": m["id"], "title": m["title"], "type": m["type"]} for m in metrics]}
+
+
+@router.get("/apps/{slug}/metrics/{metric_id}")
+def app_metric(slug: str, metric_id: str, request: Request):
+    """Return the live payload for one metric of a generated dashboard app."""
+    try:
+        mod = _resolve_module(slug)
+    except ImportError:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    if dashboard_app_manager.get_app(slug) is None:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    filters = dict(request.query_params)
+    try:
+        result = mod.run_metric(None, metric_id, filters)
+    except Exception as exc:  # metric not found / query error → surface cleanly
+        logger.warning("dashboard app %s metric %s failed: %s", slug, metric_id, exc)
+        raise HTTPException(status_code=404, detail=f"metric not found: {metric_id}")
+    # run_metric may be sync (template) or async; normalize.
+    if hasattr(result, "__await__"):
+        import asyncio
+        result = asyncio.get_event_loop().run_until_complete(result)
+    return {"metric_id": metric_id, "data": result}
+
+
+@router.get("/apps/{slug}/{path:path}")
+def serve_dashboard_app(slug: str, path: str):
+    """Serve a generated dashboard app's static `dist/` files.
+
+    Resolves the on-disk app directory on every request (works on any worker,
+    any app, no restart).  Guards against `..` traversal and falls back to
+    `index.html` for client-side routes (SPA).  Missing app/slug → 404 JSON;
+    traversal → 400 JSON; missing file → 404 JSON.  Never raises 5xx for a
+    benign bad request.
+    """
+    record = dashboard_app_manager.get_app(slug)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    app_dir = dashboard_app_manager.resolve_app_dir(slug)
+    if app_dir is None or not app_dir.exists():
+        raise HTTPException(status_code=404, detail="Dashboard app files missing on disk")
+
+    # `config.json` is generated at the app ROOT (not in dist/), but the
+    # frontend fetches it at the app URL root. Serve it from the root when
+    # present, otherwise fall through to the dist/ lookup below.
+    if path == "config.json" and (app_dir / "config.json").exists():
+        safe = (app_dir / "config.json").resolve()
+        return FileResponse(safe, media_type=_media_type_for(safe.name))
+
+    # The built SPA lives in the app's `dist/` directory; assets + index.html
+    # are served from there. SPA client routes fall back to index.html.
+    base = (app_dir / "dist").resolve()
+    if not base.exists():
+        raise HTTPException(status_code=404, detail="Dashboard app files missing on disk")
+    safe = (base / path).resolve()
+    if not safe.is_relative_to(base):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    if safe.is_dir():
+        safe = safe / "index.html"
+    elif not safe.exists() and "." not in safe.name:
+        safe = base / "index.html"  # SPA fallback for client routes
+    if not safe.exists():
+        raise HTTPException(status_code=404, detail="Not found")
+    return FileResponse(safe, media_type=_media_type_for(safe.name))
+
+
+@router.websocket("/apps/{slug}/ws")
+async def app_ws(websocket: WebSocket, slug: str):
+    """Proxy the generated app's live WebSocket.
+
+    The generated module owns the `ConnectionManager` + poller; we resolve it
+    per-connect (not at process start) so any worker can serve the socket
+    regardless of which worker started the poller.  Anonymous/invalid tokens
+    are rejected with close code 1008 (T9 auth).
+    """
+    token = websocket.query_params.get("token")
+    if not token or not auth_service.verify_token(token):
+        await websocket.close(code=1008, reason="invalid token")
+        return
+    try:
+        mod = _resolve_module(slug)
+    except ImportError:
+        await websocket.close(code=1008, reason="app not found")
+        return
+    if dashboard_app_manager.get_app(slug) is None:
+        await websocket.close(code=1008, reason="app not found")
+        return
+    mgr = mod.get_connection_manager()
+    await mgr.connect(slug, websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keepalive / disconnect detect
+    except Exception:
+        pass
+    finally:
+        mgr.disconnect(slug, websocket)
 
 
 @router.get("/{dashboard_id}")

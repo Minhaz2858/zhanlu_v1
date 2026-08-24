@@ -143,6 +143,7 @@ def parse_task_spec(
     agent_name: str = "general_assistant",
     active_skill: Optional[dict] = None,
     conversation_context: Optional[dict] = None,
+    db=None,
 ) -> dict:
     """Parse a user message into a TaskSpec using the LLM.
 
@@ -278,6 +279,18 @@ Respond with ONLY a JSON object, no explanation."""
             task_spec["selected_skill_id"] = active_skill.get("id")
             task_spec["selected_skill_name"] = active_skill.get("name")
 
+            # FIX 2026-08-23: resolve skill methodology from DB so the
+            # planner sees the full body and the plan follows it.
+            _skill_id = active_skill.get("id")
+            if _skill_id and db:
+                try:
+                    from app.models.tool import Tool
+                    _tool_row = db.query(Tool).filter(Tool.id == _skill_id).first()
+                    if _tool_row and _tool_row.skill_md:
+                        task_spec["selected_skill_methodology"] = _tool_row.skill_md[:5000]
+                except Exception:
+                    pass  # Best-effort
+
         # ── Follow-up entity inheritance ──────────────────────────────
         # On a follow-up turn, merge prior entities so refinement
         # requests ("dark theme") inherit the topic/metric/date_range
@@ -348,5 +361,6 @@ Respond with ONLY a JSON object, no explanation."""
             "selected_skill": active_skill,
             "selected_skill_id": active_skill.get("id") if active_skill else None,
             "selected_skill_name": active_skill.get("name") if active_skill else None,
+            "selected_skill_methodology": None,  # resolved lazily by planner if needed
         }
         return default

@@ -110,7 +110,7 @@ _PLAN_SCHEMA: dict[str, Any] = {
         "slides": {
             "type": "array",
             "minItems": 3,
-            "maxItems": 14,
+            "maxItems": 20,
             "items": {
                 "type": "object",
                 "properties": {
@@ -132,7 +132,14 @@ _PLAN_SCHEMA: dict[str, Any] = {
                     "chart_spec": {
                         "type": "object",
                         "properties": {
-                            "chart_type": {"type": "string"},
+                            "chart_type": {
+                                "type": "string",
+                                "enum": [
+                                    "bar", "column", "line", "pie",
+                                    "grouped_bar", "grouped_column",
+                                    "stacked_bar", "stacked_column", "donut",
+                                ],
+                            },
                             "x_key": {"type": "string"},
                             "y_keys": {"type": "array", "items": {"type": "string"}},
                             "title": {"type": "string"},
@@ -193,7 +200,8 @@ def _build_planner_prompt(
         f"SUGGESTED CHARTS:\n{chart_lines}\n\n"
         "STRICT RULES (you must obey every one):\n"
         "- Output valid JSON matching the requested schema.\n"
-        "- 8-12 slides. First slide layout 'cover', last 'closing'.\n"
+        "- 8-20 slides (up to 20 for multi-dimensional reports). First slide "
+        "layout 'cover', last 'closing'.\n"
         "- Use layouts only from the schema enum: cover, agenda, kpi_grid, "
         "chart_full, chart_with_bullets, findings_cards, insights_bullets, "
         "recommendations, data_table, section_divider, closing.\n"
@@ -205,6 +213,19 @@ def _build_planner_prompt(
         "words; set slide.max_bullets=5 and slide.max_words_per_bullet=12. "
         "Prefer 3-4 bullets; split long bullets.\n"
         "- x_key / y_keys must match actual column names in the data.\n"
+        "- MULTI-DIMENSION RULE (HARD): when the user asks for breakdowns by "
+        "multiple dimensions (e.g. 'by product, by customer, by region'), "
+        "produce ONE dedicated chart slide PER dimension, each using a "
+        "'chart_full' or 'chart_with_bullets' layout with that dimension as "
+        "the x_key. Do NOT cram multiple dimensions into one chart. Add a "
+        "'section_divider' before each dimension's chart slides when there "
+        "are 3+ dimensions.\n"
+        "- CHART TYPES: use 'grouped_bar'/'grouped_column' to compare a "
+        "measure across 2 series (e.g. revenue this month vs last month per "
+        "product), and 'stacked_bar'/'stacked_column' to show composition "
+        "breakdowns (e.g. revenue by product stacked by region). Prefer "
+        "'pie'/'donut' only for a single share-of-total dimension with <= 6 "
+        "segments.\n"
         "- For data-heavy decks prefer deck_type 'data_report' and reference "
         "the suggested charts. For 'beautiful'/'investor'/'pitch' requests use "
         "'investor_deck' or 'marketing' and lean on cover / section_divider / "

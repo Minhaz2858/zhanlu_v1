@@ -53,6 +53,10 @@ class BacktestResult:
     per_model_crps: dict[str, float | None] = field(default_factory=dict)
     interval_coverage: dict[str, float | None] = field(default_factory=dict)
     interval_width: dict[str, float | None] = field(default_factory=dict)
+    # P0.1: blended-ensemble own error per horizon (NOT mean of member MAPEs)
+    ensemble_mape_by_horizon: dict[int, float] = field(default_factory=dict)
+    # P0.2: convenience view of per_horizon_mape[h]["seasonal_naive"]
+    naive_mape_by_horizon: dict[int, float] = field(default_factory=dict)
 
 
 def evaluate(
@@ -120,6 +124,8 @@ def evaluate(
             per_model_crps={},
             interval_coverage={},
             interval_width={},
+            ensemble_mape_by_horizon={},
+            naive_mape_by_horizon={},
         )
 
     # Adaptive fold count: scale with series length (min 10, max 20)
@@ -160,6 +166,11 @@ def evaluate(
     dir_correct: dict[str, int] = {name: 0 for name in all_model_names}
     dir_total_per_model: dict[str, int] = {name: 0 for name in all_model_names}
 
+    # P0.1: blended-ensemble error accumulators per horizon.
+    _BASELINE_NAMES = {"naive_last", "seasonal_naive", "mean_reversion"}
+    ensemble_names = [n for n in all_model_names if n not in _BASELINE_NAMES]
+    blend_errors_by_horizon: dict[int, list[float]] = {h: [] for h in horizons}
+
     evaluated_folds = 0
     for T in origins:
         y_train = y.iloc[:T]
@@ -184,11 +195,11 @@ def evaluate(
             if pred is None:
                 for h in horizons:
                     errors_by_horizon[h][name].append(float("inf"))
-                _fold_preds[name] = np.full(primary_h, np.nan)
+                _fold_preds[name] = np.full(h_max, np.nan)
                 continue
 
             pred_arr = np.asarray(pred, dtype=float)
-            _fold_preds[name] = pred_arr[:primary_h].copy()
+            _fold_preds[name] = pred_arr[:h_max].copy()  # full length for blend scoring
 
             for h in horizons:
                 if h > len(y_actual) or h > len(pred_arr):
@@ -212,10 +223,63 @@ def evaluate(
         # Stacking meta-learner callback: record fold predictions + actuals
         if on_fold is not None:
             _actuals_for_fold = np.asarray(y_actual.iloc[:primary_h], dtype=float)
+            # Slice fold_preds to primary_h for stacking callback (full length
+            # kept for blend scoring above).
+            _fold_preds_primary = {k: v[:primary_h] for k, v in _fold_preds.items()}
             try:
-                on_fold(int(T), y_train.copy(), _fold_preds, _actuals_for_fold)
+                on_fold(int(T), y_train.copy(), _fold_preds_primary, _actuals_for_fold)
             except Exception:
                 logger.debug("on_fold callback failed (non-fatal)", exc_info=True)
+
+        # P0.1: blended-ensemble forecast per fold.
+        # Use walk-forward inverse-MAPE weights: for fold K, use cumulative
+        # per-model MAPE from all *previous* folds (cold-start → equal weights).
+        cum_mape: dict[str, float] = {}
+        for en_name in ensemble_names:
+            prev_errs = [
+                e for h in horizons
+                for e in errors_by_horizon[h].get(en_name, [])[:-1]  # exclude current fold
+                if np.isfinite(e)
+            ]
+            cum_mape[en_name] = float(np.mean(prev_errs)) if prev_errs else float("inf")
+
+        # Inverse-MAPE weights (same formula as engine.py ensemble construction)
+        inv_weights: dict[str, float] = {}
+        total_inv = 0.0
+        for en_name in ensemble_names:
+            m = cum_mape.get(en_name, float("inf"))
+            if np.isfinite(m) and m > 0:
+                inv_weights[en_name] = 1.0 / m
+                total_inv += 1.0 / m
+            else:
+                inv_weights[en_name] = 0.0
+        # Cold-start: equal weights
+        if total_inv == 0 and ensemble_names:
+            for en_name in ensemble_names:
+                inv_weights[en_name] = 1.0
+            total_inv = float(len(ensemble_names))
+        # Normalize
+        if total_inv > 0:
+            for en_name in ensemble_names:
+                inv_weights[en_name] /= total_inv
+
+        # Blend the fold predictions and score against actuals per horizon
+        for h in horizons:
+            if h > len(y_actual):
+                blend_errors_by_horizon[h].append(float("inf"))
+                continue
+            actual_h = float(y_actual.iloc[h - 1])
+            blend_val = 0.0
+            has_any = False
+            for en_name in ensemble_names:
+                pred_arr = _fold_preds.get(en_name)
+                if pred_arr is not None and h <= len(pred_arr) and np.isfinite(pred_arr[h - 1]):
+                    blend_val += inv_weights.get(en_name, 0.0) * float(pred_arr[h - 1])
+                    has_any = True
+            if not has_any:
+                blend_errors_by_horizon[h].append(float("inf"))
+            else:
+                blend_errors_by_horizon[h].append(_error_metric(actual_h, blend_val, use_rmse))
 
     # Aggregate per-horizon MAPE (or RMSE — sqrt applied here for RMSE path).
     per_horizon_mape: dict[int, dict[str, float]] = {}
@@ -246,6 +310,22 @@ def evaluate(
     ensemble_mape = float(np.mean(ensemble_candidates)) if ensemble_candidates else float("inf")
 
     naive_mape = per_model_mape.get("seasonal_naive", float("inf"))
+
+    # ── P0.1: blended-ensemble MAPE per horizon (the blend's OWN error) ─
+    ensemble_mape_by_horizon: dict[int, float] = {}
+    for h in horizons:
+        blend_errs = [e for e in blend_errors_by_horizon[h] if np.isfinite(e)]
+        if not blend_errs:
+            ensemble_mape_by_horizon[h] = float("inf")
+        elif use_rmse:
+            ensemble_mape_by_horizon[h] = float(np.sqrt(np.mean(blend_errs)))
+        else:
+            ensemble_mape_by_horizon[h] = float(np.mean(blend_errs))
+
+    # P0.2: convenience view of seasonal_naive MAPE per horizon
+    naive_mape_by_horizon: dict[int, float] = {}
+    for h in horizons:
+        naive_mape_by_horizon[h] = per_horizon_mape.get(h, {}).get("seasonal_naive", float("inf"))
 
     # ── MASE (Mean Absolute Scaled Error) ──────────────────────────────
     # MASE = MAE_model / MAE_seasonal_naive. Scale-free; standard TS metric.
@@ -348,6 +428,8 @@ def evaluate(
         per_model_crps=per_model_crps,
         interval_coverage=interval_coverage,
         interval_width=interval_width,
+        ensemble_mape_by_horizon=ensemble_mape_by_horizon,
+        naive_mape_by_horizon=naive_mape_by_horizon,
     )
 
 

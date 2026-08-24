@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { deriveSlug, useDashboardStream } from './hooks/useDashboardStream.js';
+import { applyDesignTokens } from './hooks/useDesignTokens.js';
 import { Widget } from './widgets/index.jsx';
 
 const STATUS_BADGE = {
@@ -34,6 +35,9 @@ export default function App() {
       })
       .then((cfg) => {
         if (!cancelled) {
+          // Apply the persisted design-system tokens (colors/fonts/spacing) as
+          // CSS custom properties BEFORE first paint of the dashboard chrome.
+          applyDesignTokens(cfg.design);
           setConfig(cfg);
           setTheme(cfg.theme || 'light');
         }
@@ -129,25 +133,25 @@ export default function App() {
 
   if (configError) {
     return (
-      <div className="p-8 text-sm text-red-600 dark:text-red-400">
+      <div className="p-8 text-sm text-destructive">
         Failed to load dashboard config: {configError}
       </div>
     );
   }
   if (!config) {
-    return <div className="p-8 text-sm text-slate-500 dark:text-slate-400">Loading dashboard…</div>;
+    return <div className="p-8 text-sm text-foreground/60">Loading dashboard…</div>;
   }
 
   return (
-    <div className="min-h-full bg-slate-50 p-4 dark:bg-slate-950 dark:text-slate-100 sm:p-6">
+    <div className="min-h-full bg-background p-4 text-foreground sm:p-6">
       <header className="mb-5 flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h1 className="text-xl font-semibold tracking-tight">{config.name}</h1>
+          <h1 className="font-heading text-xl font-semibold tracking-tight">{config.name}</h1>
           {config.description ? (
-            <p className="mt-0.5 text-sm text-slate-500 dark:text-slate-400">{config.description}</p>
+            <p className="mt-0.5 text-sm text-foreground/60">{config.description}</p>
           ) : null}
           {hasFilters ? (
-            <p className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-sky-100 px-2.5 py-0.5 text-xs font-medium text-sky-700 dark:bg-sky-900/40 dark:text-sky-300">
+            <p className="mt-1 inline-flex items-center gap-1.5 rounded-full bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary">
               Filtered view: {filters.toString()}
             </p>
           ) : null}
@@ -176,7 +180,7 @@ export default function App() {
       </div>
 
       {streamStatus === 'reconnecting' ? (
-        <p className="mt-4 text-center text-xs text-slate-400">Reconnecting to live data…</p>
+        <p className="mt-4 text-center text-xs text-foreground/50">Reconnecting to live data…</p>
       ) : null}
     </div>
   );

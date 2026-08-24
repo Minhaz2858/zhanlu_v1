@@ -42,7 +42,7 @@
  */
 
 import { useState } from 'react';
-import { Loader2, CheckCircle2, XCircle, ChevronDown, ChevronRight, Sparkles } from 'lucide-react';
+import { Loader2, CheckCircle2, XCircle, ChevronDown, ChevronRight, Sparkles, BookOpen } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ReasoningPanel from './ReasoningPanel';
 
@@ -74,6 +74,37 @@ function isExpandable(step) {
   return Boolean(step && (step.command || step.output_preview));
 }
 
+/**
+ * `ask_data_agent` step commands embed the raw data question which may contain
+ * internal table/column names. The description ("Querying the bound data
+ * source") is sufficient user-facing text — hide the raw command entirely
+ * for these steps so no SQL leaks.
+ */
+function shouldShowCommand(step) {
+  if (!step?.command) return false;
+  if (step.tool_name === 'ask_data_agent') return false;
+  return true;
+}
+
+/**
+ * Strip raw SQL/ERP internals from activity step text so the user only sees
+ * human-readable language, not table names like erp_t_sal_outstock or column
+ * IDs like FMATERIALID.
+ */
+function sanitizeActivityText(text) {
+  if (!text) return text;
+  return text
+    // Strip [Schema: ...] blocks entirely
+    .replace(/\[Schema:[^\]]*\]/gi, '')
+    // Replace erp_t_xxx / erp_v_xxx table references
+    .replace(/\berp_[tv]_[a-z0-9_]+\b/gi, '[table]')
+    // Replace F-prefixed column names (FMATERIALID, FREALQTY, etc.)
+    .replace(/\bF[A-Z][A-Z0-9_]+\b/g, '[field]')
+    // Collapse multiple spaces left behind
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 export default function ActivitySteps({ steps, phase, reasoning }) {
   const { lang, t } = useLanguage();
   const isEn = lang === 'en';
@@ -100,7 +131,8 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
     ? `${(totalMs / 1000).toFixed(1)}s`
     : totalMs > 0 ? `${totalMs}ms` : '';
 
-  // Localized summary copy (matches TracePanel.jsx pattern: hardcoded lang ternary)
+  // Localized summary copy (hardcoded lang ternary; the ReasoningSummary /
+  // TracePanel cards that used this pattern were removed 2026-08-22)
   const stepWord = isEn
     ? (totalCount === 1 ? 'step' : 'steps')
     : '步';
@@ -172,9 +204,19 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
             const expandable = isExpandable(step);
             const stepKey = step.number ?? idx;
             const isStepExpanded = Boolean(expandedSteps[stepKey]);
+            // FIX 2026-08-23: detect skill-driven steps for KIMI-style highlighting
+            const isSkillStep = step.tool_name === 'load_skill_body'
+              || step.tool_name === 'Skill'
+              || step.tool_name === 'skill'
+              || (step.description && /skill|methodology/i.test(step.description));
 
             return (
-              <div key={stepKey} className="rounded-lg transition-colors hover:bg-muted/40">
+              <div
+                key={stepKey}
+                className={`rounded-lg transition-colors hover:bg-muted/40 ${
+                  isSkillStep ? 'border-l-[3px] border-l-indigo-400' : ''
+                }`}
+              >
                 {/* Step row — clickable when it carries expandable detail */}
                 <div
                   role={expandable ? 'button' : undefined}
@@ -193,14 +235,18 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
                   {/* Number badge */}
                   <span
                     className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-semibold leading-none transition-colors ${
-                      isRunning
+                      isSkillStep && isRunning
+                        ? 'bg-indigo-100 text-indigo-600 ring-1 ring-indigo-200'
+                        : isRunning
                         ? 'bg-blue-100 text-blue-600 ring-1 ring-blue-200'
                         : isFailed
                           ? 'bg-red-100 text-red-600 ring-1 ring-red-200'
-                          : 'bg-green-100 text-green-600 ring-1 ring-green-200'
+                          : isSkillStep
+                            ? 'bg-indigo-100 text-indigo-600 ring-1 ring-indigo-200'
+                            : 'bg-green-100 text-green-600 ring-1 ring-green-200'
                     }`}
                   >
-                    {step.number}
+                    {isSkillStep ? <BookOpen className="h-3 w-3" /> : step.number}
                   </span>
 
                   {/* Description */}
@@ -213,7 +259,7 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
                           : 'text-muted-foreground'
                     }`}
                   >
-                    {step.description}
+                    {sanitizeActivityText(step.description)}
                   </span>
 
                   {/* Status icon */}
@@ -251,9 +297,9 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
                     bash panel) + output preview (scrollable) */}
                 {expandable && isStepExpanded && (
                   <div className="ml-9 mr-2 mb-1.5 space-y-1.5" data-testid={`activity-step-detail-${stepKey}`}>
-                    {step.command && (
+                    {shouldShowCommand(step) && (
                       <pre className="max-h-48 overflow-auto rounded-md bg-zinc-900 px-3 py-2 text-[11px] leading-4 text-zinc-100 whitespace-pre-wrap break-words">
-                        {step.command}
+                        {sanitizeActivityText(step.command)}
                       </pre>
                     )}
                     {step.output_preview && (

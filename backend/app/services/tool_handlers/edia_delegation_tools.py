@@ -193,7 +193,7 @@ async def _run_sub_agent(
             final_text = content
             break
 
-        messages.append({
+        assistant_msg = {
             "role": "assistant",
             "content": content,
             "tool_calls": [
@@ -207,7 +207,11 @@ async def _run_sub_agent(
                 }
                 for tc in raw_tool_calls
             ],
-        })
+        }
+        _reasoning = (llm_response.get("reasoning") or "").strip()
+        if _reasoning:
+            assistant_msg["reasoning_content"] = _reasoning
+        messages.append(assistant_msg)
 
         batch_ids: list[str] = []
         batch_names: list[str] = []

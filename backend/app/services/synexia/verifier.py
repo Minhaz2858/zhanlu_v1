@@ -111,10 +111,119 @@ def _check_data_integrity(observations: list) -> dict:
     }
 
 
+def _check_degenerate_result(observations: list) -> dict:
+    """Detect degenerate data-agent results: all-NULL dimensions, 0 rows,
+    or metadata-only rows (MIN_DATE/MAX_DATE/ENTRY_COUNT with no
+    actual business data).
+
+    ``critical=True``: degenerate results mean the data query failed to
+    retrieve meaningful data — a re-plan with adjusted SQL/filters is needed.
+    """
+    from app.services.goal_contract import is_effective_empty, is_metadata_only_rows  # lazy import
+
+    degenerate = []
+    for obs in observations:
+        if obs.success is False:
+            continue
+        rd = obs.result_data
+        if not isinstance(rd, dict):
+            continue
+        # Only check observations that produced rows (data-agent shape)
+        if "rows" not in rd:
+            continue
+        rows = rd.get("rows", [])
+        if isinstance(rows, (list, tuple)) and len(rows) == 0:
+            degenerate.append(obs.id)
+        elif isinstance(rows, list) and len(rows) > 0:
+            if is_effective_empty(rows):
+                degenerate.append(obs.id)
+            elif is_metadata_only_rows(rows):
+                # Metadata-only results (e.g. 1 row of MIN_DATE/MAX_DATE/ENTRY_COUNT)
+                # are degenerate — the query returned schema info, not business data.
+                degenerate.append(obs.id)
+    return {
+        "check": "degenerate_result",
+        "ok": not degenerate,
+        "detail": f"{len(degenerate)} degenerate" if degenerate else "ok",
+        "critical": True,
+    }
+
+
+def _check_wrong_grain(observations: list) -> dict:
+    """Detect wrong-grain results: plan expected aggregate but got raw rows.
+
+    ``critical=False``: wrong grain degrades quality but the data is still
+    usable — the LLM can summarize it. Flagged as a soft warning.
+    """
+    wrong_grain = []
+    for obs in observations:
+        if obs.success is False:
+            continue
+        rd = obs.result_data
+        if not isinstance(rd, dict):
+            continue
+        rows = rd.get("rows", [])
+        if not isinstance(rows, list):
+            continue
+        # Heuristic: if a data-agent observation returned >50 rows and the
+        # plan node's expected_grain was "aggregate" (1-5 rows), it's likely
+        # wrong grain.
+        expected_grain = None
+        if obs.plan_node is not None:
+            expected_grain = getattr(obs.plan_node, "expected_grain", None)
+        if expected_grain == "aggregate" and len(rows) > 50:
+            wrong_grain.append(obs.id)
+        # Also flag if >200 raw rows without pagination — likely unaggregated
+        elif len(rows) > 200 and expected_grain != "raw":
+            wrong_grain.append(obs.id)
+    return {
+        "check": "wrong_grain",
+        "ok": not wrong_grain,
+        "detail": f"{len(wrong_grain)} wrong-grain" if wrong_grain else "ok",
+        "critical": False,  # soft — LLM can still summarize
+    }
+
+
+def _check_coverage(observations: list, plan_nodes: list | None = None) -> dict:
+    """Verify every plan node that should produce answer data actually did.
+
+    ``critical=True``: missing coverage means the user's question is only
+    partially answered — a re-plan is needed.
+    """
+    if not plan_nodes:
+        return {"check": "coverage", "ok": True, "detail": "no_plan", "critical": True}
+
+    # Build set of plan node IDs that were expected to produce data
+    expected_node_ids = set()
+    for node in plan_nodes:
+        if getattr(node, "produces_data", True) and not getattr(node, "optional", False):
+            expected_node_ids.add(getattr(node, "id", id(node)))
+
+    # Build set of node IDs that actually produced data
+    observed_node_ids = set()
+    for obs in observations:
+        if obs.success is False:
+            continue
+        node_id = getattr(obs, "plan_node_id", None) or getattr(obs, "node_id", None)
+        if node_id:
+            rd = obs.result_data
+            if isinstance(rd, dict) and rd.get("rows"):
+                observed_node_ids.add(node_id)
+
+    uncovered = expected_node_ids - observed_node_ids
+    return {
+        "check": "coverage",
+        "ok": not uncovered,
+        "detail": f"{len(uncovered)} uncovered" if uncovered else "ok",
+        "critical": True,
+    }
+
+
 class VerificationResult:
     """Lightweight value object — no pydantic dependency on this hot path."""
 
-    __slots__ = ("checks", "artifact_ok", "observations_ok", "data_integrity_ok")
+    __slots__ = ("checks", "artifact_ok", "observations_ok", "data_integrity_ok",
+                 "degenerate_result_ok", "wrong_grain_ok", "coverage_ok")
 
     def __init__(self, checks: list[dict]):
         self.checks = checks
@@ -122,10 +231,17 @@ class VerificationResult:
         self.artifact_ok = bool(by_name.get("artifact_exists", True))
         self.observations_ok = bool(by_name.get("observation_success", True))
         self.data_integrity_ok = bool(by_name.get("data_integrity", True))
+        self.degenerate_result_ok = bool(by_name.get("degenerate_result", True))
+        self.wrong_grain_ok = bool(by_name.get("wrong_grain", True))
+        self.coverage_ok = bool(by_name.get("coverage", True))
 
     @property
     def passed(self) -> bool:
-        return self.artifact_ok and self.observations_ok and self.data_integrity_ok
+        return (self.artifact_ok and self.observations_ok
+                and self.data_integrity_ok
+                and self.degenerate_result_ok
+                and self.wrong_grain_ok
+                and self.coverage_ok)
 
     def all_checks_passed(self) -> bool:
         """True iff every check (deterministic + any LLM-augmented) is ok.
@@ -371,6 +487,22 @@ def verify_execution(
     except Exception as e:
         logger.warning("VERIFY: data_integrity check raised: %s", e)
         checks.append({"check": "data_integrity", "ok": False, "detail": f"error: {e}", "critical": False})
+    try:
+        checks.append(_check_degenerate_result(observations))
+    except Exception as e:
+        logger.warning("VERIFY: degenerate_result check raised: %s", e)
+        checks.append({"check": "degenerate_result", "ok": False, "detail": f"error: {e}", "critical": True})
+    try:
+        checks.append(_check_wrong_grain(observations))
+    except Exception as e:
+        logger.warning("VERIFY: wrong_grain check raised: %s", e)
+        checks.append({"check": "wrong_grain", "ok": False, "detail": f"error: {e}", "critical": False})
+    try:
+        plan_nodes = list(getattr(plan, "nodes", None) or []) if plan else None
+        checks.append(_check_coverage(observations, plan_nodes))
+    except Exception as e:
+        logger.warning("VERIFY: coverage check raised: %s", e)
+        checks.append({"check": "coverage", "ok": False, "detail": f"error: {e}", "critical": True})
 
     result = VerificationResult(checks)
     logger.info(

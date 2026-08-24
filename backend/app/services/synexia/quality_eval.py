@@ -232,6 +232,27 @@ at an adequate level.
 # Same failure markers as reflexion._fallback_verdict (kept in sync).
 _FAILURE_MARKERS = ("404", "not found", "failed to load", "internal server error")
 
+# Apology markers: the agent couldn't synthesize an answer despite having data.
+# Parallel to the _APOLOGY_PATTERN_RE in agents.py but simpler (substring match).
+_APOLOGY_MARKERS = (
+    "had trouble putting it all together",
+    "unable to put", "unable to synthesize", "unable to compile",
+    "couldn't put together", "could not put together",
+    "couldn't synthesize", "could not synthesize",
+)
+
+# Bounce-back markers: the agent dumped raw data and invited the user to
+# "ask for a summary" instead of actually answering. This is a non-answer
+# and must be flagged for revision.
+_BOUNCE_BACK_MARKERS = (
+    "i retrieved", "retrieved 1 rows", "retrieved 1 records",
+    "you can ask me", "ask me for a summary", "ask me for a breakdown",
+    "ask me for a chart", "would you like me to",
+    "feel free to ask", "let me know if you",
+    # Chinese
+    "你可以让我", "需要我提供", "是否需要我", "我可以提供",
+)
+
 
 # ── Helpers (mirrors reflexion.py — kept here so the module is self-contained) ─
 
@@ -271,7 +292,7 @@ def _clamp(v: float, lo: float = 0.0, hi: float = 1.0) -> float:
 
 
 def _heuristic_verdict(assistant_text: str) -> QualityEvalResult:
-    """No-LLM fallback: failure-marker detection (mirrors reflexion)."""
+    """No-LLM fallback: failure-marker + apology + bounce-back detection."""
     text = (assistant_text or "").lower()
     if any(m in text for m in _FAILURE_MARKERS):
         return QualityEvalResult(
@@ -280,6 +301,33 @@ def _heuristic_verdict(assistant_text: str) -> QualityEvalResult:
             confidence=0.3,
             issues=["detected failure marker in assistant text"],
             raw="heuristic-only",
+        )
+    # Apology: agent couldn't synthesize despite having data.
+    if any(m in text for m in _APOLOGY_MARKERS):
+        return QualityEvalResult(
+            verdict="revise",
+            completeness_score=0.25,
+            confidence=0.4,
+            issues=["apology: agent couldn't synthesize answer from data"],
+            suggestions=[
+                "Write a comprehensive answer using the data you already have.",
+                "Do NOT apologize — just answer the question.",
+            ],
+            raw="heuristic-apology",
+        )
+    # Bounce-back: agent dumped data + invited user to re-ask.
+    if any(m in text for m in _BOUNCE_BACK_MARKERS):
+        return QualityEvalResult(
+            verdict="revise",
+            completeness_score=0.2,
+            confidence=0.4,
+            issues=["bounce-back: agent dumped raw data instead of answering"],
+            suggestions=[
+                "Write a comprehensive answer using the data you already have.",
+                "Do NOT invite the user to ask again.",
+                "Do NOT dump raw tables — synthesize the data into prose.",
+            ],
+            raw="heuristic-bounce-back",
         )
     return QualityEvalResult(
         verdict="accept",

@@ -1,6 +1,5 @@
 import { useState } from 'react';
 import AgentMarkdown from '@/components/agent/AgentMarkdown';
-import ReasoningSummary from '@/components/chat/ReasoningSummary';
 import ReasoningPanel from '@/components/chat/ReasoningPanel';
 import ArtifactCardList from '@/components/chat/ArtifactCardList';
 import { Bot, User, ChevronDown, ChevronRight, CheckCircle2, XCircle, Loader2, Wrench, ShieldAlert, ThumbsUp, ThumbsDown } from 'lucide-react';
@@ -209,8 +208,6 @@ export default function SkillMessageBubble({ message, conversationId, onArtifact
             testId="skill-reasoning-panel"
           />
         )}
-        {/* Always-on Reasoning & actions card */}
-        {!isUser && <ReasoningSummary trace={trace} lang="en" />}
       </div>
     </div>
   );

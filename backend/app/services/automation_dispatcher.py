@@ -593,7 +593,9 @@ async def _reap_stale_executions(force_all_active: bool = False) -> int:
     db = SessionLocal()
     reaped = 0
     try:
-        now = datetime.now(timezone.utc)
+        # Postgres TIMESTAMP columns are tz-naive UTC; build a naive now so
+        # comparisons don't raise "can't compare offset-naive and offset-aware".
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         rows = db.query(AutomationExecution).filter(
             AutomationExecution.status.in_(["queued", "running"]),
         ).all()

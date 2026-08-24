@@ -244,3 +244,49 @@ def summarize_profile(profile: dict[str, dict[str, Any]], max_columns: int = 25)
         lines.append(f"... ({len(profile) - max_columns} more columns omitted)")
 
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Group-by breakdowns
+# ---------------------------------------------------------------------------
+
+
+def group_by_profile(
+    rows: list[dict[str, Any]],
+    dimension: str,
+    value_col: str,
+    top_n: int | None = 10,
+) -> list[dict[str, Any]]:
+    """Compute a top-N group-by breakdown for one dimension.
+
+    Given rows and a categorical ``dimension`` plus a numeric ``value_col``,
+    aggregates ``value_col`` per group and returns the top-``top_n`` groups
+    sorted by aggregated value descending, each as::
+
+        {"group": <label>, "value": <float>, "share_pct": <float 0-100>}
+
+    ``share_pct`` is the group's share of the dimension total.  Groups with
+    null/empty labels are skipped.  Deterministic ordering — ties break by
+    group label ascending.  Pass ``top_n=None`` to return ALL groups.
+    """
+    groups: dict[str, float] = {}
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        key = r.get(dimension)
+        val = _to_float(r.get(value_col))
+        if key is None or key == "" or val is None:
+            continue
+        groups[str(key)] = groups.get(str(key), 0.0) + val
+
+    if not groups:
+        return []
+
+    total = sum(groups.values())
+    sorted_groups = sorted(groups.items(), key=lambda kv: (-kv[1], str(kv[0])))
+    if top_n is not None:
+        sorted_groups = sorted_groups[:top_n]
+    return [
+        {"group": g, "value": v, "share_pct": v / total * 100 if total else 0.0}
+        for g, v in sorted_groups
+    ]

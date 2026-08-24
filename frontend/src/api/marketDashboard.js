@@ -105,7 +105,13 @@ export const marketDashboardApi = {
     if (!res.ok) return [];
     return res.json();
   },
+  /** MLOps: regime status for dynamic confidence badge. */
+  regimeStatus: (productKey) =>
+    getJson(`/forecast-ops/regime-status/${encodeURIComponent(productKey)}`),
 };
+
+export const getRegimeStatus = marketDashboardApi.regimeStatus;
+export const getAccuracyDashboard = marketDashboardApi.accuracyDashboard;
 
 /** Weekly Summary & Forecast Digest API client. */
 export const weeklyDigestApi = {

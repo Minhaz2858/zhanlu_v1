@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
+from typing import Any
+
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -15,6 +18,40 @@ logger = logging.getLogger(__name__)
 class DriverAttribution:
     feature: str
     weight: float  # 0-1
+
+
+@dataclass
+class WaterfallItem:
+    """A single bar in the driver-attribution waterfall chart."""
+    feature: str
+    contribution: float  # positive = pushes forecast up, negative = pushes down
+    weight: float  # feature importance 0-1
+    direction: str  # "up" | "down" | "neutral"
+
+
+@dataclass
+class WaterfallResult:
+    """Full waterfall: base value + feature contributions = forecast value."""
+    product_key: str
+    base_value: float  # typically the last observed price (naive baseline)
+    forecast_value: float
+    items: list[WaterfallItem]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "product_key": self.product_key,
+            "base_value": round(self.base_value, 2),
+            "forecast_value": round(self.forecast_value, 2),
+            "items": [
+                {
+                    "feature": it.feature,
+                    "contribution": round(it.contribution, 2),
+                    "weight": round(it.weight, 4),
+                    "direction": it.direction,
+                }
+                for it in self.items
+            ],
+        }
 
 
 @dataclass
@@ -28,6 +65,23 @@ class Explanation:
     drift_warning: bool
     regime: str = ""
     directional_signal: str = ""
+
+    def to_dict(self) -> dict:
+        """Serialize to JSON-compatible dict for ForecastRun.model_detail."""
+        return {
+            "product_key": self.product_key,
+            "summary": self.summary,
+            "confidence": self.confidence,
+            "drivers": [
+                {"feature": d.feature, "weight": round(d.weight, 4)}
+                for d in self.drivers
+            ],
+            "cleaning_note": self.cleaning_note,
+            "coherence_flags": self.coherence_flags,
+            "drift_warning": self.drift_warning,
+            "regime": self.regime,
+            "directional_signal": self.directional_signal,
+        }
 
 
 def _extract_drivers(xgboost_model, feature_names: list[str]) -> list[DriverAttribution]:
@@ -162,4 +216,80 @@ def explain_forecast(
         drift_warning=drift_warning,
         regime=regime,
         directional_signal=directional_signal,
+    )
+
+
+def compute_waterfall(
+    product_key: str,
+    forecast_values: list[float],
+    xgboost_model,
+    feature_names: list[str],
+    base_value: float | None = None,
+) -> WaterfallResult:
+    """Compute a driver-attribution waterfall chart.
+
+    The waterfall decomposes the forecast into:
+      - Base value (last observed price, or naive baseline)
+      - Feature contributions (positive = pushes up, negative = pushes down)
+      - Sum = forecast value
+
+    Each feature's contribution is proportional to its importance weight,
+    with direction determined by the sign of the feature's coefficient
+    (if available) or by the relative position of the forecast vs base.
+
+    Parameters
+    ----------
+    product_key : str
+    forecast_values : list[float]
+        The point forecast values (one per horizon step).
+    xgboost_model : XGBoostForecast
+        Fitted XGBoost model with feature_importances_.
+    feature_names : list[str]
+        Exogenous feature names (ordered).
+    base_value : float | None
+        Base value for the waterfall. Defaults to the first forecast value
+        (naive baseline approximation).
+
+    Returns
+    -------
+    WaterfallResult
+    """
+    drivers = _extract_drivers(xgboost_model, feature_names)
+    if not drivers:
+        return WaterfallResult(
+            product_key=product_key,
+            base_value=base_value or (forecast_values[0] if forecast_values else 0.0),
+            forecast_value=forecast_values[-1] if forecast_values else 0.0,
+            items=[],
+        )
+
+    if base_value is None:
+        base_value = forecast_values[0] if forecast_values else 0.0
+    forecast_value = forecast_values[-1] if forecast_values else base_value
+    total_change = forecast_value - base_value
+
+    items: list[WaterfallItem] = []
+    for d in drivers:
+        # Contribution proportional to weight × total change
+        # Direction: if forecast > base, positive contributions push up;
+        # if forecast < base, positive contributions push down
+        contribution = d.weight * total_change
+        if abs(contribution) < 0.01:
+            direction = "neutral"
+        elif contribution > 0:
+            direction = "up"
+        else:
+            direction = "down"
+        items.append(WaterfallItem(
+            feature=d.feature,
+            contribution=contribution,
+            weight=d.weight,
+            direction=direction,
+        ))
+
+    return WaterfallResult(
+        product_key=product_key,
+        base_value=base_value,
+        forecast_value=forecast_value,
+        items=items,
     )

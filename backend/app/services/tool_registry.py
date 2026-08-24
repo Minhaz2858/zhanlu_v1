@@ -439,6 +439,10 @@ DEFAULT_TOOLS_BY_AGENT: dict[str, list[str]] = {
         "undo_dashboard_edit",
         "uiux_search",
         "uiux_design_system",
+        # What-if scenario simulation (Brent/Naphtha shocks) — the chat
+        # agent answers "what if brent rises 5%?" with the causal-chain
+        # elasticity math (no dashboard UI; scenario questions in chat).
+        "forecast_what_if",
     ],
     # Phase 9 will expand this and add a "power_user" agent; kept in sync
     # via DEFAULT_POWER_USER_TOOLS in system_agents.py.

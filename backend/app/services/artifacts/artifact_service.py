@@ -18,11 +18,13 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.artifact import (
     Artifact, ArtifactVersion, ArtifactBlob, MessageArtifact,
     ARTIFACT_STATUSES, ARTIFACT_TYPES,
 )
 from app.services.artifacts.storage import get_blob_storage
+from app.services.dashboard_intent import dashboard_intent
 
 logger = logging.getLogger(__name__)
 
@@ -46,10 +48,36 @@ class ArtifactService:
         data_snapshot_ids: Optional[list] = None,
         org_id: str = "default-org",
         app_id: str = "default-app",
-    ) -> Artifact:
-        """Create a new artifact in 'draft' status."""
+        source: str = "agent",
+    ) -> Optional[Artifact]:
+        """Create a new artifact in 'draft' status.
+
+        Returns the persisted ``Artifact`` on success, or ``None`` if the
+        artifact was suppressed by the dashboard-turn guard (see below).
+
+        Dashboard-turn guard (T18): when ``FULLSTACK_DASHBOARD_ENABLED`` is on
+        AND the current turn is a dashboard-intent turn (carried via the
+        ``dashboard_intent`` ContextVar) AND ``source != "dashboard_app"``, the
+        artifact is dropped before it ever reaches the database.  This stops a
+        stray analytics-path artifact (e.g. a static "Web page" written from the
+        agent's narration sentence) from landing on the same thread as the real
+        dashboard app.  The dashboard app itself sets ``source="dashboard_app"``
+        so it always passes through.
+        """
         if artifact_type not in ARTIFACT_TYPES:
             raise ValueError(f"Invalid artifact_type '{artifact_type}'. Must be one of: {ARTIFACT_TYPES}")
+
+        if (
+            settings.FULLSTACK_DASHBOARD_ENABLED
+            and dashboard_intent.get()
+            and source != "dashboard_app"
+        ):
+            logger.warning(
+                "dropped analytics-path artifact on dashboard turn: "
+                "type=%s source=%s title=%r conversation=%s",
+                artifact_type, source, title, conversation_id,
+            )
+            return None
 
         artifact = Artifact(
             id=str(uuid4()),
@@ -63,6 +91,7 @@ class ArtifactService:
             data_snapshot_ids=data_snapshot_ids or [],
             org_id=org_id,
             app_id=app_id,
+            source=source,
         )
         self.db.add(artifact)
         self.db.commit()

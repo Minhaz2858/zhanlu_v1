@@ -237,12 +237,39 @@ def generate_pptx_fallback(*, output_path: Path, config: dict, data: list[dict])
                 for r in preview_rows
             ]
             _add_content_slide("Data Preview", lines, bullet=False)
+    # ── Even with no rows, always produce methodology + next-steps slides ──
+    if meta["methodology"]:
+        _add_content_slide("Methodology", [meta["methodology"]], bullet=False)
+    else:
+        # Provide a default methodology when no data was found
+        _add_content_slide(
+            "Methodology",
+            [
+                "Data was queried from the bound data source.",
+                "The query returned no matching rows for the requested filters.",
+                "This may indicate the data does not cover the requested time "
+                "period, or the relevant table/columns were not matched.",
+            ],
+            bullet=True,
+        )
     if meta["key_findings"]:
         _add_content_slide("Key Findings", [_safe_text(f) for f in meta["key_findings"]])
     if meta["recommendations"]:
         _add_content_slide("Recommendations", [_safe_text(r) for r in meta["recommendations"]])
     if meta["next_step"]:
         _add_content_slide("Next Step", [meta["next_step"]], bullet=False)
+    elif not rows:
+        # When no data was found, provide actionable next steps
+        _add_content_slide(
+            "Next Steps",
+            [
+                "Try a different time period (e.g. 'last month' or broader range)",
+                "Remove specific filters to see if any data exists",
+                "Check if the correct data source/table is connected",
+                "Ask about a different metric or dimension",
+            ],
+            bullet=True,
+        )
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     prs.save(str(output_path))

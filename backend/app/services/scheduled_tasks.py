@@ -336,6 +336,156 @@ def _run_threshold_autotune_step(db) -> dict:
         return {"error": True}
 
 
+MAX_REBUILDS_PER_NIGHT = 10
+
+
+def _run_rebuild_step(db) -> dict:
+    """T3.1 Rebuild queue processor — retrain targets flagged needs_rebuild.
+
+    Gated by FORECAST_ACCURACY_FEEDBACK_ENABLED (same flag that sets needs_rebuild).
+    Picks up ForecastTarget rows with status='needs_rebuild', retrains them,
+    and resets status to 'active' on success.  Caps at MAX_REBUILDS_PER_NIGHT.
+    Returns {rebuilt, failed, skipped, total_flagged}.
+    """
+    from app.config import settings as _settings
+    if not getattr(_settings, "FORECAST_ACCURACY_FEEDBACK_ENABLED", False):
+        return {"skipped": True}
+    try:
+        from app.models.forecasting import ForecastTarget
+        from app.services.forecasting.engine import ForecastEngine
+
+        targets = (
+            db.query(ForecastTarget)
+            .filter(
+                ForecastTarget.org_id == "default-org",
+                ForecastTarget.status == "needs_rebuild",
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            )
+            .limit(MAX_REBUILDS_PER_NIGHT)
+            .all()
+        )
+        if not targets:
+            return {"rebuilt": 0, "failed": 0, "skipped": 0, "total_flagged": 0}
+
+        engine = ForecastEngine(db)
+        rebuilt = 0
+        failed = 0
+        for target in targets:
+            try:
+                engine.compute_target_anchored(target.id)
+                target.status = "active"
+                # Clear the alert flag so it doesn't get re-flagged immediately
+                if target.model_config and "accuracy_alert" in target.model_config:
+                    target.model_config["accuracy_alert"]["rebuilt_at"] = datetime.datetime.now(
+                        datetime.timezone.utc
+                    ).isoformat()
+                db.add(target)
+                db.commit()
+                rebuilt += 1
+                logger.info(
+                    "[rebuild] ✓ %s retrained, status→active", target.name
+                )
+            except Exception:
+                db.rollback()
+                failed += 1
+                logger.exception(
+                    "[rebuild] ✗ %s retrain failed, keeping needs_rebuild",
+                    target.name,
+                )
+
+        total_flagged = db.query(ForecastTarget).filter(
+            ForecastTarget.org_id == "default-org",
+            ForecastTarget.status == "needs_rebuild",
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).count()
+
+        return {
+            "rebuilt": rebuilt,
+            "failed": failed,
+            "skipped": max(0, total_flagged - rebuilt - failed),
+            "total_flagged": total_flagged,
+        }
+    except Exception:
+        logger.exception("[nightly-forecast] rebuild step failed")
+        return {"error": True}
+
+
+def _run_realized_price_backfill_step(db) -> dict:
+    """T3.2 Realized-price backfill — populate ForecastDecisionLog.actual_price from ERP.
+
+    Runs BEFORE eval so that eval can score against fresh realized prices.
+    Gated by FORECAST_DECISION_LOGGING_ENABLED (same flag that creates decision logs).
+    Returns {backfilled, skipped, error}.
+    """
+    from app.config import settings as _settings
+    if not getattr(_settings, "FORECAST_DECISION_LOGGING_ENABLED", False):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.accuracy_tracker import backfill_realized_prices
+        result = backfill_realized_prices(db)
+        return result
+    except Exception:
+        logger.exception("[nightly-forecast] realized-price backfill step failed")
+        return {"error": True}
+
+
+def _run_p_rise_calibration_step(db) -> dict:
+    """T3.3 p_rise isotonic calibration — weekly recalibration from realized data.
+
+    Gated by FORECAST_P_RISE_CALIBRATION_ENABLED (default OFF).
+    Only runs on Mondays (7-day cycle). Persist calibration curves to
+    ForecastTarget.model_config["p_rise_calibration"].
+    Returns {calibrated, skipped, error}.
+    """
+    from app.config import settings as _settings
+    if not getattr(_settings, "FORECAST_P_RISE_CALIBRATION_ENABLED", False):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.p_rise_calibration import run_weekly_p_rise_calibration
+        return run_weekly_p_rise_calibration(db)
+    except Exception:
+        logger.exception("[nightly-forecast] p_rise calibration step failed")
+        return {"error": True}
+
+
+def _run_champion_challenger_step(db) -> dict:
+    """T3.4 Champion/challenger — nightly shadow runs + auto-promotion.
+
+    Gated by FORECAST_CHAMPION_CHALLENGER_ENABLED (default OFF).
+    Runs shadow forecasts for registered challengers, persists metrics to DB,
+    and auto-promotes when a challenger beats the champion consistently.
+    Returns {shadow_runs, promotions, error}.
+    """
+    from app.config import settings as _settings
+    if not getattr(_settings, "FORECAST_CHAMPION_CHALLENGER_ENABLED", False):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.ops.champion_challenger import run_nightly_champion_challenger
+        return run_nightly_champion_challenger(db)
+    except Exception:
+        logger.exception("[nightly-forecast] champion/challenger step failed")
+        return {"error": True}
+
+
+def _run_finetuning_step(db) -> dict:
+    """T3.5 Nightly Chronos-Bolt prompt fine-tuning.
+
+    Gated by FORECAST_FINETUNING_ENABLED (default OFF).
+    Loads price series, builds pooled dataset, trains soft-prompt tokens,
+    and saves them to disk for next forecast run.
+    Returns summary dict or {skipped: True}.
+    """
+    from app.config import settings as _settings
+    if not getattr(_settings, "FORECAST_FINETUNING_ENABLED", False):
+        return {"skipped": True}
+    try:
+        from app.services.forecasting.finetuning.finetune_runner import run_nightly_finetuning
+        return run_nightly_finetuning(db)
+    except Exception:
+        logger.exception("[nightly-forecast] finetuning step failed")
+        return {"error": True}
+
+
 def _run_decision_scoring_step(db) -> dict:
     """T2.1 Decision-ROI loop closure — backfill + score pending decisions.
 
@@ -438,13 +588,35 @@ def _run_nightly_forecast_sync() -> dict:
         _drift_on = os.environ.get("FORECAST_DRIFT_AUTO_ADJUST_ENABLED", "false").lower() in ("1", "true", "yes")
         _decision_on = os.environ.get("FORECAST_DECISION_LOGGING_ENABLED", "false").lower() in ("1", "true", "yes")
         _event_cal_on = os.environ.get("FORECAST_EVENT_CALIBRATION_ENABLED", "false").lower() in ("1", "true", "yes")
+        _acc_fb_on = os.environ.get("FORECAST_ACCURACY_FEEDBACK_ENABLED", "false").lower() in ("1", "true", "yes")
+        _autotune_on = os.environ.get("FORECAST_THRESHOLD_AUTOTUNE_ENABLED", "false").lower() in ("1", "true", "yes")
+        _p_rise_cal_on = os.environ.get("FORECAST_P_RISE_CALIBRATION_ENABLED", "false").lower() in ("1", "true", "yes")
+        _champ_on = os.environ.get("FORECAST_CHAMPION_CHALLENGER_ENABLED", "false").lower() in ("1", "true", "yes")
+        # Fallback to pydantic settings for flags that may only be in .env
+        if not _p_rise_cal_on:
+            try:
+                from app.config import settings as _s
+                _p_rise_cal_on = getattr(_s, "FORECAST_P_RISE_CALIBRATION_ENABLED", False)
+            except Exception:
+                pass
+        if not _champ_on:
+            try:
+                from app.config import settings as _s
+                _champ_on = getattr(_s, "FORECAST_CHAMPION_CHALLENGER_ENABLED", False)
+            except Exception:
+                pass
+
+        # Step order matters: realized-price backfill FIRST so eval has fresh data
+        summary["realized_price_backfill"] = _run_realized_price_backfill_step(db) if _decision_on else {"skipped": True}
         summary["eval"] = _run_eval_step(db) if _eval_on else {"skipped": True}
         summary["drift"] = _run_drift_step(db) if _drift_on else {"skipped": True}
-        _acc_fb_on = os.environ.get("FORECAST_ACCURACY_FEEDBACK_ENABLED", "false").lower() in ("1", "true", "yes")
         summary["decision_scoring"] = _run_decision_scoring_step(db) if _decision_on else {"skipped": True}
         summary["event_calibration"] = _run_event_calibration_step(db) if _event_cal_on else {"skipped": True}
-        _autotune_on = os.environ.get("FORECAST_THRESHOLD_AUTOTUNE_ENABLED", "false").lower() in ("1", "true", "yes")
         summary["accuracy_feedback"] = _run_accuracy_feedback_step(db) if _acc_fb_on else {"skipped": True}
+        summary["rebuild"] = _run_rebuild_step(db) if _acc_fb_on else {"skipped": True}
+        summary["p_rise_calibration"] = _run_p_rise_calibration_step(db) if _p_rise_cal_on else {"skipped": True}
+        summary["champion_challenger"] = _run_champion_challenger_step(db) if _champ_on else {"skipped": True}
+        summary["finetuning"] = _run_finetuning_step(db)
         summary["threshold_autotune"] = _run_threshold_autotune_step(db) if _autotune_on else {"skipped": True}
         return summary
     finally:

@@ -10,6 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models import UserSetting
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,19 @@ def get_user_llm_overrides(db: Session, user_id: str) -> dict[str, Any]:
     if row.max_tokens is not None:
         mt = int(row.max_tokens)
         if _MAX_TOKENS_MIN <= mt <= _MAX_TOKENS_MAX:
+            # Clamp against the configured hard cap so a value that exceeds
+            # the endpoint's real max_model_len (e.g. self-hosted vLLM
+            # capped at 16384 while the user saved 32768) can never produce
+            # a provider HTTP 400.
+            cap = getattr(settings, "LLM_MAX_TOKENS_HARD_CAP", None)
+            if cap:
+                cap = int(cap)
+                if mt > cap:
+                    logger.warning(
+                        "User %s max_tokens %d exceeds hard cap %d, clamped",
+                        user_id, mt, cap,
+                    )
+                    mt = cap
             out["max_tokens"] = mt
         else:
             logger.warning(

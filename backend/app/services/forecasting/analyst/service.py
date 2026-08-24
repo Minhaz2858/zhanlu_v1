@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import logging
-import os
 from datetime import datetime
 from typing import Optional
 
 import pandas as pd
 
+from app.config import settings
 from app.models.market_dashboard import PRODUCT_LABELS
 from app.services import market_dashboard_service as mds
 from app.services.llm_service import chat_completion_json_sync
@@ -69,7 +69,7 @@ def _build_pack_for(product_id: str, day: int, run) -> dict:
     # Wave 1: demand signal + supplier ladder (flag-gated, default OFF)
     demand_signal: dict | None = None
     supplier_ladder: dict | None = None
-    if os.environ.get("FORECAST_DEMAND_SIGNAL_ENABLED", "false").lower() == "true":
+    if settings.FORECAST_DEMAND_SIGNAL_ENABLED:
         try:
             from app.services.forecasting.features.exogenous_loaders import (
                 ErpVolumeLoader, SupplierDispersionLoader,
@@ -122,7 +122,7 @@ def _build_pack_for(product_id: str, day: int, run) -> dict:
     downstream_utilization: dict | None = None
     inventory_pressure: dict | None = None
     import_pressure: dict | None = None
-    if os.environ.get("FORECAST_EXTERNAL_SIGNAL_ENABLED", "false").lower() == "true":
+    if settings.FORECAST_EXTERNAL_SIGNAL_ENABLED:
         try:
             # Build a price_df from history_rows for divergence computations
             price_df = None

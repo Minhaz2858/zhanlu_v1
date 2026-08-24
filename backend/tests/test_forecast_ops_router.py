@@ -90,3 +90,43 @@ def test_run_evaluation_disabled_when_flag_off(db):
     c = _client(db, eval_on=False, admin=True)
     r = c.post("/api/forecast-ops/run-evaluation")
     assert r.status_code in (404, 501, 503)
+
+
+def test_what_if_endpoint_delegates_to_helper(db, monkeypatch):
+    """Endpoint is a thin wrapper around the shared compute_what_if helper."""
+    fake_result = {
+        "product_key": "异戊二烯",
+        "base_forecast": [100.0, 101.0],
+        "adjusted_forecast": [105.0, 106.05],
+        "total_impact_pct": 5.0,
+        "adjustments": [{"driver": "naphtha", "delta_pct": 10.0,
+                         "impact_pct": 5.0, "description": "x"}],
+    }
+    called = {}
+    def fake_compute_what_if(product_key, brent_delta_pct, naphtha_delta_pct, db):
+        called.update(product_key=product_key, brent=brent_delta_pct,
+                      naphtha=naphtha_delta_pct)
+        return fake_result
+    monkeypatch.setattr(
+        "app.services.forecasting.what_if.compute_what_if", fake_compute_what_if,
+    )
+    c = _client(db, eval_on=False)
+    r = c.get("/api/forecast-ops/what-if/异戊二烯?brent_delta_pct=5.0&naphtha_delta_pct=-3.0")
+    assert r.status_code == 200
+    assert r.json() == fake_result
+    assert called["product_key"] == "异戊二烯"
+    assert called["brent"] == 5.0
+    assert called["naphtha"] == -3.0
+
+
+def test_what_if_endpoint_404_when_target_missing(db, monkeypatch):
+    """LookupError from the helper surfaces as a 404, not a 500."""
+    def fake_compute_what_if(product_key, brent_delta_pct, naphtha_delta_pct, db):
+        raise LookupError(f"no forecast target for '{product_key}'")
+    monkeypatch.setattr(
+        "app.services.forecasting.what_if.compute_what_if", fake_compute_what_if,
+    )
+    c = _client(db, eval_on=False)
+    r = c.get("/api/forecast-ops/what-if/nope")
+    assert r.status_code == 404
+    assert "no forecast target" in r.json()["detail"]

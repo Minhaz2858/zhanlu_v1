@@ -91,11 +91,11 @@ def test_fsm_in_sse_path_emits_fsm_state_events_unit():
     # We test by reading the v3 region textually to confirm the route exists
     # and emits the events. This avoids standing up FastAPI + DB.
     from pathlib import Path
-    src = Path("/root/zhanlu/backend/app/routers/agents.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "agents.py").read_text()
 
     # The new v3 route returns a StreamingResponse when the trigger fires.
     assert "def _fsm_event_stream():" in src
-    assert "return StreamingResponse(\n                _fsm_event_stream()" in src
+    assert "return StreamingResponse(\n                _sse_with_heartbeat(_fsm_event_stream())" in src
     # The callback wires state into the SSE envelope.
     assert "collected.append(_emit_fsm_state(state))" in src
     # The callback is plumbed into the FSM run.
@@ -151,7 +151,7 @@ def test_v3_route_uses_conv_org_id_and_agent_name(monkeypatch):
     conv and the path param, matching the v2 pattern. This guards against
     accidental hardcoding."""
     from pathlib import Path
-    src = Path("/root/zhanlu/backend/app/routers/agents.py").read_text()
+    src = (Path(__file__).resolve().parents[1] / "app" / "routers" / "agents.py").read_text()
     # Look for the v3 region pattern
     assert "_v3_agent_name = conv.agent_name or \"general_assistant\"" in src
     assert "_v3_org_id = getattr(conv, \"org_id\", None) or \"default-org\"" in src

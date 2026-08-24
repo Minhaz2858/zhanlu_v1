@@ -244,6 +244,91 @@ def should_trigger_planning(
 
 
 # ---------------------------------------------------------------------------
+# Non-data intent detection (for data-bound routing override)
+# ---------------------------------------------------------------------------
+
+# Lightweight stopwords for greetings / thanks / meta / capability questions.
+# No domain keywords — works for any customer's schema and in Chinese.
+_NON_DATA_STOPWORDS_EN: frozenset[str] = frozenset({
+    "hello", "hi", "hey", "thanks", "thank", "ok", "okay", "yes",
+    "no", "sure", "cool", "nice", "great", "bye", "lol", "hmm",
+    "good", "morning", "afternoon", "evening", "please", "help",
+    "what can you do", "who are you", "capabilities",
+})
+
+# Chinese equivalents — greetings / thanks / meta / capability.
+_NON_DATA_STOPWORDS_ZH: frozenset[str] = frozenset({
+    "你好", "您好", "嗨", "哈喽", "谢谢", "感谢", "好的", "好", "嗯",
+    "再见", "拜拜", "拜", "早上好", "下午好", "晚上好", "请",
+    "帮忙", "你能做什么", "你会什么", "你是谁", "功能", "能力",
+})
+
+# Combined set for quick membership test (after lower-casing + strip).
+_NON_DATA_STOPWORDS: frozenset[str] = _NON_DATA_STOPWORDS_EN | _NON_DATA_STOPWORDS_ZH
+
+# Short non-data patterns — these are always non-data regardless of length.
+_NON_DATA_PATTERN_RE = re.compile(
+    r"^(hi|hey|hello|你好|您好|thanks|thank you|谢谢|ok|okay|好的"
+    r"|bye|goodbye|再见|拜拜|what can you do|你能做什么|你是谁"
+    r"|who are you|capabilities)[\s!.?]*$",
+    re.IGNORECASE,
+)
+
+# Numeric token pattern — if the message contains numbers (dates, amounts),
+# it's likely a data question, not a greeting.
+_NUMERIC_TOKEN_RE = re.compile(r"\d+")
+
+
+def _is_non_data_intent(user_message: str) -> bool:
+    """Return True for greeting/thanks/help/capability/meta questions.
+
+    Returns False for any message that could possibly be a data question.
+    Uses three layers — no domain vocabulary, works in any language/schema:
+
+    Layer 1 — Exact match: message (stripped, lowered) is in stopwords.
+    Layer 2 — Pattern match: message matches a short non-data regex.
+    Layer 3 — Structural heuristic: very short (≤30 chars), no question
+              mark, no numeric tokens → likely non-data.
+
+    This function is deliberately **conservative** — it only returns True
+    when it's confident the message is NOT a data question. Any ambiguity
+    falls through to False, letting the data-bound FSM pipeline handle it.
+    """
+    text = user_message.strip()
+    if not text:
+        return True  # empty message → non-data
+
+    lower = text.lower()
+
+    # Layer 1: exact stopword match (covers both EN and ZH)
+    if lower in _NON_DATA_STOPWORDS:
+        return True
+
+    # Layer 2: pattern match for common short non-data forms
+    if _NON_DATA_PATTERN_RE.match(lower):
+        return True
+
+    # Layer 3: structural heuristic — very short, no question, no numbers
+    if (
+        len(text) <= 30
+        and "?" not in text
+        and "？" not in text
+        and not _NUMERIC_TOKEN_RE.search(text)
+    ):
+        # Likely a greeting/thanks/acknowledgment
+        # But check for data-adjacent words that could be short queries
+        _DATA_ADJACENT_RE = re.compile(
+            r"(?:数据|报告|销量|库存|客户|产品|表|查询|search|data|report|sales|inventory|customer|product|query|show|get|give|find|list|top)",
+            re.IGNORECASE,
+        )
+        if _DATA_ADJACENT_RE.search(lower):
+            return False  # short but data-adjacent → NOT non-data
+        return True
+
+    return False
+
+
+# ---------------------------------------------------------------------------
 # Follow-up refinement detection (routing-layer override)
 # ---------------------------------------------------------------------------
 

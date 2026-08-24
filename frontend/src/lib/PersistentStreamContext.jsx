@@ -25,19 +25,34 @@ import React, { createContext, useContext, useState, useRef, useCallback } from 
  *   Refs (survive Chat unmount/remount):
  *     - genRef:              generation counter for stream invalidation
  *     - abortRef:            current AbortController
+ *     - streamGenRef:        gen value of the LAST stream started via
+ *                            startSending(). Lets a stale stream loop
+ *                            decide whether it is still the owner of the
+ *                            shared stream state (streamGenRef === gen)
+ *                            or whether a newer stream superseded it
+ *                            (streamGenRef > gen) and thus must not call
+ *                            resetStream()/complete() and clobber the
+ *                            newer stream's state.
  *     - pendingMessageRef:   Map<sessionId, { content, toolCalls, artifacts, phase, loading }>
  *
  *   State:
- *     - isActive:            true while a stream is running
+ *     - isActive:            true while ANY stream is running (global)
+ *     - activeSessionId:     sessionId of the currently running stream, or
+ *                            null when idle. Lets consumers scope their
+ *                            busy/loading UI to the streaming session so
+ *                            other sessions stay interactive (concurrent
+ *                            chat support).
  *
  *   Actions:
- *     - startSending()       create a new AbortController
+ *     - startSending(sessionId, gen)  create a new AbortController
  *     - complete()           mark the stream as done
  *     - abort()              abort the current stream (Stop button)
  *     - incrementGen()       bump generation to invalidate in-flight streams
  *     - updatePendingMessage(sid, msg)   write accumulated content
  *     - getPendingMessage(sid)           read accumulated content
  *     - clearPendingMessage(sid)         clean up after merging
+ *     - isActiveForSession(sessionId)    true iff the stream belongs to
+ *                                        `sessionId`
  */
 
 const PersistentStreamContext = createContext(null);
@@ -45,18 +60,23 @@ const PersistentStreamContext = createContext(null);
 export function PersistentStreamProvider({ children }) {
   const genRef = useRef(0);
   const abortRef = useRef(null);
+  const streamGenRef = useRef(-1);
   const [isActive, setIsActive] = useState(false);
+  const [activeSessionId, setActiveSessionId] = useState(null);
   // Map<sessionId, partial assistant message>
   const pendingMessageRef = useRef(new Map());
 
-  const startSending = useCallback(() => {
+  const startSending = useCallback((sessionId = null, gen = null) => {
     abortRef.current = new AbortController();
+    if (gen !== null) streamGenRef.current = gen;
     setIsActive(true);
+    setActiveSessionId(sessionId);
   }, []);
 
   const complete = useCallback(() => {
     abortRef.current = null;
     setIsActive(false);
+    setActiveSessionId(null);
   }, []);
 
   /**
@@ -68,6 +88,7 @@ export function PersistentStreamProvider({ children }) {
     }
     abortRef.current = null;
     setIsActive(false);
+    setActiveSessionId(null);
   }, []);
 
   /**
@@ -80,6 +101,7 @@ export function PersistentStreamProvider({ children }) {
     }
     abortRef.current = null;
     setIsActive(false);
+    setActiveSessionId(null);
   }, []);
 
   const incrementGen = useCallback(() => {
@@ -98,12 +120,27 @@ export function PersistentStreamProvider({ children }) {
     pendingMessageRef.current.delete(sessionId);
   }, []);
 
+  /**
+   * True iff the currently running stream belongs to `sessionId`.
+   * Falls back to the global `isActive` when sessionId is null/undefined
+   * so legacy callers that don't track a session still behave correctly.
+   */
+  const isActiveForSession = useCallback(
+    (sessionId) => {
+      if (!sessionId) return isActive;
+      return isActive && activeSessionId === sessionId;
+    },
+    [isActive, activeSessionId]
+  );
+
   return (
     <PersistentStreamContext.Provider
       value={{
         genRef,
         abortRef,
+        streamGenRef,
         isActive,
+        activeSessionId,
         startSending,
         complete,
         abort,
@@ -112,6 +149,7 @@ export function PersistentStreamProvider({ children }) {
         updatePendingMessage,
         getPendingMessage,
         clearPendingMessage,
+        isActiveForSession,
       }}
     >
       {children}

@@ -45,6 +45,12 @@ def build_features(
     tech_indicators_enabled: bool = False,
     fourier_enabled: bool = False,
     oilchem_exog_enabled: bool = False,
+    # P1-2A: cross-product lag features
+    upstream_series_map: dict[str, pd.Series] | None = None,
+    cross_product_lags_enabled: bool = False,
+    # P3-2C: self-accuracy feature
+    recent_mape_7d: float | None = None,
+    self_accuracy_feature_enabled: bool = False,
 ) -> FeatureMatrix:
     # ---- preprocess volume_df (Wave 1: ERP volume exogenous) ----
     _volume_enabled = False
@@ -252,6 +258,20 @@ def build_features(
             dow = date.weekday()
             row["dow_sin"] = float(np.sin(2 * np.pi * dow / 7))
             row["dow_cos"] = float(np.cos(2 * np.pi * dow / 7))
+        # P3-2C: self-accuracy feature (recent MAPE as model confidence signal)
+        if self_accuracy_feature_enabled and recent_mape_7d is not None:
+            row["recent_mape_7d"] = float(recent_mape_7d)
+        # P1-2A: cross-product upstream lag features
+        if cross_product_lags_enabled and upstream_series_map:
+            for upstream_key, upstream_series in upstream_series_map.items():
+                for lag in range(1, 4):  # lag 1, 2, 3 days
+                    lag_date = date - timedelta(days=lag)
+                    col = f"upstream_{upstream_key}_lag{lag}"
+                    if lag_date in upstream_series.index:
+                        row[col] = float(upstream_series.loc[lag_date])
+                    else:
+                        prior = upstream_series[upstream_series.index <= lag_date]
+                        row[col] = float(prior.iloc[-1]) if len(prior) > 0 else float(upstream_series.iloc[0])
         # ERP volume lags (Wave 1)
         if _volume_enabled:
             vol_series = volume_df["volume"]
@@ -364,6 +384,25 @@ def build_features(
                 dow = date.weekday()
                 row["dow_sin"] = float(np.sin(2 * np.pi * dow / 7))
                 row["dow_cos"] = float(np.cos(2 * np.pi * dow / 7))
+            # P3-2C: self-accuracy feature for future horizon (carry last known value)
+            if self_accuracy_feature_enabled and recent_mape_7d is not None:
+                row["recent_mape_7d"] = float(recent_mape_7d)
+            # P1-2A: cross-product upstream lag features for future horizon
+            if cross_product_lags_enabled and upstream_series_map:
+                _last_date = y_dates[-1]
+                for upstream_key, upstream_series in upstream_series_map.items():
+                    for lag in range(1, 4):
+                        lag_date = date - timedelta(days=lag)
+                        col = f"upstream_{upstream_key}_lag{lag}"
+                        if lag_date <= _last_date:
+                            if lag_date in upstream_series.index:
+                                row[col] = float(upstream_series.loc[lag_date])
+                            else:
+                                prior = upstream_series[upstream_series.index <= lag_date]
+                                row[col] = float(prior.iloc[-1]) if len(prior) > 0 else float(upstream_series.iloc[0])
+                        else:
+                            # Future: carry last known value forward
+                            row[col] = float(upstream_series.iloc[-1]) if len(upstream_series) > 0 else 0.0
             # ERP volume lags for future (Wave 1)
             if _volume_enabled:
                 vol_series = volume_df["volume"]

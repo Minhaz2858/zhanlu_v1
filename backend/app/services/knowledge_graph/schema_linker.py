@@ -47,8 +47,11 @@ async def link_schema(
 
     Returns None when no catalog collection exists for any kb_id.
     """
-    if not settings.SCHEMA_LINKING_ENABLED:
-        return None
+    # The caller (db_tools / nl_answer_service) already checks the
+    # SCHEMA_LINKING_ENABLED flag and context-level opt-in before calling
+    # this function, so we do NOT re-check settings.SCHEMA_LINKING_ENABLED
+    # here.  This allows context-level schema_linking_enabled=True to work
+    # even when the global default is off.
 
     # ── 1. RRF-based table retrieval per KB ──
     retrieved: list[dict] = []
@@ -441,3 +444,132 @@ def _count_catalog_tables(db: Session, kb_ids: list[str]) -> int:
         .filter(KBTableMeta.kb_id.in_(kb_ids))
         .count()
     )
+
+
+# ── full table-of-contents (TOC) ───────────────────────────────────────────
+
+def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
+    """Return a lightweight table-of-contents for ALL tables in the catalog.
+
+    Each entry has: table_name, description (zh/en), row_count,
+    coverage (date_column, max_date), table_role.
+    This is used by the two-phase NL2SQL flow so the LLM can see
+    ALL available tables before choosing which ones to query.
+    """
+    rows = (
+        db.query(KBTableMeta)
+        .filter(KBTableMeta.kb_id.in_(kb_ids))
+        .order_by(KBTableMeta.table_name)
+        .all()
+    )
+    result = []
+    for r in rows:
+        cov = r.coverage_json or {}
+        desc = r.description_en or r.description_zh or ""
+        result.append({
+            "table_name": r.table_name,
+            "description": desc,
+            "row_count": r.row_count,
+            "date_column": cov.get("date_column", ""),
+            "max_date": cov.get("max_date", ""),
+            "min_date": cov.get("min_date", ""),
+            "table_role": r.table_role,
+        })
+    return result
+
+
+def format_toc_text(toc: list[dict], token_budget: int = 1200) -> str:
+    """Render the full TOC as a compact text block for the LLM.
+
+    Each table is 1-2 lines, e.g.:
+      sales_detail (50,000 rows, sales detail, coverage: 2023-01~2026-08)
+    """
+    lines = ["-- ALL tables in this database (choose the most relevant ones):\n"]
+    used = 60  # rough estimate for header line
+
+    for t in toc:
+        name = t["table_name"]
+        desc = t["description"]
+        rows_n = t.get("row_count")
+        max_d = t.get("max_date", "")
+        min_d = t.get("min_date", "")
+        role = t.get("table_role", "")
+
+        parts = [name]
+        if rows_n is not None:
+            parts.append(f"~{rows_n:,} rows")
+        if desc:
+            parts.append(desc[:60])
+        if role and role != "unknown":
+            parts.append(f"role={role}")
+        if min_d and max_d:
+            parts.append(f"coverage: {min_d}~{max_d}")
+        elif max_d:
+            parts.append(f"latest: {max_d}")
+
+        line = "  " + ", ".join(parts)
+        tok = max(1, len(line) // 2)
+        if used + tok > token_budget:
+            lines.append(f"  ... and {len(toc) - len(lines) + 1} more tables (not shown due to budget)")
+            break
+        lines.append(line)
+        used += tok
+
+    return "\n".join(lines)
+
+
+def get_selected_tables_ddl(
+    db: Session, kb_ids: list[str], selected_table_names: list[str],
+    token_budget: int = 800,
+) -> str:
+    """Given a list of table names chosen by the LLM, return full DDL
+    for those tables (with columns, types, descriptions, join paths).
+
+    This is Phase 2 of the two-phase NL2SQL flow.
+    """
+    metas = (
+        db.query(KBTableMeta)
+        .filter(
+            KBTableMeta.kb_id.in_(kb_ids),
+            KBTableMeta.table_name.in_(selected_table_names),
+        )
+        .all()
+    )
+    # Build enriched table dicts (same shape as _enrich_tables output)
+    from app.models.knowledge_catalog import KBColumnMeta
+    enriched = []
+    for m in metas:
+        cols = (
+            db.query(KBColumnMeta)
+            .filter(KBColumnMeta.table_meta_id == m.id)
+            .order_by(KBColumnMeta.ordinal)
+            .all()
+        )
+        enriched.append({
+            "table_meta_id": m.id,
+            "table_name": m.table_name,
+            "schema_name": m.schema_name,
+            "table_type": m.table_type,
+            "row_count": m.row_count,
+            "description_zh": m.description_zh,
+            "description_en": m.description_en,
+            "coverage_json": m.coverage_json or {},
+            "rrf_score": 1.0,
+            "columns": [
+                {
+                    "name": c.column_name,
+                    "data_type": c.data_type,
+                    "is_nullable": c.is_nullable,
+                    "is_primary_key": c.is_primary_key,
+                    "description_zh": c.description_zh,
+                    "description_en": c.description_en,
+                }
+                for c in cols
+            ],
+        })
+
+    # Get join paths among selected tables
+    join_paths = _expand_joins(db, enriched, max_hops=2)
+
+    # Format as DDL
+    return _format_slice(enriched, join_paths, token_budget)

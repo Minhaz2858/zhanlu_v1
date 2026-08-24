@@ -348,6 +348,49 @@ class ForecastDecisionLog(TimestampedBase):
     )
 
 
+class ChallengerShadowRun(TimestampedBase):
+    """Champion/challenger shadow-run results — persists nightly shadow metrics.
+
+    One row per (target_id, challenger_type, run_date).  The nightly
+    champion/challenger step writes these after each shadow run.  Auto-promotion
+    reads consecutive weeks of shadow runs to decide if a challenger should
+    replace the champion.
+    """
+    __tablename__ = "challenger_shadow_runs"
+
+    target_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("forecast_targets.id"), nullable=False, index=True,
+    )
+    product_key: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    challenger_type: Mapped[str] = mapped_column(
+        String(50), nullable=False,
+        comment="e.g. 'stacking_meta', 'xgboost_tuned', 'var'",
+    )
+    challenger_config: Mapped[Optional[dict]] = mapped_column(
+        JSON, nullable=True,
+        comment="Model config used for this challenger run",
+    )
+
+    # ── Metrics ───────────────────────────────────────────────
+    horizon_days: Mapped[int] = mapped_column(Integer, nullable=False, default=7)
+    shadow_mape: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    champion_mape: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    shadow_delta_mape: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True,
+        comment="champion_mape - shadow_mape (positive = challenger wins)",
+    )
+
+    # ── Lifecycle ─────────────────────────────────────────────
+    run_date: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, index=True,
+        comment="Date of the nightly run",
+    )
+    promoted: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False,
+        comment="True once auto-promotion has applied this challenger",
+    )
+
+
 class ForecastEventImpact(TimestampedBase):
     """Quantified impact of exogenous events on forecast accuracy (Wave 2 T2.2).
 

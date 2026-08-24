@@ -30,6 +30,16 @@ class TestKeywordClassify:
         assert result is not None
         assert "decision" in result
 
+    def test_what_if_keyword(self):
+        result = _keyword_classify("what if brent rises 5%")
+        assert result is not None
+        assert "what_if" in result
+
+    def test_what_if_scenario_keyword(self):
+        result = _keyword_classify("simulate a naphtha +3% shock")
+        assert result is not None
+        assert "what_if" in result
+
     def test_diagnosis_keyword(self):
         result = _keyword_classify("why did sales drop")
         assert result is not None
@@ -140,6 +150,10 @@ class TestStageToTools:
     def test_perception_stage_has_tools(self):
         tools = stage_to_tools("perception")
         assert "ask_perception" in tools or "web_search" in tools
+
+    def test_what_if_stage_has_tools(self):
+        tools = stage_to_tools("what_if")
+        assert "forecast_what_if" in tools
 
 
 class TestIsEnabled:

@@ -19,6 +19,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.forecasting import (
     ForecastAccuracyLog,
     ForecastBusinessRule,
@@ -52,6 +53,7 @@ from app.services.forecasting.reconcile import (
 )
 from app.services.forecasting.price_change_probability import (
     compute as compute_price_change_probability,
+    compute_empirical,
 )
 from app.services.forecasting.scenarios import ScenarioResult, generate
 
@@ -209,7 +211,7 @@ class ForecastEngine:
         # --- ERP price smoothing (Phase 2A) ---
         # ERP transaction prices have deal-to-deal noise; rolling median
         # preserves trend while being robust to single-transaction outliers.
-        erp_smooth_enabled = os.environ.get("FORECAST_ERP_SMOOTHING_ENABLED", "false").lower() == "true"
+        erp_smooth_enabled = settings.FORECAST_ERP_SMOOTHING_ENABLED
         datasource_cfg = target.datasource or {}
         is_erp_table = (
             isinstance(datasource_cfg, dict)
@@ -219,7 +221,7 @@ class ForecastEngine:
         if erp_smooth_enabled and is_erp_table:
             try:
                 from app.services.forecasting.preprocess import smooth_erp_prices
-                smooth_window = int(os.environ.get("FORECAST_ERP_SMOOTHING_WINDOW", "7"))
+                smooth_window = settings.FORECAST_ERP_SMOOTHING_WINDOW
                 y = smooth_erp_prices(y, window=smooth_window)
             except Exception as exc:
                 logger.warning("ERP smoothing failed for %s: %s", target.product_key, exc)
@@ -240,9 +242,7 @@ class ForecastEngine:
         )
 
         # Wave 6: Regime-aware model pool switching
-        _regime_enabled = os.environ.get(
-            "FORECAST_REGIME_AWARE_POOL_ENABLED", "false",
-        ).lower() == "true"
+        _regime_enabled = settings.FORECAST_REGIME_AWARE_POOL_ENABLED
         _dropped_regime: list[str] = []
         if _regime_enabled and len(y) >= 20:
             try:
@@ -272,21 +272,20 @@ class ForecastEngine:
             except Exception as exc:
                 logger.warning("Regime-aware detection failed: %s", exc)
 
-        # Wave 6: Stacking meta-learner setup
-        _stacking_enabled = os.environ.get(
-            "FORECAST_STACKING_ENABLED", "false",
-        ).lower() == "true"
+        # Wave 6: Stacking meta-learner setup (P2.12: shadow mode)
+        # Shadow mode: always train + compute when sklearn is available,
+        # but only PUBLISH when FORECAST_STACKING_ENABLED=true.
+        _stacking_publish = settings.FORECAST_STACKING_ENABLED
         _stacker = None
-        if _stacking_enabled:
-            try:
-                from app.services.forecasting.models.stacking_meta import StackingMetaLearner
-                _stacker = StackingMetaLearner(alpha=1.0, scale=True)
+        try:
+            from app.services.forecasting.models.stacking_meta import StackingMetaLearner
+            _stacker = StackingMetaLearner(alpha=1.0, scale=True)
 
-                def _on_fold_closure(fold_T: int, y_train, fold_preds, fold_actuals):
-                    _stacker.record_fold(fold_preds, fold_actuals)
-            except ImportError:
-                logger.warning("scikit-learn not available — stacking disabled")
-                _stacking_enabled = False
+            def _on_fold_closure(fold_T: int, y_train, fold_preds, fold_actuals):
+                _stacker.record_fold(fold_preds, fold_actuals)
+        except ImportError:
+            logger.warning("scikit-learn not available — stacking disabled")
+            _stacking_publish = False
 
         # --- Step 3: Preprocessing (Phase 1) ---
         preprocess_enabled = _get_config_bool("FORECAST_PREPROCESS_ENABLED", True)
@@ -295,9 +294,7 @@ class ForecastEngine:
         if preprocess_enabled:
             try:
                 # P2-3: Enhanced preprocessing (flag-gated)
-                enhanced_preprocess_enabled = os.environ.get(
-                    "FORECAST_ENHANCED_PREPROCESS_ENABLED", "false"
-                ).lower() == "true"
+                enhanced_preprocess_enabled = settings.FORECAST_ENHANCED_PREPROCESS_ENABLED
                 if enhanced_preprocess_enabled:
                     from app.services.forecasting.preprocess_enhanced import preprocess_enhanced
                     pp, enhanced_report, holiday_df = preprocess_enhanced(
@@ -320,21 +317,59 @@ class ForecastEngine:
         # --- Backtest ---
         bt = evaluate(
             y_model, models, seasonal_period=sp, horizons=horizons,
-            on_fold=_on_fold_closure if _stacking_enabled and _stacker is not None else None,
+            on_fold=_on_fold_closure if _stacker is not None else None,
         )
         per_model_mape = bt.per_model_mape
 
-        # Wave 6: Fit stacking meta-learner after backtest
-        if _stacking_enabled and _stacker is not None:
+        # Wave 6: Fit stacking meta-learner after backtest (shadow mode: always train)
+        _stacking_fitted = False
+        _stacking_mape: float | None = None
+        if _stacker is not None:
             try:
-                fitted = _stacker.fit_meta()
-                if fitted:
-                    logger.info("Stacking meta-learner fitted for %s", target.product_key)
+                _stacking_fitted = _stacker.fit_meta()
+                if _stacking_fitted:
+                    logger.info("Stacking meta-learner fitted (shadow) for %s", target.product_key)
+                    _stacking_mape = _stacker.compute_mape()
+                    if _stacking_mape is not None:
+                        logger.info(
+                            "Stacking shadow MAPE for %s: %.2f%% (default blend: %.2f%%, delta: %.2f%%)",
+                            target.product_key, _stacking_mape,
+                            bt.ensemble_mape if math.isfinite(bt.ensemble_mape) else float("nan"),
+                            (bt.ensemble_mape - _stacking_mape) if (math.isfinite(bt.ensemble_mape) and _stacking_mape is not None) else float("nan"),
+                        )
                 else:
                     _stacking_enabled = False  # fall back to softmax
             except Exception as exc:
                 logger.warning("Stacking fit_meta failed: %s", exc)
                 _stacking_enabled = False
+
+        # Persist stacking shadow comparison to ChallengerShadowRun
+        if _stacking_fitted and _stacking_mape is not None:
+            try:
+                from app.models.forecasting import ChallengerShadowRun
+                _champ_mape = bt.ensemble_mape if math.isfinite(bt.ensemble_mape) else None
+                _delta = (_champ_mape - _stacking_mape) if _champ_mape is not None else None
+                shadow_row = ChallengerShadowRun(
+                    target_id=target.id,
+                    product_key=target.product_key,
+                    challenger_type="stacking_meta",
+                    challenger_config={"alpha": _stacker._model.alpha, "models": list(_stacker.feature_names)},
+                    horizon_days=max(horizons),
+                    shadow_mape=_stacking_mape,
+                    champion_mape=_champ_mape,
+                    shadow_delta_mape=_delta,
+                    run_date=datetime.utcnow(),
+                    promoted=False,
+                )
+                db.add(shadow_row)
+                db.flush()
+                logger.info(
+                    "ChallengerShadowRun persisted for %s: stacking_mape=%.2f%%, champion_mape=%s",
+                    target.product_key, _stacking_mape,
+                    f"{_champ_mape:.2f}%" if _champ_mape else "N/A",
+                )
+            except Exception as exc:
+                logger.warning("Failed to persist ChallengerShadowRun for %s: %s", target.product_key, exc)
 
         # --- Model selector: prune consistently underperforming models ---
         try:
@@ -402,12 +437,19 @@ class ForecastEngine:
                 )
 
                 kg = build_c5_c9_graph()
-                exog_spec = derive_feature_spec(target.product_key, kg)
+                # Allow domain experts to override exog features per product
+                _exog_override = None
+                if isinstance(target.model_config, dict):
+                    _exog_override = target.model_config.get("exog_features")
+                exog_spec = derive_feature_spec(
+                    target.product_key, kg,
+                    override_exog_features=_exog_override,
+                )
                 feature_names = exog_spec.feedstock_keys
 
                 # ERP volume exogenous feature (Wave 1, flag-gated)
                 volume_df = None
-                if os.environ.get("FORECAST_ERP_VOLUME_EXOG_ENABLED", "false").lower() == "true":
+                if settings.FORECAST_ERP_VOLUME_EXOG_ENABLED:
                     try:
                         parts = (target.product_key or "").split(".")
                         product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
@@ -429,7 +471,7 @@ class ForecastEngine:
                 # P0-1: Demand signal + supplier dispersion exogenous features
                 demand_signal_obj = None
                 supplier_disp_df = None
-                if os.environ.get("FORECAST_DEMAND_SIGNAL_EXOG_ENABLED", "false").lower() == "true":
+                if settings.FORECAST_DEMAND_SIGNAL_EXOG_ENABLED:
                     try:
                         parts = (target.product_key or "").split(".")
                         product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
@@ -468,7 +510,7 @@ class ForecastEngine:
                 operating_rate_df = None
                 inventory_df = None
                 import_price_df = None
-                if os.environ.get("FORECAST_EXTERNAL_EXOG_ENABLED", "false").lower() == "true":
+                if settings.FORECAST_EXTERNAL_EXOG_ENABLED:
                     parts = (target.product_key or "").split(".")
                     product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
                     try:
@@ -536,7 +578,7 @@ class ForecastEngine:
 
                 # Wave 5: Oilchem exogenous features (Brent/naphtha/C5/C9 from 隆众资讯)
                 oilchem_df = None
-                _oilchem_enabled = os.environ.get("FORECAST_OILCHEM_EXOG_ENABLED", "false").lower() == "true"
+                _oilchem_enabled = settings.FORECAST_OILCHEM_EXOG_ENABLED
                 if _oilchem_enabled:
                     try:
                         from app.services.forecasting.features.oilchem_loader import get_oilchem_loader
@@ -552,12 +594,8 @@ class ForecastEngine:
                         logger.warning("Oilchem load failed: %s", exc)
 
                 # Wave 5: Feature engineering flags
-                _tech_ind_enabled = os.environ.get(
-                    "FORECAST_TECHNICAL_INDICATORS_ENABLED", "false",
-                ).lower() == "true"
-                _fourier_enabled = os.environ.get(
-                    "FORECAST_FOURIER_FEATURES_ENABLED", "false",
-                ).lower() == "true"
+                _tech_ind_enabled = settings.FORECAST_TECHNICAL_INDICATORS_ENABLED
+                _fourier_enabled = settings.FORECAST_FOURIER_FEATURES_ENABLED
 
                 # Build feature matrix for exog models (no cascade in single-target mode)
                 feed_loader = FeedstockLoader()
@@ -622,9 +660,7 @@ class ForecastEngine:
 
         # Market regime detection (flag-gated)
         regime_label: str | None = None
-        regime_detection_enabled = os.environ.get(
-            "FORECAST_REGIME_DETECTION_ENABLED", "false"
-        ).lower() == "true"
+        regime_detection_enabled = settings.FORECAST_REGIME_DETECTION_ENABLED
         if regime_detection_enabled:
             try:
                 from app.services.forecasting.regime_detector import detect_regime
@@ -637,35 +673,96 @@ class ForecastEngine:
             except Exception as exc:
                 logger.warning("Regime detection failed for %s: %s", target.product_key, exc)
 
-        # Wave 6: Stacking meta-learner overrides softmax when fitted
-        if _stacking_enabled and _stacker is not None and _stacker.fitted:
-            stacking_fc = _stacker.blend(forecasts, h_max)
-            if stacking_fc is not None:
-                from app.services.forecasting.ensemble import EnsembleResult
-                ensemble_result = EnsembleResult(
-                    point_forecast=stacking_fc,
-                    weights={k: 1.0 / max(1, len(forecasts)) for k in forecasts},
-                    models_run=models_run,
-                    models_failed=models_failed,
-                    individual_forecasts=forecasts,
-                )
-                logger.info(
-                    "Used stacking meta-learner for %s (models: %s)",
-                    target.product_key, _stacker.feature_names,
-                )
-            else:
-                # Fallback to softmax
-                tau = auto_tune_tau(per_model_mape)
-                ensemble_result = blend(
-                    forecasts, per_model_mape, per_model_error_by_horizon=per_h,
-                    tau=tau, regime=regime_label,
-                )
+        # Wave 6: Stacking meta-learner (P2.12: shadow mode)
+        # Always compute shadow forecast when fitted; only PUBLISH when enabled.
+        _stacking_shadow_fc = None
+        if _stacker is not None and _stacking_fitted:
+            try:
+                _stacking_shadow_fc = _stacker.blend(forecasts, h_max)
+            except Exception as exc:
+                logger.warning("Stacking blend failed for %s: %s", target.product_key, exc)
+
+        if _stacking_publish and _stacking_shadow_fc is not None:
+            from app.services.forecasting.ensemble import EnsembleResult
+            ensemble_result = EnsembleResult(
+                point_forecast=_stacking_shadow_fc,
+                weights={k: 1.0 / max(1, len(forecasts)) for k in forecasts},
+                models_run=models_run,
+                models_failed=models_failed,
+                individual_forecasts=forecasts,
+            )
+            logger.info(
+                "PUBLISHED stacking meta-learner for %s (models: %s)",
+                target.product_key, _stacker.feature_names,
+            )
         else:
+            # Default: inverse-MAPE blend (or stacking not published)
             tau = auto_tune_tau(per_model_mape)
             ensemble_result = blend(
                 forecasts, per_model_mape, per_model_error_by_horizon=per_h,
                 tau=tau, regime=regime_label,
             )
+
+        # Self-learning: apply champion/challenger ensemble overrides if present
+        _ensemble_overrides = (target.model_config or {}).get("ensemble_overrides")
+        if _ensemble_overrides and "weights" in _ensemble_overrides:
+            try:
+                override_weights = _ensemble_overrides["weights"]
+                # Re-blend with override weights if stacking shadow is available
+                if _stacking_shadow_fc is not None and "stacking" in override_weights:
+                    stack_w = float(override_weights.get("stacking", 0.6))
+                    default_w = float(override_weights.get("default_blend", 0.4))
+                    # Weighted combination of stacking + default blend
+                    blended_point = (
+                        stack_w * _stacking_shadow_fc
+                        + default_w * ensemble_result.point_forecast
+                    )
+                    ensemble_result = EnsembleResult(
+                        point_forecast=blended_point,
+                        weights=override_weights,
+                        models_run=ensemble_result.models_run,
+                        models_failed=ensemble_result.models_failed,
+                        individual_forecasts=ensemble_result.individual_forecasts,
+                    )
+                    logger.info(
+                        "Champion/challenger override applied for %s: %s",
+                        target.product_key, override_weights,
+                    )
+            except Exception as exc:
+                logger.warning("Ensemble override apply failed for %s: %s", target.product_key, exc)
+
+        # P1-4A: Feedback-driven adjustment (flag-gated)
+        _feedback_adjustment = 0.0
+        if settings.FORECAST_FEEDBACK_TRAINING_ENABLED:
+            try:
+                from app.services.forecasting.ops.feedback_trainer import (
+                    compute_feedback_adjustment,
+                    apply_feedback_adjustment,
+                )
+                _feedback_adjustment = compute_feedback_adjustment(
+                    db,
+                    target.id,
+                    list(ensemble_result.point_forecast.values),
+                    forecast_date=datetime.utcnow(),
+                )
+                if _feedback_adjustment != 0.0:
+                    adjusted_fc = apply_feedback_adjustment(
+                        list(ensemble_result.point_forecast.values),
+                        _feedback_adjustment,
+                    )
+                    ensemble_result = EnsembleResult(
+                        point_forecast=pd.Series(adjusted_fc, index=ensemble_result.point_forecast.index),
+                        weights=ensemble_result.weights,
+                        models_run=ensemble_result.models_run,
+                        models_failed=ensemble_result.models_failed,
+                        individual_forecasts=ensemble_result.individual_forecasts,
+                    )
+                    logger.info(
+                        "Feedback adjustment applied for %s: %.2f",
+                        target.product_key, _feedback_adjustment,
+                    )
+            except Exception as exc:
+                logger.warning("Feedback adjustment failed for %s: %s", target.product_key, exc)
 
         # --- Guard ---
         naive_fc = forecasts.get("seasonal_naive")
@@ -679,21 +776,19 @@ class ForecastEngine:
                 naive_fc = ensemble_result.point_forecast
 
         # P2-1: Advanced guard flag-gated — replaces simple evaluate_guard
-        advanced_guard_enabled = os.environ.get(
-            "FORECAST_ADVANCED_GUARD_ENABLED", "false"
-        ).lower() == "true"
+        advanced_guard_enabled = settings.FORECAST_ADVANCED_GUARD_ENABLED
         if advanced_guard_enabled:
             from app.services.forecasting.guard_advanced import evaluate_guard_advanced
             last_actual = float(y_model.iloc[-1]) if len(y_model) > 0 else None
             last_data_date = y_model.index[-1].to_pydatetime() if isinstance(y_model.index, pd.DatetimeIndex) and len(y_model) > 0 else None
-            monotonicity_enabled = os.environ.get("FORECAST_MONOTONICITY_ENABLED", "false").lower() == "true"
-            soft_gate_enabled = os.environ.get("FORECAST_SOFT_GATE_ENABLED", "false").lower() == "true"
-            soft_gate_margin = float(os.environ.get("FORECAST_SOFT_GATE_MARGIN_PCT", "2.0"))
+            monotonicity_enabled = settings.FORECAST_MONOTONICITY_ENABLED
+            soft_gate_enabled = settings.FORECAST_SOFT_GATE_ENABLED
+            soft_gate_margin = settings.FORECAST_SOFT_GATE_MARGIN_PCT
             guard_result = evaluate_guard_advanced(
                 ensemble_result.point_forecast,
                 naive_fc,
-                bt.ensemble_mape,
-                bt.naive_mape,
+                _blend_mape,
+                _naive_mape,
                 last_actual=last_actual,
                 max_change_pct=15.0,
                 enforce_monotonicity=monotonicity_enabled,
@@ -704,16 +799,31 @@ class ForecastEngine:
                 soft_blend_margin_pct=soft_gate_margin,
             )
         else:
-            soft_gate_enabled = os.environ.get("FORECAST_SOFT_GATE_ENABLED", "false").lower() == "true"
-            soft_gate_margin = float(os.environ.get("FORECAST_SOFT_GATE_MARGIN_PCT", "2.0"))
+            soft_gate_enabled = settings.FORECAST_SOFT_GATE_ENABLED
+            soft_gate_margin = settings.FORECAST_SOFT_GATE_MARGIN_PCT
+            # P0.1/P0.2: Use the blend's own MAPE at the decision horizon (h=7),
+            # not the legacy mean-of-members / averaged-across-horizons scalar.
+            _decision_h = 7
+            _blend_mape = bt.ensemble_mape_by_horizon.get(_decision_h, bt.ensemble_mape)
+            _naive_mape = bt.naive_mape_by_horizon.get(_decision_h, bt.naive_mape)
             guard_result = evaluate_guard(
                 ensemble_result.point_forecast,
                 naive_fc,
-                bt.ensemble_mape,
-                bt.naive_mape,
+                _blend_mape,
+                _naive_mape,
                 soft_blend_enabled=soft_gate_enabled,
                 soft_blend_margin_pct=soft_gate_margin,
             )
+
+        # P0.2: Per-horizon gate verdicts for model_detail transparency.
+        below_naive_by_horizon: dict[int, bool] = {}
+        for _h in horizons:
+            _bh_blend = bt.ensemble_mape_by_horizon.get(_h, bt.ensemble_mape)
+            _bh_naive = bt.naive_mape_by_horizon.get(_h, bt.naive_mape)
+            if np.isfinite(_bh_blend) and np.isfinite(_bh_naive):
+                below_naive_by_horizon[_h] = bool(_bh_blend >= _bh_naive)
+            else:
+                below_naive_by_horizon[_h] = guard_result.below_naive_baseline
 
         # --- Step 8: Coherence check (Phase 1) ---
         if exog_spec and exog_spec.feedstock_keys:
@@ -942,20 +1052,26 @@ class ForecastEngine:
             calibration=cal,
         )
 
-        # --- Price-change probability (Phase D) ---
+        # --- Price-change probability (Phase D → P0.3: empirical) ---
         last_actual = float(y_model.iloc[-1]) if len(y_model) > 0 else None
         probability_report: dict = {}
-        if cal is not None and last_actual:
+        if last_actual:
             try:
                 for h in horizons:
-                    pcp = compute_price_change_probability(
-                        guard_result.published_forecast,
-                        last_actual=last_actual,
-                        calibration=cal,
+                    h_idx = min(h, len(guard_result.published_forecast))
+                    delta_h = float(guard_result.published_forecast.iloc[h_idx - 1]) - last_actual
+                    hw_h = cal.half_widths.get(h) if cal else None
+                    pcp = compute_empirical(
+                        point_forecast_delta=delta_h,
+                        residuals_by_horizon=bt.residuals_by_horizon,
                         horizon=h,
+                        last_actual=last_actual,
+                        below_naive_flat=guard_result.below_naive_baseline,
+                        min_samples=10,
+                        fallback_half_width=hw_h,
                     )
                     probability_report[str(h)] = {
-                        "p_rise": round(pcp.p_rise, 3),
+                        "p_rise": round(pcp.p_rise, 3) if pcp.p_rise is not None else None,
                         "p_rise_gt": {str(k): round(v, 3) for k, v in pcp.p_rise_gt.items()},
                         "expected_change_pct": round(pcp.expected_change_pct, 4),
                     }
@@ -1105,6 +1221,14 @@ class ForecastEngine:
                     clf_p_rise = dir_h_cp.get("p_rise")
                     if clf_p_rise is not None:
                         p_rise = float(clf_p_rise)
+                # Self-learning: apply isotonic calibration from model_config if present
+                _pr_cal = (target.model_config or {}).get("p_rise_calibration")
+                if _pr_cal:
+                    try:
+                        from app.services.forecasting.ops.p_rise_calibration import apply_calibration
+                        p_rise = apply_calibration(p_rise, _pr_cal)
+                    except Exception:
+                        logger.debug("p_rise calibration apply failed for %s", target.product_key)
                 exp_chg = prob_h.get("expected_change_pct")
                 exp_chg_f = float(exp_chg) if exp_chg is not None else 0.0
                 dir_h = directional_report.get(h_key) or {}
@@ -1163,6 +1287,24 @@ class ForecastEngine:
             for h in horizons
         }
 
+        # P1: Horizon auto-cap — omit horizons where blended MAPE exceeds threshold.
+        # Threshold comes from target.model_config (default 15.0%).
+        _max_mape = float(
+            (target.model_config or {}).get("max_horizon_mape", 15.0)
+        )
+        _excluded_horizons: list[int] = []
+        if bt.ensemble_mape_by_horizon:
+            for h in list(horizons):
+                emape = bt.ensemble_mape_by_horizon.get(h)
+                if emape is not None and math.isfinite(emape) and emape > _max_mape:
+                    results.pop(str(h), None)
+                    _excluded_horizons.append(h)
+            if _excluded_horizons:
+                logger.info(
+                    "Horizon auto-cap for %s: excluded %s (MAPE > %.1f%%)",
+                    target.product_key, _excluded_horizons, _max_mape,
+                )
+
         model_detail = {
             "models_run": models_run,
             "models_failed": models_failed,
@@ -1170,6 +1312,21 @@ class ForecastEngine:
             "ensemble_mape": bt.ensemble_mape if math.isfinite(bt.ensemble_mape) else None,
             "naive_mape": bt.naive_mape if math.isfinite(bt.naive_mape) else None,
             "metric": bt.metric,
+            # P0.1: blended-ensemble own error per horizon (NOT mean of member MAPEs)
+            "ensemble_mape_by_horizon": {
+                h: v for h, v in bt.ensemble_mape_by_horizon.items() if math.isfinite(v)
+            },
+            # P0.2: per-horizon gate verdicts (True = below naive at that horizon)
+            "below_naive_by_horizon": below_naive_by_horizon,
+            # P2.12: stacking shadow metrics (computed but not published)
+            "stacking_shadow": (
+                {
+                    "fitted": True,
+                    "models": list(_stacker.feature_names),
+                    "stacking_mape": _stacking_mape,
+                }
+                if _stacking_fitted else {"fitted": False}
+            ),
         }
 
         # --- Write ForecastRun ---

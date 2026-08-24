@@ -19,18 +19,19 @@ Confidence:
 """
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 
-# Decision thresholds — env-overridable for calibration (Wave 1).
+from app.config import settings
+
+# Decision thresholds — centralized via config.py (Wave 1).
 # All defaults match the original hardcoded values → zero regression when flags off.
-# Wave 2 T2.4: get_thresholds(product_key) resolves DB → env → default.
-_BUY_THRESHOLD = float(os.environ.get("FORECAST_BUY_THRESHOLD", "0.70"))
-_SELL_THRESHOLD = float(os.environ.get("FORECAST_SELL_THRESHOLD", "0.30"))
-_BUY_MIN_CHANGE = float(os.environ.get("FORECAST_BUY_MIN_CHANGE", "0.03"))
-_SELL_MIN_CHANGE = float(os.environ.get("FORECAST_SELL_MIN_CHANGE", "-0.03"))
-_EDGE_THRESHOLD = float(os.environ.get("FORECAST_EDGE_THRESHOLD", "0.55"))
-_P_HIGH_MARGIN = float(os.environ.get("FORECAST_P_HIGH_MARGIN", "0.25"))
+# Wave 2 T2.4: get_thresholds(product_key) resolves DB → settings → default.
+_BUY_THRESHOLD = settings.FORECAST_BUY_THRESHOLD
+_SELL_THRESHOLD = settings.FORECAST_SELL_THRESHOLD
+_BUY_MIN_CHANGE = settings.FORECAST_BUY_MIN_CHANGE
+_SELL_MIN_CHANGE = settings.FORECAST_SELL_MIN_CHANGE
+_EDGE_THRESHOLD = settings.FORECAST_EDGE_THRESHOLD
+_P_HIGH_MARGIN = settings.FORECAST_P_HIGH_MARGIN
 
 
 def get_thresholds(
@@ -102,14 +103,14 @@ def get_thresholds(
     except Exception:
         pass
 
-    # Fallback: env → hardcoded (Wave 1 behavior, zero regression).
-    # Re-read env at call time, not module-import time.
+    # Fallback: settings → hardcoded (Wave 1 behavior, zero regression).
+    # Read settings at call time (supports hot-reload without restart).
     return {
-        "buy": float(os.environ.get("FORECAST_BUY_THRESHOLD", "0.70")),
-        "sell": float(os.environ.get("FORECAST_SELL_THRESHOLD", "0.30")),
-        "buy_min_change": float(os.environ.get("FORECAST_BUY_MIN_CHANGE", "0.03")),
-        "sell_min_change": float(os.environ.get("FORECAST_SELL_MIN_CHANGE", "-0.03")),
-        "edge": float(os.environ.get("FORECAST_EDGE_THRESHOLD", "0.55")),
+        "buy": float(getattr(settings, "FORECAST_BUY_THRESHOLD", 0.70)),
+        "sell": float(getattr(settings, "FORECAST_SELL_THRESHOLD", 0.30)),
+        "buy_min_change": float(getattr(settings, "FORECAST_BUY_MIN_CHANGE", 0.03)),
+        "sell_min_change": float(getattr(settings, "FORECAST_SELL_MIN_CHANGE", -0.03)),
+        "edge": float(getattr(settings, "FORECAST_EDGE_THRESHOLD", 0.55)),
     }
 
 

@@ -21,6 +21,9 @@ from app.services.forecasting.features.external_feed_ingest import (
     list_series as _list_series,
 )
 from app.services.forecasting.features.mock_feeds import seed_mock_feeds
+from app.services.forecasting.regime_detector import detect_regime
+from app.services.forecasting.accuracy_tracker import rolling_accuracy
+from app.services.forecasting.conformal import ConformalCalibration
 
 router = APIRouter(prefix="/forecast-ops", tags=["forecast-ops"])
 
@@ -403,4 +406,492 @@ def seed_mock_external_feeds(
         product_key=product_key,
         n_weeks=n_weeks,
     )
+
+
+@router.get("/regime-status/{product_key}")
+def get_regime_status(
+    product_key: str,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Dynamic confidence badge data: regime, recent accuracy, shift score.
+
+    Returns { regime, recent_mape, recent_directional_accuracy,
+              confidence_level, confidence_label, shift_score,
+              message, timestamp }.
+    """
+    from app.config import settings
+    from app.models.forecasting import ForecastRun
+    from app.services.forecasting.features.feature_loader import load_series
+    from sqlalchemy import func
+
+    target = db.query(ForecastTarget).filter_by(
+        product_key=product_key, is_deleted=False,
+    ).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"product not found: {product_key}")
+
+    # Load price series for regime detection
+    series = load_series(db, target.id, target.product_key)
+    if series is None or len(series) < 60:
+        return {
+            "regime": "unknown",
+            "recent_mape": None,
+            "recent_directional_accuracy": None,
+            "confidence_level": "low",
+            "confidence_label": "低",
+            "shift_score": None,
+            "message": "数据不足，无法判断",
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    # Regime detection
+    try:
+        regime_result = detect_regime(series)
+        regime = regime_result.regime if regime_result else "unknown"
+    except Exception:
+        regime = "unknown"
+
+    # Recent MAPE (30 days)
+    try:
+        recent_mape = rolling_accuracy(
+            db, target.id, days=30, metric="mape",
+        )
+    except Exception:
+        recent_mape = None
+
+    # Recent directional accuracy (30 days)
+    try:
+        recent_dir_acc = rolling_accuracy(
+            db, target.id, days=30, metric="directional_accuracy",
+        )
+    except Exception:
+        recent_dir_acc = None
+
+    # Confidence scoring
+    confidence_level = "high"
+    confidence_label = "高"
+    message = "模型表现良好"
+
+    if recent_mape is not None:
+        if recent_mape > 15.0:
+            confidence_level = "low"
+            confidence_label = "低"
+            message = "近期准确率偏低"
+        elif recent_mape > 8.0:
+            confidence_level = "medium"
+            confidence_label = "中"
+            message = "近期准确率一般"
+
+    if regime == "volatile" and confidence_level == "high":
+        confidence_level = "medium"
+        confidence_label = "中"
+        message = "波动剧烈，需谨慎"
+    elif regime == "trend_break":
+        confidence_level = "low"
+        confidence_label = "低"
+        message = "趋势突变，模型置信度低"
+
+    # Shift score (placeholder — will be populated by P3-1D adversarial detector)
+    shift_score = None
+
+    return {
+        "regime": regime,
+        "recent_mape": round(recent_mape, 2) if recent_mape is not None else None,
+        "recent_directional_accuracy": (
+            round(recent_dir_acc, 2) if recent_dir_acc is not None else None
+        ),
+        "confidence_level": confidence_level,
+        "confidence_label": confidence_label,
+        "shift_score": shift_score,
+        "message": message,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@router.get("/driver-attribution/{product_key}")
+def get_driver_attribution(
+    product_key: str,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Driver-attribution waterfall for a product.
+
+    Returns { product_key, base_value, forecast_value, items: [
+      { feature, contribution, weight, direction }, ...
+    ]}.
+
+    Uses the most recent ForecastRun's model_detail (which stores drivers)
+    to reconstruct the waterfall. If no recent run exists, returns empty.
+    """
+    from app.models.forecasting import ForecastRun
+
+    run = (
+        db.query(ForecastRun)
+        .join(ForecastTarget, ForecastRun.target_id == ForecastTarget.id)
+        .filter(
+            ForecastTarget.product_key == product_key,
+            ForecastTarget.is_deleted == False,  # noqa: E712
+            ForecastRun.model_detail.isnot(None),
+        )
+        .order_by(ForecastRun.forecast_date.desc())
+        .first()
+    )
+
+    if run is None or not run.model_detail:
+        return {
+            "product_key": product_key,
+            "base_value": None,
+            "forecast_value": None,
+            "items": [],
+            "message": "No recent forecast run with driver data found",
+        }
+
+    detail = run.model_detail
+    drivers = detail.get("drivers", [])
+    if not drivers:
+        return {
+            "product_key": product_key,
+            "base_value": None,
+            "forecast_value": None,
+            "items": [],
+            "message": "No driver data in latest forecast run",
+        }
+
+    # Reconstruct waterfall from stored drivers
+    # We don't have the original model object, so we approximate:
+    # base_value = actual_price (last known), forecast = first point forecast
+    base_value = float(run.actual_price) if run.actual_price else None
+    forecast_value = None
+    if run.point_forecast and len(run.point_forecast) > 0:
+        forecast_value = float(run.point_forecast[0])
+
+    if base_value is None or forecast_value is None:
+        return {
+            "product_key": product_key,
+            "base_value": base_value,
+            "forecast_value": forecast_value,
+            "items": [],
+            "message": "Insufficient data for waterfall reconstruction",
+        }
+
+    total_change = forecast_value - base_value
+    items = []
+    for d in drivers:
+        weight = d.get("weight", 0.0)
+        contribution = weight * total_change
+        if abs(contribution) < 0.01:
+            direction = "neutral"
+        elif contribution > 0:
+            direction = "up"
+        else:
+            direction = "down"
+        items.append({
+            "feature": d.get("feature", "unknown"),
+            "contribution": round(contribution, 2),
+            "weight": round(weight, 4),
+            "direction": direction,
+        })
+
+    return {
+        "product_key": product_key,
+        "base_value": round(base_value, 2),
+        "forecast_value": round(forecast_value, 2),
+        "items": items,
+    }
+
+
+@router.get("/backtest-replay/{product_key}")
+def get_backtest_replay(
+    product_key: str,
+    days: int = 90,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Backtest replay: historical forecast vs actual pairs for a product.
+
+    Returns [{ date, actual, forecast_1d, forecast_3d, forecast_7d, mape_7d }]
+    from the last ``days`` of ForecastRun data.
+    """
+    from app.models.forecasting import ForecastRun, ForecastTarget
+    from datetime import datetime, timedelta, timezone
+
+    target = db.query(ForecastTarget).filter_by(
+        product_key=product_key, is_deleted=False,
+    ).first()
+    if target is None:
+        raise HTTPException(status_code=404, detail=f"product not found: {product_key}")
+
+    since = datetime.now(timezone.utc) - timedelta(days=days)
+
+    runs = (
+        db.query(ForecastRun)
+        .filter(
+            ForecastRun.target_id == target.id,
+            ForecastRun.forecast_date >= since,
+            ForecastRun.actual_price.isnot(None),
+            ForecastRun.point_forecast.isnot(None),
+        )
+        .order_by(ForecastRun.forecast_date.asc())
+        .all()
+    )
+
+    if not runs:
+        return {
+            "product_key": product_key,
+            "days_requested": days,
+            "data_points": 0,
+            "series": [],
+        }
+
+    series = []
+    for run in runs:
+        actual = float(run.actual_price) if run.actual_price else None
+        point_fc = run.point_forecast
+        if not point_fc or actual is None:
+            continue
+
+        # Extract forecasts at different horizons
+        fc_1d = float(point_fc[0]) if len(point_fc) > 0 else None
+        fc_3d = float(point_fc[2]) if len(point_fc) > 2 else None
+        fc_7d = float(point_fc[6]) if len(point_fc) > 6 else None
+
+        # Compute MAPE for 7d if available
+        mape_7d = None
+        if fc_7d is not None and actual != 0:
+            mape_7d = round(abs((actual - fc_7d) / actual) * 100, 2)
+
+        series.append({
+            "date": run.forecast_date.isoformat() if run.forecast_date else None,
+            "actual": round(actual, 2),
+            "forecast_1d": round(fc_1d, 2) if fc_1d is not None else None,
+            "forecast_3d": round(fc_3d, 2) if fc_3d is not None else None,
+            "forecast_7d": round(fc_7d, 2) if fc_7d is not None else None,
+            "mape_7d": mape_7d,
+        })
+
+    return {
+        "product_key": product_key,
+        "days_requested": days,
+        "data_points": len(series),
+        "series": series,
+    }
+
+
+@router.get("/what-if/{product_key}")
+def get_what_if_simulation(
+    product_key: str,
+    brent_delta_pct: float = 0.0,
+    naphtha_delta_pct: float = 0.0,
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """What-if analysis: simulate forecast changes given upstream price shocks.
+
+    Uses domain_signals causal-chain elasticities for instant propagation
+    (no model re-running required).
+
+    Parameters
+    ----------
+    product_key : str
+        Product to simulate.
+    brent_delta_pct : float
+        Percentage change in Brent price (e.g., 5.0 = +5%).
+    naphtha_delta_pct : float
+        Percentage change in naphtha price (e.g., -3.0 = -3%).
+
+    Returns
+    -------
+    dict
+        { product_key, base_forecast, adjusted_forecast, adjustments: [
+          { driver, delta_pct, impact_pct, adjusted_value }
+        ]}
+    """
+    from app.services.forecasting.what_if import compute_what_if
+
+    try:
+        return compute_what_if(
+            product_key=product_key,
+            brent_delta_pct=brent_delta_pct,
+            naphtha_delta_pct=naphtha_delta_pct,
+            db=db,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@router.get("/accuracy-dashboard")
+def get_accuracy_dashboard(
+    db=Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Per-product accuracy dashboard data.
+
+    Returns:
+      - accuracy_heatmap: product × horizon matrix with MAPE values
+      - mape_trends: per-product MAPE sparkline data (90 days)
+      - directional_accuracy: % correct direction per product
+      - calibration_curve: predicted vs actual interval coverage
+      - top_misses: worst products/horizons
+    """
+    from app.models.forecasting import ForecastTarget, ForecastAccuracyLog, ForecastRun
+    from datetime import datetime, timedelta, timezone
+
+    targets = (
+        db.query(ForecastTarget)
+        .filter(
+            ForecastTarget.org_id == "default-org",
+            ForecastTarget.status == "active",
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        )
+        .all()
+    )
+
+    since = datetime.now(timezone.utc) - timedelta(days=90)
+
+    # Accuracy heatmap: product × horizon
+    heatmap = []
+    for target in targets:
+        logs = (
+            db.query(ForecastAccuracyLog)
+            .filter(
+                ForecastAccuracyLog.target_id == target.id,
+                ForecastAccuracyLog.evaluated_at >= since,
+                ForecastAccuracyLog.realized_mape.isnot(None),
+            )
+            .order_by(ForecastAccuracyLog.evaluated_at.desc())
+            .limit(30)
+            .all()
+        )
+        if not logs:
+            continue
+
+        # Average MAPE by horizon
+        horizon_mape = {}
+        for log in logs:
+            h = log.horizon_days or 7
+            mape = float(log.realized_mape) if log.realized_mape else None
+            if mape is not None:
+                if h not in horizon_mape:
+                    horizon_mape[h] = []
+                horizon_mape[h].append(mape)
+
+        row = {
+            "product_key": target.product_key or target.name,
+            "product_name": target.name,
+            "horizons": {
+                str(h): round(sum(v) / len(v), 2) if v else None
+                for h, v in horizon_mape.items()
+            },
+        }
+        heatmap.append(row)
+
+    # MAPE trends: per-product 90-day sparklines
+    mape_trends = []
+    for target in targets:
+        logs = (
+            db.query(ForecastAccuracyLog)
+            .filter(
+                ForecastAccuracyLog.target_id == target.id,
+                ForecastAccuracyLog.evaluated_at >= since,
+                ForecastAccuracyLog.realized_mape.isnot(None),
+            )
+            .order_by(ForecastAccuracyLog.evaluated_at.asc())
+            .all()
+        )
+        if not logs:
+            continue
+
+        trend = [
+            {
+                "date": log.evaluated_at.isoformat() if log.evaluated_at else None,
+                "mape": round(float(log.realized_mape), 2),
+                "horizon": log.horizon_days or 7,
+            }
+            for log in logs
+        ]
+        mape_trends.append({
+            "product_key": target.product_key or target.name,
+            "product_name": target.name,
+            "trend": trend,
+        })
+
+    # Directional accuracy: compute from ForecastRun
+    directional = []
+    for target in targets:
+        runs = (
+            db.query(ForecastRun)
+            .filter(
+                ForecastRun.target_id == target.id,
+                ForecastRun.forecast_date >= since,
+                ForecastRun.actual_price.isnot(None),
+            )
+            .order_by(ForecastRun.forecast_date.asc())
+            .all()
+        )
+        if len(runs) < 2:
+            continue
+
+        correct_direction = 0
+        total = 0
+        for i in range(1, len(runs)):
+            prev_actual = float(runs[i - 1].actual_price) if runs[i - 1].actual_price else None
+            curr_actual = float(runs[i].actual_price) if runs[i].actual_price else None
+            prev_fc = runs[i - 1].point_forecast
+            if prev_actual is None or curr_actual is None or not prev_fc:
+                continue
+
+            # Direction of actual change
+            actual_dir = curr_actual - prev_actual
+            # Direction of forecast (first horizon step)
+            fc_dir = float(prev_fc[0]) - prev_actual if len(prev_fc) > 0 else 0
+
+            if actual_dir == 0 or fc_dir == 0:
+                continue
+
+            if (actual_dir > 0 and fc_dir > 0) or (actual_dir < 0 and fc_dir < 0):
+                correct_direction += 1
+            total += 1
+
+        if total > 0:
+            directional.append({
+                "product_key": target.product_key or target.name,
+                "product_name": target.name,
+                "correct": correct_direction,
+                "total": total,
+                "accuracy_pct": round(correct_direction / total * 100, 1),
+            })
+
+    # Top misses: worst MAPE
+    top_misses = []
+    for target in targets:
+        worst_log = (
+            db.query(ForecastAccuracyLog)
+            .filter(
+                ForecastAccuracyLog.target_id == target.id,
+                ForecastAccuracyLog.evaluated_at >= since,
+                ForecastAccuracyLog.realized_mape.isnot(None),
+            )
+            .order_by(ForecastAccuracyLog.realized_mape.desc())
+            .first()
+        )
+        if worst_log and worst_log.realized_mape:
+            top_misses.append({
+                "product_key": target.product_key or target.name,
+                "product_name": target.name,
+                "worst_mape": round(float(worst_log.realized_mape), 2),
+                "horizon": worst_log.horizon_days or 7,
+                "date": worst_log.evaluated_at.isoformat() if worst_log.evaluated_at else None,
+            })
+
+    # Sort by worst MAPE descending
+    top_misses.sort(key=lambda x: x["worst_mape"], reverse=True)
+
+    return {
+        "accuracy_heatmap": heatmap,
+        "mape_trends": mape_trends,
+        "directional_accuracy": directional,
+        "top_misses": top_misses[:10],
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 

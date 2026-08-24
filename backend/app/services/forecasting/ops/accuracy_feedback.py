@@ -329,3 +329,34 @@ def check_accuracy_thresholds(
             _flag_needs_rebuild(db, target, status, mape, now)
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# P2.16: Rebuild-queue accessor (for ops endpoints)
+# ---------------------------------------------------------------------------
+
+def needs_rebuild_products(session=None) -> list[dict]:
+    """Return products flagged for rebuild.
+
+    Queries ForecastTarget rows with status='needs_rebuild'.
+    Returns list of dicts with product_key, name, and reason.
+    """
+    if session is None:
+        return []
+
+    try:
+        from app.models.forecasting import ForecastTarget
+        targets = session.query(ForecastTarget).filter(
+            ForecastTarget.status == "needs_rebuild"
+        ).all()
+        return [
+            {
+                "product_key": t.product_key,
+                "name": t.name,
+                "reason": (t.model_config or {}).get("accuracy_alert", {}),
+            }
+            for t in targets
+        ]
+    except Exception as exc:
+        logger.warning("needs_rebuild_products query failed: %s", exc)
+        return []

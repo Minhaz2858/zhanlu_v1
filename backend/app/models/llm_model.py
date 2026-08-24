@@ -4,7 +4,7 @@ Supports cloud (OpenAI/DeepSeek/...) and private/self-hosted endpoints.
 ``api_key`` is Fernet-encrypted at rest; decrypted only inside the resolver.
 """
 
-from sqlalchemy import String, Text, Boolean, Index
+from sqlalchemy import String, Text, Boolean, Integer, Index
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -47,6 +47,20 @@ class LlmModel(TimestampedBase):
     bypass_hallucination_guardrail: Mapped[bool] = mapped_column(
         Boolean, default=False, nullable=False,
         doc="When True, skip the hallucination guardrail (ask_data_agent force) for this model",
+    )
+    context_window: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        doc="Model context window in tokens (e.g. 16384 for small vLLM, 128000 for DeepSeek). "
+            "NULL = fall back to compaction default / MODEL_CONTEXT_WINDOWS heuristic.",
+    )
+    max_output_tokens: Mapped[int | None] = mapped_column(
+        Integer, nullable=True,
+        doc="Per-model cap on output tokens. NULL = use user setting clamped by LLM_MAX_TOKENS_HARD_CAP.",
+    )
+    supports_structured_tool_calls: Mapped[bool] = mapped_column(
+        Boolean, default=True, nullable=False,
+        doc="False for vLLM without --enable-auto-tool-choice (tool calls arrive as XML in content). "
+            "When False, the server proactively omits tool_choice and parses tool calls from content.",
     )
 
     __table_args__ = (

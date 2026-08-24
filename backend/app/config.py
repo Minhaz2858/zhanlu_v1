@@ -185,14 +185,33 @@ class Settings(BaseSettings):
 
     # Models that ignore or reject a caller-supplied ``temperature`` value.
     # Reasoning models like Moonshot kimi-k2.6 only accept temperature=1, and
-    # OpenAI o1/o3 reject the field outright. Qwen3-family models served via
-    # vLLM run in thinking mode by default and likewise reject any temperature
-    # other than 1 (HTTP 400 "invalid temperature: only 1 is allowed for this
-    # model"). For these, the temperature key is omitted from chat/completions
-    # requests so the provider's own default (temperature=1) is used (otherwise
-    # a valid key surfaces as a misleading HTTP 400). Comma-separated substrings
-    # matched case-insensitively against the model id.
-    LLM_FIXED_TEMPERATURE_MODELS: str = "kimi-k2,o1,o3,qwen3"
+    # OpenAI o1/o3 reject the field outright. For these, the temperature key is
+    # omitted from chat/completions requests so the provider's own default is
+    # used (otherwise a valid key surfaces as a misleading HTTP 400). Comma-
+    # separated substrings matched case-insensitively against the model id.
+    LLM_FIXED_TEMPERATURE_MODELS: str = "kimi-k2,o1,o3,qwen3,deepseek-v4"
+
+    # Hard cap on the ``max_tokens`` sent to any LLM endpoint. Self-hosted
+    # vLLM deployments often run with a smaller ``max_model_len`` than the
+    # registered model card claims (e.g. card says 250000 but the server is
+    # actually capped at 16384). A request with ``max_tokens`` greater than
+    # the server's ``max_model_len`` is rejected with HTTP 400
+    # ("max_tokens=... cannot be greater than max_model_len=..."), which
+    # surfaces as a generic "Sorry, I hit an error" in chat. This cap is
+    # applied to the user's saved max_tokens (UserSetting) before any LLM
+    # request.
+    #
+    # NOTE: this is a SAFETY NET only. Per-model context-aware clamping
+    # (``_clamp_max_tokens_for_context`` in agents.py, driven by
+    # ``LlmModel.context_window`` / ``max_output_tokens``) now takes over as the
+    # primary limiter, so this global value can stay at a generous 4096 without
+    # regressing small vLLM servers (they are clamped per-model instead).
+    LLM_MAX_TOKENS_HARD_CAP: int = 4096
+
+    # Synthesis (report-building) LLM output-token budget.
+    # 1536 is far too small for a full multi-section report; 6144 gives
+    # enough headroom for executive summary + markdown tables + analysis.
+    LLM_SYNTH_MAX_TOKENS: int = 6144
 
     # ── Document ingestion — audio / image / video ────────────────────────
     # Audio: transcribe uploads via an OpenAI-compatible Whisper endpoint
@@ -474,6 +493,20 @@ class Settings(BaseSettings):
     # standalone nudge cap. Default 2 matches the historical hardcoded value.
     VERIFY_NUDGE_MAX: int = 2
 
+    # ── DELIVERABLE PHASE-LOCK + QUERY-PURPOSE TAGGING (2026-08-21) ──────
+    # Bug 1/2/3 fix for the "unprofessional agent" trace (supply-chain turn):
+    # (1) DELIVERABLE_PHASE_LOCK_ENABLED — when the contract requires data,
+    #     block create_artifact / run_sandbox_skill mid-loop until an
+    #     answer-tagged dataset exists; build the deliverable ONCE post-loop
+    #     from the FINAL answer dataset; strip internal-reference sentences
+    #     from the final bubble.
+    # (2) QUERY_PURPOSE_TAGGING_ENABLED — tag every ask_data_agent result
+    #     probe / auxiliary / answer via catalog table_role + SQL shape;
+    #     only answer-tagged results feed the deliverable + synthesis.
+    # Both default OFF per project convention (flag-off = current behavior).
+    DELIVERABLE_PHASE_LOCK_ENABLED: bool = False
+    QUERY_PURPOSE_TAGGING_ENABLED: bool = False
+
     # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
     # Post-FINALIZE semantic quality layer: a combined completeness +
     # reflexion LLM critique on the generated response, with a bounded
@@ -576,6 +609,77 @@ class Settings(BaseSettings):
     # LLM analyst brief writer. When False, the deterministic template
     # brief is used everywhere (no LLM calls).
     FORECAST_ANALYST_LLM_ENABLED: bool = False
+
+    # ── Forecast self-learning flags (P0/P2) ──────────────────────
+    # p_rise isotonic calibration: recalibrate rise probabilities weekly
+    # from realized decision data using IsotonicCalibrator.
+    FORECAST_P_RISE_CALIBRATION_ENABLED: bool = False
+    # Champion/challenger: shadow-run alternative models nightly, persist
+    # metrics to DB, auto-promote when challenger beats champion consistently.
+    FORECAST_CHAMPION_CHALLENGER_ENABLED: bool = False
+
+    # ── Forecast feature-activation flags (centralized 2026-08-21) ──────
+    # All previously read via scattered os.environ.get() calls; now declared
+    # here so the admin API can introspect them and Docker restarts pick up
+    # changes from .env. All default False per project convention.
+    FORECAST_ERP_SMOOTHING_ENABLED: bool = False
+    FORECAST_ERP_SMOOTHING_WINDOW: int = 7
+    FORECAST_REGIME_AWARE_POOL_ENABLED: bool = False
+    FORECAST_STACKING_ENABLED: bool = False
+    FORECAST_ENHANCED_PREPROCESS_ENABLED: bool = False
+    FORECAST_ERP_VOLUME_EXOG_ENABLED: bool = False
+    FORECAST_DEMAND_SIGNAL_EXOG_ENABLED: bool = False
+    FORECAST_EXTERNAL_EXOG_ENABLED: bool = False
+    FORECAST_OILCHEM_EXOG_ENABLED: bool = False
+    FORECAST_TECHNICAL_INDICATORS_ENABLED: bool = False
+    FORECAST_FOURIER_FEATURES_ENABLED: bool = False
+    FORECAST_REGIME_DETECTION_ENABLED: bool = False
+    FORECAST_REGIME_ADAPTIVE_WEIGHTS_ENABLED: bool = False
+    FORECAST_ADVANCED_GUARD_ENABLED: bool = False
+    FORECAST_MONOTONICITY_ENABLED: bool = False
+    FORECAST_SOFT_GATE_ENABLED: bool = False
+    FORECAST_SOFT_GATE_MARGIN_PCT: float = 2.0
+    # Model-pool flags
+    FORECAST_XGB_DIRECT_ENABLED: bool = False
+    FORECAST_FOUNDATION_MODELS_ENABLED: bool = False
+    FORECAST_FOUNDATION_MODEL_CHRONOS_ENABLED: bool = True
+    FORECAST_FOUNDATION_MODEL_MOIRAI_ENABLED: bool = True
+    FORECAST_VAR_ENABLED: bool = False
+    FORECAST_XGB_TUNING_ENABLED: bool = False
+    FORECAST_FEATURE_SELECTION_ENABLED: bool = False
+    # Fine-tuning flags
+    FORECAST_FINETUNING_ENABLED: bool = False
+    FORECAST_FINETUNING_PROMPT_TOKENS: int = 16
+    FORECAST_FINETUNING_LR: float = 1e-3
+    FORECAST_FINETUNING_EPOCHS: int = 5
+    FORECAST_FINETUNING_DIR: str = "/tmp/forecast_finetuning"
+    # Cross-product lag features (P1-2A)
+    FORECAST_CROSS_PRODUCT_LAGS_ENABLED: bool = False
+    # Feedback training (P1-4A)
+    FORECAST_FEEDBACK_TRAINING_ENABLED: bool = False
+    # Quantile regression (P3-2B)
+    FORECAST_QUANTILE_REGRESSION_ENABLED: bool = False
+    # Adversarial shift detector (P3-1D)
+    FORECAST_ADVERSARIAL_SHIFT_ENABLED: bool = False
+    # Self-accuracy feature (P3-2C)
+    FORECAST_SELF_ACCURACY_FEATURE_ENABLED: bool = False
+    # Preprocessing flags
+    FORECAST_ANOMALY_DETECTION_ENABLED: bool = False
+    # Decision-engine thresholds
+    FORECAST_BUY_THRESHOLD: float = 0.70
+    FORECAST_SELL_THRESHOLD: float = 0.30
+    FORECAST_BUY_MIN_CHANGE: float = 0.03
+    FORECAST_SELL_MIN_CHANGE: float = -0.03
+    FORECAST_EDGE_THRESHOLD: float = 0.55
+    FORECAST_P_HIGH_MARGIN: float = 0.25
+    # Drift/accuracy tuning
+    FORECAST_DRIFT_BLEND_FACTOR: float = 0.2
+    FORECAST_ACCURACY_THRESHOLD_EXCELLENT: float = 8.0
+    FORECAST_ACCURACY_THRESHOLD_ACCEPTABLE: float = 15.0
+    FORECAST_ACCURACY_THRESHOLD_CRITICAL: float = 25.0
+    # Analyst signals
+    FORECAST_DEMAND_SIGNAL_ENABLED: bool = False
+    FORECAST_EXTERNAL_SIGNAL_ENABLED: bool = False
 
     # ── Ecisco BI feature flags (EDIA 5.1.2 → zhanlu migration) ─────────
     # Master switch for EDIA-specific delegated tools in the ecisco_bi_assistant
@@ -711,14 +815,15 @@ class Settings(BaseSettings):
     ROLE_FEEDBACK_THROTTLE: int = 3
 
     # ── Project Knowledge Graph / Semantic Catalog ───────────────────────
-    # Phase 1 flags (default OFF — roll out after catalog indexer + schema
-    # linker are tested against the EDIA warehouse).
+    # Phase 1 flags.
     # SEMANTIC_CATALOG_ENABLED: background indexer per KB (tables, columns,
     #   FK, LLM descriptions, Chroma embeddings).
     # SCHEMA_LINKING_ENABLED: query-time RRF retrieval + join-path expansion
     #   into a curated ~800-token DDL slice for NLAnswerService/Data Agent.
+    #   Enabled: cuts Data Agent query time ~50% by replacing full-table
+    #   describe_schema with targeted 3-5 table DDL slices from ChromaDB.
     SEMANTIC_CATALOG_ENABLED: bool = True
-    SCHEMA_LINKING_ENABLED: bool = False
+    SCHEMA_LINKING_ENABLED: bool = True
     # NL2SQL_SHADOW_MODE_ENABLED: run the governed nl2sql validator/policy
     #   alongside the live agent data path (NLAnswerService), logging
     #   divergence to nl2sql_query_logs. The served result is NEVER altered

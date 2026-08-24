@@ -1151,6 +1151,7 @@ def get_forecast_base_batch_v2(
                         badge_label_en=trust_raw.get("badge_label_en", ""),
                         reason_zh=trust_raw.get("reason_zh"),
                         reason_en=trust_raw.get("reason_en"),
+                        reason_codes=trust_raw.get("reason_codes", []),
                     )
 
                 # Phase D: probability overlay
@@ -1713,6 +1714,7 @@ def _build_overlay_meta(
             badge_label_en=trust_raw.get("badge_label_en", ""),
             reason_zh=trust_raw.get("reason_zh"),
             reason_en=trust_raw.get("reason_en"),
+            reason_codes=trust_raw.get("reason_codes", []),
         )
 
     # Phase D: probability overlay (price-change probability per horizon)

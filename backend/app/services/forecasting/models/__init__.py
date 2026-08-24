@@ -43,8 +43,8 @@ def build_model_pool(
     but fit-time failures (convergence) must be caught by the ensemble.
     """
     import logging
-    import os
 
+    from app.config import settings
     from app.services.forecasting.models.naive import NaiveLast, SeasonalNaive
     from app.services.forecasting.models.ets import ETSModel
     from app.services.forecasting.models.arima import ARIMAModel
@@ -82,9 +82,7 @@ def build_model_pool(
             logger.warning("xgboost not installed — skipping xgboost_reg model")
 
     # Optional: direct multi-step XGBoost (Wave 3 — separate model per horizon)
-    direct_enabled = os.environ.get(
-        "FORECAST_XGB_DIRECT_ENABLED", "false"
-    ).lower() == "true"
+    direct_enabled = settings.FORECAST_XGB_DIRECT_ENABLED
     if direct_enabled and not skip_ml:
         try:
             from app.services.forecasting.models.xgboost_direct import (
@@ -97,14 +95,10 @@ def build_model_pool(
             logger.warning("xgboost not installed — skipping xgboost_direct model")
 
     # Optional: foundation models (flag-gated, lazy import)
-    foundation_enabled = os.environ.get(
-        "FORECAST_FOUNDATION_MODELS_ENABLED", "false"
-    ).lower() == "true"
+    foundation_enabled = settings.FORECAST_FOUNDATION_MODELS_ENABLED
     if foundation_enabled and y is not None and len(y) >= 60:
         # Chronos-Bolt (univariate zero-shot)
-        chronos_on = os.environ.get(
-            "FORECAST_FOUNDATION_MODEL_CHRONOS_ENABLED", "true"
-        ).lower() == "true"
+        chronos_on = settings.FORECAST_FOUNDATION_MODEL_CHRONOS_ENABLED
         if chronos_on:
             try:
                 from app.services.forecasting.models.chronos_bolt import (
@@ -120,9 +114,7 @@ def build_model_pool(
                 )
 
         # Moirai (exog-aware zero-shot)
-        moirai_on = os.environ.get(
-            "FORECAST_FOUNDATION_MODEL_MOIRAI_ENABLED", "true"
-        ).lower() == "true"
+        moirai_on = settings.FORECAST_FOUNDATION_MODEL_MOIRAI_ENABLED
         if moirai_on:
             try:
                 from app.services.forecasting.models.moirai import MoiraiModel
@@ -140,9 +132,7 @@ def build_model_pool(
         )
 
     # Optional: VAR model (Wave 6 — cross-product multivariate)
-    var_enabled = os.environ.get(
-        "FORECAST_VAR_ENABLED", "false"
-    ).lower() == "true"
+    var_enabled = settings.FORECAST_VAR_ENABLED
     if var_enabled and y is not None and len(y) >= 60:
         try:
             from app.services.forecasting.models.var_model import VARModel

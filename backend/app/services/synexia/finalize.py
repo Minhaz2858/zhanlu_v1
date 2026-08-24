@@ -475,7 +475,17 @@ def finalize_into_artifact(
                                 }
                                 for k in (payload.kpis or [])
                             ],
-                            "insights": list(payload.insights or []),
+                            # NOTE: serialize InsightSpec -> dict. Passing raw
+                            # pydantic objects here raised "Object of type
+                            # InsightSpec is not JSON serializable" inside
+                            # run_sandbox_skill_sync (config.json), poisoned
+                            # the SQLAlchemy session via a failed flush, and
+                            # made the WHOLE artifact write roll back
+                            # (2026-08-21, 82 occurrences in 24h of logs).
+                            "insights": [
+                                {"icon": i.icon, "text": i.text}
+                                for i in (payload.insights or [])
+                            ],
                             "source": source or "",
                             # C-Heavy skill-driven additions: the runner
                             # uses the original user request + the full

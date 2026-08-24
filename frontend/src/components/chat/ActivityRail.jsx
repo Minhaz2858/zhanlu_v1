@@ -12,7 +12,7 @@ import { useState } from 'react';
 import {
   Loader2, CheckCircle2, Circle, Brain, Search, ClipboardList,
   Shield, Zap, Eye, BadgeCheck, Flag, ChevronDown, ChevronRight,
-  AlertCircle,
+  AlertCircle, BookOpen, Sparkles,
 } from 'lucide-react';
 
 const FSM_STATES = [
@@ -148,14 +148,23 @@ export default function ActivityRail({ execution }) {
           <div className="space-y-1">
             {observations.map((obs, i) => {
               const isExpanded = expandedObs[i];
+              const isSkillCall = obs.observation_type === 'skill_call';
+              const skillName = isSkillCall
+                ? (obs.tool_name || (obs.result_data && obs.result_data.name) || 'skill')
+                : null;
               return (
                 <div
                   key={i}
-                  className={`rounded-lg px-2 py-1.5 text-xs ${obs.success ? 'bg-green-50/50' : 'bg-red-50/50'
-                    }`}
+                  className={`rounded-lg px-2 py-1.5 text-xs ${
+                    isSkillCall
+                      ? 'border-l-[3px] border-l-indigo-500 bg-indigo-50/60'
+                      : obs.success ? 'bg-green-50/50' : 'bg-red-50/50'
+                  }`}
                 >
                   <div className="flex items-center gap-1.5">
-                    {obs.success ? (
+                    {isSkillCall ? (
+                      <BookOpen className="h-3 w-3 shrink-0 text-indigo-500" />
+                    ) : obs.success ? (
                       <CheckCircle2 className="h-3 w-3 shrink-0 text-green-500" />
                     ) : (
                       <AlertCircle className="h-3 w-3 shrink-0 text-red-500" />
@@ -165,15 +174,26 @@ export default function ActivityRail({ execution }) {
                       className="flex items-center gap-1 text-foreground hover:text-foreground"
                     >
                       {isExpanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
-                      <span className="font-medium">{obs.tool_name || obs.observation_type}</span>
+                      {isSkillCall ? (
+                        <span className="font-semibold text-indigo-700">
+                          {obs.success ? 'Loaded skill' : 'Skill load failed'}: {skillName}
+                        </span>
+                      ) : (
+                        <span className="font-medium">{obs.tool_name || obs.observation_type}</span>
+                      )}
                     </button>
                     {obs.duration_ms && (
                       <span className="ml-auto text-[10px] text-muted-foreground">{obs.duration_ms}ms</span>
                     )}
                   </div>
+                  {isSkillCall && obs.success && !isExpanded && (
+                    <p className="mt-0.5 pl-7 text-[10px] text-indigo-500/70">
+                      Following methodology: {skillName}
+                    </p>
+                  )}
                   {isExpanded && obs.result_text && (
                     <pre className="mt-1 whitespace-pre-wrap pl-6 text-[10px] text-muted-foreground">
-                      {obs.result_text.slice(0, 300)}
+                      {obs.result_text.slice(0, 500)}
                     </pre>
                   )}
                   {isExpanded && obs.error_message && (

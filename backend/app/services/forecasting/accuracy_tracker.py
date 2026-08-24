@@ -282,3 +282,139 @@ def score_pending_decisions(db) -> dict:
 
     return {"scored_count": scored, "total_roi_avg": None, "buy_count": 0,
             "sell_count": 0, "errors": errors}
+
+
+# ---------------------------------------------------------------------------
+# Realized-price backfill (self-learning loop)
+# ---------------------------------------------------------------------------
+
+def backfill_realized_prices(db) -> dict:
+    """Backfill actual_price_t and actual_price_th from ERP execution prices.
+
+    Step 1: Fill actual_price_t for decision logs where it's NULL.
+    Step 2: Fill actual_price_th for decision logs where the horizon has passed.
+
+    Returns {backfilled_t, backfilled_th, skipped, errors}.
+    """
+    from app.models.forecasting import ForecastDecisionLog
+    from app.services.forecasting.features.exogenous_loaders import _resolve_mysql_engine
+
+    engine = _resolve_mysql_engine()
+    if engine is None:
+        logger.warning("[backfill] No EDIA MySQL engine — skipping")
+        return {"backfilled_t": 0, "backfilled_th": 0, "skipped": 0, "errors": ["No MySQL engine"]}
+
+    now = datetime.now(timezone.utc)
+    backfilled_t = 0
+    backfilled_th = 0
+    skipped = 0
+    errors = []
+
+    # Step 1: Fill actual_price_t where NULL
+    null_t_logs = db.query(ForecastDecisionLog).filter(
+        ForecastDecisionLog.actual_price_t.is_(None),
+    ).limit(200).all()
+
+    for log in null_t_logs:
+        try:
+            # Use md_t_lz_price (main EDIA price table) for all products
+            # The product_id in decision logs maps to FMATERIAL_NAME
+            target_date = log.as_of_date
+            product_name = log.product_id
+
+            with engine.connect() as conn:
+                from sqlalchemy import text
+                row = conn.execute(
+                    text(
+                        "SELECT `FDATE`, `FTAXPRICE` FROM `md_t_lz_price` "
+                        "WHERE `FMATERIAL_NAME` = :product "
+                        "AND `FDATE` <= :target_date "
+                        "AND `FDATE` >= :min_date "
+                        "AND `FTAXPRICE` NOT IN ('F7', 'NaN', '', 'null', 'NULL') "
+                        "ORDER BY `FDATE` DESC LIMIT 1"
+                    ),
+                    {
+                        "product": product_name,
+                        "target_date": target_date.isoformat(),
+                        "min_date": (target_date - timedelta(days=7)).isoformat(),
+                    },
+                ).fetchone()
+
+            if row and row[1] is not None:
+                log.actual_price_t = float(row[1])
+                backfilled_t += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            errors.append(f"log {log.id}: {exc}")
+            logger.warning("[backfill] actual_price_t failed for log %s: %s", log.id, exc)
+
+    if backfilled_t > 0:
+        db.flush()
+
+    # Step 2: Fill actual_price_th where NULL but horizon has passed and actual_price_t is set
+    null_th_logs = db.query(ForecastDecisionLog).filter(
+        ForecastDecisionLog.actual_price_t.isnot(None),
+        ForecastDecisionLog.actual_price_th.is_(None),
+        ForecastDecisionLog.roi_pct.is_(None),
+    ).limit(200).all()
+
+    for log in null_th_logs:
+        try:
+            horizon_end = log.as_of_date + timedelta(days=log.horizon_day)
+            if horizon_end > now:
+                skipped += 1
+                continue
+
+            product_name = log.product_id
+
+            with engine.connect() as conn:
+                from sqlalchemy import text
+                row = conn.execute(
+                    text(
+                        "SELECT `FDATE`, `FTAXPRICE` FROM `md_t_lz_price` "
+                        "WHERE `FMATERIAL_NAME` = :product "
+                        "AND `FDATE` <= :target_date "
+                        "AND `FDATE` >= :min_date "
+                        "AND `FTAXPRICE` NOT IN ('F7', 'NaN', '', 'null', 'NULL') "
+                        "ORDER BY `FDATE` DESC LIMIT 1"
+                    ),
+                    {
+                        "product": product_name,
+                        "target_date": horizon_end.isoformat(),
+                        "min_date": (horizon_end - timedelta(days=7)).isoformat(),
+                    },
+                ).fetchone()
+
+            if row and row[1] is not None:
+                log.actual_price_th = float(row[1])
+                # Compute ROI immediately
+                actual_price_t = float(log.actual_price_t)
+                if actual_price_t > 0:
+                    from app.services.forecasting.features.decision_roi import score_decision
+                    log.roi_pct = score_decision(
+                        action=log.action,
+                        actual_price_t=actual_price_t,
+                        actual_price_th=float(row[1]),
+                    )
+                    log.realized_at = now
+                backfilled_th += 1
+            else:
+                skipped += 1
+        except Exception as exc:
+            errors.append(f"log {log.id}: {exc}")
+            logger.warning("[backfill] actual_price_th failed for log %s: %s", log.id, exc)
+
+    if backfilled_th > 0:
+        db.flush()
+
+    logger.info(
+        "[backfill] Done: %d price_t, %d price_th, %d skipped, %d errors",
+        backfilled_t, backfilled_th, skipped, len(errors),
+    )
+    return {
+        "backfilled_t": backfilled_t,
+        "backfilled_th": backfilled_th,
+        "skipped": skipped,
+        "errors": errors[:10],  # cap for log safety
+    }

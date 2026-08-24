@@ -254,16 +254,19 @@ def build_conversation_context(
         transcript = _build_transcript(db, conversation_id)
         recent_artifacts = _get_recent_artifacts(db, conversation_id)
         prior_entities = _get_prior_entities(db, conversation_id)
+        prior_datasets = _get_prior_datasets(db, conversation_id)
 
         dashboard_id = _get_conversation_dashboard_id(db, conversation_id)
 
-        if not transcript and not recent_artifacts and not prior_entities and not dashboard_id:
+        if not transcript and not recent_artifacts and not prior_entities and not dashboard_id and not prior_datasets:
             return {}
         result: dict = {
             "transcript": transcript,
             "recent_artifacts": recent_artifacts,
             "prior_entities": prior_entities,
         }
+        if prior_datasets:
+            result["prior_datasets"] = prior_datasets
         if dashboard_id:
             result["dashboard_id"] = dashboard_id
         # Phase 4: carry forward artifact type of the most recent artifact
@@ -368,6 +371,54 @@ def _get_prior_entities(db: Session, conversation_id: str) -> dict:
     except Exception as e:
         logger.debug("_get_prior_entities failed (non-fatal): %s", e)
     return {}
+
+
+def _get_prior_datasets(db: Session, conversation_id: str) -> list[dict] | None:
+    """Extract answer datasets from the most recent *completed* turn.
+
+    Returns a compact list of ``{rows, sql, source_id, source_name}`` dicts
+    from prior observations tagged with ``purpose='answer'``. This allows
+    follow-up requests ("a summary", "break it down") to synthesize from
+    existing data without re-querying (~5s instead of ~35s).
+
+    Only returns datasets when they contain non-trivial data (not effectively
+    empty per ``is_effective_empty``). Returns None when no usable prior
+    data exists.
+    """
+    try:
+        from app.models.execution import Execution
+        from app.services.goal_contract import is_effective_empty
+
+        prev = db.query(Execution).filter(
+            Execution.conversation_id == conversation_id,
+            Execution.current_state.in_(["done", "fail"]),
+        ).order_by(Execution.created_date.desc()).first()
+        if not prev or not prev.observations:
+            return None
+
+        datasets = []
+        for obs in prev.observations:
+            if not obs.success:
+                continue
+            rd = obs.result_data
+            if not isinstance(rd, dict):
+                continue
+            rows = rd.get("rows")
+            if not isinstance(rows, list) or len(rows) == 0:
+                continue
+            if is_effective_empty(rows):
+                continue
+            datasets.append({
+                "rows": rows[:200],  # cap to avoid bloat
+                "sql": rd.get("sql"),
+                "source_id": rd.get("source_id"),
+                "source_name": rd.get("source_name"),
+            })
+
+        return datasets if datasets else None
+    except Exception as e:
+        logger.debug("_get_prior_datasets failed (non-fatal): %s", e)
+        return None
 
 
 def _get_agent_memories(db: Session, agent_name: str, user_message: str) -> list:

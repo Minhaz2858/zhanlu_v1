@@ -150,10 +150,6 @@ vi.mock('@/components/chat/ArtifactPreviewPane', () => ({
   default: () => React.createElement('div', { 'data-testid': 'artifact-preview-pane' }),
 }));
 
-vi.mock('@/components/chat/TracePanel', () => ({
-  default: () => React.createElement('div', { 'data-testid': 'trace-panel' }),
-}));
-
 vi.mock('@/components/chat/ChatFilesModal', () => ({
   default: () => React.createElement('div', { 'data-testid': 'chat-files-modal' }),
 }));

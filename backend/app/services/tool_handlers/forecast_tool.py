@@ -28,6 +28,7 @@ from app.services.artifacts.artifact_service import ArtifactService
 from app.services.forecasting.engine import ForecastEngine
 from app.services.forecasting.pptx_payload import ForecastPayloadAssembler
 from app.services.forecasting.report import WeeklyReportGenerator
+from app.services.forecasting.what_if import compute_what_if
 from app.services.tool_handlers.artifact_tool import _create_artifact_tool
 from app.services.tool_handlers.db_tools import _require_kb_id
 from app.services.tool_registry import registry
@@ -1031,6 +1032,151 @@ FORECAST_BRIEF_SCHEMA = {
 }
 
 
+async def _forecast_what_if(args, db, user_id, context=None):
+    """Simulate a forecast under upstream price shocks (Brent/Naphtha).
+
+    Mirrors ``app.routers.forecast_ops.get_what_if_simulation`` using the
+    shared causal-chain elasticity math (``what_if.compute_what_if``) — no
+    model re-running.
+    """
+    product_id = (args.get("product_id") or "").strip().lower()
+    if not product_id:
+        return {"success": False, "error": "no forecast target for ''"}
+
+    brent_arg = args.get("brent_delta_pct")
+    naphtha_arg = args.get("naphtha_delta_pct")
+    try:
+        brent_delta_pct = float(brent_arg) if brent_arg is not None else 0.0
+        naphtha_delta_pct = float(naphtha_arg) if naphtha_arg is not None else 0.0
+    except (TypeError, ValueError) as exc:
+        return {"success": False, "error": f"simulation failed: {exc}"}
+
+    # Only reject when the caller explicitly passed zero shocks; a bare
+    # product_id lookup (no delta keys) still resolves the target first.
+    if brent_delta_pct == 0 and naphtha_delta_pct == 0 and (
+        brent_arg is not None or naphtha_arg is not None
+    ):
+        return {"success": False,
+                "error": "specify at least one price shock (brent_delta_pct or naphtha_delta_pct)"}
+
+    org_id, _app_id = _resolve_org_context(context)
+
+    def _do_sim() -> dict:
+        target = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key.like(f"ecisco.{product_id}.%"),
+            ForecastTarget.org_id == org_id,
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).order_by(ForecastTarget.report_order.asc()).first()
+        if target is None:
+            return {"success": False, "error": f"no forecast target for '{product_id}'"}
+
+        try:
+            result = compute_what_if(target.product_key, brent_delta_pct,
+                                     naphtha_delta_pct, db)
+        except LookupError as exc:
+            return {"success": False, "error": str(exc)}
+        except Exception as exc:
+            logger.warning("forecast_what_if failed (%s): %s", product_id, exc)
+            return {"success": False, "error": f"simulation failed: {exc}"}
+
+        adjusted = result.get("adjusted_forecast") or []
+        if not adjusted:
+            return {"success": False,
+                    "error": "No forecast available for simulation"}
+
+        base = result.get("base_forecast") or []
+        adjustments = result.get("adjustments") or []
+
+        # Drivers — always surface both brent + naphtha rows (zero → "no shock")
+        by_driver = {a.get("driver"): a for a in adjustments if a.get("driver")}
+        drivers = []
+        for driver, delta in (("brent", brent_delta_pct),
+                              ("naphtha", naphtha_delta_pct)):
+            entry = by_driver.get(driver)
+            if entry is None:
+                drivers.append({
+                    "driver": driver,
+                    "delta_pct": round(delta, 2),
+                    "impact_pct": 0.0,
+                    "note": "no shock" if delta == 0 else "shock not modeled",
+                })
+            else:
+                drivers.append({
+                    "driver": driver,
+                    "delta_pct": entry.get("delta_pct", 0.0),
+                    "impact_pct": entry.get("impact_pct", 0.0),
+                    "note": entry.get("description") or f"{driver} shock",
+                })
+
+        # Horizon table — first 7 base/adjusted points
+        horizon_table = []
+        for i, b in enumerate(base[:7], start=1):
+            a = adjusted[i - 1] if i - 1 < len(adjusted) else b
+            delta_pct = round((a - b) / b * 100, 2) if b else None
+            horizon_table.append({"day": i, "base": b,
+                                  "adjusted": a, "delta_pct": delta_pct})
+
+        total_impact_pct = result.get("total_impact_pct", 0.0)
+        head = horizon_table[-1] if horizon_table else None
+        active = [d for d in drivers if d["delta_pct"] not in (0, 0.0)]
+        shock_text = " + ".join(
+            f"{d['driver']} {d['delta_pct']:+.1f}%" for d in active
+        )
+        if head:
+            narration_hint = (
+                f"{shock_text} -> {product_id} {total_impact_pct:+.2f}% on day 7 "
+                f"({head['base']:.2f} -> {head['adjusted']:.2f})."
+            )
+        else:
+            narration_hint = f"{shock_text} -> {product_id} {total_impact_pct:+.2f}%."
+
+        return {
+            "success": True,
+            "product_id": product_id,
+            "product_key": target.product_key,
+            "base_forecast": base,
+            "adjusted_forecast": adjusted,
+            "total_impact_pct": total_impact_pct,
+            "drivers": drivers,
+            "horizon_table": horizon_table,
+            "narration_hint": narration_hint,
+        }
+
+    try:
+        return await asyncio.to_thread(_do_sim)
+    except Exception as exc:
+        logger.warning("forecast_what_if failed (%s): %s", product_id, exc)
+        return {"success": False, "error": f"simulation failed: {exc}"}
+
+
+FORECAST_WHAT_IF_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "forecast_what_if",
+        "description": (
+            "Simulate how a dashboard product's (dcpd, isoprene, piperylene, "
+            "c5_resin, etc.) forecast changes under upstream price shocks. "
+            "Provide percentage changes for Brent (brent_delta_pct) and/or "
+            "naphtha (naphtha_delta_pct); at least one must be non-zero. "
+            "Use this for 'what if' / scenario questions about the forecast. "
+            "Safe read-only tool."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "product_id": {"type": "string",
+                               "description": "Dashboard product_id, e.g. 'dcpd'."},
+                "brent_delta_pct": {"type": "number", "default": 0,
+                                    "description": "Percentage change in Brent price (e.g. 5.0 = +5%)."},
+                "naphtha_delta_pct": {"type": "number", "default": 0,
+                                      "description": "Percentage change in naphtha price (e.g. -3.0 = -3%)."},
+            },
+            "required": ["product_id"],
+        },
+    },
+}
+
+
 # ======================================================================
 # Registration
 # ======================================================================
@@ -1098,6 +1244,13 @@ for _name, _schema, _handler, _enabled, _desc in (
         _forecast_brief,
         True,
         "Get the evidence-grounded AI analyst brief for a product.",
+    ),
+    (
+        "forecast_what_if",
+        FORECAST_WHAT_IF_SCHEMA,
+        _forecast_what_if,
+        True,
+        "Simulate a forecast under upstream price shocks (Brent/Naphtha) for scenario analysis",
     ),
 ):
     registry.register(
