@@ -146,7 +146,7 @@ clean = re.sub(r"✅\s*\n?\s*\{.*?\}", "", clean, flags=re.DOTALL).strip()
 clean = re.sub(r"Function:\s*\w+\s*\n\s*Arguments:\s*\{.*?\}", "", clean, flags=re.DOTALL).strip()
 ```
 
-The downstream `len(clean) <= 60` short-circuit and the "thinking monologue" heuristic (line 7005+) remain unchanged.
+The downstream `len(clean) <= 60` short-circuit and the "thinking monologue" heuristic (line 7024+) remain unchanged.
 
 ### 4.3 Why append-only
 

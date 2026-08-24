@@ -23,7 +23,7 @@
 - **Per-tag JSON parsing wrapped in `try/except (ValueError, TypeError)`** — one malformed block must not poison other blocks.
 - **`isinstance(_obj, dict)` guard** before accessing `.get("name")` / `.get("arguments")`.
 - **`_args` coerced to dict** if the model emits it as a string (downstream OpenAI strict-type check).
-- **Function names (`_extract_tool_calls_from_content`, `_strip_tool_call_markup`) and their call sites (agents.py lines 6715, 6720, 7401, 7406, 9688) are unchanged.**
+- **Function names (`_extract_tool_calls_from_content`, `_strip_tool_call_markup`) and their call sites (agents.py lines 6687, 6692, 7424, 7427, 9703) are unchanged.**
 - **Append-only:** Formats 1-3 logic is not modified. Multi-model users (DeepSeek, Moonshot, OpenAI) are unaffected.
 
 ---
