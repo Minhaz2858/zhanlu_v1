@@ -322,6 +322,12 @@ class Settings(BaseSettings):
     # provider instead of the fixed order from LLM_FALLBACK_PROVIDERS.
     LLM_HEALTH_ROUTING_ENABLED: bool = False
 
+    # Inject ``parallel_tool_calls: True`` into LLM request payloads for
+    # OpenAI-compatible models (deepseek*, openai/*, gpt-*).  Anthropic
+    # models are excluded automatically (they reject the field).  When
+    # False (default), no injection — behaviour is unchanged.
+    LLM_PARALLEL_TOOL_CALLS_ENABLED: bool = False
+
     # ── Rate Limiting ───────────────────────────────────────────────────
     RATE_LIMIT_ENABLED: bool = False
     RATE_LIMIT_RPM: int = 60  # max requests per minute per user+app
@@ -438,6 +444,14 @@ class Settings(BaseSettings):
     PPT_SMART_ROUTER_ENABLED: bool = False
     PPT_LLM_POLISH_ENABLED: bool = False
     PPT_AUDIT_ENABLED: bool = False
+    # New: route create_artifact(type="pptx") through the professional deck
+    # pipeline (planner → router → layout engine → audit/repair/polish) so the
+    # in-chat artifact matches the download. Precondition: PPT_DECK_PLANNER_ENABLED.
+    PPT_CREATE_ARTIFACT_PIPELINE_ENABLED: bool = False
+    # New: ground deck data in the REAL query rows (Execution ObservationRecords
+    # + conversation tool results) instead of only the LLM-authored payload
+    # chart data. Used by both the download path and the tool path.
+    PPT_DECK_DATA_GROUNDING_ENABLED: bool = False
     # Phase 4: intent-driven deck profiles (data_report / executive_brief /
     # pitch_narrative / periodic_review).  When OFF, every deck uses the
     # historical data_report structure (backward compatible, zero risk).

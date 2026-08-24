@@ -51,6 +51,135 @@ def build_llm_payload(body: dict, model: str) -> tuple[dict, list[dict], bool]:
     return payload, messages, bool(json_schema)
 
 
+def _sanitize_tool_call_pairing(messages: list[dict] | None) -> list[dict]:
+    """Drop orphan ``assistant.tool_calls`` and stray ``tool`` role messages.
+
+    The OpenAI/DeepSeek API requires that every ``assistant`` message carrying
+    ``tool_calls`` be immediately followed by one ``tool`` role message per
+    call (matched by ``tool_call_id``).  When a message-rebuild or compaction
+    path strips the tool-result messages but leaves the
+    ``assistant.tool_calls`` field intact, the provider returns HTTP 400
+    ("insufficient tool messages following tool_calls message").  That cascades
+    into :func:`record_failure` -> circuit-breaker opens -> all providers
+    exhausted -> 502 with no error message -> the user sees
+    "agent not responding".
+
+    This validator is a defense-in-depth gate: it sanitises the message list
+    right before the HTTP request so that no upstream code path can produce
+    an orphan-``tool_calls`` 400.  Two passes:
+
+    **Pass 1 (forward scan)**: for each ``assistant`` message with
+    ``tool_calls``, walk forward through *contiguous* ``tool`` role messages
+    collecting matching ``tool_call_id``s.  Any unmatched ids are stripped
+    from ``assistant.tool_calls``.  If the entire list is stripped, the key
+    is removed.
+
+    **Pass 2 (backward scan)**: any ``tool`` role message whose
+    ``tool_call_id`` does not appear in *any* preceding ``assistant.tool_calls``
+    is removed.
+
+    Returns a new list (never mutates the input).
+    """
+    if not messages:
+        return list(messages) if messages is not None else []
+
+    # Pass 1: collect expected tool_call_ids per assistant position
+    assistant_expected: dict[int, set[str]] = {}
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "assistant":
+            continue
+        tc = msg.get("tool_calls")
+        if not tc:
+            continue
+        ids: set[str] = set()
+        for c in tc:
+            tid = c.get("id") or c.get("tool_call_id", "")
+            if tid:
+                ids.add(tid)
+        if ids:
+            assistant_expected[i] = ids
+
+    # Walk forward from each assistant to find contiguous matching tool results
+    matched_ids: set[str] = set()
+    for asst_i, expected_ids in assistant_expected.items():
+        found: set[str] = set()
+        j = asst_i + 1
+        while j < len(messages):
+            nxt = messages[j]
+            if nxt.get("role") != "tool":
+                break  # tool results must be contiguous
+            tid = nxt.get("tool_call_id", "")
+            if tid in expected_ids:
+                found.add(tid)
+            j += 1
+        matched_ids |= found
+
+    # Build new list: strip unmatched tool_calls from assistant messages
+    cleaned: list[dict] = []
+    for i, msg in enumerate(messages):
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            expected = assistant_expected.get(i, set())
+            kept = [
+                c for c in msg["tool_calls"]
+                if (c.get("id") or c.get("tool_call_id", "")) in expected
+                and (c.get("id") or c.get("tool_call_id", "")) in matched_ids
+            ]
+            if kept:
+                new_msg = {**msg, "tool_calls": kept}
+            else:
+                # All tool_calls were orphan — strip the key but keep text
+                new_msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+            if not new_msg.get("content"):
+                new_msg.setdefault("content", "")
+            cleaned.append(new_msg)
+        else:
+            cleaned.append(msg)
+
+    # Pass 2: remove stray tool messages whose tool_call_id has no
+    # preceding assistant.tool_calls entry
+    all_assistant_tc_ids: set[str] = set()
+    result: list[dict] = []
+    for msg in cleaned:
+        if msg.get("role") == "assistant" and msg.get("tool_calls"):
+            for c in msg["tool_calls"]:
+                tid = c.get("id") or c.get("tool_call_id", "")
+                if tid:
+                    all_assistant_tc_ids.add(tid)
+        if msg.get("role") == "tool":
+            tid = msg.get("tool_call_id", "")
+            if tid not in all_assistant_tc_ids:
+                continue
+        result.append(msg)
+
+    return result
+
+
+def _supports_parallel_tool_calls(model: str) -> bool:
+    """Return True if the LLM provider for ``model`` accepts the
+    ``parallel_tool_calls`` capability flag.
+
+    The OpenAI/DeepSeek API treats this as a hint to emit multiple
+    ``tool_calls`` in a single assistant message.  Anthropic rejects the
+    field (HTTP 400), so it must be excluded for any model whose name
+    suggests the Claude family.
+
+    Conservative default: if the model name is unrecognised, return
+    False — no injection, no risk of breaking unknown providers.
+    """
+    if not model:
+        return False
+    m = model.lower()
+    # Hard reject: anthropic / claude never accept this field.
+    if "anthropic" in m or "claude" in m:
+        return False
+    # OpenAI-compatible families: deepseek, OpenAI direct, GPT-*.
+    if "deepseek" in m:
+        return True
+    if m.startswith("openai/") or m.startswith("gpt-"):
+        return True
+    return False
+
+
 def llm_headers() -> dict:
     """Return the authorization headers for the LLM API."""
     return {
@@ -236,6 +365,24 @@ async def call_llm(
 
     payload, built_messages, has_schema = build_llm_payload(body, routed_model)
 
+    # ── Defense-in-depth: sanitize orphan assistant.tool_calls before send ──
+    # Stripped messages are the root cause of "agent not responding" under
+    # qwen3.6-27b: deepseek (catalog default for background calls) returns
+    # HTTP 400 for orphan tool_calls -> record_failure -> circuit-breaker
+    # opens -> all providers exhausted -> 502 with no detail.  See
+    # _sanitize_tool_call_pairing docstring for the full failure path.
+    sanitized_messages = _sanitize_tool_call_pairing(built_messages)
+    if len(sanitized_messages) != len(built_messages) or any(
+        (m.get("tool_calls") != o.get("tool_calls"))
+        for m, o in zip(sanitized_messages, built_messages)
+    ):
+        logger.warning(
+            "call_llm: sanitized messages (%d → %d) — orphan tool_calls stripped",
+            len(built_messages), len(sanitized_messages),
+        )
+    payload["messages"] = sanitized_messages
+    built_messages = sanitized_messages
+
     # ── Cache check (temperature=0 only) ──
     from app.services.llm_cache import get_cached_response, set_cached_response
     cached = get_cached_response(
@@ -250,6 +397,72 @@ async def call_llm(
             latency_ms=0,
         )
         return cached
+
+    # ── Pre-flight: estimate total payload vs. model's context window ──
+    # The total LLM payload is (system prompt + messages + tools).  A user
+    # on a small-context model (e.g. qwen3.6-27b, 65,536 tokens) can
+    # overflow even with a short conversation if the system prompt +
+    # data-source context alone is 60k+ tokens.  We estimate the payload
+    # here and either:
+    #   (a) clamp max_tokens down so the request still fits, OR
+    #   (b) raise a clear, actionable 502 if the payload itself doesn't
+    #       fit even with max_tokens=0.
+    from app.services.compaction import get_context_window, estimate_messages_tokens
+    _model_ctx = get_context_window(routed_model)
+    _est_input_tokens = estimate_messages_tokens(built_messages)
+    _tools_tokens = sum(
+        len(json.dumps(t)) // 4 for t in (payload.get("tools") or [])
+    )
+    _total_est = _est_input_tokens + _tools_tokens
+    _reserved_for_output = (
+        payload.get("max_tokens")
+        or temperature
+        and int(getattr(settings, "LLM_MAX_TOKENS_HARD_CAP", 4096))
+        or int(getattr(settings, "LLM_MAX_TOKENS_HARD_CAP", 4096))
+    )
+    # Simplify: just use the hard cap as the default upper bound for max_tokens
+    _reserved_for_output = int(getattr(settings, "LLM_MAX_TOKENS_HARD_CAP", 4096))
+    if _total_est + _reserved_for_output > _model_ctx:
+        _headroom = max(0, _model_ctx - _total_est)
+        if _headroom <= 0:
+            # Payload itself exceeds the model's context window — no
+            # amount of max_tokens reduction will help.  Surface a clear
+            # error so the user can switch to a larger-context model.
+            _msg = (
+                f"Payload too large for model '{routed_model}': "
+                f"~{_total_est} tokens (system + messages + tools) "
+                f"vs. context_window={_model_ctx}. "
+                f"Switch to a model with a larger context window "
+                f"(e.g. deepseek-v4-flash, 128k) or reduce the bound "
+                f"data-source / skill context."
+            )
+            logger.error("call_llm pre-flight: %s", _msg)
+            raise HTTPException(
+                status_code=502,
+                detail=f"LLM request failed (payload too large for model): {_msg}",
+            )
+        # Otherwise: clamp max_tokens to fit
+        original_max = payload.get("max_tokens") or _reserved_for_output
+        payload["max_tokens"] = min(original_max, _headroom)
+        logger.warning(
+            "call_llm pre-flight: clamping max_tokens from %d to %d "
+            "(payload %d + output ≤ context_window %d for model %s)",
+            original_max, payload["max_tokens"],
+            _total_est, _model_ctx, routed_model,
+        )
+
+    # ── P0-2 parallel tool calls capability injection ──
+    # When the feature flag is on AND the routed model accepts the
+    # field, declare ``parallel_tool_calls: True`` so the LLM may emit
+    # multiple tool_calls in a single assistant message.  This is a
+    # no-op (default-off) for the existing 220+ payload call sites that
+    # still go through this function; each provider's own gating on
+    # the field decides the actual behaviour.
+    if (
+        getattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", False)
+        and _supports_parallel_tool_calls(routed_model)
+    ):
+        payload["parallel_tool_calls"] = True
 
     # ── Health-based provider selection ──
     providers = get_llm_providers()
