@@ -44,6 +44,7 @@ from app.routers.openharness import router as openharness_router
 from app.routers.artifacts import router as artifacts_router
 from app.routers.sandbox import router as sandbox_router
 from app.routers.data_snapshots import router as data_snapshots_router
+from app.routers.agent_runs import router as agent_runs_router  # P0-3
 from app.routers.executions import router as executions_router
 from app.routers.agent_studio import router as agent_studio_router
 from app.routers.skill_studio import router as skill_studio_router
@@ -716,6 +717,7 @@ def create_app() -> FastAPI:
     app.include_router(artifacts_router, prefix="/api")
     app.include_router(sandbox_router, prefix="/api")
     app.include_router(data_snapshots_router, prefix="/api")
+    app.include_router(agent_runs_router, prefix="/api")  # P0-3
     app.include_router(executions_router, prefix="/api")
     app.include_router(agent_studio_router, prefix="/api")
     app.include_router(skill_studio_router, prefix="/api")

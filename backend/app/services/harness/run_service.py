@@ -211,6 +211,133 @@ class AgentRunService:
         finally:
             db.close()
 
+    def list_steps(self, run_id: str, db=None) -> list:
+        """Return all AgentRunStep records for ``run_id``, ordered by
+        ``step_index`` ascending.  P0-3 router endpoint backing.
+        Optional ``db`` parameter for tests; production uses SessionLocal.
+        """
+        from app.models.agent_run_step import AgentRunStep
+        own = db is None
+        if own:
+            db = SessionLocal()
+        try:
+            return (db.query(AgentRunStep)
+                    .filter(AgentRunStep.run_id == run_id,
+                            AgentRunStep.is_deleted == False)
+                    .order_by(AgentRunStep.step_index.asc()).all())
+        except Exception as e:
+            logger.warning('AgentRunService: list_steps(%s) failed: %s', run_id, e)
+            return []
+        finally:
+            if own:
+                db.close()
+
+    def append_step(self, run_id: str, step_type: str,
+                    step_index: int = 0, tool_name: str | None = None,
+                    tool_input: str | None = None, tool_output: str | None = None,
+                    iteration: int = 0, duration_ms: int = 0,
+                    checkpoint: str | None = None, db=None) -> str | None:
+        """Append a new AgentRunStep to the run.  Returns the new step_id
+        on success, None on failure (logs warning).  Optional ``db`` for tests.
+        """
+        import uuid as _uuid
+        from app.models.agent_run_step import AgentRunStep
+        step_id = _uuid.uuid4().hex[:32]
+        own = db is None
+        if own:
+            db = SessionLocal()
+        try:
+            step = AgentRunStep(
+                step_id=step_id,
+                run_id=run_id,
+                step_type=step_type,
+                step_index=step_index,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_output=tool_output,
+                iteration=iteration,
+                duration_ms=duration_ms,
+                checkpoint=checkpoint,
+            )
+            db.add(step)
+            db.commit()
+            return step_id
+        except Exception as e:
+            logger.warning('AgentRunService: append_step(%s, idx=%d) failed: %s',
+                           run_id, step_index, e)
+            db.rollback()
+            return None
+        finally:
+            if own:
+                db.close()
+
+    def finalize_run(self, run_id: str, status: str = 'completed',
+                     iterations: int | None = None,
+                     tool_call_count: int | None = None, db=None) -> bool:
+        """Mark a run as terminated with ``status`` ('completed' or 'failed').
+        Optional counters override the row's values.  Returns True on success.
+        Optional ``db`` for tests.
+        """
+        from app.models.agent_run import AgentRun
+        from datetime import datetime, timezone
+        own = db is None
+        if own:
+            db = SessionLocal()
+        try:
+            row = db.query(AgentRun).filter(
+                AgentRun.run_id == run_id, AgentRun.is_deleted == False
+            ).first()
+            if not row:
+                return False
+            row.status = status
+            row.finished_at = datetime.now(timezone.utc)
+            if iterations is not None:
+                row.iterations = iterations
+            if tool_call_count is not None:
+                row.tool_call_count = tool_call_count
+            db.commit()
+            return True
+        except Exception as e:
+            logger.warning('AgentRunService: finalize_run(%s) failed: %s', run_id, e)
+            db.rollback()
+            return False
+        finally:
+            if own:
+                db.close()
+
+    def list_runs_by_conversation(self, conversation_id: str, db=None) -> list:
+        """Return all AgentRun records whose ``caller_context`` JSON contains
+        ``conversation_id``.  P0-3 router endpoint backing.  Optional ``db``
+        for tests.
+        """
+        import json as _json
+        from app.models.agent_run import AgentRun
+        own = db is None
+        if own:
+            db = SessionLocal()
+        try:
+            rows = (db.query(AgentRun)
+                    .filter(AgentRun.is_deleted == False)
+                    .order_by(AgentRun.created_date.desc()).all())
+            matches = []
+            for r in rows:
+                if not r.caller_context:
+                    continue
+                try:
+                    ctx = _json.loads(r.caller_context) if isinstance(r.caller_context, str) else r.caller_context
+                except Exception:
+                    continue
+                if isinstance(ctx, dict) and ctx.get('conversation_id') == conversation_id:
+                    matches.append(r)
+            return matches
+        except Exception as e:
+            logger.warning('AgentRunService: list_runs_by_conversation(%s) failed: %s',
+                           conversation_id, e)
+            return []
+        finally:
+            if own:
+                db.close()
+
     def list_runs(self, status: str | None = None) -> list:
         """Return all AgentRun records, optionally filtered by status."""
         from app.models.agent_run import AgentRun

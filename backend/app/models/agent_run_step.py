@@ -35,3 +35,10 @@ class AgentRunStep(TimestampedBase):
 
     iteration = Column(Integer, default=0)
     duration_ms = Column(Integer, nullable=True)
+
+    # P0-3 — explicit checkpoint marker.  When set, this step is a
+    # resumption point: the harness restores from this row's
+    # messages_snapshot on resume.  ``None`` means "regular step, not
+    # a checkpoint boundary".
+    is_checkpoint = Column(String(1), nullable=True, default=None)  # "Y" | None
+    checkpoint = Column(Text, nullable=True)  # JSON: tool_input + tool_output snapshot
