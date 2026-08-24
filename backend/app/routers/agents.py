@@ -6999,7 +6999,17 @@ def _strip_tool_call_markup(content: str) -> str:
     proceeds with a clean ``assistant_content``.
     """
     # 1) Strip tool-call markup blocks
-    clean = re.sub(r"<function=\w+>.*?</function>", "", content, flags=re.DOTALL).strip()
+    # Strip canonical Qwen3 / Hermes-Qwen <tool_call>...</tool_call> blocks
+    # FIRST — these blocks contain raw JSON that the existing legacy regexes
+    # would partially match (false positive on the inner "name"/"arguments"
+    # strings).  Whitespace-tolerant for the same reasons as the extractor.
+    clean = re.sub(
+        r"<\s*tool_call\s*>.*?<\s*/\s*tool_call\s*>",
+        "",
+        content,
+        flags=re.DOTALL,
+    ).strip()
+    clean = re.sub(r"<function=\w+>.*?</function>", "", clean, flags=re.DOTALL).strip()
     clean = re.sub(r"✅\s*\n?\s*\{.*?\}", "", clean, flags=re.DOTALL).strip()
     clean = re.sub(r"Function:\s*\w+\s*\n\s*Arguments:\s*\{.*?\}", "", clean, flags=re.DOTALL).strip()
 
@@ -12188,12 +12198,18 @@ async def add_message_stream(
         # when synthesis is coming.  The conditions mirror the full check
         # at line ~12176.  Moving this earlier is safe because the tool loop
         # has already completed and the contract's answer_datasets are final.
+        #
+        # FIX 2026-08-24: gate the deferred synthesis on the PRESENCE of
+        # answer data, not on collection_complete(). A trailing coverage
+        # probe or one empty branch used to veto the entire synthesis stage
+        # even when 70+ rows of business data had been collected — the turn
+        # then fell through to the generic fallback despite having data.
         _deferred_answer = (
             _contract.answer_datasets()[-1]
             if (
                 settings.DELIVERABLE_PHASE_LOCK_ENABLED
                 and _contract is not None
-                and _contract.collection_complete()
+                and _contract.has_answer_data()
                 and not _orch_no_data[0]
                 and not (
                     _create_artifact_titles
@@ -12455,6 +12471,15 @@ async def add_message_stream(
         # _deferred_answer was already computed above (line ~11947) so we can
         # skip re-computing it here.  The early computation was added as part
         # of the FIX 2026-08-22 to let the post-loop fallback guard work.
+
+        # FIX 2026-08-24: hoisted synthesis callable out of the deferred
+        # branch so the empty-bubble guarantee can always invoke the LLM
+        # when answer data exists, even when the deferred block was skipped.
+        _synth_endpoint = effective_llm.endpoint
+
+        async def _deferred_synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+            return await _call_synthesis_llm(system_prompt, msgs, endpoint=_ep)
+
         if _deferred_answer is not None:
             # FIX A+C (2026-08-22): synthesize from the FULL answer-tagged
             # dataset set, not just the last query.  The final query is often
