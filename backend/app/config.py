@@ -359,6 +359,16 @@ class Settings(BaseSettings):
         '"drop_old_tool_messages","fallback_to_different_model"]'
     )
 
+    # ── P1-5: data-source-runtime compact mode ─────────────────────────
+    # When the target model's context_window is <= DSR_COMPACT_MODE_MAX_CONTEXT,
+    # the "Bound Data Sources" block is structurally compressed
+    # (drop sample rows, verbose descriptions; cap concept catalog).
+    # Models with context_window > this threshold see the full prompt
+    # (unchanged behaviour).
+    # Set to 0 to disable compact mode entirely.
+    DSR_COMPACT_MODE_MAX_CONTEXT: int = 70_000
+    DSR_COMPACT_CONCEPT_MAX_LINES: int = 20
+
     # ── Rate Limiting ───────────────────────────────────────────────────
     RATE_LIMIT_ENABLED: bool = False
     RATE_LIMIT_RPM: int = 60  # max requests per minute per user+app

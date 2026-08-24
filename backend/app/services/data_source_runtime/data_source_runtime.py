@@ -477,10 +477,78 @@ def _build_concept_catalog(db: Session, kb_ids: list[str]) -> dict[str, str]:
         return {}
 
 
+# P1-5 — structural compression helpers for small-context models.
+# These keep the table/column STRUCTURE (the LLM still knows what tables
+# exist and how to join them) but drop the expensive parts (sample
+# rows, verbose descriptions, exhaustive concept catalog).
+
+# Heuristics for "this line is a sample row, not a column definition".
+_SAMPLE_ROW_MARKERS = (
+    "sample row", "example:", "examples:", "samples:",
+    "```", "e.g.", "for instance",
+)
+# Heuristics for "this line is a verbose description, not a column".
+# A line >200 chars without any SQL/structural token is treated as
+# description and dropped in compact mode.
+_STRUCTURAL_TOKENS = (
+    "CREATE", "PRIMARY", "FOREIGN", "KEY", "VARCHAR", "INT", "DATE",
+    "NUMERIC", "BOOLEAN", "TEXT", "TIMESTAMP", "INDEX", "UNIQUE",
+    "TABLE", "REFERENCES", "DEFAULT", "NOT NULL", "CHECK",
+)
+
+
+def _compact_schema_hint(full: str) -> str:
+    """Drop sample rows + verbose descriptions from a schema hint while
+    preserving every column name, type, and constraint.
+
+    Structural rules:
+      * Drop any line containing a sample-row marker.
+      * Drop any line >200 chars that lacks a structural SQL token
+        (catches long description paragraphs).
+      * Keep all other lines verbatim.
+      * Never slice a line in half — line-level filtering only.
+    """
+    if not full:
+        return ""
+    out: list[str] = []
+    in_sample_block = False
+    for line in full.splitlines():
+        low = line.lower()
+        # Mark the start of a sample block.
+        if any(m in low for m in _SAMPLE_ROW_MARKERS):
+            in_sample_block = True
+            # If the marker line itself has no column info, drop it.
+            if not any(t in line for t in _STRUCTURAL_TOKENS):
+                continue
+        # While in a sample block, drop lines unless they look structural.
+        if in_sample_block:
+            if any(t in line for t in _STRUCTURAL_TOKENS):
+                out.append(line)
+                continue
+            if line.strip() == "":
+                in_sample_block = False
+                continue
+            continue
+        # Outside a sample block: drop only the over-long description lines.
+        if len(line) > 200 and not any(t in line for t in _STRUCTURAL_TOKENS):
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+def _compact_concept_catalog(full: str, max_lines: int = 20) -> str:
+    """Keep the first ``max_lines`` lines of a concept catalog."""
+    if not full:
+        return ""
+    return "\n".join(full.splitlines()[:max_lines])
+
+
 def _build_data_source_prompt_section(
     bound_meta: list[dict], has_weekly_report: bool = False,
     schema_slices: dict[str, str] | None = None,
     concept_catalogs: dict[str, str] | None = None,
+    compact_mode: bool = False,
+    compact_concept_max_lines: int = 20,
 ) -> str:
     """Compose the 'Bound Data Sources' section appended to the system prompt.
 
@@ -516,6 +584,8 @@ def _build_data_source_prompt_section(
             for kb in db_meta:
                 sl = (schema_slices or {}).get(kb["id"])
                 if sl:
+                    if compact_mode:
+                        sl = _compact_schema_hint(sl)
                     lines.append(
                         f"  Schema hint for `{kb['name']}`: `{sl}`"
                     )
@@ -525,6 +595,10 @@ def _build_data_source_prompt_section(
             for kb in db_meta:
                 cc = (concept_catalogs or {}).get(kb["id"])
                 if cc:
+                    if compact_mode:
+                        cc = _compact_concept_catalog(
+                            cc, max_lines=compact_concept_max_lines
+                        )
                     lines.append("  **Data Concepts** (business term → table.column):")
                     for concept_line in cc.splitlines():
                         lines.append(f"  {concept_line}")
@@ -905,6 +979,7 @@ def prepare_data_source_runtime(
     selected_project_name: str | None = None,
     pinned_data_source_id: str | None = None,
     user_id: str | None = None,
+    target_context_window: int | None = None,
 ) -> tuple[list[dict], str, dict]:
     """Augment the agent's tool list + system prompt for data source support.
 
@@ -994,9 +1069,19 @@ def prepare_data_source_runtime(
     bound_meta = _load_bound_kb_meta(db, bound_ids)
     schema_slices = _build_schema_slice(db, bound_ids)
     concept_catalogs = _build_concept_catalog(db, bound_ids)
+    # P1-5: when the target model has a small context window, compress the
+    # "Bound Data Sources" block structurally.  Default compact threshold
+    # is 70,000 (anything ≤ 70k → compact; bigger models keep full).
+    # Default-off when target_context_window is None (back-compat).
+    _compact_max_ctx = getattr(settings, "DSR_COMPACT_MODE_MAX_CONTEXT", 70_000)
+    _compact_mode = (
+        target_context_window is not None
+        and target_context_window <= _compact_max_ctx
+    )
     section = _build_data_source_prompt_section(
         bound_meta, has_weekly_report=False, schema_slices=schema_slices,
         concept_catalogs=concept_catalogs,
+        compact_mode=_compact_mode,
     )
 
     # PREPEND the critical anti-hallucination directive so it's the first

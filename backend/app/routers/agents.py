@@ -38,6 +38,11 @@ from app.models.agent_app import AgentApp
 from app.models.agent_conversation import AgentConversation
 from app.models.user import User
 from app.services.tracing import TraceContext
+from app.services.data_execution.session_state import SessionState, SessionStateService
+from app.services.data_execution.cache import cache_data_execution
+from app.services.data_execution.prompt_block import build_session_state_block
+from app.services.intent.export_intent import detect_export_intent
+from app.services.tool_handlers.artifact_tool import _create_artifact_tool
 from app.services.llm_service import llm_headers, llm_url, get_model, model_has_fixed_temperature
 from app.services.llm_router import resolve_effective_llm, resolve_message_project_id, EffectiveLLM
 from app.services.agent_prompts import (
@@ -4068,6 +4073,7 @@ async def add_message(
 
         # Auto-inject DB tools + "Bound Data Sources" prompt section if the
         # agent has data sources. Idempotent — no-op when nothing is bound.
+        from app.services.compaction import get_context_window
         try:
             from app.services.data_source_runtime import prepare_data_source_runtime
             from app.models.project import Project as _Project
@@ -4080,6 +4086,13 @@ async def add_message(
                 selected_project_id=getattr(conv, "project_id", None),
                 selected_project_name=_sel_proj_name,
                 user_id=user.id if user else None,
+                # P1-5: pass the user-selected model's context window so
+                # the Bound Data Sources block auto-compresses for small
+                # models (e.g. qwen3.6-27b 65k) and stays full for big
+                # models (deepseek 128k, claude 200k).
+                target_context_window=get_context_window(
+                    user_model_v2 or get_model()
+                ),
             )
         except Exception as e:
             logger.debug("Data source runtime prep failed (non-fatal): %s", e)
@@ -4102,7 +4115,12 @@ async def add_message(
         if _engine_name != "default":
             try:
                 from app.services.context_engine import get_context_engine
-                _ctx_engine = get_context_engine(_engine_name, model=get_model())
+                # FIX 2026-08-24 (v2): the engine's threshold check uses
+                # the user's model (so e.g. qwen3.6-27b's 65k window is
+                # respected), but the actual LLM-based compression MUST use
+                # a model with enough context to fit a 60k+ token input
+                # (deepseek-v4-flash, 128k).
+                _ctx_engine = get_context_engine(_engine_name, model=user_model_v2 or get_model())
                 if _ctx_engine.should_compress(llm_messages):
                     logger.info("Context engine '%s' compacting conversation %s", _engine_name, conversation_id)
                     llm_messages, _wc = await _ctx_engine.compress(llm_messages, model=get_model())
@@ -4120,7 +4138,15 @@ async def add_message(
                 should_autocompact,
                 estimate_messages_tokens,
             )
-            model_name = get_model()
+            # FIX 2026-08-24 (v2): use the USER'S selected model ONLY for
+            # the threshold check (so e.g. qwen3.6-27b's 65,536 window is
+            # respected), but the compaction's LLM call MUST use a model
+            # with a large enough context to actually summarize 60k+ tokens.
+            # qwen3.6-27b (65k) can't summarize 60k+ tokens of itself, so
+            # the compactor falls back to the global default
+            # (deepseek-v4-flash, 128k) for the LLM step.
+            model_name = user_model_v2 or get_model()
+            compactor_model = get_model()  # LLM that actually summarizes
             state = _compaction_states.get(conversation_id)
             if state is None:
                 state = AutoCompactState()
@@ -4130,7 +4156,7 @@ async def add_message(
                 logger.info("Auto-compacting conversation %s (token estimate high)", conversation_id)
                 llm_messages, was_compacted = await auto_compact_if_needed(
                     llm_messages,
-                    model=model_name,
+                    model=compactor_model,
                     state=state,
                     trigger="auto",
                 )
@@ -4354,6 +4380,13 @@ async def add_message(
                         from app.services.compaction import auto_compact_if_needed
                         llm_messages, was_compacted = await auto_compact_if_needed(
                             llm_messages,
+                            # FIX 2026-08-24 (v2): the compactor's LLM call
+                            # needs a LARGER context than the user's model
+                            # when the conversation is already over the
+                            # user's limit.  Use the global default
+                            # (deepseek-v4-flash, 128k) to actually be able
+                            # to summarize a 60k-token conversation even
+                            # when the user is on qwen3.6-27b (65k).
                             model=get_model(),
                             state=_compaction_states.get(conversation_id, AutoCompactState()),
                             force=True,
@@ -6733,7 +6766,7 @@ def _estimate_input_tokens(
     prompt structural tokens (role markers, special tokens, etc.).
     """
     total_chars = sum(
-        len(m.get("content", "")) + len(m.get("role", ""))
+        len(m.get("content") or "") + len(m.get("role") or "")
         for m in messages if isinstance(m, dict)
     )
     msg_tokens = max(1, total_chars // 4)  # 4 chars/token for messages (role overhead is small)
@@ -8258,6 +8291,11 @@ async def add_message_stream(
                         selected_project_name=_v3_effective_pname,
                         pinned_data_source_id=_v3_pinned_dsr_id,
                         user_id=user.id if user else None,
+                        # P1-5: this is a pre-flight data-ctx bound-KB
+                        # check (bound_ids only), so compact mode does
+                        # not affect the answer.  Pass None to keep
+                        # behaviour 100% unchanged on this path.
+                        target_context_window=None,
                     )
                     _v3_bound = _v3_data_ctx_extras.get("bound_kb_ids") or []
                     logger.info(
@@ -8910,11 +8948,17 @@ async def add_message_stream(
     # same project-scope the FSM already used.
     try:
         from app.services.data_source_runtime import prepare_data_source_runtime
+        from app.services.compaction import get_context_window
         tools, system_prompt, _ = prepare_data_source_runtime(
             db, agent_app, tools, system_prompt,
             selected_project_id=_v3_effective_pid,
             selected_project_name=_v3_effective_pname,
             user_id=user.id if user else None,
+            # P1-5: pass the user-selected model's context window so the
+            # Bound Data Sources block auto-compresses for small models.
+            target_context_window=get_context_window(
+                user_model or get_model()
+            ),
         )
     except Exception as e:
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
@@ -8949,6 +8993,36 @@ async def add_message_stream(
             "- After the data returns, answer with a short executive "
             "summary: key numbers, trends, and one recommendation.\n"
         )
+
+    # ── T15: weak re-export intent → nudge the system prompt (flag-gated) ──
+    # Append before llm_messages is built so the directive reaches the loop.
+    if settings.INTENT_ROUTER_ENABLED:
+        _intent = detect_export_intent(user_content)
+        if _intent and _intent.confidence == "weak":
+            _directive = (
+                "\n\nUSER INTENT DETECTED: re-export. Prefer "
+                "create_artifact(source_execution_id=...) with the session's "
+                "last execution_id instead of re-running data tools."
+            )
+            try:
+                _state = SessionStateService.get_last(db, session_id=conversation_id)
+                if isinstance(_state, SessionState) and getattr(_state, "last_execution_id", None):
+                    _directive += f" Last: {_state.last_execution_id}\n"
+            except Exception as _exc:
+                logger.debug("[intent-router] weak state lookup failed: %s", _exc)
+            system_prompt += _directive
+
+    # ── T17: SESSION STATE block (fail-open, best-effort) ──────────────
+    # Append cached last-data-execution metadata before llm_messages freeze
+    # so re-export/re-format requests can reuse the execution_id instead of
+    # re-running data tools. build_session_state_block returns None when
+    # there is no cached row, so this is a no-op when the cache is empty.
+    try:
+        state_block = build_session_state_block(db, session_id=conversation_id)
+        if state_block:
+            system_prompt = system_prompt + state_block
+    except Exception as _exc:
+        logger.debug("[session-state] injection failed: %s", _exc)
 
     llm_messages = [{"role": "system", "content": system_prompt}]
     for msg in messages:
@@ -9072,6 +9146,51 @@ async def add_message_stream(
         # the empty-rows path) as well as after it (orchestrator fallback),
         # so compute it once up front.
         _orch_doc_format = detect_file_intent(user_content)
+
+        # ── T15: strong re-export intent → hard bypass (flag-gated) ─────────
+        # If the user asks to re-export/re-format a previous analysis AND a
+        # cached session execution exists, build the artifact directly from the
+        # cached structured data (source_execution_id) and end the stream
+        # WITHOUT running the LLM loop. Any failure falls through to the normal
+        # loop below (never 500s the stream).
+        if settings.INTENT_ROUTER_ENABLED:
+            _intent = detect_export_intent(user_content)
+            if _intent and _intent.confidence == "strong":
+                try:
+                    _state = None
+                    try:
+                        _state = SessionStateService.get_last(db, session_id=conversation_id)
+                    except Exception as _exc:
+                        logger.debug("[intent-router] strong state lookup failed: %s", _exc)
+                    if isinstance(_state, SessionState) and getattr(_state, "last_execution_id", None):
+                        _intent.source_execution_id = _state.last_execution_id
+                    if _intent.source_execution_id:
+                        _result = await _create_artifact_tool(
+                            args={
+                                "type": _intent.format,
+                                "title": (getattr(_state, "last_tool_name", None) or "Report"),
+                                "source_execution_id": _intent.source_execution_id,
+                            },
+                            db=db,
+                            user_id=str(user.id),
+                            context={
+                                "conversation_id": conversation_id,
+                                "agent_app_id": agent_app_id,
+                                "agent_name": agent_name,
+                            },
+                        )
+                        _done_content = "Document ready."
+                        if isinstance(_result, dict):
+                            _done_content = (
+                                _result.get("artifact_url")
+                                or _result.get("message")
+                                or _result.get("title")
+                                or "Document ready."
+                            )
+                        yield f'data: {json.dumps({"type": "done", "content": _done_content, "conversation": conv.to_dict()})}\n\n'
+                        return
+                except Exception as exc:
+                    logger.warning("[intent-router] strong-intent bypass failed, falling through: %s", exc)
 
         # ── Activity steps tracking (Claude-style inline numbered steps) ──
         _step_counter = [0]  # mutable counter (list for nonlocal access)
@@ -9826,6 +9945,13 @@ async def add_message_stream(
                         # SSE stream). Mutate in place instead.
                         _compacted, was_compacted = await auto_compact_if_needed(
                             llm_messages,
+                            # FIX 2026-08-24 (v2): the compactor's LLM call
+                            # needs MORE context than the user's model to
+                            # actually summarize a 60k+ token conversation
+                            # when the user is on a small-context model
+                            # (qwen3.6-27b = 65k).  Use the global default
+                            # (deepseek-v4-flash, 128k) so the compactor's
+                            # LLM call doesn't itself overflow.
                             model=get_model(),
                             state=_compaction_states.get(
                                 conversation_id, AutoCompactState()
@@ -11481,6 +11607,37 @@ async def add_message_stream(
                         logger.warning(
                             "v3 No-data card failed (non-fatal) for conv=%s: %s",
                             conversation_id, no_data_err,
+                        )
+
+                # ── Auto-cache hook (flag-gated, fail-open) ────────────
+                # Persist the FINAL enriched tool result (after smart-retry,
+                # synthesis, and no-data card mutations above) so downstream
+                # resume/intent-router flows can reuse cached data executions.
+                # `_execution_id` is injected into the result dict and must
+                # flow to the frontend record + message append that follow.
+                if (
+                    getattr(settings, "DATA_EXECUTION_CACHE_ENABLED", False)
+                    and isinstance(result, dict)
+                    and not result.get("requires_approval")
+                    and result.get("success") is not False
+                ):
+                    try:
+                        exec_id = await cache_data_execution(
+                            db=db,
+                            session_id=conversation_id,
+                            tool_name=tool_name,
+                            args=call.get("args") if isinstance(call, dict) else None,
+                            result=result,
+                            summary_text=None,
+                            org_id=getattr(user, "org_id", None),
+                            app_id=getattr(user, "app_id", None),
+                        )
+                        if exec_id:
+                            result = {**result, "_execution_id": exec_id}
+                    except Exception as exc:
+                        logger.warning(
+                            "data-execution cache failed (fail-open) conv=%s: %s",
+                            conversation_id, exc,
                         )
 
                 tool_call_record = {
