@@ -6938,6 +6938,47 @@ def _extract_tool_calls_from_content(content: str) -> list[dict]:
             },
         })
 
+    # ── Format 4: canonical Qwen3 / Hermes-Qwen <tool_call>{json}</tool_call> ──
+    # Emitted by vLLM with `--tool-call-parser=qwen3_xml` when the structured
+    # tool_calls path is bypassed (e.g. mid-stream truncation, oversized tool
+    # schema, or as a defensive fallback in some Qwen3 chat templates).  The
+    # inner JSON is the same shape as legacy Format 3 (`Function:/Arguments:`).
+    #
+    # Whitespace-tolerant to handle observed real-world drift:
+    #   - extra whitespace inside the tag (`<  tool_call  >`)
+    #   - leading/trailing whitespace around the JSON
+    #   - newlines between tag and JSON
+    #
+    # Per-tag try/except so one malformed block does not poison the rest of
+    # the response (vLLM can emit half-finished tags under load).
+    _hermes_tag_re = re.compile(
+        r"<\s*tool_call\s*>\s*(\{.*?\})\s*<\s*/\s*tool_call\s*>",
+        re.DOTALL,
+    )
+    for _m in _hermes_tag_re.finditer(content):
+        raw = _m.group(1).strip()
+        try:
+            _obj = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.debug("Format 4: skipping malformed JSON in tool_call tag: %r", raw[:80])
+            continue
+        if not isinstance(_obj, dict):
+            continue
+        _fn = _obj.get("name")
+        if not isinstance(_fn, str) or not _fn:
+            continue
+        _args = _obj.get("arguments", {})
+        if not isinstance(_args, dict):
+            _args = {}
+        tool_calls.append({
+            "id": f"call_{_uuid.uuid4().hex[:24]}",
+            "type": "function",
+            "function": {
+                "name": _fn,
+                "arguments": json.dumps(_args, ensure_ascii=False),
+            },
+        })
+
     return tool_calls
 
 
