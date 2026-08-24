@@ -265,6 +265,46 @@ _CHATTER_RE = re.compile(
 )
 
 
+# Generic heading patterns that must NEVER become a deliverable title.
+# These are the first sentence a model often emits ("Quarterly Sales
+# Report", "Monthly Performance", "Q3 Update") — useful as section
+# labels but useless as the artifact's headline. The blocklist also
+# catches time-only fragments ("Q3", "Q4 2026", "July", "August") that
+# leak into titles when the LLM starts with a date anchor.
+#
+# NOTE: The blocklist is intentionally narrow — it rejects:
+#   1. Pure time fragments (Q1-Q4, month names, bare years)
+#   2. Pure single-word section headers ("Report", "Summary", "Overview")
+#   3. Time-period + report-type boilerplate ("Quarterly Report",
+#      "Monthly Update")
+# It does NOT reject legitimate title prefixes like "Executive
+# Overview", "July Overview", or "Sales Performance" — those carry
+# real content and are valid as headlines.
+_GENERIC_HEADING_BLOCKLIST = re.compile(
+    r"^(?:"
+    # Pure time fragments
+    r"q[1-4](?:\s+\d{4})?$|"
+    r"(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
+    r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
+    r"dec(?:ember)?)(?:\s+\d{4})?$|"
+    r"\d{4}$|"
+    # Pure single-word section headers
+    r"report$|summary$|overview$|update$|review$|brief$|"
+    r"analysis$|insights?$|snapshot$|recap$|notes?$|dashboard$|"
+    r"wrap[\s-]?up$|check[\s-]?in$|status$|"
+    # Exact section-header labels (the boilerplate that opens every
+    # business report — "Executive Summary" is always a section, never
+    # a title).
+    r"executive summary$|"
+    # Time-period + report-type boilerplate
+    r"(?:quarterly|monthly|weekly|annual|yearly|daily|periodic)\s+"
+    r"(?:report|summary|overview|update|review|brief|"
+    r"analysis|recap|wrap[\s-]?up)$"
+    r")",
+    re.IGNORECASE,
+)
+
+
 def _is_meta_chatter(sentence: str) -> bool:
     """True when ``sentence`` is procedural narrator chatter, not content."""
     s = (sentence or "").strip()
@@ -336,26 +376,147 @@ def _prose_to_summary(text: str, max_chars: int = 4000) -> str:
 
 def _title_from_prose(text: str, fallback: str) -> str:
     """Best-effort title: first markdown H1, else first *non-chatter*
-    sentence, else fallback."""
-    if text:
-        h1 = re.search(r"^\s*#\s+(.+)$", text, flags=re.MULTILINE)
-        if h1:
-            return h1.group(1).strip()[:120]
-        for sentence in _split_sentences(text):
-            if _is_meta_chatter(sentence):
-                continue
-            return sentence[:120]
+    sentence, else fallback.
+
+    Generic heading sentences (e.g. "Quarterly Sales Report", "Q3",
+    "Executive Summary") are skipped so the deliverable title carries
+    the user's actual content rather than a section label. The
+    ``_GENERIC_HEADING_BLOCKLIST`` covers common time-only fragments
+    and boilerplate report labels.
+
+    When the H1 is blocklisted, the H1 line is stripped from the
+    prose before sentence extraction so the blocklisted prefix doesn't
+    leak into the first sentence.
+    """
+    if not text:
+        return fallback
+    h1 = re.search(r"^\s*#\s+(.+)$", text, flags=re.MULTILINE)
+    if h1:
+        candidate = h1.group(1).strip()[:120]
+        if candidate and not _GENERIC_HEADING_BLOCKLIST.match(candidate):
+            return candidate
+        # H1 was blocklisted — strip the H1 line from the prose so
+        # the blocklisted prefix doesn't contaminate the first
+        # sentence in the next pass.
+        text = re.sub(r"^\s*#\s+.+$", "", text, count=1, flags=re.MULTILINE)
+    # Split on newlines first, then on sentence terminators within
+    # each line, so multi-line prose (e.g. "Q3 2026\nExecutive
+    # Summary") doesn't get joined into one "sentence" that defeats
+    # the blocklist.
+    candidates: list[str] = []
+    for line in (text or "").splitlines():
+        candidates.extend(_split_sentences(line))
+    for sentence in candidates:
+        if not sentence:
+            continue
+        if _is_meta_chatter(sentence):
+            continue
+        if _GENERIC_HEADING_BLOCKLIST.match(sentence):
+            continue
+        return sentence[:120]
     return fallback
 
 
-def _title_from_user_request(user_message: str, fallback: str) -> str:
-    """Derive a report title from the user's own request — it states intent
-    without narrator chatter, so it beats assistant prose as a title source."""
+# ── Meaningful-title generation (2026-08-24) ────────────────────────────
+# Previously the deliverable title echoed the user's raw query verbatim
+# ("i want July 2026 sales report (volume, revenue, margin, inventory) in
+# docx file"). Now we strip conversational wrappers and file-format suffixes,
+# pull date/period entities to the front, capitalize, and clamp.
+
+_PREFIXES_TO_STRIP = re.compile(
+    r"^\s*(i\s+want|i\s+need|please\s+(give|make|generate|create)\s+me|"
+    r"can\s+you\s+(please\s+)?(give|make|generate|create|show)\s+(me\s+)?|"
+    r"show\s+me|make\s+me|generate|create|write)\b\s*",
+    re.IGNORECASE,
+)
+
+_SUFFIXES_TO_STRIP = re.compile(
+    r"\s+(in|as|using)\s+(a\s+)?(docx|word|pdf|pptx|powerpoint|excel|xlsx|"
+    r"markdown|md|html|file|document|deck|spreadsheet)"
+    r"\s*(file|document|deck|spreadsheet)?\s*[\.\?]?\s*$",
+    re.IGNORECASE,
+)
+
+_METRIC_PAREN_RE = re.compile(r"\s*\([^)]*\)\s*")
+
+# (pattern, format). The format is applied with str.format(*groups) unless it
+# contains a "%" (a strftime format for the month-year pattern).
+_PERIOD_PATTERNS = [
+    (re.compile(
+        r"\b(january|february|march|april|may|june|july|august|september|"
+        r"october|november|december)\s+(\d{4})\b", re.I), "%B %Y"),
+    (re.compile(r"\bq([1-4])\s*(\d{4})\b", re.I), "Q{0} {1}"),
+    (re.compile(r"\blast\s+(\d+)\s+(days?|weeks?|months?)\b", re.I), "Last {0} {1}"),
+    (re.compile(r"\bthis\s+(week|month|quarter|year)\b", re.I), "This {0}"),
+]
+
+_PERIOD_CONNECTOR_TAIL_RE = re.compile(r"\s+(for|of|in|on|to|with)\s*$")
+
+
+def _split_period(text: str) -> tuple[str, str]:
+    """Return (normalized_period, remainder) from the first period match.
+
+    Example: ("july 2026 sales report", …) -> ("July 2026", " sales report").
+    """
+    for pattern, fmt in _PERIOD_PATTERNS:
+        m = pattern.search(text)
+        if not m:
+            continue
+        raw = m.group(0)
+        if "%" in fmt:
+            period = datetime.strptime(raw.title(), "%B %Y").strftime(fmt)
+        else:
+            period = fmt.format(*m.groups())
+        period = period[0].upper() + period[1:]
+        remainder = text[: m.start()] + " " + text[m.end():]
+        return period, remainder
+    return "", text
+
+
+def _extract_period(text: str) -> str:
+    """Return a normalized period descriptor ("July 2026", "Q3 2026",
+    "Last 30 days", "This month") found in the text, else ""."""
+    return _split_period(text)[0]
+
+
+def _generate_meaningful_title(
+    user_message: str,
+    assistant_content: str = "",
+    fallback: str = "Data report",
+) -> str:
+    """Build a clean, creative deliverable title from the user's request.
+
+    1. Strip file-format suffixes ("in docx file", "as a Word document", …).
+    2. Strip conversational prefixes ("i want", "please give me", "generate", …).
+    3. Drop parenthetical metric lists ("(volume, revenue, margin, inventory)").
+    4. If empty/short afterwards, fall back to prose (H1 → first sentence) then
+       to the caller-supplied fallback.
+    5. Move any date/period entity ("July 2026", "Q3 2026") to the front.
+    6. Capitalize the first letter, collapse whitespace, clamp to 60 chars.
+    """
     text = re.sub(r"\s+", " ", (user_message or "").strip())
-    if not text:
-        return fallback
-    text = re.split(r"(?<=[.!?。！？])\s", text, maxsplit=1)[0].strip()
-    return text[:120] if text else fallback
+    text = _SUFFIXES_TO_STRIP.sub("", text).strip()
+    text = _PREFIXES_TO_STRIP.sub("", text).strip()
+    text = _METRIC_PAREN_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip().rstrip(".?!")
+    if not text or len(text) < 3:
+        return _title_from_prose(assistant_content, fallback=fallback)
+
+    period, remainder = _split_period(text)
+    if period:
+        remainder = _PERIOD_CONNECTOR_TAIL_RE.sub("", remainder).strip()
+        text = f"{period} {remainder}".strip() if remainder else period
+
+    text = text[0].upper() + text[1:].lower()
+    if len(text) > 60:
+        cut = text[:57].rsplit(" ", 1)[0]
+        text = cut.rstrip(" ,-") + "…"
+    return text
+
+
+def _title_from_user_request(user_message: str, fallback: str) -> str:
+    """Deprecated alias kept for compatibility; use _generate_meaningful_title."""
+    return _generate_meaningful_title(user_message, fallback=fallback)
 
 
 def _mine_ask_data_result(
@@ -405,10 +566,58 @@ def _mine_ask_data_result(
     return best
 
 
+def _mine_enterprise_payload(
+    tool_calls_for_frontend: list[dict], *, skip_superseded: bool = True,
+) -> Optional[dict]:
+    """Return the EnterpriseReport ``payload`` from this turn's
+    ``collect_enterprise_data`` call (if any).
+
+    The enterprise pipeline tool produces a 6-section executive
+    payload that already carries ``enterprise_report_kind ==
+    "executive"``. When present, this payload is the authoritative
+    artifact content — the docx exporter will detect the marker and
+    delegate to ``render_enterprise_docx`` to produce the full
+    executive document (cover, KPI grid, breakdowns, drivers, risks,
+    actions, lineage appendix).
+
+    Returns ``None`` when no enterprise tool call happened (the
+    caller falls through to the generic ReportCard path).
+
+    ``skip_superseded=True`` (default) drops results marked
+    ``__superseded`` so a failed/empty enterprise run never
+    contaminates the artifact.
+    """
+    if not tool_calls_for_frontend:
+        return None
+    for tc in tool_calls_for_frontend:
+        if tc.get("name") != "collect_enterprise_data":
+            continue
+        if skip_superseded and tc.get("__superseded"):
+            continue
+        res = tc.get("results") or {}
+        if not isinstance(res, dict):
+            continue
+        if res.get("success") is not True:
+            continue
+        if (res.get("enterprise_report_kind") or "").lower().strip() != "executive":
+            continue
+        payload = res.get("payload")
+        if not isinstance(payload, dict) or not payload:
+            continue
+        return payload
+    return None
+
+
 def _mine_ask_data_rows(
     tool_calls_for_frontend: list[dict], *, skip_superseded: bool = True,
 ) -> list[dict]:
-    """Pull row dicts out of non-superseded ``ask_data_agent`` calls.
+    """Pull row dicts out of non-superseded data-producing tool calls.
+
+    Scans ALL tools in ``DATA_PRODUCING_TOOLS`` (ask_data_agent, execute_query,
+    ask_erp_kpi, etc.).  EDIA structured-data tools (ask_erp_kpi, etc.) have
+    their results normalized into rows by ``_normalize_tool_result_to_rows``
+    at the v3 stream level, so by the time we see them here they already
+    contain a ``rows`` key.
 
     Honors the cap the platform documents for embedded data: anything beyond
     ``_DASHBOARD_MAX_ROWS`` is dropped (a fully pre-aggregated sample is
@@ -417,11 +626,13 @@ def _mine_ask_data_rows(
     ``skip_superseded=True`` (default) drops results marked ``__superseded``
     so a stale empty/error query never contaminates the artifact payload.
     """
+    from app.routers.agents import DATA_PRODUCING_TOOLS as _DATA_TOOLS
+
     if not tool_calls_for_frontend:
         return []
     rows: list[dict] = []
     for tc in tool_calls_for_frontend:
-        if tc.get("name") != "ask_data_agent":
+        if tc.get("name") not in _DATA_TOOLS:
             continue
         if skip_superseded and tc.get("__superseded"):
             continue
@@ -446,42 +657,136 @@ def _mine_ask_data_rows(
     return rows
 
 
+def _iter_historical_data_results(
+    conversation_messages: list[dict],
+):
+    """Yield ``(tc_or_msg, result_dict)`` for every data-producing tool
+    result found in conversation history, **newest turn first**.
+
+    Scans ALL tools in ``DATA_PRODUCING_TOOLS`` (ask_data_agent, execute_query,
+    ask_erp_kpi, etc.), not just ask_data_agent.
+
+    Handles BOTH persisted shapes:
+
+    * **assistant messages** with a ``tool_calls`` array — the persistence
+      layer saves tool results inline in each tool_call's ``results`` key
+      (this is the shape stored in ``conv.messages``);
+    * ``role: "tool"`` messages with a JSON-string ``content`` — the
+      LLM-facing reconstruction produced when history is re-loaded for the
+      model.
+
+    Yields are in reverse-chronological order so callers can prefer the
+    freshest data.
+    """
+    from app.routers.agents import DATA_PRODUCING_TOOLS as _DATA_TOOLS
+
+    if not conversation_messages:
+        return
+    for msg in reversed(conversation_messages):
+        role = msg.get("role")
+        if role == "assistant":
+            for tc in (msg.get("tool_calls") or []):
+                if not isinstance(tc, dict):
+                    continue
+                if tc.get("name") not in _DATA_TOOLS:
+                    continue
+                res = tc.get("results")
+                if isinstance(res, str):
+                    try:
+                        res = json.loads(res)
+                    except Exception:
+                        continue
+                if isinstance(res, dict):
+                    yield tc, res
+        elif role == "tool":
+            content = msg.get("content")
+            if not isinstance(content, str):
+                continue
+            try:
+                payload = json.loads(content)
+            except Exception:
+                continue
+            if not isinstance(payload, dict):
+                continue
+            result = payload.get("result") or payload
+            if isinstance(result, dict):
+                yield msg, result
+
+
+# Backward-compatible alias — old name still used by some call sites.
+_iter_historical_ask_data_results = _iter_historical_data_results
+
+
+def _mine_historical_ask_data_result(
+    conversation_messages: list[dict], *, skip_superseded: bool = True,
+) -> Optional[dict]:
+    """Return the richest data-producing tool result dict from PREVIOUS turns.
+
+    Scans ALL tools in ``DATA_PRODUCING_TOOLS`` (not just ask_data_agent).
+
+    Same ranking as ``_mine_ask_data_result``: a synthesized
+    ``report_card_payload`` wins outright; otherwise the result with the
+    most rows/columns.  Returns ``None`` when no earlier turn fetched data.
+
+    Handles both persisted shapes (see ``_iter_historical_data_results``).
+    """
+    best: Optional[dict] = None
+    best_rows = -1
+    best_cols = -1
+    for tc_or_msg, res in _iter_historical_ask_data_results(conversation_messages):
+        if skip_superseded and (
+            res.get("__superseded") or tc_or_msg.get("__superseded")
+        ):
+            continue
+        rcp = res.get("report_card_payload")
+        if isinstance(rcp, dict) and rcp:
+            return res  # jackpot — a synthesized payload from an earlier turn
+        rows = res.get("rows")
+        if not isinstance(rows, list):
+            nested = res.get("data") or res.get("result")
+            if isinstance(nested, dict):
+                rows = nested.get("rows")
+        n_rows = len(rows) if isinstance(rows, list) else 0
+        n_cols = (
+            len(rows[0]) if (
+                isinstance(rows, list) and rows and isinstance(rows[0], dict)
+            ) else 0
+        )
+        if n_rows or res.get("answer"):
+            if best is None or (n_rows, n_cols) > (best_rows, best_cols):
+                best = res
+                best_rows, best_cols = n_rows, n_cols
+    return best
+
+
 def _mine_historical_answer_rows(
     conversation_messages: list[dict], *, skip_superseded: bool = True,
 ) -> list[dict]:
-    """Pull row dicts out of ``ask_data_agent`` tool results from PREVIOUS
+    """Pull row dicts out of data-producing tool results from PREVIOUS
     turns in the conversation history.
+
+    Scans ALL tools in ``DATA_PRODUCING_TOOLS`` (not just ask_data_agent).
 
     When a follow-up turn (e.g. "give me in docx formate") re-queries the
     database and gets 0 rows, we can fall back to data that was successfully
     fetched in an earlier turn instead of producing a useless "no data" file.
+
+    FIX 2026-08-24: rewritten to handle both persisted shapes —
+    ``assistant.tool_calls[].results`` (the persistence layer's actual
+    format) *and* ``role: "tool"`` JSON content (the LLM-facing
+    reconstruction).  Previously only the latter was checked, which meant
+    the function **always returned []** on persisted conversation history
+    because the persistence layer never stores standalone tool messages.
     """
-    if not conversation_messages:
-        return []
     rows: list[dict] = []
-    for msg in conversation_messages:
-        if msg.get("role") != "tool":
+    for tc_or_msg, res in _iter_historical_ask_data_results(conversation_messages):
+        if skip_superseded and (
+            res.get("__superseded") or tc_or_msg.get("__superseded")
+        ):
             continue
-        content = msg.get("content")
-        if not isinstance(content, str):
-            continue
-        try:
-            payload = json.loads(content)
-        except Exception:
-            continue
-        if not isinstance(payload, dict):
-            continue
-        # The tool result may be wrapped in a standardized envelope
-        # {"result": {...}, "success": true, ...}
-        result = payload.get("result") or payload
-        if not isinstance(result, dict):
-            continue
-        if skip_superseded and result.get("__superseded"):
-            continue
-        # Extract rows — same logic as _mine_ask_data_rows
-        candidate = result.get("rows")
+        candidate = res.get("rows")
         if not isinstance(candidate, list):
-            nested = result.get("data") or result.get("result")
+            nested = res.get("data") or res.get("result")
             if isinstance(nested, dict):
                 candidate = nested.get("rows")
         if not isinstance(candidate, list):
@@ -1053,8 +1358,28 @@ async def ensure_artifact_for_doc_request(
     payload: dict[str, Any] | None = None
     title: Optional[str] = None
 
+    # Phase 1C: Enterprise pipeline short-circuit. When the
+    # `collect_enterprise_data` tool produced a full EnterpriseReport
+    # payload this turn, use IT as the artifact payload — the
+    # ``docx_export.render`` will detect ``enterprise_report_kind ==
+    # "executive"`` and delegate to ``render_enterprise_docx``,
+    # producing a 6-section executive DOCX (cover, exec summary with
+    # citations, KPI grid, breakdown, drivers, risks, actions, lineage
+    # appendix) instead of a generic ReportCard.
+    enterprise_payload = _mine_enterprise_payload(
+        tool_calls_for_frontend or [], skip_superseded=True,
+    )
+    if isinstance(enterprise_payload, dict) and enterprise_payload:
+        payload = dict(enterprise_payload)
+        title = payload.get("title") or None
+        logger.info(
+            "orchestrator: using enterprise pipeline payload (title=%.60s, "
+            "kind=%s)",
+            (title or ""), payload.get("enterprise_report_kind"),
+        )
+
     turn_rcp = (data_result or {}).get("report_card_payload")
-    if isinstance(turn_rcp, dict) and turn_rcp:
+    if isinstance(turn_rcp, dict) and turn_rcp and payload is None:
         # Reuse this turn's payload verbatim so the exported file mirrors
         # the in-chat report card (including an honest "no data" story).
         payload = dict(turn_rcp)
@@ -1064,76 +1389,125 @@ async def ensure_artifact_for_doc_request(
         rows = _mine_ask_data_rows(tool_calls_for_frontend or [], skip_superseded=True)
         answer = ((data_result or {}).get("answer") or "").strip()
         summary = answer or _prose_to_summary(assistant_content)
-        source_name = (data_result or {}).get("source_name") or "assistant-reply"
+        source_name = (data_result or {}).get("source_name") or ""
         sql = ((data_result or {}).get("sql") or "").strip()
+
+        # FIX 2026-08-24: follow-up export turns ("give me in docx")
+        # regularly run ZERO data queries — the model answers from
+        # conversation context because the data is already there.  Reuse
+        # the richest ask_data_agent result from earlier turns instead of
+        # shipping a "no rows" warning file.
+        if not rows:
+            _hist_result = _mine_historical_ask_data_result(
+                (context or {}).get("messages") or [],
+                skip_superseded=True,
+            )
+            if _hist_result:
+                _hrcp = _hist_result.get("report_card_payload")
+                if isinstance(_hrcp, dict) and _hrcp:
+                    # Reuse the earlier turn's synthesized payload verbatim so
+                    # the exported file mirrors the in-chat report card.
+                    payload = dict(_hrcp)
+                    title = payload.get("title") or None
+                    logger.info(
+                        "orchestrator: export reusing historical RCP "
+                        "(title=%.60s)", (title or ""),
+                    )
+                else:
+                    _h_rows = _hist_result.get("rows")
+                    if not isinstance(_h_rows, list):
+                        _nested = _hist_result.get("data") or _hist_result.get("result")
+                        if isinstance(_nested, dict):
+                            _h_rows = _nested.get("rows")
+                    if isinstance(_h_rows, list):
+                        rows = [r for r in _h_rows if isinstance(r, dict)][:_DASHBOARD_MAX_ROWS]
+                    answer = answer or ((_hist_result.get("answer") or "").strip())
+                    source_name = source_name or (_hist_result.get("source_name") or "")
+                    sql = sql or ((_hist_result.get("sql") or "").strip())
+                    if rows:
+                        logger.info(
+                            "orchestrator: export reusing historical rows "
+                            "(rows=%d, source=%s)", len(rows), source_name,
+                        )
+
+        # Apply the "assistant-reply" default only AFTER historical mining
+        # so that historical source_name/sql take precedence.
+        if not source_name:
+            source_name = "assistant-reply"
 
         # ── Data quality gate ────────────────────────────────────────────
         # Before building the artifact payload, validate that the data is
         # business-meaningful (not just internal IDs or empty).
-        _dq = _validate_artifact_data_quality(rows, user_message)
-        if not _dq["valid"]:
-            logger.warning(
-                "orchestrator: artifact data quality check failed: %s "
-                "(rows=%d, reason=%s)",
-                user_message[:80], len(rows), _dq["reason"],
-            )
-            # Return a data-quality-warning artifact instead of garbage
-            payload = {
-                "summary": (
-                    f"Data quality issue detected: {_dq['reason']}. "
-                    f"The query returned {len(rows)} rows but they contain "
-                    f"only internal ID columns (no business metrics). "
-                    f"Please re-run with a proper aggregation query."
-                ),
-                "source": source_name,
-                "user_signal": "export",
-                "methodology": (
-                    f"Data sourced from {source_name} (SQL: {sql[:80]}…) "
-                    f"returning {len(rows)} rows — DATA QUALITY WARNING: "
-                    f"{_dq['reason']}"
-                ),
-                "data_quality_warning": True,
-            }
-            # Don't add KPIs or charts for garbage data
-            if sql:
-                payload["sql"] = sql
-            if not title:
-                title = user_message or fallback_title
-        else:
-            # Fix 2b: methodology cites only the final non-superseded source
-            # (name + clipped SQL + row count), never a merged list that could
-            # include a superseded query's dead source.
-            methodology = (
-                f"Data sourced from {source_name}"
-                + (f" (SQL: {sql[:80]}\u2026)" if sql else "")
-                + f" returning {len(rows)} rows."
-            )
-            payload = {
-                "summary": summary,
-                "source": source_name,
-                "user_signal": "export",
-                "methodology": methodology,
-            }
-            if rows:
-                kpis = _rows_to_kpis(rows)
-                if kpis:
-                    payload["kpis"] = kpis
-                label_col, value_col = _pick_chart_columns(rows)
-                if label_col and value_col:
-                    payload["chart"] = {
-                        "type": "bar",
-                        "title": f"{value_col} by {label_col}",
-                        "x_key": label_col,
-                        "y_keys": [value_col],
-                        "data": rows[:50],
-                    }
-            if sql:
-                payload["sql"] = sql
+        # FIX 2026-08-24: skip the DQ gate when a historical RCP was reused —
+        # it was already validated when originally synthesized in the earlier
+        # turn.
+        if payload is None:
+            _dq = _validate_artifact_data_quality(rows, user_message)
+            if not _dq["valid"]:
+                logger.warning(
+                    "orchestrator: artifact data quality check failed: %s "
+                    "(rows=%d, reason=%s)",
+                    user_message[:80], len(rows), _dq["reason"],
+                )
+                # Return a data-quality-warning artifact instead of garbage
+                payload = {
+                    "summary": (
+                        f"Data quality issue detected: {_dq['reason']}. "
+                        f"The query returned {len(rows)} rows but they contain "
+                        f"only internal ID columns (no business metrics). "
+                        f"Please re-run with a proper aggregation query."
+                    ),
+                    "source": source_name,
+                    "user_signal": "export",
+                    "methodology": (
+                        f"Data sourced from {source_name} (SQL: {sql[:80]}…) "
+                        f"returning {len(rows)} rows — DATA QUALITY WARNING: "
+                        f"{_dq['reason']}"
+                    ),
+                    "data_quality_warning": True,
+                }
+                # Don't add KPIs or charts for garbage data
+                if sql:
+                    payload["sql"] = sql
+                if not title:
+                    title = user_message or fallback_title
+            else:
+                # Fix 2b: methodology cites only the final non-superseded source
+                # (name + clipped SQL + row count), never a merged list that could
+                # include a superseded query's dead source.
+                methodology = (
+                    f"Data sourced from {source_name}"
+                    + (f" (SQL: {sql[:80]}\u2026)" if sql else "")
+                    + f" returning {len(rows)} rows."
+                )
+                payload = {
+                    "summary": summary,
+                    "source": source_name,
+                    "user_signal": "export",
+                    "methodology": methodology,
+                }
+                if rows:
+                    kpis = _rows_to_kpis(rows)
+                    if kpis:
+                        payload["kpis"] = kpis
+                    label_col, value_col = _pick_chart_columns(rows)
+                    if label_col and value_col:
+                        payload["chart"] = {
+                            "type": "bar",
+                            "title": f"{value_col} by {label_col}",
+                            "x_key": label_col,
+                            "y_keys": [value_col],
+                            "data": rows[:50],
+                        }
+                if sql:
+                    payload["sql"] = sql
 
     if not title:
-        title = _title_from_user_request(user_message, fallback="")
-    if not title:
-        title = _title_from_prose(assistant_content, fallback=fallback_title)
+        title = _generate_meaningful_title(
+            user_message,
+            assistant_content=assistant_content,
+            fallback=fallback_title,
+        )
     payload["title"] = title
     if not payload.get("summary"):
         payload["summary"] = title

@@ -12,6 +12,44 @@ from typing import Optional
 from app.config import settings
 
 # ---------------------------------------------------------------------------
+# Report-metric extraction (2026-08-24)
+#
+# When a user asks for a report with N metrics (e.g. "sales report (volume,
+# revenue, margin, inventory)"), the agent must run at least one data query per
+# metric so the deliverable is comprehensive instead of a 1-row stub. These
+# helpers tell prompt assembly which metrics a user message requests.
+# ---------------------------------------------------------------------------
+
+_METRIC_KEYWORDS: dict[str, list[str]] = {
+    "volume": ["volume", "qty", "quantity", "shipped", "sold", "tons", "units"],
+    "revenue": ["revenue", "sales amount", "income", "turnover", "value"],
+    "margin": ["margin", "profit", "gross profit", "markup"],
+    "inventory": ["inventory", "stock", "on hand", "in stock", "warehouse qty"],
+}
+
+
+def extract_requested_metrics(user_message: str) -> list[str]:
+    """Return the business metrics a user asked for, in order of appearance.
+
+    Word-boundary matching with an optional plural suffix means "profit" and
+    "profits" both map to ``margin``, while "marginal" and "inventive" never
+    false-positive. Returns [] for empty / non-English / metric-free input.
+    """
+    if not user_message or not user_message.strip():
+        return []
+    lower = user_message.lower()
+    hits: list[tuple[int, str]] = []
+    for metric, keywords in _METRIC_KEYWORDS.items():
+        for kw in keywords:
+            m = re.search(rf"\b{re.escape(kw)}s?\b", lower)
+            if m:
+                hits.append((m.start(), metric))
+                break  # first keyword hit per metric is enough
+    hits.sort(key=lambda t: t[0])
+    return [metric for _, metric in hits]
+
+
+# ---------------------------------------------------------------------------
 # Hidden system skills — always-on for the Agent Builder, never registered as
 # user-selectable runtime skills. Read once at import time from
 # backend/system_skills/ so a missing file degrades gracefully to an empty
@@ -1264,17 +1302,20 @@ NO HALLUCINATION (STRICT — you MUST follow this)
 FILE-FORMAT INTENT (HARD RULE — when the user asks for a downloadable file)
 - If the user message mentions a file format keyword — `docx`, `pptx`, `xlsx`, `pdf`, `md` (or natural variants like "Word file", "PowerPoint", "Excel", "PDF", "markdown") — the user wants a downloadable file, NOT just an in-chat preview. A chart / ReportCard / DataTableCard is NEVER an acceptable substitute.
 - For such requests you MUST (in this exact order):
-  1. Call `ask_data_agent` first to fetch the real data rows from the connected knowledge base.
-  2. Then call `create_artifact` ONCE with the user-requested format and the fetched data:
+  1. Parse the user's request for EVERY business metric they mention (e.g. volume, revenue, margin, inventory, qty, profit, stock). If the user lists N metrics, you MUST run at least N `ask_data_agent` calls — ONE per metric — before assembling the file. Do NOT collapse a multi-metric request into a single aggregate query and stop: a "volume + revenue + margin + inventory" report needs four separate data pulls (plus a cross-metric join if useful). Only after all requested metrics have usable rows may you build the deliverable.
+  2. Call `ask_data_agent` first to fetch the real data rows from the connected knowledge base.
+  3. Then call `create_artifact` ONCE with the user-requested format and the fetched data:
      - `create_artifact(type="docx", title=<title>, payload={"sections": [...], "tables": [...], "charts": [...]})`
      - `create_artifact(type="pptx", title=<title>, payload={"slides": [...]})`
      - `create_artifact(type="pdf",  title=<title>, payload={...})`
      - `create_artifact(type="xlsx", title=<title>, payload={"sheets": [...]})`
      - The `type` parameter MUST exactly match the user-requested format. Do NOT substitute `html` / `html_report` / `chart` when the user asked for `docx` / `pptx` / `pdf`.
-  3. The platform will render the file, store it, and present an inline preview + download button in the chat. Do NOT narrate the generation — call the tool and let the platform show the result.
-  4. Do NOT stop at a chart-only response, a ReportCard, or a DataTableCard — the user asked for a FILE.
+  4. The platform will render the file, store it, and present an inline preview + download button in the chat. Do NOT narrate the generation — call the tool and let the platform show the result.
+  5. Do NOT stop at a chart-only response, a ReportCard, or a DataTableCard — the user asked for a FILE.
+- Multi-metric example: user asks "i want July 2026 sales report (volume, revenue, margin, inventory) in docx file". Run FOUR separate `ask_data_agent` calls — one for volume, one for revenue, one for margin, one for inventory — then call `create_artifact(type="docx", ...)` with all four result sets in the payload's sections/tables. The final file must show data for every metric the user named; never ship a file that silently drops revenue/margin/inventory.
 - If `create_artifact` returns an error, classify it: TRANSIENT → retry ONCE; STRUCTURAL → fix the payload and retry; `missing_config` / `missing_infra` → fall back to `run_sandbox_skill(format=<fmt>, data=<rows>, title=<title>, instructions=<user intent>)` to produce the file in the Docker sandbox.
-- If `ask_data_agent` returns no rows, ask ONE clarifying question with a `:::options` block before producing the file.
+- If `ask_data_agent` returns no rows for a metric, retry once with a broader filter (different table or wider date range) before giving up; if it still returns no rows, say so in the report instead of silently omitting the metric.
+- If ALL `ask_data_agent` calls return no rows, ask ONE clarifying question with a `:::options` block before producing the file.
 
 INTENT ROUTING
 1. Classify the request first (data lookup, web research, browser action, calculation, planning, chitchat).
@@ -1855,6 +1896,23 @@ def get_system_prompt(
         settings, "ENTITY_MASTER_FILTER_ENABLED", False
     ):
         prompt = prompt + _ENTITY_MASTER_FILTER_BLOCK
+
+    # Enterprise Business-Data Report Protocol — appended to DB-bound
+    # agents (Ecisco BI, user agents with bound KBs) when the
+    # ENTERPRISE_PIPELINE_ENABLED flag is on. Routes business-data /
+    # performance-metric / operational-analysis / executive-insight
+    # requests through the `collect_enterprise_data` tool, which
+    # runs the full profile → multi-facet execute → synthesize → verify
+    # pipeline. The protocol block is authored in
+    # `enterprise_orchestrator.prompts.ENTERPRISE_BUSINESS_DATA_PROTOCOL`
+    # (single source of truth).
+    if _agent_is_db_bound(agent_name, agent_app) and getattr(
+        settings, "ENTERPRISE_PIPELINE_ENABLED", False
+    ):
+        from app.services.enterprise_orchestrator.prompts import (
+            ENTERPRISE_BUSINESS_DATA_PROTOCOL,
+        )
+        prompt = prompt + ENTERPRISE_BUSINESS_DATA_PROTOCOL
 
     # 4. If the user message is time-sensitive, contains a URL, or asks for
     #    a file, append the matching [GROUNDING REQUIRED] / [FILE

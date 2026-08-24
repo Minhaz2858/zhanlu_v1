@@ -46,6 +46,7 @@ from app.services.tool_handlers import delegate_tool  # noqa: F401
 from app.services.tool_handlers import db_tools  # noqa: F401
 from app.services.tool_handlers import delegation_tools  # noqa: F401
 from app.services.tool_handlers import edia_delegation_tools  # noqa: F401
+from app.services.tool_handlers import enterprise_data_tools  # noqa: F401  # Phase 1C: collect_enterprise_data
 from app.services.tool_handlers import sandbox_tool  # noqa: F401
 from app.services.tool_handlers import sandbox_code  # noqa: F401
 
