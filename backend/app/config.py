@@ -514,6 +514,19 @@ class Settings(BaseSettings):
     PPTX_DATA_TABLE_HIGHLIGHT_TOP: int = 3
     PPTX_VISUAL_VERIFY_ENABLED: bool = False
 
+    # ── HTML design renderer (Phase 4) ────────────────────────────────
+    # New render path for design-heavy decks. Renders the deck as HTML
+    # via the theme catalog, then converts to PPTX (v1.0: image fill via
+    # LibreOffice + pdftoppm; v1.1: editable text). When OFF, all decks
+    # fall through to the existing structured python-pptx renderer.
+    HTML_DESIGN_RENDERER_ENABLED: bool = False
+    # Editable text pipeline (v1.1). Until this lands, only image_fill
+    # is available regardless of HTML_DESIGN_RENDERER_ENABLED.
+    HTML_DESIGN_EDITABLE_ENABLED: bool = False
+    # Restrict the theme catalog. Empty list = all 12 presets available.
+    # Populated by deployment, e.g. ["bold_signal", "electric_studio"].
+    HTML_DESIGN_THEMES: list[str] = []
+
     # ── DELIVERABLE GUARANTEE (2026-08-18 incident hardening) ────────────
     # Fix 1a: a mid-turn report card (html_report artifact) must NOT satisfy
     # an explicit pptx/docx/xlsx/dashboard request. When enabled, the
@@ -602,6 +615,29 @@ class Settings(BaseSettings):
     # already nudged once, skip further nudges and finalize. Set to 0 to
     # disable (legacy behavior).
     SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE: int = 200
+
+    # ── Multi-Domain Enrichment (2026-08-25) ──────────────────────────────
+    # Default per-turn cap for ask_data_agent calls. The dynamic estimator
+    # (_estimate_ask_data_agent_cap) raises the cap above this for queries
+    # with explicit metric lists, but for plain queries ("give me last
+    # month sales report") the old floor of 2 was too low. Bumped to 4 so
+    # the LLM has room to query across ERP / Inventory / Market / CRM /
+    # Documents domains and produce a comprehensive answer.
+    ASK_DATA_AGENT_DEFAULT_CAP: int = 4
+
+    # When True, after the first ask_data_agent result lands in the loop,
+    # inject a reflection prompt nudging the LLM to consider whether
+    # additional domains should be queried before finalizing. The LLM
+    # decides autonomously what (if anything) to query — this is guidance,
+    # not a hard rule. Disabled in tests / evaluation runs.
+    ASK_DATA_AGENT_REFLECT_AFTER_FIRST: bool = True
+
+    # When True, append the data-domain coverage hint block to all
+    # db-bound agent system prompts. Tells the LLM which business
+    # domains (ERP, Inventory, Market, CRM, Documents) are typically
+    # available so it can reason about cross-domain enrichment. Generic
+    # — does not hardcode table names; agents discover via describe_schema.
+    DATA_DOMAIN_HINTS_ENABLED: bool = True
 
     # ── qwen3.6-27b Local Fast Mode (2026-08-25) ──────────────────────
     # Per-model overrides that fire ONLY when the user's selected model is
@@ -966,6 +1002,20 @@ class Settings(BaseSettings):
     # SCHEMA_GRAPH_TOKEN_BUDGET: approximate token budget for the rendered
     #   context block (~4 chars/token).
     SCHEMA_GRAPH_TOKEN_BUDGET: int = 1200
+
+    # ── Schema Discovery (2026-08-25) ────────────────────────────────────
+    # When describe_schema runs, include this many sample rows per table
+    # so the LLM can classify tables by VALUE content (works regardless
+    # of arbitrary table/column naming). Set to 0 to disable.
+    # Defaults to 2 — enough to see the data shape, small enough not to
+    # bloat the schema payload.
+    SCHEMA_DESCRIBE_SAMPLE_ROWS: int = 2
+
+    # When True, the data-domain hint block tells the LLM to classify
+    # tables by sample-row values (primary), with column patterns as a
+    # last-resort hint. Set to False to revert to name-only matching
+    # (legacy behavior — fragile for non-English / abbreviated schemas).
+    SCHEMA_CLASSIFY_BY_SAMPLE: bool = True
 
     # ── Entity Master Filter (universal master-first query pattern) ─────
     # ENTITY_MASTER_FILTER_ENABLED: master gate. When True, ALL database-bound
