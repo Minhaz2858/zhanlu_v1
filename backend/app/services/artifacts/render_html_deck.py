@@ -72,7 +72,11 @@ def render_html_deck(plan: DeckPlan, ctx: ExportContext) -> bytes:
     # 3. Convert to PPTX (image fill)
     try:
         return render_image_fill(stage_html)
-    except PptxRenderError as exc:
+    except (PptxRenderError, Exception) as exc:
+        if isinstance(exc, PptxRenderError):
+            raise RenderError(f"image_fill pipeline failed: {exc}") from exc
+        # Generic exceptions (e.g. browser missing) also get wrapped
+        # so the caller always sees a ``RenderError`` it can catch.
         raise RenderError(f"image_fill pipeline failed: {exc}") from exc
 
 
