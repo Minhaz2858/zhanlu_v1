@@ -10257,6 +10257,7 @@ async def add_message_stream(
             raw_tool_calls: list = []
             final_reasoning = ""
             content_streamed = False  # tracks whether deltas were sent live
+            _plan_step_seen: set = set()  # 2026-08-25: dedup plan_step_added events
 
             try:
                 # P1.3: Pre-API deterministic tool result pruning
@@ -10302,6 +10303,17 @@ async def add_message_stream(
                                 if ev_type == "delta":
                                     assistant_content += ev_data
                                     content_streamed = True
+                                    # 2026-08-25: live-streaming spec — parse the
+                                    # streaming text for plan-step markers and emit
+                                    # `plan_step_added` for each newly-detected step.
+                                    try:
+                                        from app.services.agent_loop.streaming_helpers import parse_plan_steps_from_text
+                                        for _step in parse_plan_steps_from_text(assistant_content):
+                                            if _step["step_index"] not in _plan_step_seen:
+                                                _plan_step_seen.add(_step["step_index"])
+                                                yield f'data: {json.dumps({"type": "plan_step_added", "step_index": _step["step_index"], "title": _step["title"]})}\n\n'
+                                    except Exception as _plan_err:
+                                        logger.debug("plan step parse failed (non-fatal): %s", _plan_err)
                                     if _nudge_replacement_pending:
                                         # D1/D2: post-nudge re-synthesis replaces
                                         # the whole bubble instead of appending, so
