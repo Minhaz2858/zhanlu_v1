@@ -34,7 +34,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Sparkles, Loader2, Check, ShieldCheck, AlertTriangle, XCircle,
   ListChecks, ChevronDown, ChevronUp, Brain, Timer, Rows3, FileStack,
-  Plug, PlugZap, Database, ClipboardList,
+  Plug, PlugZap, Database, ClipboardList, Search,
 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { pickEvents } from './LiveActivityStream.legacyAdapter';
@@ -573,6 +573,44 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
                   {reasoning}
                   {isStreaming && <span className="animate-pulse text-purple-400">▍</span>}
                 </pre>
+              )}
+            </div>
+          )}
+
+          {/* Live search section — gray, collapsible, shows search queries.
+              2026-08-25: live-streaming spec — types in the query char-by-char
+              via the typing effect from the backend. */}
+          {streamingSearchQueries && Object.keys(streamingSearchQueries).length > 0 && (
+            <div className="border-t border-border/60 bg-secondary/10 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setSearchOpen((v) => !v)}
+                data-testid="live-activity-search-toggle"
+                className="flex w-full cursor-pointer items-center gap-1.5 text-xs text-muted-foreground transition-opacity hover:opacity-100"
+              >
+                <Search className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <span className="font-mono text-[10px] uppercase tracking-wide opacity-70">
+                  {isEn ? 'Search' : le.search || '搜索'}
+                </span>
+                <span className="text-[10px] opacity-50">
+                  · {Object.keys(streamingSearchQueries).length} {isEn ? 'active' : '进行中'}
+                </span>
+                <ChevronDown
+                  className={`ml-auto h-3 w-3 transition-transform ${searchOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {searchOpen && (
+                <div className="mt-1 space-y-0.5">
+                  {Object.entries(streamingSearchQueries).map(([toolCallId, partial]) => (
+                    <div
+                      key={toolCallId}
+                      data-testid="live-activity-search-row"
+                      className="ml-2 text-xs text-muted-foreground font-mono border-l-2 border-gray-500/30 pl-2 truncate"
+                    >
+                      🔍 {partial}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}
