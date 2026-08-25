@@ -602,6 +602,7 @@ async def _force_llm_synthesis(
     synth_call_fn,
     conversation_history: list[dict],
     max_retries: int = 2,
+    endpoint=None,
 ) -> str:
     """Force the LLM to write a comprehensive analysis using the data rows.
 
@@ -622,7 +623,17 @@ async def _force_llm_synthesis(
     Returns:
         The LLM's analysis text, or "" if all attempts fail
     """
+    import time as _time
+    _synth_t0 = _time.monotonic()
+    _is_qwen = _is_qwen_local_model(endpoint) if endpoint is not None else False
+    logger.info(
+        "DIAG _force_llm_synthesis entry: rows=%d, endpoint=%s, is_qwen=%s",
+        len(rows) if rows else 0,
+        getattr(endpoint, "model_id", "?") if endpoint else "None",
+        _is_qwen,
+    )
     if not rows:
+        logger.warning("DIAG _force_llm_synthesis: rows empty, returning '' immediately")
         return ""
 
     col_summary = _build_column_summary(rows)
@@ -642,7 +653,28 @@ async def _force_llm_synthesis(
         preagg_block = ""
 
     for attempt in range(max_retries):
-        if attempt == 0:
+        if _is_qwen:
+            # qwen3.6-27b: use the CEO-grade 5-section prompt
+            # (re-applied 2026-08-25 — the file was reverted by an
+            # external process; this restores the Session 16 fix)
+            prompt = _build_qwen3_synthesis_prompt(
+                user_question=user_msg,
+                data_rows=rows,
+                columns=_columns,
+                table_name="query_result",
+            )
+            prompt += (
+                f"\n\nADDITIONAL CONTEXT (use these to compute specific numbers):\n"
+                f"{preagg_block}\n\n"
+                f"Column value ranges:\n{col_summary}\n\n"
+                f"Data sample (first 8 rows):\n{rows_sample}\n\n"
+                f"REMINDER: You MUST produce ALL 5 sections in order: "
+                f"Executive Summary, Key Metrics, Detailed Breakdown, "
+                f"Risks & Opportunities, Recommended Actions. Do NOT stop "
+                f"after the Executive Summary — the user expects a complete "
+                f"report with all sections filled in."
+            )
+        elif attempt == 0:
             prompt = (
                 "You are a data analyst. The user asked: "
                 f"\"{user_msg[:200]}\"\n\n"
@@ -684,7 +716,16 @@ async def _force_llm_synthesis(
             )
 
         try:
-            result = await synth_call_fn(prompt, conversation_history)
+            # Wrap synthesis LLM call in a timeout so a hung vLLM
+            # doesn't make the user wait forever. qwen3.6-27b needs
+            # a longer cap (60s) because the CEO-grade prompt is larger
+            # and the model can take 30-50s to produce a full report.
+            # Re-applied 2026-08-25 — the file was reverted.
+            _SYNTH_TIMEOUT_S = 60.0 if _is_qwen else 12.0
+            result = await asyncio.wait_for(
+                synth_call_fn(prompt, conversation_history),
+                timeout=_SYNTH_TIMEOUT_S,
+            )
             text = (result.get("content", "") or "").strip()
             # Check it's a real answer, not another placeholder
             _is_bad = (
@@ -697,6 +738,12 @@ async def _force_llm_synthesis(
                 or _BOUNCE_BACK_PATTERN_RE.search(text)
             )
             if not _is_bad:
+                _elapsed = _time.monotonic() - _synth_t0
+                logger.info(
+                    "DIAG _force_llm_synthesis SUCCESS: attempt %d returned "
+                    "%d chars in %.1fs (rows=%d)",
+                    attempt + 1, len(text), _elapsed, len(rows),
+                )
                 return text
             logger.info(
                 "force_llm_synthesis attempt %d produced bad answer "
@@ -705,11 +752,23 @@ async def _force_llm_synthesis(
                 bool(_APOLOGY_PATTERN_RE.search(text)),
             )
         except Exception as e:
+            _elapsed = _time.monotonic() - _synth_t0
+            logger.warning(
+                "DIAG _force_llm_synthesis attempt %d EXCEPTION after %.1fs "
+                "(rows=%d): %s — caller should use deterministic fallback",
+                attempt + 1, _elapsed, len(rows), e,
+            )
             logger.warning(
                 "force_llm_synthesis attempt %d failed: %s",
                 attempt + 1, e,
             )
 
+    _elapsed = _time.monotonic() - _synth_t0
+    logger.warning(
+        "DIAG _force_llm_synthesis: ALL %d ATTEMPTS FAILED, total elapsed %.1fs, "
+        "rows=%d, returning '' (caller will use deterministic fallback)",
+        max_retries, _elapsed, len(rows),
+    )
     return ""  # all attempts failed
 
 
@@ -9827,7 +9886,28 @@ async def add_message_stream(
         # 2026-08-25: per-model override — qwen3.6-27b uses 10 iterations (not 40)
         # to keep turn time under 60s. DeepSeek-chat path unchanged.
         _v3_max_iterations = _effective_max_tool_iterations(effective_llm)
+        # 2026-08-25: hard wall-clock cap on the orchestrator loop.
+        # 60s keeps the user's HTTP connection alive (typical proxy/browser
+        # idle cap is 240s, but observed 228s "connection interrupted"
+        # before any message was saved). We log the break so the
+        # post-loop synthesis can still produce a response from whatever
+        # rows were collected so far.
+        import time as _time_outer
+        _loop_t0 = _time_outer.monotonic()
+        _LOOP_WALL_CLOCK_CAP_S = 60.0
         for iteration in range(_v3_max_iterations):
+            # 2026-08-25: wall-clock cap. If we've been looping >60s, break
+            # and let the post-loop synthesizer produce a final answer from
+            # whatever we have. Prevents the "228s connection interrupted"
+            # failure mode.
+            _now = _time_outer.monotonic()
+            if _now - _loop_t0 > _LOOP_WALL_CLOCK_CAP_S:
+                logger.warning(
+                    "v3 stream: wall-clock cap %.0fs hit on conv %s (iter=%d) — "
+                    "breaking loop to let post-loop synthesis save the response",
+                    _LOOP_WALL_CLOCK_CAP_S, conversation_id, iteration,
+                )
+                break
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
                 logger.info(
@@ -10233,6 +10313,9 @@ async def add_message_stream(
                                             yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
                                 elif ev_type == "reasoning":
                                     final_reasoning += ev_data
+                                    # 2026-08-25: live-streaming spec — emit per-token reasoning to client
+                                    # so the UI can show character-by-character "thinking" (Kimi/Claude-style).
+                                    yield f'data: {json.dumps({"type": "reasoning_delta", "content": ev_data})}\n\n'
                                 elif ev_type == "tool_calls":
                                     raw_tool_calls = ev_data or []
                                     # qwen3 content-based tool_call extraction:
@@ -13723,6 +13806,28 @@ async def add_message_stream(
         #      comprehensive-table fallback, NOT a generic apology)
         #   3. Only if BOTH are empty/missing → `_choose_fallback`
         #      (which now will at least mention the artifact).
+        # DIAGNOSTIC 2026-08-25: capture state at empty-bubble entry
+        try:
+            _lr_count = len(_last_rows) if "_last_rows" in locals() and _last_rows else 0
+            _tc_count = len(tool_calls_for_frontend)
+            _ac_len = len(accumulated_content) if accumulated_content else 0
+            _ds_len = (
+                len(_deferred_synth.assistant_content)
+                if ("_deferred_synth" in locals() and _deferred_synth is not None
+                    and getattr(_deferred_synth, "assistant_content", None))
+                else 0
+            )
+            _ond = _orch_no_data[0] if "_orch_no_data" in locals() else None
+            _anywr = _any_ask_data_with_rows if "_any_ask_data_with_rows" in locals() else None
+            logger.info(
+                "DIAG v3 empty-bubble entry: conv=%s, last_rows=%d, "
+                "tool_calls=%d, accumulated=%d, deferred_synth=%d, "
+                "orch_no_data=%s, any_ask_data_with_rows=%s",
+                conversation_id, _lr_count, _tc_count, _ac_len, _ds_len,
+                _ond, _anywr,
+            )
+        except Exception as _diag_err:
+            logger.warning("DIAG v3 empty-bubble entry failed: %s", _diag_err)
         if not (accumulated_content or "").strip():
             _synth_for_bubble = ""
             try:
