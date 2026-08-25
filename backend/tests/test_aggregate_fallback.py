@@ -41,9 +41,9 @@ def test_aggregate_fallback_returns_narrative_for_report_request():
 
 
 def test_aggregate_fallback_keeps_placeholder_for_non_report_request():
-    """When user did NOT ask for a report, keep the existing
-    'Analyzing N rows…' placeholder behavior (don't change UX
-    for non-report turns)."""
+    """When user did NOT ask for a report, the fallback now STILL
+    produces a narrative (round 5: user wants extensive answers for
+    ALL data queries, not just report-style ones)."""
     from app.routers import agents as a
     tool_calls = [{
         "name": "ask_data_agent",
@@ -55,8 +55,11 @@ def test_aggregate_fallback_keeps_placeholder_for_non_report_request():
     }]
     user_msg = "how many customers do we have"
     out = a._data_rows_fallback(tool_calls, user_content=user_msg)
-    # Non-report request → placeholder OK
-    assert out.startswith("Analyzing")
+    # 2026-08-26: was a placeholder for non-report requests; now
+    # ALL data queries get the aggregate narrative
+    assert not out.startswith("Analyzing"), (
+        f"got placeholder for non-report request (should be narrative now): {out!r}"
+    )
 
 
 def test_aggregate_fallback_handles_empty_user_msg():

@@ -767,13 +767,24 @@ def _data_rows_fallback(
             # by the platform, so the user sees BOTH the data table and
             # the narrative. This guarantees the user always gets a
             # useful written answer for report-style requests even when
-            # the LLM synthesis call times out or returns empty.
+            # 2026-08-26: the LLM synthesis call times out or returns
+            # empty, the platform's empty-bubble guarantee fires and
+            # displays the fallback as the user's answer. We used to
+            # only run the aggregate fallback for explicit report-style
+            # requests (report/review/performance/etc.), but the user
+            # wants extensive analysis for ALL data queries — including
+            # "snapshot", "summary", "stats", plain data asks, etc.
+            # So we now ALWAYS run the aggregate fallback when there are
+            # actual data rows. The user gets a real written narrative
+            # around the data card, never just "Analyzing N rows…".
             try:
-                from app.services.goal_contract import is_report_request
-                if is_report_request(user_content):
-                    return _build_aggregate_fallback(dict_rows, src, user_content or "")
-            except Exception:
-                pass
+                return _build_aggregate_fallback(dict_rows, src, user_content or "")
+            except Exception as _fallback_exc:
+                logger.warning(
+                    "_data_rows_fallback: _build_aggregate_fallback "
+                    "failed (rows=%d, src=%s): %s",
+                    len(dict_rows), src, _fallback_exc,
+                )
             # FIX 2026-08-22: return a neutral placeholder instead of a
             # markdown table so the user doesn't see raw data mid-stream.
             # The synthesis step replaces this with the final narrative
