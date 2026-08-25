@@ -22,7 +22,7 @@ from .cache import ProjectKnowledgeCache
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api/project-knowledge", tags=["project-knowledge"])
+router = APIRouter(prefix="/project-knowledge", tags=["project-knowledge"])
 
 
 def _db():

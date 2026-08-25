@@ -115,6 +115,53 @@ def add_data_binding(
     db.add(binding)
     db.commit()
     db.refresh(binding)
+
+    # ── 2026-08-25: trigger project_knowledge ingestion for ecisco_bi_assistant ─
+    # When a new data binding is added to the Ecisco BI AgentApp, schedule a
+    # background ingestion into the project knowledge cache. Idempotent.
+    try:
+        from app.config import settings
+        from app.models.agent_app import AgentApp
+        from app.models.knowledge_base import KnowledgeBase
+        if getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
+            ecisco_names = getattr(settings, "ECISCO_BI_AGENT_NAMES", ["ecisco_bi_assistant"]) or []
+            agent_row = db.query(AgentApp).filter(
+                AgentApp.id == agent_id, AgentApp.is_deleted == False,  # noqa: E712
+            ).first()
+            if agent_row and agent_row.name in ecisco_names:
+                # The datasource may be a KnowledgeBase or a regular datasource.
+                # The cache's ingest step uses catalog_indexer.index_kb_catalog which
+                # works on KB rows; for non-KB bindings we just skip the trigger.
+                kb = db.query(KnowledgeBase).filter(
+                    KnowledgeBase.id == req.datasource_id,
+                    KnowledgeBase.is_deleted == False,  # noqa: E712
+                ).first()
+                if kb is not None and getattr(agent_row, "project_id", None):
+                    import asyncio
+                    from app.services.project_knowledge.ingestion import ingest_for_project
+                    project_id = agent_row.project_id
+                    kb_id = kb.id
+                    async def _bg():
+                        from app.database import SessionLocal
+                        bg_db = SessionLocal()
+                        try:
+                            await ingest_for_project(project_id, kb_id, bg_db)
+                        except Exception as _e:
+                            logger.warning("project_knowledge bg ingest failed: %s", _e)
+                        finally:
+                            try:
+                                bg_db.close()
+                            except Exception:
+                                pass
+                    try:
+                        loop = asyncio.get_event_loop()
+                        loop.create_task(_bg())
+                    except RuntimeError:
+                        # No running loop (e.g. sync test) -- run inline.
+                        asyncio.run(_bg())
+    except Exception as _trig_err:
+        logger.warning("project_knowledge trigger skipped (non-fatal): %s", _trig_err)
+
     return binding.to_dict()
 
 
