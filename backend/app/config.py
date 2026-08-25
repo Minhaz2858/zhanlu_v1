@@ -849,6 +849,62 @@ class Settings(BaseSettings):
     ECISCO_BI_KG_LAYER_ENTITIES_ENABLED: bool = True   # Layer 2 (entity lookup) on/off
     ECISCO_BI_KG_LAYER_METRICS_ENABLED: bool = True    # Layer 3 (metric lookup) on/off
 
+    # ── Ecisco BI Schema Linker Allowlist (2026-08-25) ─────────────
+    # When the calling agent is in ECISCO_BI_AGENT_NAMES, restrict the
+    # schema-linker top-K to a curated list of business views/tables.
+    # This dramatically reduces wrong-table picks (e.g. AI tables like
+    # decision_log / intelligence_events shadowing real sales data) and
+    # cuts search time by ~3-5x.
+    #
+    # Per the warehouse doc (docs/aipdp_data_warehouse_prod.md):
+    #   "Prefer business VIEWS over raw erp_t_* tables -- views already
+    #    resolve material names, customer names, and org names."
+    ECISCO_BI_SCHEMA_LINKER_ALLOWLIST_ENABLED: bool = False
+    ECISCO_BI_SCHEMA_LINKER_TABLE_ALLOWLIST: list[str] = [
+        # ── SALES (the primary domain) ─────────────────────────────────
+        # Business views -- contain CUST_NAME, material_name, FAMOUNT etc.
+        # These answer >80% of "sales/revenue/customer/top-N" questions.
+        "erp_v_sale_orderentry",   # 14,359 rows, primary sales view (CUST_NAME, FAMOUNT)
+        "erp_v_sale_huizhou",      # 14,031 rows, sales by Huizhou plant
+        "erp_v_sale_guangdong",    # 299 rows, sales by Guangdong plant
+        "erp_product_sales_details",  # 1,387 rows, enriched contract+shipment+payment
+        # ── CONTRACTS ────────────────────────────────────────────────
+        "erp_v_contract",          # 98K rows, contract lines
+        "erp_v_contract_execution",  # contract+delivery view
+        "erp_t_crm_contract",      # 11,719 rows, contract headers
+        "erp_t_crm_contractentry", # 13,797 rows, contract lines
+        # ── INVENTORY / STOCK ────────────────────────────────────────
+        "erp_v_stk_inventory",     # 154 rows, current stock snapshot
+        "erp_t_stk_inventory",     # 47,969 rows, historical stock
+        "erp_v_raw_material_receiving",  # 400 rows, monthly raw material
+        "erp_v_product_grade",     # 1,075 rows, quality grades
+        # ── PRICING (market + own) ───────────────────────────────────
+        "v_lz_data",               # 11,117 rows, unified Longzhong market
+        "lz_v_裂解c5_data",         # market data
+        "lz_v_异戊二烯_data",
+        "lz_v_双环戊二烯_data",
+        "lz_v_苯乙烯_data",
+        "lz_v_工业用裂解碳九_data",  # C9 market
+        "lz_v_间戊二烯_data",
+        "actual_price",            # company's own quotes
+        "v_actual_price",
+        "forecast_price",          # AI forecast prices
+        "v_forecast_price",
+        "partner_forecast_price",
+        "v_partner_forecast_price",
+        "intelligence_events",     # market intelligence (curated AI domain)
+        # ── MASTER DATA ──────────────────────────────────────────────
+        "erp_t_bd_customer",       # 745 customer master (PK=FCUSTID)
+        "material",                # 25,707 material master
+        "_ref_material_mapping",   # 26,538 FMATERIALID -> name bridge
+        "sale_erp_v_戊烷发泡剂_data",  # per-product sales views
+        "sale_erp_v_碳五石油树脂_data",
+        "sale_erp_v_双环戊二烯_data",
+        "sale_erp_v_异戊二烯_data",
+        "sale_erp_v_间戊二烯_data",
+        "sale_erp_v_工业用裂解碳九_data",
+    ]
+
     # ── Supply Chain Snapshot (per-product ERP panel under RegionalTable) ──
     SUPPLY_CHAIN_SNAPSHOT_ENABLED: bool = False      # Gate for GET /market-dashboard/supply-chain/{product_id}
 

@@ -23,6 +23,52 @@ from app.models.knowledge_catalog import KBTableMeta, KBTableRelation
 
 logger = logging.getLogger(__name__)
 
+
+# ── Ecisco BI schema-linker allowlist (2026-08-25) ─────────────────
+# When the calling agent is in ECISCO_BI_AGENT_NAMES and
+# ECISCO_BI_SCHEMA_LINKER_ALLOWLIST_ENABLED is True, restrict retrieval
+# to a curated 30+ table list (business views + price views + masters).
+# This avoids wrong-table picks like intelligence_events or decision_log
+# shadowing real sales data, and cuts search time.
+def _resolve_table_allowlist_for_kb(db: Session, kb_ids: list[str]) -> list[str] | None:
+    if not getattr(settings, "ECISCO_BI_SCHEMA_LINKER_ALLOWLIST_ENABLED", False):
+        return None
+    if not kb_ids:
+        return None
+    try:
+        from app.models.agent_app import AgentApp
+        ecisco_names = (
+            getattr(settings, "ECISCO_BI_AGENT_NAMES", ["ecisco_bi_assistant"]) or []
+        )
+        if not ecisco_names:
+            return None
+        target_kb_ids = {k for k in kb_ids if k}
+        if not target_kb_ids:
+            return None
+        apps = (
+            db.query(AgentApp)
+            .filter(
+                AgentApp.name.in_(ecisco_names),
+                AgentApp.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        for app in apps:
+            bound = set(app.knowledge_bases or [])
+            if bound & target_kb_ids:
+                allowlist = getattr(
+                    settings, "ECISCO_BI_SCHEMA_LINKER_TABLE_ALLOWLIST", None,
+                )
+                if allowlist:
+                    logger.info(
+                        "schema_linker: allowlist ENABLED for project %s (agent=%s, %d tables)",
+                        app.project_id, app.name, len(allowlist),
+                    )
+                    return list(allowlist)
+    except Exception as e:
+        logger.debug("schema_linker: allowlist resolve failed (non-fatal): %s", e)
+    return None
+
 DEFAULT_TOP_K = 8       # tables returned to the caller
 DEFAULT_HOPS = 2        # max join-path depth
 DEFAULT_TOKEN_BUDGET = 800
@@ -55,8 +101,12 @@ async def link_schema(
 
     # ── 1. RRF-based table retrieval per KB ──
     retrieved: list[dict] = []
+    table_allowlist = _resolve_table_allowlist_for_kb(db, kb_ids)
     for kb_id in kb_ids:
-        hits = _retrieve_from_catalog(question, kb_id, top_k=top_k)
+        hits = _retrieve_from_catalog(
+            question, kb_id, top_k=top_k,
+            table_allowlist=table_allowlist,
+        )
         if hits is not None:
             retrieved.extend(hits)
 
@@ -162,14 +212,23 @@ def _apply_entity_boost(
 
 
 def _retrieve_from_catalog(
-    question: str, kb_id: str, top_k: int
+    question: str, kb_id: str, top_k: int,
+    table_allowlist: list[str] | None = None,
 ) -> list[dict] | None:
-    """Query Chroma catalog_{kb_id} collection, return table-level hits or None."""
+    """Query Chroma catalog_{kb_id} collection, return table-level hits or None.
+
+    When ``table_allowlist`` is provided, post-filter hits so only docs whose
+    ``table_name`` metadata is in the allowlist survive.  This is the
+    Ecisco-BI narrow-search optimization.
+    """
     from app.services.document_ingestion.store import _get_client
     from app.services.rag.hybrid_retrieval import hybrid_query_collection
 
     client = _get_client()
     collection_name = f"catalog_{kb_id}"
+    allowlist_set = (
+        {t.lower() for t in table_allowlist} if table_allowlist else None
+    )
     try:
         coll = client.get_collection(collection_name)
     except Exception:
@@ -199,6 +258,15 @@ def _retrieve_from_catalog(
         mid = m.get("table_meta_id", "")
         if not mid:
             continue
+
+        # ── Allowlist post-filter (Ecisco BI) ──
+        # If a table_name is in metadata but NOT in the allowlist, drop
+        # the hit.  This prevents AI-domain tables (intelligence_events,
+        # decision_log) from shadowing real sales tables.
+        if allowlist_set:
+            tname = (m.get("table_name") or "").lower()
+            if tname and tname not in allowlist_set:
+                continue
 
         if kind == "table":
             entry = table_scores.get(mid)
