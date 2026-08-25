@@ -615,8 +615,8 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
                   {isEn ? 'Search' : le.search || '搜索'}
                 </span>
                 <span className="text-[10px] opacity-50">
-                  · {Object.keys(streamingSearchQueries).length > 0
-                    ? `${Object.keys(streamingSearchQueries).length} ${isEn ? 'active' : '进行中'}`
+                  · {Object.keys(streamingSearchQueries || {}).length > 0
+                    ? `${Object.keys(streamingSearchQueries || {}).length} ${isEn ? 'active' : '进行中'}`
                     : (isEn ? 'idle' : '空闲')}
                 </span>
                 <ChevronDown
@@ -625,7 +625,7 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
               </button>
               {searchOpen && (
                 <div className="mt-1 space-y-0.5">
-                  {Object.keys(streamingSearchQueries).length > 0 ? (
+                  {Object.keys(streamingSearchQueries || {}).length > 0 ? (
                     Object.entries(streamingSearchQueries).map(([toolCallId, partial]) => (
                       <div
                         key={toolCallId}
@@ -712,8 +712,8 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
                   {isEn ? 'Results' : le.results || '结果'}
                 </span>
                 <span className="text-[10px] opacity-50">
-                  · {Object.keys(streamingDataPreviews).length > 0
-                    ? `${Object.values(streamingDataPreviews).reduce((sum, p) => sum + (p.rows_so_far || 0), 0)} ${isEn ? 'rows' : '行'}`
+                  · {Object.keys(streamingDataPreviews || {}).length > 0
+                    ? `${Object.values(streamingDataPreviews || {}).reduce((sum, p) => sum + (p.rows_so_far || 0), 0)} ${isEn ? 'rows' : '行'}`
                     : (isEn ? 'idle' : '空闲')}
                 </span>
                 <ChevronDown
@@ -722,7 +722,7 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
               </button>
               {dataPreviewOpen && (
                 <div className="mt-1 space-y-1.5">
-                  {Object.keys(streamingDataPreviews).length > 0 ? (
+                  {Object.keys(streamingDataPreviews || {}).length > 0 ? (
                     Object.entries(streamingDataPreviews).map(([toolCallId, preview]) => {
                       const colCount = Math.min(5, (preview.columns || []).length);
                       return (
