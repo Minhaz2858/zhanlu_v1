@@ -467,13 +467,22 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   }, [isStreaming, userToggled]);
 
   // Auto-scroll: follow new events unless the user has scrolled up.
+  // 2026-08-25: live-streaming spec — also follow streaming content updates
+  // (reasoning text, plan steps, search queries, data previews) so the user
+  // sees the latest progress as it streams in.
   const scrollRef = useRef(null);
   const nearBottom = useRef(true);
   useEffect(() => {
     if (nearBottom.current && scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [mergedIndented.length]);
+  }, [
+    mergedIndented.length,
+    typeof reasoning === 'string' ? reasoning.length : 0,
+    streamingSearchQueries ? Object.keys(streamingSearchQueries).length : 0,
+    Array.isArray(streamingPlanSteps) ? streamingPlanSteps.length : 0,
+    streamingDataPreviews ? Object.keys(streamingDataPreviews).length : 0,
+  ]);
 
   if (!hasEvents) return null;
 
