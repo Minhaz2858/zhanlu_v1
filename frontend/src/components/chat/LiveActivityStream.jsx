@@ -399,7 +399,7 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning }) {
 
 // ── Main component ─────────────────────────────────────────────────────
 
-export default function LiveActivityStream({ events, legacySteps, phase, reasoning, isStreaming }) {
+export default function LiveActivityStream({ events, legacySteps, phase, reasoning, isStreaming, streamingSearchQueries, streamingPlanSteps, streamingDataPreviews }) {
   const { lang, t } = useLanguage();
   const isEn = lang === 'en';
   const le = t?.chat?.liveEvent || {};
@@ -447,6 +447,11 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   const [expanded, setExpanded] = useState(() => Boolean(isStreaming));
   const [userToggled, setUserToggled] = useState(false);
   const [thinkingOpen, setThinkingOpen] = useState(false);
+  // 2026-08-25: live-streaming spec — per-section collapse state. Default
+  // open while streaming so the user sees the live content; collapses on done.
+  const [planOpen, setPlanOpen] = useState(true);
+  const [searchOpen, setSearchOpen] = useState(true);
+  const [dataPreviewOpen, setDataPreviewOpen] = useState(true);
   const prevStreaming = useRef(isStreaming);
 
   // Auto-collapse ~1s after the stream finishes, unless the user manually
@@ -568,6 +573,49 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
                   {reasoning}
                   {isStreaming && <span className="animate-pulse text-purple-400">▍</span>}
                 </pre>
+              )}
+            </div>
+          )}
+
+          {/* Live plan section — blue, collapsible, step count, last-step spinner.
+              2026-08-25: live-streaming spec — grows in real-time as the LLM
+              emits plan_step_added events. */}
+          {Array.isArray(streamingPlanSteps) && streamingPlanSteps.length > 0 && (
+            <div className="border-t border-blue-500/30 bg-blue-500/5 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setPlanOpen((v) => !v)}
+                data-testid="live-activity-plan-toggle"
+                className="flex w-full cursor-pointer items-center gap-1.5 text-xs text-muted-foreground transition-opacity hover:opacity-100"
+              >
+                <ClipboardList className="h-3 w-3 shrink-0 text-blue-500/80" />
+                <span className="font-mono text-[10px] uppercase tracking-wide opacity-70">
+                  {isEn ? 'Plan' : le.plan || '计划'}
+                </span>
+                <span className="text-[10px] opacity-50">
+                  · {streamingPlanSteps.length} {isEn ? 'steps' : '步'}
+                </span>
+                <ChevronDown
+                  className={`ml-auto h-3 w-3 transition-transform ${planOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {planOpen && (
+                <div className="mt-1 space-y-0.5">
+                  {streamingPlanSteps.map((step, i) => (
+                    <div
+                      key={step.step_index ?? i}
+                      className="flex items-start gap-2 py-1.5 px-2 rounded transition-colors hover:bg-secondary/40"
+                    >
+                      <span className="font-mono text-xs text-blue-500/70 mt-0.5">
+                        {step.step_index ?? i + 1}.
+                      </span>
+                      <span className="text-xs text-foreground/80 flex-1">{step.title}</span>
+                      {i === streamingPlanSteps.length - 1 && isStreaming && (
+                        <Loader2 className="h-3 w-3 text-blue-500/60 animate-spin" />
+                      )}
+                    </div>
+                  ))}
+                </div>
               )}
             </div>
           )}
