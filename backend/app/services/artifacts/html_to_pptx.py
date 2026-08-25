@@ -108,7 +108,7 @@ def _wrap_slide_html(slide_chunk: str) -> str:
 
 
 def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> None:
-    """Render a single slide's HTML to a 1920x1080 PNG via Firefox headless."""
+    """Render a single slide's HTML to a 1920x1080 PNG via headless browser."""
     fx = _firefox()
     workdir = png_path.parent
     html_path = workdir / (png_path.stem + ".html")
@@ -116,15 +116,23 @@ def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> 
 
     profile_dir.mkdir(exist_ok=True)
 
-    # Use a unique profile per call to avoid Firefox's "already running" guard.
+    # Use a unique profile per call to avoid the browser's "already running" guard.
     profile = profile_dir / png_path.stem
     profile.mkdir(exist_ok=True)
 
+    # Chromium's classic headless mode rejects multiple targets; Firefox
+    # accepts them as-is.  Switch to ``--headless=new`` (modern Chromium
+    # headless) which supports the same args as Firefox.
+    is_chromium = "chrom" in fx.lower()
+    headless_flag = "--headless=new" if is_chromium else "--headless"
+
     cmd = [
-        fx, "--headless",
-        "--new-instance",
+        fx, headless_flag,
+        "--no-sandbox",
+        "--disable-gpu",
+        "--new-instance" if not is_chromium else "--no-first-run",
         "--no-remote",
-        "--profile", str(profile),
+        "--user-data-dir", str(profile),
         "--window-size=1920,1080",
         f"--screenshot={png_path}",
         f"file://{html_path}",
@@ -136,11 +144,11 @@ def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> 
             env={"HOME": str(profile_dir), "DISPLAY": ""},
         )
     except subprocess.TimeoutExpired as exc:
-        raise PptxRenderError("firefox timeout after 60s") from exc
+        raise PptxRenderError("browser timeout after 60s") from exc
 
     if proc.returncode != 0 or not png_path.exists():
         raise PptxRenderError(
-            f"firefox exited {proc.returncode}: {proc.stderr[:500]}"
+            f"browser exited {proc.returncode}: {proc.stderr[:500]}"
         )
 
 
