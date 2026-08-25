@@ -70,8 +70,12 @@ export default function PptxArtifactPreview({
         const doc = new DOMParser().parseFromString(text, 'text/html');
         const sections = Array.from(doc.querySelectorAll('[data-slide]'));
         if (!sections.length) {
-          setStatus('error');
-          setError('No slides found');
+          // Image-fill PPTX decks (rendered via the new HTML design path)
+          // don't expose an HTML preview — fall back to showing the first
+          // stored thumbnail as a single static image.  The user can still
+          // download the original PPTX and open it in PowerPoint for
+          // editing.
+          setStatus('image_fill_fallback');
           return;
         }
         // Read the deck's actual aspect ratio from the first slide's inline
@@ -215,6 +219,12 @@ export default function PptxArtifactPreview({
           <ErrorState message={error} downloadUrl={downloadUrl} title={title} />
         ) : status === 'loading' ? (
           <LoadingState />
+        ) : status === 'image_fill_fallback' ? (
+          <ImageFillFallback
+            artifactId={artifactId}
+            downloadUrl={downloadUrl}
+            title={title}
+          />
         ) : total === 0 ? (
           <ErrorState message="No slides to show" downloadUrl={downloadUrl} title={title} />
         ) : (
@@ -295,6 +305,32 @@ function LoadingState() {
     <div className="flex flex-1 items-center justify-center gap-2 py-6 text-xs text-muted-foreground">
       <Loader2 className="h-3.5 w-3.5 animate-spin" />
       Loading presentation...
+    </div>
+  );
+}
+
+function ImageFillFallback({ artifactId, downloadUrl, title }) {
+  // Renders a single thumbnail (slide 1) for image-fill PPTX decks.
+  // The thumbnail endpoint reuses the existing _maybe_store_thumbnails
+  // pipeline which converts the PPTX to PDF and then to per-page PNGs.
+  return (
+    <div className="flex flex-1 flex-col items-center justify-center gap-3 p-4 text-center">
+      <img
+        src={`${API_BASE}/artifacts/${artifactId}/preview?format=thumbnail&page=1`}
+        alt={title || 'Slide 1 preview'}
+        className="max-h-[60vh] max-w-full rounded border border-zinc-200 shadow-sm"
+        loading="lazy"
+      />
+      <p className="text-xs text-muted-foreground">
+        Image-fill deck — open in PowerPoint to edit. {downloadUrl && (
+          <a
+            href={downloadUrl}
+            className="ml-2 inline-flex items-center gap-1 text-orange-600 hover:underline"
+          >
+            <Download className="h-3 w-3" /> Download
+          </a>
+        )}
+      </p>
     </div>
   );
 }
