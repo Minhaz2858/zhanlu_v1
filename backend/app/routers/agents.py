@@ -496,7 +496,7 @@ def _choose_fallback(
     # unused. Now: if rows exist, show them; the file-disclosure only
     # fires when there is truly nothing to show.
     if has_rows:
-        return _data_rows_fallback(tool_calls_for_frontend)
+        return _data_rows_fallback(tool_calls_for_frontend, user_content=user_content)
     # FIX 2026-08-24 (probe-only): when data queries DID run but every
     # result was metadata-only (SELECT COUNT(*) / MIN / MAX probes), the
     # generic file-disclosure ("could not be generated… tool budget") is
@@ -626,7 +626,10 @@ def _extract_data_rows_from_tool_call(tc: dict) -> tuple[list[dict], str] | None
     return None
 
 
-def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
+def _data_rows_fallback(
+    tool_calls_for_frontend: list[dict],
+    user_content: str | None = None,
+) -> str:
     """Direct fallback built from the actual retrieved rows (no LLM).
 
     Renders a clean markdown table (≤10 rows), hiding system columns
@@ -635,6 +638,14 @@ def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
     ``result["rows"]`` shape (ask_data_agent / execute_query) and the
     nested ``fetch_data_batch`` ``result["results"][*].rows`` shape —
     see ``_extract_data_rows_from_tool_call``.
+
+    2026-08-26: when the user asked for a written report/review/
+    performance/etc. and the synthesis LLM call failed, instead of
+    returning only "Analyzing N rows…" (a useless placeholder), we
+    now build a brief best-effort analysis from the row aggregates
+    so the user gets a meaningful response even when the LLM
+    synthesis times out. The platform data card is still attached
+    separately, so the user sees BOTH the data + a narrative.
     """
     from app.services.goal_contract import is_metadata_only_rows  # lazy
     for tc in (tool_calls_for_frontend or []):
@@ -684,6 +695,20 @@ def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
                 lines.append(
                     "| " + " | ".join(str(r.get(k, "")) for k in visible) + " |"
                 )
+            # 2026-08-26: when the user asked for a written report,
+            # build a brief best-effort narrative from the actual row
+            # aggregates instead of returning just the placeholder
+            # "Analyzing N rows…". The data card is attached separately
+            # by the platform, so the user sees BOTH the data table and
+            # the narrative. This guarantees the user always gets a
+            # useful written answer for report-style requests even when
+            # the LLM synthesis call times out or returns empty.
+            try:
+                from app.services.goal_contract import is_report_request
+                if is_report_request(user_content):
+                    return _build_aggregate_fallback(dict_rows, src, user_content or "")
+            except Exception:
+                pass
             # FIX 2026-08-22: return a neutral placeholder instead of a
             # markdown table so the user doesn't see raw data mid-stream.
             # The synthesis step replaces this with the final narrative
@@ -692,6 +717,122 @@ def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
             # data after streaming if synthesis didn't run.
             return f"Analyzing {len(rows)} rows of data…"
     return _GENERIC_EMPTY_CONTENT_FALLBACK
+
+
+def _build_aggregate_fallback(
+    dict_rows: list[dict],
+    src: str,
+    user_msg: str,
+) -> str:
+    """2026-08-26: deterministic aggregate-based narrative built from
+    the actual retrieved rows. Used when the LLM synthesis call fails
+    on a report-style request. Produces a real written answer so the
+    user never sees only a "Analyzing N rows…" placeholder.
+
+    Picks the most likely numeric columns (totals, sums, averages) and
+    the most likely label columns (categorical/ID), then writes a
+    short executive summary + 3-5 key numbers + 1-2 recommendations.
+    """
+    import statistics as _stats
+    if not dict_rows:
+        return _GENERIC_EMPTY_CONTENT_FALLBACK
+
+    # Pick label columns: short text, low cardinality
+    label_candidates: list[tuple[str, int]] = []
+    numeric_candidates: list[tuple[str, float]] = []
+    first = dict_rows[0]
+    for k, v in first.items():
+        if v is None:
+            continue
+        # Numeric column detection
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            vals = [r.get(k) for r in dict_rows if isinstance(r.get(k), (int, float))]
+            if vals:
+                numeric_candidates.append((k, sum(vals)))
+        elif isinstance(v, str) and v.strip():
+            uniq = {r.get(k) for r in dict_rows if r.get(k)}
+            if 1 < len(uniq) <= len(dict_rows):
+                label_candidates.append((k, len(uniq)))
+
+    # Pick top 2 label columns (highest cardinality, prefer non-ID names)
+    label_candidates.sort(key=lambda x: -x[1])
+    label_cols = [k for k, _ in label_candidates[:2]]
+
+    # Pick top 4 numeric columns (largest absolute sum)
+    numeric_candidates.sort(key=lambda x: -abs(x[1]))
+    numeric_cols = [k for k, _ in numeric_candidates[:4]]
+
+    # Build the report
+    out: list[str] = []
+    out.append(f"**Report Summary — {len(dict_rows)} rows from `{src}`**\n")
+
+    # Executive summary
+    out.append(
+        "The data was retrieved successfully but the narrative synthesis "
+        "service did not complete in time. The findings below are "
+        "computed directly from the retrieved rows so you can act on them "
+        "without waiting for a longer analysis."
+    )
+    out.append("")
+
+    # Key numbers
+    if numeric_cols:
+        out.append("**Key Numbers**\n")
+        for k in numeric_cols:
+            vals = [r.get(k) for r in dict_rows if isinstance(r.get(k), (int, float))]
+            if not vals:
+                continue
+            total = sum(vals)
+            avg = total / len(vals)
+            mx = max(vals)
+            mn = min(vals)
+            out.append(
+                f"- **{k}** — total {total:,.2f}, average {avg:,.2f}, "
+                f"range {mn:,.2f} to {mx:,.2f} across {len(vals)} rows."
+            )
+        out.append("")
+
+    # Top / bottom by first numeric column
+    if numeric_cols and label_cols:
+        sort_key = numeric_cols[0]
+        try:
+            sorted_rows = sorted(
+                [r for r in dict_rows if isinstance(r.get(sort_key), (int, float))],
+                key=lambda r: r.get(sort_key, 0),
+                reverse=True,
+            )
+        except Exception:
+            sorted_rows = []
+        if sorted_rows:
+            out.append(f"**Top Performers (by {sort_key})**\n")
+            for r in sorted_rows[:3]:
+                bits = []
+                for lc in label_cols:
+                    v = r.get(lc)
+                    if v:
+                        bits.append(str(v))
+                label = " · ".join(bits) if bits else "(no label)"
+                out.append(f"- {label} — {sort_key}={r.get(sort_key):,.2f}")
+            out.append("")
+
+    # Recommendations
+    out.append("**Next Steps**\n")
+    out.append(
+        "- If you need a deeper written analysis, send the request again "
+        "(the synthesis service was interrupted this time)."
+    )
+    out.append(
+        "- The full data is preserved in the table above; you can ask "
+        "follow-up questions such as 'rank by <column>' or 'compare to "
+        "the previous month' for further breakdown."
+    )
+    if numeric_cols:
+        out.append(
+            f"- For deeper drilldown, ask about the top contributors to "
+            f"`{numeric_cols[0]}` or filter by any of the {len(label_cols)} "
+            f"label dimensions shown."
+        )
+    return "\n".join(out)
 
 
 # ---------------------------------------------------------------------------
@@ -14684,9 +14825,23 @@ async def add_message_stream(
                         )
                     else:
                         # LLM couldn't produce a real answer either
-                        accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
-                except Exception:
-                    accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+                        accumulated_content = _data_rows_fallback(
+                            tool_calls_for_frontend, user_content=user_content,
+                        )
+                except Exception as _synth_exc:
+                    # 2026-08-26: log the actual exception so we can
+                    # diagnose why the synthesis keeps failing instead
+                    # of silently falling through to the placeholder.
+                    logger.warning(
+                        "v3 empty-bubble: _force_llm_synthesis failed "
+                        "(conv=%s, rows=%s): %s",
+                        conversation_id,
+                        len(_last_rows) if "_last_rows" in locals() else "?",
+                        _synth_exc,
+                    )
+                    accumulated_content = _data_rows_fallback(
+                        tool_calls_for_frontend, user_content=user_content,
+                    )
             if not (accumulated_content or "").strip():
                 try:
                     accumulated_content = _choose_fallback(
@@ -14766,7 +14921,9 @@ async def add_message_stream(
                 if len(_llm_ans) > 50:
                     accumulated_content = _llm_ans
                 else:
-                    accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+                    accumulated_content = _data_rows_fallback(
+                        tool_calls_for_frontend, user_content=user_content,
+                    )
             except Exception as _apology_err:
                 logger.warning("v3 apology/bounce-back fallback failed: %s", _apology_err)
                 try:
