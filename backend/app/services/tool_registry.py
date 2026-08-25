@@ -530,6 +530,54 @@ DEFAULT_USER_AGENT_TOOLS: list[str] = [
 ]
 
 
+# 2026-08-25: centralized tool-format normalizer. OpenAI/DeepSeek API
+# requires every tool to have the structure:
+#   {"type": "function", "function": {"name", "description", "parameters"}}
+# Various tool-definition sites (registry, data_source_runtime, etc.) used
+# to pass through flat schemas (just {"name", "description", "parameters"})
+# which DeepSeek rejected with:
+#   tools[N]: missing field `type` (status 400)
+# Use this function as the LAST step before sending tools to the LLM.
+def normalize_tool_schema(schema: dict, *, fallback_name: str = "") -> dict:
+    """Wrap a tool schema in the OpenAI function envelope if not already wrapped.
+
+    Idempotent: if the schema is already wrapped, return it unchanged.
+    Also validates the wrapped form has a 'type' field set to 'function'.
+
+    Args:
+        schema: The tool schema dict (either wrapped or flat).
+        fallback_name: Name to use if the schema has no 'name' field.
+
+    Returns:
+        A properly wrapped tool schema dict.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    # Already in wrapped form
+    if schema.get("type") == "function" and "function" in schema:
+        return schema
+    # Flat form: wrap it
+    if "name" in schema or fallback_name:
+        return {
+            "type": "function",
+            "function": {
+                "name": schema.get("name") or fallback_name,
+                "description": schema.get("description", ""),
+                "parameters": schema.get("parameters", {"type": "object", "properties": {}}),
+            },
+        }
+    # Unknown form — pass through
+    return schema
+
+
+def normalize_tools_list(tools: list[dict] | None) -> list[dict] | None:
+    """Apply normalize_tool_schema to every tool in a list. Returns a new list."""
+    if not tools:
+        return tools
+    return [normalize_tool_schema(t) for t in tools]
+
+
+
 def get_skill_to_tool_map(db=None) -> dict[str, str]:
     """Build a mapping of display names → registry tool names.
 

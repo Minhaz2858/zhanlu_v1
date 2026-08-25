@@ -1060,11 +1060,17 @@ def prepare_data_source_runtime(
     if "ask_data_agent" not in existing_names:
         entry = registry.get_entry("ask_data_agent")
         if entry:
-            augmented_tools.append(entry.schema)
+            # 2026-08-25: BUGFIX — entry.schema may be in flat form (no
+            # 'function' wrapper). DeepSeek rejects this with:
+            #   tools[N]: missing field `type` (status 400)
+            # Normalize before adding to the tools list.
+            from app.services.tool_registry import normalize_tool_schema
+            augmented_tools.append(normalize_tool_schema(entry.schema, fallback_name=entry.name))
     if "fetch_data_batch" not in existing_names:
         entry = registry.get_entry("fetch_data_batch")
         if entry:
-            augmented_tools.append(entry.schema)
+            from app.services.tool_registry import normalize_tool_schema
+            augmented_tools.append(normalize_tool_schema(entry.schema, fallback_name=entry.name))
 
     bound_meta = _load_bound_kb_meta(db, bound_ids)
     schema_slices = _build_schema_slice(db, bound_ids)

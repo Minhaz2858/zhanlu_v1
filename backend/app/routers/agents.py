@@ -562,6 +562,186 @@ def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
     return _GENERIC_EMPTY_CONTENT_FALLBACK
 
 
+# ---------------------------------------------------------------------------
+# Institutional-Grade Research-Analyst Fallback (2026-08-25).
+# Triggered when the research-analyst directive is active AND the
+# main agent loop exited with empty ``assistant_content`` despite tool
+# calls producing data. Common pattern with weak / non-directive-
+# compliant models (e.g. deepseek-chat): the LLM emits
+# ``tool_calls`` with empty content instead of synthesizing, the loop
+# burns its budget on tool calls, exits, and the user sees only the
+# raw data rows (the markdown-table fallback).
+#
+# This helper closes that gap: when invoked, it makes ONE focused
+# synthesis LLM call with a tight institutional-grade prompt + the
+# collected data summary, and returns the analysis text. If anything
+# fails (timeout, error, no data, missing flag, non-DB agent), it
+# returns ``None`` so the existing fallback chain runs unchanged.
+# ---------------------------------------------------------------------------
+
+async def _research_analyst_fallback(
+    user_content: str,
+    tool_calls_for_frontend: list[dict],
+    agent_name: str | None,
+    agent_app,
+    max_data_chars: int = 6000,
+    timeout_s: float = 25.0,
+) -> str | None:
+    """One-shot forced-synthesis for the institutional-grade protocol.
+
+    Returns:
+        The institutional-grade analysis text on success, otherwise
+        ``None``. Failure modes (any one falls through to the original
+        fallback chain):
+          - COMPREHENSIVE_DATA_MARKET_PROFILE_ENABLED flag is off.
+          - Agent is not DB-bound (``_agent_is_db_bound`` is False).
+          - No ``DATA_PRODUCING_TOOLS`` results in tool history.
+          - Synthesis LLM call times out or errors.
+
+    Implementation notes:
+      - Wraps ``_call_synthesis_llm`` in ``asyncio.wait_for`` so a
+        stuck LLM cannot block the user for >timeout_s.
+      - Uses no ``tools`` payload (the synthesis call is text-only).
+      - Tight prompt: ``max_tokens=6144`` (LLM_SYNTH_MAX_TOKENS default),
+        temperature 0.7, top-of-prompt: directive reminder + 8-dim +
+        format-specific instructions. Forces prose; refuses tool calls.
+    """
+    if not _research_directive_enabled():
+        return None
+    if not agent_name:
+        return None
+    # DB-bound gating — only fire on agents that the directive targets.
+    try:
+        from app.services.agent_prompts import _agent_is_db_bound
+        if not _agent_is_db_bound(agent_name, agent_app):
+            return None
+    except Exception:
+        return None
+    # Need at least one data-producing tool call with results.
+    has_data = False
+    for tc in (tool_calls_for_frontend or []):
+        if tc.get("name") not in DATA_PRODUCING_TOOLS:
+            continue
+        results = tc.get("results")
+        if not isinstance(results, dict):
+            continue
+        if results.get("rows"):
+            has_data = True
+            break
+        if results.get("report_card_payload"):
+            has_data = True
+            break
+    if not has_data:
+        return None
+    # Build a compact data summary for the LLM prompt.
+    summary = _data_summary_for_synthesis(tool_calls_for_frontend, max_chars=max_data_chars)
+    if not summary.strip():
+        return None
+
+    sys_prompt = (
+        "You are an expert research analyst (institutional-grade, not "
+        "summary level). The previous LLM call emitted empty content "
+        "instead of synthesizing — write the analysis now. REQUIRED "
+        "STRUCTURE: (1) Section 1 Overview Dashboard — total items + "
+        "sentiment tally + 1-paragraph macro; (2) Section 2 Executive "
+        "Summary — ≤120 words + 2-3 actionable recommendations with "
+        "trigger levels + risk alerts; (3) Section 3 Entity-by-Entity "
+        "Deep Dive — for each distinct entity in the data: Snapshot "
+        "(current value + Δ%) + 100-word Market Analysis + Forecast "
+        "Table (near-term AND medium-term Baseline/Upside/Downside) + "
+        "AI Decision (Strategy, Basis, 2-3 Key Risks with triggers); "
+        "(4) Section 4 Disclaimer (AI-generated, not investment "
+        "advice). STYLE: NO vague language — replace 'demand is stable' "
+        "with specifics + percentages. NO marketing language. "
+        "Quantified predictions only. Confidence calibration explicit. "
+        "Risk symmetry (upside AND downside). NO tool calls. NO "
+        "follow-up offers. Return ONLY the analysis."
+    )
+    user_prompt = (
+        f"USER QUESTION:\n{(user_content or '(empty)')[:500]}\n\n"
+        f"DATA SUMMARY (the agent already ran these queries):\n"
+        f"{summary[:max_data_chars]}\n\n"
+        "Write the institutional-grade analysis NOW. Do not preface, "
+        "do not apologize, do not summarize what you will do — "
+        "deliver the analysis."
+    )
+
+    try:
+        import asyncio
+        messages = [{"role": "user", "content": user_prompt}]
+        result = await asyncio.wait_for(
+            _call_synthesis_llm(sys_prompt, messages),
+            timeout=timeout_s,
+        )
+        text = (result.get("content") or "").strip() if isinstance(result, dict) else ""
+        if not text:
+            return None
+        # Light sanity guard: refuse the synthesis if it's < 80 chars
+        # (the LLM emitted a literal "ok" or token noise instead of analysis).
+        if len(text) < 80:
+            logger.info(
+                "_research_analyst_fallback: synthesis too short (%d chars) — falling through",
+                len(text),
+            )
+            return None
+        logger.info(
+            "_research_analyst_fallback: produced %d-char analysis for agent=%s",
+            len(text), agent_name,
+        )
+        return text
+    except Exception as exc:
+        logger.warning("_research_analyst_fallback: synthesis failed: %s", exc)
+        return None
+
+
+def _data_summary_for_synthesis(
+    tool_calls_for_frontend: list[dict],
+    max_chars: int = 6000,
+) -> str:
+    """Compact text representation of data-producing tool results, sized
+    for an LLM prompt. Truncates individual sections at ~50% of budget
+    to leave room for the directive in ``sys_prompt``.
+
+    Returns a multi-section string ``"- tool_name: <summary>"``,
+    suitable for inclusion in the user_prompt of ``_call_synthesis_llm``.
+    """
+    sections: list[str] = []
+    for tc in (tool_calls_for_frontend or []):
+        if tc.get("name") not in DATA_PRODUCING_TOOLS:
+            continue
+        results = tc.get("results")
+        if not isinstance(results, dict):
+            continue
+        rows = results.get("rows")
+        if not rows and not results.get("report_card_payload"):
+            continue
+        name = tc.get("name", "?")
+        src = results.get("source_name") or "data source"
+        if isinstance(rows, list) and rows:
+            rows_summary = _build_column_summary(rows[:30])
+            sections.append(
+                f"- {name}({src}): {len(rows)} rows\n  {rows_summary}"
+            )
+        elif results.get("report_card_payload"):
+            rcp = results["report_card_payload"]
+            title = rcp.get("title") or "report"
+            sections.append(f"- {name}({src}): report_card '{title}'")
+        if sum(len(s) for s in sections) > max_chars:
+            break
+    return "\n".join(sections)
+
+
+def _research_directive_enabled() -> bool:
+    """Module-local flag check (used by ``_research_analyst_fallback`` and
+    any future code that wants to honor the same opt-in). Wraps
+    ``settings.getattr`` so tests can monkeypatch without touching the
+    Pydantic Settings instance.
+    """
+    return bool(
+        getattr(settings, "COMPREHENSIVE_DATA_MARKET_PROFILE_ENABLED", False)
+    )
+
+
 def _build_column_summary(rows: list[dict]) -> str:
     """Build a short text summary of columns and their value ranges.
 
@@ -1263,6 +1443,13 @@ DATA_PRODUCING_TOOLS: frozenset = frozenset({
     "execute_sql",
     "sql_query",
     "forecast_brief",
+    # Institutional-grade research-analyst pipeline (2026-08-25)
+    # comprehensive_data/profile="market" emits structured report_card
+    # payloads; collect_enterprise_data emits the ExecutiveReport card.
+    # Both must be treated as data producers so the LLM-floor fallback
+    # recognizes their results as ground-truth data to synthesize on.
+    "comprehensive_data",
+    "collect_enterprise_data",
 })
 
 # FIX 2026-08-24: sub-agent tools that return a `prompt_text` formatted
@@ -7755,7 +7942,13 @@ async def _stream_llm_with_tools(
     if _clamped_max is not None:
         base_payload["max_tokens"] = _clamped_max
     if tools:
-        base_payload["tools"] = tools
+        # 2026-08-25: BUGFIX — defense in depth. Even though
+        # tool_registry.get_schemas() and data_source_runtime now wrap
+        # flat schemas in the OpenAI function envelope, some legacy
+        # tool-definition sites may still pass through unwrapped
+        # schemas. Normalize here so the LLM never sees a malformed tool.
+        from app.services.tool_registry import normalize_tools_list
+        base_payload["tools"] = normalize_tools_list(tools)
     # Proactively skip tool_choice for models that reject it (vLLM without
     # --enable-auto-tool-choice). Tool calls are recovered from content text.
     _skip_tool_choice = _should_skip_tool_choice(endpoint)
@@ -12815,9 +13008,34 @@ async def add_message_stream(
         # the user sees "detailed report" + "I gathered some information..."
         # as a confusing double-message.
         if not assistant_content and not locals().get("content_streamed"):
-            assistant_content = _EMPTY_CONTENT_FALLBACK if agent_name == "agent_builder" else _choose_fallback(
-                tool_calls_for_frontend, _orch_created, user_content=user_content,
-            )
+            if agent_name == "agent_builder":
+                assistant_content = _EMPTY_CONTENT_FALLBACK
+            else:
+                # NEW 2026-08-25: institutional-grade research-analyst
+                # forced-synthesis. When the directive is active AND we
+                # have data AND the main loop emitted empty content (the
+                # common 'LLM dropped into tool_calls with empty content'
+                # failure on weak models), make ONE focused synthesis
+                # call before the existing data-table fallback. If that
+                # succeeds, the user gets the institutional-grade
+                # analysis they were promised. If it fails or is not
+                # applicable, fall through to the existing chain.
+                try:
+                    research_text = await _research_analyst_fallback(
+                        user_content=user_content,
+                        tool_calls_for_frontend=tool_calls_for_frontend,
+                        agent_name=agent_name,
+                        agent_app=agent_app,
+                    )
+                except Exception as _ra_exc:  # noqa: BLE001
+                    logger.warning("_research_analyst_fallback raised: %s", _ra_exc)
+                    research_text = None
+                if research_text:
+                    assistant_content = research_text
+                else:
+                    assistant_content = _choose_fallback(
+                        tool_calls_for_frontend, _orch_created, user_content=user_content,
+                    )
 
         # Decision-summary pause (R4): if the assistant text contains a
         # `:::decision-summary` block, persist the pending payload to
