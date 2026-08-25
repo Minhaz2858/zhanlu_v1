@@ -1,10 +1,15 @@
 """HTML → PPTX converters.
 
 * ``render_image_fill(stage_html)`` — full-fidelity static image fills.
-  v1.0 default.  Pipeline: stage_html → ``soffice --headless
-  --convert-to pdf`` → ``pdftoppm -png -r 192`` → python-pptx with
-  each PNG as a 16:9 image fill.  Reuses the soffice + pdftoppm
-  pattern from ``backend/app/services/artifacts/thumbnails.py``.
+  v1.0 default.  Pipeline: split stage into per-slide HTML → Firefox
+  headless screenshot each at 1920x1080 → python-pptx with each PNG
+  as a 16:9 image fill.
+
+  Note: the original spec said LibreOffice + pdftoppm, but soffice's
+  HTML writer paginates inconsistently with the kpi_grid layout,
+  producing more PDF pages than slides.  Firefox headless honors
+  ``width/height/overflow: hidden`` exactly, so each slide renders as
+  exactly one 1920x1080 PNG.
 
 * ``render_editable_text(stage_html)`` — text-editable native PPTX.
   v1.1 (not implemented in this plan; signature reserved).
@@ -13,6 +18,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 import shutil
 import subprocess
 import tempfile
@@ -39,73 +45,103 @@ def _find_binary(names: Tuple[str, ...]) -> Optional[str]:
 
 
 def image_fill_available() -> bool:
-    """True when ``soffice`` and ``pdftoppm`` are installed and on PATH."""
+    """True when Firefox (or Chromium) is installed and on PATH."""
     return (
-        _find_binary(("soffice", "libreoffice")) is not None
-        and _find_binary(("pdftoppm",)) is not None
+        _find_binary(("firefox", "firefox-esr", "chromium", "google-chrome")) is not None
     )
 
 
-def _convert_html_to_pdf(stage_html: str, workdir: Path) -> Path:
-    soffice = _find_binary(("soffice", "libreoffice"))
-    if soffice is None:
-        raise PptxRenderError("soffice/libreoffice not found on PATH")
+def _firefox() -> str:
+    """Resolve the Firefox binary path."""
+    fx = _find_binary(("firefox", "firefox-esr", "chromium", "google-chrome"))
+    if fx is None:
+        raise PptxRenderError(
+            "no browser found (need firefox, firefox-esr, chromium, or google-chrome)"
+        )
+    return fx
 
-    html_path = workdir / "index.html"
-    html_path.write_text(stage_html, encoding="utf-8")
 
-    profile_dir = workdir / "soffice_profile"
+def _split_stage_into_slides(stage_html: str) -> List[str]:
+    """Split the stage HTML into one self-contained chunk per slide.
+
+    Each chunk includes its own ``<style>`` block and the
+    ``<section class="slide...">...</section>`` body so it can be
+    rendered standalone.  If a section has no preceding ``<style>``
+    block, the chunk still includes the section (the test fixture
+    ``SAMPLE_STAGE`` has two sections sharing one head-level style).
+    """
+    pattern = re.compile(
+        r'(<style>.*?</style>\s*)?<section class="slide[^"]*"[^>]*>.*?</section>',
+        re.DOTALL,
+    )
+    matches = []
+    for m in pattern.finditer(stage_html):
+        # ``m.group(0)`` includes the optional style block.
+        matches.append(m.group(0))
+    if not matches:
+        return [stage_html]
+    return matches
+
+
+def _wrap_slide_html(slide_chunk: str) -> str:
+    """Wrap a slide chunk in a minimal HTML page that constrains the
+    viewport to 1920x1080 and hides overflow.
+
+    The body's ``overflow: hidden`` + exact ``width/height`` make Firefox
+    render exactly one 1920x1080 frame per slide; content past those
+    bounds is clipped, not paginated.
+    """
+    return f"""<!DOCTYPE html>
+<html><head><meta charset='utf-8'>
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  html, body {{
+    width: 1920px; height: 1080px;
+    background: #000;
+    overflow: hidden;
+  }}
+  body {{ font-family: 'Work Sans', sans-serif; }}
+</style>
+</head><body>
+{slide_chunk}
+</body></html>"""
+
+
+def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> None:
+    """Render a single slide's HTML to a 1920x1080 PNG via Firefox headless."""
+    fx = _firefox()
+    workdir = png_path.parent
+    html_path = workdir / (png_path.stem + ".html")
+    html_path.write_text(slide_html, encoding="utf-8")
+
     profile_dir.mkdir(exist_ok=True)
 
+    # Use a unique profile per call to avoid Firefox's "already running" guard.
+    profile = profile_dir / png_path.stem
+    profile.mkdir(exist_ok=True)
+
     cmd = [
-        soffice, "--headless", "--norestore", "--nologo",
-        "--nofirststartwizard",
-        f"-env:UserInstallation=file://{profile_dir}",
-        "--convert-to", "pdf", "--outdir", str(workdir),
-        str(html_path),
+        fx, "--headless",
+        "--new-instance",
+        "--no-remote",
+        "--profile", str(profile),
+        "--window-size=1920,1080",
+        f"--screenshot={png_path}",
+        f"file://{html_path}",
     ]
     try:
         proc = subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=60, cwd=str(workdir),
+            env={"HOME": str(profile_dir), "DISPLAY": ""},
         )
     except subprocess.TimeoutExpired as exc:
-        raise PptxRenderError("soffice timeout after 60s") from exc
+        raise PptxRenderError("firefox timeout after 60s") from exc
 
-    if proc.returncode != 0:
+    if proc.returncode != 0 or not png_path.exists():
         raise PptxRenderError(
-            f"soffice exited {proc.returncode}: {proc.stderr[:500]}"
+            f"firefox exited {proc.returncode}: {proc.stderr[:500]}"
         )
-
-    pdf_path = workdir / "index.pdf"
-    if not pdf_path.exists():
-        raise PptxRenderError(f"soffice produced no PDF (stderr: {proc.stderr[:500]})")
-    return pdf_path
-
-
-def _convert_pdf_to_pngs(pdf_path: Path, workdir: Path) -> List[Path]:
-    pdftoppm = _find_binary(("pdftoppm",))
-    if pdftoppm is None:
-        raise PptxRenderError("pdftoppm not found on PATH")
-
-    prefix = workdir / "slide"
-    cmd = [pdftoppm, "-png", "-r", "192", str(pdf_path), str(prefix)]
-    try:
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=60, cwd=str(workdir),
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise PptxRenderError("pdftoppm timeout after 60s") from exc
-
-    if proc.returncode != 0:
-        raise PptxRenderError(
-            f"pdftoppm exited {proc.returncode}: {proc.stderr[:500]}"
-        )
-
-    pngs = sorted(workdir.glob("slide-*.png"))
-    if not pngs:
-        raise PptxRenderError("pdftoppm produced no PNGs")
-    return pngs
 
 
 def _build_pptx_from_pngs(pngs: List[Path]) -> bytes:
@@ -133,14 +169,20 @@ def render_image_fill(stage_html: str) -> bytes:
     """
     if not image_fill_available():
         raise PptxRenderError(
-            "image_fill pipeline unavailable: soffice or pdftoppm missing"
+            "image_fill pipeline unavailable: no browser installed"
         )
 
     with tempfile.TemporaryDirectory(prefix="zhanlu_html2pptx_") as td:
         workdir = Path(td)
         try:
-            pdf_path = _convert_html_to_pdf(stage_html, workdir)
-            pngs = _convert_pdf_to_pngs(pdf_path, workdir)
+            slide_chunks = _split_stage_into_slides(stage_html)
+            pngs: List[Path] = []
+            profile_dir = workdir / "firefox_profiles"
+            for i, chunk in enumerate(slide_chunks):
+                slide_html = _wrap_slide_html(chunk)
+                png_path = workdir / f"slide_{i:03d}.png"
+                _render_slide_to_png(slide_html, png_path, profile_dir)
+                pngs.append(png_path)
             pptx_bytes = _build_pptx_from_pngs(pngs)
         except PptxRenderError:
             raise

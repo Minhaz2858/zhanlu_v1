@@ -519,10 +519,13 @@ def render_slide(layout: str, plan: SlidePlan, theme: ThemePreset) -> str:
 # essentials: fixed 16:9 stage, no scrollbars, page breaks for print).
 _STAGE_CSS = """
 * { box-sizing: border-box; margin: 0; padding: 0; }
+@page { size: 1920px 1080px; margin: 0; }
 html, body {
   width: 1920px;
   font-family: 'Work Sans', sans-serif;
   background: #000;
+  margin: 0;
+  padding: 0;
 }
 .slide {
   width: 1920px;
@@ -531,6 +534,9 @@ html, body {
   overflow: hidden;
   page-break-after: always;
   break-after: page;
+  display: block;
+  page-break-inside: avoid;
+  break-inside: avoid;
 }
 .slide:last-child { page-break-after: auto; break-after: auto; }
 """
