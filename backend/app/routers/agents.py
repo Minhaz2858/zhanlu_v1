@@ -12543,6 +12543,16 @@ async def add_message_stream(
                             )
                             if _le_offer:
                                 yield _le_offer
+                            # 2026-08-25: live-streaming spec — also emit a dedicated
+                            # data_preview SSE event that bypasses the _LIVE_EVENT_CAP.
+                            # This lets the UI show a live mini-grid under the tool row
+                            # immediately when the query returns rows, not when the
+                            # synthesis step completes.
+                            try:
+                                _tc_id = f"tc-{_step_counter[0]}"
+                                yield f'data: {json.dumps({"type": "data_preview", "tool_call_id": _tc_id, "columns": _sample["columns"], "sample_rows": _sample["sample_rows"], "rows_so_far": _le_rowcount})}\n\n'
+                            except Exception as _dp_err:
+                                logger.debug("data_preview emit failed (non-fatal): %s", _dp_err)
 
                 llm_messages.append({
                     "role": "assistant", "content": None,
