@@ -542,26 +542,31 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
             })}
           </div>
 
-          {/* Thinking sub-section — collapsed by default, state-driven toggle. */}
+          {/* Thinking sub-section — collapsed by default, state-driven toggle.
+              2026-08-25: live-streaming spec — add char count + pulsing cursor. */}
           {typeof reasoning === 'string' && reasoning.trim().length > 0 && (
-            <div className="border-t border-border/60 px-3 py-2">
+            <div className="border-t border-purple-500/30 bg-purple-500/5 px-3 py-2">
               <button
                 type="button"
                 onClick={() => setThinkingOpen((v) => !v)}
                 data-testid="live-activity-thinking-toggle"
-                className="flex cursor-pointer items-center gap-1.5 text-xs text-muted-foreground transition-opacity hover:opacity-100"
+                className="flex w-full cursor-pointer items-center gap-1.5 text-xs text-muted-foreground transition-opacity hover:opacity-100"
               >
                 <Brain className="h-3 w-3 shrink-0 text-purple-500/80" />
                 <span className="font-mono text-[10px] uppercase tracking-wide opacity-70">
                   {isEn ? 'Thinking' : le.thinking || '思考'}
                 </span>
+                <span className="text-[10px] opacity-50">
+                  · {reasoning.length.toLocaleString()} chars
+                </span>
                 <ChevronDown
-                  className={`h-3 w-3 transition-transform ${thinkingOpen ? 'rotate-180' : ''}`}
+                  className={`ml-auto h-3 w-3 transition-transform ${thinkingOpen ? 'rotate-180' : ''}`}
                 />
               </button>
               {thinkingOpen && (
                 <pre className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap rounded bg-secondary/30 px-3 py-2 font-mono text-xs text-muted-foreground">
                   {reasoning}
+                  {isStreaming && <span className="animate-pulse text-purple-400">▍</span>}
                 </pre>
               )}
             </div>

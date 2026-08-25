@@ -381,6 +381,9 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
               phase={message.phase}
               reasoning={hasReasoning ? message.reasoning : undefined}
               isStreaming={isStreaming}
+              streamingSearchQueries={message.streaming_search_queries}
+              streamingPlanSteps={message.streaming_plan_steps}
+              streamingDataPreviews={message.streaming_data_previews}
             />
             {message.phase?.execution_id && onOpenRun && (
               <button
