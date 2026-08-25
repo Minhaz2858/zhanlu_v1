@@ -436,6 +436,56 @@ function DataPreviewPane({ offer, isEn }) {
 
 // ── Plan summary row ───────────────────────────────────────────────────
 
+// 2026-08-25: ProgressBar — horizontal bar showing event-level progress
+// and time estimate. Hidden when status is 'idle' (no events yet).
+function ProgressBar({ progress, isLive, isEn }) {
+  if (!progress || progress.status === 'idle') return null;
+
+  const fillColor =
+    progress.status === 'failed'
+      ? 'bg-red-500'
+      : progress.status === 'completed'
+        ? 'bg-emerald-500'
+        : 'bg-blue-500';
+
+  const labelStatus =
+    progress.status === 'running'
+      ? isEn ? 'Working' : '处理中'
+      : progress.status === 'completed'
+        ? isEn ? 'Done' : '完成'
+        : progress.status === 'failed'
+          ? isEn ? 'Failed' : '失败'
+          : '';
+
+  const elapsed = Math.round((progress.elapsedMs || 0) / 1000);
+  const remaining = Math.round((progress.estimatedRemainingMs || 0) / 1000);
+
+  return (
+    <div
+      data-testid="live-activity-progress"
+      className="border-b border-border/60 px-3 py-2"
+    >
+      <div className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
+        <span className="font-mono uppercase tracking-wide opacity-70">
+          {labelStatus}
+          {progress.currentPhase ? ` · ${progress.currentPhase}` : ''}
+        </span>
+        <span className="opacity-50">
+          {isEn ? 'Step' : '步骤'} {progress.completedEvents}/{progress.totalEvents}
+          {elapsed > 0 && ` · ${elapsed}s ${isEn ? 'elapsed' : '已用'}`}
+          {isLive && remaining > 0 && ` · ~${remaining}s ${isEn ? 'left' : '剩余'}`}
+        </span>
+      </div>
+      <div className="h-1 w-full overflow-hidden rounded-full bg-secondary/50">
+        <div
+          className={`h-full ${fillColor} transition-[width] duration-500 ease-out`}
+          style={{ width: `${Math.max(2, Math.min(100, progress.fillPct))}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function PlanSummaryRow({ ev, le, isEn }) {
   const steps = Array.isArray(ev.params?.steps) ? ev.params.steps : [];
   return (
@@ -710,6 +760,13 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
               )}
             </div>
           )}
+
+          {/* Progress bar — 2026-08-25 activity-feed modernization. */}
+          <ProgressBar
+            progress={computeProgress(mergedIndented)}
+            isLive={isLive}
+            isEn={isEn}
+          />
 
           {/* Event list (max-height, auto-scroll while live). */}
           <div
