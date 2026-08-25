@@ -132,7 +132,7 @@ def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> 
         "--disable-gpu",
         "--new-instance" if not is_chromium else "--no-first-run",
         "--no-remote",
-        "--user-data-dir", str(profile),
+        f"--user-data-dir={profile}",
         "--window-size=1920,1080",
         f"--screenshot={png_path}",
         f"file://{html_path}",
