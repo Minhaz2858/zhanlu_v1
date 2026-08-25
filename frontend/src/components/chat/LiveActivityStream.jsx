@@ -618,7 +618,7 @@ function SubagentRow({ ev, le, isEn, t }) {
 
 // ── Generic typed row (tool_call_started, _finished, _failed, retry, verify, finalize) ──
 
-function TypedRow({ ev, le, isLive, isEn, isStickyRunning }) {
+function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedProp }) {
   const status = ev.status || 'done';
   // A finalize_started / artifact_progress row left 'running' after the turn
   // ended (legacy turns predate the finalize_done event) must NOT keep
@@ -626,6 +626,23 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning }) {
   const isRunning =
     status === 'running' &&
     !((ev.type === 'finalize_started' || ev.type === 'artifact_progress') && !isLive);
+  // 2026-08-25: when collapsed, render a compact chip instead of the full
+  // row. Activity-feed modernization task 9.
+  const collapsed = !!collapsedProp && (status === 'done' || status === 'failed');
+  if (collapsed) {
+    return (
+      <div
+        data-testid="live-activity-collapsed-chip"
+        data-event-type={ev.type}
+        className={`flex items-center gap-2 rounded-md border border-border/40 bg-secondary/20 px-2 py-1 text-[11px] text-muted-foreground transition-colors hover:bg-secondary/40 ${ev.indent ? 'ml-6' : ''}`}
+      >
+        <span className={status === 'failed' ? 'text-red-500' : 'text-emerald-600'}>
+          {status === 'failed' ? '✗' : '✓'}
+        </span>
+        <span className="flex-1 truncate font-mono">{collapsedChipSummary(ev)}</span>
+      </div>
+    );
+  }
   const indent = ev.indent || 0;
   const label = resolveLabel(ev, le);
   const meta = eventMeta(ev, isEn);
@@ -718,7 +735,16 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   );
   const hasEvents = Array.isArray(effectiveEvents) && effectiveEvents.length > 0;
   const merged = useMemo(() => (hasEvents ? mergeEvents(effectiveEvents) : []), [effectiveEvents, hasEvents]);
-  const mergedIndented = useMemo(() => applyRetryIndent(merged), [merged]);
+  // 2026-08-25: activity-feed modernization pipeline
+  // 1. attachSubagentParent: pair tool rows with their parent subagent
+  // 2. nestRows: set indent=1 for child rows under a subagent
+  // 3. computeCollapseStates: auto-collapse done rows when newer events are running
+  const mergedIndented = useMemo(() => {
+    if (!hasEvents) return [];
+    const withParents = attachSubagentParent(merged);
+    const nested = nestRows(withParents);
+    return computeCollapseStates(nested);
+  }, [merged, hasEvents]);
 
   // Headline derivation: latest `phase_enter.*` event wins; fall back to the
   // legacy `phase` prop only when no events exist. This is the single source
@@ -863,7 +889,14 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
               const isSticky = isLive && i === stickyRunningKey;
               return (
                 <div key={`${ev.ts}-${i}`}>
-                  <TypedRow ev={ev} le={le} isLive={isLive} isEn={isEn} isStickyRunning={isSticky} />
+                  <TypedRow
+                    ev={ev}
+                    le={le}
+                    isLive={isLive}
+                    isEn={isEn}
+                    isStickyRunning={isSticky}
+                    collapsed={ev.collapsed}
+                  />
                   {ev.data_offer && <DataPreviewPane offer={ev.data_offer} isEn={isEn} />}
                 </div>
               );
