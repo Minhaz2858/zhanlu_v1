@@ -6754,29 +6754,131 @@ def _should_skip_tool_choice(endpoint: "LLMEndpoint | None") -> bool:
     return False
 
 
+def _rebuild_v3_history_messages(
+    system_prompt: str,
+    messages: list[dict],
+) -> list[dict]:
+    """Rebuild OpenAI-format ``llm_messages`` from persisted conversation history.
+
+    Persisted assistant messages store tool results inline inside each
+    tool_call's ``results`` key rather than as separate ``role: tool``
+    messages, so they are re-expanded here to restore the expected
+    ``assistant(tool_calls) → tool → ...`` pattern.
+
+    Error/retry persistence can save the SAME tool_call object (same id +
+    same embedded results) into more than one assistant message; re-emitting
+    it duplicates the tool-result payload in the LLM context and can push a
+    turn past the provider's context window.  We dedupe by ``tool_call_id``:
+    only the first occurrence of each id is expanded into a ``role: tool``
+    message, and stale duplicate assistant messages keep their text but drop
+    their already-emitted tool calls.
+    """
+    llm_messages: list[dict] = [{"role": "system", "content": system_prompt}]
+    seen_tool_ids: set[str] = set()
+    for msg in messages:
+        role = msg.get("role")
+        content = msg.get("content")
+        if role == "assistant" and msg.get("tool_calls"):
+            saved_tcs = [
+                tc for tc in (msg.get("tool_calls") or [])
+                if isinstance(tc, dict)
+            ]
+            # Drop tool calls whose results were already expanded earlier in
+            # the history (stale duplicates re-saved by the error path).
+            fresh_tcs = [
+                tc for tc in saved_tcs
+                if tc.get("id") not in seen_tool_ids
+            ]
+            openai_tcs = _to_openai_tool_calls(fresh_tcs) if fresh_tcs else None
+            if openai_tcs:
+                llm_messages.append({
+                    "role": "assistant",
+                    "content": content,
+                    "tool_calls": openai_tcs,
+                })
+            elif content:
+                # Stale duplicate assistant message (same tool calls re-saved
+                # by the error path): keep any visible text, drop the calls.
+                llm_messages.append({"role": "assistant", "content": content})
+            for tc in fresh_tcs:
+                tc_id = tc.get("id")
+                tc_results = tc.get("results")
+                if tc_id and tc_results is not None:
+                    seen_tool_ids.add(tc_id)
+                    _content = tc_results if isinstance(tc_results, str) else json.dumps(tc_results)
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc_id,
+                        "content": _content,
+                    })
+        elif role == "tool":
+            _tid = msg.get("tool_call_id", "")
+            if _tid and _tid in seen_tool_ids:
+                continue  # duplicate of an assistant-embedded result
+            if _tid:
+                seen_tool_ids.add(_tid)
+            llm_messages.append({
+                "role": "tool",
+                "tool_call_id": _tid,
+                "content": msg.get("content", ""),
+            })
+        elif role and content is not None:
+            llm_messages.append({"role": role, "content": content})
+    return llm_messages
+
+
 def _estimate_input_tokens(
     messages: list[dict],
     tools: list[dict] | None = None,
 ) -> int:
     """Rough token estimate for messages + tool definitions.
 
-    Uses ~3.5 chars/token (slightly conservative for mixed EN/CJK) and
-    accounts for tool JSON schemas which are sent outside ``messages`` but
-    still consume context tokens.  Adds a flat +200 overhead for system
+    Conservative (tends to over-estimate) so ``_clamp_max_tokens_for_context``
+    never lets input + output exceed the provider's context window.  Counts
+    message ``content`` (string or multimodal text blocks), assistant
+    ``tool_calls`` (OpenAI ``function.name/arguments`` AND the persisted
+    Zhanlu shape ``name``/``arguments_string`` + embedded ``results``), and
+    tool JSON schemas which are sent outside ``messages`` but still consume
+    context tokens.  Dense JSON (tool results/arguments) tokenizes at ~1.5-3
+    chars/token, well below the 4 chars/token of plain prose, so the whole
+    estimate uses 3 chars/token.  Adds a flat +200 overhead for system
     prompt structural tokens (role markers, special tokens, etc.).
     """
-    total_chars = sum(
-        len(m.get("content") or "") + len(m.get("role") or "")
-        for m in messages if isinstance(m, dict)
-    )
-    msg_tokens = max(1, total_chars // 4)  # 4 chars/token for messages (role overhead is small)
+    total_chars = 0
+    for m in messages:
+        if not isinstance(m, dict):
+            continue
+        content = m.get("content")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            # Multimodal content blocks: count text, skip image_url blocks.
+            for block in content:
+                if isinstance(block, dict) and isinstance(block.get("text"), str):
+                    total_chars += len(block["text"])
+        role = m.get("role")
+        if isinstance(role, str):
+            total_chars += len(role)
+        # Assistant tool calls (both OpenAI shape and persisted shape).
+        for tc in (m.get("tool_calls") or []):
+            if not isinstance(tc, dict):
+                continue
+            fn = tc.get("function")
+            if isinstance(fn, dict):
+                total_chars += len(str(fn.get("name") or ""))
+                total_chars += len(str(fn.get("arguments") or ""))
+            total_chars += len(str(tc.get("name") or ""))
+            total_chars += len(str(tc.get("arguments_string") or ""))
+            res = tc.get("results")
+            if res is not None:
+                total_chars += len(res if isinstance(res, str) else json.dumps(res))
+    msg_tokens = max(1, total_chars // 3)  # 3 chars/token (dense JSON is costly)
 
     # Tool definitions: each tool schema is typically 200-600 tokens.
-    # Use json-length / 3.5 as a rough estimate.
     tool_tokens = 0
     if tools:
         tool_chars = sum(len(str(t)) for t in tools)
-        tool_tokens = max(0, tool_chars // 4)
+        tool_tokens = max(0, tool_chars // 3)
 
     # Flat overhead for system/structural tokens (role markers, special tokens, chat template)
     overhead = 200
@@ -8632,4 +8734,4981 @@ async def add_message_stream(
                         )
                         db.add(msg)
                         db.commit()
-         
+                        db.refresh(msg)
+                except Exception as _persist_err:
+                    logger.warning("v3 FSM route: assistant persist failed (non-fatal): %s", _persist_err)
+
+                # Persist the assistant reply into conv.messages too, so the
+                # next turn's context assembler sees BOTH sides of the
+                # conversation (parity with the v2 blocking route at
+                # ~line 1743).  Without this, follow-up turns see only the
+                # user's messages and lose all artifact/context references.
+                try:
+                    _compact_tool_calls = []
+                    for _tc in (fsm_result.tool_calls or []):
+                        _compact_tool_calls.append({
+                            "name": _tc.get("name"),
+                            "success": _tc.get("success"),
+                            "artifact_ids": _tc.get("artifact_ids", []),
+                        })
+                    _assistant_msg = {
+                        "id": str(uuid4()),
+                        "role": "assistant",
+                        "content": (assistant_content or "")[:4000],
+                        "created_date": datetime.now(timezone.utc).isoformat(),
+                        "tool_calls": _compact_tool_calls,
+                        "artifact_ids": fsm_result.artifact_ids or [],
+                        "file_exports": (
+                            fsm_result.file_exports if hasattr(fsm_result, "file_exports") else {}
+                        ),
+                        "quality_eval": (
+                            fsm_result.quality_eval if hasattr(fsm_result, "quality_eval") else None
+                        ),
+                    }
+                    messages.append(_assistant_msg)
+                    conv.messages = list(messages)
+                    conv.updated_date = datetime.now(timezone.utc)
+                    db.commit()
+                    db.refresh(conv)
+                except Exception as _conv_msg_err:
+                    logger.warning(
+                        "v3 FSM route: conv.messages append failed (non-fatal): %s",
+                        _conv_msg_err,
+                    )
+                    db.rollback()
+
+                # --- Experience layer (Phase A): turn-end recipe + user profile ---
+                try:
+                    _fsm_agent_app = (
+                        db.query(AgentApp)
+                        .filter(AgentApp.name == _v3_agent_name, AgentApp.is_deleted == False)  # noqa: E712
+                        .first()
+                    )
+                    _fsm_agent_app_id = _fsm_agent_app.id if _fsm_agent_app else _v3_agent_name
+                    _fsm_tool_seq = []
+                    for _tc in (fsm_result.tool_calls or []):
+                        _nm = _tc.get("name") if isinstance(_tc, dict) else getattr(_tc, "name", "")
+                        if _nm:
+                            _fsm_tool_seq.append({"name": _nm})
+                    _record_turn_experience(
+                        agent_app_id=_fsm_agent_app_id,
+                        user_id=getattr(user, "id", None),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        tool_sequence=_fsm_tool_seq,
+                        iterations=len(_fsm_tool_seq),
+                    )
+                    _store_turn_cache(
+                        db,
+                        agent_app_id=_fsm_agent_app_id,
+                        user_id=getattr(user, "id", None),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        artifact_ids=getattr(fsm_result, "artifact_ids", None),
+                    )
+                except Exception as _fsm_xp_err:  # noqa: BLE001 — best-effort
+                    logger.warning("experience: FSM turn-end hook failed (non-fatal): %s", _fsm_xp_err)
+
+                done_payload = {
+                    "type": "done",
+                    "content": assistant_content,
+                    "conversation": conv.to_dict(),
+                    "fsm_state": fsm_result.state,
+                    "fsm_execution_id": fsm_result.execution_id,
+                    "fsm_confidence": fsm_result.confidence,
+                    "fsm_tool_calls": fsm_result.tool_calls,
+                    "fsm_artifact_ids": fsm_result.artifact_ids,
+                    # Phase 5: surface the quality-gate decision + plan summary
+                    # so the automation executor can apply the gate to its own
+                    # deliverable (generated via document_generator) and so the
+                    # panel can render the decomposed plan. Both are None when
+                    # the FSM produced no artifacts / no plan.
+                    "fsm_quality_gate": fsm_result.quality_gate,
+                    "fsm_plan_summary": fsm_result.plan_summary,
+                }
+                _push_live("finalize_done", "finalize_done")
+                yield f'data: {json.dumps(done_payload)}\n\n'
+
+            return StreamingResponse(
+                _sse_with_heartbeat(_fsm_event_stream()),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no",
+                    # Bug 3 fix: explicit keep-alive header for proxies
+                    # that don't infer it from Content-Type. Some
+                    # corporate reverse proxies close the connection
+                    # after one HTTP request unless they see this.
+                    "Connection": "keep-alive",
+                },
+            )
+    except Exception as _v3_plan_err:
+        logger.warning(
+            "v3 add_message_stream: planning trigger check failed (non-fatal): %s",
+            _v3_plan_err,
+        )
+
+    # --- Pre-run setup (mirrors add_message v2) ---
+    # P3-bis: when ``conv.agent_name`` is None (the case for sessions
+    # auto-adopted by ``_create_automation`` — the actual executor is
+    # ``automation_runtime_agent``, not the chat agent), default to
+    # ``general_assistant`` so the chat's toolset and system prompt
+    # resolve to a real agent. Without this, ``get_tools`` falls back
+    # to a minimal user-agent toolset that doesn't include
+    # ``execute_automation`` — the LLM then tells the user "I don't
+    # have execute_automation" when the /automation "Run Now" button
+    # hands a structured "Run Automation Task: ..." prompt to the
+    # chat. Mirrors the v3 path's ``_v3_agent_name = conv.agent_name
+    # or "general_assistant"`` default a few hundred lines above.
+    agent_name = conv.agent_name or "general_assistant"
+    agent_app = None
+    tool_config = None
+    if agent_name:
+        agent_app = db.query(AgentApp).filter(
+            AgentApp.name == agent_name,
+            AgentApp.is_deleted == False,
+        ).first()
+        if agent_app and agent_app.tool_config:
+            tool_config = agent_app.tool_config
+
+    system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content)
+    agent_app_id = agent_app.id if agent_app else agent_name
+
+    # Resolve the chat session that owns this conversation so tools like
+    # ``_create_automation`` can link the new task to the chat. The LLM
+    # cannot pass chat_session_id in its tool args (it doesn't know it).
+    # Without this lookup the "Scheduled" button never appears in the chat
+    # header for sessions whose automations were created via the agent.
+    chat_session_id: str | None = None
+    try:
+        from app.models.chat_session import ChatSession
+        sess_row = db.query(ChatSession).filter(
+            ChatSession.conversation_id == conv.id,
+            ChatSession.is_deleted == False,  # noqa: E712
+        ).order_by(ChatSession.created_date.desc()).first()
+        if sess_row:
+            chat_session_id = sess_row.id
+    except Exception as _cs_err:
+        logger.debug("add_message_stream: chat_session lookup skipped: %s", _cs_err)
+
+    # P8: Unified system prompt assembly (memory + todos + coding context + learning graph)
+    try:
+        from app.services.dynamic_prompt_builder import build_system_prompt as _build_prompt
+        system_prompt = _build_prompt(
+            base_prompt=system_prompt,
+            db=db,
+            agent_app_id=agent_app_id,
+            conversation_id=conversation_id,
+            user_id=user.id if user else None,
+            agent_app=agent_app,
+            # Project scope (2026-08-05): forward the effective
+            # project_id (body override > conv.project_id, resolved
+            # up-front in the data-source-runtime prep block) so the
+            # memory snapshot is recalled only from the active
+            # project. Without this, a note like "Q2 2026 sales
+            # report" taken in one project leaked into every other
+            # project's system prompt — the user saw the same
+            # report-recollection greeting in convs across all
+            # projects. The same ``_v3_effective_pid`` / fallback
+            # name resolution is used for the data-source runtime
+            # above, so both pieces see the same project scope.
+            project_id=_v3_effective_pid,
+        )
+    except Exception:
+        pass
+
+    # Inject conversation context (follow-up awareness) so the legacy
+    # streaming loop resolves refinement turns ("make it dark theme")
+    # against prior artifacts instead of treating them as brand-new topics.
+    try:
+        _v3_followup_block = format_followup_context_block(_v3_conv_ctx)
+        if _v3_followup_block:
+            system_prompt += _v3_followup_block
+    except Exception:
+        pass  # Follow-up context injection is best-effort
+
+    # Phase 1: inject extracted attachment text into the system prompt so
+    # the legacy tool loop (non-FSM path) can read what the user uploaded.
+    # The FSM path gets the same content via context_assembler, but the
+    # legacy loop never calls assemble_context — so we inline it here.
+    # Image files with no OCR text are noted as "[image attached — use the
+    # multimodal content block]" — the actual image bytes are forwarded as
+    # a multimodal content block in the user message below.
+    if file_urls:
+        try:
+            from app.services.document_ingestion.service import prepare_for_context
+            _attach_parts: list[str] = []
+            _image_urls: list[str] = []
+            for _furl in file_urls:
+                _prep = prepare_for_context(_furl)
+                _fname = _prep.get("file_name") or _furl
+                if _prep.get("is_image"):
+                    _image_urls.append(_furl)
+                    if _prep.get("text"):
+                        _attach_parts.append(
+                            f"--- {_fname} (image, OCR) ---\n{_prep['text']}"
+                        )
+                    else:
+                        _attach_parts.append(
+                            f"--- {_fname} (image, no OCR text — see multimodal block) ---"
+                        )
+                elif _prep.get("text"):
+                    _attach_parts.append(
+                        f"--- {_fname} ---\n{_prep['text']}"
+                    )
+                elif _prep.get("error"):
+                    _attach_parts.append(
+                        f"--- {_fname} [could not read: {_prep['error']}] ---"
+                    )
+            if _attach_parts:
+                system_prompt += (
+                    "\n\n=== User attachments ===\n"
+                    + "\n\n".join(_attach_parts)
+                    + "\n\nThe user uploaded the file(s) above. Answer the "
+                    "user's question using their content. Quote the file "
+                    "name when citing a passage.\n"
+                )
+        except Exception as _attach_err:
+            logger.warning(
+                "v3 stream: attachment injection failed (non-fatal): %s",
+                _attach_err,
+            )
+
+    # Skill methodology injection
+    if agent_app and getattr(agent_app, "skills", None):
+        try:
+            from app.services.skills_loader import get_skill_prompt_for_agent
+            skill_prompt = get_skill_prompt_for_agent(agent_app.skills, db=db)
+            if skill_prompt:
+                system_prompt += f"\n\n{skill_prompt}"
+        except Exception:
+            pass
+
+    # Full skill catalog injection (dynamic discovery) — see the main
+    # chat path above for the full rationale.  Best-effort, token-budgeted.
+    if agent_app:
+        try:
+            from app.services.skills_loader import list_skills as loader_list_skills
+            from app.services.skills_loader import unified_search
+            from app.services.skill_routing.catalog import build_catalog
+            from app.services.skill_routing.post_router_hook import (
+                build_agent_forced_skill_directive,
+                post_router_pick,
+            )
+
+            all_skills = [s.to_dict() for s in loader_list_skills()]
+            catalog_block = build_catalog(all_skills)
+            if catalog_block:
+                # Post-router hook: when a strong skill match fires, append a
+                # HARD directive to the system prompt telling the LLM to
+                # invoke the matched skill as its first action via the Skill
+                # meta-tool.  Reuses unified_search results when available.
+                forced_skill_directive = ""
+                if user_content:
+                    try:
+                        results = unified_search(
+                            user_content, limit=5, db=db,
+                        )
+                        forced = post_router_pick(
+                            user_content,
+                            db=db,
+                            candidates=results,
+                        )
+                        if forced:
+                            forced_skill_directive = (
+                                build_agent_forced_skill_directive(
+                                    forced["skill_name"],
+                                    score=forced.get("score"),
+                                )
+                            )
+                    except Exception:
+                        pass  # Forced-skill directive is best-effort
+                system_prompt += forced_skill_directive
+                system_prompt += (
+                    "\n\n## Skill Catalog (dynamic discovery)\n"
+                    "You have access to ALL skills below — not just the "
+                    "ones bound to you. Use the `Skill` tool to load or "
+                    "execute any skill by name (e.g. "
+                    '`Skill {command: "execute weekly-report-generation"}`). '
+                    "`load_skill_body` is a SEPARATE tool from the `Skill` "
+                    "dispatcher — call it directly with {name: '<skill-name>'} "
+                    "to read a skill's full methodology. NEVER pass a tool "
+                    "name (like 'load_skill_body') as a Skill command.\n\n"
+                    f"<available_skills>\n{catalog_block}\n</available_skills>"
+                )
+        except Exception:
+            pass
+
+    # FIX 2026-08-23: inject the user-selected skill's SKILL.md body
+    # as a hard runtime directive (same pattern as v2 path above).
+    if selected_skill_id:
+        _sel_skill_block_v3 = _build_selected_skill_runtime_block(
+            db, selected_skill, selected_skill_id,
+        )
+        if _sel_skill_block_v3:
+            system_prompt += "\n\n" + _sel_skill_block_v3
+            logger.info(
+                "v3 selected_runtime_skill injected for conv=%s, skill_id=%s",
+                conversation_id, selected_skill_id,
+            )
+
+    tools = get_tools(agent_name, tool_config, agent_app)
+
+    # Reuse the pre-computed data-source runtime from above (avoids a
+    # duplicate DB query). `prepare_data_source_runtime` is purely a
+    # function of the agent + the selected project, so the
+    # `bound_kb_ids` set is identical to the one the FSM path got.
+    # The `_v3_effective_pid` / `_v3_effective_pname` variables were
+    # resolved up-front (body project context takes precedence over
+    # conv.project_id) — use them here so the tools list gets the
+    # same project-scope the FSM already used.
+    try:
+        from app.services.data_source_runtime import prepare_data_source_runtime
+        from app.services.compaction import get_context_window
+        tools, system_prompt, _ = prepare_data_source_runtime(
+            db, agent_app, tools, system_prompt,
+            selected_project_id=_v3_effective_pid,
+            selected_project_name=_v3_effective_pname,
+            user_id=user.id if user else None,
+            # P1-5: pass the user-selected model's context window so the
+            # Bound Data Sources block auto-compresses for small models.
+            target_context_window=get_context_window(
+                user_model or get_model()
+            ),
+        )
+    except Exception as e:
+        logger.debug("Data source runtime prep failed (non-fatal): %s", e)
+    data_ctx_extras = _v3_data_ctx_extras or {}
+
+    # Concise-mode rule for data turns (2026-08-21): the model narrated the
+    # SQL it planned to run and pasted raw results into the final answer —
+    # long latency + internal artifacts in the bubble. Demand tool-first
+    # behavior and a clean synthesized answer.
+    try:
+        _tool_names = {
+            (t.get("function") or {}).get("name")
+            for t in (tools or [])
+            if isinstance(t, dict)
+        }
+    except Exception:
+        _tool_names = set()
+    if _tool_names & DATA_PRODUCING_TOOLS:
+        system_prompt += (
+            "\n\n## RESPONSE DISCIPLINE (data turns)\n"
+            "- Call the data tool FIRST. Do NOT narrate the SQL you plan to "
+            "run, and do NOT write out query text or column lists in prose.\n"
+            "- When you call `ask_data_agent`, include the `[schema: ...]` "
+            "block from the Bound Data Sources section in your question, and "
+            "keep the question SHORT (1-2 sentences). Do NOT paste raw SQL "
+            "or join hints — the Data Agent writes its own SQL.\n"
+            "- Do NOT paste raw query output (raw IDs, wide tables, JSON) "
+            "into your final answer. The platform renders data cards "
+            "automatically.\n"
+            "- Do NOT include a 'JSON Report Card' section or any raw JSON "
+            "payload in the final answer.\n"
+            "- After the data returns, answer with a short executive "
+            "summary: key numbers, trends, and one recommendation.\n"
+        )
+
+    # ── T15: weak re-export intent → nudge the system prompt (flag-gated) ──
+    # Append before llm_messages is built so the directive reaches the loop.
+    if settings.INTENT_ROUTER_ENABLED:
+        _intent = detect_export_intent(user_content)
+        if _intent and _intent.confidence == "weak":
+            _directive = (
+                "\n\nUSER INTENT DETECTED: re-export. Prefer "
+                "create_artifact(source_execution_id=...) with the session's "
+                "last execution_id instead of re-running data tools."
+            )
+            try:
+                _state = SessionStateService.get_last(db, session_id=conversation_id)
+                if isinstance(_state, SessionState) and getattr(_state, "last_execution_id", None):
+                    _directive += f" Last: {_state.last_execution_id}\n"
+            except Exception as _exc:
+                logger.debug("[intent-router] weak state lookup failed: %s", _exc)
+            system_prompt += _directive
+
+    # ── T17: SESSION STATE block (fail-open, best-effort) ──────────────
+    # Append cached last-data-execution metadata before llm_messages freeze
+    # so re-export/re-format requests can reuse the execution_id instead of
+    # re-running data tools. build_session_state_block returns None when
+    # there is no cached row, so this is a no-op when the cache is empty.
+    try:
+        state_block = build_session_state_block(db, session_id=conversation_id)
+        if state_block:
+            system_prompt = system_prompt + state_block
+    except Exception as _exc:
+        logger.debug("[session-state] injection failed: %s", _exc)
+
+    llm_messages = _rebuild_v3_history_messages(system_prompt, messages)
+
+    # Phase 2: multimodal image pass-through. If the current user message
+    # carried image attachments, convert the last user message's content
+    # into a list of OpenAI-compatible content blocks (text + image_url)
+    # so gpt-4o / claude-sonnet / similar vision models see the image
+    # natively (in addition to any OCR text injected into the system
+    # prompt above). Non-image uploads are unaffected — their text is
+    # already in the system prompt and needs no content-block form.
+    if file_urls:
+        try:
+            from app.services.document_ingestion.service import build_image_content_blocks
+            _img_blocks = build_image_content_blocks(file_urls)
+            if _img_blocks and llm_messages and llm_messages[-1].get("role") == "user":
+                _last = llm_messages[-1]
+                _text = str(_last.get("content") or "")
+                _last["content"] = [{"type": "text", "text": _text}] + _img_blocks
+        except Exception as _img_err:
+            logger.warning(
+                "v3 stream: image content block injection failed (non-fatal): %s",
+                _img_err,
+            )
+
+    tool_calls_for_frontend: list[dict] = []
+    guardrail_retries = 0
+    # Phase 1: one reactive-compaction pass per turn on stream context
+    # overflow (see the stream error handler). NOTE: must be a mutable list
+    # so the nested event_stream generator can flip it without declaring
+    # nonlocal — assigning the bare name inside event_stream() would make
+    # it local to event_stream, turning every earlier read into
+    # UnboundLocalError and killing the SSE stream (same trap as
+    # llm_messages, guardrail_retries, etc.).
+    _stream_compaction_attempted = [False]
+    assistant_content = ""
+    # Fix 2a: assistant_content length at the last ask_data_agent result, so
+    # the text BETWEEN two ask_data_agent calls can be checked for retry
+    # hints (an explicit re-query supersedes the earlier result).
+    _ask_data_content_len = [0]
+    # Smart-retry budget (LLM-driven broadening) for empty ask_data_agent
+    # results with a file-format intent. Mutable list so the nested
+    # generator can decrement it without declaring nonlocal.
+    _smart_retry_budget = [2]
+    # Set True when the no-data branch renders a card-only outcome (no
+    # empty PPTX/DOCX). The post-loop artifact fallback must be skipped
+    # for that turn — an empty file is worse than a clear no-data card.
+    _orch_no_data = [False]
+
+    async def event_stream():
+        nonlocal assistant_content, guardrail_retries, messages, conv
+
+        # T18: mark this turn as dashboard-intent so the artifact persistence
+        # layer can drop stray analytics-path artifacts (e.g. a static "Web
+        # page" written from the agent's narration sentence) that would land on
+        # the same thread as the real dashboard app. Reset in the finally below
+        # so the flag never leaks across turns.
+        _dash_intent_token = set_dashboard_intent(bool(_is_dashboard_request(user_content)))
+
+        # CRITICAL: FastAPI's ``get_db`` dependency closes the injected
+        # ``db`` session in its ``finally`` block as soon as this endpoint
+        # *returns* the ``StreamingResponse``. That happens BEFORE the
+        # generator below is consumed — so by the time we reach the
+        # tool-calling loop, ``db.is_active`` is already ``False`` and
+        # ``conv`` is detached. Every subsequent ``db.commit()`` would
+        # silently no-op (the symptom: streamed text appears via SSE but
+        # never lands in the DB → "vanishing text" on reload).
+        #
+        # Fix: open a dedicated session for the lifetime of the
+        # generator and shadow the closed ``db`` parameter. The session
+        # is closed by the generator's own ``finally`` at the very end.
+        from app.database import SessionLocal as _StreamSessionLocal
+        stream_db = _StreamSessionLocal()
+        db = stream_db  # noqa: F811 — intentional shadow of the closed dep
+        _fresh_conv = db.query(AgentConversation).filter(
+            AgentConversation.id == conversation_id,
+            AgentConversation.is_deleted == False,
+        ).first()
+        if _fresh_conv is not None:
+            conv = _fresh_conv
+            messages = list(conv.messages or [])
+
+        assistant_msg_id = str(uuid.uuid4())
+        artifact_ids: list[str] = []
+        # File-format intent is needed INSIDE the loop (synthesis gate for
+        # the empty-rows path) as well as after it (orchestrator fallback),
+        # so compute it once up front.
+        _orch_doc_format = detect_file_intent(user_content)
+
+        # ── T15: strong re-export intent → hard bypass (flag-gated) ─────────
+        # If the user asks to re-export/re-format a previous analysis AND a
+        # cached session execution exists, build the artifact directly from the
+        # cached structured data (source_execution_id) and end the stream
+        # WITHOUT running the LLM loop. Any failure falls through to the normal
+        # loop below (never 500s the stream).
+        if settings.INTENT_ROUTER_ENABLED:
+            _intent = detect_export_intent(user_content)
+            if _intent and _intent.confidence == "strong":
+                try:
+                    _state = None
+                    try:
+                        _state = SessionStateService.get_last(db, session_id=conversation_id)
+                    except Exception as _exc:
+                        logger.debug("[intent-router] strong state lookup failed: %s", _exc)
+                    if isinstance(_state, SessionState) and getattr(_state, "last_execution_id", None):
+                        _intent.source_execution_id = _state.last_execution_id
+                    if _intent.source_execution_id:
+                        _result = await _create_artifact_tool(
+                            args={
+                                "type": _intent.format,
+                                "title": (getattr(_state, "last_tool_name", None) or "Report"),
+                                "source_execution_id": _intent.source_execution_id,
+                            },
+                            db=db,
+                            user_id=str(user.id),
+                            context={
+                                "conversation_id": conversation_id,
+                                "agent_app_id": agent_app_id,
+                                "agent_name": agent_name,
+                            },
+                        )
+                        _done_content = "Document ready."
+                        if isinstance(_result, dict):
+                            _done_content = (
+                                _result.get("artifact_url")
+                                or _result.get("message")
+                                or _result.get("title")
+                                or "Document ready."
+                            )
+                        yield f'data: {json.dumps({"type": "done", "content": _done_content, "conversation": conv.to_dict()})}\n\n'
+                        return
+                except Exception as exc:
+                    logger.warning("[intent-router] strong-intent bypass failed, falling through: %s", exc)
+
+        # ── Activity steps tracking (Claude-style inline numbered steps) ──
+        _step_counter = [0]  # mutable counter (list for nonlocal access)
+        _activity_steps: list[dict] = []  # accumulate for final persistence
+        _emitted_phases: set[str] = {"goal"}  # phase headlines already sent this turn
+        reasoning_acc: list[str] = []  # P0: accumulate reasoning across iterations for final assistant_msg
+
+        # ── Typed live-activity feed (inline per-message stream) ──
+        # Parallel to the legacy numbered steps: structured events
+        # {type, label_key, params, ts} surfaced to the frontend's
+        # LiveActivityStream and persisted on the assistant message.
+        _live_events: list[dict] = []
+        _live_event_count = [0]
+
+        def _push_live_event(event_type: str, label_key: str, params: dict | None = None) -> str | None:
+            """Build a live event, record for persistence, return its SSE frame."""
+            _ev = _build_live_event(event_type, label_key, params, count=_live_event_count)
+            if _ev is not None:
+                _live_events.append(_ev)
+                return _sse_live_event(_ev)
+            return None
+
+        # Claude-style phase headline: the turn always opens in "Fathoming".
+        yield _emit_phase("goal")
+        # NOTE: the typed live feed deliberately does NOT emit phase_enter.goal
+        # here. The feed only materializes once the turn proves tool-bound
+        # (first tool batch) — chitchat turns that never call a tool render no
+        # activity box at all. The goal event is fired alongside the first
+        # act batch below.
+
+        # Emit "Understanding your request" step (running → done)
+        _step_counter[0] += 1
+        _step_start_times: dict[int, float] = {}  # step_num → monotonic start time
+        _step_start_times[_step_counter[0]] = time.monotonic()
+        yield _emit_activity_step(
+            _step_counter[0], "Understanding your request", "running",
+        )
+        _activity_steps.append({
+            "number": _step_counter[0],
+            "description": "Understanding your request",
+            "status": "running",
+        })
+        _step_dur = int((time.monotonic() - _step_start_times[_step_counter[0]]) * 1000)
+        yield _emit_activity_step(
+            _step_counter[0], "Understanding your request", "done",
+            duration_ms=_step_dur,
+        )
+        _activity_steps[-1]["status"] = "done"
+        _activity_steps[-1]["duration_ms"] = _step_dur
+
+        # P0 reliability: per-turn guardrail controller + per-conversation iteration budget
+        guard_ctrl = ToolLoopGuardController(_loop_guard_config_for(agent_app))
+        _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
+        conv_budget = IterationBudget(max_total=_max_iters)
+        _verify_attempts = 0
+        _gate_attempts = 0  # universal self-eval re-plan nudges this turn
+        _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
+        # Fix 1b: one-shot "force create_artifact next iteration" signal set
+        # by the LAST allowed pptx nudge (pptx_turn_guard.force_next). Read at
+        # the top of the next iteration next to should_force_create_pptx, so
+        # prose deflection can never end the turn without a deck.
+        _pptx_force_next_iteration = False
+        # File-deliverable turn guard: mirrors pptx guard for html/docx/pdf/
+        # xlsx/md.  Detects format from user prompt OR automation metadata.
+        _file_nudge_attempts = 0
+        _file_force_next_iteration = False
+        _output_format = body.get("output_format")  # automation runtime may pass
+        # Initialize BEFORE the loop: the budget guard and the tool-call
+        # loop guard can both ``break`` on the FIRST iteration, before the
+        # in-loop assignment runs — the post-loop ``if not content_streamed``
+        # read then raised UnboundLocalError and killed the SSE stream
+        # ("Sorry, the connection was interrupted" in the chat UI).
+        content_streamed = False  # tracks whether deltas were sent live
+        # Turn-scope marker for the loop guard: only tool calls made during
+        # THIS turn (from the triggering user message onward) count toward
+        # the hard cap. Scanning the whole history made legitimate
+        # cross-turn repetitions (e.g. re-running the same automation via
+        # "Run Now" every day) trip the in-turn guard on iteration 0.
+        _turn_start_idx = max(0, len(llm_messages) - 1)
+        # Phase 3: dynamic tool budget — estimate how many ask_data_agent
+        # calls this query needs based on concept/metric count.
+        _dynamic_tool_caps: dict[str, int] = {}
+        if user_content:
+            _data_cap = _estimate_ask_data_agent_cap(user_content)
+            if _data_cap > TOOL_CALL_CAPS.get("ask_data_agent", 2):
+                _dynamic_tool_caps["ask_data_agent"] = _data_cap
+                logger.info(
+                    "Dynamic tool cap: ask_data_agent=%d (query complexity from '%s…')",
+                    _data_cap,
+                    user_content[:60],
+                )
+            # fetch_data_batch gets a proportional cap (each call can contain
+            # multiple parallel queries, so fewer calls needed)
+            _fetch_cap = max(2, _data_cap // 2)
+            if _fetch_cap > TOOL_CALL_CAPS.get("fetch_data_batch", 3):
+                _dynamic_tool_caps["fetch_data_batch"] = _fetch_cap
+        # Finish-line state (UnboundLocalError discipline: initialized BEFORE
+        # the loop). ``dashboard_forced`` tracks whether the dashboard guard
+        # forced ``create_dashboard`` this turn; ``_wrapup_nudged`` ensures
+        # the T-3 wrap-up message is injected exactly once.
+        dashboard_forced = False
+        _wrapup_nudged = False
+        # ── Dynamic per-turn budget (schema-aware soft cap) ───────────
+        # db-bound agents get a dynamic iteration budget that scales with
+        # schema-graph join complexity (see calculate_agent_budget in
+        # agent_prompts). MAX_TOOL_ITERATIONS stays the absolute hard cap;
+        # this soft cap can be RAISED mid-loop once describe_schema reveals
+        # join edges (see the upgrade hook in the tool-execution branch).
+        _auto_flag = bool(
+            body.get("force_planning")
+            or body.get("phase") == "automation"
+            or _auto_task_id
+            or _auto_exec_id
+        )
+        _effective_budget = calculate_agent_budget(
+            None, user_content or "", is_automation=_auto_flag,
+        )
+        _schema_edges_seen = False
+        # T12: per-turn describe_schema cap (dashboard turns). The agent can
+        # burn its whole tool-loop budget re-inspecting the schema instead of
+        # shipping the dashboard; once the cap fires we block further
+        # describe_schema calls, freeze the budget-upgrade hook (so the soft
+        # cap stops widening), and nudge the model to build NOW.
+        _describe_schema_count = 0
+        _schema_budget_frozen = False
+        _v3_executed_tool_names: list[str] = []
+        # T19: tools that were CALLED this turn but FAILED (returned
+        # {"success": False} or threw). Lets the dashboard-orchestrator guard
+        # distinguish "build tool ran OK" from "build tool crashed" — a failed
+        # build must NOT unlock the static-artifact fallback.
+        _v3_failed_tool_names: set[str] = set()
+        # Fix 4: titles of create_artifact calls already executed this turn,
+        # so a second identical static page is blocked (always waste).
+        _create_artifact_titles: set[str] = set()
+        # Fix 6: narration-nudge guard counter. The model sometimes exits the
+        # v3 loop with ONLY narration (no tool call) on a dashboard-shaped
+        # turn; each nudge forces the EXACT next workflow step and continues
+        # the loop. Capped by MAX_DASHBOARD_NARRATION_NUDGES so a weak model
+        # cannot be nagged forever.
+        _dashboard_narration_nudges: int = 0
+        # ── Goal-Contract closed loop (flag-gated) ────────────────────
+        # A machine-checkable contract for this turn: what deliverable (if
+        # any) the user asked for, whether data is required, and whether the
+        # model promised a follow-up tool call in prose. Built ONCE per turn
+        # here, updated at runtime from tool results, and checked FIRST in
+        # the no-tool-calls exit branch. When GOAL_CONTRACT_ENABLED is off,
+        # ``_contract`` stays None and every legacy guard below runs
+        # bit-for-bit as before (flag-off = current behavior).
+        _contract = None
+        _contract_force_tool = None  # remediation force armed by the exit checker
+        _contract_force_synthesis = False  # same, but forces tool_choice="none" for synthesis
+        _empty_answer_forces = 0          # Fix 2: cap of one re-synthesis per turn
+        _empty_answer_force_next = False  # Fix 2: armed by the exit-branch net
+        _last_iter_prose = ""            # Fix 3: last iter's prose for promise-as-answer check
+        if settings.GOAL_CONTRACT_ENABLED:
+            try:
+                _bound_kb_ids = data_ctx_extras.get("bound_kb_ids") or []
+                _contract = build_goal_contract(
+                    user_content or "",
+                    agent_config={
+                        "tools": _tool_names_from_schemas(tools),
+                        "bound_kb_ids": _bound_kb_ids,
+                    },
+                    max_forces=settings.GOAL_CONTRACT_MAX_FORCES,
+                    table_executor=_make_goal_contract_table_executor(db, _bound_kb_ids),
+                )
+            except Exception as _gc_err:  # noqa: BLE001 — contract must never break the loop
+                logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
+                _contract = None
+        # ── Query-purpose resolver (flag-gated, Bug 2 fix) ─────────────
+        # Resolves catalog table roles ONCE per turn (memoized) so every
+        # ask_data_agent result can be tagged probe/auxiliary/answer before
+        # it may feed the deliverable. Fail-open: on any init error the
+        # resolver stays None and classification degrades to shape-only.
+        _purpose_resolver = None
+        if settings.QUERY_PURPOSE_TAGGING_ENABLED:
+            try:
+                _purpose_resolver = TableRoleResolver(
+                    db,
+                    kb_ids=(data_ctx_extras or {}).get("bound_kb_ids") or [],
+                    project_id=_v3_effective_pid,
+                )
+            except Exception as _purpose_init_err:  # noqa: BLE001
+                logger.warning(
+                    "query-purpose resolver init failed (shape-only fallback): %s",
+                    _purpose_init_err,
+                )
+                _purpose_resolver = None
+        _loop_exit_monotonic = None
+        # Multi-iter content accumulator (2026-08-20):
+        # The v3 loop resets `assistant_content = ""` at the top of every
+        # iteration. Without this accumulator, the persisted assistant_msg
+        # and the `done` event's content field end up carrying ONLY the
+        # LAST iteration's prose — all earlier iterations' content (tables,
+        # key findings, recommendations) is silently lost. We capture each
+        # iter's content BEFORE the reset and join them post-loop.
+        _v3_iter_contents: list[str] = []
+        # Recovery buffer: when a nudge site pops good content from the
+        # accumulator, we save the longest popped entry here. If the loop
+        # exits with empty/stale content (nudge failed, max iterations),
+        # we recover this best prior iteration instead of falling back to
+        # generic "I had trouble..." or raw data rows. (Bug 2026-08-23)
+        # Wrapped in a list so nested event_stream can mutate without
+        # nonlocal (same pattern as _stream_compaction_attempted).
+        _v3_recovered_best = [None]  # type: ignore[var-annotated]
+        accumulated_content: str = ""  # post-loop computed; safe default for early-exit paths
+        # D1/D2 (2026-08-20): once a gate nudges a re-synthesis, every
+        # subsequent streamed delta must REPLACE the bubble (content_replace
+        # SSE) instead of appending — otherwise the nudge-reply prose leaks
+        # into the final user-facing answer. Turn-scoped: once True it stays
+        # True for the rest of the turn (all post-nudge iterations are
+        # replacement content, only the last synthesis survives).
+        _nudge_replacement_pending = False
+        # UX FIX (2026-08-24): When the user asked for a file deliverable
+        # (docx, pptx, xlsx, pdf, html, md), suppress ALL intermediate text
+        # in the chat bubble until the turn is fully complete. Without this
+        # the user sees streaming analysis that gets replaced/collapsed by
+        # the final synthesis — jarring "make-then-collapse" UX. We only
+        # show the FINAL accumulated_content in the very last SSE event.
+        _suppress_chat_deltas = bool(_orch_doc_format)
+        for iteration in range(MAX_TOOL_ITERATIONS):
+            # P0: consume one iteration from the conversation-level budget
+            if not conv_budget.consume():
+                logger.info(
+                    "Conversation %s iteration budget exhausted (%d/%d), breaking",
+                    conversation_id, conv_budget.used, conv_budget.max_total,
+                )
+                break
+            # ── Dynamic soft-cap check ────────────────────────────────
+            # The per-turn budget is a soft cap: the model self-regulates
+            # via the T-3 wrap-up nudge below, and we break here if it
+            # keeps going. MAX_TOOL_ITERATIONS still bounds the range.
+            if iteration >= _effective_budget:
+                # Goal-Contract soft-cap suppression: when the turn contract
+                # still has unmet criteria (deliverable unproduced / zero-row
+                # re-query / announced tool), skip the soft-cap break so the
+                # exit-checker force machinery below can fire. The hard cap
+                # MAX_TOOL_ITERATIONS still bounds the loop.
+                _gc_soft_continue = False
+                if settings.GOAL_CONTRACT_ENABLED and _contract is not None:
+                    # Fix 3a: update pending action from last iter's prose
+                    # BEFORE checking unmet, so the sequence-stamp state is
+                    # current even when the model produced promise text
+                    # alongside tool calls (the exit branch only calls
+                    # refresh_pending_action on text-only responses).
+                    if _last_iter_prose:
+                        _contract.refresh_pending_action(_last_iter_prose)
+                    if bool(_contract.unmet(_tool_names_from_schemas(tools))):
+                        _gc_soft_continue = True
+                    else:
+                        # Fix 3b: promise-as-answer gap — the model produced
+                        # promise text ("Let me verify…") alongside tool calls
+                        # in a prior iteration. refresh_pending_action arms the
+                        # pending action, but record_tool_executed (called
+                        # during tool execution AFTER arming) advances
+                        # _executed_seq past _armed_seq, so _unmet_pending_action
+                        # returns [] and unmet() misses it. Direct check
+                        # bypasses the sequence-stamp logic.
+                        _last_pending = pending_action_phrase(_last_iter_prose)
+                        if (
+                            _last_pending
+                            and _contract._usable_results > 0
+                            and _contract.forces_used < _contract.max_forces
+                        ):
+                            _gc_soft_continue = True
+                            _contract.record_force()
+                            _contract_force_synthesis = True
+                            _nudge_msg = (
+                                f"You announced: \"{_last_pending}\" — but you "
+                                f"already have the data. Write the final answer now "
+                                f"using the retrieved data. Do not announce future actions."
+                            )
+                            llm_messages.append({"role": "assistant", "content": _last_iter_prose})
+                            llm_messages.append({"role": "user", "content": _nudge_msg})
+                            # Pop the last iter content so re-synthesis replaces
+                            # it instead of appending alongside the promise text.
+                            # BUGFIX 2026-08-23: save popped good content so we
+                            # can recover it if the nudge fails (max iter / loop
+                            # exit with empty content).
+                            if _v3_iter_contents:
+                                _popped = _v3_iter_contents.pop()
+                                if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                                    _v3_recovered_best[0] = _popped
+                            assistant_content = ""
+                            _nudge_replacement_pending = True
+                            logger.info(
+                                "v3 stream: promise-as-answer at soft-cap → forcing synthesis "
+                                "(conv=%s, iter=%d, phrase=%s, forces=%d/%d)",
+                                conversation_id, iteration, _last_pending[:60],
+                                _contract.forces_used, _contract.max_forces,
+                            )
+
+                if _gc_soft_continue:
+                    logger.info(
+                        "v3 stream: soft-cap reached but goal-contract unmet (conv=%s, iter=%d); continuing",
+                        conversation_id, iteration,
+                    )
+                else:
+                    logger.info(
+                        "v3 stream: dynamic per-turn budget reached (%d) for conv=%s; wrapping up",
+                        _effective_budget, conversation_id,
+                    )
+                    break
+            # --- Mid-turn steer drain (P2) ---
+            # Pick up any user steer messages enqueued by the POST /steer
+            # endpoint since the last iteration. Inject them into the LLM
+            # message history as user messages and yield a `steer` SSE event
+            # so the client can render an inline marker. Best-effort: a
+            # steer-bus failure must never break the chat path.
+            try:
+                _steer_msgs = steer_bus.drain(conversation_id)
+            except Exception as _steer_drain_err:
+                logger.warning(
+                    "v3 event_stream: steer drain failed (non-fatal): %s",
+                    _steer_drain_err,
+                )
+                _steer_msgs = []
+            if _steer_msgs:
+                for _sm in _steer_msgs:
+                    llm_messages.append({"role": "user", "content": _sm})
+                yield _emit_steer(_steer_msgs)
+
+            # Per-tool-name runaway guard. If the LLM has called the same
+            # tool TOOL_CALL_HARD_CAP times already, inject a final nudge
+            # and break — do NOT make another LLM call. Stops the
+            # classic skills/skills_hub loop on agent_builder.
+            # Scoped to the CURRENT turn: repetitions from earlier turns
+            # (e.g. the user re-running the same automation) are legitimate
+            # and must not trip the in-turn guard.
+            loop_info = _detect_tool_call_loop(llm_messages, start_idx=_turn_start_idx, dynamic_caps=_dynamic_tool_caps)
+            if loop_info is not None:
+                looped_tool, looped_n = loop_info
+                # Internal LLM-facing nudge: tells the model to stop
+                # calling the same tool and wrap up. Scaffolding for
+                # the model, not for the user.
+                nudge = (
+                    f"Tool '{looped_tool}' was already called {looped_n} times. "
+                    "Use the result you have and produce your final answer. "
+                    "Do not call it again."
+                )
+                # User-facing assistant content: friendly text, no
+                # internal tool names or call counts. The previous
+                # implementation reused `nudge` for both, leaking
+                # internal scaffolding into the chat UI. After R4
+                # we explicitly tell the user we are proceeding with
+                # sensible defaults so the loop guard stopping the
+                # agent does not feel like a dead end.
+                #
+                # The original message ("I'm going to build the agent
+                # with sensible defaults now…") is specific to the
+                # ``agent_builder`` flow where the guard was first
+                # needed. For every other agent (Sales, Research,
+                # general_assistant, …) that wording is nonsensical —
+                # the user is NOT building an agent, they're asking a
+                # normal question. Use an agent-aware message so the
+                # loop guard doesn't feel like a dead end regardless
+                # of which agent tripped it.
+                if agent_name == "agent_builder":
+                    user_facing = (
+                        "I'm going to build the agent with sensible defaults now. "
+                        "You can adjust anything after creation."
+                    )
+                else:
+                    user_facing = (
+                        "I noticed I was repeating the same tool call, so I'll "
+                        "stop here and answer based on what I've gathered so far."
+                    )
+                logger.warning(
+                    "Tool-call loop guard tripped in conversation %s: "
+                    "tool=%r count=%d (cap=%d). Breaking loop.",
+                    conversation_id, looped_tool, looped_n, TOOL_CALL_HARD_CAP,
+                )
+                # Bug 2 fix: do NOT stream the reflexion text as the user's
+                # response. The previous code set assistant_content =
+                # user_facing and yielded it as a delta, which surfaced
+                # internal FSM state ("repeating the same tool call") in
+                # the chat UI. Instead, break the loop and let the
+                # post-loop fallback (see _FALLBACK_EMPTY_LOOP_GUARD_MSG
+                # below) produce a clean response if the LLM didn't
+                # already accumulate one across the tool iterations.
+                llm_messages.append({"role": "user", "content": nudge})
+                # Mark that we tripped the loop guard so the post-loop
+                # fallback can pick an appropriate user-facing message
+                # (the agent_builder-specific copy above vs a generic
+                # "I gathered some information" message for other agents).
+                _loop_guard_user_facing = user_facing
+                break
+            # Finish line: with 3 iterations left (per the DYNAMIC soft cap),
+            # tell the model to stop exploring and assemble its final answer
+            # (injected exactly once).
+            if iteration == _effective_budget - 3 and not _wrapup_nudged:
+                _wrapup_nudged = True
+                llm_messages.append({
+                    "role": "user",
+                    "content": (
+                        "You have 3 steps left. Stop exploring and produce "
+                        "your final answer with what you have."
+                    ),
+                })
+            tool_choice = _compute_tool_choice(
+                user_content, data_ctx_extras, iteration,
+                tool_names=_tool_names_from_schemas(tools),
+            )
+
+            # Dashboard guard: if the user asked for a live dashboard and
+            # we've already done the schema/design pass, force the next LLM
+            # turn to call `create_dashboard` so the dashboard renders inline
+            # in the chat. Without this, the agent often keeps running
+            # `execute_query` and dumps markdown tables instead of producing
+            # an interactive dashboard artifact.
+            # Also fires in dashboard-capable projects (Ecisco BI) when the
+            # agent speculatively loads dashboard skills before being asked.
+            _tool_names = _tool_names_from_schemas(tools)
+            _is_dash_project = bool(conv.agent_name and (
+                "ecisco_bi" in conv.agent_name.lower()
+                or "bi_assistant" in conv.agent_name.lower()
+            ))
+            _dash_build_tool = dashboard_build_tool()
+            if (
+                _dash_build_tool in _tool_names
+                and should_force_create_dashboard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    has_dashboard_tool=True,
+                    is_dashboard_project=_is_dash_project,
+                )
+            ):
+                logger.info(
+                    "v3 stream: forcing %s after schema/design "
+                    "pass (conv=%s, iter=%d, prior_tool_count=%d, dash_project=%s)",
+                    _dash_build_tool, conversation_id, iteration,
+                    len(tool_calls_for_frontend), _is_dash_project,
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": _dash_build_tool},
+                }
+                dashboard_forced = True
+            # PPTX turn-guard: mirror the dashboard forcing for artifact decks.
+            # When the user asked for a PPT and the tool-loop budget window is
+            # closing with no pptx artifact created, force create_artifact so
+            # the model must emit the call (dashboard forcing wins via the
+            # dashboard_forced guard inside should_force_create_pptx).
+            _pptx_forced = False
+            # Fix 1b: the last-allowed synthesis-boundary nudge arms
+            # _pptx_force_next_iteration, which overrides the T-window check
+            # here so the model MUST emit create_artifact next turn.
+            if _pptx_force_next_iteration or should_force_create_pptx(
+                user_content,
+                tool_calls_for_frontend,
+                iteration=iteration,
+                max_iterations=MAX_TOOL_ITERATIONS,
+                has_artifact_tool="create_artifact" in _tool_names,
+                dashboard_forced=dashboard_forced,
+            ):
+                logger.info(
+                    "v3 stream: forcing create_artifact for pptx request "
+                    "(conv=%s, iter=%d, prior_tool_count=%d)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_artifact"},
+                }
+                _pptx_forced = True
+                _pptx_force_next_iteration = False  # consume the one-shot force
+            # File-deliverable forcing (html/docx/pdf/xlsx/md): mirrors pptx
+            # guard but covers non-pptx formats.  Blocked when pptx/dashboard
+            # already forced.  For automation runs, detect output_format from
+            # the harness metadata passed through the v3 loop.
+            _file_forced = False
+            if not _pptx_forced and not dashboard_forced and (
+                _file_force_next_iteration or should_force_create_file(
+                    user_content,
+                    tool_calls_for_frontend,
+                    iteration=iteration,
+                    max_iterations=MAX_TOOL_ITERATIONS,
+                    has_artifact_tool="create_artifact" in _tool_names,
+                    dashboard_forced=dashboard_forced,
+                    pptx_forced=_pptx_forced,
+                    output_format=_output_format,
+                )
+            ):
+                logger.info(
+                    "v3 stream: forcing create_artifact for file deliverable "
+                    "(conv=%s, iter=%d, prior_tool_count=%d, format=%s)",
+                    conversation_id, iteration, len(tool_calls_for_frontend),
+                    getattr(should_force_create_file, '_last_fmt', '?'),
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": "create_artifact"},
+                }
+                _file_forced = True
+                _file_force_next_iteration = False  # consume the one-shot force
+
+            # Goal-Contract force (flag-gated): the exit checker armed a
+            # remediation force (unmet deliverable / zero-row re-query /
+            # announced-but-unexecuted tool). Override tool_choice so the next
+            # LLM turn MUST emit the required tool. Tool-presence was already
+            # verified inside contract.unmet(); dashboard/pptx guard forcing
+            # above takes precedence via the finish-line guard flag below.
+            _contract_forced = False
+            if (
+                settings.GOAL_CONTRACT_ENABLED
+                and _contract is not None
+                and _contract_force_tool is not None
+                and _contract_force_tool in _tool_names
+            ):
+                logger.info(
+                    "v3 stream: goal-contract forcing %s (conv=%s, iter=%d)",
+                    _contract_force_tool, conversation_id, iteration,
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": _contract_force_tool},
+                }
+                _contract_forced = True
+                _contract_force_tool = None  # consume the one-shot force
+
+            # Goal-Contract force-synthesis: the exit checker armed a
+            # forced-synthesis (usable data already retrieved; the model just
+            # needs to write the answer). Override tool_choice="none" so the
+            # model must answer in prose. Fix 2's empty-answer net arms the
+            # same one-shot force (via _empty_answer_force_next).
+            if (
+                (
+                    settings.GOAL_CONTRACT_ENABLED
+                    and _contract is not None
+                    and _contract_force_synthesis
+                )
+                or _empty_answer_force_next
+            ):
+                logger.info(
+                    "v3 stream: forcing synthesis (conv=%s, iter=%d)",
+                    conversation_id, iteration,
+                )
+                tool_choice = "none"
+                _contract_forced = True
+                _contract_force_synthesis = False  # consume the one-shot force
+                _empty_answer_force_next = False   # consume the one-shot force
+
+            # Finish line: on the final iteration force tool_choice="none" so
+            # the LLM must answer in text. Guard forcing (dashboard + pptx +
+            # goal-contract) wins.
+            tool_choice = _finish_line_tool_choice(
+                iteration, MAX_TOOL_ITERATIONS - 1,
+                dashboard_forced or _pptx_forced or _contract_forced, tool_choice,
+            )
+
+            # ── Gap 1: true token streaming ───────────────────────────
+            # When STREAM_TOKEN_DELTAS is on, drive the streaming generator
+            # (_stream_llm_with_tools) so tokens are yielded to the client
+            # as they arrive (typing effect). The generator also
+            # reassembles fragmented tool_calls so agent tool execution
+            # continues to work. When the flag is off, fall back to the
+            # legacy buffered _call_llm_with_tools path (unchanged).
+            #
+            # Multi-iter content capture (2026-08-20):
+            # If a previous iteration produced prose (assistant_content is
+            # non-empty), append it to the accumulator BEFORE resetting for
+            # the next iter. Without this, multi-iter turns lose all but the
+            # LAST iter's prose in the persisted message + `done` event.
+            if assistant_content:
+                _v3_iter_contents.append(assistant_content)
+                _last_iter_prose = assistant_content  # Fix 3: save for promise-as-answer check
+            assistant_content = ""
+            raw_tool_calls: list = []
+            final_reasoning = ""
+            content_streamed = False  # tracks whether deltas were sent live
+
+            try:
+                # P1.3: Pre-API deterministic tool result pruning
+                prune_tool_results_only(llm_messages, model=get_model())
+                sanitize_messages(llm_messages)
+                # Fix D (always-on): condense oversized ask_data_agent report
+                # cards before EVERY LLM call, not just the forced-synthesis
+                # finish line. A reasoning model can exhaust its output budget
+                # on reasoning_content mid-loop and return empty content on the
+                # very next call; shrinking the report card early prevents that.
+                # Idempotent: once condensed, content drops below the 6000-char
+                # threshold, so re-condensing is a no-op. Full payload stays in
+                # tool_calls_for_frontend (frontend report-card rendering).
+                _condense_data_agent_results(llm_messages)
+                # P1-5 Hermes-style proactive pruning (Step 2): between FSM
+                # iterations, replace old tool results with a compact state
+                # checkpoint.  This prevents accumulation of 50k+ tokens of
+                # tool results across multiple data fetches in the v3 FSM
+                # loop.  Deterministic, no-LLM, sub-millisecond.
+                from app.services.agent_loop.fsm_pruner import prune_between_fsm_states
+                llm_messages[:] = prune_between_fsm_states(
+                    llm_messages, current_state="llm_call",
+                )
+                if STREAM_TOKEN_DELTAS:
+                    # ── Streaming path ────────────────────────────────
+                    # Iterate the generator: deltas → client immediately;
+                    # reasoning → accumulate; terminal event → set
+                    # assistant_content / raw_tool_calls.
+                    # Phase 1: bounded transient retry. Only safe BEFORE the
+                    # first client-visible chunk (content_streamed) — after
+                    # that, a restart would duplicate emitted content, so we
+                    # raise into the outer handler as before.
+                    _stream_attempt = 1
+                    while True:
+                        try:
+                            async for ev_type, ev_data in _stream_llm_with_tools(
+                                llm_messages, tools, tool_choice=tool_choice,
+                                model_override=user_model,
+                                endpoint=effective_llm.endpoint,
+                                temperature=llm_overrides.get("temperature"),
+                                max_tokens=llm_overrides.get("max_tokens"),
+                            ):
+                                if ev_type == "delta":
+                                    assistant_content += ev_data
+                                    content_streamed = True
+                                    if _nudge_replacement_pending:
+                                        # D1/D2: post-nudge re-synthesis replaces
+                                        # the whole bubble instead of appending, so
+                                        # leaked nudge-reply prose never shows.
+                                        if not _suppress_chat_deltas:
+                                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                    else:
+                                        if not _suppress_chat_deltas:
+                                            yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
+                                elif ev_type == "reasoning":
+                                    final_reasoning += ev_data
+                                elif ev_type == "tool_calls":
+                                    raw_tool_calls = ev_data or []
+                                    # qwen3 content-based tool_call extraction:
+                                    # the thinking preamble was already streamed
+                                    # as deltas. Replace it with clean content
+                                    # so the chat bubble shows the tool result
+                                    # instead of raw thinking.
+                                    if content_streamed and assistant_content:
+                                        cleaned = _strip_tool_call_markup(assistant_content)
+                                        # Also strip SQL/plan narration
+                                        # ("SELECT …" fences, bare SQL
+                                        # paragraphs): this iteration is
+                                        # calling tools, so the prose is
+                                        # plan narration, not the answer
+                                        # ("SQL leak", 2026-08-21).
+                                        cleaned = _strip_sql_narration(cleaned)
+                                        if cleaned != assistant_content:
+                                            assistant_content = cleaned
+                                            if not _suppress_chat_deltas:
+                                                yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                elif ev_type == "done":
+                                    # Generator's authoritative full text — use
+                                    # it if we didn't accumulate (defensive; in
+                                    # practice assistant_content already matches).
+                                    if ev_data and not assistant_content:
+                                        assistant_content = ev_data
+                                elif ev_type == "error":
+                                    raise RuntimeError(ev_data)
+                            break  # stream completed cleanly
+                        except Exception as stream_err:
+                            ce_stream = classify_api_error(stream_err)
+                            if (
+                                content_streamed
+                                or not is_transient(ce_stream)
+                                or _stream_attempt >= max_attempts_for(ce_stream)
+                            ):
+                                raise
+                            delay = next_backoff(
+                                _stream_attempt - 1, retry_after_seconds(stream_err)
+                            )
+                            _stream_attempt += 1
+                            logger.warning(
+                                "stream: transient %s in conversation %s; "
+                                "retry %d/%d in %.1fs",
+                                ce_stream.reason.value, conversation_id,
+                                _stream_attempt, max_attempts_for(ce_stream), delay,
+                            )
+                            yield f'data: {json.dumps({"type": "llm_retry", "attempt": _stream_attempt, "max_attempts": max_attempts_for(ce_stream), "delay_ms": int(delay * 1000), "reason": ce_stream.reason.value})}\n\n'
+                            await asyncio.sleep(delay)
+                else:
+                    # ── Legacy buffered path ──────────────────────────
+                    llm_response = await _call_llm_with_tools(
+                        llm_messages, tools, tool_choice=tool_choice,
+                        model_override=user_model,
+                        endpoint=effective_llm.endpoint,
+                        temperature=llm_overrides.get("temperature"),
+                        max_tokens=llm_overrides.get("max_tokens"),
+                    )
+                    assistant_content = llm_response.get("content", "")
+                    raw_tool_calls = llm_response.get("tool_calls", [])
+                    final_reasoning = llm_response.get("reasoning", "") or ""
+            except Exception as e:
+                # P1.1: Structured error classification
+                ce = classify_api_error(e)
+                logger.warning(
+                    "LLM call error in conversation %s (stream): reason=%s retryable=%s should_compress=%s err=%r",
+                    conversation_id, ce.reason.value, ce.retryable, ce.should_compress, e,
+                )
+                metrics.record_error(ce.reason.value)
+                # Phase 1: honor classifier hints the stream path used to
+                # drop. Only safe before any client-visible content was
+                # emitted (content_streamed False).
+                if not content_streamed and ce.should_fallback:
+                    # Switch model for a final buffered attempt. Seamless:
+                    # nothing has streamed yet, so emitting the buffered
+                    # content as one delta is indistinguishable to the client.
+                    try:
+                        async def _call_with_fallback_model(_model_name):
+                            return await _call_llm_with_tools(
+                                llm_messages, tools, tool_choice=tool_choice,
+                                model_override=_model_name,
+                                endpoint=effective_llm.endpoint,
+                                temperature=llm_overrides.get("temperature"),
+                                max_tokens=llm_overrides.get("max_tokens"),
+                            )
+                        _fb_response, _fb_model = await with_fallback(
+                            get_model(), _call_with_fallback_model, ce,
+                            user_fallback=llm_overrides.get("fallback_model"),
+                        )
+                    except Exception as _fb_err:
+                        _fb_response, _fb_model = None, None
+                        logger.warning("stream: fallback attempts failed: %s", _fb_err)
+                    if _fb_response:
+                        assistant_content = _fb_response.get("content", "")
+                        raw_tool_calls = _fb_response.get("tool_calls", [])
+                        final_reasoning = _fb_response.get("reasoning", "") or ""
+                        logger.info("stream: fallback to model %s succeeded", _fb_model)
+                        if assistant_content:
+                            content_streamed = True
+                            if _nudge_replacement_pending:
+                                # D1/D2: full-content emit must replace the
+                                # bubble when a re-synthesis is in flight.
+                                if not _suppress_chat_deltas:
+                                    yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                            else:
+                                if not _suppress_chat_deltas:
+                                    yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
+                        # Fall through to the post-try flow (reasoning_done,
+                        # tool-call handling) instead of failing the turn.
+                    else:
+                        for _err_event in _persist_stream_error(
+                            db, conv, conversation_id, messages, e, ce,
+                            tool_calls_for_frontend, artifact_ids,
+                        ):
+                            yield _err_event
+                        _discard_steer(conversation_id)
+                        return
+                elif (
+                    not content_streamed
+                    and ce.should_compress
+                    and not _stream_compaction_attempted[0]
+                ):
+                    # Context overflow: one reactive compaction pass, then
+                    # re-enter the iteration with compacted messages.
+                    _stream_compaction_attempted[0] = True
+                    try:
+                        from app.services.compaction import (
+                            AutoCompactState,
+                            auto_compact_if_needed,
+                        )
+                        # NOTE: must NOT rebind `llm_messages` here — it is a
+                        # closure variable from add_message_stream, and any
+                        # assignment would make it event_stream-local, turning
+                        # every earlier read into UnboundLocalError (kills the
+                        # SSE stream). Mutate in place instead.
+                        _compacted, was_compacted = await auto_compact_if_needed(
+                            llm_messages,
+                            # FIX 2026-08-24 (v2): the compactor's LLM call
+                            # needs MORE context than the user's model to
+                            # actually summarize a 60k+ token conversation
+                            # when the user is on a small-context model
+                            # (qwen3.6-27b = 65k).  Use the global default
+                            # (deepseek-v4-flash, 128k) so the compactor's
+                            # LLM call doesn't itself overflow.
+                            model=get_model(),
+                            state=_compaction_states.get(
+                                conversation_id, AutoCompactState()
+                            ),
+                            force=True,
+                            trigger="reactive",
+                        )
+                    except Exception as compact_err:
+                        logger.error("stream: reactive compaction failed: %s", compact_err)
+                        was_compacted = False
+                    if was_compacted:
+                        if not _compacted or _compacted[0].get("role") != "system":
+                            _compacted.insert(0, {"role": "system", "content": system_prompt})
+                        llm_messages[:] = _compacted
+                        continue
+                    for _err_event in _persist_stream_error(
+                        db, conv, conversation_id, messages, e, ce,
+                        tool_calls_for_frontend, artifact_ids,
+                    ):
+                        yield _err_event
+                    _discard_steer(conversation_id)
+                    return
+                else:
+                    for _err_event in _persist_stream_error(
+                        db, conv, conversation_id, messages, e, ce,
+                        tool_calls_for_frontend, artifact_ids,
+                    ):
+                        yield _err_event
+                    _discard_steer(conversation_id)
+                    return
+
+            # P0: surface reasoning captured from the LLM message.
+            # The non-streaming _call_llm_with_tools puts DeepSeek-R1's
+            # reasoning_content at message.reasoning_content; we forward it
+            # as a single 'reasoning_done' SSE event per iteration and
+            # accumulate it into reasoning_acc for final persistence on
+            # assistant_msg (the assistant_msg dict is built later, after
+            # the loop ends — see line ~4000).
+            # NOTE: 'fsm_state' event type is reserved for the future
+            # SynexiaFSM-in-SSE follow-up. It will share this envelope; the
+            # FSM design is separate.
+            if final_reasoning:
+                reasoning_acc.append(final_reasoning)
+                yield f'data: {json.dumps({"type": "reasoning_done", "reasoning": final_reasoning, "step_count": len(tool_calls_for_frontend)})}\n\n'
+
+            if not raw_tool_calls:
+                # ── Goal-Contract exit checker (flag-gated) ──────────
+                # FIRST in the exit branch: if the turn contract has unmet
+                # criteria (deliverable unproduced / zero-rows-with-text-
+                # filters / an announced-but-unexecuted tool), inject the
+                # remediation nudge and arm the tool_choice force for the
+                # next iteration, then continue the loop. When the contract
+                # is satisfied (or the force budget is exhausted) the legacy
+                # guardrail → verify-on-stop → pptx-guard → self-eval chain
+                # below runs unchanged (flag-off = current behavior).
+                if settings.GOAL_CONTRACT_ENABLED and _contract is not None:
+                    # Re-evaluate the pending-action marker from the model's
+                    # latest prose. The announce-but-don't-execute pattern
+                    # ("Let me check the live tables...") only surfaces in
+                    # assistant_content at exit — the turn-start value comes
+                    # from user_content alone. Only runs in the no-tool-calls
+                    # exit branch (cheap; the criterion matters at exit).
+                    _contract.refresh_pending_action(assistant_content)
+                    # Fix 4 (extended): clean exit — whenever the model's last
+                    # sentence announces a pending action ("Let me verify…"),
+                    # strip that trailing sentence. Previously this only fired
+                    # when forces_used >= max_forces, but the promise-as-answer
+                    # bug also happens when the model exits normally with
+                    # promise text after producing a valid artifact — the user
+                    # sees the artifact AND the misleading "Let me verify…"
+                    # appended to it. Now we ALWAYS strip + append the note.
+                    _pending_phrase = pending_action_phrase(assistant_content)
+                    _stripped_promise = False
+                    if _pending_phrase:
+                        _stripped_promise = True
+                        assistant_content = _strip_trailing_pending(
+                            assistant_content, _pending_phrase,
+                        )
+                        # Only append the limitation note if the stripped
+                        # content is non-empty (the rest of the answer is
+                        # real content that stands on its own). When the
+                        # pending sentence IS the whole reply, the empty-
+                        # answer net below will handle it.
+                        if assistant_content.strip():
+                            assistant_content = (
+                                assistant_content + "\n\nNote: this turn ended before completing the "
+                                "additional verification described above. The current answer is based "
+                                "on the data already returned."
+                            ).strip()
+                    _gc_unmet = _contract.unmet(_tool_names_from_schemas(tools))
+                    if _gc_unmet:
+                        _gc_crit = _gc_unmet[0]
+                        _contract.record_force()
+                        if _gc_crit.force_synthesis:
+                            _contract_force_synthesis = True
+                        else:
+                            _contract_force_tool = _gc_crit.force_tool
+                        llm_messages.append({"role": "assistant", "content": assistant_content})
+                        llm_messages.append({"role": "user", "content": _gc_crit.message})
+                        logger.info(
+                            "v3 stream: goal-contract unmet (%s) → forcing %s "
+                            "(conv=%s, iter=%d, forces=%d/%d)",
+                            _gc_crit.code,
+                            "synthesis" if _gc_crit.force_synthesis else _gc_crit.force_tool,
+                            conversation_id,
+                            iteration, _contract.forces_used, _contract.max_forces,
+                        )
+                        # Pop the just-captured iter content: the next iter
+                        # will re-emit (corrected) prose and we don't want
+                        # to accumulate both copies in `_v3_iter_contents`.
+                        # BUGFIX 2026-08-23: save popped good content for recovery.
+                        if _v3_iter_contents:
+                            _popped = _v3_iter_contents.pop()
+                            if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                                _v3_recovered_best[0] = _popped
+                        # D1/D2: nudge-reply prose must never be visible. Clear
+                        # it (the top-of-loop append skips it) and mark the
+                        # next iteration's stream as a bubble replacement.
+                        if content_streamed and assistant_content and not _suppress_chat_deltas:
+                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        assistant_content = ""
+                        _nudge_replacement_pending = True
+                        continue
+                # ── Promise-stripped force synthesis (Fix 5b) ───────────
+                # When the model's FINAL reply was ONLY a pending-action
+                # promise ("Let me get a clean view…"), we stripped it above.
+                # The user has already received the promise text via SSE, but
+                # the persisted message is now empty. The empty-answer net
+                # below would refuse to fire because content_streamed=True —
+                # but the content that was streamed was a PROMISE, not an
+                # answer. Force one re-synthesis pass so the persisted
+                # message becomes a real answer. The frontend's content_replace
+                # event will swap the promise bubble for the real answer.
+                _has_usable_data = (
+                    (_contract is not None and _contract._usable_results > 0)
+                    if settings.GOAL_CONTRACT_ENABLED
+                    else any(
+                        tc.get("status") == "completed"
+                        for tc in tool_calls_for_frontend
+                    )
+                )
+                if (
+                    _stripped_promise
+                    and not assistant_content.strip()
+                    and _has_usable_data
+                    and _empty_answer_forces < 1
+                    and settings.GOAL_CONTRACT_ENABLED
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    _contract.record_force()
+                    _contract_force_synthesis = True
+                    _nudge_msg = (
+                        "You announced a follow-up action but did not execute it. "
+                        "The data you need is already in your context. "
+                        "Write the final answer now using the retrieved data. "
+                        "Do not announce future actions."
+                    )
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _nudge_msg})
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
+                    if _v3_iter_contents:
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
+                    # Tell the frontend to swap the streamed promise text
+                    # for the upcoming synthesis bubble.
+                    yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.info(
+                        "v3 stream: stripped promise at exit → forcing synthesis "
+                        "(conv=%s, iter=%d, forces=%d/%d)",
+                        conversation_id, iteration,
+                        _empty_answer_forces, 1,
+                    )
+                    continue
+                # ── Apology-guard (Fix 5) ────────────────────────────────
+                # Model "answered" with the generic apology ("I gathered some
+                # information but had trouble putting it all together") even
+                # though usable data was retrieved. This is NOT an empty
+                # answer — it's an unhelpful non-answer — so the empty-answer
+                # net below would miss it. Force one re-synthesis pass via the
+                # same _empty_answer_force machinery (capped at 1/turn).
+                if (
+                    _APOLOGY_PATTERN_RE.search(assistant_content or "")
+                    and _has_usable_data
+                    and _empty_answer_forces < 1
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous reply was an apology, not an answer — "
+                            "but you already have the data needed to answer. "
+                            "Write the final answer now in prose, using the tool "
+                            "results above. Do not apologize and do not call tools."
+                        ),
+                    })
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.warning(
+                        "v3 stream: apology detected with usable data → forcing "
+                        "synthesis retry (conv=%s, iter=%d, forces=%d/%d)",
+                        conversation_id, iteration,
+                        _empty_answer_forces, 1,
+                    )
+                    continue
+                # ── Bounce-back guard (Fix 7) ──────────────────────────────
+                # The agent retrieved data but instead of answering, it dumped
+                # a table + "You can ask me for a summary". This is NOT an
+                # answer — force one re-synthesis pass (same cap as apology).
+                if (
+                    _BOUNCE_BACK_PATTERN_RE.search(assistant_content or "")
+                    and _has_usable_data
+                    and _empty_answer_forces < 1
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous reply just dumped raw data instead of "
+                            "answering the user's question. The user asked a real "
+                            "question and expects a real answer. Write a comprehensive "
+                            "answer now using the data you already have. Do NOT invite "
+                            "the user to ask again and do NOT call tools."
+                        ),
+                    })
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.warning(
+                        "v3 stream: bounce-back detected with usable data → forcing "
+                        "synthesis retry (conv=%s, iter=%d, forces=%d/%d)",
+                        conversation_id, iteration,
+                        _empty_answer_forces, 1,
+                    )
+                    continue
+                # ── Empty-answer safety net (Fix 2) ─────────────────────
+                # Model stopped with NO visible prose (reasoning-budget
+                # exhaustion) but usable data was retrieved → force one
+                # synthesis retry (tool_choice="none" next iteration, which
+                # also runs Fix 1 condensation so the retry has a real
+                # chance of producing a prose answer).
+                _has_usable_data = (
+                    (_contract is not None and _contract._usable_results > 0)
+                    if settings.GOAL_CONTRACT_ENABLED
+                    else any(
+                        tc.get("status") == "completed"
+                        for tc in tool_calls_for_frontend
+                    )
+                )
+                if _empty_answer_needs_force(
+                    assistant_content, content_streamed, _v3_iter_contents,
+                    _empty_answer_forces, _has_usable_data,
+                ):
+                    _empty_answer_forces += 1
+                    _empty_answer_force_next = True
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "Your previous response was empty. You already have "
+                            "the data needed to answer. Write the final answer "
+                            "now in prose, using the tool results above. Do not "
+                            "call any tools."
+                        ),
+                    })
+                    # Replace any previously streamed text (promise narration
+                    # from earlier iterations) with the upcoming synthesis.
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.warning(
+                        "v3 stream: empty final answer with usable data; forcing "
+                        "one synthesis retry (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                    continue
+                guardrail_result = _check_hallucination_guardrail(
+                    user_content, data_ctx_extras, tool_calls_for_frontend,
+                    iteration, guardrail_retries,
+                )
+                if guardrail_result.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": guardrail_result.message})
+                    guardrail_retries += 1
+                    # D1/D2: guardrail nudge-reply must not leak into the
+                    # final answer (same clear + content_replace pattern).
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    continue
+                elif guardrail_result.action == "fallback":
+                    assistant_content = guardrail_result.message
+                    break
+                # No guardrail trigger — stream the final response
+                # P2.1: Verification-on-stop
+                # Fix 1c: the verify-nudge shares the goal-contract force budget.
+                # When the contract is active, a nudge is only issued while
+                # forces_used < min(VERIFY_NUDGE_MAX, GOAL_CONTRACT_MAX_FORCES);
+                # issuing one records a force so a nudge can never extend the
+                # turn beyond the global force budget. Contract inactive (flag
+                # off) → standalone cap via settings.VERIFY_NUDGE_MAX.
+                _verify_nudge = build_verify_on_stop_nudge(llm_messages, attempts=_verify_attempts)
+                if _verify_nudge and _contract is not None and _contract.forces_used >= min(
+                    settings.VERIFY_NUDGE_MAX, settings.GOAL_CONTRACT_MAX_FORCES,
+                ):
+                    _verify_nudge = None
+                if _verify_nudge:
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _verify_nudge})
+                    _verify_attempts += 1
+                    if _contract is not None:
+                        _contract.record_force()
+                    # D1/D2: verify nudge-reply must not leak into the final
+                    # answer (same clear + content_replace pattern).
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    continue
+                # P2.1.5: PPTX turn-guard (v3 loop) — if the user asked for a
+                # PPT deck and the model ended its turn with text only (no tool
+                # call), nudge it to call create_artifact(type="pptx") now
+                # (cap 1/turn). Runs BEFORE the self-eval gate.
+                _pptx_guard = pptx_turn_guard(
+                    user_content,
+                    tool_calls_for_frontend,
+                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                    attempts=_pptx_nudge_attempts,
+                )
+                if _pptx_guard.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _pptx_guard.message})
+                    _pptx_nudge_attempts += 1
+                    # Fix 1b: the LAST allowed nudge arms a one-shot force so
+                    # the next iteration forces create_artifact (the model can
+                    # no longer deflect in prose).
+                    if _pptx_guard.force_next:
+                        _pptx_force_next_iteration = True
+                    logger.info(
+                        "v3 stream: pptx turn-guard nudge injected (conv=%s, iter=%d, force_next=%s)",
+                        conversation_id, iteration, _pptx_guard.force_next,
+                    )
+                    # Pop captured iter content: nudge injects assistant_content
+                    # to llm_messages so the LLM sees it as context; the next
+                    # iter's re-emit replaces it (avoid duplicating the entire
+                    # response in `_v3_iter_contents`).
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
+                    if _v3_iter_contents:
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
+                    # D1/D2: pptx nudge-reply must not leak into the final
+                    # answer (same clear + content_replace pattern).
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    continue
+                if _pptx_guard.action == "disclose":
+                    logger.warning(
+                        "v3 stream: pptx deliverable not generated; disclosure "
+                        "appended (conv=%s, iter=%d)", conversation_id, iteration,
+                    )
+                    assistant_content = (assistant_content or "") + " " + _pptx_guard.message
+                # P2.1.6: File-deliverable turn-guard (v3 loop) — mirrors pptx
+                # guard for html/docx/pdf/xlsx/md.  When the user asked for a
+                # file deliverable (or automation output_format), nudge the
+                # model to call create_artifact.  Blocked when pptx guard
+                # already nudged/forced this iteration.
+                if _pptx_guard.action == "none":
+                    _file_guard = file_turn_guard(
+                        user_content,
+                        tool_calls_for_frontend,
+                        budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                        attempts=_file_nudge_attempts,
+                        output_format=_output_format,
+                    )
+                    if _file_guard.action == "nudge":
+                                        llm_messages.append({"role": "assistant", "content": assistant_content})
+                                        llm_messages.append({"role": "user", "content": _file_guard.message})
+                                        _file_nudge_attempts += 1
+                                        if _file_guard.force_next:
+                                            _file_force_next_iteration = True
+                                        logger.info(
+                                            "v3 stream: file turn-guard nudge injected "
+                                            "(conv=%s, iter=%d, format=%s, force_next=%s)",
+                                            conversation_id, iteration,
+                                            _file_guard.detected_format, _file_guard.force_next,
+                                        )
+                                        # Pop captured iter content: see pptx nudge site above
+                                        # for rationale. Prevents the report from being appended
+                                        # twice to `_v3_iter_contents` after the agent re-emits.
+                                        # BUGFIX 2026-08-23: save popped good content for recovery.
+                                        if _v3_iter_contents:
+                                            _popped = _v3_iter_contents.pop()
+                                            if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                                                _v3_recovered_best[0] = _popped
+                                        # D1/D2: file-guard nudge-reply must not
+                                        # leak into the final answer.
+                                        if content_streamed and assistant_content and not _suppress_chat_deltas:
+                                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                        assistant_content = ""
+                                        _nudge_replacement_pending = True
+                                        continue
+                    if _file_guard.action == "disclose":
+                        logger.warning(
+                            "v3 stream: file deliverable not generated; disclosure "
+                            "appended (conv=%s, iter=%d, format=%s)",
+                            conversation_id, iteration, _file_guard.detected_format,
+                        )
+                        assistant_content = (assistant_content or "") + " " + _file_guard.message
+                # P2.2: Universal Self-Evaluation & Re-Planning gate (v3 loop)
+                _gate_result = await _check_answer_verification_gate(
+                    user_content,
+                    tool_calls_for_frontend,
+                    assistant_content,
+                    attempts=_gate_attempts,
+                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                    catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
+                )
+                if _gate_result.action == "nudge":
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _gate_result.message})
+                    _gate_attempts += 1
+                    # Pop captured iter content: the gate nudged because it
+                    # thinks a dimension is missing; the next iter's prose
+                    # will replace this entry instead of duplicating it
+                    # (the user's repro: "Daily Sales Data Sync" produced
+                    # the report twice because markdown/outcome/running
+                    # triggered a re-iteration).
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
+                    if _v3_iter_contents:
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
+                    # D1/D2: gate nudge-reply prose must never be visible.
+                    # Clear it so the top-of-loop append skips it; the next
+                    # iteration's stream replaces the bubble instead of
+                    # appending (leakage fix).
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    continue
+                if _gate_result.action == "disclose":
+                    assistant_content = (assistant_content or "") + _gate_result.message
+                # ── Fix 6: dashboard-narration nudge guard ─────────────
+                # The model exited with ONLY narration ("I'll build you an ERP
+                # dashboard...") and no tool call. None of the six guards above
+                # fired because narration IS content (empty-answer net skips),
+                # no data was retrieved (promise-strip skips), and no tools ran
+                # (self-eval returns "none"). When the flag is on and the build
+                # tool hasn't been called yet, inject a hard nudge naming the
+                # EXACT next workflow step and continue the loop (capped per
+                # turn). Confirmation questions after describe_schema are
+                # allowed by the prompt HARD RULE and are skipped here.
+                if (
+                    getattr(settings, "DASHBOARD_NARRATION_NUDGE_ENABLED", False)
+                    and dashboard_narration_needs_nudge(
+                        user_content,
+                        _v3_executed_tool_names,
+                        _dashboard_narration_nudges,
+                        settings.MAX_DASHBOARD_NARRATION_NUDGES,
+                        narration=assistant_content,
+                    )
+                ):
+                    _nudge_message = build_dashboard_narration_nudge_message(
+                        _v3_executed_tool_names, _dash_build_tool,
+                    )
+                    _dashboard_narration_nudges += 1
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({"role": "user", "content": _nudge_message})
+                    logger.info(
+                        "v3 stream: dashboard narration nudge injected "
+                        "(conv=%s, iter=%d, nudge=%d/%d)",
+                        conversation_id, iteration,
+                        _dashboard_narration_nudges,
+                        settings.MAX_DASHBOARD_NARRATION_NUDGES,
+                    )
+                    # Pop captured iter content: see file-guard nudge site for
+                    # rationale — the re-emitted iteration must replace the
+                    # narration bubble instead of appending a duplicate.
+                    # BUGFIX 2026-08-23: save popped good content for recovery.
+                    if _v3_iter_contents:
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
+                    # D1/D2: the nudge reply must never leak into the final
+                    # answer (same content_replace SSE pattern as the other
+                    # nudge sites).
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    continue
+                break
+
+            # Parse and execute tool calls (parallel for multiple)
+            parsed_calls = []
+            for tc in raw_tool_calls:
+                func = tc.get("function", {})
+                tool_name = func.get("name", "")
+                args_str = func.get("arguments", "{}")
+                tool_call_id = tc.get("id", str(uuid.uuid4()))
+                try:
+                    args = json.loads(args_str) if isinstance(args_str, str) else args_str
+                except json.JSONDecodeError:
+                    args = {}
+                parsed_calls.append({
+                    "tool_name": tool_name, "args": args,
+                    "args_str": args_str, "tool_call_id": tool_call_id,
+                })
+
+            # ── Dashboard guard interception ──────────────────────────
+            # The guard above set tool_choice to force create_dashboard, but
+            # weaker models (e.g. qwen3.5-27b) often ignore that and return
+            # execute_query instead. Block those calls AND inject a synthetic
+            # tool result so the LLM sees why its call was rejected and
+            # retries with create_dashboard. Only `create_dashboard` and
+            # harmless side-effect tools are allowed through.
+            # ── Data-contract confirmation gate (T7) ──────────────────
+            # If the LLM tries to call the build tool while the data contract
+            # is unconfirmed (ambiguous request, no schema grounding, no user
+            # approval), block the build and inject a synthetic clarification
+            # so the agent asks instead of building on invented tables.
+            if parsed_calls and _dash_build_tool in {p["tool_name"] for p in parsed_calls}:
+                if contract_confirmation_needed(user_content, tool_calls_for_frontend):
+                    _build_call = next(
+                        (p for p in parsed_calls if p["tool_name"] == _dash_build_tool),
+                        None,
+                    )
+                    _non_build = [p for p in parsed_calls if p["tool_name"] != _dash_build_tool]
+                    if _build_call is not None:
+                        logger.warning(
+                            "v3 stream: data-contract gate blocked %s on unconfirmed "
+                            "contract (conv=%s, iter=%d).",
+                            _dash_build_tool, conversation_id, iteration,
+                        )
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _build_call["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _dash_build_tool,
+                                    "arguments": _build_call["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _build_call["tool_call_id"],
+                            "content": (
+                                "BLOCKED by the data-contract guard: you tried to build a "
+                                "live dashboard before confirming the data contract. You "
+                                "MUST first inspect the real schema with `describe_schema` "
+                                "or `inspect_data_source`. If the user's request is "
+                                "ambiguous about which table, metric, or aggregation to "
+                                "use, ask the user ONE clarifying question and wait for "
+                                "the answer. NEVER invent table or column names — a "
+                                "dashboard built on fabricated data is worse than none."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"contract_gate_{uuid.uuid4()}",
+                            "name": "data_contract_gate",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _dash_build_tool,
+                                "reason": "data contract not confirmed (ambiguous request, no schema grounding)",
+                            },
+                        })
+                        parsed_calls = _non_build
+                        if not _non_build:
+                            yield (f'data: {json.dumps({"type": "tool_call", "name": "data_contract_gate", "args": {"blocked": _dash_build_tool}})}\n\n')
+                            continue
+
+            # ── Deliverable phase-lock gate (Bug 1/2 fix) ───────────────
+            # The model must NOT build the deliverable (create_artifact /
+            # run_sandbox_skill) before answer-tagged data has been
+            # collected. When the contract requires data and no answer
+            # dataset exists yet, block the build call and inject a
+            # synthetic tool result steering the agent to query first.
+            if (
+                settings.DELIVERABLE_PHASE_LOCK_ENABLED
+                and _contract is not None
+                and _contract.requires_data
+                and not _contract.has_answer_data()
+            ):
+                _phase_locked_calls = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in ("create_artifact", "run_sandbox_skill")
+                ]
+                if _phase_locked_calls:
+                    _phase_blocked_ids = {
+                        p["tool_call_id"] for p in _phase_locked_calls
+                    }
+                    _non_phase_locked = [
+                        p for p in parsed_calls
+                        if p["tool_call_id"] not in _phase_blocked_ids
+                    ]
+                    for _plc in _phase_locked_calls:
+                        logger.warning(
+                            "v3 stream: deliverable phase-lock blocked %s before "
+                            "data collection (conv=%s, iter=%d)",
+                            _plc["tool_name"], conversation_id, iteration,
+                        )
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _plc["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _plc["tool_name"],
+                                    "arguments": _plc["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _plc["tool_call_id"],
+                            "content": (
+                                "BLOCKED by the deliverable phase-lock: you tried to "
+                                "build the deliverable before collecting the data it "
+                                "needs. Query the data first (ask_data_agent / "
+                                "execute_query), WAIT for the returned rows, then build "
+                                "the deliverable from those rows. Never fabricate data "
+                                "or build on empty results."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"deliverable_gate_{uuid.uuid4()}",
+                            "name": "deliverable_phase_lock",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _plc["tool_name"],
+                                "reason": "deliverable requires data that has not been collected yet",
+                            },
+                        })
+                    parsed_calls = _non_phase_locked
+                    if not _non_phase_locked:
+                        yield (
+                            f'data: {json.dumps({"type": "tool_call", "name": "deliverable_phase_lock", "args": {"blocked": [p["tool_name"] for p in _phase_locked_calls]}})}\n\n'
+                        )
+                        continue
+
+            # ── T12: describe_schema per-turn cap (dashboard turns) ──────
+            # Re-inspecting the schema costs a whole tool iteration each time
+            # AND widens the soft budget via the edge-discovery hook, letting
+            # the agent explore forever instead of shipping the dashboard.
+            # Once the cap is reached, block further describe_schema calls,
+            # freeze the budget-upgrade hook, and steer the model to
+            # create_fullstack_dashboard NOW.
+            _max_describe_cap = getattr(
+                settings, "MAX_DESCRIBE_SCHEMA_PER_DASHBOARD_TURN", 2
+            )
+            if (
+                _max_describe_cap > 0
+                and any(
+                    p["tool_name"] in DASHBOARD_SCHEMA_CAP_TOOLS
+                    for p in parsed_calls
+                )
+                and describe_schema_cap_reached(
+                    user_content,
+                    _v3_executed_tool_names,
+                    _max_describe_cap,
+                )
+            ):
+                _cap_blocked = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in DASHBOARD_SCHEMA_CAP_TOOLS
+                ]
+                _schema_budget_frozen = True
+                logger.warning(
+                    "v3 stream: describe_schema cap reached (%d/%d) for "
+                    "dashboard turn (conv=%s, iter=%d); blocking %d further "
+                    "describe_schema call(s) and freezing budget upgrade.",
+                    _describe_schema_count, _max_describe_cap,
+                    conversation_id, iteration, len(_cap_blocked),
+                )
+                for _blk in _cap_blocked:
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": _blk["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": _blk["tool_name"],
+                                "arguments": _blk["args_str"],
+                            },
+                        }],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": _blk["tool_call_id"],
+                        "content": (
+                            "BLOCKED: the schema has already been inspected "
+                            f"{_describe_schema_count} times this turn (cap "
+                            f"{_max_describe_cap}). STOP exploring the schema "
+                            "— you have enough information to build the "
+                            f"dashboard. Call {_dash_build_tool} NOW with the "
+                            "widgets you have planned, even if you only have a "
+                            "few columns. The dashboard renders inline in the "
+                            "chat."
+                        ),
+                    })
+                    tool_calls_for_frontend.append({
+                        "id": f"schema_cap_{uuid.uuid4()}",
+                        "name": "describe_schema_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": _blk["tool_name"],
+                            "reason": (
+                                f"describe_schema called "
+                                f"{_describe_schema_count} times "
+                                f"(cap {_max_describe_cap}); build now"
+                            ),
+                        },
+                    })
+                parsed_calls = [
+                    p for p in parsed_calls
+                    if p["tool_name"] not in DASHBOARD_SCHEMA_CAP_TOOLS
+                ]
+                if not parsed_calls:
+                    tool_calls_for_frontend.append({
+                        "id": f"schema_cap_redirect_{uuid.uuid4()}",
+                        "name": "describe_schema_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "all_calls",
+                            "reason": "cap reached; redirect to build tool",
+                        },
+                    })
+                    yield (f'data: {json.dumps({"type": "tool_call", "name": "describe_schema_cap", "args": {"blocked": "describe_schema"}})}\n\n')
+                    continue
+
+            # ── Fix 2: hard-block anti-tools on dashboard turns ──────────
+            # Before the full-stack build tool has run, create_artifact and
+            # the legacy create_dashboard are bypasses that silently ship a
+            # static page instead of the real-time dashboard. Block them and
+            # nudge the model to call the build tool NOW with the queries it
+            # already ran. The ACTIVE build tool itself is never blocked (in
+            # legacy mode create_dashboard IS the build tool).
+            if dashboard_antitools_should_block(
+                user_content, _v3_executed_tool_names
+            ):
+                _anti_blocked = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in DASHBOARD_ANTITOOLS
+                    and p["tool_name"] != _dash_build_tool
+                ]
+                if _anti_blocked:
+                    logger.warning(
+                        "v3 stream: dashboard anti-tools blocked %s on "
+                        "dashboard turn (conv=%s, iter=%d); steering to %s.",
+                        [b["tool_name"] for b in _anti_blocked],
+                        conversation_id, iteration, _dash_build_tool,
+                    )
+                    for _blk in _anti_blocked:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _blk["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _blk["tool_name"],
+                                    "arguments": _blk["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _blk["tool_call_id"],
+                            "content": (
+                                "BLOCKED: this turn is a dashboard build. "
+                                "Static HTML artifacts and the legacy "
+                                f"dashboard tool are disabled here. Call "
+                                f"{_dash_build_tool} NOW with the queries and "
+                                "schema you already gathered — the dashboard "
+                                "renders inline in the chat."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"antitool_{uuid.uuid4()}",
+                            "name": "dashboard_antitool",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _blk["tool_name"],
+                                "reason": (
+                                    "static/legacy dashboard build blocked; "
+                                    "use create_fullstack_dashboard"
+                                ),
+                            },
+                        })
+                    _anti_blocked_names = {b["tool_name"] for b in _anti_blocked}
+                    parsed_calls = [
+                        p for p in parsed_calls
+                        if p["tool_name"] not in _anti_blocked_names
+                    ]
+                    if not parsed_calls:
+                        tool_calls_for_frontend.append({
+                            "id": f"antitool_redirect_{uuid.uuid4()}",
+                            "name": "dashboard_antitool",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": "all_calls",
+                                "reason": "anti-tool blocked; redirect to build tool",
+                            },
+                        })
+                        yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_antitool", "args": {"blocked": "anti_tools"}})}\n\n')
+                        continue
+
+            # ── Fix 3: total-exploration cap (dashboard turns) ────────────
+            # describe_schema + execute_query + execute_sql + sql_query
+            # combined. Fires independently of the T12 describe_schema cap:
+            # whichever trips first blocks further exploration, freezes the
+            # budget-upgrade hook, and steers the model to the build tool.
+            _max_explore = getattr(
+                settings, "MAX_DASHBOARD_EXPLORATION_PER_TURN", 8
+            )
+            if (
+                _max_explore > 0
+                and any(
+                    p["tool_name"] in DASHBOARD_EXPLORATION_TOOLS
+                    for p in parsed_calls
+                )
+                and dashboard_exploration_cap_reached(
+                    user_content,
+                    _v3_executed_tool_names,
+                    _max_explore,
+                )
+            ):
+                _explore_blocked = [
+                    p for p in parsed_calls
+                    if p["tool_name"] in DASHBOARD_EXPLORATION_TOOLS
+                ]
+                _schema_budget_frozen = True
+                logger.warning(
+                    "v3 stream: dashboard exploration cap reached (%d/%d) for "
+                    "dashboard turn (conv=%s, iter=%d); blocking %d further "
+                    "exploration call(s) and freezing budget upgrade.",
+                    len(_v3_executed_tool_names), _max_explore,
+                    conversation_id, iteration, len(_explore_blocked),
+                )
+                for _blk in _explore_blocked:
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": _blk["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": _blk["tool_name"],
+                                "arguments": _blk["args_str"],
+                            },
+                        }],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": _blk["tool_call_id"],
+                        "content": (
+                            "BLOCKED: total schema exploration + query "
+                            f"execution has hit the cap of {_max_explore} "
+                            "this turn. STOP exploring — you have enough "
+                            f"information. Call {_dash_build_tool} NOW with "
+                            "the widgets you have planned."
+                        ),
+                    })
+                    tool_calls_for_frontend.append({
+                        "id": f"explore_cap_{uuid.uuid4()}",
+                        "name": "dashboard_exploration_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": _blk["tool_name"],
+                            "reason": (
+                                "total exploration cap "
+                                f"({_max_explore}) reached; build now"
+                            ),
+                        },
+                    })
+                parsed_calls = [
+                    p for p in parsed_calls
+                    if p["tool_name"] not in DASHBOARD_EXPLORATION_TOOLS
+                ]
+                if not parsed_calls:
+                    tool_calls_for_frontend.append({
+                        "id": f"explore_cap_redirect_{uuid.uuid4()}",
+                        "name": "dashboard_exploration_cap",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "all_calls",
+                            "reason": "exploration cap reached; redirect to build tool",
+                        },
+                    })
+                    yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_exploration_cap", "args": {"blocked": "exploration"}})}\n\n')
+                    continue
+
+            # ── Fix 4: duplicate create_artifact titles (all turns) ───────
+            # A second create_artifact call with the same title in one turn is
+            # always waste (duplicate static pages). Applies to ALL turns.
+            # Titles are recorded here (check-then-add) because every
+            # create_artifact remaining in parsed_calls is destined to run.
+            _dup_blocked = []
+            for _p in parsed_calls:
+                if _p["tool_name"] != "create_artifact":
+                    continue
+                _art_title = parse_artifact_title(_p.get("args_str"))
+                if not _art_title:
+                    continue
+                if _art_title in _create_artifact_titles:
+                    _dup_blocked.append(_p)
+                else:
+                    _create_artifact_titles.add(_art_title)
+            if _dup_blocked:
+                logger.warning(
+                    "v3 stream: duplicate create_artifact title(s) blocked "
+                    "(conv=%s, iter=%d): %s",
+                    conversation_id, iteration,
+                    [b.get("args_str", "") for b in _dup_blocked],
+                )
+                for _blk in _dup_blocked:
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{
+                            "id": _blk["tool_call_id"],
+                            "type": "function",
+                            "function": {
+                                "name": _blk["tool_name"],
+                                "arguments": _blk["args_str"],
+                            },
+                        }],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": _blk["tool_call_id"],
+                        "content": (
+                            "BLOCKED: an artifact with this title already "
+                            "exists this turn. Duplicate static artifacts are "
+                            "not created — update or iterate on the existing "
+                            "one instead."
+                        ),
+                    })
+                    tool_calls_for_frontend.append({
+                        "id": f"dup_artifact_{uuid.uuid4()}",
+                        "name": "create_artifact_dedup",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "create_artifact",
+                            "reason": "duplicate artifact title this turn",
+                        },
+                    })
+                _dup_ids = {id(b) for b in _dup_blocked}
+                parsed_calls = [
+                    p for p in parsed_calls if id(p) not in _dup_ids
+                ]
+                if not parsed_calls:
+                    tool_calls_for_frontend.append({
+                        "id": f"dup_artifact_redirect_{uuid.uuid4()}",
+                        "name": "create_artifact_dedup",
+                        "status": "blocked",
+                        "results": {
+                            "blocked": "all_calls",
+                            "reason": "duplicate artifact blocked",
+                        },
+                    })
+                    yield (f'data: {json.dumps({"type": "tool_call", "name": "create_artifact_dedup", "args": {"blocked": "duplicate_artifact"}})}\n\n')
+                    continue
+
+            if parsed_calls:
+                _dash_guard_names = {p["tool_name"] for p in parsed_calls}
+                if (
+                    _dash_build_tool in _dash_guard_names
+                    or _dash_build_tool in _tool_names
+                ) and any(
+                    n in dashboard_guard_blocked_tools()
+                    for n in _dash_guard_names
+                ):
+                    # Strip the blocked tool calls; keep only create_dashboard
+                    # and harmless tools.
+                    _blocked_names = [
+                        p["tool_name"]
+                        for p in parsed_calls
+                        if p["tool_name"] in dashboard_guard_blocked_tools()
+                    ]
+                    logger.warning(
+                        "v3 stream: dashboard guard intercepted %s after "
+                        "schema/design pass (conv=%s, iter=%d). Blocking "
+                        "those calls; will retry with create_dashboard.",
+                        _blocked_names, conversation_id, iteration,
+                    )
+                    # Inject synthetic tool results for the blocked calls so
+                    # the LLM has a complete turn to reason about. Then
+                    # retry: keep only the allowed calls for this iteration.
+                    _blocked = [p for p in parsed_calls if p["tool_name"] in dashboard_guard_blocked_tools()]
+                    _allowed = [p for p in parsed_calls if p["tool_name"] not in dashboard_guard_blocked_tools()]
+                    _blocked_summary = ", ".join(sorted({p["tool_name"] for p in _blocked}))
+                    for _blk in _blocked:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _blk["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _blk["tool_name"],
+                                    "arguments": _blk["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _blk["tool_call_id"],
+                            "content": (
+                                "BLOCKED by dashboard guard: the user asked "
+                                "for a live dashboard. You already have the "
+                                "schema + design pass done. STOP running "
+                                f"more {_blk['tool_name']} calls. Call "
+                                "create_dashboard NOW with the widgets "
+                                "you've planned, even if you only have a "
+                                "few columns. The dashboard will render "
+                                "inline in the chat."
+                            ),
+                        })
+                    if not _allowed:
+                        # Nothing else to execute — force a retry that
+                        # should land on create_dashboard.
+                        tool_calls_for_frontend.append({
+                            "id": f"guard_blocked_{uuid.uuid4()}",
+                            "name": "dashboard_guard_intercept",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _blocked_summary,
+                                "reason": "guard: schema/design pass done; only create_dashboard allowed",
+                            },
+                        })
+                        yield f'data: {json.dumps({"type": "tool_call", "name": "dashboard_guard_intercept", "args": {"blocked": _blocked_summary}})}\n\n'
+                        continue
+                    parsed_calls = _allowed
+
+            # Intercept path (R5): if the LLM's batch includes a
+            # `create_agent` call, intercept it BEFORE execution, drop the
+            # entry from the parallel-execute set, and pause for the
+            # Decision Summary card. Siblings still execute normally so
+            # their results feed back into the next iteration if the user
+            # clicks Cancel.
+            intercepted, intercept_payload, intercept_index = _intercept_create_agent(parsed_calls)
+            if intercepted:
+                logger.info(
+                    "create_agent intercept (v3 stream): conv=%s tool_call_id=%s "
+                    "payload_keys=%s siblings=%d",
+                    conversation_id,
+                    parsed_calls[intercept_index]["tool_call_id"],
+                    sorted((intercept_payload or {}).keys()),
+                    len(parsed_calls) - 1,
+                )
+                sibling_calls = [c for i, c in enumerate(parsed_calls) if i != intercept_index]
+                ctx_v3 = {
+                    "conversation_id": conversation_id,
+                    "agent_app_id": agent_app_id,
+                    "agent_name": agent_name,
+                    "conversation_metadata": conv.metadata_ or {},
+                    "chat_session_id": chat_session_id,
+                    **(data_ctx_extras or {}),
+                    "main_agent_will_synthesize": bool(_orch_doc_format),
+                }
+                sibling_results: list[dict] = []
+                if sibling_calls:
+                    if len(sibling_calls) == 1:
+                        sibling_results = [await execute_tool(
+                            sibling_calls[0]["tool_name"],
+                            sibling_calls[0]["args"],
+                            db,
+                            user.id if user else None,
+                            context=ctx_v3,
+                        )]
+                    else:
+                        async def _exec_v3_sibling(call):
+                            return await execute_tool(
+                                call["tool_name"], call["args"], db,
+                                user.id if user else None,
+                                context=ctx_v3,
+                            )
+                        raw_sib = await asyncio.gather(
+                            *[_exec_v3_sibling(c) for c in sibling_calls],
+                            return_exceptions=True,
+                        )
+                        for i, r in enumerate(raw_sib):
+                            if isinstance(r, Exception):
+                                logger.warning("sibling tool '%s' raised: %s", sibling_calls[i]["tool_name"], r)
+                                sibling_results.append({"success": False, "error": f"{type(r).__name__}: {r}"})
+                            else:
+                                sibling_results.append(r)
+                # Record siblings in the assistant message + LLM trace.
+                for sib_call, sib_result in zip(sibling_calls, sibling_results):
+                    sib_name = sib_call["tool_name"]
+                    sib_display = TOOL_DISPLAY_NAMES.get(sib_name, sib_name)
+                    sib_record = {
+                        "id": sib_call["tool_call_id"],
+                        "name": sib_display,
+                        "arguments_string": sib_call["args_str"],
+                        "results": sib_result,
+                        "status": "completed" if isinstance(sib_result, dict) and sib_result.get("success") else "failed",
+                    }
+                    if sib_name in INTERNAL_TOOLS:
+                        sib_record["display_projection"] = _internal_tool_projection(sib_name)
+                    tool_calls_for_frontend.append(sib_record)
+                    # P0: incremental trace_step — reuses the same step shape
+                    # as _derive_trace_from_response so the frontend
+                    # ReasoningSummary component needs no schema change.
+                    display_proj = sib_record.get("display_projection") or {}
+                    if display_proj.get("hide_details"):
+                        _step_title = display_proj.get("label", sib_record.get("name", ""))
+                        _step_detail = display_proj.get("done_label", "")
+                    else:
+                        _step_title = sib_record.get("name", "")
+                        _results = sib_record.get("results")
+                        if isinstance(_results, dict):
+                            _step_detail = str(_results.get("summary") or _results.get("text") or "")[:200]
+                        elif isinstance(_results, str):
+                            _step_detail = _results[:200]
+                        else:
+                            _step_detail = ""
+                    _step = {
+                        "step": len(tool_calls_for_frontend),
+                        "type": "tool_call",
+                        "title": _step_title,
+                        "detail": _step_detail,
+                        "status": sib_record.get("status", "completed"),
+                        "duration_ms": int(sib_record.get("duration_ms") or 0),
+                    }
+                    yield f'data: {json.dumps({"type": "trace_step", "step": _step})}\n\n'
+                    llm_messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{"id": sib_call["tool_call_id"], "type": "function",
+                                        "function": {"name": sib_name, "arguments": sib_call["args_str"]}}],
+                    })
+                    llm_messages.append({
+                        "role": "tool",
+                        "tool_call_id": sib_call["tool_call_id"],
+                        "content": json.dumps(sib_result),
+                    })
+                # ReAct reflexion: if any sibling tool failed, inject a
+                # critique system message before the next LLM iteration.
+                _inject_reflexion_critique(llm_messages, sibling_calls, sibling_results)
+                # Now mark the create_agent entry as awaiting_decision_summary.
+                intercepted_call = parsed_calls[intercept_index]
+                intercepted_record = {
+                    "id": intercepted_call["tool_call_id"],
+                    "name": TOOL_DISPLAY_NAMES.get("create_agent", "create_agent"),
+                    "arguments_string": intercepted_call["args_str"],
+                    "status": "awaiting_decision_summary",
+                }
+                tool_calls_for_frontend.append(intercepted_record)
+                # Persist pause + emit SSE.
+                paused, stripped_for_ui, _note = _persist_decision_summary_pause(
+                    db, conv, messages, assistant_msg_id,
+                    tool_calls_for_frontend, assistant_content,
+                    tool_call_payload=intercept_payload,
+                )
+                if paused:
+                    # Stream the assistant's narrative prose first so the user
+                    # sees the agent's recommendation.
+                    if stripped_for_ui:
+                        yield f'data: {json.dumps({"type": "delta", "content": stripped_for_ui})}\n\n'
+                    # Refresh so the SSE payload reflects the new metadata.
+                    try:
+                        conv = db.query(AgentConversation).filter(
+                            AgentConversation.id == conversation_id,
+                        ).first() or conv
+                    except Exception:
+                        pass
+                yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'
+                _discard_steer(conversation_id)
+                return
+                # Sanitiser rejected — fall through to normal flow. Rare.
+
+            # ── Activity step: emit "running" for each tool ──
+            # Phase headline: the first tool batch flips the turn into
+            # "Fabricating" (Claude-style: the headline names the moment).
+            if "act" not in _emitted_phases:
+                _emitted_phases.add("act")
+                yield _emit_phase("act")
+                # Live feed: the turn is now proven tool-bound — open the
+                # feed with the goal headline, then the act headline.
+                _le_goal = _push_live_event("phase_enter", "phase_enter.goal")
+                if _le_goal:
+                    yield _le_goal
+                _le_act = _push_live_event("phase_enter", "phase_enter.act")
+                if _le_act:
+                    yield _le_act
+
+            _tool_step_indices: list[int] = []
+            # Count parallel calls per tool for index suffix
+            _tool_counts: dict[str, int] = {}
+            for pc in parsed_calls:
+                _tool_counts[pc["tool_name"]] = _tool_counts.get(pc["tool_name"], 0) + 1
+            _tool_run_index: dict[str, int] = {}
+            for pc in parsed_calls:
+                _step_counter[0] += 1
+                desc = _format_activity_description(pc["tool_name"], pc.get("args"))
+                # Append (N/M) suffix for parallel same-tool calls
+                tn = pc["tool_name"]
+                idx = _tool_run_index.get(tn, 0) + 1
+                _tool_run_index[tn] = idx
+                total = _tool_counts.get(tn, 1)
+                if total >= 2:
+                    desc = f"{desc} ({idx}/{total})"
+                cmd = _summarize_tool_command(tn, pc.get("args"))
+                yield _emit_activity_step(_step_counter[0], desc, "running", tool_name=tn, command=cmd)
+                _step_start_times[_step_counter[0]] = time.monotonic()
+                _le_tool = _push_live_event("tool_call_started", "tool_call_started", {"tool_label": desc})
+                if _le_tool:
+                    yield _le_tool
+                # Sub-agent delegation badge: surfaces what the parent chat
+                # loop asked the sub-agent to do (e.g. ask_data_agent).
+                if tn.startswith("ask_"):
+                    _le_sub_inv = _push_live_event(
+                        "subagent_invoked", "subagent_invoked",
+                        {"agent_label": desc, "target": tn},
+                    )
+                    if _le_sub_inv:
+                        yield _le_sub_inv
+                _activity_steps.append({
+                    "number": _step_counter[0],
+                    "description": desc,
+                    "status": "running",
+                    "tool_name": tn,
+                    **({"command": cmd} if cmd else {}),
+                })
+                _tool_step_indices.append(_step_counter[0])
+
+            ctx = {
+                "conversation_id": conversation_id,
+                "agent_app_id": agent_app_id,
+                "agent_name": agent_name,
+                "conversation_metadata": conv.metadata_ or {},
+                "chat_session_id": chat_session_id,
+                **(data_ctx_extras or {}),
+                "endpoint": effective_llm.endpoint,
+                # PERF 2026-08-24: deliverable turns synthesize post-loop;
+                # the data agent can skip its narrate LLM call (saves ~1 call
+                # per ask_data_agent). Simple Q&A turns keep narrate.
+                "main_agent_will_synthesize": bool(_orch_doc_format),
+            }
+
+            # ── Tool execution ──────────────────────────────────────────────
+            # Long-running delegation tools (ask_perception / ask_intelligence
+            # / ask_diagnosis / batch tool / …) can block for minutes. When
+            # any call in this batch is long-running, run the whole batch in a
+            # background task and emit ``tool_progress`` heartbeat frames while
+            # it executes, so the client sees liveness and proxies don't
+            # idle-kill the connection.
+            async def _run_tool_batch():
+                # P2-12: shared core in app.services.agent_loop.tool_executor.
+                async def _invoke_v3(tool_name, args):
+                    return await execute_tool(
+                        tool_name, args, db,
+                        user.id if user else None, context=ctx,
+                    )
+
+                return await execute_tool_batch(
+                    parsed_calls,
+                    before_call=guard_ctrl.before_call,
+                    invoke=_invoke_v3,
+                    blocked_result_factory=_guardrail_synthetic_result,
+                )
+
+            if any(_is_long_running_tool(c["tool_name"]) for c in parsed_calls):
+                _tool_task = asyncio.ensure_future(_run_tool_batch())
+                try:
+                    async for _frame in _emit_tool_progress_while_waiting(_tool_task, parsed_calls):
+                        yield _frame
+                finally:
+                    if not _tool_task.done():
+                        _tool_task.cancel()
+                results = _tool_task.result()
+            else:
+                results = await _run_tool_batch()
+
+            # Process results — check for approval pause
+            paused_for_approval = False
+            pending_tool = None
+            for idx, (call, result) in enumerate(zip(parsed_calls, results)):
+                tool_name = call["tool_name"]
+                args_str = call["args_str"]
+                tool_call_id = call["tool_call_id"]
+                display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
+                # T12: count describe_schema executions + record executed tool
+                # names (canonical) so the pre-execution interception zone can
+                # enforce the per-turn cap on the NEXT iteration.
+                _v3_executed_tool_names.append(tool_name)
+                # T19: record FAILED tool executions. `result` is already
+                # normalized here — exceptions were converted to
+                # {"success": False, "error": ...} by _run_tool_batch, and
+                # handlers signal failure via the same shape. Explicitly
+                # failed builds must not unlock the orchestrator fallback.
+                if isinstance(result, dict) and result.get("success") is False:
+                    _v3_failed_tool_names.add(tool_name)
+                if tool_name == "describe_schema":
+                    _describe_schema_count += 1
+                if tool_name == "create_artifact":
+                    _art_title = parse_artifact_title(args_str)
+                    if _art_title:
+                        _create_artifact_titles.add(_art_title)
+
+                if isinstance(result, dict) and result.get("requires_approval"):
+                    tool_call_record = {
+                        "id": tool_call_id, "name": display_name,
+                        "arguments_string": args_str, "results": result,
+                        "status": "awaiting_approval",
+                        "approval_id": result.get("approval_id"),
+                        "reason": result.get("reason", ""),
+                    }
+                    tool_calls_for_frontend.append(tool_call_record)
+                    pending_tool = {
+                        "tool_name": tool_name, "args": call["args"],
+                        "args_str": args_str, "tool_call_id": tool_call_id,
+                        "approval_id": result.get("approval_id"),
+                        "remaining_calls": [
+                            c for c in parsed_calls[parsed_calls.index(call) + 1:]
+                        ],
+                    }
+                    paused_for_approval = True
+                    break
+
+                # ── Smart retry: empty ask_data_agent result + doc intent ─
+                # The query ran to completion but returned 0 rows. Before
+                # finalizing a no-data card, ask the LLM to propose a
+                # broader question and re-run the data agent (strict
+                # budget: max 2 attempts). If data comes back, `result`
+                # is replaced so the normal data path below synthesizes
+                # and finalizes a real artifact.
+                # FIX 2026-08-24: ALSO retry when the result is metadata-only
+                # (e.g. [{row_count: 14275}] from SELECT COUNT(*)) — such
+                # results are just as useless as 0 rows for building a
+                # deliverable, but the old check (rows == []) let them
+                # through to the synthesis pipeline untouched.
+                _rows_for_retry_check = result.get("rows") if isinstance(result, dict) else None
+                _needs_smart_retry = False
+                if (
+                    tool_name == "ask_data_agent"
+                    and isinstance(result, dict)
+                    and _orch_doc_format
+                    and _smart_retry_budget[0] > 0
+                ):
+                    if _rows_for_retry_check == []:
+                        _needs_smart_retry = True
+                    elif isinstance(_rows_for_retry_check, list) and _rows_for_retry_check:
+                        try:
+                            # NOTE: uses the module-level import (line ~193).
+                            # A local `from … import is_metadata_only_rows`
+                            # here shadowed the global for the WHOLE function
+                            # and crashed line ~11474 with UnboundLocalError
+                            # when this branch never executed.
+                            if len(_rows_for_retry_check) <= 2 and is_metadata_only_rows(
+                                _rows_for_retry_check
+                            ):
+                                _needs_smart_retry = True
+                                logger.info(
+                                    "v3 smart retry triggered: metadata-only rows "
+                                    "(%d rows) for conv=%s",
+                                    len(_rows_for_retry_check), conversation_id,
+                                )
+                        except Exception:
+                            pass
+                if _needs_smart_retry:
+                    try:
+                        async def _retry_llm_call(_sys, _msgs, _ep=effective_llm.endpoint):
+                            _r = await _call_synthesis_llm(_sys, _msgs, endpoint=_ep)
+                            return _r.get("content", "") if isinstance(_r, dict) else ""
+
+                        async def _retry_execute(_q):
+                            return await execute_tool(
+                                "ask_data_agent", {"question": _q},
+                                db, user.id if user else None, context=ctx,
+                            )
+
+                        from app.services.synexia.smart_retry import llm_driven_retry_ask_data
+                        _retried = await llm_driven_retry_ask_data(
+                            question=user_content,
+                            failed_result=result,
+                            call_llm_fn=_retry_llm_call,
+                            execute_ask_data_fn=_retry_execute,
+                            max_attempts=2,
+                        )
+                    except Exception as _retry_err:
+                        logger.warning(
+                            "v3 smart retry failed (non-fatal) for conv=%s: %s",
+                            conversation_id, _retry_err,
+                        )
+                        _retried = None
+                    if _retried is not None and _retried.get("rows"):
+                        _smart_retry_budget[0] -= 1
+                        result = _retried
+                        logger.info(
+                            "v3 SMART RETRY: recovered %d rows for conv=%s (question=%s)",
+                            len(_retried.get("rows", [])), conversation_id,
+                            _retried.get("retried_question", "")[:80],
+                        )
+
+                # ── Report synthesis / deferred collection (data tools) ────
+                # Any data-producing tool feeds the deferred pipeline:
+                # ask_data_agent (delegated), execute_query / execute_sql /
+                # sql_query (direct SQL), forecast_brief (market reads).
+                # Production bug (2026-08-21): the Ecisco BI agent collected
+                # 41 rows via execute_query, but record_dataset only fired
+                # for ask_data_agent → answer_datasets() stayed empty → the
+                # post-loop card never built → raw table + no deliverable.
+                # The legacy eager-synthesis elif below stays ask_data_agent-
+                # only so flag-OFF behavior is unchanged for other tools.
+                if (
+                    tool_name in DATA_PRODUCING_TOOLS
+                    and isinstance(result, dict)
+                    and result.get("rows")
+                    and settings.QUERY_PURPOSE_TAGGING_ENABLED
+                ):
+                    # Deferred deliverable pipeline (Bug 1/2 fix): tag the
+                    # query result purpose (probe/auxiliary/answer) and
+                    # collect answer datasets on the contract. NO synthesis
+                    # runs mid-loop — the card is built ONCE, post-loop,
+                    # from the final answer dataset.
+                    try:
+                        _purpose = classify_query_purpose(
+                            sql=result.get("sql"),
+                            rows=result.get("rows"),
+                            table_roles=(
+                                _purpose_resolver.roles_for(
+                                    extract_tables_from_sql(result.get("sql") or "")
+                                )
+                                if _purpose_resolver is not None
+                                else {}
+                            ),
+                        )
+                    except Exception as purpose_err:
+                        logger.warning(
+                            "v3 query-purpose classification failed (fail-open "
+                            "answer) conv=%s: %s", conversation_id, purpose_err,
+                        )
+                        _purpose = "answer"
+                    result["query_purpose"] = _purpose
+                    if _purpose == "answer" and _contract is not None:
+                        _contract.record_dataset(
+                            rows=result.get("rows"),
+                            sql=result.get("sql"),
+                            source_name=result.get("source_name"),
+                            source_id=result.get("source_id"),
+                            purpose=_purpose,
+                            tool_call_id=tool_call_id,
+                        )
+                    logger.info(
+                        "v3 query purpose=%s rows=%d conv=%s (card deferred to post-loop)",
+                        _purpose, len(result.get("rows", [])), conversation_id,
+                    )
+                elif tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
+                    # Legacy eager synthesis (flag OFF) — behavior unchanged.
+                    try:
+                        _synth_endpoint = effective_llm.endpoint
+
+                        async def _synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+                            return await _call_synthesis_llm(
+                                system_prompt, msgs, endpoint=_ep
+                            )
+
+                        # FIX 2026-08-24: merge rows from EVERY ask_data_agent
+                        # call so far this turn, not just the current one.
+                        # Previously rows=result.get("rows") meant multi-query
+                        # turns (sales + revenue + inventory) synthesized from
+                        # the LAST query only — the final answer ignored all
+                        # earlier datasets.
+                        # ALSO FIX: skip metadata-only datasets (SELECT COUNT(*)
+                        # probes) so the synthesis only sees real business rows.
+                        _merged_rows: list[dict] = []
+                        _merged_seen: set[str] = set()
+                        try:
+                            from app.services.goal_contract import (
+                                is_metadata_only_rows as _imor,
+                            )
+                        except Exception:
+                            _imor = None
+                        for _m_tc in tool_calls_for_frontend:
+                            if _m_tc.get("name") != "ask_data_agent":
+                                continue
+                            _m_res = _m_tc.get("results") or {}
+                            if not isinstance(_m_res, dict):
+                                continue
+                            _m_rows = _m_res.get("rows") or []
+                            # Skip this dataset if it is a metadata-only probe
+                            # (1-2 rows, every column a MIN/MAX/COUNT aggregate).
+                            if (
+                                _imor is not None
+                                and _m_rows
+                                and len(_m_rows) <= 2
+                                and _imor(_m_rows)
+                            ):
+                                continue
+                            for _m_row in _m_rows:
+                                if not isinstance(_m_row, dict):
+                                    continue
+                                _m_key = json.dumps(
+                                    _m_row, sort_keys=True, default=str,
+                                    ensure_ascii=False,
+                                )
+                                if _m_key not in _merged_seen:
+                                    _merged_seen.add(_m_key)
+                                    _merged_rows.append(_m_row)
+                        _synth_rows = _merged_rows or result.get("rows")
+
+                        # FIX 2026-08-23: resolve skill context for synthesis
+                        _v3e_skill_name, _v3e_skill_method = _resolve_skill_for_synthesis(
+                            tool_calls_for_frontend,
+                            selected_skill,
+                            selected_skill_id,
+                            db,
+                        )
+                        synth_result = await synthesize_report(
+                            user_message=user_content,
+                            rows=_synth_rows,
+                            sql=result.get("sql"),
+                            source_name=result.get("source_name"),
+                            source_id=result.get("source_id"),
+                            call_llm_fn=_synth_call,
+                            skill_name=_v3e_skill_name,
+                            skill_methodology=_v3e_skill_method,
+                        )
+                        if synth_result.report_card_payload is not None:
+                            # Always attach payload + synthesis text so the
+                            # frontend can suppress DataTableCard and show
+                            # the narrative.
+                            result["report_card_payload"] = synth_result.report_card_payload.model_dump()
+                            result["synthesis_text"] = synth_result.assistant_content
+                            # ── FINALIZE: persist Artifact row + HTML blob ──
+                            # FIX 2026-08-22: only create an artifact card
+                            # when the user explicitly asked for a file
+                            # deliverable. For simple data questions the
+                            # synthesis text IS the answer — no card needed.
+                            if _orch_doc_format:
+                                # NOTE: finalize_into_artifact may mutate
+                                # `payload.user_signal` in-place when a
+                                # file-format intent is detected (e.g. the
+                                # user asked for DOCX).  We MUST re-serialize
+                                # the payload AFTER finalize so the mutated
+                                # field reaches the frontend.
+                                # Offload finalize to a thread: the sandbox
+                                # render can block 30-120s; if we await it
+                                # directly the SSE heartbeat starves and the
+                                # connection drops. Commit the caller's session
+                                # first, then run with heartbeat coverage.
+                                _finalize_task = _start_finalize_offloaded(
+                                    db,
+                                    {
+                                        "conversation_id": conversation_id,
+                                        "agent_name": agent_name,
+                                        "user_message": user_content,
+                                        "source": result.get("source_name"),
+                                        "sql": result.get("sql"),
+                                        "payload": synth_result.report_card_payload,
+                                        "message_id": assistant_msg_id,
+                                    },
+                                )
+                                async for _hb in _emit_tool_progress_while_waiting(
+                                    _finalize_task,
+                                    [
+                                        {
+                                            "tool_call_id": "finalize-artifact",
+                                            "tool_name": "create_artifact",
+                                            "args_str": "",
+                                            "args": {},
+                                        }
+                                    ],
+                                ):
+                                    yield _hb
+                                artifact, file_exports = _finalize_task.result()
+                                # Re-serialize AFTER finalize so user_signal
+                                # reflects any change (e.g. "export_docx").
+                                result["report_card_payload"] = synth_result.report_card_payload.model_dump()
+
+                                if file_exports:
+                                    result["file_exports"] = file_exports
+                                    # Prefer the file-export artifact_id so
+                                    # the frontend picks up the DOCX/PPTX
+                                    # preview instead of the HTML artifact.
+                                    primary_fmt = next(iter(file_exports))
+                                    export = file_exports[primary_fmt]
+                                    export_artifact_id = export.get("artifact_id")
+                                    if export_artifact_id:
+                                        result["artifact_id"] = export_artifact_id
+                                        artifact_ids.append(export_artifact_id)
+                                if artifact is not None:
+                                    # Keep the HTML artifact_id as a fallback
+                                    # when no file export was generated.
+                                    if not file_exports:
+                                        result["artifact_id"] = artifact.id
+                                        artifact_ids.append(artifact.id)
+                            else:
+                                artifact = None
+                                file_exports = {}
+                                logger.info(
+                                    "FINALIZE: skipped artifact creation (no file intent) for conv=%s",
+                                    conversation_id,
+                                )
+                    except Exception as synth_err:
+                        logger.warning(
+                            "Report synthesis failed (non-fatal) for conv=%s: %s",
+                            conversation_id, synth_err,
+                        )
+                elif tool_name == "ask_data_agent" and _should_finalize_no_data(result, _orch_doc_format):
+                    # ── Empty rows + file-format intent ──────────────────
+                    # After the smart retry (above) exhausted its budget the
+                    # query still returned 0 rows. Per the user's rule ("if
+                    # there's no data, how would the agent make the file?"),
+                    # we do NOT render an empty PPTX/DOCX — an empty artifact
+                    # misleads and confuses. Instead we emit a clear no-data
+                    # report card + narrative and mark the turn so the
+                    # post-loop artifact fallback is skipped (an empty file
+                    # generated from the generic fallback text is worse than
+                    # a clean "no data" card).
+                    try:
+                        no_data_payload = build_no_data_payload(
+                            user_message=user_content,
+                            source=result.get("source_name"),
+                            sql=result.get("sql"),
+                        )
+                        result["report_card_payload"] = no_data_payload.model_dump()
+                        result["no_data"] = True
+                        result["synthesis_text"] = (
+                            no_data_payload.summary
+                            or "No data was found for the requested filters/time period."
+                        )
+                        _orch_no_data[0] = True
+                        logger.info(
+                            "v3 NO-DATA (card only, no empty file): conv=%s (doc_format=%s)",
+                            conversation_id, _orch_doc_format,
+                        )
+                    except Exception as no_data_err:
+                        logger.warning(
+                            "v3 No-data card failed (non-fatal) for conv=%s: %s",
+                            conversation_id, no_data_err,
+                        )
+
+                # ── Auto-cache hook (flag-gated, fail-open) ────────────
+                # Persist the FINAL enriched tool result (after smart-retry,
+                # synthesis, and no-data card mutations above) so downstream
+                # resume/intent-router flows can reuse cached data executions.
+                # `_execution_id` is injected into the result dict and must
+                # flow to the frontend record + message append that follow.
+                if (
+                    getattr(settings, "DATA_EXECUTION_CACHE_ENABLED", False)
+                    and isinstance(result, dict)
+                    and not result.get("requires_approval")
+                    and result.get("success") is not False
+                ):
+                    try:
+                        exec_id = await cache_data_execution(
+                            db=db,
+                            session_id=conversation_id,
+                            tool_name=tool_name,
+                            args=call.get("args") if isinstance(call, dict) else None,
+                            result=result,
+                            summary_text=None,
+                            org_id=getattr(user, "org_id", None),
+                            app_id=getattr(user, "app_id", None),
+                        )
+                        if exec_id:
+                            result = {**result, "_execution_id": exec_id}
+                    except Exception as exc:
+                        logger.warning(
+                            "data-execution cache failed (fail-open) conv=%s: %s",
+                            conversation_id, exc,
+                        )
+
+                tool_call_record = {
+                    "id": tool_call_id, "name": display_name,
+                    "arguments_string": args_str, "results": result,
+                    "status": "completed" if result.get("success") else "failed",
+                }
+                if tool_name in INTERNAL_TOOLS:
+                    tool_call_record["display_projection"] = _internal_tool_projection(tool_name)
+                tool_calls_for_frontend.append(tool_call_record)
+
+                # ── Fix 2a: superseded-marker detection ──────────────
+                # After each ask_data_agent result, mark earlier empty/error
+                # results (same bound KB) as superseded so deck/card
+                # generation never cites a stale/dead query. Also marks a
+                # prior result superseded when the assistant text between
+                # the two calls contains explicit retry hints.
+                if tool_name == "ask_data_agent" and isinstance(result, dict):
+                    inter_call_text = assistant_content[_ask_data_content_len[0]:]
+                    _mark_superseded_ask_data_priors(
+                        tool_calls_for_frontend, result, inter_call_text,
+                    )
+                    _ask_data_content_len[0] = len(assistant_content)
+
+                # ── Goal-Contract runtime updates (flag-gated) ───────
+                # Feed tool outcomes into the turn contract so the exit
+                # checker can verify the goal was actually achieved (artifact
+                # produced from non-empty data, query rows returned, announced
+                # tool executed). Pure in-memory work; no new I/O.
+                if _contract is not None and isinstance(result, dict):
+                    # A query tool call that returned no usable rows (empty /
+                    # all-null / metadata-only snapshot, or a failed call with
+                    # no rows payload) must NOT count as fulfilling an
+                    # announced action — pass the quality down so
+                    # _announced_executed stays unset and the pending-action
+                    # (now: _executed_seq is not stamped, so _armed_seq >
+                    # _executed_seq on exit)
+                    # remediation can still fire on exit.
+                    _query_rows = result.get("rows")
+                    _query_quality = (
+                        RESULT_QUALITY_NO_DATA
+                        if (
+                            is_effective_empty(_query_rows)
+                            or is_metadata_only_rows(_query_rows)
+                        )
+                        else RESULT_QUALITY_ASSUMED_OK
+                    )
+                    _contract.record_tool_executed(
+                        tool_name, result_quality=_query_quality
+                    )
+                    # Query results: only a real rows payload counts (a bare
+                    # sql key without rows must not register a zero-row event).
+                    if isinstance(result.get("rows"), list):
+                        _contract.record_query_result(
+                            result.get("rows"), result.get("sql"),
+                        )
+                    # Artifacts / dashboards: any successful produce call
+                    # satisfies the deliverable; kind is mapped to the contract
+                    # canonical form so _deliverable_produced() can match.
+                    _gc_produced = bool(
+                        result.get("artifact_id")
+                        or result.get("dashboard")
+                        or result.get("dashboard_app")
+                    )
+                    if result.get("success") and _gc_produced:
+                        if result.get("dashboard") or result.get("dashboard_app"):
+                            _gc_kind = "dashboard"
+                        else:
+                            _gc_kind = result.get("kind") or result.get("type") or tool_name
+                        _gc_rows = result.get("rows")
+                        _contract.record_artifact(
+                            kind=str(_gc_kind).lower(),
+                            ok=True,
+                            rows=(len(_gc_rows) if isinstance(_gc_rows, list) else None),
+                        )
+
+                # ── Dynamic budget upgrade ───────────────────────────
+                # describe_schema revealed schema-graph join edges: widen
+                # the per-turn soft cap so the agent can explore the joins
+                # instead of being nudged to wrap up too early. Idempotent
+                # (runs once, on the first edge-bearing result). T12: once
+                # the describe_schema cap fires for a dashboard turn, the
+                # upgrade is frozen so the soft cap stops widening.
+                if (
+                    not _schema_budget_frozen
+                    and not _schema_edges_seen
+                    and tool_name == "describe_schema"
+                ):
+                    _edge_count = _schema_edge_count(result)
+                    if _edge_count:
+                        _schema_edges_seen = True
+                        _upgraded_budget = calculate_agent_budget(
+                            [{"confidence": 0.9}] * min(_edge_count, 3),
+                            user_content or "", is_automation=_auto_flag,
+                        )
+                        if _upgraded_budget > _effective_budget:
+                            logger.info(
+                                "v3 stream: schema graph revealed %d join edge(s); "
+                                "per-turn budget %d->%d (conv=%s)",
+                                _edge_count, _effective_budget,
+                                _upgraded_budget, conversation_id,
+                            )
+                            _effective_budget = _upgraded_budget
+
+                # Gap B checkpoint: the moment a report card or artifact
+                # exists, persist it — a dropped SSE stream or crash later
+                # in the turn must not erase finished work.
+                if isinstance(result, dict) and (
+                    result.get("report_card_payload") or result.get("artifact_id")
+                ):
+                    _checkpoint_partial_assistant_msg(
+                        db, conv, messages, assistant_msg_id,
+                        tool_calls_for_frontend, artifact_ids,
+                    )
+
+                # Live artifact event (Claude-style side panel): emit the
+                # canonical artifact shape the moment it exists so the
+                # frontend can open/update the preview pane mid-turn
+                # instead of waiting for the `done` event. Additive SSE
+                # type — old clients ignore it.
+                if (
+                    isinstance(result, dict)
+                    and result.get("success")
+                    and result.get("artifact_id")
+                    and tool_name in ("create_artifact", "run_sandbox_skill")
+                ):
+                    _live_art = {
+                        "artifact_id": result.get("artifact_id"),
+                        "version_id": result.get("version_id"),
+                        "version_number": result.get("version_number"),
+                        "file_url": result.get("file_url"),
+                        "preview_url": result.get("preview_url"),
+                        "title": result.get("title", ""),
+                        "type": result.get("type", ""),
+                        "file_name": result.get("file_name", ""),
+                        "mime_type": result.get("mime_type", ""),
+                        "file_size": result.get("file_size"),
+                        "has_preview": result.get("has_preview", False),
+                    }
+                    if result.get("preview_artifact_id"):
+                        _live_art["preview_artifact_id"] = result["preview_artifact_id"]
+                    yield f'data: {json.dumps({"type": "artifact_created", "artifact": _live_art})}\n\n'
+
+                # ── Activity step: mark done/failed ──
+                try:
+                    step_num = _tool_step_indices[idx] if idx < len(_tool_step_indices) else None
+                except NameError:
+                    step_num = _step_counter[0]  # fallback for intercept path
+                if step_num is not None:
+                    new_status = "done" if result.get("success") else "failed"
+                    # Reuse the description from the stored "running" step
+                    # so that any (N/M) suffix is preserved on the done/failed
+                    # update too.
+                    step_desc = None
+                    for s in _activity_steps:
+                        if s.get("number") == step_num:
+                            step_desc = s.get("description", "")
+                            s["status"] = new_status
+                            break
+                    if not step_desc:
+                        step_desc = _format_activity_description(tool_name, call.get("args"))
+                    # Claude-style expandable detail: WHAT ran + WHAT came back.
+                    _step_cmd = _summarize_tool_command(tool_name, call.get("args"))
+                    _step_out = _summarize_tool_output(result)
+                    _step_art = result.get("artifact_id") if isinstance(result, dict) else None
+                    # Persist the detail fields on the stored step so the
+                    # final message save keeps them (survives page refresh).
+                    for s in _activity_steps:
+                        if s.get("number") == step_num:
+                            if _step_cmd:
+                                s["command"] = _step_cmd
+                            if _step_out:
+                                s["output_preview"] = _step_out
+                            if _step_art:
+                                s["artifact_id"] = _step_art
+                            break
+                    _step_dur_ms = int((time.monotonic() - _step_start_times.get(step_num, time.monotonic())) * 1000)
+                    yield _emit_activity_step(
+                        step_num, step_desc, new_status, tool_name=tool_name,
+                        command=_step_cmd, output_preview=_step_out,
+                        artifact_id=_step_art,
+                        duration_ms=_step_dur_ms,
+                    )
+                    # Live feed: typed tool-completion event with structured
+                    # counts/duration (content invariant enforced upstream).
+                    _le_rowcount = result.get("row_count") if isinstance(result, dict) else None
+                    if not isinstance(_le_rowcount, int) or _le_rowcount < 0:
+                        _le_rowcount = None
+                    _le_params: dict = {
+                        "tool_label": step_desc or tool_name,
+                        "duration": round(_step_dur_ms / 1000, 1),
+                    }
+                    if _le_rowcount is not None:
+                        _le_params["row_count"] = _le_rowcount
+                    _le_fin = _push_live_event(
+                        "tool_call_finished" if new_status == "done" else "tool_call_failed",
+                        "tool_call_finished" if new_status == "done" else "tool_call_failed",
+                        _le_params,
+                    )
+                    if _le_fin:
+                        yield _le_fin
+                    # Sub-agent return row — pairs with the invoked badge above
+                    # so the user can see the delegation's outcome + duration.
+                    if tn.startswith("ask_"):
+                        _le_sub_ret_params: dict = {
+                            "agent_label": step_desc or tool_name,
+                            "duration": round(_step_dur_ms / 1000, 1),
+                        }
+                        if _le_rowcount is not None:
+                            _le_sub_ret_params["row_count"] = _le_rowcount
+                        _le_sub_ret = _push_live_event(
+                            "subagent_returned", "subagent_returned",
+                            _le_sub_ret_params,
+                        )
+                        if _le_sub_ret:
+                            yield _le_sub_ret
+                    # Inline data peek attached to the matching tool row.
+                    # Only fires when the tool actually returned rows, so the
+                    # preview pane never shows up on non-data tools.
+                    if _le_rowcount and _le_rowcount > 0 and isinstance(result, dict):
+                        _sample = _sample_rows_from_payload(result)
+                        if _sample and _sample["columns"] and _sample["sample_rows"]:
+                            _le_offer = _push_live_event(
+                                "data_offer", "data_offer",
+                                {
+                                    "tool_label": step_desc or tool_name,
+                                    "row_count": _le_rowcount,
+                                    "columns": _sample["columns"],
+                                    "sample_rows": _sample["sample_rows"],
+                                },
+                            )
+                            if _le_offer:
+                                yield _le_offer
+
+                llm_messages.append({
+                    "role": "assistant", "content": None,
+                    "tool_calls": [{"id": tool_call_id, "type": "function",
+                                    "function": {"name": tool_name, "arguments": args_str}}],
+                })
+                # P0: apply Layer 2 (per-result) persistence + guardrail after_call
+                _result_str = _persisted_result_str(tool_name, result, conversation_id)
+                # P1-5 Hermes-style hard cap: cap the individual tool result
+                # to FSM_PRUNE_MIN_RESULT_CHARS (50k chars ≈ 12-15k tokens)
+                # BEFORE appending to llm_messages.  This is Hermes Step 1
+                # (hard tool output caps) — prevents any single result from
+                # being too large, regardless of what the tool returned.
+                from app.services.agent_loop.fsm_pruner import hard_cap_tool_result
+                _result_str = hard_cap_tool_result(_result_str)
+                llm_messages.append({
+                    "role": "tool", "tool_call_id": tool_call_id,
+                    "content": _result_str,
+                })
+                guard_ctrl.after_call(tool_name, call["args"], _result_str)
+                # FIX 2026-08-24: harvest rich-text answers from market-research
+                # sub-agents (ask_perception/ask_intelligence/ask_diagnosis/
+                # ask_decision/ask_pricing). These return prompt_text instead of
+                # rows; without this hook their text is silently discarded and
+                # the post-loop join produces nothing, so the user gets the
+                # generic "I gathered some information" fallback. Appending to
+                # _v3_iter_contents here means the post-loop join includes it in
+                # accumulated_content, the empty-bubble guarantee never fires,
+                # and the final content_replace shows the real report.
+                if tool_name in TEXT_PRODUCING_TOOLS:
+                    _harv = _harvest_text_answer(result)
+                    if _harv:
+                        _v3_iter_contents.append(_harv)
+                        logger.info(
+                            "v3 captured text answer from %s (%d chars, conv=%s)",
+                            tool_name, len(_harv), conversation_id,
+                        )
+                # P8: Record learning
+                try:
+                    from app.services.learning_graph import record_learning as _rl
+                    _rl(agent_app_id, f"called {tool_name}",
+                        "success" if isinstance(result, dict) and result.get("success") else "failure",
+                        context=(user_content or "")[:200], tool=tool_name)
+                except Exception:
+                    pass
+
+            # P0: Layer 3 — apply per-turn aggregate budget to this batch's results
+            if not paused_for_approval:
+                _batch_ids = [c["tool_call_id"] for c in parsed_calls]
+                _batch_names = [c["tool_name"] for c in parsed_calls]
+                _apply_turn_budget_to_messages(
+                    llm_messages, _batch_ids, _batch_names, conversation_id
+                )
+
+            # P0: if guardrail controller tripped a halt, inject nudge and break
+            if not paused_for_approval and guard_ctrl.halt_decision:
+                _hd = guard_ctrl.halt_decision
+                logger.warning(
+                    "Guardrail halt in conversation %s (stream): %s (tool=%s, count=%d)",
+                    conversation_id, _hd.code, _hd.tool_name, _hd.count,
+                )
+                metrics.record_guardrail_halt(_hd.code)
+                llm_messages.append({
+                    "role": "user",
+                    "content": (
+                        f"A tool loop was detected: {_hd.message} "
+                        "Use the results you already have and produce your final answer."
+                    ),
+                })
+                break
+
+            # P0: refund iteration for execute_code turns
+            if not paused_for_approval and all(c["tool_name"] == "execute_code" for c in parsed_calls):
+                if all(isinstance(r, dict) and r.get("success") is True for r in results):
+                    conv_budget.refund()
+
+            # ReAct reflexion: if any tool in this batch failed, inject a
+            # critique system message so the next iteration reasons about
+            # the failure instead of blindly retrying.  Guarded by
+            # ``not paused_for_approval`` because an approval break leaves
+            # un-appended results in ``results`` that must not be critiqued.
+            if not paused_for_approval:
+                _inject_reflexion_critique(llm_messages, parsed_calls, results)
+
+            # Emit tool progress event
+            yield f'data: {json.dumps({"type": "tool_progress", "tool_calls": tool_calls_for_frontend})}\n\n'
+
+            # Force-pause (R6): if the LLM has been exploring for 2+
+            # iterations without ever calling `create_agent`, and the user
+            # message contains a save-directly / build-it cue, build a
+            # decision summary from the user message + sensible defaults
+            # and pause for the Decision Summary card. This breaks the
+            # discovery loop deterministically — without it, DeepSeek
+            # tends to narrate "Presenting the decision summary" in prose
+            # and keep calling list_tools/skills forever, leaving the user
+            # staring at "Searching available capabilities..." spinners.
+            #
+            # IMPORTANT: trigger on the accumulated tool-call COUNT, not
+            # the iteration counter. LLMs that support parallel tool
+            # calls (DeepSeek, GPT-4, Claude) issue ALL discovery calls
+            # in a single iteration. The classic 3-call discovery
+            # pattern (list_tools + search_skills + list_knowledge_bases)
+            # happens at iteration 0, so iteration >= 2 never fires.
+            # `len(tool_calls_for_frontend) >= 2` is iteration-agnostic:
+            # it fires whether the calls were parallel (1 iteration) or
+            # sequential (multiple iterations). See
+            # tests/test_force_pause_parallel_tools.py for the regression
+            # test.
+            if (
+                len(tool_calls_for_frontend) >= 2
+                and not intercepted
+                and _user_wants_save_directly(user_content)
+            ):
+                forced = _build_forced_decision_summary(user_content)
+                forced_clean = _sanitize_decision_payload(forced)
+                if forced_clean.get("name"):
+                    logger.info(
+                        "force-pause (v3 stream): conv=%s iteration=%d "
+                        "user_cue='save directly' forced_payload_keys=%s",
+                        conversation_id, iteration,
+                        sorted(forced_clean.keys()),
+                    )
+                    # Record a synthetic create_agent entry for the chat
+                    # bubble so the user sees what's about to happen.
+                    synthetic_id = f"forced_{uuid.uuid4()}"
+                    tool_calls_for_frontend.append({
+                        "id": synthetic_id,
+                        "name": TOOL_DISPLAY_NAMES.get("create_agent", "create_agent"),
+                        "arguments_string": json.dumps(forced_clean),
+                        "status": "awaiting_decision_summary",
+                        "forced": True,
+                    })
+                    paused, stripped_for_ui, _note = _persist_decision_summary_pause(
+                        db, conv, messages, assistant_msg_id,
+                        tool_calls_for_frontend, assistant_content,
+                        tool_call_payload=forced_clean,
+                    )
+                    if paused:
+                        if stripped_for_ui:
+                            yield f'data: {json.dumps({"type": "delta", "content": stripped_for_ui})}\n\n'
+                        # Add a short note explaining what we did.
+                        note = (
+                            "\n\nI have enough to build the agent. I'm pausing "
+                            "here so you can review before I save it."
+                        )
+                        yield f'data: {json.dumps({"type": "delta", "content": note})}\n\n'
+                        try:
+                            conv = db.query(AgentConversation).filter(
+                                AgentConversation.id == conversation_id,
+                            ).first() or conv
+                        except Exception:
+                            pass
+                        yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'
+                        return
+                    # Sanitiser rejected — fall through. Very rare.
+
+            # Persist in-progress state to the DB so that a dropped SSE
+            # connection doesn't lose the work that already happened.
+            # The full resume_state is only stored when paused; here we save
+            # a lightweight checkpoint that the UI can use to recover.
+            # NOTE: We must NOT rebind `messages` here — it's a closure
+            # variable shared with the outer scope. Build a new list and
+            # mutate `messages` in place via slicing so the outer binding
+            # stays valid.
+            try:
+                base = list(messages)
+                # Drop a trailing empty assistant placeholder (if any) so we
+                # don't accumulate one assistant message per iteration.
+                # The cleanup drops the placeholder whenever the trailing
+                # assistant message has empty content — regardless of whether
+                # it carries tool_calls. The previous version also required
+                # "no tool_calls", which never fired because partials always
+                # carry ``tool_calls_for_frontend`` (report cards, artifact
+                # ids). Result: each checkpoint appended a new partial
+                # without dropping the old, and ``conv.messages`` grew with
+                # duplicate assistant messages. (Bug: user asked one question,
+                # refresh showed multiple identical answers.)
+                if base and base[-1].get("role") == "assistant" and not base[-1].get("content"):
+                    base = base[:-1]
+                base.append({
+                    "id": str(uuid.uuid4()), "role": "assistant", "content": "",
+                    "created_date": datetime.now(timezone.utc).isoformat(),
+                    "tool_calls": tool_calls_for_frontend,
+                })
+                conv.messages = base
+                # IMPORTANT: re-assign metadata_ to a NEW dict so SQLAlchemy
+                # detects the change. Mutating in place (e.g. `md["k"]=v`)
+                # does NOT trigger change detection for JSON columns.
+                new_meta = dict(conv.metadata_ or {})
+                new_meta["_last_checkpoint_at"] = datetime.now(timezone.utc).isoformat()
+                conv.metadata_ = new_meta
+                conv.updated_date = datetime.now(timezone.utc)
+                db.commit()
+                # Replace the closure variable's contents in place.
+                messages[:] = base
+                logger.info("v3 stream checkpoint saved: conv=%s msgs=%d tool_calls=%d", conversation_id, len(base), len(tool_calls_for_frontend))
+            except Exception as _ckpt_err:
+                logger.warning("v3 stream checkpoint save failed: %s", _ckpt_err)
+                db.rollback()
+
+            if paused_for_approval:
+                # The checkpoint block above already committed conv.messages
+                # and conv.metadata_. The instance is now expunged from the
+                # session, so re-query a fresh one to attach the resume_state
+                # and awaiting_approval status on top.
+                try:
+                    db.refresh(conv)
+                except Exception:
+                    conv = db.query(AgentConversation).filter(
+                        AgentConversation.id == conversation_id,
+                    ).first()
+                if not conv:
+                    logger.error("Conversation %s vanished after checkpoint commit", conversation_id)
+                    return
+                # IMPORTANT: build a new dict for metadata_ so SQLAlchemy's
+                # change detection picks up the new key. Mutating the existing
+                # dict in place does NOT trigger an UPDATE for JSON columns.
+                new_meta = dict(conv.metadata_ or {})
+                new_meta["_resume_state"] = {
+                    "llm_messages": llm_messages, "iteration": iteration,
+                    "tool_calls_for_frontend": tool_calls_for_frontend,
+                    "agent_name": agent_name, "agent_app_id": agent_app_id,
+                    "data_ctx_extras": data_ctx_extras, "user_content": user_content,
+                    "guardrail_retries": guardrail_retries,
+                    "system_prompt": system_prompt, "tools": tools,
+                    "pending_tool": pending_tool,
+                }
+                conv.metadata_ = new_meta
+                conv.status = "awaiting_approval"
+                conv.messages = messages
+                conv.updated_date = datetime.now(timezone.utc)
+                db.commit()
+                yield f'data: {json.dumps({"type": "paused", "conversation": conv.to_dict()})}\n\n'
+                _discard_steer(conversation_id)
+                return
+
+        # --- Stream the final response ---
+        _loop_exit_monotonic = time.monotonic()
+        # Use the ``assistant_content`` already captured by the main loop's
+        # last non-streaming ``_call_llm_with_tools`` call. DO NOT re-call
+        # the LLM here: when the message history still contains assistant
+        # ``tool_calls`` from prior iterations and we pass ``tools=None``,
+        # DeepSeek (and any model whose native tool-calling format is
+        # in-band) cannot return structured ``tool_calls``, so it falls
+        # back to emitting its native DSML tokens as plain text content,
+        # e.g. "<｜｜DSML｜｜tool_calls> <｜｜DSML｜｜invoke name="...">".
+        # That raw token soup streams verbatim to the UI and renders
+        # inside the assistant chat bubble — the "raw text" symptom in
+        # the Agent Builder. The non-streaming ``add_message`` v2 path
+        # already does this correctly (uses the content the main loop
+        # produced with no second LLM call), so we mirror that here.
+        # BUGFIX (Fix A): `_orch_created` must exist before the fallback
+        # reference above can evaluate it. It is (re)assigned by the
+        # orchestrator block below; this early init provides a safe empty
+        # default when the orchestrator is skipped (fallback path, error
+        # path, or the dashboard-orchestrator guard).
+        _orch_created: list[dict] = []
+
+        # BUGFIX: skip fallback if deltas were already streamed — otherwise
+        # the user sees "detailed report" + "I gathered some information..."
+        # as a confusing double-message.
+        if not assistant_content and not locals().get("content_streamed"):
+            assistant_content = _EMPTY_CONTENT_FALLBACK if agent_name == "agent_builder" else _choose_fallback(
+                tool_calls_for_frontend, _orch_created, user_content=user_content,
+            )
+
+        # Decision-summary pause (R4): if the assistant text contains a
+        # `:::decision-summary` block, persist the pending payload to
+        # `conv.metadata_` and emit a `paused` SSE event so the frontend
+        # can render the DecisionSummaryCard. We still stream the
+        # (block-stripped) prose as a `delta` first so the user sees
+        # the agent's recommendation text, then pause for review.
+        paused, stripped_for_ui, _note = _persist_decision_summary_pause(
+            db, conv, messages, assistant_msg_id,
+            tool_calls_for_frontend, assistant_content,
+        )
+        if paused:
+            # Stream the user-visible (block-stripped) text first — but
+            # only if we haven't already streamed the (unstripped) text
+            # token-by-token above. When STREAM_TOKEN_DELTAS is on, the
+            # raw text was already sent; the frontend will receive the
+            # cleaned version via the final `done` event's persisted
+            # assistant message. Sending it again would duplicate.
+            if not content_streamed:
+                yield f'data: {json.dumps({"type": "delta", "content": stripped_for_ui})}\n\n'
+            # Refresh the conversation so the SSE payload reflects the
+            # newly-written `awaiting_decision_summary` metadata.
+            try:
+                conv = db.query(AgentConversation).filter(
+                    AgentConversation.id == conversation_id,
+                ).first() or conv
+            except Exception:
+                pass
+            yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'
+            return
+
+        # Phase headline: composing the final response = "Crystallizing".
+        if "finalize" not in _emitted_phases:
+            _emitted_phases.add("finalize")
+            yield _emit_phase("finalize")
+            # Live feed: the tool loop finished cleanly → verify_passed,
+            # then finalize_started marks the synthesis stage.
+            _le_vp = _push_live_event("verify_passed", "verify_passed")
+            if _le_vp:
+                yield _le_vp
+            _le_fs = _push_live_event("finalize_started", "finalize_started")
+            if _le_fs:
+                yield _le_fs
+
+        # ── Activity step: "Generating response" done ──
+        _step_counter[0] += 1
+        if _loop_exit_monotonic is not None:
+            _gen_dur = int((time.monotonic() - _loop_exit_monotonic) * 1000)
+        else:
+            _gen_dur = None
+        yield _emit_activity_step(
+            _step_counter[0], "Generating response", "done",
+            duration_ms=_gen_dur if _gen_dur is not None else 0,
+        )
+        _activity_steps.append({
+            "number": _step_counter[0],
+            "description": "Generating response",
+            "status": "done",
+            "duration_ms": _gen_dur if _gen_dur is not None else 0,
+        })
+
+        # ── Marker contract: ◤MD_DOCX◤ / ◤HTML_DOCX◤ / ◤PPTX◤ ──
+        # Strip markers from the streamed + persisted assistant content, and
+        # route each marker through the generation orchestrator (which properly
+        # *awaits* the async _create_artifact_tool — the previous synchronous
+        # call produced a never-awaited coroutine, so markers never yielded
+        # artifacts). Also runs the server-driven doc-request fallback (Q1) so
+        # a confirmed file request always yields an artifact. Best-effort: a
+        # marker/fallback failure must never break the SSE stream.
+        # (_orch_doc_format was computed before the tool loop.)
+        # ── Fix C: dashboard-orchestrator guard ────────────────────────────
+        # On dashboard-intent turns where the build tool was never called,
+        # the post-loop orchestrator would auto-create a static HTML
+        # "Dashboard" artifact (ensure_artifact_for_doc_request with
+        # doc_format="dashboard"), bypassing DASHBOARD_ANTITOOLS — the exact
+        # routing conflict observed on caeeda3b. Skip the whole orchestrator
+        # block and surface a synthetic BLOCKED record so the UI shows why
+        # no artifact appeared.
+        _orch_guard_should_block = dashboard_orchestrator_should_block(
+            user_content, _v3_executed_tool_names, _v3_failed_tool_names,
+        )
+        if _orch_guard_should_block:
+            logger.warning(
+                "v3 stream: dashboard-orchestrator guard blocked post-loop "
+                "artifact creation on dashboard turn (conv=%s); build tool "
+                "never called — skipping orchestrator.",
+                conversation_id,
+            )
+            tool_calls_for_frontend.append({
+                "id": f"orchguard_{uuid.uuid4()}",
+                "name": "dashboard_orchestrator_guard",
+                "status": "blocked",
+                "results": {
+                    "blocked": "orchestrator",
+                    "reason": (
+                        "post-loop orchestrator skipped on dashboard turn; "
+                        "the dashboard should be built with "
+                        "create_fullstack_dashboard"
+                    ),
+                },
+            })
+        try:
+            if _orch_guard_should_block:
+                raise _OrchGuardSkipped()
+            from app.services.generation_orchestrator import (
+                ensure_artifact_for_doc_request,
+                fulfill_markers,
+            )
+
+            assistant_content, _orch_created = await fulfill_markers(
+                assistant_content,
+                db=db,
+                context={
+                    "conversation_id": conversation_id,
+                    "agent_app_id": agent_app_id,
+                },
+            )
+            # Also post-process the LLM's own [[RESULT]]...[[END]] blocks.
+            # Some system prompts (and most LLM hallucinations) tell the
+            # model to emit a [[RESULT]] block with a *fake* artifact id;
+            # without this step the frontend renders a card pointing at a
+            # non-existent artifact and the user sees a 404.  Fulfilling
+            # here creates a real artifact and rewrites the id in the
+            # assistant text so the resource card works end-to-end.
+            try:
+                from app.services.result_block_processor import (
+                    fulfill_result_blocks,
+                )
+
+                assistant_content, _result_created = await fulfill_result_blocks(
+                    assistant_content,
+                    db=db,
+                    context={
+                        "conversation_id": conversation_id,
+                        "agent_app_id": agent_app_id,
+                    },
+                )
+                if _result_created:
+                    _orch_created = list(_orch_created) + _result_created
+            except Exception as _rb_err:
+                logger.warning(
+                    "v3 stream: result_block post-processor raised (non-fatal): %s",
+                    _rb_err,
+                )
+
+            # ── Self-healing refusal guardrail ──────────────────────────
+            # When the LLM says "I cannot browse" for an online-research
+            # request, auto-run ``web_search`` and append the results to
+            # ``assistant_content`` so the user always gets a real answer.
+            # In the v3 stream path we DO NOT re-ask the LLM (would
+            # require a second stream) — we just append the search
+            # results so the user sees the corrected answer.
+            try:
+                from app.services.turn_action import check_and_fallback
+
+                _rg_decision = await check_and_fallback(
+                    user_message=user_content,
+                    assistant_text=assistant_content,
+                    db=db,
+                )
+                if _rg_decision.get("search_results"):
+                    bullets = "\n".join(
+                        f"- [{r.get('title','?')}]({r.get('url','?')}): {r.get('snippet','')}"
+                        for r in _rg_decision["search_results"]
+                    )
+                    assistant_content = (
+                        f"{assistant_content}\n\n"
+                        f"---\n"
+                        f"_I can browse the web — here is what I found for "
+                        f"\"{_rg_decision['search_query']}\":_\n\n"
+                        f"{bullets}"
+                    )
+            except Exception as _rg_err:
+                logger.warning(
+                    "v3 stream: refusal guardrail raised (non-fatal): %s",
+                    _rg_err,
+                )
+            if not _orch_no_data[0]:
+                _fallback = await ensure_artifact_for_doc_request(
+                    doc_format=_orch_doc_format,
+                    assistant_content=assistant_content,
+                    already_created=_orch_created,
+                    tool_calls_for_frontend=tool_calls_for_frontend,
+                    artifact_ids=artifact_ids,
+                    db=db,
+                    context={
+                        "conversation_id": conversation_id,
+                        "agent_app_id": agent_app_id,
+                        "user_message": user_content,
+                    },
+                )
+                if _fallback:
+                    _orch_created = list(_orch_created) + [_fallback]
+        except _OrchGuardSkipped:
+            pass  # Fix C: dashboard-orchestrator guard fired — orchestrator skipped
+        except Exception as _marker_outer_err:
+            logger.warning(
+                "v3 Marker parsing block failed (non-fatal): %s",
+                _marker_outer_err,
+            )
+
+        # Emit the final assistant content as a delta — but ONLY if it
+        # was not already streamed token-by-token above (STREAM_TOKEN_DELTAS
+        # path). Re-emitting would duplicate the text in the UI. The
+        # legacy buffered path (flag off) and fallback paths
+        # (guardrail/loop-guard/error-recovery) still need this emit
+        # because they set assistant_content without streaming.
+        if not content_streamed and not _suppress_chat_deltas:
+            yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
+
+        # Surface orchestrator-created artifacts (marker fulfillment + the
+        # server-driven doc fallback) as synthetic create_artifact tool_call
+        # records so _collect_artifact_results links + exposes them exactly
+        # like the LLM-driven path.
+        # Bug 2 fix: post-loop fallback for an empty assistant_content.
+        # When the tool-call loop guard trips (see _detect_tool_call_loop
+        # above) we break without producing a final answer — the previous
+        # implementation leaked the internal reflexion text as the
+        # user's response. Now we fall back to a clean, agent-aware
+        # message only if the LLM didn't already produce a response
+        # across the tool iterations.
+        # FIX 2026-08-22: compute whether the deferred synthesis will run
+        # AFTER the loop, so we can skip the post-loop fallback placeholder
+        # when synthesis is coming.  The conditions mirror the full check
+        # at line ~12176.  Moving this earlier is safe because the tool loop
+        # has already completed and the contract's answer_datasets are final.
+        #
+        # FIX 2026-08-24: gate the deferred synthesis on the PRESENCE of
+        # answer data, not on collection_complete(). A trailing coverage
+        # probe or one empty branch used to veto the entire synthesis stage
+        # even when 70+ rows of business data had been collected — the turn
+        # then fell through to the generic fallback despite having data.
+        _deferred_answer = (
+            _contract.answer_datasets()[-1]
+            if (
+                settings.DELIVERABLE_PHASE_LOCK_ENABLED
+                and _contract is not None
+                and _contract.has_answer_data()
+                and not _orch_no_data[0]
+                and not (
+                    _create_artifact_titles
+                    or "create_artifact" in _v3_executed_tool_names
+                    or "run_sandbox_skill" in _v3_executed_tool_names
+                )
+                and _contract.answer_datasets()
+            )
+            else None
+        )
+        # Skip the post-loop fallback when synthesis will run. The synthesis
+        # LLM is the authoritative source of the bubble text — falling back
+        # first and then having to overwrite later is brittle and (before
+        # the fix at ~12282) the "only replace if empty" condition meant
+        # the placeholder stuck, so the report card appeared to "vanish".
+        if not (assistant_content or "").strip() and _deferred_answer is None:
+            try:
+                # Dashboard-specific rescue: if the user asked for a
+                # dashboard but the active build tool was never called,
+                # inject a final nudge forcing the LLM to call it with
+                # whatever schema info it has. The tool name is flag-aware
+                # (dashboard_build_tool) so we never force the disabled
+                # legacy create_dashboard. This prevents the common
+                # "budget exhausted during exploration" failure.
+                _rescue_build_tool = dashboard_build_tool()
+                if (
+                    _rescue_build_tool
+                    and _is_dashboard_request(user_content)
+                    and not _tool_was_called(tool_calls_for_frontend, _rescue_build_tool)
+                    and not _tool_was_called(tool_calls_for_frontend, "update_fullstack_dashboard")
+                    and not _tool_was_called(tool_calls_for_frontend, "update_dashboard")
+                ):
+                    logger.info(
+                        "Dashboard rescue: user asked for dashboard but "
+                        "%s never called (conv=%s). Injecting rescue nudge.",
+                        _rescue_build_tool, conversation_id,
+                    )
+                    rescue_nudge = (
+                        "CRITICAL: The user asked for a dashboard but you ran "
+                        "out of tool iterations before calling "
+                        + _rescue_build_tool + ". "
+                        "You MUST call " + _rescue_build_tool + " NOW with the schema "
+                        "information you already have. Use the column names you "
+                        "discovered from describe_schema/execute_query. Do NOT "
+                        "explore further — build the dashboard with what you know."
+                    )
+                    llm_messages.append({"role": "user", "content": rescue_nudge})
+                    # One final LLM call to force the active build tool
+                    try:
+                        _rescue_stream = _stream_llm_with_tools(
+                            llm_messages, tools,
+                            tool_choice={"type": "function", "function": {"name": _rescue_build_tool}},
+                            model_override=user_model,
+                            endpoint=effective_llm.endpoint,
+                            temperature=llm_overrides.get("temperature"),
+                            max_tokens=llm_overrides.get("max_tokens"),
+                        )
+                        async for _ev_type, _ev_data in _rescue_stream:
+                            if _ev_type == "delta":
+                                assistant_content += _ev_data
+                                content_streamed = True
+                                if not _suppress_chat_deltas:
+                                    yield f'data: {json.dumps({"type": "delta", "content": _ev_data})}\n\n'
+                            elif _ev_type == "tool_calls":
+                                raw_tool_calls = _ev_data or []
+                        # If the rescue produced a build-tool call, execute it
+                        if raw_tool_calls:
+                            for _tc in raw_tool_calls:
+                                _fn = _tc.get("function", {})
+                                _tname = _fn.get("name", "")
+                                if _tname == _rescue_build_tool:
+                                    _targs = _fn.get("arguments", "{}")
+                                    if isinstance(_targs, str):
+                                        import json as _json
+                                        try:
+                                            _targs = _json.loads(_targs)
+                                        except Exception:
+                                            _targs = {}
+                                    _tool_result = await execute_tool(
+                                        _tname, _targs, db,
+                                        user_id,
+                                        context={
+                                            "conversation_id": conversation_id,
+                                            "agent_app_id": agent_app_id,
+                                            "agent_name": agent_name,
+                                            "conversation_metadata": conv.metadata_ or {},
+                                            "chat_session_id": chat_session_id,
+                                            **(data_ctx_extras or {}),
+                                        },
+                                    )
+                                    tc_id = _tc.get("id", str(uuid.uuid4()))
+                                    tool_calls_for_frontend.append({
+                                        "id": tc_id,
+                                        "name": _rescue_build_tool,
+                                        "arguments_string": _fn.get("arguments", "{}") if isinstance(_fn.get("arguments"), str) else json.dumps(_fn.get("arguments", {})),
+                                        "status": "completed" if isinstance(_tool_result, dict) and _tool_result.get("success") else "failed",
+                                        "results": _tool_result,
+                                    })
+                                    if isinstance(_tool_result, dict):
+                                        _dash_id = _tool_result.get("dashboard_id") or _tool_result.get("artifact_id")
+                                        if _dash_id and _dash_id not in artifact_ids:
+                                            artifact_ids.append(_dash_id)
+                                    # Append tool result to messages for persistence
+                                    llm_messages.append({"role": "assistant", "content": None, "tool_calls": [_tc]})
+                                    llm_messages.append({"role": "tool", "tool_call_id": tc_id, "content": json.dumps(_tool_result)})
+                                    logger.info(
+                                        "Dashboard rescue: %s executed "
+                                        "(success=%s, conv=%s)",
+                                        _rescue_build_tool,
+                                        isinstance(_tool_result, dict) and _tool_result.get("success"),
+                                        conversation_id,
+                                    )
+                    except Exception as _rescue_err:
+                        logger.warning(
+                            "Dashboard rescue LLM call failed: %s (conv=%s)",
+                            _rescue_err, conversation_id,
+                        )
+                # After rescue attempt (or if no rescue needed), check
+                # if we still have empty content.
+                if not (assistant_content or "").strip():
+                    # BUGFIX: If the streaming loop already emitted deltas
+                    # to the user (content_streamed=True), the user has
+                    # already seen the answer. Do NOT append a second
+                    # fallback message on top — it creates a confusing
+                    # "detailed report + I gathered some information but
+                    # had trouble..." double-message. Just leave
+                    # assistant_content empty; the streamed deltas are the
+                    # authoritative answer.
+                    if locals().get("content_streamed"):
+                        logger.info(
+                            "Post-loop: content was already streamed; "
+                            "skipping fallback append (conv=%s)",
+                            conversation_id,
+                        )
+                    elif locals().get("_loop_guard_user_facing"):
+                        assistant_content = _loop_guard_user_facing
+                    else:
+                        # Dashboard-specific fallback message (flag-aware tool
+                        # name so the check matches what the agent actually had
+                        # available this turn).
+                        if _is_dashboard_request(user_content) and not _tool_was_called(
+                            tool_calls_for_frontend,
+                            locals().get("_rescue_build_tool") or "create_dashboard",
+                        ):
+                            assistant_content = (
+                                "I ran out of steps while exploring the data for your dashboard. "
+                                "Please try again — I'll create the dashboard more quickly this time."
+                            )
+                        else:
+                            # Context-aware fallback: choose the best message
+                            # based on what was produced this turn (report cards,
+                            # artifacts, dashboard requests, or generic).
+                            assistant_content = _choose_fallback(
+                                tool_calls_for_frontend, _orch_created,
+                                user_content=user_content,
+                            )
+                logger.info(
+                    "Post-loop fallback: empty assistant_content, using fallback message "
+                    "(conv=%s, len=%d)",
+                    conversation_id, len(assistant_content),
+                )
+            except Exception as _fallback_err:
+                logger.warning("Post-loop fallback failed: %s", _fallback_err)
+                assistant_content = _GENERIC_EMPTY_CONTENT_FALLBACK
+        if _orch_created:
+            for _art in _orch_created:
+                tool_calls_for_frontend.append({
+                    "id": f"orch-{_art.get('artifact_id')}",
+                    "name": "create_artifact",
+                    "status": "completed",
+                    "results": _art,
+                })
+                if _art.get("artifact_id") and _art["artifact_id"] not in artifact_ids:
+                    artifact_ids.append(_art["artifact_id"])
+
+        # Multi-iter content accumulation (2026-08-20):
+        # Capture the FINAL iteration's `assistant_content` (the per-iter
+        # reset at the top of the loop only captures iter 1..N-1; iter N's
+        # content survives in `assistant_content` after the loop). After
+        # this append, `_v3_iter_contents` holds every iteration's prose
+        # in order. We join with `\n\n` (markdown paragraph break) and
+        # filter empty entries (tool-only iters with no prose) so the
+        # result reads naturally as a single flowing response.
+        if assistant_content:
+            _v3_iter_contents.append(assistant_content)
+        accumulated_content = "\n\n".join(c for c in _v3_iter_contents if c).strip()
+        # Edge case: if no iter produced any prose (all-tool turn), fall
+        # back to whatever assistant_content holds (fallback text or "").
+        if not accumulated_content and assistant_content:
+            accumulated_content = assistant_content
+
+        # BUGFIX 2026-08-23: recover best prior iteration if nudges
+        # discarded all good content. When a nudge fires, it pops the
+        # last iteration from the accumulator. If the loop then exits
+        # (max iterations / budget cap) before producing a real answer,
+        # accumulated_content becomes empty or just a promise phrase.
+        # We saved the longest popped entry in `_v3_recovered_best`.
+        if _v3_recovered_best[0]:
+            _cur_len = len(accumulated_content or "")
+            _rec_len = len(_v3_recovered_best[0])
+            if _rec_len > _cur_len and _rec_len > 200:
+                logger.info(
+                    "v3 post-loop: recovered best prior iter (%d chars) "
+                    "over current (%d chars, conv=%s)",
+                    _rec_len, _cur_len, conversation_id,
+                )
+                accumulated_content = _v3_recovered_best[0]
+
+        # Post-loop promise-text cleanup (Fix 5): if the accumulated
+        # content ends with a pending-action sentence ("Let me verify…"),
+        # strip it. This handles the case where the model produced promise
+        # text alongside tool calls (not in the exit branch) and the loop
+        # broke at the budget cap without the exit checker ever seeing it.
+        if accumulated_content and settings.GOAL_CONTRACT_ENABLED:
+            _post_pending = pending_action_phrase(accumulated_content)
+            if _post_pending:
+                accumulated_content = _strip_trailing_pending(
+                    accumulated_content, _post_pending,
+                )
+                if accumulated_content.strip():
+                    accumulated_content = (
+                        accumulated_content + "\n\nNote: this turn ended before completing the "
+                        "additional verification described above. The current answer is based "
+                        "on the data already returned."
+                    ).strip()
+
+        # Post-loop internal-reference hygiene (Bug 3 fix): drop trailing
+        # sentences that reference loop iterations the user never saw
+        # ("the discrepancy", "you're right", "as I mentioned earlier",
+        # "let me re-query…"). Deterministic, flag-gated.
+        if accumulated_content and settings.DELIVERABLE_PHASE_LOCK_ENABLED:
+            _hygiene_stripped = _strip_internal_references(accumulated_content)
+            if _hygiene_stripped != accumulated_content:
+                logger.info(
+                    "v3 internal-reference hygiene: stripped trailing residue "
+                    "(conv=%s, %d chars -> %d chars)",
+                    conversation_id, len(accumulated_content), len(_hygiene_stripped),
+                )
+                accumulated_content = _hygiene_stripped
+            # SQL/plan-narration strip (defense-in-depth for models that
+            # narrate SQL in the final iteration without emitting tool
+            # calls): ```sql fences, bare SELECT paragraphs, and empty
+            # "JSON Report Card" sections ("SQL leak", 2026-08-21).
+            _sql_stripped = _strip_sql_narration(accumulated_content)
+            if _sql_stripped != accumulated_content:
+                logger.info(
+                    "v3 sql-narration hygiene: stripped sql/json artifacts "
+                    "(conv=%s, %d chars -> %d chars)",
+                    conversation_id, len(accumulated_content), len(_sql_stripped),
+                )
+                accumulated_content = _sql_stripped
+
+        # ── Deferred deliverable: single post-loop synthesis + finalize ──
+        # Bug 1 fix: cards are built ONCE at the end of the turn, from the
+        # FINAL answer-tagged dataset (later queries refine earlier ones).
+        # Skipped when (a) flags off, (b) no contract / collection
+        # incomplete, (c) no answer dataset, (d) an artifact was already
+        # built this turn, or (e) the no-data card already fired.
+        # _deferred_answer was already computed above (line ~11947) so we can
+        # skip re-computing it here.  The early computation was added as part
+        # of the FIX 2026-08-22 to let the post-loop fallback guard work.
+
+        # FIX 2026-08-24: hoisted synthesis callable out of the deferred
+        # branch so the empty-bubble guarantee can always invoke the LLM
+        # when answer data exists, even when the deferred block was skipped.
+        _synth_endpoint = effective_llm.endpoint
+
+        async def _deferred_synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+            return await _call_synthesis_llm(system_prompt, msgs, endpoint=_ep)
+
+        if _deferred_answer is not None:
+            # FIX A+C (2026-08-22): synthesize from the FULL answer-tagged
+            # dataset set, not just the last query.  The final query is often
+            # a degenerate refinement (e.g. a 1-row data-quality check) —
+            # the earlier totals/breakdown datasets must still feed the
+            # report.  Rows are merged deterministically (record order kept,
+            # identical rows deduplicated) and the payload carries a
+            # per-dataset overview so the LLM sees the whole query picture.
+            _all_answer_datasets = _contract.answer_datasets()
+            _last_rows = merge_answer_rows(_all_answer_datasets)
+
+            # ── Historical data fallback (follow-up file-format turns) ───
+            # When the user asks for a file format change (e.g. "give me in
+            # docx formate") in a follow-up turn, the agent re-queries the
+            # database. If that re-query returns 0 rows, we fall back to data
+            # that was successfully fetched in an earlier turn instead of
+            # producing a useless "no data" file.
+            _hist_rows: list[dict] = []
+            _hist_sql = ""
+            _hist_source = ""
+            if is_effective_empty(_last_rows):
+                from app.services.generation_orchestrator import (
+                    _mine_historical_answer_rows,
+                )
+                _hist_rows = _mine_historical_answer_rows(messages)
+                if _hist_rows:
+                    logger.info(
+                        "v3 deferred deliverable: using %d historical rows "
+                        "from previous turn (conv=%s)",
+                        len(_hist_rows), conversation_id,
+                    )
+                    # Also try to extract SQL / source from the historical
+                    # tool result so the methodology section is accurate.
+                    for _m in reversed(messages):
+                        if _m.get("role") != "tool":
+                            continue
+                        _c = _m.get("content")
+                        if not isinstance(_c, str):
+                            continue
+                        try:
+                            _p = json.loads(_c)
+                        except Exception:
+                            continue
+                        if not isinstance(_p, dict):
+                            continue
+                        _r = _p.get("result") or _p
+                        if not isinstance(_r, dict):
+                            continue
+                        _hr = _r.get("rows")
+                        if isinstance(_hr, list) and _hr:
+                            _hist_sql = _r.get("sql") or ""
+                            _hist_source = _r.get("source_name") or ""
+                            break
+                    _last_rows = _hist_rows
+
+            if is_effective_empty(_last_rows):
+                logger.info(
+                    "v3 deferred deliverable skipped: all answer datasets empty "
+                    "and no historical data (conv=%s)",
+                    conversation_id,
+                )
+            else:
+                # Data-quality gate: don't build an artifact from garbage data
+                # (e.g. rows that contain only internal IDs like FENTRYID, or
+                # rows that are MIN/MAX/COUNT aggregates like {row_count: 14275}).
+                from app.services.generation_orchestrator import (
+                    _validate_artifact_data_quality,
+                )
+                # NOTE: is_metadata_only_rows comes from the module-level
+                # import (line ~193). Do NOT re-import it locally — a local
+                # import shadows the global for the whole function scope and
+                # causes UnboundLocalError at earlier unconditional uses.
+                # FIX 2026-08-24: also reject MIN/MAX/COUNT-only result sets.
+                # `_validate_artifact_data_quality` accepts "count" as a
+                # business fragment (row_count contains "count"), so the shape
+                # check alone misses the common pattern of the data agent
+                # running SELECT COUNT(*) and treating the 1-row result as
+                # real business data.
+                _is_meta_only = (
+                    bool(_last_rows)
+                    and len(_last_rows) <= 2
+                    and is_metadata_only_rows(_last_rows)
+                )
+                _dq = _validate_artifact_data_quality(_last_rows, user_content)
+                if _is_meta_only:
+                    _dq = {
+                        "valid": False,
+                        "reason": (
+                            "the answer dataset contains only aggregate metadata "
+                            "(MIN/MAX/COUNT) instead of business rows — the data "
+                            "agent likely ran a row-count probe, not a real data "
+                            "query"
+                        ),
+                    }
+                if not _dq["valid"]:
+                    logger.warning(
+                        "v3 deferred deliverable skipped: data quality check failed "
+                        "(%s) (conv=%s)",
+                        _dq["reason"],
+                        conversation_id,
+                    )
+                    _no_data_msg = (
+                        f"I checked your warehouse for the data needed for your "
+                        f"request, but {_dq['reason']}. If you expected records "
+                        f"for this period, please verify the date range, table "
+                        f"names, or filters."
+                    )
+                    _acc_text = (accumulated_content or "").strip()
+                    _is_placeholder_now = (
+                        not _acc_text
+                        or _acc_text == _GENERIC_EMPTY_CONTENT_FALLBACK.strip()
+                        or _acc_text.startswith("(The requested")
+                        or _acc_text.startswith("Data retrieved (")
+                        or _acc_text.startswith("Analyzing ")
+                        or _acc_text.startswith("I gathered some information")
+                        or _acc_text.startswith("Based on the analysis of")
+                        or _acc_text.startswith("I've completed your request")
+                        or _acc_text.startswith("Your deliverable")
+                        or _acc_text.startswith("Here is the artifact")
+                    )
+                    if _is_placeholder_now:
+                        accumulated_content = _no_data_msg
+                        try:
+                            yield (
+                                'data: '
+                                + json.dumps({
+                                    "type": "content_replace",
+                                    "content": accumulated_content,
+                                })
+                                + '\n\n'
+                            )
+                        except Exception as _bubble_yield_err:
+                            logger.debug(
+                                "v3 deferred no-data bubble yield failed: %s",
+                                _bubble_yield_err,
+                            )
+                else:
+                    try:
+                        _synth_endpoint = effective_llm.endpoint
+
+                        async def _deferred_synth_call(system_prompt, msgs, _ep=_synth_endpoint):
+                            return await _call_synthesis_llm(system_prompt, msgs, endpoint=_ep)
+
+                        # FIX 2026-08-23: resolve skill context for deferred synthesis
+                        _def_skill_name, _def_skill_method = _resolve_skill_for_synthesis(
+                            tool_calls_for_frontend,
+                            selected_skill,
+                            selected_skill_id,
+                            db,
+                        )
+                        # Prefer historical SQL/source when we fell back to
+                        # historical rows so the docx methodology is accurate.
+                        _use_sql = _deferred_answer.get("sql") or _hist_sql
+                        _use_source = _deferred_answer.get("source_name") or _hist_source
+                        _use_source_id = _deferred_answer.get("source_id")
+                        _deferred_synth = await synthesize_report(
+                            user_message=user_content,
+                            rows=_last_rows,
+                            sql=_use_sql,
+                            source_name=_use_source,
+                            source_id=_use_source_id,
+                            call_llm_fn=_deferred_synth_call,
+                            datasets=_all_answer_datasets if not _hist_rows else [],
+                            skill_name=_def_skill_name,
+                            skill_methodology=_def_skill_method,
+                        )
+                        # ── Synthesis prose guarantee (v2 — robust) ────────────
+                        # The synthesis LLM sometimes returns ONLY a JSON block
+                        # with no prose → _strip_json_block leaves empty prose →
+                        # assistant_content falls back to payload.summary which
+                        # is short → chat bubble shows generic fallback.
+                        # Fix: 3-tier guarantee:
+                        #   1. If prose < 150 chars → try forced LLM synthesis
+                        #   2. If forced synthesis also fails → build answer from data
+                        #   3. If no data rows → leave as-is (truly empty case)
+                        _synth_prose = (_deferred_synth.assistant_content or "").strip()
+
+                        # --- Tier 1: Forced LLM synthesis (when prose too short) ---
+                        if len(_synth_prose) < 150 and _last_rows:
+                            logger.info(
+                                "v3 synthesis prose too short (%d chars), forcing "
+                                "second synthesis (conv=%s)",
+                                len(_synth_prose), conversation_id,
+                            )
+                            try:
+                                _forced_prompt = (
+                                    "You are a data analyst. The user asked: "
+                                    f"\"{user_content}\"\n\n"
+                                    f"You queried the database and got {len(_last_rows)} "
+                                    f"rows of real business data.\n\n"
+                                    "Write a COMPREHENSIVE 5-8 sentence analysis that:\n"
+                                    "1. Restates what was asked and what data was found\n"
+                                    "2. Summarizes key totals and figures (use SPECIFIC "
+                                    "numbers from the data)\n"
+                                    "3. Identifies top performers or key patterns\n"
+                                    "4. Highlights any anomalies or notable findings\n"
+                                    "5. Ends with one concrete follow-up suggestion\n\n"
+                                    "IMPORTANT RULES:\n"
+                                    "- NEVER say 'I've completed your request' or "
+                                    "'Here is the artifact' or 'The data has been "
+                                    "retrieved'\n"
+                                    "- NEVER just describe the data structure. "
+                                    "Write REAL analysis with REAL numbers.\n"
+                                    "- Your answer must be useful even WITHOUT the "
+                                    "attached file.\n\n"
+                                    f"Data (first 5 rows):\n"
+                                    f"{json.dumps(_last_rows[:5], default=str, ensure_ascii=False)[:1200]}\n\n"
+                                    f"All {len(_last_rows)} rows column summary:\n"
+                                    f"{_build_column_summary(_last_rows)}"
+                                )
+                                _forced_synth = await _deferred_synth_call(
+                                    _forced_prompt,
+                                    [{"role": "user", "content": user_content}],
+                                )
+                                _forced_text = (_forced_synth.get("content", "") or "").strip()
+                                # Validate: don't accept another apology/placeholder
+                                _is_bad = (
+                                    not _forced_text
+                                    or len(_forced_text) < 100
+                                    or _APOLOGY_PATTERN_RE.search(_forced_text)
+                                    or _BOUNCE_BACK_PATTERN_RE.search(_forced_text)
+                                )
+                                if not _is_bad and len(_forced_text) > len(_synth_prose):
+                                    _deferred_synth.assistant_content = _forced_text
+                                    logger.info(
+                                        "v3 forced synthesis produced %d chars (was %d)",
+                                        len(_forced_text), len(_synth_prose),
+                                    )
+                                    _synth_prose = _forced_text
+                                elif _is_bad:
+                                    logger.info(
+                                        "v3 forced synthesis produced bad answer "
+                                        "(len=%d, apology=%s), will retry in Tier 2",
+                                        len(_forced_text),
+                                        bool(_APOLOGY_PATTERN_RE.search(_forced_text or "")),
+                                    )
+                            except Exception as _forced_err:
+                                logger.warning(
+                                    "v3 forced synthesis failed (non-fatal): %s",
+                                    _forced_err,
+                                )
+
+                        # --- Tier 2: Second LLM synthesis attempt (more explicit) ---
+                        # If after Tier 1 forced synthesis, prose is STILL too short,
+                        # try one more time with even more explicit instructions.
+                        # We ALWAYS use the LLM — never hardcoded answers — because
+                        # different users have different databases/schemas.
+                        _synth_prose = (_deferred_synth.assistant_content or "").strip()
+                        if len(_synth_prose) < 150 and _last_rows:
+                            logger.info(
+                                "v3 synthesis STILL too short (%d chars) after Tier 1, "
+                                "attempting Tier 2 LLM synthesis (conv=%s)",
+                                len(_synth_prose), conversation_id,
+                            )
+                            try:
+                                _tier2_answer = await _force_llm_synthesis(
+                                    user_content,
+                                    _last_rows,
+                                    synth_call_fn=_deferred_synth_call,
+                                    conversation_history=llm_messages,
+                                    max_retries=2,
+                                )
+                                if len(_tier2_answer) > len(_synth_prose):
+                                    _deferred_synth.assistant_content = _tier2_answer
+                                    logger.info(
+                                        "v3 Tier 2 LLM synthesis: %d chars (was %d)",
+                                        len(_tier2_answer), len(_synth_prose),
+                                    )
+                            except Exception as _tier2_err:
+                                logger.warning(
+                                    "v3 Tier 2 LLM synthesis failed (non-fatal): %s",
+                                    _tier2_err,
+                                )
+                        if _deferred_synth.report_card_payload is not None:
+                            _payload_dump = _deferred_synth.report_card_payload.model_dump()
+                            # FIX 2026-08-22: only create an artifact card when
+                            # the user explicitly asked for a file deliverable.
+                            # For simple data questions the synthesis text IS
+                            # the answer — no card needed.
+                            if _orch_doc_format:
+                                _deferred_task = _start_finalize_offloaded(
+                                    db,
+                                    {
+                                        "conversation_id": conversation_id,
+                                        "agent_name": agent_name,
+                                        "user_message": user_content,
+                                        "source": _deferred_answer.get("source_name"),
+                                        "sql": _deferred_answer.get("sql"),
+                                        "payload": _deferred_synth.report_card_payload,
+                                        "message_id": assistant_msg_id,
+                                    },
+                                )
+                                # FIX 2026-08-22: cap the offloaded finalize wait so
+                                # the SSE stream always closes. Without this, if the
+                                # sandbox container hangs the "Finalizing your answer"
+                                # activity step stays loading forever and nothing gets
+                                # persisted to the database.
+                                _DEFERRED_FINALIZE_TIMEOUT_S = 120
+                                try:
+                                    async with asyncio.timeout(_DEFERRED_FINALIZE_TIMEOUT_S):
+                                        async for _hb in _emit_tool_progress_while_waiting(
+                                            _deferred_task,
+                                            [{
+                                                "tool_call_id": "finalize-artifact-deferred",
+                                                "tool_name": "create_artifact",
+                                                "args_str": "",
+                                                "args": {},
+                                            }],
+                                        ):
+                                            yield _hb
+                                    _artifact_row, _file_exports = _deferred_task.result()
+                                except asyncio.TimeoutError:
+                                    logger.warning(
+                                        "v3 deferred finalize timed out after %ds "
+                                        "(sandbox render stuck). Continuing without "
+                                        "file export. (conv=%s)",
+                                        _DEFERRED_FINALIZE_TIMEOUT_S, conversation_id,
+                                    )
+                                    _deferred_task.cancel()
+                                    _artifact_row, _file_exports = None, {}
+                                except Exception as _deferred_err:
+                                    logger.error(
+                                        "v3 deferred finalize failed: %s (conv=%s)",
+                                        _deferred_err, conversation_id,
+                                    )
+                                    _artifact_row, _file_exports = None, {}
+                                # Re-serialize AFTER finalize so user_signal reflects
+                                # any mutation (e.g. "export_docx").
+                                _payload_dump = _deferred_synth.report_card_payload.model_dump()
+                            else:
+                                _artifact_row, _file_exports = None, {}
+                                logger.info(
+                                    "DEFERRED FINALIZE: skipped artifact creation "
+                                    "(no file intent) for conv=%s",
+                                    conversation_id,
+                                )
+                            # Attach the card payload + artifact to the answer
+                            # dataset's tool-call record (the frontend MessageBubble
+                            # reads report_card_payload from the persisted call).
+                            _tc_record = next(
+                                (
+                                    r for r in tool_calls_for_frontend
+                                    if r.get("id") == _deferred_answer.get("tool_call_id")
+                                ),
+                                None,
+                            )
+                            if _tc_record is None:
+                                # Fallback: attach to the last answer-tagged call
+                                # (the smart retry may have re-executed the query).
+                                _tc_record = next(
+                                    (
+                                        r for r in reversed(tool_calls_for_frontend)
+                                        if isinstance(r.get("results"), dict)
+                                        and r.get("results", {}).get("query_purpose") == "answer"
+                                    ),
+                                    None,
+                                )
+                            if _tc_record is not None:
+                                # Attach INSIDE results — MessageBubble's
+                                # reportToolResult reads tc.results.report_card_payload,
+                                # matching every legacy eager path
+                                # (result["report_card_payload"]). The first deferred
+                                # implementation wrote at the record top level, so the
+                                # ReportCard never rendered (final-answer layout bug,
+                                # 2026-08-21).
+                                _tc_results = _tc_record.get("results")
+                                if not isinstance(_tc_results, dict):
+                                    _tc_results = {}
+                                    _tc_record["results"] = _tc_results
+                                _tc_results["report_card_payload"] = _payload_dump
+                                _tc_results["synthesis_text"] = _deferred_synth.assistant_content
+                                # Bubble-text companion: when the turn produced
+                                # no prose (or the strips removed it all), show
+                                # the synthesis text as the bubble so the card
+                                # never arrives over a blank message. The
+                                # empty-bubble guarantee further below only
+                                # catches the no-card case.
+                                #
+                                # FIX 2026-08-22: also replace fallback placeholder
+                                # text (e.g. "Data retrieved (1 rows):" from the
+                                # post-loop fallback, or the generic "I gathered
+                                # some information…" message). The synthesis ran
+                                # and produced real prose — the user should see it,
+                                # not the placeholder. Without this override, the
+                                # synthesis text is attached only to
+                                # _tc_results["synthesis_text"] (which MessageBubble
+                                # ignores), and the bubble shows the stale raw-rows
+                                # fallback, so the report card appears to "vanish"
+                                # once the stream ends and the user re-reads the
+                                # conversation.
+                                _synth_text = (_deferred_synth.assistant_content or "").strip()
+                                _acc_text = (accumulated_content or "").strip()
+                                _is_fallback_placeholder = (
+                                    not _acc_text
+                                    or _acc_text == _GENERIC_EMPTY_CONTENT_FALLBACK.strip()
+                                    or _acc_text.startswith("(The requested")
+                                    or _acc_text.startswith("Data retrieved (")
+                                    or _acc_text.startswith("Analyzing ")
+                                    or _acc_text.startswith("I gathered some information")
+                                    or _acc_text.startswith("Based on the analysis of")
+                                    or _acc_text.startswith("I've completed your request")
+                                    or _acc_text.startswith("Your deliverable")
+                                    or _acc_text.startswith("Here is the artifact")
+                                )
+                                if _synth_text and _is_fallback_placeholder:
+                                    accumulated_content = _deferred_synth.assistant_content
+                                    try:
+                                        yield (
+                                            'data: '
+                                            + json.dumps({
+                                                "type": "content_replace",
+                                                "content": accumulated_content,
+                                            })
+                                            + '\n\n'
+                                        )
+                                    except Exception as _bubble_yield_err:
+                                        logger.debug(
+                                            "v3 deferred bubble yield failed "
+                                            "(client gone?): %s",
+                                            _bubble_yield_err,
+                                        )
+                                if _file_exports:
+                                    _tc_results["file_exports"] = _file_exports
+                                    _primary_fmt = next(iter(_file_exports))
+                                    _export = _file_exports[_primary_fmt]
+                                    _export_aid = _export.get("artifact_id")
+                                    if _export_aid:
+                                        _tc_results["artifact_id"] = _export_aid
+                                        if _export_aid not in artifact_ids:
+                                            artifact_ids.append(_export_aid)
+                                if _artifact_row is not None and not _file_exports:
+                                    _tc_results["artifact_id"] = _artifact_row.id
+                                    if _artifact_row.id not in artifact_ids:
+                                        artifact_ids.append(_artifact_row.id)
+                            # Emit artifact_created SSE (same shape as mid-loop).
+                            _deferred_aid = None
+                            if _file_exports:
+                                _deferred_aid = (
+                                    next(iter(_file_exports.values()), {}).get("artifact_id")
+                                    or (_artifact_row.id if _artifact_row is not None else None)
+                                )
+                            elif _artifact_row is not None:
+                                _deferred_aid = _artifact_row.id
+                            if _deferred_aid:
+                                _live_art = {
+                                    "artifact_id": _deferred_aid,
+                                    "version_id": (
+                                        getattr(_artifact_row, "version_id", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "version_number": (
+                                        getattr(_artifact_row, "version_number", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "file_url": (
+                                        getattr(_artifact_row, "file_url", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "preview_url": (
+                                        getattr(_artifact_row, "preview_url", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "title": (
+                                        getattr(_artifact_row, "title", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "type": (
+                                        getattr(_artifact_row, "type", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "file_name": (
+                                        getattr(_artifact_row, "file_name", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "mime_type": (
+                                        getattr(_artifact_row, "mime_type", "")
+                                        if _artifact_row is not None else ""
+                                    ),
+                                    "file_size": (
+                                        getattr(_artifact_row, "file_size", None)
+                                        if _artifact_row is not None else None
+                                    ),
+                                    "has_preview": bool(
+                                        getattr(_artifact_row, "has_preview", False)
+                                        if _artifact_row is not None else False
+                                    ),
+                                }
+                                yield (
+                                    f'data: {json.dumps({"type": "artifact_created", "artifact": _live_art})}\n\n'
+                                )
+                            logger.info(
+                                "v3 DEFERRED deliverable: card emitted once post-loop (conv=%s, rows=%d)",
+                                conversation_id, len(_last_rows or []),
+                            )
+                    except Exception as deferred_err:
+                        logger.warning(
+                            "v3 deferred deliverable failed (non-fatal) for conv=%s: %s",
+                            conversation_id, deferred_err,
+                        )
+
+        # ── Empty-bubble guarantee (post-strip, post-deferred) ────────────
+        # The strips above (promise + internal-reference) can remove ALL
+        # accumulated prose when the model's only output was narration —
+        # exactly the failing traces of 2026-08-21 ("Let me query the
+        # warehouse… Let me check the tables…" as the entire response).
+        # The earlier post-loop fallback (~line 11108) skips itself when
+        # content_streamed=True ("the streamed deltas are the answer"),
+        # but those deltas were the narration we just stripped. Guarantee:
+        # NEVER persist an empty final bubble — a turn must always end
+        # with a real message (answer, card intro, or honest fallback).
+        #
+        # FIX 2026-08-23: synthesis-aware fallback. When the deferred
+        # deliverable path ran above and produced synthesis text + an
+        # artifact (PPT/DOCX/PDF), we MUST NOT fall back to
+        # `_choose_fallback → _artifact_aware_fallback` which would
+        # surface the misleading "I've completed your request. Here's
+        # the artifact: ..." text — that hides the actual analysis.
+        # Instead, prefer (in order):
+        #   1. `_deferred_synth.assistant_content` (the LLM's narrative)
+        #   2. A data-rows narrative built from `_last_rows` (the
+        #      comprehensive-table fallback, NOT a generic apology)
+        #   3. Only if BOTH are empty/missing → `_choose_fallback`
+        #      (which now will at least mention the artifact).
+        if not (accumulated_content or "").strip():
+            _synth_for_bubble = ""
+            try:
+                if "_deferred_synth" in locals() and _deferred_synth is not None:
+                    _synth_for_bubble = (
+                        getattr(_deferred_synth, "assistant_content", "") or ""
+                    ).strip()
+            except Exception:
+                _synth_for_bubble = ""
+            if _synth_for_bubble and not _synth_for_bubble.startswith(
+                ("I've completed your request", "Your deliverable", "Here is the artifact")
+            ):
+                # Synthesis produced real prose — use it. This is the
+                # same content the chat bubble should show.
+                accumulated_content = _synth_for_bubble
+                logger.info(
+                    "v3 empty-bubble guarantee: using deferred synthesis text "
+                    "(conv=%s, len=%d)",
+                    conversation_id, len(accumulated_content),
+                )
+            elif "_last_rows" in locals() and _last_rows:
+                # No (or weak) synthesis text but we DO have data rows.
+                # Use the LLM to write a comprehensive analysis — never
+                # hardcoded, because different users have different databases.
+                try:
+                    _llm_answer = await _force_llm_synthesis(
+                        user_content,
+                        _last_rows,
+                        synth_call_fn=_deferred_synth_call,
+                        conversation_history=llm_messages,
+                        max_retries=2,
+                    )
+                    if len(_llm_answer) > 50:
+                        accumulated_content = _llm_answer
+                        logger.info(
+                            "v3 empty-bubble: LLM answer (%d chars, conv=%s)",
+                            len(_llm_answer), conversation_id,
+                        )
+                    else:
+                        # LLM couldn't produce a real answer either
+                        accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+                except Exception:
+                    accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+            if not (accumulated_content or "").strip():
+                try:
+                    accumulated_content = _choose_fallback(
+                        tool_calls_for_frontend, _orch_created,
+                        user_content=user_content,
+                    )
+                except Exception as _guarantee_err:
+                    logger.warning(
+                        "v3 empty-bubble guarantee fallback failed: %s",
+                        _guarantee_err,
+                    )
+                    accumulated_content = _GENERIC_EMPTY_CONTENT_FALLBACK
+                logger.info(
+                    "v3 empty-bubble guarantee fired (conv=%s, streamed=%s, len=%d)",
+                    conversation_id,
+                    bool(locals().get("content_streamed")),
+                    len(accumulated_content),
+                )
+            else:
+                logger.info(
+                    "v3 empty-bubble guarantee: synthesis-aware replacement "
+                    "(conv=%s, streamed=%s, len=%d)",
+                    conversation_id,
+                    bool(locals().get("content_streamed")),
+                    len(accumulated_content),
+                )
+            try:
+                if locals().get("content_streamed"):
+                    # Swap the (already-blanked or stale narration) live
+                    # bubble for the guarantee text — same content_replace
+                    # pattern as every nudge site.
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "content_replace",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+                else:
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "delta",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+            except Exception as _yield_err:
+                logger.debug(
+                    "v3 empty-bubble guarantee yield failed (client gone?): %s",
+                    _yield_err,
+                )
+
+        # ── Apology-guard (post-loop, deterministic) ──────────────────────
+        # The in-loop check above should have caught an apology accompanied by
+        # usable data and forced a real re-synthesis. If it still slipped
+        # through (the forced retry ALSO apologized, or the loop ended before
+        # the net could fire), deterministically swap the apology/bounce-back
+        # for a data-aware message so the user NEVER sees "I had trouble
+        # putting it all together" or "I retrieved N rows… you can ask me for
+        # a summary" when rows were actually retrieved.
+        _is_bounce_back = _BOUNCE_BACK_PATTERN_RE.search(accumulated_content or "")
+        _is_apology = _APOLOGY_PATTERN_RE.search(accumulated_content or "")
+        if (_is_bounce_back or _is_apology) and _has_data_rows(tool_calls_for_frontend):
+            try:
+                # Use LLM to write a comprehensive answer instead of
+                # _data_rows_fallback. Different databases need the LLM
+                # to interpret data meaningfully.
+                _llm_ans = await _force_llm_synthesis(
+                    user_content,
+                    _last_rows if "_last_rows" in locals() else [],
+                    synth_call_fn=_deferred_synth_call,
+                    conversation_history=llm_messages,
+                    max_retries=2,
+                )
+                if len(_llm_ans) > 50:
+                    accumulated_content = _llm_ans
+                else:
+                    accumulated_content = _data_rows_fallback(tool_calls_for_frontend)
+            except Exception as _apology_err:
+                logger.warning("v3 apology/bounce-back fallback failed: %s", _apology_err)
+                try:
+                    accumulated_content = _choose_fallback(
+                        tool_calls_for_frontend, _orch_created,
+                        user_content=user_content,
+                    )
+                except Exception:
+                    accumulated_content = _GENERIC_EMPTY_CONTENT_FALLBACK
+            logger.info(
+                "v3 %s (post-loop): swapped for data-aware message "
+                "(conv=%s, len=%d)",
+                "bounce-back" if _is_bounce_back else "apology-guard",
+                conversation_id,
+                len(accumulated_content),
+            )
+            try:
+                if locals().get("content_streamed"):
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "content_replace",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+                else:
+                    yield (
+                        'data: '
+                        + json.dumps({
+                            "type": "delta",
+                            "content": accumulated_content,
+                        })
+                        + '\n\n'
+                    )
+            except Exception:
+                pass
+
+        # Save the final assistant message
+        assistant_msg = {
+            "id": assistant_msg_id, "role": "assistant",
+            "content": accumulated_content,
+            "created_date": datetime.now(timezone.utc).isoformat(),
+        }
+        if tool_calls_for_frontend:
+            assistant_msg["tool_calls"] = tool_calls_for_frontend
+        # Attach artifact_ids so the frontend can render ArtifactPreviewCard
+        if artifact_ids:
+            assistant_msg["artifact_ids"] = artifact_ids
+        # Attach activity_steps so they survive page refresh
+        if _activity_steps:
+            assistant_msg["activity_steps"] = _activity_steps
+        # Attach the typed live-activity feed so past turns render their
+        # collapsed summary on reload (LiveActivityStream).
+        if _live_events:
+            assistant_msg["live_events"] = _live_events
+        # Surface create_artifact results as artifacts
+        _artifacts = _collect_artifact_results(
+            tool_calls_for_frontend, assistant_msg_id, conversation_id, db,
+        )
+        if _artifacts:
+            assistant_msg["artifacts"] = _artifacts
+        # Derive and attach the execution trace (Reasoning & actions)
+        assistant_msg["trace"] = _derive_trace_from_response(
+            assistant_content, tool_calls_for_frontend,
+        )
+        # P0: persist reasoning as a separate key (not mixed into content)
+        # so context compaction does not feed it back to the model.
+        if reasoning_acc:
+            assistant_msg["reasoning"] = "".join(reasoning_acc)
+
+        # ── Final-write dedupe ─────────────────────────────────────────
+        # The stream checkpoints above mutate ``messages[:] = base`` on
+        # every partial commit, so by the time we reach here ``messages``
+        # contains one trailing empty assistant placeholder per checkpoint.
+        # Each has empty content + the same accumulated ``tool_calls``.
+        # Before appending the authoritative final, drop those trailing
+        # placeholders so the user sees exactly ONE assistant bubble for
+        # this turn (not one per iteration). Only touches the trailing
+        # run — earlier user/system messages and assistant messages with
+        # real content are preserved.
+        while (
+            messages
+            and messages[-1].get("role") == "assistant"
+            and not messages[-1].get("content")
+        ):
+            messages.pop()
+
+        messages.append(assistant_msg)
+
+        # CRITICAL: rebind conv.messages to a NEW list object so SQLAlchemy
+        # detects the change for the JSON column. The checkpoint block
+        # above (lines 1991-2016) rebinds `conv.messages` to a different
+        # list object (the `base` snapshot), so simply re-assigning
+        # `messages.append(...)` does NOT propagate to conv.messages —
+        # the in-memory `messages` closure variable and `conv.messages`
+        # end up pointing at different list objects. We rebuild the
+        # final list here and assign it explicitly to ensure the
+        # `done` event's conversation payload reflects the actual
+        # stored state.
+        conv.messages = list(messages)
+        conv.updated_date = datetime.now(timezone.utc)
+        # Offload the final commit to a worker thread: the DB write can take
+        # tens of milliseconds (JSON column + flush), and blocking the event
+        # loop here starves the SSE heartbeat pings exactly when the client
+        # most needs them (right before `done`). NEVER re-raise on failure —
+        # a persistence error must not abort the stream before `done` is
+        # emitted; the user still sees their answer, and the row can be
+        # reconciled later.
+        def _final_commit() -> None:
+            conv.messages = list(messages)
+            db.commit()
+
+        try:
+            await asyncio.to_thread(_final_commit)
+        except Exception as _commit_err:
+            logger.error("v3 stream final commit failed (non-fatal): %s", _commit_err)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        # The checkpoint block above may have expunged the instance;
+        # re-query a fresh one so the final to_dict() reflects the
+        # freshly-committed row.
+        try:
+            conv = db.query(AgentConversation).filter(
+                AgentConversation.id == conversation_id,
+            ).first() or conv
+        except Exception as _refresh_err:
+            logger.warning("v3 stream final refresh failed: %s", _refresh_err)
+
+        # Fire-and-forget memory extraction
+        if agent_app_id and len(messages) >= 4:
+            asyncio.create_task(_bg_extract_memories(
+                agent_app_id, list(messages), user.id if user else None,
+            ))
+
+        # P3 post-turn memory consolidation — extract durable user facts via
+        # LLM and merge into the OHMO workspace's user.md. Gated behind
+        # OHMO_MEMORY_CONSOLIDATION_ENABLED (default OFF). Best-effort: the
+        # function never raises, so a failure here cannot break the SSE
+        # stream. Runs as a fire-and-forget task (sync LLM + sync OHMO I/O
+        # offloaded via to_thread to keep the event loop clean).
+        try:
+            if getattr(settings, "OHMO_MEMORY_CONSOLIDATION_ENABLED", False):
+                import asyncio as _asyncio
+                _user_msg = next(
+                    (m.get("content", "") for m in messages if m.get("role") == "user"),
+                    "",
+                )
+                _asyncio.create_task(_asyncio.to_thread(
+                    consolidate_turn_memory,
+                    _user_msg,
+                    assistant_content or "",
+                ))
+        except Exception as _mc_hook_err:
+            logger.warning(
+                "v3 stream: memory consolidation hook failed (non-fatal): %s",
+                _mc_hook_err,
+            )
+
+        # QUALITY_EVAL (Part 2 — Gap Analysis): run standalone quality
+        # eval on the non-FSM v3 streaming path. Gated by
+        # QUALITY_EVAL_ALL_PATHS.  When the text is revised, the done
+        # event carries the updated assistant_content.
+        # (Fixed 2026-08-17): the previous version called
+        # evaluate_response_quality() synchronously INSIDE the async SSE
+        # generator.  That blocked the event loop for the whole LLM eval
+        # (up to 120s per call), so _sse_with_heartbeat couldn't emit its
+        # 5s pings and proxies/browsers timed out — the client saw
+        # "Sorry, the connection was interrupted."  Now offloaded to a
+        # worker thread with a 15s ceiling and eval-only (no re-gen).
+        try:
+            if getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
+                from app.services.synexia.quality_eval import evaluate_response_quality
+
+                async def _run_qe() -> object:
+                    def _sync_qe() -> object:
+                        return evaluate_response_quality(
+                            user_message=user_content or "",
+                            assistant_text=assistant_content,
+                            max_iterations=0,  # eval-only, never re-generate
+                        )
+                    return await asyncio.to_thread(_sync_qe)
+
+                _qe_result = await asyncio.wait_for(_run_qe(), timeout=15.0)
+                if _qe_result.final_text and _qe_result.final_text != assistant_content:
+                    assistant_content = _qe_result.final_text
+                    # Multi-iter content re-sync (2026-08-20):
+                    # Quality eval revised `assistant_content` POST-LOOP.
+                    # The accumulator's LAST entry holds the pre-revision
+                    # final-iter content — replace it so the revision is
+                    # preserved while earlier iterations stay intact.
+                    # Then re-compute `accumulated_content` and sync the
+                    # in-memory `assistant_msg["content"]` so the `done`
+                    # event's conversation payload reflects the revision
+                    # (DB commit at the final-write block already happened
+                    # with pre-revision content; this is a pre-existing
+                    # inconsistency, not introduced by this fix).
+                    if _v3_iter_contents:
+                        _v3_iter_contents[-1] = assistant_content
+                    else:
+                        _v3_iter_contents.append(assistant_content)
+                    accumulated_content = "\n\n".join(c for c in _v3_iter_contents if c).strip()
+                    if isinstance(assistant_msg, dict):
+                        assistant_msg["content"] = accumulated_content
+                # Emit quality eval verdict as SSE event
+                yield f'data: {json.dumps({"type": "quality_eval", "quality_eval": _qe_result.to_dict()})}\n\n'
+        except asyncio.TimeoutError:
+            logger.warning("v3 stream quality eval timed out after 15s (non-fatal)")
+        except Exception as _qe_err:
+            logger.warning("v3 stream quality eval failed (non-fatal): %s", _qe_err)
+
+        # --- Experience layer (Phase A/B): recipe + profile + cache store ---
+        # BUG FIX (post-tool offload, follows f435531): get_embedding() inside
+        # _store_turn_cache is a sync LLM API call (5-60s); running it inline
+        # on the event loop starved the SSE heartbeat pings in
+        # _sse_with_heartbeat() so the `done` frame below was never emitted
+        # before nginx/proxy idle-killed the connection. Offload the whole
+        # experience hook to a worker thread, bounded by a ceiling so a stalled
+        # embedding service fails over gracefully instead of hanging the stream.
+        # The offloaded work opens its own DB session (SQLAlchemy Session is
+        # not thread-safe across threads; see the established pattern at
+        # line 5522). Best-effort: any failure is logged and skipped, so the
+        # `done` frame below always fires.
+        try:
+            def _experience_work() -> None:
+                from app.database import SessionLocal
+                _record_turn_experience(
+                    agent_app_id=agent_app_id,
+                    user_id=getattr(user, "id", None),
+                    user_content=user_content,
+                    assistant_content=assistant_content,
+                    tool_sequence=tool_calls_for_frontend,
+                    iterations=len(tool_calls_for_frontend or []),
+                )
+                cache_db = SessionLocal()
+                try:
+                    _store_turn_cache(
+                        cache_db,
+                        agent_app_id=agent_app_id,
+                        user_id=getattr(user, "id", None),
+                        user_content=user_content,
+                        assistant_content=assistant_content,
+                        artifact_ids=(
+                            assistant_msg.get("artifact_ids")
+                            if isinstance(assistant_msg, dict) else None
+                        ),
+                    )
+                finally:
+                    try:
+                        cache_db.close()
+                    except Exception:
+                        pass
+
+            await asyncio.wait_for(
+                asyncio.to_thread(_experience_work),
+                timeout=EXPERIENCE_HOOK_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(
+                "v3 stream experience hook timed out after %ss (non-fatal)",
+                EXPERIENCE_HOOK_TIMEOUT_S,
+            )
+        except Exception as _xp_err:  # noqa: BLE001 — best-effort
+            logger.warning("experience: turn-end hook failed (non-fatal): %s", _xp_err)
+
+        # ── Always emit the `done` frame last ──
+        # BUG FIX: the `done` frame is the only signal the frontend uses to
+        # commit the assistant message; if any earlier step raised something
+        # the outer try/excepts didn't catch (e.g. BaseException subclasses
+        # like asyncio.CancelledError from a proxy timeout, or a generator
+        # close mid-stream), the frontend would see a dropped connection
+        # without ever receiving `done`. Wrap the post-tool section in a
+        # try/finally so `done` is yielded regardless. (See f435531 — the
+        # artifact-render fix already offloaded the long sync work; this
+        # guards the remaining path.)
+        try:
+            _le_fd = _push_live_event("finalize_done", "finalize_done")
+            if _le_fd:
+                yield _le_fd
+            # UX FIX (2026-08-24): When intermediate deltas were suppressed,
+            # emit the final accumulated content as a single content_replace
+            # BEFORE the done event. The frontend MessageBubble reads the
+            # content field from `done` for the persisted bubble, but many
+            # UI implementations only update live from streaming events —
+            # without this explicit content_replace the user would see an
+            # empty bubble even after the file is ready.
+            if _suppress_chat_deltas:
+                _final_bubble_text = (
+                    accumulated_content or assistant_content or ""
+                )
+                if _final_bubble_text:
+                    yield (
+                        f'data: {json.dumps({"type": "content_replace", "content": _final_bubble_text})}\n\n'
+                    )
+            yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
+        except (GeneratorExit, StopIteration):
+            raise
+        except Exception as _done_err:
+            logger.error(
+                "v3 stream: failed to serialize `done` frame (non-fatal): %s",
+                _done_err,
+            )
+            # Emit a minimal fallback `done` so the frontend at least unblocks.
+            try:
+                yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content or "", "trace": [], "conversation": {}})}\n\n'
+            except Exception:
+                logger.error("v3 stream: fallback done frame also failed")
+        finally:
+            # Clean up the steer bus for this conversation (best-effort).
+            try:
+                _discard_steer(conversation_id)
+            except Exception as _discard_err:
+                logger.warning("v3 stream: steer discard failed (non-fatal): %s", _discard_err)
+            # T18: clear the dashboard-intent flag set at event_stream entry.
+            try:
+                reset_dashboard_intent(_dash_intent_token)
+            except Exception as _reset_err:
+                logger.warning("v3 stream: reset dashboard intent failed (non-fatal): %s", _reset_err)
+
+    return StreamingResponse(
+        _sse_with_heartbeat(_guarantee_done(event_stream())),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            # Bug 3 fix: see comment on the other StreamingResponse
+            # above. Same keep-alive header for the legacy (non-FSM)
+            # streaming path.
+            "Connection": "keep-alive",
+        },
+    )
