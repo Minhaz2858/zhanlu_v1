@@ -1107,6 +1107,38 @@ def _evaluate_answer_inner(
 
     max_replans = int(getattr(settings, "SELF_EVAL_MAX_REPLANS", 3))
 
+    # 2026-08-25: pending_action downgrade. When the ONLY signal is
+    # `pending_action` (the model ended with "Let me...") AND the agent
+    # has produced substantive prose (>= SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE
+    # chars) AND there is at least one non-empty tool result, treat the
+    # answer as COMPLETE. The trailing promise phrase will be stripped
+    # post-loop by `pending_action_phrase` cleanup in agents.py
+    # (lines ~12746-12762), so re-iterating to force a new answer is
+    # unnecessary and only causes the "collapse" UX.
+    if signals == ["pending_action"]:
+        _min_prose = int(
+            getattr(settings, "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE", 200)
+        )
+        _has_data = any(
+            not (r.get("empty") and not r.get("text"))
+            for r in (results or [])
+        )
+        if (
+            _has_data
+            and len((assistant_text or "").strip()) >= _min_prose
+        ):
+            logger.info(
+                "answer_verification: pending_action-only signal downgraded to "
+                "COMPLETE (prose=%d chars, has_data=True). Trailing promise "
+                "phrase will be stripped post-loop.",
+                len((assistant_text or "").strip()),
+            )
+            return VerificationResult(
+                status="COMPLETE",
+                source="deterministic",
+                signals=["pending_action_downgraded"],
+            )
+
     if signals:
         # Re-plan is only possible if we still have attempts and budget.
         if attempts >= max_replans or budget_remaining < 2:

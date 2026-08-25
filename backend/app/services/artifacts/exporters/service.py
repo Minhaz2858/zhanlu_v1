@@ -55,6 +55,7 @@ from app.services.artifacts.exporters import (
     safe_mime_type,
 )
 from app.services.artifacts.exporters._common import chart_rows, stamp_filename
+from app.services.artifacts.deck_data import build_deck_user_context, collect_grounded_rows
 
 logger = logging.getLogger(__name__)
 
@@ -357,6 +358,7 @@ class ExportService:
             )
             if theme:
                 ctx.theme = theme
+            ctx.theme_name = theme or ctx.theme
             if mode:
                 ctx.mode = mode
             if style_recipe:
@@ -370,9 +372,25 @@ class ExportService:
             # All flags default OFF, so the report-card renderer below is the
             # unchanged path unless a deployment opts into deck planning.
             if format == "pptx" and settings.PPT_DECK_PLANNER_ENABLED:
-                deck_rows = chart_rows(payload) if payload else []
+                # Data grounding: when opted in, plan the deck off the REAL
+                # query rows the agent fetched (ObservationRecords on the
+                # artifact's execution / conversation), falling back to the
+                # LLM-authored payload.chart.data when nothing is recoverable.
+                if settings.PPT_DECK_DATA_GROUNDING_ENABLED:
+                    deck_rows = collect_grounded_rows(
+                        self.db,
+                        artifact=artifact,
+                        conversation_id=artifact.conversation_id,
+                        execution_id=artifact.execution_id,
+                        user_message=user_message,
+                    )
+                    if not deck_rows:
+                        deck_rows = chart_rows(payload) if payload else []
+                else:
+                    deck_rows = chart_rows(payload) if payload else []
                 data, mime, ext, audit_report = self._render_deck_pipeline(
-                    payload, ctx, deck_rows, user_message=user_message
+                    payload, ctx, deck_rows,
+                    user_message=user_message, artifact=artifact,
                 )
                 # The dispatcher already ran audit + repair + polish; flag it so
                 # we don't double-run the quality loop / polish below.
@@ -490,6 +508,51 @@ class ExportService:
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, coro).result()
 
+    @staticmethod
+    def _resolved_theme_name(ctx: ExportContext) -> str:
+        """A validate-able theme name for the deck planner.
+
+        Brand kits supply hex ``theme_tokens`` whose name would NOT pass
+        ``validate_theme_name`` — when they're present, hand the planner the
+        vendored base name (``ctx.theme``) instead.  Otherwise prefer the
+        explicitly resolved ``ctx.theme_name``, then ``ctx.theme``, then the
+        ``zhanlu-blue`` default.
+        """
+        if getattr(ctx, "theme_tokens", None):
+            return getattr(ctx, "theme", None) or "zhanlu-blue"
+        return (
+            getattr(ctx, "theme_name", None)
+            or getattr(ctx, "theme", None)
+            or "zhanlu-blue"
+        )
+
+    def render_pptx_deck(
+        self,
+        payload: Optional[ReportCardPayload],
+        ctx: ExportContext,
+        rows: list[dict[str, Any]],
+        *,
+        user_message: str = "",
+        artifact=None,
+        user_id: Optional[str] = None,
+    ) -> tuple[bytes, str, str]:
+        """Public wrapper over the deck pipeline for the artifact-tool path.
+
+        Lets the tool that stores the in-chat artifact render through the SAME
+        professional pipeline as the download route, so the in-chat deck and
+        the downloaded file are byte-consistent.  Falls back to the legacy
+        catalog renderer when the pipeline isn't opted in.
+        """
+        if not settings.PPT_DECK_PLANNER_ENABLED:
+            from app.services.artifacts.exporters.pptx_export import render as _legacy
+            return _legacy(payload, ctx)
+
+        data, mime, ext, _audit = self._render_deck_pipeline(
+            payload, ctx, rows,
+            user_message=user_message, artifact=artifact, user_id=user_id,
+        )
+        return data, mime, ext
+
     def _render_deck_pipeline(
         self,
         payload: Optional[ReportCardPayload],
@@ -497,6 +560,10 @@ class ExportService:
         rows: list[dict[str, Any]],
         *,
         user_message: str,
+        artifact=None,
+        user_id: Optional[str] = None,
+        org_id: str = "default-org",
+        app_id: str = "default-app",
     ) -> tuple[bytes, str, str, Optional[dict[str, Any]]]:
         """Run planner → router → layout-engine render for a PPT deck.
 
@@ -506,6 +573,11 @@ class ExportService:
         "sandbox".  A full sandbox html2pptx render is an agent-side skill
         concern, so the deterministic export pipeline renders through the
         layout engine as a faithful fallback while recording the route.
+
+        The planner is no longer blind: it receives the resolved theme name,
+        the brand ``theme_tokens``, and the user/brand context
+        (``build_deck_user_context`` — role / profile / memory / brand kit)
+        so decks are themed and personal, not template-filling.
 
         Returns ``(bytes, mime, ext, audit_report)`` — the audit report comes
         from the shared ``render_dispatcher`` (which already ran the audit +
@@ -530,11 +602,28 @@ class ExportService:
             )
         )
 
+        # Personalization + brand: hand the planner the resolved theme name,
+        # the brand palette, and the user/brand context so its copy matches
+        # the audience and the customer palette instead of a generic template.
+        theme_name = self._resolved_theme_name(ctx)
+        theme_tokens = getattr(ctx, "theme_tokens", None)
+        user_context = build_deck_user_context(
+            self.db,
+            artifact=artifact,
+            user_id=user_id,
+            conversation_id=getattr(ctx, "conversation_id", None),
+            user_message=user_message,
+            org_id=org_id,
+            app_id=app_id,
+        )
+
         plan, _profile = self._run_coro(
             build_deck_plan(
                 user_message, rows,
-                theme_recommendation=getattr(ctx, "theme_name", None),
+                theme_recommendation=theme_name,
                 profile_name=profile_name,
+                theme_tokens=theme_tokens,
+                user_context=user_context,
             )
         )
 

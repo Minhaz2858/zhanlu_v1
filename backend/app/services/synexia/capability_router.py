@@ -398,6 +398,9 @@ def _execute_tool_node(db, execution, node, user_id, data_ctx_extras=None) -> Ob
     # the data-source runtime on top so KB scoping reaches ask_data_agent.
     tool_context = {
         "conversation_id": getattr(execution, "conversation_id", None),
+        # Execution identity lets the artifact path ground a deck in the REAL
+        # query rows this execution fetched (see deck_data.collect_grounded_rows).
+        "execution_id": getattr(execution, "id", None),
         "agent_app_id": getattr(execution, "app_id", None) or getattr(execution, "agent_name", None),
         "agent_name": getattr(execution, "agent_name", None),
         **(data_ctx_extras or {}),
@@ -913,6 +916,9 @@ def _execute_skill_node(
     skill_id = args.get("skill_id")
     tool_context = {
         "conversation_id": getattr(execution, "conversation_id", None),
+        # Execution identity lets the artifact path ground a deck in the REAL
+        # query rows this execution fetched (see deck_data.collect_grounded_rows).
+        "execution_id": getattr(execution, "id", None),
         "agent_app_id": getattr(execution, "app_id", None) or getattr(execution, "agent_name", None),
         "agent_name": getattr(execution, "agent_name", None),
         **(data_ctx_extras or {}),

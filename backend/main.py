@@ -617,6 +617,20 @@ async def lifespan(app: FastAPI):
             "Automation startup reaper error (non-fatal): %s", e
         )
 
+    # Start the DataExecution cleanup loop (TTL sweep + per-session cap)
+    if getattr(settings, "DATA_EXECUTION_CLEANUP_ENABLED", False):
+        try:
+            from app.services.data_execution.cleanup import scheduled_cleanup_loop
+            asyncio.create_task(
+                scheduled_cleanup_loop(),
+                name="data-execution-cleanup",
+            )
+            startup_logger.info("DataExecution cleanup loop started (interval=%ds)", 3600)
+        except Exception as e:
+            startup_logger.warning(
+                "DataExecution cleanup loop startup error (non-fatal): %s", e
+            )
+
     # Start the catalog indexing watchdog (recovers from stuck indexing status)
     catalog_watchdog_stop = asyncio.Event()
     catalog_watchdog_task = None

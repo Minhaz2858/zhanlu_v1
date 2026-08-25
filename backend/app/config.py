@@ -590,9 +590,35 @@ class Settings(BaseSettings):
     # boundary. When False, only deterministic detectors run.
     SELF_EVAL_LLM_GATE_ENABLED: bool = True
     # Max re-plan nudges per user turn before escalating to IMPOSSIBLE/disclose.
-    SELF_EVAL_MAX_REPLANS: int = 3
+    # 2026-08-25: reduced default from 3 to 1 to prevent the 3-cycle "collapse"
+    # pattern where each nudge causes a content_replace SSE that visually
+    # replaces the user's streamed text. With MAX_REPLANS=1, the gate can fire
+    # at most one nudge per turn before falling through to finalize.
+    SELF_EVAL_MAX_REPLANS: int = 1
     # Timeout for the synchronous LLM evaluator call (mirrors quality_eval).
     SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 15.0
+    # 2026-08-25: data-sufficient fast-path. When the agent has usable data
+    # AND already produced substantive prose (>= N chars) AND self-eval has
+    # already nudged once, skip further nudges and finalize. Set to 0 to
+    # disable (legacy behavior).
+    SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE: int = 200
+
+    # ── qwen3.6-27b Local Fast Mode (2026-08-25) ──────────────────────
+    # Per-model overrides that fire ONLY when the user's selected model is
+    # a qwen3.* served on local vLLM. DeepSeek-chat path is unaffected.
+    # Goal: 8-15 LLM calls/turn → 3-5 calls/turn; 200s → 42-52s turn time.
+    QWEN3_FAST_MODE_ENABLED: bool = True
+    QWEN3_MAX_TOOL_ITERATIONS: int = 10                 # was 40
+    QWEN3_GOAL_CONTRACT_ENABLED: bool = False           # was True
+    QWEN3_VERIFY_NUDGE_MAX: int = 0                     # was 2
+    QWEN3_DATA_AGENT_BUDGET_SECONDS: float = 30.0        # was 60
+    QWEN3_FORCE_SYNTHESIS_MAX_RETRIES: int = 0          # was 1
+    # Self-eval KEPT per user decision (safety net), but tightened:
+    QWEN3_SELF_EVAL_MAX_REPLANS: int = 1                 # was 3
+    QWEN3_SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 5.0      # was 15.0
+    # Synthesis quality knobs (Component 4):
+    QWEN3_SYNTHESIS_MAX_TOKENS: int = 3072              # was 1536
+    QWEN3_SYNTHESIS_TEMPERATURE: float = 0.3            # was default
 
     # D4 (2026-08-20): deterministic category-subset coverage check for the
     # verification gate. When True, an answer to a category/portfolio request

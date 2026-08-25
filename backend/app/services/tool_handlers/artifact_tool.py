@@ -37,7 +37,15 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
+from app.models.session_state import SessionState
 from app.services.artifacts.event_logger import log_deck_event_fire_and_forget
+from app.services.artifacts.exporters import ExportContext
+from app.services.artifacts.exporters._common import chart_rows
+from app.services.data_execution.execution_service import DataExecutionService
+from app.services.data_execution.session_state import SessionStateService
+from app.services.tool_handlers._errors import ToolExecutionError
+from app.services.tool_handlers._payload_from_execution import _payload_from_execution
 from app.services.tool_registry import registry
 from app.services.synexia.contracts import ReportCardPayload
 
@@ -512,6 +520,73 @@ def _create_sidecar_preview(
         return None
 
 
+def _build_deck_export_context(
+    exporter,
+    artifact,
+    *,
+    conversation_id: Optional[str],
+    user_message: str,
+    org_id: str,
+    app_id: str,
+) -> tuple[ExportContext, Optional[str]]:
+    """Build the deck-pipeline ExportContext + brand fingerprint for the tool.
+
+    When a workspace brand kit exists, ``ctx.theme_tokens`` carries the flat
+    hex palette (so the pipeline themes the deck to the customer brand) and the
+    returned fingerprint keys the cached ``format_export`` blob — a kit edit
+    then invalidates the stale deck.  ``theme_name`` stays a vendored base name
+    because hex tokens don't pass ``validate_theme_name``; the pipeline
+    resolves the actual theme via ``ExportService._resolved_theme_name``.
+    """
+    ctx = ExportContext(
+        conversation_id=conversation_id,
+        user_message=user_message,
+    )
+    theme_tokens, brand_fp = exporter._resolve_brand_tokens(
+        artifact, org_id=org_id, app_id=app_id
+    )
+    if theme_tokens:
+        ctx.theme_tokens = theme_tokens
+        ctx.theme_name = "zhanlu-blue"
+    return ctx, brand_fp
+
+
+def _collect_rows_for_tool(
+    db,
+    rcp: Optional[ReportCardPayload],
+    *,
+    artifact=None,
+    conversation_id: Optional[str] = None,
+    execution_id: Optional[str] = None,
+    user_message: str = "",
+    limit: int = 2000,
+) -> list[dict]:
+    """Ground a deck in the REAL query rows; fall back to the payload rows.
+
+    When ``PPT_DECK_DATA_GROUNDING_ENABLED``, recover the rows the agent
+    actually fetched during the conversation (ObservationRecords on the
+    artifact's execution / conversation — e.g. the ERP data the user asked
+    to report on).  If nothing is recoverable (e.g. the legacy non-FSM path
+    with no ``Execution``), fall back to the LLM-authored
+    ``payload.chart.data`` (historical behavior).
+    """
+    if not getattr(settings, "PPT_DECK_DATA_GROUNDING_ENABLED", False):
+        return chart_rows(rcp) if rcp else []
+    from app.services.artifacts.deck_data import collect_grounded_rows
+
+    rows = collect_grounded_rows(
+        db,
+        artifact=artifact,
+        conversation_id=conversation_id,
+        execution_id=execution_id,
+        user_message=user_message,
+        limit=limit,
+    )
+    if not rows:
+        rows = chart_rows(rcp) if rcp else []
+    return rows
+
+
 async def _create_artifact_tool(
     args: dict,
     db: Optional[Session] = None,
@@ -528,6 +603,69 @@ async def _create_artifact_tool(
     description = args.get("description") or ""
     skill = args.get("skill") or ""
 
+    source_execution_id = args.get("source_execution_id")
+    conversation_id = context.get("conversation_id") if context else None
+
+    # --- GUARD 1: no execution_id AND no usable payload → BLOCK ---
+    if not source_execution_id:
+        has_data = bool(payload)
+        if not has_data:
+            raise ToolExecutionError(
+                "create_artifact called with no source_execution_id and no "
+                "structured payload. For re-exports, pass "
+                "source_execution_id=evt_xxx. For new analyses, populate "
+                "the payload with at least one of: chart, kpis, data_table, "
+                "slides, html_content, summary."
+            )
+
+    # --- GUARD 2: resolve execution identity ---
+    # When source_execution_id is present, resolve the cached DataExecution
+    # row and reject missing / expired / cross-session executions. When
+    # absent, fall back to the session's last cached execution (fail-open:
+    # any lookup failure simply leaves ``execution`` as None).
+    execution = None
+    if source_execution_id:
+        execution = DataExecutionService.get_by_id(db, source_execution_id)
+        if not execution or execution.is_expired():
+            raise ToolExecutionError(
+                f"source_execution_id {source_execution_id!r} not found or "
+                f"expired (TTL: 7 days)."
+            )
+        if execution.session_id != conversation_id:
+            raise ToolExecutionError(
+                f"source_execution_id {source_execution_id!r} belongs to a "
+                f"different session."
+            )
+    else:
+        # Fail-open: session-state lookup is best-effort; any error here
+        # (e.g. a non-ORM db in tests) must not break payload-only flows.
+        # isinstance() also rejects MagicMock-ish "rows" so a fake db can
+        # never fabricate an execution and pollute the payload.
+        try:
+            state = SessionStateService.get_last(db, session_id=conversation_id)
+        except Exception:
+            state = None
+        if isinstance(state, SessionState) and state.last_execution_id:
+            execution = DataExecutionService.get_by_id(db, state.last_execution_id)
+
+    # --- Enrich payload from the cached DataExecution ---
+    # GUARD 2 resolved ``execution``; map its cached result into the
+    # ReportCard payload, letting the LLM's explicit payload fields win.
+    if execution:
+        cached_payload = _payload_from_execution(execution)
+        payload = {**cached_payload, **payload}
+        args["payload"] = payload
+        rows = (execution.result or {}).get("rows") or []
+        if len(rows) == 0:
+            payload.setdefault("sections", []).append({
+                "title": "Data Quality Note",
+                "content": (
+                    f"The cached data tool ({execution.tool_name}) returned 0 "
+                    f"rows. The document below reflects that empty result."
+                ),
+                "type": "narrative",
+            })
+
     if artifact_type not in ("docx", "pdf", "pptx", "html"):
         return {
             "success": False,
@@ -541,8 +679,12 @@ async def _create_artifact_tool(
     if not payload or not isinstance(payload, dict):
         return {"success": False, "error": "payload must be a non-empty object"}
 
-    conversation_id = context.get("conversation_id") if context else None
     agent_app_id = context.get("agent_app_id") if context else None
+    # Execution identity links the artifact to the run that fetched its data,
+    # so a deck can be grounded in that execution's REAL query rows.
+    execution_id = context.get("execution_id") if context else None
+    org_id = (context or {}).get("org_id", "default-org")
+    app_id = (context or {}).get("app_id", "default-app")
 
     # --- Enrich sparse payload from a sibling rich HTML report ---
     # The agent often calls create_artifact right after
@@ -576,6 +718,7 @@ async def _create_artifact_tool(
             payload = dict(payload)
             payload["deck_plan"] = deck_plan.model_dump(mode="json")
 
+    used_pipeline = False
     try:
         from app.services.artifacts.artifact_service import ArtifactService
         from app.services.artifacts.preview_builder import convert_to_preview
@@ -588,7 +731,10 @@ async def _create_artifact_tool(
             title=title,
             description=description,
             conversation_id=conversation_id,
+            execution_id=execution_id,
             created_by_agent_id=agent_app_id,
+            org_id=org_id,
+            app_id=app_id,
         )
 
         # 2. Create an initial version
@@ -617,10 +763,62 @@ async def _create_artifact_tool(
                     return {"success": False, "error": "html_content is required for html type"}
                 data = html_content.encode("utf-8")
             elif artifact_type == "pptx":
-                from app.services.artifacts.exporters.pptx_export import render as _render_pptx
                 rcp = _payload_to_reportcard(payload, title)
-                data, mime, ext = await _run_blocking(_render_pptx, rcp)
-                file_name = _safe_filename(title, ext)
+                if (
+                    settings.PPT_DECK_PLANNER_ENABLED
+                    and settings.PPT_CREATE_ARTIFACT_PIPELINE_ENABLED
+                ):
+                    # Professional pipeline (planner → router → layout engine →
+                    # audit/repair/polish): render through the SAME
+                    # ExportService.render_pptx_deck the download path uses, so
+                    # the in-chat deck and the downloaded file are consistent.
+                    # Grounding + brand theming + personalization apply here.
+                    from app.services.artifacts.exporters.service import ExportService
+
+                    exporter = ExportService(db)
+                    user_message_arg = str(args.get("user_message", ""))
+                    ctx, brand_fp = _build_deck_export_context(
+                        exporter, artifact,
+                        conversation_id=conversation_id,
+                        user_message=user_message_arg,
+                        org_id=org_id,
+                        app_id=app_id,
+                    )
+                    rows = _collect_rows_for_tool(
+                        db, rcp,
+                        artifact=artifact,
+                        conversation_id=conversation_id,
+                        execution_id=execution_id,
+                        user_message=user_message_arg,
+                    )
+                    data, mime, ext = await _run_blocking(
+                        exporter.render_pptx_deck,
+                        rcp, ctx, rows,
+                        user_message=user_message_arg,
+                        artifact=artifact,
+                        user_id=user_id,
+                    )
+                    file_name = _safe_filename(title, ext)
+                    used_pipeline = True
+                    # Byte-consistency: register the exact bytes as the cached
+                    # format_export blob so GET /download?format=pptx returns
+                    # THIS deck (not a fresh LLM re-render with different rows).
+                    try:
+                        exporter._attach_format_blob(
+                            artifact=artifact, version=version,
+                            format="pptx", file_name=file_name,
+                            mime_type=mime, data=data,
+                            theme_fingerprint=brand_fp,
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to register deck format_export blob for "
+                            "artifact %s: %s", artifact.id, exc,
+                        )
+                else:
+                    from app.services.artifacts.exporters.pptx_export import render as _render_pptx
+                    data, mime, ext = await _run_blocking(_render_pptx, rcp)
+                    file_name = _safe_filename(title, ext)
             elif artifact_type == "docx":
                 from app.services.artifacts.exporters.docx_export import render as _render_docx
                 rcp = _payload_to_reportcard(payload, title)
@@ -694,6 +892,24 @@ async def _create_artifact_tool(
         # Update artifact status
         service.update_status(artifact.id, "preview_ready")
 
+        # When the professional pipeline was used, persist the enriched payload
+        # + owner so any future re-render reconstructs the same content and can
+        # re-personalize (the download route has no auth, so it reads
+        # owner_user_id off the artifact's metadata).
+        if used_pipeline:
+            try:
+                meta = dict(artifact.metadata_json or {})
+                meta["report_card_payload"] = payload
+                if user_id:
+                    meta["owner_user_id"] = user_id
+                artifact.metadata_json = meta
+                db.commit()
+            except Exception as exc:
+                logger.warning(
+                    "Failed to persist deck metadata for artifact %s: %s",
+                    artifact.id, exc,
+                )
+
         # 6b. For file-format artifacts (docx / pptx / xlsx), auto-create
         #     a rich sidecar HTML preview so the dedup layer can pair
         #     them and the in-chat preview pane shows the rich HTML
@@ -735,6 +951,7 @@ async def _create_artifact_tool(
             "file_size": len(data),
             "has_preview": has_preview,
             "preview_artifact_id": preview_artifact_id,
+            "payload": payload,
         }
 
         logger.info(
@@ -879,34 +1096,30 @@ CREATE_ARTIFACT_SCHEMA = {
         "name": "create_artifact",
         "description": (
             "Produce a downloadable document (docx, pdf, pptx, html) and "
-            "surface it inline in the chat. Always pair this with "
-            "skills.execute(name='...') first to load the methodology for "
-            "the target format (e.g. 'pptx', 'docx', 'pdf', "
-            "'artifacts-builder'), then call this tool with the "
-            "structured payload. For 'html' type, pass an "
-            "{html_content: string} in the payload. For 'docx'/'pdf'/'pptx', "
-            "pass a ReportCard-shaped payload with title, summary, kpis, "
-            "chart, insights, slides, etc."
+            "surface it inline in the chat. "
+            "PREFERRED for re-exports: pass `source_execution_id` (the "
+            "evt_xxx id from a previous data tool result) instead of "
+            "`payload` — the platform will re-build the document from "
+            "the cached structured data, so you do not need to "
+            "re-run the data tool. "
+            "If `source_execution_id` is omitted, `payload` is used "
+            "(legacy path). For 'html' type, pass {html_content: string}."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "type": {
+                "type": {"type": "string", "enum": ["docx", "pdf", "pptx", "html"]},
+                "title": {"type": "string"},
+                "description": {"type": "string"},
+                "skill": {"type": "string"},
+                "source_execution_id": {
                     "type": "string",
-                    "enum": ["docx", "pdf", "pptx", "html"],
-                    "description": "The output file type to produce.",
-                },
-                "title": {
-                    "type": "string",
-                    "description": "Human-readable title for the artifact (used as file name base).",
-                },
-                "description": {
-                    "type": "string",
-                    "description": "Optional short description of what this artifact contains.",
-                },
-                "skill": {
-                    "type": "string",
-                    "description": "Name of the skill that produced this (e.g. 'pptx', 'docx'). Helps with provenance tracking.",
+                    "description": (
+                        "OPTIONAL. The evt_xxx id of a cached data tool "
+                        "execution in this session. When provided, the "
+                        "document is built from the cached structured "
+                        "result — no re-run needed."
+                    ),
                 },
                 "payload": {
                     "type": "object",
@@ -935,7 +1148,7 @@ CREATE_ARTIFACT_SCHEMA = {
                     },
                 },
             },
-            "required": ["type", "title", "payload"],
+            "required": ["type", "title"],
         },
     },
 }

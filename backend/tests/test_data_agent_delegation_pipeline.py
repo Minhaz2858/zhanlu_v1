@@ -535,5 +535,45 @@ class TestMaxIterations(unittest.TestCase):
         self.assertEqual(len(calls), 2, f"expected 2 LLM calls, got {len(calls)}")
 
 
+class TestWallClockCapDefault(unittest.TestCase):
+    """2026-08-25: the default wall-clock cap was lowered 90s → 60s.
+
+    A slow query must not hold the SSE stream hostage. The default should
+    now be 60s (override via DATA_AGENT_BUDGET_SECONDS env var). The
+    existing TestWallClockCap test patches the value to 0.2s, so it's
+    unaffected by the default change; this test pins the new default.
+    """
+
+    def test_default_budget_is_60s(self):
+        from app.services.tool_handlers import delegation_tools
+        # Import-time read of os.environ; verify the in-memory constant.
+        # Note: env var override still takes precedence (covered by the
+        # patched test above), but the module-level default must be 60.0.
+        self.assertEqual(
+            delegation_tools.DATA_AGENT_BUDGET_SECONDS,
+            60.0,
+            f"DATA_AGENT_BUDGET_SECONDS default should be 60.0, "
+            f"got {delegation_tools.DATA_AGENT_BUDGET_SECONDS}",
+        )
+
+    def test_env_override_still_works(self):
+        """The env var DATA_AGENT_BUDGET_SECONDS still overrides the
+        default at import time. We re-import the module in a subprocess
+        to verify the env-var path."""
+        import subprocess
+        result = subprocess.run(
+            [
+                sys.executable, "-c",
+                "import os; os.environ['DATA_AGENT_BUDGET_SECONDS']='42';"
+                "import sys; sys.path.insert(0, '" + _BACKEND_ROOT + "');"
+                "from app.services.tool_handlers import delegation_tools;"
+                "print(delegation_tools.DATA_AGENT_BUDGET_SECONDS)",
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, msg=result.stderr)
+        self.assertEqual(float(result.stdout.strip()), 42.0)
+
+
 if __name__ == "__main__":
     unittest.main()

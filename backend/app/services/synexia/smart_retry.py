@@ -34,6 +34,17 @@ range, drop optional filters (customer/product/region/category).
 in the actual table. Keep the intent clear but be less prescriptive about \
 specific column names.
 
+HERMES RE-PLAN RULES (applies when a warehouse catalog is provided below):
+- You are given the FULL list of tables in the warehouse with row counts and \
+coverage dates. Pick a DIFFERENT table than the one the failed SQL used — \
+the previous table either had no matching rows or was stale.
+- Prefer tables with MORE rows and MORE recent coverage dates. A table with \
+14275 rows updated last week is far better than one with 0 rows updated in \
+2023.
+- If the failed SQL used a CJK table name (e.g. erp_t_sal_outstock), prefer \
+another CJK table from the catalog over an English-named view — business \
+data in this warehouse lives in CJK-named tables.
+
 Rules:
 - Output ONLY the revised question. No preamble, no markdown fences, no quotes.
 - Keep the user's core intent (which metric / which entity) unchanged.
@@ -43,7 +54,8 @@ agent picks the right table (e.g. "sales order data", "inventory data").
 - Relax the most restrictive parts: widen the date range, drop optional \
 filters, loosen exact-match conditions.
 - Prefer a concrete, SQL-able question with an explicit, wider time window.
-- If the request is already maximally broad, reply exactly: NO_RETRY
+- If the request is already maximally broad AND you've tried a different \
+table on a prior attempt, reply exactly: NO_RETRY
 """
 
 
@@ -117,6 +129,7 @@ async def llm_driven_retry_ask_data(
     call_llm_fn: Callable[[str, list], Awaitable[str]],
     execute_ask_data_fn: Callable[[str], Awaitable[dict]],
     max_attempts: int = 2,
+    get_catalog_fn: Optional[Callable[[], Awaitable[str]]] = None,
 ) -> Optional[dict]:
     """Attempt to find data for ``question`` after an empty first result.
 
@@ -124,12 +137,43 @@ async def llm_driven_retry_ask_data(
     ``None`` if every attempt came back empty (or the LLM declined /
     errored). Never raises: failures are logged and swallowed so the
     caller's stream can never crash on a retry.
+
+    Hermes-style re-plan: when ``get_catalog_fn`` is supplied, the full
+    warehouse table-of-contents is fetched fresh before EACH retry attempt
+    and injected into the LLM's revision prompt. This lets the LLM pick a
+    DIFFERENT table than the one that produced zero rows — the most common
+    cause of empty results. Without the catalog, the LLM only sees the
+    failed query's columns and is more likely to propose the same wrong
+    table again.
     """
     attempts = 0
     while attempts < max_attempts:
         attempts += 1
         context = _describe_failure(failed_result)
-        system_prompt = _RETRY_SYSTEM_PROMPT + "\n\n" + context
+
+        # ── Hermes Step 1: re-read the catalog before each retry ──
+        # The catalog lists ALL tables with row counts + coverage dates.
+        # Injecting it lets the LLM pick a different table than the one
+        # that just returned 0 rows. Failures here are non-fatal — the
+        # retry proceeds with just the failure context (legacy behavior).
+        _catalog_block = ""
+        if get_catalog_fn is not None:
+            try:
+                _catalog_text = await get_catalog_fn()
+                if _catalog_text and _catalog_text.strip():
+                    _catalog_block = (
+                        "\n\nWAREHOUSE TABLE CATALOG (re-read fresh for this "
+                        "attempt — pick a DIFFERENT table than the failed "
+                        "SQL above):\n"
+                        + _catalog_text.strip()
+                    )
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "smart-retry catalog fetch failed (attempt %d, non-fatal): %s",
+                    attempts, exc,
+                )
+
+        system_prompt = _RETRY_SYSTEM_PROMPT + "\n\n" + context + _catalog_block
         try:
             reply = await call_llm_fn(
                 system_prompt, [{"role": "user", "content": question}]
@@ -153,19 +197,24 @@ async def llm_driven_retry_ask_data(
             new_result["retried"] = True
             new_result["retried_question"] = revised
             new_result["retry_attempts"] = attempts
+            new_result["hermes_catalog_used"] = bool(_catalog_block)
             logger.info(
-                "smart-retry SUCCESS (attempt %d): found %d rows; sql=%s",
+                "smart-retry SUCCESS (attempt %d): found %d rows; sql=%s; "
+                "catalog_used=%s; revised_q=%s",
                 attempts,
                 len(rows),
                 str(new_result.get("sql") or "")[:200],
+                bool(_catalog_block),
+                revised[:120],
             )
             return new_result
         # Still empty — feed the failure back for the next round.
         failed_result = new_result
         logger.info(
-            "smart-retry attempt %d still empty; sql=%s",
+            "smart-retry attempt %d still empty; sql=%s; catalog_used=%s",
             attempts,
             str(new_result.get("sql") or "")[:200],
+            bool(_catalog_block),
         )
     return None
 

@@ -298,3 +298,18 @@ class TestDocxFallback:
         assert ext == docx_export.EXT
         with zipfile.ZipFile(__import__("io").BytesIO(data)) as z:
             assert "word/document.xml" in z.namelist()
+
+
+def test_data_execution_cache_flag_defaults_false():
+    from app.config import settings
+    assert settings.DATA_EXECUTION_CACHE_ENABLED is False
+
+
+def test_data_execution_cleanup_flag_defaults_false():
+    from app.config import settings
+    assert settings.DATA_EXECUTION_CLEANUP_ENABLED is False
+
+
+def test_intent_router_flag_defaults_false():
+    from app.config import settings
+    assert settings.INTENT_ROUTER_ENABLED is False

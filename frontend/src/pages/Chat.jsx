@@ -2307,20 +2307,40 @@ export default function Chat() {
           fullContent += evt.content;
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
-              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+              m.id === aiMsg.id
+                ? { ...m, content: fullContent, refining: false }
+                : m
             ));
             // Persist partial content so it survives page navigation
             stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, loading: true });
+          }
+        } else if (evt.type === 'content_preserve' && typeof evt.content === 'string') {
+          // 2026-08-25: the server signals that the current bubble's text
+          // should be PRESERVED (kept visible) while the next iteration's
+          // stream replaces it. This eliminates the "collapse" UX where
+          // the user's visible text suddenly disappears. We set a
+          // `refining: true` flag so the bubble can show a subtle
+          // "Refining answer..." indicator. The subsequent content_replace
+          // (or streamed deltas) will clear this flag.
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id
+                ? { ...m, refining: true, refiningReason: evt.reason || 'nudge' }
+                : m
+            ));
           }
         } else if (evt.type === 'content_replace' && typeof evt.content === 'string') {
           // D2 (2026-08-20): post-nudge re-synthesis. The server replaces the
           // whole bubble (REPLACE, not append) so leaked nudge-reply prose
           // never shows. Each event carries the full accumulated text; the
           // `done` event still carries the authoritative final content.
+          // 2026-08-25: clear the `refining` flag set by content_preserve.
           fullContent = evt.content;
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
-              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+              m.id === aiMsg.id
+                ? { ...m, content: fullContent, refining: false }
+                : m
             ));
             // Persist partial content so it survives page navigation
             stream.updatePendingMessage(sid, { id: aiMsg.id, content: fullContent, loading: true });
@@ -2389,6 +2409,7 @@ export default function Chat() {
                   ...m,
                   content: fullContent,
                   tool_calls: toolCalls,
+                  refining: false,
                   ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
                 }
                 : m

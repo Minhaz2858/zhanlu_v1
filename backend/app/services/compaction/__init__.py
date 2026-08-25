@@ -138,6 +138,14 @@ def get_context_window(model: str, *, context_window_tokens: int | None = None) 
         return 8_000
     if "claude" in m or "sonnet" in m or "opus" in m or "haiku" in m:
         return 200_000
+    # qwen3.6-27b is a local vLLM-served model with a 65,536-token context
+    # window.  Without this override, the heuristic below returns 128,000
+    # (the cloud qwen default), auto-compact never fires until 89,600
+    # tokens, and the conversation overflows the model's REAL 65,536 limit
+    # on the next turn -> 400 "maximum context length is 65536 tokens".
+    # Keep more specific keys BEFORE the generic qwen fallback.
+    if "qwen3.6-27b" in m and "awq4" not in m:
+        return 65_536
     if "qwen" in m or "moonshot" in m or "kimi" in m:
         return 128_000
     return DEFAULT_CONTEXT_WINDOW

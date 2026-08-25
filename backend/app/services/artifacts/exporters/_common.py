@@ -67,6 +67,13 @@ class ExportContext:
     theme: str = "zhanlu-blue"
     mode: str = "light"
     style_recipe: str = "sharp"
+    # The resolved, validate-able theme NAME the deck planner should assume
+    # when tuning copy tone/mood (e.g. "zhanlu-blue").  Kept separate from
+    # ``theme_tokens`` — a brand kit supplies hex tokens whose name does NOT
+    # pass ``_theme.validate_theme_name``, so the planner always receives a
+    # vendored base name here while the brand palette arrives via
+    # ``theme_tokens``.  Optional and JSON-serializable.
+    theme_name: Optional[str] = None
     # Multi-tenant brand kit (SaaS): a flat hex-token dict resolved from
     # the workspace's brand kit by ExportService.  When set, it takes
     # precedence over `theme` (see _theme.resolve_ctx_theme).  Kept as a

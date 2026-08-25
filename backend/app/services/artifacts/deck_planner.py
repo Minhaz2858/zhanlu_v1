@@ -177,6 +177,9 @@ def _build_planner_prompt(
     row_count: int,
     theme_name: str = "zhanlu-blue",
     theme_mood: str = "",
+    *,
+    theme_tokens: Optional[dict[str, Any]] = None,
+    personalization: Optional[dict[str, Any]] = None,
 ) -> str:
     chart_lines = "\n".join(
         f"- {c['chart_type']} | x={c['x_key']} | y={c['y_keys']} | {c['title']}"
@@ -192,6 +195,8 @@ def _build_planner_prompt(
         + theme_name
         + "'.\n"
     )
+    brand_guidance = _build_brand_guidance(theme_tokens)
+    audience_guidance = _build_audience_guidance(personalization)
     return (
         "You are a presentation architect. Build a concise, narrative slide "
         "sequence for the following request.\n\n"
@@ -231,9 +236,61 @@ def _build_planner_prompt(
         "'investor_deck' or 'marketing' and lean on cover / section_divider / "
         "kpi_grid layouts.\n\n"
         f"{theme_guidance}\n"
+        f"{brand_guidance}\n"
+        f"{audience_guidance}"
         "METHODOLOGY (from the pptx skill — follow it):\n"
         f"{methodology}\n"
     )
+
+
+def _build_brand_guidance(
+    theme_tokens: Optional[dict[str, Any]],
+) -> str:
+    """Return a BRAND STYLE block so the planner matches copy to the brand."""
+    if not isinstance(theme_tokens, dict) or not theme_tokens:
+        return ""
+    primary = theme_tokens.get("primary")
+    palette = theme_tokens.get("chart_palette")
+    fonts = theme_tokens.get("fonts") or {}
+    heading_font = fonts.get("heading") if isinstance(fonts, dict) else None
+    body_font = fonts.get("body") if isinstance(fonts, dict) else None
+
+    bits = ["\nBRAND STYLE: the deck renders in this customer's brand colors "
+            "and fonts. Match the copy tone and emphasis to it."]
+    if primary:
+        bits.append(f"- Primary color: {primary}")
+    if isinstance(palette, list) and palette:
+        bits.append("- Chart series palette: " + ", ".join(
+            str(c) for c in palette[:4]
+        ))
+    if heading_font or body_font:
+        bits.append(f"- Fonts: {heading_font or body_font or ''}"
+                    + (f" / {body_font}" if body_font and heading_font else ""))
+    return "\n".join(bits) + "\n"
+
+
+def _build_audience_guidance(
+    personalization: Optional[dict[str, Any]],
+) -> str:
+    """Return an AUDIENCE & CONTEXT block so copy fits the actual audience."""
+    if not isinstance(personalization, dict) or not personalization:
+        return ""
+    lines = ["\nAUDIENCE & CONTEXT: this deck is for the following audience — "
+             "tailor the tone, depth, and emphasis accordingly. Ground the "
+             "narrative in this context rather than generic business advice."]
+    role = personalization.get("role_text")
+    if role:
+        lines.append(f"- Audience/role: {role}")
+    profile = personalization.get("profile_text")
+    if profile:
+        lines.append(f"- User preferences: {profile}")
+    brand_name = personalization.get("brand_name")
+    if brand_name:
+        lines.append(f"- Company/brand: {brand_name}")
+    memory = personalization.get("memory_text")
+    if memory:
+        lines.append(f"- About this user/project: {memory}")
+    return "\n".join(lines) + "\n"
 
 
 async def _llm_deck_plan(
@@ -243,6 +300,9 @@ async def _llm_deck_plan(
     row_count: int,
     theme_name: str = "zhanlu-blue",
     theme_mood: str = "",
+    *,
+    theme_tokens: Optional[dict[str, Any]] = None,
+    personalization: Optional[dict[str, Any]] = None,
 ) -> Optional[DeckPlan]:
     """Make the single bounded LLM call and coerce the result into a DeckPlan.
 
@@ -253,6 +313,7 @@ async def _llm_deck_plan(
     prompt = _build_planner_prompt(
         user_intent, profile_summary, chart_hints, row_count,
         theme_name=theme_name, theme_mood=theme_mood,
+        theme_tokens=theme_tokens, personalization=personalization,
     )
     try:
         result = await asyncio.wait_for(
@@ -635,13 +696,19 @@ async def build_deck_plan(
     rows: list[dict[str, Any]],
     theme_recommendation: str | None = None,
     profile_name: str | None = None,
+    *,
+    theme_tokens: Optional[dict[str, Any]] = None,
+    user_context: Optional[dict[str, Any]] = None,
 ) -> tuple[DeckPlan, dict[str, dict[str, Any]]]:
     """Entry point: profile the data, then plan the deck.
 
     ``theme_recommendation`` (optional) is the active theme name so the LLM
     planner can match copy tone / mood.  ``profile_name`` (optional) selects a
     deck profile (Phase 4); when ``DECK_PROFILES_ENABLED`` is on it is
-    classified from ``user_intent`` if not explicitly provided.  Returns
+    classified from ``user_intent`` if not explicitly provided.  Keyword-only
+    ``theme_tokens`` carries the resolved brand hex tokens (from the workspace
+    brand kit) so the planner matches the customer's palette, and
+    ``user_context`` carries the audience/role/profile/memory block.  Returns
     ``(DeckPlan, profile)``.  Falls back to a deterministic plan when the LLM
     call is disabled, fails, or times out.
     """
@@ -666,6 +733,16 @@ async def build_deck_plan(
                 "deck_planner: unknown theme_recommendation '%s'; using default",
                 theme_recommendation,
             )
+    # Brand tokens inform tone even for the deterministic fallback: surface the
+    # primary/accent hexes in the mood so headline phrasing stays brand-aware.
+    if isinstance(theme_tokens, dict) and theme_tokens:
+        primary = theme_tokens.get("primary")
+        accent = (theme_tokens.get("chart_palette") or [None])[0] or primary
+        if primary:
+            brand_hint = f"brand primary {primary}"
+            if accent and accent != primary:
+                brand_hint += f" / accent {accent}"
+            theme_mood = (theme_mood + " · " if theme_mood else "") + brand_hint
 
     # Resolve the deck profile (Phase 4). Explicit wins; otherwise classify
     # from intent when the feature flag is enabled; else default data_report.
@@ -690,6 +767,7 @@ async def build_deck_plan(
     plan = await _llm_deck_plan(
         user_intent, profile_summary_text, chart_hints, row_count,
         theme_name=theme_name, theme_mood=theme_mood,
+        theme_tokens=theme_tokens, personalization=user_context,
     )
     if plan is None:
         plan = _fallback_plan(user_intent, profile, rows, profile_name=resolved_profile_name)

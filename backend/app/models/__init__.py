@@ -95,6 +95,8 @@ from app.models.report_recipe import ReportRecipe
 from app.models.weekly_digest import WeeklyReportCard, WeeklyReportProduct
 from app.models.alert_baseline import AlertProductBaseline
 from app.models.dashboard_app import DashboardApp
+from app.models.data_execution import DataExecution
+from app.models.session_state import SessionState
 
 __all__ = [
     "TimestampedBase",
@@ -191,4 +193,6 @@ __all__ = [
     "WeeklyReportCard",
     "WeeklyReportProduct",
     "AlertProductBaseline",
+    "DataExecution",
+    "SessionState",
 ]

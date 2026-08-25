@@ -447,6 +447,137 @@ def test_build_gap_disclosure_empty_for_complete():
     assert av.build_gap_disclosure(av.VerificationResult(status="COMPLETE")) == ""
 
 
+# ── pending_action downgrade (2026-08-25) ──────────────────────────────
+# When the only signal is `pending_action` (model ends with "Let me...")
+# AND the agent has produced substantive prose AND has data, downgrade
+# the result to COMPLETE. The trailing promise phrase is stripped
+# post-loop by agents.py:12746-12762, so re-iterating to force a new
+# answer is unnecessary and only causes the "collapse" UX.
+
+
+def test_pending_action_only_downgrades_to_complete_with_data_and_prose(monkeypatch):
+    """Substantive prose + data + pending_action phrase → COMPLETE."""
+    monkeypatch.setattr(settings, "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE", 200)
+    long_prose = (
+        "Sales summary for last month: PVC was the top seller with 1,200 units, "
+        "followed by C5 with 800 units and C9 with 450 units. Customer mix "
+        "remained stable, with the top three partners accounting for 60% of "
+        "shipment volume. Average contract price held steady at the prior "
+        "month's level, indicating stable demand across the portfolio and no "
+        "material shift in customer behavior. We can monitor the daily "
+        "shipment cadence to confirm the trend holds for the current month."
+    )
+    assert len(long_prose) >= 200
+    result = av.evaluate_answer(
+        "give me last month sales report",
+        [
+            {
+                "tool": "execute_query",
+                "columns": ["FNAME", "units"],
+                "rows": [
+                    {"FNAME": "PVC", "units": 1200},
+                    {"FNAME": "C5", "units": 800},
+                    {"FNAME": "C9", "units": 450},
+                ],
+            }
+        ],
+        long_prose + " Let me verify these numbers against the database.",
+        attempts=0,
+        budget_remaining=30,
+    )
+    assert result.status == "COMPLETE", (
+        f"expected COMPLETE for data-sufficient pending_action-only signal, "
+        f"got {result.status} with signals={result.signals}"
+    )
+    assert "pending_action_downgraded" in result.signals
+
+
+def test_pending_action_only_does_not_downgrade_short_prose(monkeypatch):
+    """Short prose + data + pending_action phrase → still INCOMPLETE.
+
+    The downgrade requires >= SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE chars
+    of substantive prose. Short prose doesn't qualify.
+    """
+    monkeypatch.setattr(settings, "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE", 200)
+    result = av.evaluate_answer(
+        "give me last month sales report",
+        [
+            {
+                "tool": "execute_query",
+                "columns": ["FNAME", "amount"],
+                "rows": [{"FNAME": "PVC", "amount": 1200}],
+            }
+        ],
+        "Top seller: PVC. Let me check details.",
+        attempts=0,
+        budget_remaining=30,
+    )
+    assert result.status == "INCOMPLETE"
+    assert "pending_action" in result.signals
+
+
+def test_pending_action_only_does_not_downgrade_without_data(monkeypatch):
+    """No data + substantive prose + pending_action phrase → still INCOMPLETE.
+
+    Without data, the answer is empty; the downgrade should not fire.
+    """
+    monkeypatch.setattr(settings, "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE", 200)
+    long_prose = (
+        "Based on my analysis, the sales report shows a significant increase "
+        "in volume across all product categories during the last month. "
+        "The trend analysis indicates a 12% rise compared to the prior month, "
+        "with PVC and C5 leading the growth. Customer concentration remained "
+        "stable, with the top 3 partners representing 60% of total volume."
+        " Let me verify these numbers against the database."
+    )
+    assert len(long_prose) >= 200
+    result = av.evaluate_answer(
+        "give me last month sales report",
+        [{"tool": "execute_query", "columns": ["x"], "rows": []}],  # empty
+        long_prose,
+        attempts=0,
+        budget_remaining=30,
+    )
+    # Could fire empty + pending_action. Must NOT downgrade to COMPLETE.
+    assert result.status in ("INCOMPLETE", "IMPOSSIBLE")
+    assert "pending_action" in result.signals
+
+
+def test_pending_action_does_not_downgrade_when_other_signals_fire(monkeypatch):
+    """Multi-signal (pending_action + coverage) → still INCOMPLETE.
+
+    The downgrade only fires when pending_action is the SOLE signal.
+    If other detectors also fire (coverage, empty, degenerate), the
+    answer is genuinely incomplete and a nudge is justified.
+    """
+    monkeypatch.setattr(settings, "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE", 200)
+    long_prose = (
+        "I have some data but I'm missing the Q3 column. Let me re-query "
+        "to get the full breakdown with the daily aggregation you asked for. "
+        "The data so far shows PVC leading the volume chart at 1,200 units, "
+        "but I cannot present the complete Q3 daily breakdown without the "
+        "missing columns. Let me re-query to get the full breakdown now."
+    )
+    assert len(long_prose) >= 200
+    result = av.evaluate_answer(
+        "give me last month Q3 sales report with daily breakdown",
+        [
+            {
+                "tool": "execute_query",
+                "columns": ["FNAME", "amount"],  # missing "Q3" / daily columns
+                "rows": [{"FNAME": "PVC", "amount": 1200}],
+            }
+        ],
+        long_prose,
+        attempts=0,
+        budget_remaining=30,
+    )
+    # At minimum pending_action fires; if coverage also fires, downgrade
+    # must NOT activate. Either way, result must be INCOMPLETE (not COMPLETE).
+    assert result.status in ("INCOMPLETE", "IMPOSSIBLE")
+    assert "pending_action_downgraded" not in result.signals
+
+
 # ── Zero-hardcoding rule ───────────────────────────────────────────────
 
 

@@ -429,7 +429,6 @@ class ForecastEngine:
 
         if exog_enabled:
             try:
-                from app.config import settings
                 from app.services.knowledge_graph.graph import build_c5_c9_graph
                 from app.services.forecasting.features.exogenous_loaders import (
                     FeedstockLoader, FxLoader, EventFlagLoader, ErpVolumeLoader,

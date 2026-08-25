@@ -445,6 +445,16 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
             {isStreaming && (
               <span className="ml-0.5 inline-block h-4 w-2 animate-pulse rounded-sm bg-primary align-text-bottom" />
             )}
+            {/* 2026-08-25: subtle "Refining answer..." indicator when the
+                server emitted a content_preserve SSE event. The old text
+                stays visible (no collapse); this just signals that a
+                replacement is streaming in. */}
+            {!isUser && message.refining && (
+              <div className="mt-2 flex items-center gap-2 text-xs italic text-muted-foreground">
+                <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-primary" />
+                {lang === 'en' ? 'Refining answer…' : '正在优化答案…'}
+              </div>
+            )}
             {message.plan_summary && (
               <div className="mt-3">
                 <PlanEditor plan={message.plan_summary} readOnly={!isStreaming} />

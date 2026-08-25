@@ -138,13 +138,16 @@ async def _run_alert_check_cycle() -> None:
 async def _run_news_ingestion_cycle() -> None:
     """Run one news ingestion scan cycle for the intelligence layer."""
     try:
-        from app.database import AsyncSessionLocal
+        from app.database import SessionLocal
         from app.services.intelligence.news_ingestion_agent import NewsIngestionAgent
 
-        async with AsyncSessionLocal() as db:
-            agent = NewsIngestionAgent(db, org_id="default-org")
-            await agent.run_news_cycle(trigger="scheduled")
-            await db.commit()
+        def _run_sync() -> None:
+            with SessionLocal() as db:
+                agent = NewsIngestionAgent(db, org_id="default-org")
+                agent.run_news_cycle(trigger="scheduled")
+                db.commit()
+
+        await asyncio.to_thread(_run_sync)
     except Exception as e:
         logger.warning("News ingestion cycle failed: %s", e)
 
@@ -547,6 +550,7 @@ def _run_nightly_forecast_sync() -> dict:
         engine = ForecastEngine(db)
         success_count = 0
         failures = []
+        backfill_used = 0
         t0 = time.monotonic()
         for target in targets:
             target_t0 = time.monotonic()
@@ -560,14 +564,32 @@ def _run_nightly_forecast_sync() -> dict:
                     target.name,
                     elapsed,
                 )
-            except Exception:
+            except Exception as exc:
                 db.rollback()  # Roll back failed target, keep prior commits
                 elapsed = time.monotonic() - target_t0
-                logger.exception(
-                    "[nightly-forecast] ✗ %s failed (%.1fs)",
-                    target.name,
-                    elapsed,
+                logger.warning(
+                    "[nightly-forecast] ✗ %s primary engine failed (%.1fs): %s — falling back to backfill",
+                    target.name, elapsed, exc,
                 )
+                # Fallback: simple backfill that always produces a valid
+                # ForecastRun (with explanation.probability populated) so the
+                # decision board does not fall back to "数据不足,建议观望".
+                try:
+                    from app.services.forecasting.backfill_forecast import backfill_target
+                    run = backfill_target(target, db)
+                    if run is not None:
+                        db.commit()
+                        backfill_used += 1
+                        logger.info(
+                            "[nightly-forecast] ✓ %s backfilled (%.1fs total)",
+                            target.name, time.monotonic() - target_t0,
+                        )
+                        continue
+                except Exception as bf_exc:
+                    logger.error(
+                        "[nightly-forecast] backfill also failed for %s: %s",
+                        target.name, bf_exc,
+                    )
                 failures.append(target.name)
 
         total_elapsed = time.monotonic() - t0

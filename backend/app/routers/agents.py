@@ -1238,7 +1238,7 @@ def _harvest_text_answer(result: dict) -> str | None:
 # dataset, and a second call is the hard stop.
 TOOL_CALL_CAPS: dict[str, int] = {
     "memory": 1,
-    "ask_data_agent": 2,
+    "ask_data_agent": 6,
     "fetch_data_batch": 3,  # direct SQL fast path; each call can have up to 8 queries
     # Defense-in-depth against the interrupt leak: if an agent re-enables the
     # interrupt tool via tool_config, cap it at 2 calls/turn so it can never
@@ -1304,6 +1304,332 @@ _LONG_RUNNING_TOOLS = frozenset({
 def _is_long_running_tool(tool_name: str) -> bool:
     """True if ``tool_name`` may run for tens of seconds or minutes."""
     return is_long_running_tool(tool_name, _LONG_RUNNING_TOOLS)
+
+
+# ── qwen3.6-27b Local Fast Mode (2026-08-25) ────────────────────────────────
+# Per-model overrides that fire ONLY when the user's selected model is a
+# qwen3.* served on local vLLM. DeepSeek-chat path is unaffected.
+
+def _is_qwen_local_model(endpoint) -> bool:
+    """True iff the user's selected model is a qwen3.* served on local vLLM.
+
+    Used to gate the per-model fast-mode overrides (QWEN3_* config flags).
+    Detection: model_id starts with "qwen3" AND the endpoint is private OR
+    the api_key is empty/\"EMPTY\" (vLLM doesn't validate keys).
+
+    Returns False for:
+    - deepseek-chat (cloud API)
+    - qwen3 with a real API key (cloud-hosted qwen, not local vLLM)
+    - None/empty endpoint
+    """
+    if not endpoint or not getattr(endpoint, "model_id", None):
+        return False
+    mid = str(endpoint.model_id).lower()
+    if not mid.startswith("qwen3"):
+        return False
+    if getattr(endpoint, "is_private", False):
+        return True
+    api_key = str(getattr(endpoint, "api_key", "") or "").strip()
+    return api_key in {"", "EMPTY"}
+
+
+def _effective_max_tool_iterations(endpoint) -> int:
+    """Return the effective MAX_TOOL_ITERATIONS for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_MAX_TOOL_ITERATIONS
+    return MAX_TOOL_ITERATIONS
+
+
+def _effective_goal_contract_enabled(endpoint) -> bool:
+    """Return whether goal-contract is enabled for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_GOAL_CONTRACT_ENABLED
+    return settings.GOAL_CONTRACT_ENABLED
+
+
+def _effective_verify_nudge_max(endpoint) -> int:
+    """Return the effective VERIFY_NUDGE_MAX for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_VERIFY_NUDGE_MAX
+    return settings.VERIFY_NUDGE_MAX
+
+
+def _effective_data_agent_budget_seconds(endpoint) -> float:
+    """Return the effective DATA_AGENT_BUDGET_SECONDS for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_DATA_AGENT_BUDGET_SECONDS
+    from app.services.tool_handlers.delegation_tools import DATA_AGENT_BUDGET_SECONDS
+    return DATA_AGENT_BUDGET_SECONDS
+
+
+def _effective_self_eval_max_replans(endpoint) -> int:
+    """Return the effective SELF_EVAL_MAX_REPLANS for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_SELF_EVAL_MAX_REPLANS
+    return settings.SELF_EVAL_MAX_REPLANS
+
+
+def _effective_self_eval_timeout(endpoint) -> float:
+    """Return the effective SELF_EVAL_LLM_GATE_TIMEOUT_S for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_SELF_EVAL_LLM_GATE_TIMEOUT_S
+    return settings.SELF_EVAL_LLM_GATE_TIMEOUT_S
+
+
+def _effective_force_synthesis_max_retries(endpoint) -> int:
+    """Return the effective max_retries for _force_llm_synthesis."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_FORCE_SYNTHESIS_MAX_RETRIES
+    return 1  # legacy default
+
+
+def _effective_synthesis_max_tokens(endpoint) -> int:
+    """Return the effective synthesis max_tokens for the user's model."""
+    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
+        return settings.QWEN3_SYNTHESIS_MAX_TOKENS
+    return 1536  # legacy default
+
+
+# ── Component 4: CEO-grade synthesis prompt for qwen3.6-27b ─────────────────
+
+_QWEN3_SYNTHESIS_TEMPLATE = """\
+You are a CEO-grade business analyst. Using ONLY the data below, write a \
+comprehensive answer in this exact structure:
+
+## Executive Summary
+[2-3 sentences: what was asked, what was found, the headline number]
+
+## Key Metrics
+- Total {measure_label}: {currency_symbol}{total:,.2f}
+- Date range covered: {date_range}
+- Number of records: {row_count}
+- Top {dimension_label}: {top_dimension_value}
+
+## Detailed Breakdown
+[markdown table of top 10-20 rows, or bullets if many dimensions]
+
+## Risks & Opportunities
+[1-2 sentences: notable patterns, anomalies, trends]
+
+## Recommended Actions
+[1-2 actionable items based on the data]
+
+DATA (use only this, do not invent numbers):
+{data_inline}
+"""
+
+_MAX_INLINE_ROWS = 100
+_MAX_INLINE_CHARS = 4000
+
+
+def _build_qwen3_synthesis_prompt(
+    user_question: str,
+    data_rows: list,
+    columns: list,
+    table_name: str = "data",
+) -> str:
+    """Build the CEO-grade synthesis prompt for qwen3.6-27b.
+
+    Inlines up to 100 rows / 4000 chars of data directly in the prompt so
+    the model doesn't have to "look up" the data from a tool result.
+    """
+    from collections import Counter
+
+    total_rows = len(data_rows) if data_rows else 0
+    truncated = (data_rows or [])[:_MAX_INLINE_ROWS]
+    # Build markdown table
+    if truncated and columns:
+        header = "| " + " | ".join(columns) + " |"
+        sep = "| " + " | ".join("---" for _ in columns) + " |"
+        body_lines = []
+        for row in truncated:
+            vals = []
+            for c in columns:
+                v = row.get(c, "") if isinstance(row, dict) else ""
+                if isinstance(v, float):
+                    vals.append(f"{v:,.2f}")
+                else:
+                    vals.append(str(v))
+            body_lines.append("| " + " | ".join(vals) + " |")
+        data_inline = "\n".join([header, sep] + body_lines)
+    else:
+        data_inline = "(no rows)"
+
+    if total_rows > _MAX_INLINE_ROWS:
+        data_inline += f"\n\n*Showing first {_MAX_INLINE_ROWS} of {total_rows} rows.*"
+
+    # Truncate to max chars
+    if len(data_inline) > _MAX_INLINE_CHARS:
+        data_inline = data_inline[:_MAX_INLINE_CHARS] + "\n...(truncated)"
+
+    # Compute simple metrics for the template placeholders
+    measure_label = "value"
+    currency_symbol = "¥"
+    total = 0.0
+    # Find first numeric column for "total"
+    for row in truncated:
+        if not isinstance(row, dict):
+            continue
+        for c in columns:
+            v = row.get(c)
+            if isinstance(v, (int, float)):
+                total += float(v)
+                measure_label = c
+                break
+
+    # Top dimension (first non-numeric column)
+    dimension_label = "item"
+    top_dimension_value = "n/a"
+    for c in columns:
+        if c == measure_label:
+            continue
+        dimension_label = c
+        vals = [str(row.get(c, "")) if isinstance(row, dict) else "" for row in truncated]
+        if vals:
+            top_dimension_value = Counter(vals).most_common(1)[0][0]
+        break
+
+    # Date range
+    date_range = "n/a"
+    for c in columns:
+        if "date" in c.lower() or "time" in c.lower():
+            dates = sorted([str(row.get(c, "")) if isinstance(row, dict) else "" for row in truncated if row.get(c) if isinstance(row, dict)])
+            if dates:
+                date_range = f"{dates[0]} to {dates[-1]}"
+            break
+
+    return _QWEN3_SYNTHESIS_TEMPLATE.format(
+        measure_label=measure_label,
+        currency_symbol=currency_symbol,
+        total=total,
+        date_range=date_range,
+        row_count=total_rows,
+        dimension_label=dimension_label,
+        top_dimension_value=top_dimension_value,
+        data_inline=data_inline,
+    )
+
+
+# ── Component 5: Deterministic fallback (never "Sorry") ─────────────────────
+
+_APOLOGY_PATTERNS = [
+    "i couldn't", "i couldn't find", "let me re-query", "let me try again",
+    "i wasn't able to", "unable to retrieve", "no data found",
+    "i apologize", "i'm sorry", "sorry, i hit an error",
+]
+
+
+def _should_trigger_fallback(synthesis_text: str, data_rows: list) -> bool:
+    """Return True if the deterministic fallback should fire.
+
+    Fires when:
+    - synthesis_text is empty AND data_rows is non-empty
+    - synthesis_text matches an apology pattern AND data_rows is non-empty
+    - synthesis_text is <100 chars AND data_rows is non-empty
+    Does NOT fire when data_rows is empty (no data to show).
+    """
+    if not data_rows:
+        return False
+    if not synthesis_text or not synthesis_text.strip():
+        return True
+    if len(synthesis_text.strip()) < 100:
+        return True
+    lower = synthesis_text.lower()
+    for pattern in _APOLOGY_PATTERNS:
+        if pattern in lower:
+            return True
+    return False
+
+
+def _build_deterministic_fallback(
+    data_rows: list,
+    columns: list,
+    table_name: str = "data",
+) -> str:
+    """Build a deterministic markdown summary from data rows (no LLM).
+
+    Includes:
+    - Numeric summary (total/avg/min/max) for numeric columns
+    - Top-3 values for categorical columns
+    - Date range for date columns
+    - Markdown table of top 20 rows
+    """
+    from collections import Counter
+
+    if not data_rows:
+        return "No data available."
+
+    total_rows = len(data_rows)
+    lines = ["## Executive Summary (auto-generated)", ""]
+
+    # Detect column types
+    numeric_cols = []
+    categorical_cols = []
+    date_cols = []
+    for c in columns:
+        sample_val = next((row.get(c) for row in data_rows if isinstance(row, dict) and row.get(c) is not None), None)
+        if isinstance(sample_val, (int, float)):
+            numeric_cols.append(c)
+        elif isinstance(sample_val, str):
+            if any(k in c.lower() for k in ["date", "time", "created", "updated"]):
+                date_cols.append(c)
+            else:
+                categorical_cols.append(c)
+
+    # Numeric summary
+    for c in numeric_cols:
+        vals = [float(row.get(c, 0)) for row in data_rows if isinstance(row, dict) and isinstance(row.get(c), (int, float))]
+        if vals:
+            total = sum(vals)
+            avg = total / len(vals)
+            mn = min(vals)
+            mx = max(vals)
+            lines.append(f"- Total {c}: ¥{total:,.2f}")
+            lines.append(f"- Average {c}: ¥{avg:,.2f}")
+            lines.append(f"- Min {c}: ¥{mn:,.2f}")
+            lines.append(f"- Max {c}: ¥{mx:,.2f}")
+
+    # Categorical top-3
+    for c in categorical_cols[:3]:
+        vals = [str(row.get(c, "")) for row in data_rows if isinstance(row, dict) and row.get(c)]
+        if vals:
+            top3 = Counter(vals).most_common(3)
+            for val, count in top3:
+                lines.append(f"- Top {c}: {val} ({count} records)")
+
+    # Date range
+    for c in date_cols:
+        dates = sorted([str(row.get(c, "")) for row in data_rows if isinstance(row, dict) and row.get(c)])
+        if dates:
+            lines.append(f"- Date range ({c}): {dates[0]} to {dates[-1]}")
+
+    lines.append(f"- Number of records: {total_rows}")
+    lines.append("")
+
+    # Markdown table (top 20 rows)
+    lines.append("## Data Preview (top 20 rows)")
+    lines.append("")
+    display_rows = data_rows[:20]
+    if display_rows and columns:
+        header = "| " + " | ".join(columns) + " |"
+        sep = "| " + " | ".join("---" for _ in columns) + " |"
+        lines.append(header)
+        lines.append(sep)
+        for row in display_rows:
+            vals = []
+            for c in columns:
+                v = row.get(c, "") if isinstance(row, dict) else ""
+                if isinstance(v, float):
+                    vals.append(f"{v:,.2f}")
+                else:
+                    vals.append(str(v))
+            lines.append("| " + " | ".join(vals) + " |")
+
+    if total_rows > 20:
+        lines.append(f"\n*Showing first 20 of {total_rows} rows.*")
+
+    lines.append("\n*Note: LLM synthesis unavailable. Showing raw data summary.*")
+    return "\n".join(lines)
 
 
 def _start_finalize_offloaded(db, finalize_kwargs: dict) -> asyncio.Task:
@@ -1763,7 +2089,12 @@ def _inject_reflexion_critique(
     lines = [_REFLEXION_CRITIQUE_PREAMBLE, ""]
     for name, args_str, error in failures:
         lines.append(f"  • {name}({args_str}) → {error}")
-    llm_messages.append({"role": "system", "content": "\n".join(lines)})
+    # 2026-08-25: vLLM (qwen3.6-27b) rejects mid-list system messages with
+    # HTTP 400 "System message must be at the beginning." The reflexion
+    # critique is a mid-conversation nudge, so it must be role="user".
+    # DeepSeek API tolerates mid-list system messages, so this change is
+    # backward-compatible for the cloud path too.
+    llm_messages.append({"role": "user", "content": "\n".join(lines)})
     logger.info(
         "ReAct reflexion: injected critique for %d failed tool call(s): %s",
         len(failures),
@@ -5362,7 +5693,9 @@ async def add_message(
                     )
                     followup_msgs = list(messages) + [
                         {
-                            "role": "system",
+                            # 2026-08-25: role=user not role=system — vLLM rejects
+                            # mid-list system messages with HTTP 400.
+                            "role": "user",
                             "content": (
                                 "You DO have access to web_search and web_extract. "
                                 "Use these live search results to answer the user's "
@@ -9491,7 +9824,10 @@ async def add_message_stream(
         # the final synthesis — jarring "make-then-collapse" UX. We only
         # show the FINAL accumulated_content in the very last SSE event.
         _suppress_chat_deltas = bool(_orch_doc_format)
-        for iteration in range(MAX_TOOL_ITERATIONS):
+        # 2026-08-25: per-model override — qwen3.6-27b uses 10 iterations (not 40)
+        # to keep turn time under 60s. DeepSeek-chat path unchanged.
+        _v3_max_iterations = _effective_max_tool_iterations(effective_llm)
+        for iteration in range(_v3_max_iterations):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
                 logger.info(
@@ -10208,6 +10544,10 @@ async def add_message_stream(
                             _v3_recovered_best[0] = _popped
                     # Tell the frontend to swap the streamed promise text
                     # for the upcoming synthesis bubble.
+                    # 2026-08-25: emit content_preserve first so the
+                    # frontend can keep old text visible during the swap,
+                    # avoiding the "collapse" UX.
+                    yield f'data: {json.dumps({"type": "content_preserve", "content": "", "reason": "promise_strip"})}\n\n'
                     yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
@@ -10356,7 +10696,7 @@ async def add_message_stream(
                 # off) → standalone cap via settings.VERIFY_NUDGE_MAX.
                 _verify_nudge = build_verify_on_stop_nudge(llm_messages, attempts=_verify_attempts)
                 if _verify_nudge and _contract is not None and _contract.forces_used >= min(
-                    settings.VERIFY_NUDGE_MAX, settings.GOAL_CONTRACT_MAX_FORCES,
+                    _effective_verify_nudge_max(effective_llm), settings.GOAL_CONTRACT_MAX_FORCES,
                 ):
                     _verify_nudge = None
                 if _verify_nudge:
@@ -10465,15 +10805,61 @@ async def add_message_stream(
                         )
                         assistant_content = (assistant_content or "") + " " + _file_guard.message
                 # P2.2: Universal Self-Evaluation & Re-Planning gate (v3 loop)
-                _gate_result = await _check_answer_verification_gate(
-                    user_content,
-                    tool_calls_for_frontend,
-                    assistant_content,
-                    attempts=_gate_attempts,
-                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
-                    catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
-                )
-                if _gate_result.action == "nudge":
+                # 2026-08-25: data-sufficient fast-path. When the agent has
+                # usable data AND already produced substantive prose (>= N
+                # chars) AND the gate has already nudged once, skip further
+                # nudges and fall through to finalize. The 2nd/3rd nudges
+                # almost never improve quality and only cause the
+                # "collapse" UX where streamed text gets replaced. The
+                # `pending_action` post-loop strip (further down) will
+                # still clean up any trailing promise phrases.
+                _data_sufficient_skip = False
+                if (
+                    _gate_attempts >= 1
+                    and assistant_content
+                    and len(assistant_content.strip())
+                    >= int(
+                        getattr(
+                            settings,
+                            "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE",
+                            200,
+                        )
+                    )
+                ):
+                    _has_usable_for_skip = (
+                        (_contract is not None and _contract._usable_results > 0)
+                        if settings.GOAL_CONTRACT_ENABLED
+                        else any(
+                            tc.get("status") == "completed"
+                            for tc in tool_calls_for_frontend
+                        )
+                    )
+                    if _has_usable_for_skip:
+                        _data_sufficient_skip = True
+                        logger.info(
+                            "v3 stream: data-sufficient fast-path — skipping "
+                            "self-eval nudge (conv=%s, iter=%d, prose=%d "
+                            "chars, gate_attempts=%d)",
+                            conversation_id,
+                            iteration,
+                            len(assistant_content.strip()),
+                            _gate_attempts,
+                        )
+                if _data_sufficient_skip:
+                    # Don't call the gate at all; fall through to finalize
+                    # block below. The post-loop promise-strip will clean
+                    # up any trailing "Let me..." sentence.
+                    _gate_result = None
+                else:
+                    _gate_result = await _check_answer_verification_gate(
+                        user_content,
+                        tool_calls_for_frontend,
+                        assistant_content,
+                        attempts=_gate_attempts,
+                        budget_remaining=MAX_TOOL_ITERATIONS - iteration,
+                        catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
+                    )
+                if _gate_result is not None and _gate_result.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})
                     llm_messages.append({"role": "user", "content": _gate_result.message})
                     _gate_attempts += 1
@@ -10492,12 +10878,21 @@ async def add_message_stream(
                     # Clear it so the top-of-loop append skips it; the next
                     # iteration's stream replaces the bubble instead of
                     # appending (leakage fix).
+                    # 2026-08-25: emit a content_preserve event BEFORE the
+                    # content_replace so the frontend can keep the old
+                    # text visible (with a "Refining answer..." indicator)
+                    # while the next iteration streams its replacement.
+                    # This eliminates the "collapse" visual where text
+                    # disappears and reappears. The content_replace
+                    # immediately follows to swap the persisted message
+                    # content; the frontend preserves the visual bubble.
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "self_eval_nudge"})}\n\n'
                         yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     continue
-                if _gate_result.action == "disclose":
+                if _gate_result is not None and _gate_result.action == "disclose":
                     assistant_content = (assistant_content or "") + _gate_result.message
                 # ── Fix 6: dashboard-narration nudge guard ─────────────
                 # The model exited with ONLY narration ("I'll build you an ERP
@@ -11384,13 +11779,23 @@ async def add_message_stream(
                     paused_for_approval = True
                     break
 
-                # ── Smart retry: empty ask_data_agent result + doc intent ─
-                # The query ran to completion but returned 0 rows. Before
-                # finalizing a no-data card, ask the LLM to propose a
-                # broader question and re-run the data agent (strict
-                # budget: max 2 attempts). If data comes back, `result`
-                # is replaced so the normal data path below synthesizes
-                # and finalizes a real artifact.
+                # ── Hermes smart retry: empty ask_data_agent result ─────
+                # The query ran to completion but returned 0 rows (or only
+                # metadata-only rows like SELECT COUNT(*)). Before giving
+                # the user a "no data" answer, do a Hermes-style re-plan:
+                # re-read the FULL warehouse catalog, ask the LLM to pick a
+                # DIFFERENT table than the one that returned 0 rows, and
+                # re-run ask_data_agent with the revised question. Strict
+                # budget: max 2 attempts so a pathological schema can't
+                # loop forever. If data comes back, `result` is replaced
+                # so the normal data path below synthesizes/finalizes.
+                #
+                # 2026-08-25: REMOVED the `_orch_doc_format` gate so this
+                # fires for ANY data question, not just file-format turns.
+                # Previously, "tell me about last month sales" with no file
+                # intent would skip this retry and let the agent give up
+                # after one wrong-table attempt. Now the agent re-plans
+                # with the catalog in hand.
                 # FIX 2026-08-24: ALSO retry when the result is metadata-only
                 # (e.g. [{row_count: 14275}] from SELECT COUNT(*)) — such
                 # results are just as useless as 0 rows for building a
@@ -11401,7 +11806,6 @@ async def add_message_stream(
                 if (
                     tool_name == "ask_data_agent"
                     and isinstance(result, dict)
-                    and _orch_doc_format
                     and _smart_retry_budget[0] > 0
                 ):
                     if _rows_for_retry_check == []:
@@ -11436,6 +11840,66 @@ async def add_message_stream(
                                 db, user.id if user else None, context=ctx,
                             )
 
+                        # ── Hermes catalog supplier ───────────────────────
+                        # Re-reads the bound data source's table-of-contents
+                        # fresh before each retry attempt. Injected into the
+                        # LLM's revision prompt so it can pick a DIFFERENT
+                        # table than the one that returned 0 rows. Failures
+                        # here are non-fatal — smart_retry proceeds with just
+                        # the failure context (legacy behavior).
+                        async def _retry_get_catalog(
+                            _dsr_db=db,
+                            _agent=agent_app,
+                            _pid=_v3_effective_pid,
+                            _pname=_v3_effective_pname,
+                        ):
+                            try:
+                                from app.services.data_source_runtime import (
+                                    prepare_data_source_runtime,
+                                )
+                                _rt_db = _dsr_db
+                                _opened_locally = False
+                                # The v3 stream's db session may be in a
+                                # closed/committed state by the time this
+                                # retry fires (mid-loop). Open a fresh
+                                # session for the catalog read so we never
+                                # DetachedInstanceError.
+                                try:
+                                    from app.database import SessionLocal as _SL
+                                    _rt_db = _SL()
+                                    _opened_locally = True
+                                except Exception:
+                                    pass
+                                try:
+                                    _, _rt_sys, _ = prepare_data_source_runtime(
+                                        _rt_db, _agent, [], "",
+                                        selected_project_id=_pid,
+                                        selected_project_name=_pname,
+                                        compact_mode=True,
+                                        target_context_window=32_768,
+                                    )
+                                finally:
+                                    if _opened_locally:
+                                        try:
+                                            _rt_db.close()
+                                        except Exception:
+                                            pass
+                                # Return just the "Bound Data Sources"
+                                # section if present, else the whole prompt.
+                                if not _rt_sys:
+                                    return ""
+                                _marker = "Bound Data Sources"
+                                _idx = _rt_sys.find(_marker)
+                                if _idx >= 0:
+                                    return _rt_sys[_idx:][:6000]
+                                return _rt_sys[:6000]
+                            except Exception as _cat_err:
+                                logger.info(
+                                    "v3 Hermes catalog fetch failed (non-fatal): %s",
+                                    _cat_err,
+                                )
+                                return ""
+
                         from app.services.synexia.smart_retry import llm_driven_retry_ask_data
                         _retried = await llm_driven_retry_ask_data(
                             question=user_content,
@@ -11443,10 +11907,11 @@ async def add_message_stream(
                             call_llm_fn=_retry_llm_call,
                             execute_ask_data_fn=_retry_execute,
                             max_attempts=2,
+                            get_catalog_fn=_retry_get_catalog,
                         )
                     except Exception as _retry_err:
                         logger.warning(
-                            "v3 smart retry failed (non-fatal) for conv=%s: %s",
+                            "v3 Hermes smart retry failed (non-fatal) for conv=%s: %s",
                             conversation_id, _retry_err,
                         )
                         _retried = None
@@ -11454,9 +11919,11 @@ async def add_message_stream(
                         _smart_retry_budget[0] -= 1
                         result = _retried
                         logger.info(
-                            "v3 SMART RETRY: recovered %d rows for conv=%s (question=%s)",
+                            "v3 HERMES RE-PLAN: recovered %d rows for conv=%s "
+                            "(question=%s, catalog_used=%s)",
                             len(_retried.get("rows", [])), conversation_id,
                             _retried.get("retried_question", "")[:80],
+                            _retried.get("hermes_catalog_used", False),
                         )
 
                 # ── Report synthesis / deferred collection (data tools) ────

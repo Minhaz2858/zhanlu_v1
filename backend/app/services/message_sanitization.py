@@ -16,6 +16,7 @@ Zhanlu's message format.
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -129,6 +130,42 @@ def sanitize_messages_surrogates(messages: list[dict]) -> bool:
     return found
 
 
+def _try_python_literal_eval(raw: str) -> str | None:
+    """Repair single-quoted Python dict literals by using ast.literal_eval.
+
+    qwen3.6-27b emits tool_call args as Python-style dict literals:
+        'query': 'show me sales'
+        {'query': 'show me sales'}
+    Standard JSON parsers reject single quotes. ast.literal_eval handles
+    them, and we re-serialize as valid JSON.
+
+    Returns valid JSON string, or None if ast.literal_eval also fails
+    (or if the input is already valid JSON — caller should use json.loads
+    directly in that case).
+    """
+    if not raw:
+        return None
+    # If it's already valid JSON, don't touch it (fast path).
+    try:
+        json.loads(raw)
+        return None  # already valid; caller handles it
+    except (json.JSONDecodeError, TypeError):
+        pass
+    # Try ast.literal_eval. If the raw has no braces, wrap it.
+    candidate = raw.strip()
+    if not candidate.startswith("{"):
+        candidate = "{" + candidate
+    if not candidate.endswith("}"):
+        candidate = candidate + "}"
+    try:
+        parsed = ast.literal_eval(candidate)
+        if isinstance(parsed, dict):
+            return json.dumps(parsed, separators=(",", ":"), ensure_ascii=False)
+    except (ValueError, SyntaxError):
+        return None
+    return None
+
+
 def repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
     """Attempt to repair malformed tool_call argument JSON.
 
@@ -157,6 +194,17 @@ def repair_tool_call_arguments(raw_args: str, tool_name: str = "?") -> str:
         return reserialised
     except (json.JSONDecodeError, TypeError, ValueError):
         pass
+
+    # Repair pass 0.5: Python-style dict literals (single-quoted).
+    # qwen3.6-27b emits 'query': 'value' instead of {"query": "value"}.
+    # ast.literal_eval handles this; we re-serialize as valid JSON.
+    _py_repaired = _try_python_literal_eval(raw_stripped)
+    if _py_repaired is not None:
+        logger.warning(
+            "Repaired Python-literal tool_call arguments for %s (single-quoted -> JSON)",
+            tool_name,
+        )
+        return _py_repaired
 
     # Attempt common JSON repairs
     fixed = raw_stripped
@@ -223,6 +271,8 @@ def sanitize_messages(messages: list[dict]) -> bool:
     1. Surrogate sanitization — replace lone surrogates with U+FFFD.
     2. Tool_call argument repair — fix malformed JSON in tool_calls.
     3. Close interrupted tool sequences — append synthetic assistant turn.
+    4. Mid-list system message guard — demote any system message not at
+       index 0 to role=user (vLLM compatibility, 2026-08-25).
 
     Mutates ``messages`` in place. Returns True if any changes were made.
     """
@@ -255,6 +305,26 @@ def sanitize_messages(messages: list[dict]) -> bool:
     # Pass 3: close interrupted tool sequences
     if close_interrupted_tool_sequence(messages):
         changed = True
+
+    # Pass 4: demote mid-list system messages to user role.
+    # 2026-08-25: vLLM (qwen3.6-27b) rejects any system message not at
+    # index 0 with HTTP 400 "System message must be at the beginning."
+    # This is a defense-in-depth guard: even if a code path appends a
+    # system message mid-conversation, this pass catches it. DeepSeek
+    # API tolerates mid-list system messages, so demoting to user is
+    # backward-compatible (the content still reaches the LLM).
+    for idx, msg in enumerate(messages):
+        if not isinstance(msg, dict):
+            continue
+        if idx == 0:
+            continue  # index 0 system msg is always OK
+        if msg.get("role") == "system":
+            msg["role"] = "user"
+            changed = True
+            logger.info(
+                "Demoted mid-list system message at index %d to role=user (vLLM compat)",
+                idx,
+            )
 
     return changed
 

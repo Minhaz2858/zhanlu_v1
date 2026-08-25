@@ -1731,7 +1731,12 @@ def _build_overlay_meta(
         if p_rise is None:
             continue
         p_rise_gt_raw = p_info.get("p_rise_gt") or {}
-        p_rise_gt = {str(k): float(v) for k, v in p_rise_gt_raw.items() if v is not None}
+        # Defensive: p_rise_gt must be a {threshold -> P} dict. Some historical
+        # runs wrote a float here, which would crash the whole chart endpoint.
+        if not isinstance(p_rise_gt_raw, dict):
+            p_rise_gt = {}
+        else:
+            p_rise_gt = {str(k): float(v) for k, v in p_rise_gt_raw.items() if v is not None}
         probability_list.append(ProbabilityOverlayMeta(
             horizon=h_int,
             p_rise=float(p_rise),

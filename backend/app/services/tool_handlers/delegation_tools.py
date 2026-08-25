@@ -62,8 +62,14 @@ logger = logging.getLogger(__name__)
 # iterations remain — a slow warehouse query or a rambling sub-model must
 # never hold the user's turn hostage. On timeout we return whatever rows
 # were captured so far (with `truncated: True`).
+#
+# 2026-08-25: lowered from 90s → 60s per user request. A slow query must not
+# kill the SSE stream — partial rows + `truncated=True` is preferable to the
+# frontend's "Sorry, I hit an error" fallback firing after the data table
+# already rendered. The v3 stream loop's smart-retry path picks up from the
+# partial rows and either re-plans (Hermes) or synthesizes what's available.
 DATA_AGENT_BUDGET_SECONDS = float(
-    os.environ.get("DATA_AGENT_BUDGET_SECONDS", "90")
+    os.environ.get("DATA_AGENT_BUDGET_SECONDS", "60")
 )
 
 

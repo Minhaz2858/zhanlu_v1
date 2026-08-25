@@ -121,3 +121,33 @@ def test_topological_sort_detects_self_loop():
     """M5: raises ValueError on self-loop."""
     with pytest.raises(ValueError, match="cycle"):
         _topological_sort([MockNode(1, [1])])
+
+
+# ── Deck grounding: tool context carries execution_id ──
+
+def test_execute_tool_node_context_includes_execution_id():
+    """Tool nodes must surface ``execution_id`` so the artifact path can
+    ground a deck in the REAL query rows of that execution."""
+    from unittest.mock import AsyncMock
+    from app.services.synexia.capability_router import _execute_tool_node
+
+    execution = SimpleNamespace(
+        id="exec-9", conversation_id="conv-1",
+        app_id="app-1", agent_name="general_assistant",
+    )
+    node = SimpleNamespace(id="node-1", name="ask_data_agent", inputs={"query": "sales"})
+
+    with patch(
+        "app.services.agent_tools.execute_tool_with_retry", new_callable=AsyncMock
+    ) as mock_exec, patch(
+        "app.services.synexia.capability_router._record_observation"
+    ) as mock_record:
+        mock_exec.return_value = {"success": True, "response": "ok"}
+        mock_record.return_value = SimpleNamespace(success=True)
+
+        _execute_tool_node(db=None, execution=execution, node=node, user_id="user-1")
+
+    _, kwargs = mock_exec.call_args
+    ctx = kwargs["context"]
+    assert ctx["execution_id"] == "exec-9"
+    assert ctx["conversation_id"] == "conv-1"

@@ -20,6 +20,25 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def _legacy_renderer_flags(monkeypatch):
+    """Pin the PPT pipeline flags OFF for this module.
+
+    These tests exercise the LEGACY catalog renderer's offload contract
+    (``pptx_export.render`` must go through ``asyncio.to_thread``).  The
+    deployment env files now enable ``PPT_CREATE_ARTIFACT_PIPELINE_ENABLED``
+    and ``PPT_DECK_DATA_GROUNDING_ENABLED``, which would otherwise route the
+    pptx tests through the professional pipeline (``render_pptx_deck``) and
+    never call the legacy renderer.  The pipeline path's own offload contract
+    is covered by ``test_create_artifact_pipeline.py``.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "PPT_DECK_PLANNER_ENABLED", False)
+    monkeypatch.setattr(settings, "PPT_CREATE_ARTIFACT_PIPELINE_ENABLED", False)
+    monkeypatch.setattr(settings, "PPT_DECK_DATA_GROUNDING_ENABLED", False)
+
+
 def _fake_service():
     service = MagicMock()
     service.create_artifact.return_value = MagicMock(id="art-1")
