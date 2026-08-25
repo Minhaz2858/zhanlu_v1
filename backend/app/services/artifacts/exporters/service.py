@@ -635,17 +635,50 @@ class ExportService:
             route = route_deck(plan, user_message)
 
         if route == "sandbox":
-            # Design-heavy deck.  The DeckPlan already carries the cover /
-            # agenda / section-divider / kpi layouts, so the structured layout
-            # engine is a faithful deterministic fallback.  Full html2pptx
-            # sandbox rendering is delegated to the agent's html2pptx SKILL via
-            # agent_prompts guidance for interactive design-heavy requests.
-            logger.info(
-                "ExportService: deck routed to sandbox (type=%s); rendering "
-                "via layout engine as deterministic fallback",
-                plan.deck_type,
-            )
-            ctx.cover_art = True
+            # Design-heavy deck.  Try the HTML design path first if opted in;
+            # fall back to the structured layout engine (the original behavior)
+            # when the new path is disabled or fails.
+            if settings.HTML_DESIGN_RENDERER_ENABLED:
+                from app.services.artifacts.render_html_deck import (
+                    render_html_deck, RenderError, html_design_available,
+                )
+                if html_design_available():
+                    try:
+                        data = render_html_deck(plan, ctx)
+                        audit_report = {
+                            "status": "PASS",
+                            "summary": "html_design_renderer",
+                            "details": "rendered via Firefox image_fill pipeline",
+                        }
+                        logger.info(
+                            "ExportService: deck rendered via html_design (type=%s)",
+                            plan.deck_type,
+                        )
+                        return (
+                            data,
+                            "application/vnd.openxmlformats-"
+                            "officedocument.presentationml.presentation",
+                            "pptx", audit_report,
+                        )
+                    except RenderError as exc:
+                        logger.warning(
+                            "ExportService: html_design render failed, "
+                            "falling back to layout engine: %s", exc,
+                        )
+                else:
+                    logger.info(
+                        "ExportService: HTML_DESIGN_RENDERER_ENABLED but "
+                        "browser missing — using layout engine fallback"
+                    )
+            else:
+                # Original (pre-Phase-4) behavior: log and fall through.
+                logger.info(
+                    "ExportService: deck routed to sandbox (type=%s); "
+                    "HTML_DESIGN_RENDERER_ENABLED=False — using layout engine "
+                    "as deterministic fallback",
+                    plan.deck_type,
+                )
+                ctx.cover_art = True
 
         # Render via the shared dispatcher (audit + repair + polish owned there)
         # and capture its report so _render_and_store doesn't re-run the loop.
