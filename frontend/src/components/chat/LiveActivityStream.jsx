@@ -166,6 +166,79 @@ export function groupIntoBranches(rows) {
   return out;
 }
 
+// 2026-08-25: computeProgress() derives the ProgressBar state from the
+// event list. No new SSE events — everything is computed client-side.
+//
+// Returns:
+//   {
+//     status: 'idle' | 'running' | 'completed' | 'failed',
+//     totalEvents: number,
+//     completedEvents: number,
+//     currentPhase: string,
+//     estimatedRemainingMs: number,
+//     fillPct: number,  // 0-100
+//   }
+export function computeProgress(events) {
+  const list = Array.isArray(events) ? events : [];
+  if (list.length === 0) {
+    return {
+      status: 'idle',
+      totalEvents: 0,
+      completedEvents: 0,
+      currentPhase: '',
+      estimatedRemainingMs: 0,
+      fillPct: 0,
+    };
+  }
+
+  const completed = list.filter((e) => e && (e.status === 'done' || e.status === 'completed'));
+  const running = list.filter((e) => e && e.status === 'running');
+  const failed = list.filter((e) => e && e.status === 'failed');
+
+  let status = 'running';
+  if (failed.length > 0) status = 'failed';
+  else if (running.length === 0 && completed.length > 0) status = 'completed';
+  else if (running.length === 0) status = 'idle';
+
+  // Estimate remaining: average duration of completed events * running count
+  let estimatedRemainingMs = 0;
+  if (running.length > 0) {
+    const durations = completed
+      .map((e) => (typeof e.duration === 'number' ? e.duration : null))
+      .filter((d) => d != null && d > 0);
+    if (durations.length > 0) {
+      const avg = durations.reduce((s, d) => s + d, 0) / durations.length;
+      estimatedRemainingMs = Math.round(avg * running.length * 1000);
+    } else {
+      // Default 30s per running event
+      estimatedRemainingMs = running.length * 30_000;
+    }
+  }
+
+  // Current phase: most recent phase_enter event
+  let currentPhase = '';
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e && e.type && String(e.type).startsWith('phase_enter')) {
+      currentPhase = e.label_key || e.params?.label || e.params?.label_key || e.type;
+      break;
+    }
+  }
+
+  const totalEvents = list.length;
+  const completedEvents = completed.length;
+  const fillPct = totalEvents > 0 ? Math.round((completedEvents / totalEvents) * 100) : 0;
+
+  return {
+    status,
+    totalEvents,
+    completedEvents,
+    currentPhase,
+    estimatedRemainingMs,
+    fillPct,
+  };
+}
+
 function mergeEvents(events) {
   const out = [];
   const openStarted = []; // stack of tool row indices awaiting finish
