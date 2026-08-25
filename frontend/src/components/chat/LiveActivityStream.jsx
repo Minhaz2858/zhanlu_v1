@@ -281,6 +281,39 @@ export function computeCollapseStates(rows) {
   return out;
 }
 
+// 2026-08-25: collapsedChipSummary() — extract a single-line summary
+// for the CollapsedChip view. Examples:
+//   "✓ ask_data_agent · 131s · 12 rows"
+//   "✗ ask_data_agent · failed"
+//   "✓ Fathoming your request"
+export function collapsedChipSummary(ev) {
+  if (!ev || typeof ev !== 'object') return '';
+  const isFail = ev.status === 'failed';
+  const symbol = isFail ? '✗' : '✓';
+  const type = ev.type;
+  const params = ev.params || {};
+
+  // Try the most informative label first
+  let label = params.tool_label || params.agent_label || params.label || params.label_key || '';
+  if (!label && type.startsWith('phase_enter')) {
+    label = String(type).replace('phase_enter.', '');
+  }
+  if (!label) label = type;
+
+  const parts = [`${symbol} ${label}`];
+  const dur = params.duration;
+  if (typeof dur === 'number' && dur > 0) {
+    parts.push(`${Math.round(dur)}s`);
+  }
+  if (typeof params.row_count === 'number' && params.row_count > 0) {
+    parts.push(`${params.row_count} rows`);
+  }
+  if (isFail && !parts.some((p) => /fail/i.test(p))) {
+    parts.push('failed');
+  }
+  return parts.join(' · ');
+}
+
 function mergeEvents(events) {
   const out = [];
   const openStarted = []; // stack of tool row indices awaiting finish
