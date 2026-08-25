@@ -239,6 +239,48 @@ export function computeProgress(events) {
   };
 }
 
+// 2026-08-25: computeCollapseStates() — auto-collapse done events when
+// a newer event is running. When the turn ends (no running events),
+// all events expand back so the user can review.
+//
+// Returns a new array; does not mutate the input.
+//
+// Rule: a row is collapsed when
+//   - its status is 'done' or 'failed'
+//   - AND at least one NEWER row has status 'running'
+//
+// Manual overrides (manuallyExpanded) are layered on top by the
+// render layer.
+export function computeCollapseStates(rows) {
+  const out = Array.isArray(rows) ? rows.map((r) => ({ ...r })) : [];
+  const hasRunning = out.some((r) => r && r.status === 'running');
+  if (!hasRunning) {
+    for (const r of out) {
+      if (r && typeof r === 'object') r.collapsed = false;
+    }
+    return out;
+  }
+  // Find the index of the LAST running event
+  let lastRunningIdx = -1;
+  for (let i = out.length - 1; i >= 0; i--) {
+    if (out[i] && out[i].status === 'running') {
+      lastRunningIdx = i;
+      break;
+    }
+  }
+  // Collapse done/failed events that come BEFORE the last running event
+  for (let i = 0; i < out.length; i++) {
+    const r = out[i];
+    if (!r) continue;
+    if (i < lastRunningIdx && (r.status === 'done' || r.status === 'failed')) {
+      r.collapsed = true;
+    } else {
+      r.collapsed = false;
+    }
+  }
+  return out;
+}
+
 function mergeEvents(events) {
   const out = [];
   const openStarted = []; // stack of tool row indices awaiting finish
