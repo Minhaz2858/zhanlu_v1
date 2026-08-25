@@ -11750,6 +11750,27 @@ async def add_message_stream(
                 _le_tool = _push_live_event("tool_call_started", "tool_call_started", {"tool_label": desc})
                 if _le_tool:
                     yield _le_tool
+                # 2026-08-25: live-streaming spec — emit search_query_delta for search-style tools.
+                # Extracts the query from the tool args and simulates a typing effect
+                # so the UI can show the query being built character-by-character.
+                _SEARCH_TOOL_NAMES = {
+                    "web_search", "_web_search", "tavily_search",
+                    "ask_rag_research", "_ask_rag_research", "rag_research",
+                    "search_documents", "_search_documents",
+                }
+                if tn in _SEARCH_TOOL_NAMES:
+                    try:
+                        from app.services.agent_loop.streaming_helpers import _stream_typing_effect
+                        _q = (pc.get("args", {}).get("query")
+                              or pc.get("args", {}).get("question")
+                              or pc.get("args", {}).get("q")
+                              or "")
+                        if _q:
+                            _tc_id = f"tc-{_step_counter[0]}"
+                            async for _typing_frame in _stream_typing_effect(str(_q), _tc_id):
+                                yield _typing_frame
+                    except Exception as _typing_err:
+                        logger.debug("typing effect failed (non-fatal): %s", _typing_err)
                 # Sub-agent delegation badge: surfaces what the parent chat
                 # loop asked the sub-agent to do (e.g. ask_data_agent).
                 if tn.startswith("ask_"):
