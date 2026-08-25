@@ -57,6 +57,52 @@ function formatTemplate(template, params = {}) {
  * (inline preview) to the matching tool_call_finished row so the preview
  * toggle can render below the same row.
  */
+
+// 2026-08-25: helper that pairs tool_call_started with its parent
+// subagent_invoked. The backend emits subagent_id on the invoked
+// event and parent_subagent_id on the tool event. This helper sets
+// the same parent_subagent_id on the tool row by matching the open
+// subagent's `target` to the tool's `tool_label`.
+//
+// This is exported so the rendering layer can read the field directly
+// (parent_subagent_id) without re-running the matching logic.
+export function attachSubagentParent(rows) {
+  const out = Array.isArray(rows) ? [...rows] : [];
+  const openSubagents = []; // stack of {id, target}
+  for (const row of out) {
+    if (!row || typeof row !== 'object') continue;
+    if (row.type === 'subagent_invoked') {
+      openSubagents.push({
+        id: row.params?.subagent_id,
+        target: row.params?.target,
+      });
+    } else if (row.type === 'subagent_returned') {
+      // Pop matching subagent (most recent)
+      const target = row.params?.agent_label;
+      for (let i = openSubagents.length - 1; i >= 0; i--) {
+        if (openSubagents[i].target === target) {
+          openSubagents.splice(i, 1);
+          break;
+        }
+      }
+    } else if (
+      row.type === 'tool_call_started' ||
+      row.type === 'tool_call_finished' ||
+      row.type === 'tool_call_failed'
+    ) {
+      const toolLabel = row.params?.tool_label;
+      // Find the most recent open subagent with matching target
+      for (let i = openSubagents.length - 1; i >= 0; i--) {
+        if (openSubagents[i].target === toolLabel && openSubagents[i].id) {
+          row.parent_subagent_id = openSubagents[i].id;
+          break;
+        }
+      }
+    }
+  }
+  return out;
+}
+
 function mergeEvents(events) {
   const out = [];
   const openStarted = []; // stack of tool row indices awaiting finish
