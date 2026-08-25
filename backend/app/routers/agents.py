@@ -9459,6 +9459,41 @@ async def add_message_stream(
     system_prompt = get_system_prompt(agent_name, agent_app, user_message=user_content)
     agent_app_id = agent_app.id if agent_app else agent_name
 
+    # ── 2026-08-25: Project Knowledge Cache -- Qwen fast-path ─────────
+    # If the project's knowledge cache hits AND the model is Qwen, inject
+    # a structured cache block at the top of the system prompt. The block
+    # tells the LLM the answer is already in context, so it can skip
+    # schema-linker / NL2SQL for product / entity / metric questions.
+    # Behaviour: off by default. Fails open -- never raises.
+    try:
+        from app.services.project_knowledge.fast_path import try_fast_path, build_cached_system_block
+        from app.config import settings as _settings
+        _project_id_for_cache = (
+            agent_app.project_id if agent_app and getattr(agent_app, "project_id", None)
+            else None
+        )
+        if (
+            _project_id_for_cache
+            and _settings.ECISCO_BI_KG_QWEN_FAST_PATH
+            and _settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED
+        ):
+            _cached = try_fast_path(
+                db,
+                _project_id_for_cache,
+                user_content,
+                model_id=locals().get("resolved_model_id") or locals().get("llm_model_id") or None,
+            )
+            if _cached is not None:
+                system_prompt = (
+                    system_prompt + "\n\n" + build_cached_system_block(_cached)
+                )
+                logger.info(
+                    "project_knowledge fast-path hit: project=%s kind=%s confidence=%.2f",
+                    _project_id_for_cache, _cached.kind, _cached.confidence,
+                )
+    except Exception as _fp_err:
+        logger.debug("project_knowledge fast-path skipped (non-fatal): %s", _fp_err)
+
     # Resolve the chat session that owns this conversation so tools like
     # ``_create_automation`` can link the new task to the chat. The LLM
     # cannot pass chat_session_id in its tool args (it doesn't know it).
@@ -11936,6 +11971,13 @@ async def add_message_stream(
             _tool_step_indices: list[int] = []
             # Count parallel calls per tool for index suffix
             _tool_counts: dict[str, int] = {}
+            # 2026-08-25: stack of open subagents (by id). Used to set
+            # parent_subagent_id on the tool_call_started event so the
+            # frontend can nest tool rows under their subagent parent.
+            # Each entry is {"id": str, "target": str} — id is a UUID-like
+            # string the frontend uses as a stable React key.
+            _subagent_id_stack: list[dict] = []
+            _subagent_seq: int = 0
             for pc in parsed_calls:
                 _tool_counts[pc["tool_name"]] = _tool_counts.get(pc["tool_name"], 0) + 1
             _tool_run_index: dict[str, int] = {}
@@ -11953,6 +11995,32 @@ async def add_message_stream(
                 yield _emit_activity_step(_step_counter[0], desc, "running", tool_name=tn, command=cmd)
                 _step_start_times[_step_counter[0]] = time.monotonic()
                 _le_tool = _push_live_event("tool_call_started", "tool_call_started", {"tool_label": desc})
+                # 2026-08-25: if there's an open subagent with matching target,
+                # set parent_subagent_id so the frontend nests this tool row
+                # under the subagent row (eliminates the duplicate-row noise).
+                _parent_sub_id = None
+                for _sa in reversed(_subagent_id_stack):
+                    if _sa["target"] == tn:
+                        _parent_sub_id = _sa["id"]
+                        break
+                if _parent_sub_id:
+                    # Re-push with the parent field. _push_live_event returns
+                    # a frame string we can't mutate, so we append the field
+                    # via a new event variant: "tool_call_started_parent".
+                    # Actually simpler: include it in the params dict so it
+                    # travels with the event.
+                    pass  # parent_subagent_id is now added below
+                if _le_tool and _parent_sub_id:
+                    # Inject the parent_subagent_id into the existing frame
+                    # by re-serializing with the extra field. This is cheap
+                    # and avoids a duplicate event.
+                    _le_tool = _le_tool.rstrip("\n\n").rstrip()
+                    try:
+                        _frame = json.loads(_le_tool[len("data: "):])
+                        _frame.setdefault("params", {})["parent_subagent_id"] = _parent_sub_id
+                        _le_tool = f"data: {json.dumps(_frame)}\n\n"
+                    except Exception:
+                        pass
                 if _le_tool:
                     yield _le_tool
                 # 2026-08-25: live-streaming spec — emit search_query_delta for search-style tools.
@@ -11979,12 +12047,17 @@ async def add_message_stream(
                 # Sub-agent delegation badge: surfaces what the parent chat
                 # loop asked the sub-agent to do (e.g. ask_data_agent).
                 if tn.startswith("ask_"):
+                    _subagent_seq += 1
+                    _subagent_id = f"sub_{_subagent_seq}"
                     _le_sub_inv = _push_live_event(
                         "subagent_invoked", "subagent_invoked",
-                        {"agent_label": desc, "target": tn},
+                        {"agent_label": desc, "target": tn, "subagent_id": _subagent_id},
                     )
                     if _le_sub_inv:
                         yield _le_sub_inv
+                    # Push to the open-subagent stack so the next
+                    # tool_call_started can pick this up as its parent.
+                    _subagent_id_stack.append({"id": _subagent_id, "target": tn})
                 _activity_steps.append({
                     "number": _step_counter[0],
                     "description": desc,
@@ -12719,6 +12792,11 @@ async def add_message_stream(
                         )
                         if _le_sub_ret:
                             yield _le_sub_ret
+                        # 2026-08-25: pop the open subagent stack — the
+                        # delegation is complete. This matches the
+                        # subagent_invoked that pushed earlier.
+                        if _subagent_id_stack and _subagent_id_stack[-1]["target"] == tn:
+                            _subagent_id_stack.pop()
                     # Inline data peek attached to the matching tool row.
                     # Only fires when the tool actually returned rows, so the
                     # preview pane never shows up on non-data tools.
