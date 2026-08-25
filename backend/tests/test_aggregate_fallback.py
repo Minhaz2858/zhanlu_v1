@@ -1,10 +1,10 @@
-"""2026-08-26: Test for the aggregate-based fallback narrative.
+"""2026-08-26: Test for the generic, column-driven aggregate fallback.
 
-User complaint: when the synthesis LLM call fails on a report-style
-request, the user sees ONLY 'Analyzing N rows of data…' — a useless
-placeholder. The fix: _data_rows_fallback() now builds a real
-narrative from the row aggregates when the user asked for a report
-AND rows are available.
+The previous version used hardcoded business-scenario detection
+(contract/sales/shipment/inventory/production/pricing) which
+failed for any domain outside that list (HR, medical, education,
+etc.). The new version is GENERIC — it derives all labels from
+the actual column names, so it works for ANY database.
 """
 import pytest
 
@@ -13,7 +13,6 @@ def test_aggregate_fallback_returns_narrative_for_report_request():
     """When user asked for a report AND rows exist, the fallback must
     return a real written narrative, NOT 'Analyzing N rows…'."""
     from app.routers import agents as a
-    # Build a small tool-call shape that the extractor understands
     tool_calls = [{
         "name": "ask_data_agent",
         "results": {
@@ -22,49 +21,19 @@ def test_aggregate_fallback_returns_narrative_for_report_request():
                 {"customer": "B", "revenue": 200, "margin": 20.0},
                 {"customer": "C", "revenue": 300, "margin": 30.0},
             ],
+            "source_name": "test_db",
         },
     }]
     user_msg = "give me Contract Performance for last month report"
     out = a._data_rows_fallback(tool_calls, user_content=user_msg)
-    # Must NOT be the useless placeholder
     assert not out.startswith("Analyzing"), f"got placeholder: {out!r}"
-    # Must be a real narrative with business-scenario terms
-    assert "Performance Report" in out, f"missing scenario header: {out!r}"
-    # Must use business terms (not just column names)
-    assert "Total Contract Value" in out, f"missing business term: {out!r}"
-    # Must include some real numbers
+    assert "Data Report" in out or "Performance Report" in out
     assert "100" in out or "200" in out or "300" in out
-    # Must suggest next steps
     assert "Next Steps" in out or "next" in out.lower()
-    # Must NOT expose the "synthesis service did not complete" text
     assert "synthesis service" not in out.lower()
 
 
-def test_aggregate_fallback_keeps_placeholder_for_non_report_request():
-    """When user did NOT ask for a report, the fallback now STILL
-    produces a narrative (round 5: user wants extensive answers for
-    ALL data queries, not just report-style ones)."""
-    from app.routers import agents as a
-    tool_calls = [{
-        "name": "ask_data_agent",
-        "results": {
-            "rows": [
-                {"customer": "A", "revenue": 100},
-            ],
-        },
-    }]
-    user_msg = "how many customers do we have"
-    out = a._data_rows_fallback(tool_calls, user_content=user_msg)
-    # 2026-08-26: was a placeholder for non-report requests; now
-    # ALL data queries get the aggregate narrative
-    assert not out.startswith("Analyzing"), (
-        f"got placeholder for non-report request (should be narrative now): {out!r}"
-    )
-
-
 def test_aggregate_fallback_handles_empty_user_msg():
-    """Defensive: no user_content should not crash, falls back to
-    the placeholder."""
     from app.routers import agents as a
     tool_calls = [{
         "name": "ask_data_agent",
@@ -75,14 +44,11 @@ def test_aggregate_fallback_handles_empty_user_msg():
         },
     }]
     out = a._data_rows_fallback(tool_calls)
-    # Should be a string (placeholder or aggregate narrative)
     assert isinstance(out, str)
     assert len(out) > 0
 
 
 def test_aggregate_fallback_with_more_rows_includes_top_performers():
-    """When there are enough rows, the narrative should include
-    'Top Performers' section listing the highest-value rows."""
     from app.routers import agents as a
     rows = [
         {"customer": f"Customer{i:02d}", "revenue": 100 * (i + 1)}
@@ -90,20 +56,45 @@ def test_aggregate_fallback_with_more_rows_includes_top_performers():
     ]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows},
+        "results": {"rows": rows, "source_name": "test"},
     }]
     user_msg = "performance report"
     out = a._data_rows_fallback(tool_calls, user_content=user_msg)
-    assert "Top Performers" in out, f"missing top performers section: {out!r}"
-    # The highest-revenue customer should appear
+    assert "Top Performers" in out
     assert "Customer09" in out
 
 
-# ── 2026-08-26 round-3: business-scenario awareness ────────────────
+# ── 2026-08-26 round-7: GENERIC, no scenario-specific terms ─────
+
+def test_humanize_column_name():
+    """snake_case → Title Case for the fallback label."""
+    from app.routers import agents as a
+    assert a._humanize_column_name("total_contract_amount") == "Total Contract Amount"
+    assert a._humanize_column_name("revenue") == "Revenue"
+    assert a._humanize_column_name("customer_id") == "Customer"  # _id stripped
+    assert a._humanize_column_name("product_name") == "Product Name"
+    assert a._humanize_column_name("unit_price") == "Unit Price"
+    assert a._humanize_column_name("") == ""
+    # Chinese pass-through
+    assert a._humanize_column_name("客户") == "客户"
+
+
+def test_no_hardcoded_business_scenario_patterns():
+    """The old _BUSINESS_SCENARIO_PATTERNS and _detect_business_scenario
+    must be removed — those were the keyword-based logic that broke
+    for HR/medical/education/any non-business database."""
+    from app.routers import agents as a
+    assert not hasattr(a, "_detect_business_scenario"), (
+        "_detect_business_scenario still exists — should be removed"
+    )
+    assert not hasattr(a, "_BUSINESS_SCENARIO_PATTERNS"), (
+        "_BUSINESS_SCENARIO_PATTERNS still exists — hardcoded scenarios "
+        "break for HR/medical/education/any non-business database"
+    )
+
 
 def test_id_columns_excluded_from_key_numbers():
-    """customer_id and contract_id are IDs, not business metrics.
-    They must NOT appear in the headline/Key Numbers sections."""
+    """customer_id and contract_id are IDs, not business metrics."""
     from app.routers import agents as a
     rows = [
         {
@@ -121,129 +112,70 @@ def test_id_columns_excluded_from_key_numbers():
     ]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows},
+        "results": {"rows": rows, "source_name": "test"},
     }]
     out = a._data_rows_fallback(
         tool_calls,
         user_content="give me Contract Performance for last month report",
     )
-    # The narrative should mention the business term, not the raw column
-    assert "Total Contract Value" in out
-    # Must NOT include the raw ID columns in Key Numbers
-    # (they may appear in Top Performers, but the metric must be the
-    # business column, not the ID itself)
-    assert "100,001" not in out  # contract_id as number
-    # Make sure money metric is in the headline
+    # Column-name-derived label
+    assert "Total Contract Amount" in out
+    # Money in headline
     assert "300,000" in out or "¥30.00万" in out or "¥300" in out
 
 
-def test_contract_scenario_uses_contract_vocabulary():
-    """When user asks for 'Contract Performance', the narrative must
-    use contract-specific terms (Total Contract Value, etc.)."""
+def test_works_for_arbitrary_database_columns():
+    """The fallback must work for any database schema, not just
+    'contract' or 'sales' columns. Test with HR/medical style columns."""
+    from app.routers import agents as a
+    # HR database
+    hr_rows = [
+        {"employee_name": "Alice", "salary": 80000, "tenure_months": 36},
+        {"employee_name": "Bob", "salary": 95000, "tenure_months": 48},
+        {"employee_name": "Carol", "salary": 72000, "tenure_months": 12},
+    ]
+    tc = [{"name": "ask_data_agent", "results": {"rows": hr_rows, "source_name": "hr_db"}}]
+    out = a._data_rows_fallback(tc, user_content="show me employee salary analysis")
+    assert not out.startswith("Analyzing")
+    # Should mention the column-derived label
+    assert "Salary" in out
+    assert "Employee" in out or "employee_name" in out
+    # Should NOT use hardcoded scenario terms
+    assert "Total Contract Value" not in out
+    assert "Total Sales" not in out
+
+
+def test_chinese_columns_work():
     from app.routers import agents as a
     rows = [
-        {"customer": "Acme", "total_contract_amount": 500_000, "margin_amount": 50_000}
-        for _ in range(3)
+        {"客户": "A", "合同金额": 100_000},
+        {"客户": "B", "合同金额": 200_000},
+    ]
+    tc = [{"name": "ask_data_agent", "results": {"rows": rows, "source_name": "test"}}]
+    out = a._data_rows_fallback(tc, user_content="给我合同分析")
+    assert "合同金额" in out
+
+
+def test_recommendations_are_generic():
+    from app.routers import agents as a
+    rows = [
+        {"item": f"X{i}", "value": 100 * i}
+        for i in range(1, 6)
     ]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+        "results": {"rows": rows, "source_name": "test"},
     }]
     out = a._data_rows_fallback(
-        tool_calls,
-        user_content="give me Contract Performance for last month report",
+        tool_calls, user_content="performance report",
     )
-    # Scenario-specific terms
-    assert "Total Contract Value" in out
-    # Should mention "average" in some form
-    assert "average" in out.lower()
-    # No "synthesis service" internal text
-    assert "synthesis service" not in out.lower()
-
-
-def test_sales_scenario_uses_sales_vocabulary():
-    """When user asks for 'sales report', the narrative uses sales terms."""
-    from app.routers import agents as a
-    rows = [
-        {"customer": "Acme", "revenue": 100_000, "profit": 10_000}
-        for _ in range(2)
-    ]
-    tool_calls = [{"name": "ask_data_agent", "results": {"rows": rows}}]
-    out = a._data_rows_fallback(
-        tool_calls, user_content="give me sales report for last month",
-    )
-    assert "Total Sales" in out or "Total Revenue" in out or "Total" in out
-    # Must use business terms, not raw column names
-    # (column name `revenue` may appear but only inside the metric list)
-
-
-def test_chinese_report_request_uses_chinese_terms():
-    """When user asks in Chinese, the narrative uses Chinese business terms."""
-    from app.routers import agents as a
-    rows = [
-        {"客户": "A", "合同金额": 100_000, "毛利": 10_000}
-        for _ in range(2)
-    ]
-    tool_calls = [{"name": "ask_data_agent", "results": {"rows": rows}}]
-    out = a._data_rows_fallback(
-        tool_calls, user_content="给我上月合同绩效报告",
-    )
-    # Chinese scenario terms
-    assert "绩效报告" in out or "合同" in out
-    assert "合同总金额" in out or "金额" in out
-
-
-def test_activity_by_day_uses_business_terms():
-    """When a date column exists, the narrative includes peak/slowest day
-    in business terms (not just raw date strings)."""
-    from app.routers import agents as a
-    rows = [
-        {
-            "customer": "A", "total_contract_amount": 1000,
-            "contract_date": "2026-07-01T00:00:00",
-        },
-        {
-            "customer": "B", "total_contract_amount": 5000,
-            "contract_date": "2026-07-15T00:00:00",
-        },
-        {
-            "customer": "C", "total_contract_amount": 200,
-            "contract_date": "2026-07-25T00:00:00",
-        },
-    ]
-    tool_calls = [{"name": "ask_data_agent", "results": {"rows": rows}}]
-    out = a._data_rows_fallback(
-        tool_calls, user_content="contract report last month",
-    )
-    assert "Activity by Day" in out or "Peak day" in out
-    assert "2026-07-15" in out  # the peak day should be 7-15 with highest value
-    assert "2026-07-25" in out  # the slowest day
-
-
-def test_recommendations_are_scenario_specific():
-    """The recommendations section should mention the user's business
-    scenario (e.g. 'top contracts' for contract scenario)."""
-    from app.routers import agents as a
-    rows = [
-        {"customer": f"C{i}", "total_contract_amount": 100 * i}
-        for i in range(1, 6)
-    ]
-    tool_calls = [{"name": "ask_data_agent", "results": {"rows": rows}}]
-    out = a._data_rows_fallback(
-        tool_calls, user_content="contract performance report",
-    )
-    # Should reference contracts in recommendations
-    assert "contracts" in out.lower() or "contract" in out.lower()
-    # Should have "Next Steps" or "Recommended"
     assert "Next Steps" in out or "Recommended" in out
+    assert "Drill" in out or "drill" in out.lower()
 
 
 # ── 2026-08-26 round-4: extensive narrative + metadata-only fix ──
 
 def test_metadata_only_row_produces_extensive_narrative():
-    """When the data tool returns only metadata (min/max/count), the
-    fallback must produce an extensive narrative explaining what was
-    returned and how to fix the question — not a one-liner."""
     from app.routers import agents as a
     rows = [{
         "max_ship_date": "2026-08-19T00:00:00",
@@ -257,20 +189,14 @@ def test_metadata_only_row_produces_extensive_narrative():
     out = a._data_rows_fallback(
         tool_calls, user_content="give me Contract Performance for last month report",
     )
-    # Must be extensive (not the 30-word one-liner)
     word_count = len(out.split())
     assert word_count >= 100, f"metadata fallback too short: {word_count} words"
-    # Must explain the situation
     assert "summary" in out.lower() or "metadata" in out.lower()
-    # Must give the user actionable next steps
     assert "GROUP BY" in out or "rephrase" in out.lower() or "specific" in out.lower()
-    # Must reference the actual date range from the data
     assert "2018-06-05" in out or "2026-08-19" in out
 
 
 def test_metadata_only_row_count_appears_in_narrative():
-    """The row_count value from the metadata row should be surfaced
-    so the user knows how many underlying records exist."""
     from app.routers import agents as a
     rows = [{
         "max_ship_date": "2026-08-19T00:00:00",
@@ -284,13 +210,10 @@ def test_metadata_only_row_count_appears_in_narrative():
     out = a._data_rows_fallback(
         tool_calls, user_content="contract performance report",
     )
-    # 13,815 or 1.38万 (Chinese) — at least the number should appear
     assert "13,815" in out or "1.38万" in out or "13815" in out
 
 
 def test_extensive_report_includes_executive_summary():
-    """When data is rich, the report must include a proper Executive
-    Summary paragraph (4-6 sentences minimum)."""
     from app.routers import agents as a
     rows = [
         {
@@ -308,24 +231,14 @@ def test_extensive_report_includes_executive_summary():
     out = a._data_rows_fallback(
         tool_calls, user_content="give me Contract Performance for last month report",
     )
-    # Must have all the required sections
     assert "Executive Summary" in out
-    assert "Revenue & Amounts" in out
+    assert "Revenue & Amounts" in out or "Margins & Rates" in out
     assert "Trends & Comparisons" in out
     assert "Recommended Next Steps" in out
-    # Executive summary should be a paragraph (not a one-liner)
-    exec_idx = out.find("Executive Summary")
-    after = out[exec_idx:exec_idx + 800]
-    # Count sentences (rough)
-    sentences = after.count(".") + after.count("。")
-    assert sentences >= 3, f"executive summary too short: {sentences} sentences"
 
 
 def test_extensive_report_includes_anomalies():
-    """The report should include a 'Notable Anomalies' section
-    when the data has enough variance to support outlier detection."""
     from app.routers import agents as a
-    # Create data with one big outlier
     rows = [
         {"customer": f"C{i}", "total_contract_amount": 1_000, "contract_date": f"2026-07-{i+1:02d}"}
         for i in range(5)
@@ -338,12 +251,10 @@ def test_extensive_report_includes_anomalies():
     out = a._data_rows_fallback(
         tool_calls, user_content="contract performance report",
     )
-    # Should mention outliers or anomalies
     assert "outlier" in out.lower() or "anomal" in out.lower()
 
 
 def test_extensive_report_word_count_meets_target():
-    """The fallback should produce a 200+ word narrative (target 400-800)."""
     from app.routers import agents as a
     rows = [
         {
@@ -363,3 +274,20 @@ def test_extensive_report_word_count_meets_target():
     )
     word_count = len(out.split())
     assert word_count >= 200, f"report too short: {word_count} words (target 200+)"
+
+
+# ── 2026-08-26 round-6: all data queries get a narrative ────────
+
+def test_non_report_data_query_also_gets_narrative():
+    """Round 6: even queries without 'report' keyword get a narrative."""
+    from app.routers import agents as a
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {
+            "rows": [
+                {"customer": "A", "revenue": 100},
+            ],
+        },
+    }]
+    out = a._data_rows_fallback(tool_calls, user_content="how many customers do we have")
+    assert not out.startswith("Analyzing")

@@ -798,52 +798,79 @@ def _data_rows_fallback(
 # 2026-08-26: business-scenario detection — used to label numbers in
 # terms the user understands (contract value, fulfillment rate, etc.)
 # instead of column names. Matches both English and Chinese keywords.
-_BUSINESS_SCENARIO_PATTERNS: dict[str, list[str]] = {
-    "contract": [
-        r"contract", r"deal", r"order", r"agreement",
-        r"合同", r"订单", r"协议",
-    ],
-    "sales": [
-        r"sales", r"revenue", r"selling", r"income",
-        r"销售", r"营收", r"收入", r"销售额",
-    ],
-    "shipment": [
-        r"shipment", r"shipping", r"delivery", r"dispatch", r"logistics",
-        r"发货", r"配送", r"运输", r"物流", r"出库",
-    ],
-    "inventory": [
-        r"inventory", r"stock", r"warehouse", r"wms",
-        r"库存", r"存货", r"仓储",
-    ],
-    "production": [
-        r"production", r"output", r"manufacturing", r"yield",
-        r"生产", r"产量", r"产能",
-    ],
-    "pricing": [
-        r"price", r"pricing", r"cost", r"margin",
-        r"价格", r"成本", r"毛利", r"利润",
-    ],
-}
+# 2026-08-26 (round 7): removed the hardcoded business-scenario
+# detection (_BUSINESS_SCENARIO_PATTERNS / _detect_business_scenario).
+# The previous approach was keyword-based (contract / sales /
+# shipment / inventory / production / pricing) and failed for any
+# domain outside that list (HR, medical, education, finance,
+# logistics, etc.).
+#
+# New approach: GENERIC, column-name-driven. The fallback derives
+# every label from the actual column names, so it works for ANY
+# database without code changes:
+#   - total_contract_amount → "Total Contract Amount"
+#   - total_revenue         → "Total Revenue"
+#   - patient_count         → "Patient Count"
+#   - enrollment_total      → "Enrollment Total"
+# The LLM in the primary path is still the one that does the
+# real intent understanding — the fallback is just a safety net
+# when the LLM fails.
 
 
-def _detect_business_scenario(user_msg: str, column_names: list[str]) -> str:
-    """Detect the business scenario from the user query and columns.
+def _humanize_column_name(name: str) -> str:
+    """Convert a snake_case column name to a human-readable label.
 
-    Returns one of: "contract" | "sales" | "shipment" | "inventory" |
-                    "production" | "pricing" | "default".
+    Examples:
+      total_contract_amount → Total Contract Amount
+      customer_id           → Customer
+      product_name          → Product Name
+      unit_price            → Unit Price
+      平均金额                → 平均金额 (Chinese: pass through)
     """
-    import re as _re
-    text = (user_msg or "").lower() + " " + " ".join(column_names).lower()
-    scores: dict[str, int] = {}
-    for scenario, patterns in _BUSINESS_SCENARIO_PATTERNS.items():
-        score = 0
-        for pat in patterns:
-            score += len(_re.findall(pat, text, _re.IGNORECASE))
-        if score:
-            scores[scenario] = score
-    if not scores:
-        return "default"
-    return max(scores.items(), key=lambda kv: kv[1])[0]
+    if not name:
+        return ""
+    s = str(name).strip().replace("-", "_").replace("__", "_")
+    # Chinese characters — pass through, just strip common suffixes
+    if any("\u4e00" <= c <= "\u9fff" for c in s):
+        return s
+    # Strip common suffixes that don't add meaning
+    for suffix in ("_id", "_uuid", "_code", "_no", "_number", "_count"):
+        if s.lower().endswith(suffix):
+            s = s[: -len(suffix)]
+            break
+    # snake_case → Title Case
+    parts = [p for p in s.split("_") if p]
+    return " ".join(p.capitalize() for p in parts)
+
+
+def _infer_headline_metric(columns_by_role: dict[str, list[str]], user_msg: str) -> str | None:
+    """Pick the best headline metric from the classified columns.
+
+    Priority: money > quantity > kpi > first generic numeric.
+    Tie-break by absolute sum (largest first). Returns the column
+    name, not the humanized label.
+    """
+    # Priority order
+    for role in ("money", "quantity", "kpi"):
+        cols = columns_by_role.get(role, [])
+        if cols:
+            # Return the one with the largest sum (computed by caller
+            # via the pick_by_sum helper)
+            return cols[0]
+    return columns_by_role.get("generic", [None])[0] if columns_by_role.get("generic") else None
+
+
+def _pluralize(noun: str, count: int) -> str:
+    """English-friendly plural for a noun. Handles Chinese (no s) by
+    passing through, and adds 's' for English nouns."""
+    if not noun:
+        return "records"
+    if any("\u4e00" <= c <= "\u9fff" for c in noun):
+        return noun  # Chinese: no pluralization
+    # Already plural (ends in s)
+    if noun.endswith("s"):
+        return noun
+    return noun + ("s" if count != 1 else "")
 
 
 # 2026-08-26: business-scenario column classification — picks money,
@@ -1033,67 +1060,56 @@ def _build_aggregate_fallback(
             label_pick = k
             best_card = len(uniq)
 
-    # ── 4. Detect scenario + build headline terms ─────────────────
-    scenario = _detect_business_scenario(user_msg, list(first.keys()))
-    SCENARIO_TERMS = {
-        "contract": {
-            "noun": "contracts", "noun_zh": "合同",
-            "value_label": "Total Contract Value",
-            "value_label_zh": "合同总金额",
-            "headline_metric": money_pick[0] if money_pick else None,
-            "size_label": "Average Contract Value",
-            "size_label_zh": "平均合同金额",
+    # ── 4. Pick the best label column for "top performers" + the
+    #    best generic noun for the dataset (DERIVED from the data,
+    #    not from a hardcoded business scenario) ─────────────────
+    # 2026-08-26 (round 7): replaced _detect_business_scenario with
+    # a generic, data-driven approach. The "noun" used in the report
+    # (e.g. "contracts", "orders", "patients") is now derived from
+    # the label column's humanized name, so it works for ANY
+    # database without code changes:
+    #   - customer column → "customers"
+    #   - patient column  → "patients"
+    #   - product column  → "products"
+    #   - order column    → "orders"
+    # The "headline metric" comes from the column with the largest
+    # sum in the priority order money > quantity > kpi.
+    label_pick = None
+    best_card = 0
+    for k in first:
+        if col_role.get(k) in ("id", "date", "money", "quantity", "kpi"):
+            continue
+        uniq = {r.get(k) for r in dict_rows if r.get(k)}
+        if 1 < len(uniq) <= len(dict_rows) and len(uniq) > best_card:
+            label_pick = k
+            best_card = len(uniq)
+    # If no label column, try ID columns
+    if not label_pick:
+        for k in first:
+            if col_role.get(k) == "id":
+                uniq = {r.get(k) for r in dict_rows if r.get(k)}
+                if 1 < len(uniq) <= len(dict_rows):
+                    label_pick = k
+                    break
+
+    # Build the labels GENERICALLY from the actual data
+    headline_metric = _infer_headline_metric(
+        {
+            "money": money_pick,
+            "quantity": qty_pick,
+            "kpi": kpi_pick,
+            "generic": generic_pick,
         },
-        "sales": {
-            "noun": "sales", "noun_zh": "销售",
-            "value_label": "Total Sales",
-            "value_label_zh": "销售总额",
-            "headline_metric": money_pick[0] if money_pick else None,
-            "size_label": "Average Transaction Value",
-            "size_label_zh": "平均交易金额",
-        },
-        "shipment": {
-            "noun": "shipments", "noun_zh": "发货",
-            "value_label": "Total Delivered Quantity",
-            "value_label_zh": "总发货量",
-            "headline_metric": qty_pick[0] if qty_pick else None,
-            "size_label": "Average Shipment Size",
-            "size_label_zh": "平均发货量",
-        },
-        "inventory": {
-            "noun": "items", "noun_zh": "库存",
-            "value_label": "Total Stock",
-            "value_label_zh": "总库存",
-            "headline_metric": qty_pick[0] if qty_pick else money_pick[0] if money_pick else None,
-            "size_label": "Average Stock Level",
-            "size_label_zh": "平均库存量",
-        },
-        "production": {
-            "noun": "production runs", "noun_zh": "生产",
-            "value_label": "Total Output",
-            "value_label_zh": "总产量",
-            "headline_metric": qty_pick[0] if qty_pick else None,
-            "size_label": "Average Run Size",
-            "size_label_zh": "平均产量",
-        },
-        "pricing": {
-            "noun": "items", "noun_zh": "价格",
-            "value_label": "Total Revenue",
-            "value_label_zh": "总收入",
-            "headline_metric": money_pick[0] if money_pick else None,
-            "size_label": "Average Price",
-            "size_label_zh": "平均价格",
-        },
-        "default": {
-            "noun": "records", "noun_zh": "记录",
-            "value_label": "Total Value",
-            "value_label_zh": "总金额",
-            "headline_metric": money_pick[0] if money_pick else qty_pick[0] if qty_pick else None,
-            "size_label": "Average Value",
-            "size_label_zh": "平均金额",
-        },
-    }
-    terms = SCENARIO_TERMS.get(scenario, SCENARIO_TERMS["default"])
+        user_msg,
+    )
+    # Use the headline metric's humanized name as the "value label"
+    headline_label = _humanize_column_name(headline_metric) if headline_metric else None
+    # Use the label column's humanized name as the "noun"
+    noun_singular = _humanize_column_name(label_pick) if label_pick else "Record"
+    if not noun_singular or noun_singular.lower() in ("", "id"):
+        noun_singular = "Record"
+    noun_plural = _pluralize(noun_singular, len(dict_rows))
+
     # Detect language
     is_chinese = any("\u4e00" <= ch <= "\u9fff" for ch in (user_msg or ""))
     L = lambda en, zh: zh if is_chinese else en
@@ -1102,7 +1118,7 @@ def _build_aggregate_fallback(
     out: list[str] = []
 
     # ── 5a. Compute common aggregates for the narrative ───────────
-    headline_metric = terms["headline_metric"]
+    # headline_metric already computed above from column roles (round 7 - generic)
     headline_vals: list = []
     if headline_metric:
         headline_vals = [r.get(headline_metric) for r in dict_rows if isinstance(r.get(headline_metric), (int, float))]
@@ -1137,10 +1153,10 @@ def _build_aggregate_fallback(
             date_min = dates[0]
             date_max = dates[-1]
 
-    # Header
-    out.append(f"# {L('Performance Report', '绩效报告')}\n")
+    # Header — generic, derived from the actual data
+    out.append(f"# {L('Data Report', '数据报告')}\n")
     out.append(
-        f"**{L('Scope', '范围')}:** {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])} "
+        f"**{L('Scope', '范围')}:** {len(dict_rows)} {noun_plural} "
         f"{L('from', '来自')} `{src}`"
         + (f" {L('covering', '覆盖')} `{date_min}` {L('to', '至')} `{date_max}`" if date_min and date_max else "")
         + ".\n"
@@ -1149,11 +1165,14 @@ def _build_aggregate_fallback(
     # ── 5b. Executive Summary (4-6 sentence paragraph) ────────────
     summary_sentences: list[str] = []
     if headline_metric and headline_vals:
+        # Generic, data-driven label — no hardcoded scenario terms
+        value_label_en = f"Total {headline_label}" if headline_label else "Total value"
+        value_label_zh = headline_label if headline_label and any("\u4e00" <= c <= "\u9fff" for c in headline_label) else f"{headline_label or '数值'}总额"
         if headline_metric in money_cols:
             summary_sentences.append(
-                f"{L(terms['value_label'], terms['value_label_zh'])} "
+                f"{L(value_label_en, value_label_zh)} "
                 f"{L('over the period was', '为')} **{_format_money(headline_total)}** "
-                f"{L('across', '共')} {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])}, "
+                f"{L('across', '共')} {len(dict_rows)} {noun_plural}, "
                 f"{L('with an average of', '平均每笔')} **{_format_money(headline_avg)}** "
                 f"{L('per record', '')}."
             )
@@ -1162,13 +1181,14 @@ def _build_aggregate_fallback(
                 f"**{_format_money(max(headline_vals))}** "
                 f"{L('and the smallest', '，最小为')} "
                 f"**{_format_money(min(headline_vals))}**, "
-                f"{L('giving a wide range that suggests significant variation in deal sizes', '，说明交易规模差异较大')}."
+                f"{L('giving a wide range that suggests significant variation in record sizes', '，说明各记录规模差异较大')}."
             )
         else:
             summary_sentences.append(
-                f"{L('Total', '总计')} {headline_metric} {L('over the period was', '为')} "
-                f"**{headline_total:,.2f}** across {len(dict_rows)} rows, with an average of "
-                f"**{headline_avg:,.2f}** per record."
+                f"{L('Total', '总计')} {headline_label or headline_metric} "
+                f"{L('over the period was', '为')} **{headline_total:,.2f}** "
+                f"{L('across', '共')} {len(dict_rows)} {noun_plural}, "
+                f"{L('with an average of', '平均每笔')} **{headline_avg:,.2f}**."
             )
     elif len(dict_rows) == 1 and date_min and date_max:
         summary_sentences.append(
@@ -1179,7 +1199,7 @@ def _build_aggregate_fallback(
         )
     else:
         summary_sentences.append(
-            f"The query returned {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])} from `{src}`."
+            f"The query returned {len(dict_rows)} {noun_plural} from `{src}`."
         )
 
     # Add distribution insight
@@ -1349,8 +1369,8 @@ def _build_aggregate_fallback(
     out.append("")
 
     # ── 5f. Top Performers (or sample rows if metadata) ───────────
-    if terms["headline_metric"] and label_pick and len(dict_rows) > 1:
-        sort_key = terms["headline_metric"]
+    if headline_metric and label_pick and len(dict_rows) > 1:
+        sort_key = headline_metric
         try:
             sorted_rows = sorted(
                 [r for r in dict_rows if isinstance(r.get(sort_key), (int, float))],
@@ -1374,19 +1394,24 @@ def _build_aggregate_fallback(
     # Recommendations — scenario-aware (always 5+ actionable items)
     out.append(f"**{L('Recommended Next Steps', '后续建议')}**\n")
     recs = []
-    if scenario == "contract" and money_pick:
+    # 2026-08-26 (round 7): removed scenario == "contract" check —
+    # generic: apply to ANY dataset that has a money metric
+    if money_pick:
         top_money = money_pick[0]
-        _drill_en = "to identify which deals drove the bulk of last month's value"
-        _drill_zh = "，找出上月拉动总额的主要合同"
+        _drill_en = "to identify which records drove the bulk of the value"
+        _drill_zh = "，找出拉动总额的主要记录"
         recs.append(
-            f"- {L('Drill into the top contracts', '深入分析头部合同')} by `{top_money}` "
+            f"- {L('Drill into the top items', '深入分析头部记录')} by `{top_money}` "
             f"{L(_drill_en, _drill_zh)}."
         )
-    if scenario in ("contract", "sales") and label_pick:
+    if label_pick and (money_pick or headline_metric):
+        # 2026-08-26 (round 7): scenario check removed — apply this
+        # rec generically whenever we have a label column + a metric
+        _rank_label = _humanize_column_name(label_pick) or "items"
         recs.append(
-            f"- {L('Compare top customers', '对比头部客户')} "
-            f"({L('e.g.', '例如')} **{L('top 3 by', '前三按')} {terms['headline_metric'] or money_pick[0] if money_pick else terms['headline_metric']}**) "
-            f"{L('against the prior month to spot retention or churn risk', '与上月对比，留意留存或流失风险')}."
+            f"- {L('Compare top items', '对比头部记录')} "
+            f"({L('e.g.', '例如')} **{L('top 3 by', '前三按')} {headline_metric}**) "
+            f"{L('against the prior period to spot retention, churn, or growth', '与上一周期对比，留意留存、流失或增长信号')}."
         )
     if date_pick:
         recs.append(
