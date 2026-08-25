@@ -180,3 +180,29 @@ import asyncio  # noqa: E402  (imported late to keep module-level cheap)
 import logging  # noqa: E402
 
 logger = logging.getLogger(__name__)
+
+
+# ---------------------------------------------------------------------------
+# pick_pptx_mode — v1.1 architecture: LLM (or user) picks between
+# image_fill and editable_text rendering per deck.
+# ---------------------------------------------------------------------------
+
+_EDITABLE_KEYWORDS = (
+    "edit", "editable", "tweak", "modify", "update later",
+    "我需要编辑", "可以编辑", "修改",
+)
+
+
+def pick_pptx_mode(plan, user_message: str = "") -> str:
+    """Decide between ``image_fill`` (v1.0) and ``editable_text`` (v1.1).
+
+    v1.0 always returns ``"image_fill"`` because the editable_text path
+    is not implemented yet (gated by ``HTML_DESIGN_EDITABLE_ENABLED``).
+    Architecture in place so v1.1 is a single-task drop-in.
+    """
+    from app.config import settings
+
+    msg = (user_message or "").lower()
+    if settings.HTML_DESIGN_EDITABLE_ENABLED and any(k in msg for k in _EDITABLE_KEYWORDS):
+        return "editable_text"
+    return "image_fill"
