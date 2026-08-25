@@ -68,6 +68,7 @@ from app.routers.app_logs import router as app_logs_router
 from app.routers.alerts import router as alerts_router
 from app.routers.alert_preferences import router as alert_preferences_router
 from app.routers.weekly_digest_api import router as weekly_digest_router
+from app.services.project_knowledge.router import router as project_knowledge_router
 
 
 ENTITY_MODELS = {
@@ -755,6 +756,7 @@ def create_app() -> FastAPI:
     app.include_router(app_logs_router, prefix="/api")
     app.include_router(alerts_router, prefix="/api")
     app.include_router(alert_preferences_router, prefix="/api")
+    app.include_router(project_knowledge_router, prefix="/api")  # 2026-08-25: project knowledge cache admin
     # NB: app_logs_router already declares its full path including ``/api/app-logs/...``
     # internally so it ignores the extra ``/api`` prefix and lives at
     # ``/api/app-logs/...`` — matching the @base44 plugin's expected URL.
