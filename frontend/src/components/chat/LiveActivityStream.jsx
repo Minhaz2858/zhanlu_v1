@@ -103,6 +103,19 @@ export function attachSubagentParent(rows) {
   return out;
 }
 
+// 2026-08-25: nestRows() computes the visual indent level for each row.
+// Rows with a parent_subagent_id get indent 1 (rendered as a child of
+// the matching subagent row). All other rows are top-level (indent 0).
+// Returns a new array; does not mutate the input.
+export function nestRows(rows) {
+  const out = Array.isArray(rows) ? rows.map((r) => ({ ...r })) : [];
+  for (const row of out) {
+    if (!row || typeof row !== 'object') continue;
+    row.indent = row.parent_subagent_id ? 1 : 0;
+  }
+  return out;
+}
+
 function mergeEvents(events) {
   const out = [];
   const openStarted = []; // stack of tool row indices awaiting finish
