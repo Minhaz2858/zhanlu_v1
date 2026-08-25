@@ -1,5 +1,6 @@
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import StreamingMarkdown from './StreamingMarkdown';
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
@@ -440,9 +441,17 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                   )}
                 </div>
               ) : (
-                <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={components}>
-                  {preProcessContent(p.text)}
-                </ReactMarkdown>
+                // 2026-08-25: activity-feed modernization task 11.
+                // Use StreamingMarkdown for the streaming case to avoid
+                // O(N²) re-parse on every token. Falls back to the
+                // existing react-markdown for the non-streaming case.
+                isStreaming ? (
+                  <StreamingMarkdown content={preProcessContent(p.text)} isStreaming={true} />
+                ) : (
+                  <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={components}>
+                    {preProcessContent(p.text)}
+                  </ReactMarkdown>
+                )
               )
             )}
             {isStreaming && (
