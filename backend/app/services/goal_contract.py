@@ -53,7 +53,7 @@ _REPORT_REQUEST_RE = re.compile(
     r"breakdown|summary|monthly\s+report|weekly\s+report|"
     r"kpi|metrics|trends|analysis|ranking|top\s*\d+|"
     r"give\s+me|generate\s+a|write\s+a|prepare\s+a|show\s+me\s+the)\b"
-    r"|\b(报告|报表|总结|回顾|分析报告|月度|周报|排行|表现|业绩)\b",
+    r"|(报告|报表|总结|回顾|分析报告|月度|周报|排行|表现|业绩)",
     re.IGNORECASE,
 )
 

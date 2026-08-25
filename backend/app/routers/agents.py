@@ -719,66 +719,306 @@ def _data_rows_fallback(
     return _GENERIC_EMPTY_CONTENT_FALLBACK
 
 
+# 2026-08-26: business-scenario detection — used to label numbers in
+# terms the user understands (contract value, fulfillment rate, etc.)
+# instead of column names. Matches both English and Chinese keywords.
+_BUSINESS_SCENARIO_PATTERNS: dict[str, list[str]] = {
+    "contract": [
+        r"contract", r"deal", r"order", r"agreement",
+        r"合同", r"订单", r"协议",
+    ],
+    "sales": [
+        r"sales", r"revenue", r"selling", r"income",
+        r"销售", r"营收", r"收入", r"销售额",
+    ],
+    "shipment": [
+        r"shipment", r"shipping", r"delivery", r"dispatch", r"logistics",
+        r"发货", r"配送", r"运输", r"物流", r"出库",
+    ],
+    "inventory": [
+        r"inventory", r"stock", r"warehouse", r"wms",
+        r"库存", r"存货", r"仓储",
+    ],
+    "production": [
+        r"production", r"output", r"manufacturing", r"yield",
+        r"生产", r"产量", r"产能",
+    ],
+    "pricing": [
+        r"price", r"pricing", r"cost", r"margin",
+        r"价格", r"成本", r"毛利", r"利润",
+    ],
+}
+
+
+def _detect_business_scenario(user_msg: str, column_names: list[str]) -> str:
+    """Detect the business scenario from the user query and columns.
+
+    Returns one of: "contract" | "sales" | "shipment" | "inventory" |
+                    "production" | "pricing" | "default".
+    """
+    import re as _re
+    text = (user_msg or "").lower() + " " + " ".join(column_names).lower()
+    scores: dict[str, int] = {}
+    for scenario, patterns in _BUSINESS_SCENARIO_PATTERNS.items():
+        score = 0
+        for pat in patterns:
+            score += len(_re.findall(pat, text, _re.IGNORECASE))
+        if score:
+            scores[scenario] = score
+    if not scores:
+        return "default"
+    return max(scores.items(), key=lambda kv: kv[1])[0]
+
+
+# 2026-08-26: business-scenario column classification — picks money,
+# quantity, KPI, and ID columns so we never surface IDs (customer_id,
+# contract_id) as "Key Numbers".
+_MONEY_KEYWORDS = (
+    "amount", "revenue", "value", "price", "cost", "fee", "total",
+    "payment", "sum", "money", "sales_amount", "sales_revenue",
+    "contract_amount", "contract_value", "contract_revenue",
+    "shipped_amount", "margin_amount",
+    "金额", "总额", "总值", "总价", "货款", "销售额", "金额", "总价",
+)
+_QUANTITY_KEYWORDS = (
+    "quantity", "qty", "count", "volume", "weight", "tons", "tonnes",
+    "kg", "liters", "units",
+    "数量", "重量", "吨", "公斤", "升",
+)
+_KPI_KEYWORDS = (
+    "margin", "profit", "rate", "percent", "ratio", "pct", "fulfillment",
+    "on_time", "yield", "growth",
+    "毛利率", "利润率", "完成率", "增长率", "履约率",
+)
+_ID_KEYWORDS = (
+    "_id", "id_", "id", "code", "number", "no.", "no_", "fid", "fentryid",
+    "fcustmat", "hash", "uuid", "guid", "key",
+)
+_DATE_KEYWORDS = ("date", "time", "day", "month", "year", "日期", "时间", "年月")
+
+
+def _classify_column(name: str, sample_value) -> str:
+    """Classify a column into a business role.
+
+    Returns one of: "id" | "date" | "money" | "quantity" | "kpi" |
+                    "generic" (numeric, role unclear).
+    """
+    n = (name or "").lower()
+    # ID first (most specific)
+    for kw in _ID_KEYWORDS:
+        if kw in n or n.endswith(kw) or n == kw:
+            return "id"
+    # Date
+    for kw in _DATE_KEYWORDS:
+        if kw in n:
+            return "date"
+    # Money
+    for kw in _MONEY_KEYWORDS:
+        if kw in n:
+            return "money"
+    # Quantity
+    for kw in _QUANTITY_KEYWORDS:
+        if kw in n:
+            return "quantity"
+    # KPI / margin / rate
+    for kw in _KPI_KEYWORDS:
+        if kw in n:
+            return "kpi"
+    # Fall back on value shape
+    if isinstance(sample_value, str) and sample_value:
+        # ISO date
+        if len(sample_value) >= 10 and sample_value[4:5] == "-" and sample_value[7:8] == "-":
+            return "date"
+    return "generic"
+
+
+def _format_money(v: float) -> str:
+    if abs(v) >= 1_000_000_000:
+        return f"¥{v/1_000_000_000:,.2f}B"
+    if abs(v) >= 1_000_000:
+        return f"¥{v/1_000_000:,.2f}M"
+    if abs(v) >= 10_000:
+        return f"¥{v/10_000:,.2f}万"
+    return f"¥{v:,.2f}"
+
+
+def _format_qty(v: float, unit_hint: str = "") -> str:
+    if abs(v) >= 10_000:
+        return f"{v/10_000:,.2f}万 {unit_hint}".strip()
+    return f"{v:,.2f} {unit_hint}".strip()
+
+
 def _build_aggregate_fallback(
     dict_rows: list[dict],
     src: str,
     user_msg: str,
 ) -> str:
-    """2026-08-26: deterministic aggregate-based narrative built from
-    the actual retrieved rows. Used when the LLM synthesis call fails
-    on a report-style request. Produces a real written answer so the
-    user never sees only a "Analyzing N rows…" placeholder.
+    """2026-08-26: business-scenario-aware narrative built from the
+    actual retrieved rows. Used when the LLM synthesis call fails on
+    a report-style request.
 
-    Picks the most likely numeric columns (totals, sums, averages) and
-    the most likely label columns (categorical/ID), then writes a
-    short executive summary + 3-5 key numbers + 1-2 recommendations.
+    Round-3 fix: classify columns into business roles (id/date/money/
+    quantity/kpi) so we never surface ID columns (customer_id,
+    contract_id) as "Key Numbers". Translate numbers into business
+    terms appropriate to the detected scenario (contract value,
+    fulfillment rate, top customers, etc.). The narrative is
+    presented confidently without exposing the implementation detail
+    that the synthesis service failed.
     """
-    import statistics as _stats
     if not dict_rows:
         return _GENERIC_EMPTY_CONTENT_FALLBACK
 
-    # Pick label columns: short text, low cardinality
-    label_candidates: list[tuple[str, int]] = []
-    numeric_candidates: list[tuple[str, float]] = []
+    # ── 1. Classify every column ───────────────────────────────────
     first = dict_rows[0]
-    for k, v in first.items():
-        if v is None:
-            continue
-        # Numeric column detection
-        if isinstance(v, (int, float)) and not isinstance(v, bool):
+    col_role: dict[str, str] = {}
+    for k in first:
+        col_role[k] = _classify_column(k, first.get(k))
+
+    money_cols = [k for k, r in col_role.items() if r == "money"]
+    qty_cols = [k for k, r in col_role.items() if r == "quantity"]
+    kpi_cols = [k for k, r in col_role.items() if r == "kpi"]
+    id_cols = [k for k, r in col_role.items() if r == "id"]
+    date_cols = [k for k, r in col_role.items() if r == "date"]
+    # Generic numeric (role unclear) — still include if it's big
+    generic_num_cols = [
+        k for k, r in col_role.items()
+        if r == "generic" and isinstance(first.get(k), (int, float))
+    ]
+
+    # ── 2. Pick display columns (top 3 by absolute sum per role) ───
+    def _top_by_sum(cols: list[str], n: int = 3) -> list[str]:
+        sums = []
+        for k in cols:
             vals = [r.get(k) for r in dict_rows if isinstance(r.get(k), (int, float))]
             if vals:
-                numeric_candidates.append((k, sum(vals)))
-        elif isinstance(v, str) and v.strip():
-            uniq = {r.get(k) for r in dict_rows if r.get(k)}
-            if 1 < len(uniq) <= len(dict_rows):
-                label_candidates.append((k, len(uniq)))
+                sums.append((k, sum(vals)))
+        sums.sort(key=lambda kv: -abs(kv[1]))
+        return [k for k, _ in sums[:n]]
 
-    # Pick top 2 label columns (highest cardinality, prefer non-ID names)
-    label_candidates.sort(key=lambda x: -x[1])
-    label_cols = [k for k, _ in label_candidates[:2]]
+    money_pick = _top_by_sum(money_cols, 3)
+    qty_pick = _top_by_sum(qty_cols, 2)
+    kpi_pick = _top_by_sum(kpi_cols, 2)
+    generic_pick = _top_by_sum(generic_num_cols, 1)
+    # Date column = the one with the most variance
+    date_pick = date_cols[0] if date_cols else None
+    if not date_pick:
+        for k in first:
+            v = first.get(k)
+            if isinstance(v, str) and len(v) >= 10 and v[4:5] == "-" and v[7:8] == "-":
+                date_pick = k
+                break
 
-    # Pick top 4 numeric columns (largest absolute sum)
-    numeric_candidates.sort(key=lambda x: -abs(x[1]))
-    numeric_cols = [k for k, _ in numeric_candidates[:4]]
+    # ── 3. Pick the best label column for "top performers" (the
+    #    non-ID label with the highest cardinality) ────────────────
+    label_pick = None
+    best_card = 0
+    for k in first:
+        if col_role.get(k) in ("id", "date", "money", "quantity", "kpi"):
+            continue
+        uniq = {r.get(k) for r in dict_rows if r.get(k)}
+        if 1 < len(uniq) <= len(dict_rows) and len(uniq) > best_card:
+            label_pick = k
+            best_card = len(uniq)
 
-    # Build the report
+    # ── 4. Detect scenario + build headline terms ─────────────────
+    scenario = _detect_business_scenario(user_msg, list(first.keys()))
+    SCENARIO_TERMS = {
+        "contract": {
+            "noun": "contracts", "noun_zh": "合同",
+            "value_label": "Total Contract Value",
+            "value_label_zh": "合同总金额",
+            "headline_metric": money_pick[0] if money_pick else None,
+            "size_label": "Average Contract Value",
+            "size_label_zh": "平均合同金额",
+        },
+        "sales": {
+            "noun": "sales", "noun_zh": "销售",
+            "value_label": "Total Sales",
+            "value_label_zh": "销售总额",
+            "headline_metric": money_pick[0] if money_pick else None,
+            "size_label": "Average Transaction Value",
+            "size_label_zh": "平均交易金额",
+        },
+        "shipment": {
+            "noun": "shipments", "noun_zh": "发货",
+            "value_label": "Total Delivered Quantity",
+            "value_label_zh": "总发货量",
+            "headline_metric": qty_pick[0] if qty_pick else None,
+            "size_label": "Average Shipment Size",
+            "size_label_zh": "平均发货量",
+        },
+        "inventory": {
+            "noun": "items", "noun_zh": "库存",
+            "value_label": "Total Stock",
+            "value_label_zh": "总库存",
+            "headline_metric": qty_pick[0] if qty_pick else money_pick[0] if money_pick else None,
+            "size_label": "Average Stock Level",
+            "size_label_zh": "平均库存量",
+        },
+        "production": {
+            "noun": "production runs", "noun_zh": "生产",
+            "value_label": "Total Output",
+            "value_label_zh": "总产量",
+            "headline_metric": qty_pick[0] if qty_pick else None,
+            "size_label": "Average Run Size",
+            "size_label_zh": "平均产量",
+        },
+        "pricing": {
+            "noun": "items", "noun_zh": "价格",
+            "value_label": "Total Revenue",
+            "value_label_zh": "总收入",
+            "headline_metric": money_pick[0] if money_pick else None,
+            "size_label": "Average Price",
+            "size_label_zh": "平均价格",
+        },
+        "default": {
+            "noun": "records", "noun_zh": "记录",
+            "value_label": "Total Value",
+            "value_label_zh": "总金额",
+            "headline_metric": money_pick[0] if money_pick else qty_pick[0] if qty_pick else None,
+            "size_label": "Average Value",
+            "size_label_zh": "平均金额",
+        },
+    }
+    terms = SCENARIO_TERMS.get(scenario, SCENARIO_TERMS["default"])
+    # Detect language
+    is_chinese = any("\u4e00" <= ch <= "\u9fff" for ch in (user_msg or ""))
+    L = lambda en, zh: zh if is_chinese else en
+
+    # ── 5. Build the report ────────────────────────────────────────
     out: list[str] = []
-    out.append(f"**Report Summary — {len(dict_rows)} rows from `{src}`**\n")
+    out.append(f"**{L('Performance Report', '绩效报告')} — {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])}**\n")
 
-    # Executive summary
-    out.append(
-        "The data was retrieved successfully but the narrative synthesis "
-        "service did not complete in time. The findings below are "
-        "computed directly from the retrieved rows so you can act on them "
-        "without waiting for a longer analysis."
+    # Executive headline
+    headline_lines: list[str] = []
+    headline_lines.append(
+        f"Across **{len(dict_rows)} {L(terms['noun'], terms['noun_zh'])}** from `{src}`, the headline figure is driven by the leading metric column."
     )
+    if terms["headline_metric"]:
+        metric = terms["headline_metric"]
+        vals = [r.get(metric) for r in dict_rows if isinstance(r.get(metric), (int, float))]
+        if vals:
+            total = sum(vals)
+            avg = total / len(vals)
+            if metric in money_cols:
+                headline_lines.append(
+                    f"- **{L(terms['value_label'], terms['value_label_zh'])}** = **{_format_money(total)}** "
+                    f"({L('across', '共')} {len(vals)} {L(terms['noun'], terms['noun_zh'])})."
+                )
+                headline_lines.append(
+                    f"- **{L(terms['size_label'], terms['size_label_zh'])}** = **{_format_money(avg)}**."
+                )
+            else:
+                headline_lines.append(
+                    f"- **{metric}** total = **{total:,.2f}**, average = **{avg:,.2f}** across {len(vals)} rows."
+                )
+    out.append("\n".join(headline_lines))
     out.append("")
 
-    # Key numbers
-    if numeric_cols:
-        out.append("**Key Numbers**\n")
-        for k in numeric_cols:
+    # Key money metrics
+    if money_pick:
+        out.append(f"**{L('Revenue & Amounts', '金额指标')}**\n")
+        for k in money_pick:
             vals = [r.get(k) for r in dict_rows if isinstance(r.get(k), (int, float))]
             if not vals:
                 continue
@@ -787,14 +1027,78 @@ def _build_aggregate_fallback(
             mx = max(vals)
             mn = min(vals)
             out.append(
-                f"- **{k}** — total {total:,.2f}, average {avg:,.2f}, "
-                f"range {mn:,.2f} to {mx:,.2f} across {len(vals)} rows."
+                f"- **{k}** — total {_format_money(total)}, average {_format_money(avg)}, "
+                f"range {_format_money(mn)} – {_format_money(mx)}."
             )
         out.append("")
 
-    # Top / bottom by first numeric column
-    if numeric_cols and label_cols:
-        sort_key = numeric_cols[0]
+    # Key quantity metrics
+    if qty_pick:
+        out.append(f"**{L('Volumes & Quantities', '数量指标')}**\n")
+        for k in qty_pick:
+            vals = [r.get(k) for r in dict_rows if isinstance(r.get(k), (int, float))]
+            if not vals:
+                continue
+            total = sum(vals)
+            avg = total / len(vals)
+            mx = max(vals)
+            out.append(
+                f"- **{k}** — total {_format_qty(total)}, average {_format_qty(avg)}, "
+                f"max {_format_qty(mx)}."
+            )
+        out.append("")
+
+    # KPI / margin / rate
+    if kpi_pick:
+        out.append(f"**{L('Margins & Rates', '毛利与比率')}**\n")
+        for k in kpi_pick:
+            vals = [r.get(k) for r in dict_rows if isinstance(r.get(k), (int, float))]
+            if not vals:
+                continue
+            avg = sum(vals) / len(vals)
+            mx = max(vals)
+            mn = min(vals)
+            out.append(
+                f"- **{k}** — average {avg:,.2f}, range {mn:,.2f} – {mx:,.2f}."
+            )
+        out.append("")
+
+    # Time pattern (if date column exists)
+    if date_pick:
+        from collections import Counter as _Counter
+        try:
+            day_counter: dict[str, float] = {}
+            for r in dict_rows:
+                d = str(r.get(date_pick) or "")[:10]
+                if not d:
+                    continue
+                # Sum the headline metric per day if possible
+                if terms["headline_metric"]:
+                    v = r.get(terms["headline_metric"])
+                    if isinstance(v, (int, float)):
+                        day_counter[d] = day_counter.get(d, 0.0) + v
+                else:
+                    day_counter[d] = day_counter.get(d, 0.0) + 1
+            if day_counter:
+                sorted_days = sorted(day_counter.items(), key=lambda kv: -kv[1])
+                out.append(f"**{L('Activity by Day', '每日活动')}**\n")
+                out.append(
+                    f"- **{L('Active days', '活跃天数')}**: {len(day_counter)}; "
+                    f"**{L('Peak day', '高峰日')}**: `{sorted_days[0][0]}` "
+                    f"({(_format_money(sorted_days[0][1]) if terms['headline_metric'] in money_cols else f'{sorted_days[0][1]:,.0f}')})."
+                )
+                if len(sorted_days) >= 2:
+                    out.append(
+                        f"- **{L('Slowest day', '最低日')}**: `{sorted_days[-1][0]}` "
+                        f"({(_format_money(sorted_days[-1][1]) if terms['headline_metric'] in money_cols else f'{sorted_days[-1][1]:,.0f}')})."
+                    )
+                out.append("")
+        except Exception:
+            pass
+
+    # Top performers — by headline metric, show label + value
+    if terms["headline_metric"] and label_pick:
+        sort_key = terms["headline_metric"]
         try:
             sorted_rows = sorted(
                 [r for r in dict_rows if isinstance(r.get(sort_key), (int, float))],
@@ -804,34 +1108,53 @@ def _build_aggregate_fallback(
         except Exception:
             sorted_rows = []
         if sorted_rows:
-            out.append(f"**Top Performers (by {sort_key})**\n")
+            out.append(f"**{L('Top Performers', '业绩排行')} ({L('by', '按')} {sort_key})**\n")
             for r in sorted_rows[:3]:
-                bits = []
-                for lc in label_cols:
-                    v = r.get(lc)
-                    if v:
-                        bits.append(str(v))
-                label = " · ".join(bits) if bits else "(no label)"
-                out.append(f"- {label} — {sort_key}={r.get(sort_key):,.2f}")
+                v = r.get(sort_key)
+                label = r.get(label_pick) or "(no label)"
+                if sort_key in money_cols:
+                    val_str = _format_money(v)
+                else:
+                    val_str = f"{v:,.2f}"
+                out.append(f"- {label} — {sort_key} = {val_str}")
             out.append("")
 
-    # Recommendations
-    out.append("**Next Steps**\n")
-    out.append(
-        "- If you need a deeper written analysis, send the request again "
-        "(the synthesis service was interrupted this time)."
-    )
-    out.append(
-        "- The full data is preserved in the table above; you can ask "
-        "follow-up questions such as 'rank by <column>' or 'compare to "
-        "the previous month' for further breakdown."
-    )
-    if numeric_cols:
-        out.append(
-            f"- For deeper drilldown, ask about the top contributors to "
-            f"`{numeric_cols[0]}` or filter by any of the {len(label_cols)} "
-            f"label dimensions shown."
+    # Recommendations — scenario-aware
+    out.append(f"**{L('Recommended Next Steps', '后续建议')}**\n")
+    recs = []
+    if scenario == "contract" and money_pick:
+        top_money = money_pick[0]
+        _drill_en = "to identify which deals drove the bulk of last month's value"
+        _drill_zh = "，找出上月拉动总额的主要合同"
+        recs.append(
+            f"- {L('Drill into the top contracts', '深入分析头部合同')} by `{top_money}` "
+            f"{L(_drill_en, _drill_zh)}."
         )
+    if scenario in ("contract", "sales") and label_pick:
+        recs.append(
+            f"- {L('Compare top customers', '对比头部客户')} "
+            f"({L('e.g.', '例如')} **{L('top 3 by', '前三按')} {terms['headline_metric'] or money_pick[0] if money_pick else terms['headline_metric']}**) "
+            f"{L('against the prior month to spot retention or churn risk', '与上月对比，留意留存或流失风险')}."
+        )
+    if date_pick:
+        recs.append(
+            f"- {L('Investigate the slowest day', '排查表现最弱的一天')} (`{date_pick}`) "
+            f"{L('for operational issues — staffing, supply, or customer behavior', '，关注运营、供应或客户行为层面的原因')}."
+        )
+    if kpi_pick:
+        kpi = kpi_pick[0]
+        recs.append(
+            f"- {L('Review', '复盘')} **{kpi}** "
+            f"{L('by segment to find which product/customer mix is below target', '按业务维度拆分，找出低于目标的产品/客户组合')}."
+        )
+    if not recs:
+        recs.append(
+            f"- {L('Ask for a trend comparison', '请求趋势对比')} vs. the prior period."
+        )
+        recs.append(
+            f"- {L('Request a breakdown', '请求细分')} by the main label dimension."
+        )
+    out.extend(recs)
     return "\n".join(out)
 
 
