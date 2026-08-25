@@ -34,7 +34,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   Sparkles, Loader2, Check, ShieldCheck, AlertTriangle, XCircle,
   ListChecks, ChevronDown, ChevronUp, Brain, Timer, Rows3, FileStack,
-  Plug, PlugZap, Database, ClipboardList, Search,
+  Plug, PlugZap, Database, ClipboardList, Search, Table2,
 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { pickEvents } from './LiveActivityStream.legacyAdapter';
@@ -653,6 +653,65 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
                       )}
                     </div>
                   ))}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Live data preview section — green, collapsible, mini-grid of
+              returned rows. 2026-08-25: live-streaming spec — appears
+              immediately when a tool returns rows. */}
+          {streamingDataPreviews && Object.keys(streamingDataPreviews).length > 0 && (
+            <div className="border-t border-green-500/30 bg-green-500/5 px-3 py-2">
+              <button
+                type="button"
+                onClick={() => setDataPreviewOpen((v) => !v)}
+                data-testid="live-activity-datapreview-toggle"
+                className="flex w-full cursor-pointer items-center gap-1.5 text-xs text-muted-foreground transition-opacity hover:opacity-100"
+              >
+                <Table2 className="h-3 w-3 shrink-0 text-green-500/80" />
+                <span className="font-mono text-[10px] uppercase tracking-wide opacity-70">
+                  {isEn ? 'Results' : le.results || '结果'}
+                </span>
+                <span className="text-[10px] opacity-50">
+                  · {Object.values(streamingDataPreviews).reduce((sum, p) => sum + (p.rows_so_far || 0), 0)} {isEn ? 'rows' : '行'}
+                </span>
+                <ChevronDown
+                  className={`ml-auto h-3 w-3 transition-transform ${dataPreviewOpen ? 'rotate-180' : ''}`}
+                />
+              </button>
+              {dataPreviewOpen && (
+                <div className="mt-1 space-y-1.5">
+                  {Object.entries(streamingDataPreviews).map(([toolCallId, preview]) => {
+                    const colCount = Math.min(5, (preview.columns || []).length);
+                    return (
+                      <div
+                        key={toolCallId}
+                        data-testid="live-activity-preview-row"
+                        className="rounded border border-green-500/30 bg-green-500/5 px-2 py-1 text-xs"
+                      >
+                        <div className="text-green-700 dark:text-green-400 mb-1">
+                          📊 {(preview.sample_rows || []).length} {isEn ? 'rows shown' : '行预览'}
+                          {preview.rows_so_far != null && ` · ${preview.rows_so_far} ${isEn ? 'total' : '总计'}`}
+                        </div>
+                        <div
+                          className="grid gap-1 text-muted-foreground"
+                          style={{ gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))` }}
+                        >
+                          {(preview.columns || []).slice(0, colCount).map((col) => (
+                            <div key={col} className="font-mono text-[10px] opacity-70 truncate">{col}</div>
+                          ))}
+                          {(preview.sample_rows || []).slice(0, 3).map((row, ri) => (
+                            (preview.columns || []).slice(0, colCount).map((col) => (
+                              <div key={`${ri}-${col}`} className="truncate">
+                                {typeof row[col] === 'object' ? JSON.stringify(row[col]) : String(row[col] ?? '')}
+                              </div>
+                            ))
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
