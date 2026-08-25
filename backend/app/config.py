@@ -226,6 +226,28 @@ class Settings(BaseSettings):
     # forward the raw bytes to a vision-capable model).
     IMAGE_OCR_ENABLED: bool = False
 
+    # ── Institutional-grade PPT/research-analyst pipeline (2026-08-25) ──
+    # When True, the universal _RESEARCH_ANALYST_DIRECTIVE is appended to
+    # the system prompt of every DB-bound agent (data_agent,
+    # ecisco_bi_assistant, general_assistant, power_user, automation_agent,
+    # plus any user agent with bound KBs or the "Database Query" skill).
+    # The directive tells the LLM to use comprehensive_data(query, profile=
+    # "market") for multi-dimensional data coverage on PPT / chat / brief
+    # requests, and forces the synthesis-floor fallback when the main
+    # LLM call drops into tool_calls with empty content (the common
+    # failure mode with deepseek-chat on long analytical queries).
+    COMPREHENSIVE_DATA_MARKET_PROFILE_ENABLED: bool = False
+    # Pre-create_artifact coverage gate. When True, a PPT render is
+    # rejected unless the payload's coverage_dimensions list has at
+    # least COMPREHENSIVE_DATA_MIN_DIMENSIONS entries (default 3).
+    COMPREHENSIVE_DATA_GATE_ENABLED: bool = False
+    # Soft-block mode: log + carry on (instead of hard-fail).
+    COMPREHENSIVE_DATA_GATE_SOFT_BLOCK: bool = False
+    # Operator-only bypass: gate fully disabled (DR tests only).
+    COMPREHENSIVE_DATA_GATE_BYPASS: bool = False
+    # Minimum dimensions required to pass the coverage gate.
+    COMPREHENSIVE_DATA_MIN_DIMENSIONS: int = 3
+
     # Embeddings — semantic memory recall (P0). text-embedding-3-small is
     # OpenAI-compatible; providers without an /embeddings endpoint will
     # cause get_embedding() to return None and memory search transparently
@@ -814,6 +836,18 @@ class Settings(BaseSettings):
     ECISCO_BI_ERP_WRITEBACK_ENABLED: bool = False     # 5F
     ECISCO_BI_ALERTS_ENABLED: bool = False           # 5G — proactive market alert detection + UI
     ECISCO_BI_SCHEMA_DEPRECATION_ENABLED: bool = True  # F_PAEZ_JC over material_model hint for ecisco_bi_assistant
+
+    # ── Ecisco BI Project Knowledge Cache (2026-08-25) ─────────────
+    # Project-scoped facade over project_entity / project_entity_link /
+    # project_metric / project_catalog_overlay / catalog tables. Scoped to
+    # ECISCO_BI_AGENT_NAMES (default: ecisco_bi_assistant). All default False.
+    ECISCO_BI_KG_PROJECT_CACHE_ENABLED: bool = False   # master gate; enables cache facade
+    ECISCO_BI_KG_QWEN_FAST_PATH: bool = False          # inject cached answer into agent loop pre-LLM
+    QWEN_FAST_PATH_MODEL_PREFIXES: list[str] = ["qwen", "Qwen"]
+    ECISCO_BI_AGENT_NAMES: list[str] = ["ecisco_bi_assistant"]
+    PROJECT_KNOWLEDGE_INGEST_BG_WORKER: bool = True    # run ingestion in asyncio.to_thread
+    ECISCO_BI_KG_LAYER_ENTITIES_ENABLED: bool = True   # Layer 2 (entity lookup) on/off
+    ECISCO_BI_KG_LAYER_METRICS_ENABLED: bool = True    # Layer 3 (metric lookup) on/off
 
     # ── Supply Chain Snapshot (per-product ERP panel under RegionalTable) ──
     SUPPLY_CHAIN_SNAPSHOT_ENABLED: bool = False      # Gate for GET /market-dashboard/supply-chain/{product_id}
