@@ -116,6 +116,56 @@ export function nestRows(rows) {
   return out;
 }
 
+// 2026-08-25: groupIntoBranches() groups child rows under their parent
+// subagent row. Returns a list of branches, each with a `parent` row and
+// a `children` array. Standalone rows (no parent) become a branch with
+// empty children. Preserves original order.
+//
+// Behavior:
+//   - subagent_invoked: opens a new branch, registered by subagent_id
+//   - tool_call_* with parent_subagent_id: child of the matching branch
+//   - subagent_returned: attached as the LAST child of the matching
+//     open subagent branch (closes the delegation visually)
+//   - all other rows: standalone branches
+export function groupIntoBranches(rows) {
+  const out = [];
+  const branchBySubagent = new Map(); // subagent_id → branch index
+  // Most recent open subagent id per target, so we can close the right
+  // branch on subagent_returned.
+  const openByTarget = new Map();
+  for (const row of rows || []) {
+    if (!row || typeof row !== 'object') continue;
+    // 1. Child of a registered branch (by parent_subagent_id)
+    if (row.parent_subagent_id && branchBySubagent.has(row.parent_subagent_id)) {
+      const idx = branchBySubagent.get(row.parent_subagent_id);
+      out[idx].children.push(row);
+      continue;
+    }
+    // 2. subagent_returned: close the matching open subagent branch
+    if (row.type === 'subagent_returned') {
+      const target = row.params?.agent_label;
+      const subId = target ? openByTarget.get(target) : null;
+      if (subId && branchBySubagent.has(subId)) {
+        const idx = branchBySubagent.get(subId);
+        out[idx].children.push(row);
+        openByTarget.delete(target);
+        continue;
+      }
+    }
+    // 3. New top-level branch
+    const branch = { parent: row, children: [] };
+    out.push(branch);
+    if (row.type === 'subagent_invoked' && row.params?.subagent_id) {
+      branchBySubagent.set(row.params.subagent_id, out.length - 1);
+      const target = row.params?.target || row.params?.agent_label;
+      if (target) {
+        openByTarget.set(target, row.params.subagent_id);
+      }
+    }
+  }
+  return out;
+}
+
 function mergeEvents(events) {
   const out = [];
   const openStarted = []; // stack of tool row indices awaiting finish
