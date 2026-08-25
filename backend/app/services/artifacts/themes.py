@@ -189,4 +189,72 @@ def get_theme(name: str) -> ThemePreset:
     return THEME_CATALOG[name]
 
 
-__all__ = ["ThemePreset", "THEME_CATALOG", "get_theme"]
+# Default preset per deck_type.
+_DECK_TYPE_DEFAULT: Dict[str, str] = {
+    "data_report": "electric_studio",
+    "investor_deck": "bold_signal",
+    "marketing": "creative_voltage",
+    "executive_brief": "paper_and_ink",
+    "training": "notebook_tabs",
+}
+
+# Keyword overrides (case-insensitive substring match on user_message).
+# FIRST match wins.
+_KEYWORD_OVERRIDES: List[tuple] = [
+    ("editorial", "vintage_editorial"),
+    ("wellness", "dark_botanical"),
+    ("playful", "pastel_geometry"),
+    ("tech", "neon_cyber"),
+    ("terminal", "terminal_green"),
+    ("report", "swiss_modern"),
+    ("technical", "neon_cyber"),
+    ("calm", "paper_and_ink"),
+    ("modern", "swiss_modern"),
+]
+
+
+def _available_themes() -> Dict[str, ThemePreset]:
+    """Apply the deployment's ``HTML_DESIGN_THEMES`` allow-list (if any)."""
+    from app.config import settings
+    allowed = settings.HTML_DESIGN_THEMES or []
+    if not allowed:
+        return THEME_CATALOG
+    return {n: p for n, p in THEME_CATALOG.items() if n in allowed}
+
+
+def select_theme(plan, user_message: str = "") -> ThemePreset:
+    """Map a deck plan + user message to a concrete ``ThemePreset``.
+
+    Resolution order:
+      1. Keyword overrides in ``user_message`` (first match wins).
+      2. ``plan.deck_type`` → default preset table.
+      3. Fall back to ``electric_studio``.
+
+    The result is always drawn from ``settings.HTML_DESIGN_THEMES`` if that
+    allow-list is configured; otherwise from the full catalog.
+    """
+    from app.services.synexia.contracts import DeckPlan
+
+    available = _available_themes()
+
+    msg = (user_message or "").lower()
+    for keyword, preset_name in _KEYWORD_OVERRIDES:
+        if keyword in msg and preset_name in available:
+            return available[preset_name]
+
+    deck_type = (plan.deck_type if isinstance(plan, DeckPlan) else "") or ""
+    default_name = _DECK_TYPE_DEFAULT.get(deck_type.strip().lower())
+    if default_name and default_name in available:
+        return available[default_name]
+
+    # Last resort: prefer ``electric_studio`` if available, else the
+    # first available preset (alphabetical order for determinism).
+    if "electric_studio" in available:
+        return available["electric_studio"]
+    if available:
+        first_name = sorted(available)[0]
+        return available[first_name]
+    raise RuntimeError("no themes available in catalog")
+
+
+__all__ = ["ThemePreset", "THEME_CATALOG", "get_theme", "select_theme"]
