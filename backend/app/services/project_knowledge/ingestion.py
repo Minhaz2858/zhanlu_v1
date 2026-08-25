@@ -60,10 +60,20 @@ async def ingest_for_project(
         status.error = f"KB {kb_id} not found"
         return status
 
-    # 1. catalog
+    # 1. catalog — skip if already ready, run only if pending/error
     try:
         from app.services.knowledge_graph.catalog_indexer import index_kb_catalog
-        await index_kb_catalog(kb, db)
+        # If the KB is already catalogued and complete, don't re-run the
+        # (expensive) introspection+LLM description step. Re-run only when
+        # the catalog is in a non-terminal state.
+        _current_status = getattr(kb, "catalog_status", None) or "pending"
+        if _current_status not in ("ready",):
+            await index_kb_catalog(kb, db)
+        else:
+            logger.info(
+                "ingest_for_project: catalog already ready (%d tables); skipping",
+                getattr(kb, "item_count", 0) or 0,
+            )
     except Exception as e:
         logger.exception("ingest_for_project: catalog step failed")
         status.status = "error"

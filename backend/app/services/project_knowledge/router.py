@@ -67,21 +67,18 @@ async def reindex(
     user: Any = Depends(get_current_user_required),
     db=Depends(_db),
 ):
+    """Run ingestion for one (project, KB) pair. Synchronous: returns the
+    final CacheStatus so the caller knows what happened. The catalog step
+    uses asyncio.to_thread internally to keep the request loop unblocked.
+    """
     _require_flag()
-    cache = ProjectKnowledgeCache(project_id)
-    bg = getattr(settings, "PROJECT_KNOWLEDGE_INGEST_BG_WORKER", True)
-    if bg:
-        async def _bg():
-            from .ingestion import ingest_for_project
-            try:
-                await ingest_for_project(project_id, body.kb_id, db)
-            except Exception as e:
-                logger.warning("background reindex failed: %s", e)
-
-        asyncio.create_task(_bg())
-        return {"status": "queued", "project_id": project_id, "kb_id": body.kb_id}
-    status = cache.ingest(db, body.kb_id)
-    return status.to_dict()
+    from .ingestion import ingest_for_project
+    try:
+        status = await ingest_for_project(project_id, body.kb_id, db)
+        return status.to_dict()
+    except Exception as e:
+        logger.exception("reindex failed")
+        raise HTTPException(status_code=500, detail=f"reindex failed: {e}")
 
 
 @router.post("/{project_id}/invalidate")
