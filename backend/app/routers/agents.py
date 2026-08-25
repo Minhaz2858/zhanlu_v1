@@ -1669,7 +1669,28 @@ async def _force_llm_synthesis(
         return ""
 
     col_summary = _build_column_summary(rows)
-    rows_sample = json.dumps(rows[:8], default=str, ensure_ascii=False)[:2000]
+    # 2026-08-26: pass ALL the data to the LLM (not just 8 rows + 2000 chars)
+    # so it can produce a real analysis based on the full dataset, not a
+    # tiny sample.  We cap the JSON size to ~50KB to stay within token
+    # limits, but keep the top-N rows sorted by relevance.
+    # For datasets > 200 rows, include the first 200 + the pre-aggregated
+    # summary block so the LLM has both individual records and totals.
+    _MAX_ROWS_IN_PROMPT = 200
+    _MAX_JSON_CHARS = 50_000
+    if len(rows) <= _MAX_ROWS_IN_PROMPT:
+        rows_data = json.dumps(rows, default=str, ensure_ascii=False)
+        # If still too large, fall back to first N that fit
+        if len(rows_data) > _MAX_JSON_CHARS:
+            # Shrink by trimming row by row until under cap
+            for n in range(len(rows), 0, -10):
+                rows_data = json.dumps(rows[:n], default=str, ensure_ascii=False)
+                if len(rows_data) <= _MAX_JSON_CHARS:
+                    break
+    else:
+        # More than 200 rows: include first 200 + signal that the
+        # pre-aggregated block is the authoritative source of truth
+        rows_data = json.dumps(rows[:_MAX_ROWS_IN_PROMPT], default=str, ensure_ascii=False)
+    rows_sample = rows_data  # alias for backward-compat in existing prompt builders
 
     # ── Pre-aggregation (P0) ───────────────────────────────────────────
     # Compute aggregates from ALL rows so the LLM has concrete numbers to
@@ -1699,7 +1720,7 @@ async def _force_llm_synthesis(
                 f"\n\nADDITIONAL CONTEXT (use these to compute specific numbers):\n"
                 f"{preagg_block}\n\n"
                 f"Column value ranges:\n{col_summary}\n\n"
-                f"Data sample (first 8 rows):\n{rows_sample}\n\n"
+                f"Data sample (first {min(len(rows), _MAX_ROWS_IN_PROMPT)} rows):\n{rows_sample}\n\n"
                 f"REMINDER: You MUST produce ALL 5 sections in order: "
                 f"Executive Summary, Key Metrics, Detailed Breakdown, "
                 f"Risks & Opportunities, Recommended Actions. Do NOT stop "
@@ -1707,44 +1728,55 @@ async def _force_llm_synthesis(
                 f"report with all sections filled in."
             )
         elif attempt == 0:
+            # 2026-08-26: rewrite for "use ALL the data" — no more
+            # 5-8 sentence minimum. Demand a full 400-800 word report
+            # based on the actual data, generic enough to work for any
+            # database / schema (no hardcoded column names).
             prompt = (
-                "You are a data analyst. The user asked: "
-                f"\"{user_msg[:200]}\"\n\n"
-                f"The database returned {len(rows)} rows of real business data.\n\n"
-                "Write a COMPREHENSIVE 5-8 sentence analysis that:\n"
-                "1. Restates what was asked and what data was found\n"
-                "2. Summarizes key totals, figures, and trends (use SPECIFIC "
-                "numbers from the data — compute sums, averages, top items)\n"
-                "3. Identifies top performers, key patterns, or rankings\n"
-                "4. Highlights any anomalies or notable findings\n"
-                "5. Ends with one concrete follow-up suggestion\n\n"
-                "CRITICAL RULES:\n"
-                "- NEVER say 'I've completed your request' or 'Here is the "
-                "artifact' or 'The data has been retrieved'\n"
-                "- NEVER just describe the data structure or list column names\n"
-                "- Your answer must be USEFUL even WITHOUT the attached file\n"
-                "- Write REAL analysis with REAL numbers computed from the data\n"
-                "- Respond in the same language as the user's question\n\n"
-                f"{preagg_block}\n\n"
-                f"Column summary (value ranges):\n{col_summary}\n\n"
-                f"Data sample (first 8 rows):\n{rows_sample}"
+                f"You are a senior data analyst. The user asked: \"{user_msg[:300]}\"\n\n"
+                f"The database returned **{len(rows)} rows** of real business data. "
+                f"You have been given the FULL dataset below (or a representative sample if the dataset is very large).\n\n"
+                "Write a COMPREHENSIVE 400-800 word business report based on what you see in the data. "
+                "Use the user's specific question as your framing. Structure your answer as:\n\n"
+                "1. **Executive Summary** (4-6 sentences) — the headline finding. State what the data shows overall, with specific numbers (totals, averages, top items). Use business terms, not raw column names.\n\n"
+                "2. **Key Numbers** (5-10 bullet points) — concrete figures with their meaning. Pick the most important columns for this question (typically the largest numeric columns or columns matching the user's intent). For each: total, average, range, top contributor.\n\n"
+                "3. **Trends & Comparisons** (3-5 sentences) — patterns over time if there's a date column, comparisons between groups if there's a category column, or distribution insights (concentration, skew, spread).\n\n"
+                "4. **Notable Anomalies** (2-4 bullets) — outliers, surprises, missing data, anything that needs attention.\n\n"
+                "5. **Recommended Next Steps** (3-5 bullets) — concrete actions the user should take based on the findings.\n\n"
+                "CRITICAL RULES (apply to every database, any schema):\n"
+                "- USE THE ACTUAL DATA: compute sums, averages, and rankings YOURSELF from the rows. Do NOT just describe column names or the SQL.\n"
+                "- USE BUSINESS TERMS: instead of column names, use what the data represents (e.g. 'total contract value', 'revenue per customer', 'daily volume' — pick the term that fits the user's question).\n"
+                "- The user asked in: " + ("English" if not any('\u4e00' <= c <= '\u9fff' for c in user_msg) else "Chinese") + ". Respond in the same language.\n"
+                "- NEVER say 'I've completed your request' / 'Here is the artifact' / 'The data has been retrieved' / 'I have analyzed'. Start directly with the analysis.\n"
+                "- NEVER just list column names. Every number must come from the data.\n"
+                "- If a column is an ID (ends with _id / id / code / no.) or a date/time, DO NOT report it as a 'Key Number' — focus on amount/quantity/margin/rate columns instead.\n"
+                "- If the dataset has <5 rows or appears to be only metadata (min/max/count), explain what was returned and suggest how to ask a more specific question.\n\n"
+                f"=== PRE-AGGREGATED STATISTICS (computed from ALL {len(rows)} rows) ===\n"
+                f"{preagg_block or '(no aggregates computed)'}\n\n"
+                f"=== COLUMN SUMMARY (value ranges per column) ===\n"
+                f"{col_summary or '(no column summary)'}\n\n"
+                f"=== DATA ROWS ({min(len(rows), _MAX_ROWS_IN_PROMPT)} of {len(rows)} rows shown) ===\n"
+                f"{rows_sample}\n\n"
+                "Write the report now. Use the structure above. Compute numbers FROM the data, do not invent them."
             )
         else:
-            # Attempt 2: even more explicit
+            # Attempt 2: even more explicit + give up on 5-8 sentence cap
             prompt = (
                 "IMPORTANT: Your previous attempt did not produce a real "
                 "analysis. You MUST write actual content now.\n\n"
-                "The user asked: " + f"\"{user_msg[:200]}\"\n\n"
+                f"The user asked: \"{user_msg[:200]}\"\n\n"
                 f"You have {len(rows)} rows of real data. "
-                "DO NOT describe the data structure. "
-                "DO NOT say 'I have completed'. "
-                "Instead, WRITE 5-8 SENTENCES OF ACTUAL ANALYSIS. "
-                "Include specific numbers (totals, averages, top items). "
-                "Treat this as if you are presenting findings to a manager.\n\n"
+                "Write a 400-800 word report. DO NOT describe the data structure. "
+                "DO NOT say 'I have completed' or 'Here is the artifact'. "
+                "DO NOT stop after the executive summary. "
+                "Compute real numbers FROM the data and include them. "
+                "Use the 5 sections: Executive Summary, Key Numbers, Trends & "
+                "Comparisons, Notable Anomalies, Recommended Next Steps.\n\n"
+                f"=== PRE-AGGREGATES (all {len(rows)} rows) ===\n"
                 f"{preagg_block}\n\n"
-                f"Column summary:\n{col_summary}\n\n"
-                f"Data sample:\n{rows_sample}\n\n"
-                "Start your answer directly with the analysis. No preamble."
+                f"=== COLUMN SUMMARY ===\n{col_summary}\n\n"
+                f"=== DATA (first {min(len(rows), _MAX_ROWS_IN_PROMPT)} rows) ===\n{rows_sample}\n\n"
+                "Start your answer directly with the Executive Summary. No preamble."
             )
 
         try:
@@ -1752,17 +1784,23 @@ async def _force_llm_synthesis(
             # doesn't make the user wait forever. qwen3.6-27b needs
             # a longer cap (60s) because the CEO-grade prompt is larger
             # and the model can take 30-50s to produce a full report.
+            # Non-qwen (e.g. deepseek-chat) needs at least 30s to produce
+            # a 400-800 word report based on the full data; 12s is too
+            # tight (2026-08-26 — was 12s, raised to 45s).
             # Re-applied 2026-08-25 — the file was reverted.
-            _SYNTH_TIMEOUT_S = 60.0 if _is_qwen else 12.0
+            _SYNTH_TIMEOUT_S = 60.0 if _is_qwen else 45.0
             result = await asyncio.wait_for(
                 synth_call_fn(prompt, conversation_history),
                 timeout=_SYNTH_TIMEOUT_S,
             )
             text = (result.get("content", "") or "").strip()
             # Check it's a real answer, not another placeholder
+            # 2026-08-26: lowered threshold from 100 to 200 chars — a
+            # 400-800 word report is at least 2000 chars, so 200 chars is
+            # the bare minimum for any meaningful prose. (Was too lax.)
             _is_bad = (
                 not text
-                or len(text) < 100
+                or len(text) < 200
                 or text.startswith("I've completed your request")
                 or text.startswith("Here is the artifact")
                 or text.startswith("The data has been retrieved")
@@ -15004,30 +15042,46 @@ async def add_message_stream(
                                 len(_synth_prose), conversation_id,
                             )
                             try:
+                                # 2026-08-26: rewritten to use ALL rows
+                                # (or first 200) instead of just 5, demand
+                                # 400-800 words, and require the 5-section
+                                # structure. The previous prompt was capped
+                                # at 5-8 sentences which produced the
+                                # "Analyzing N rows…" placeholder problem.
+                                _rows_payload = _last_rows[:200] if len(_last_rows) > 200 else _last_rows
+                                _rows_json = json.dumps(_rows_payload, default=str, ensure_ascii=False)
+                                # Truncate to ~40KB to stay within token limits
+                                if len(_rows_json) > 40_000:
+                                    _rows_json = _rows_json[:40_000] + "\n... (truncated for length)"
+                                # Pre-aggregated stats from ALL rows
+                                _preagg = ""
+                                try:
+                                    from app.services.synexia.pre_aggregation import pre_aggregate
+                                    _preagg = pre_aggregate(_last_rows).to_prompt_block()
+                                except Exception:
+                                    _preagg = ""
                                 _forced_prompt = (
-                                    "You are a data analyst. The user asked: "
-                                    f"\"{user_content}\"\n\n"
-                                    f"You queried the database and got {len(_last_rows)} "
-                                    f"rows of real business data.\n\n"
-                                    "Write a COMPREHENSIVE 5-8 sentence analysis that:\n"
-                                    "1. Restates what was asked and what data was found\n"
-                                    "2. Summarizes key totals and figures (use SPECIFIC "
-                                    "numbers from the data)\n"
-                                    "3. Identifies top performers or key patterns\n"
-                                    "4. Highlights any anomalies or notable findings\n"
-                                    "5. Ends with one concrete follow-up suggestion\n\n"
-                                    "IMPORTANT RULES:\n"
-                                    "- NEVER say 'I've completed your request' or "
-                                    "'Here is the artifact' or 'The data has been "
-                                    "retrieved'\n"
-                                    "- NEVER just describe the data structure. "
-                                    "Write REAL analysis with REAL numbers.\n"
-                                    "- Your answer must be useful even WITHOUT the "
-                                    "attached file.\n\n"
-                                    f"Data (first 5 rows):\n"
-                                    f"{json.dumps(_last_rows[:5], default=str, ensure_ascii=False)[:1200]}\n\n"
-                                    f"All {len(_last_rows)} rows column summary:\n"
-                                    f"{_build_column_summary(_last_rows)}"
+                                    f"You are a senior data analyst. The user asked: \"{user_content[:300]}\"\n\n"
+                                    f"You queried the database and got **{len(_last_rows)} rows** of real business data.\n\n"
+                                    "Write a COMPREHENSIVE 400-800 word business report based on what you see. Use the user's question as your framing.\n\n"
+                                    "Structure (ALL 5 sections required):\n"
+                                    "1. **Executive Summary** (4-6 sentences) — headline finding with specific numbers (totals, averages, top items)\n"
+                                    "2. **Key Numbers** (5-10 bullets) — concrete figures with their meaning. Use business terms, not raw column names. Skip ID columns (those ending in _id/id/code/no.) and dates.\n"
+                                    "3. **Trends & Comparisons** (3-5 sentences) — patterns over time, distribution insights, concentration\n"
+                                    "4. **Notable Anomalies** (2-4 bullets) — outliers, surprises, missing data\n"
+                                    "5. **Recommended Next Steps** (3-5 bullets) — concrete actions\n\n"
+                                    "CRITICAL RULES:\n"
+                                    "- Compute numbers FROM the data yourself (sums, averages, rankings). Don't just list column names.\n"
+                                    "- Respond in the same language as the user's question.\n"
+                                    "- NEVER say 'I've completed your request' / 'Here is the artifact' / 'The data has been retrieved'. Start directly with the analysis.\n"
+                                    "- NEVER just describe the data structure.\n\n"
+                                    f"=== PRE-AGGREGATED STATISTICS (all {len(_last_rows)} rows) ===\n"
+                                    f"{_preagg or '(no aggregates)'}\n\n"
+                                    f"=== COLUMN SUMMARY ===\n"
+                                    f"{_build_column_summary(_last_rows) or '(none)'}\n\n"
+                                    f"=== DATA ({len(_rows_payload)} of {len(_last_rows)} rows shown) ===\n"
+                                    f"{_rows_json}\n\n"
+                                    "Write the report now. Use the 5 sections above. Compute numbers FROM the data, do not invent them."
                                 )
                                 _forced_synth = await _deferred_synth_call(
                                     _forced_prompt,
