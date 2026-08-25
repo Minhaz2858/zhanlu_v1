@@ -39,9 +39,33 @@ _DELIVERABLE_PATTERNS: List[Tuple[str, "re.Pattern"]] = [
 _DATA_QUESTION_RE = re.compile(
     r"(total|sum|average|avg|trend|forecast|sales|revenue|shipment|volume|"
     r"how\s+(many|much)|kpi|metrics?|breakdown|compare|statistics?|analysis|"
-    r"数据|销量|销售额|趋势|预测|报表|统计|分析|多少|汇总)",
+    r"report|reports|review|performance|ranking|top\s*\d+|dashboard|"
+    r"数据|销量|销售额|趋势|预测|报表|统计|分析|多少|汇总|报告|回顾|排行|排名)",
     re.IGNORECASE,
 )
+
+# 2026-08-26: report-style requests (the user explicitly asked for a
+# "report", "review", "performance", etc.) require an EXTENSIVE written
+# narrative around the data, not just the data card. Detected separately
+# so we can inject a stronger directive than the standard data-turn one.
+_REPORT_REQUEST_RE = re.compile(
+    r"\b(report|reports|review|reviews|performance|dashboard|"
+    r"breakdown|summary|monthly\s+report|weekly\s+report|"
+    r"kpi|metrics|trends|analysis|ranking|top\s*\d+|"
+    r"give\s+me|generate\s+a|write\s+a|prepare\s+a|show\s+me\s+the)\b"
+    r"|\b(报告|报表|总结|回顾|分析报告|月度|周报|排行|表现|业绩)\b",
+    re.IGNORECASE,
+)
+
+
+def is_report_request(user_message: str | None) -> bool:
+    """True when the user is asking for a written report (not just data).
+
+    Conservative: requires a report-related keyword. Pure data queries
+    ("how many customers") are NOT flagged — only requests that look
+    like they want a written analysis (report/review/summary/etc.).
+    """
+    return bool(_REPORT_REQUEST_RE.search(str(user_message or "")))
 
 _PENDING_RE = re.compile(
     r"\b(let me|i['']?ll|i will|i['']m going to|i am going to|let['']s|"

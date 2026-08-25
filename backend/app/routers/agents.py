@@ -97,6 +97,8 @@ from app.services.file_turn_guard import (
     file_turn_guard,
     should_force_create_file,
     is_file_deliverable_request,
+    file_artifact_created,
+    build_file_disclosure,
 )
 from app.services.tool_result_persistence import (
     persist_tool_result,
@@ -351,6 +353,84 @@ def _artifact_aware_fallback(titles: list[str]) -> str:
     )
 
 
+# Tool names whose success indicates the agent scheduled a future
+# deliverable via ``create_automation`` / ``update_automation``. Kept in
+# sync with ``app.services.file_turn_guard._AUTOMATION_SCHEDULING_TOOLS``.
+_AUTOMATION_SCHEDULING_TOOL_NAMES = frozenset(
+    {
+        "create_automation",
+        "update_automation",
+        "AutomationTask.create",
+        "AutomationTask.update",
+    }
+)
+
+
+def _automation_scheduled_confirmation(
+    tool_calls_for_frontend,
+    fmt: str,
+) -> str:
+    """Short, honest confirmation shown when the agent scheduled an
+    automation task but emitted empty assistant content (so the loop
+    falls back to a placeholder text).
+
+    Deterministic — pulls the task name / schedule / project from the
+    ``create_automation`` args blob. No synthetic LLM call (which would
+    just burn budget). Used by ``_choose_fallback`` so the user gets a
+    real confirmation, NOT the misleading "I gathered some information
+    but had trouble putting it all together…" line.
+
+    Pinned by tests in
+    ``tests/test_automation_scheduled_confirmation.py``. See the
+    2026-08-25 Daily Sales Data Sync regression: this helper was
+    drafted earlier in the day then lost in the P2-12
+    fallback-extraction refactor (it never landed in the
+    ``agent_loop.fallbacks`` extraction); we now keep it here in the
+    router-local pattern alongside ``_artifact_aware_fallback`` /
+    ``_data_summary_fallback``.
+    """
+    import json as _json
+
+    name = ""
+    schedule = ""
+    project = ""
+    for tc in tool_calls_for_frontend or []:
+        if str(tc.get("name") or "") not in _AUTOMATION_SCHEDULING_TOOL_NAMES:
+            continue
+        raw = tc.get("arguments_string") or tc.get("arguments") or ""
+        if isinstance(raw, dict):
+            raw = _json.dumps(raw)
+        if not raw or not isinstance(raw, str):
+            continue
+        try:
+            obj = (
+                _json.loads(raw)
+                if raw.lstrip().startswith(("{", "["))
+                else {}
+            )
+        except Exception:
+            obj = {}
+        if not isinstance(obj, dict):
+            obj = {}
+        name = name or str(obj.get("name") or "")
+        schedule = schedule or str(obj.get("schedule") or "")
+        project = project or str(obj.get("project") or "")
+    label = (fmt or "").upper() or "FILE"
+    title = name or "the automation task"
+    sched_hint = (
+        f" Schedule: `{schedule}` (cron expression; the scheduler "
+        f"computes the next fire)." if schedule else ""
+    )
+    proj_hint = f" Project: **{project}**." if project else ""
+    return (
+        f"**{title}** has been scheduled.{proj_hint} The {label} "
+        f"deliverable will be produced automatically by the runtime "
+        f"agent at the next cron fire — no further action is needed "
+        f"from you in this chat session.{sched_hint} You can review "
+        f"or pause the task from the Automation panel."
+    )
+
+
 def _data_summary_fallback(titles: list[str], user_content: str = "") -> str:
     """Fallback when data-agent report cards exist but synthesis text is empty.
 
@@ -451,9 +531,24 @@ def _choose_fallback(
     # (html/docx/pdf/xlsx/md) but no artifact was created AND no data rows
     # were retrieved, return a format-specific message instead of the
     # generic fallback.
+    #
+    # IMPORTANT (2026-08-25): also suppress the disclosure when the user
+    # asked the AGENT (not the runtime) to "set up a daily task with
+    # output_format=html" and the agent already scheduled it via
+    # ``create_automation``. ``file_artifact_created`` is now
+    # automation-aware (returns True for create_automation/update_automation
+    # calls that scheduled the matching format) so this branch correctly
+    # skips the misleading "could not be generated within this turn's
+    # tool budget" line — and ``_automation_scheduled_confirmation``
+    # surfaces the actual task name + schedule + project so the user
+    # sees a real confirmation, not the generic "I gathered some
+    # information but had trouble putting it all together" apology.
     _is_file, _fmt = is_file_deliverable_request(user_content)
     if _is_file and _fmt:
-        from app.services.file_turn_guard import build_file_disclosure
+        if file_artifact_created(tool_calls_for_frontend, _fmt):
+            return _automation_scheduled_confirmation(
+                tool_calls_for_frontend, _fmt
+            )
         return build_file_disclosure(_fmt)
     return _GENERIC_EMPTY_CONTENT_FALLBACK
 
@@ -496,24 +591,61 @@ def _is_degenerate_dataset(rows: list[dict] | None) -> bool:
     return True
 
 
+def _extract_data_rows_from_tool_call(tc: dict) -> tuple[list[dict], str] | None:
+    """Best-effort extraction of (rows, source_label) from a tool call.
+
+    Handles BOTH shapes:
+    - Tools like ``ask_data_agent`` / ``execute_query`` whose top-level
+      ``result["rows"]`` is the row list and ``result["source_name"]``
+      is the human-readable data source label.
+    - ``fetch_data_batch`` whose ``result["results"]`` is a list of
+      sub-query dicts, each carrying its own ``"rows"`` and ``"label"``.
+
+    Returns (rows, source_label) on success, ``None`` when this tool
+    call has no usable rows. Defensive: bad / malformed shapes are
+    skipped silently rather than blowing up the fallback path.
+    """
+    result = tc.get("results") or {}
+    if not isinstance(result, dict):
+        return None
+    # Shape A — direct rows at top level (ask_data_agent, execute_query, …).
+    direct_rows = result.get("rows")
+    if isinstance(direct_rows, (list, tuple)) and direct_rows:
+        src = result.get("source_name") or "the data source"
+        return (list(direct_rows), src)
+    # Shape B — fetch_data_batch: nested ``results[*].rows``.
+    sub_results = result.get("results")
+    if isinstance(sub_results, list):
+        for sub in sub_results:
+            if not isinstance(sub, dict):
+                continue
+            sub_rows = sub.get("rows")
+            if isinstance(sub_rows, (list, tuple)) and sub_rows:
+                # Use the first non-empty sub-query as the primary one.
+                return (list(sub_rows), str(sub.get("label") or "the data source"))
+    return None
+
+
 def _data_rows_fallback(tool_calls_for_frontend: list[dict]) -> str:
     """Direct fallback built from the actual retrieved rows (no LLM).
 
     Renders a clean markdown table (≤10 rows), hiding system columns
     (FENTRYID, FCUSTMATID, …) and all-empty columns. Never surfaces
-    raw "Sample values: FENTRYID=…" junk.
+    raw "Sample values: FENTRYID=…" junk. Now handles BOTH the direct
+    ``result["rows"]`` shape (ask_data_agent / execute_query) and the
+    nested ``fetch_data_batch`` ``result["results"][*].rows`` shape —
+    see ``_extract_data_rows_from_tool_call``.
     """
     from app.services.goal_contract import is_metadata_only_rows  # lazy
     for tc in (tool_calls_for_frontend or []):
         if tc.get("name") not in DATA_PRODUCING_TOOLS:
             continue
-        result = tc.get("results")
-        if not isinstance(result, dict):
+        extracted = _extract_data_rows_from_tool_call(tc)
+        if extracted is None:
             continue
-        rows = result.get("rows")
-        if not rows:
-            continue
-        src = result.get("source_name") or "the data source"
+        rows, src = extracted
+        if isinstance(rows, (list, tuple)):
+            n = len(rows)
         if isinstance(rows, (list, tuple)):
             n = len(rows)
             # Flatten to dict rows
@@ -1054,6 +1186,225 @@ def _is_dashboard_request(user_content: str) -> bool:
     return fuzzy_dashboard_request(user_content)
 
 
+# Strong-phrase anchors (EN + ZH) that mark a user message as automation-
+# SETUP intent (NOT data-query intent).  When matched, the chat router
+# rebinds the conversation to ``automation_agent`` so the LLM uses
+# ``create_automation`` / ``update_automation`` instead of mistakenly
+# calling ``ask_data_agent`` on the description text (see 2026-08-25
+# third-pass regression).
+_AUTOMATION_SETUP_HEADER_RE = re.compile(
+    r"(?imx)"
+    r"("
+    # EN: explicit header line, with optional whitespace / casing.
+    r"create\s+a?\s*new\s+automation\s+task"
+    r"|set\s+up\s+(?:a\s+|an\s+)?(?:new\s+)?automation"
+    r"|schedule\s+(?:a\s+|an\s+)?(?:new\s+)?(?:daily|hourly|weekly|cron)\s+task"
+    r"|new\s+automation\s+task"
+    # ZH: fullwidth colon, common colon variants and ZH verb choices.
+    r"|帮我新建一个自动化任务|帮我创建一个自动化任务|新建自动化任务"
+    r"|新建一个自动化任务|创建自动化任务|创建.{0,6}自动化任务"
+    r"|添加自动化任务|设置.{0,4}定时任务|添加定时任务"
+    r")"
+)
+# Structural signature of an automation-setup spec: Name/名称 +
+# Schedule/调度 + Output format/输出格式 lines present together. Catches
+# templates the user pastes without an explicit header (and any header
+# typos the regex above misses).
+_AUTOMATION_SETUP_STRUCTURE_RE = re.compile(
+    r"(?isx)"
+    r"(?:^|\n)\s*[-\u2022\u2043\u204c\u204d]?\s*(?:name|名称)\s*[:：]"
+    r".*\n"
+    r".*(?:schedule|调度(?:规则)?|频率)\s*[:：]"
+    r".*\n"
+    r".*(?:output[\s_]*format|输出格式)\s*[:：]"
+)
+
+# Header anchors for AGENT creation (rebind target: agent_builder).
+# Narrower than the automation header so "create a new automation task"
+# cannot accidentally match here.
+_AGENT_CREATION_HEADER_RE = re.compile(
+    r"(?imx)"
+    r"("
+    # EN: the noun MUST be "agent" — no other word fits this slot.
+    r"create\s+(?:a\s+|an\s+|new\s+|me\s+|custom\s+|the\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
+    r"|build\s+(?:me\s+|a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
+    r"|make\s+(?:me\s+|a\s+|an\s+|new\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
+    r"|set\s+up\s+(?:a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
+    r"|design\s+(?:a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
+    r"|new\s+agent"
+    # ZH — ``(?:[一]?\s*个?)?`` covers "新建智能体" (no counter) and
+    # "新建一个智能体" / "新建一个AI智能体" (counter word present).
+    r"|新建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
+    r"|创建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
+    r"|帮我创建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
+    r"|做\s*一个?\s*(?:AI\s*|新\s*|自定义\s*)*智能体"
+    r"|构建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
+    r"|设计\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
+    r"|添加\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*)*智能体"
+    r")"
+)
+
+# Header anchors for SKILL creation (rebind target: skill_agent).
+_SKILL_CREATION_HEADER_RE = re.compile(
+    r"(?imx)"
+    r"("
+    # EN: noun MUST be "skill" — disjoint from automation and agent headers.
+    r"create\s+(?:a\s+|new\s+|custom\s+|reusable\s+|the\s+)*skill"
+    r"|build\s+(?:me\s+|a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"|make\s+(?:me\s+|a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"|set\s+up\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"|design\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"|write\s+(?:a\s+|the\s+|new\s+|custom\s+)?SKILL\.md"
+    r"|write\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"|add\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"|new\s+skill\b"
+    # ZH — counter word ``一个`` is common in ZH; allow it.
+    r"|新建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*)*技能"
+    r"|创建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*)*技能"
+    r"|做\s*一个?\s*(?:新\s*|可复用\s*|自定义\s*)*技能"
+    r"|构建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*)*技能"
+    r"|写\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*)*技能"
+    r"|添加\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*)*技能"
+    r")"
+)
+
+# Intent table — order matters: most-specific match wins. The automation
+# header is the most distinctive ("automation task" pattern), so it goes
+# first; agent-creation and skill-creation headers are distinguished by
+# the noun ("agent" vs "skill") and don't overlap with each other.
+#
+# Each row: (intent_name, target_agent, header_regex, structure_regex_or_None)
+_SYSTEM_AGENT_INTENT_TABLE: list[tuple[str, str, "re.Pattern[str]", "re.Pattern[str] | None"]] = [
+    (
+        "automation_setup",
+        "automation_agent",
+        _AUTOMATION_SETUP_HEADER_RE,
+        _AUTOMATION_SETUP_STRUCTURE_RE,
+    ),
+    (
+        "agent_creation",
+        "agent_builder",
+        _AGENT_CREATION_HEADER_RE,
+        None,
+    ),
+    (
+        "skill_creation",
+        "skill_agent",
+        _SKILL_CREATION_HEADER_RE,
+        None,
+    ),
+]
+
+
+def _detect_system_agent_intent(
+    user_content: str | None,
+) -> tuple[str, str] | None:
+    """Return ``(intent_name, target_agent_name)`` when ``user_content``
+    is configuring a dedicated system agent, else ``None``.
+
+    The detector scans a small priority-ordered table of header +
+    (optional) structure regexes. Each entry corresponds to a system
+    agent whose dedicated purpose (automation setup / agent creation /
+    skill creation) is missing from the runtime project agent's
+    toolset. The router rebinds the conversation so the LLM uses the
+    right tool (``create_automation`` / agent-creation / skill-creator)
+    instead of misfiring on ``ask_data_agent``.
+
+    First match wins. The table is intentionally narrow — false
+    positives just route the user to a clarifying prompt; false
+    negatives leave the agent without the right tool (the 2026-08-25
+    regressions). See ``tests/test_automation_setup_intent.py`` and
+    ``tests/test_system_agent_intent_routing.py``.
+    """
+    if not isinstance(user_content, str) or not user_content.strip():
+        return None
+    for intent_name, target_agent, header_re, structure_re in _SYSTEM_AGENT_INTENT_TABLE:
+        if header_re.search(user_content):
+            return (intent_name, target_agent)
+        if structure_re is not None and structure_re.search(user_content):
+            return (intent_name, target_agent)
+    return None
+
+
+def _route_to_dedicated_system_agent(
+    conv,
+    user_content: str,
+    user_role: str,
+    db,
+) -> tuple[str, str] | None:
+    """Rebind ``conv.agent_name`` to the system agent that owns the
+    detected intent. Persists so subsequent turns in the same chat stay
+    routed there. Returns ``(intent_name, target_agent)`` on a rebind,
+    else ``None``.
+
+    No-op for non-user messages, when the conversation is already on
+    the target agent, or when no intent matches. Best-effort on the
+    ``commit`` — if persistence fails, the in-memory rebind is rolled
+    back so the current turn still runs on the original agent.
+    """
+    if user_role != "user":
+        return None
+    detected = _detect_system_agent_intent(user_content)
+    if detected is None:
+        return None
+    intent_name, target_agent = detected
+    if getattr(conv, "agent_name", None) == target_agent:
+        return None
+    previous = conv.agent_name
+    conv.agent_name = target_agent
+    conv.updated_date = datetime.now(timezone.utc)
+    try:
+        db.commit()
+    except Exception as exc:  # noqa: BLE001 — best-effort persist
+        logger.warning(
+            "system-agent routing: failed to persist rebind "
+            "(intent=%s conv=%s previous=%s target=%s): %s",
+            intent_name, getattr(conv, "id", "?"), previous,
+            target_agent, exc,
+        )
+        db.rollback()
+        conv.agent_name = previous
+        return None
+    logger.info(
+        "system-agent routing: intent=%s rebind conv=%s %s -> %s "
+        "(preview: %.80r)",
+        intent_name, getattr(conv, "id", "?"), previous, target_agent,
+        user_content,
+    )
+    return (intent_name, target_agent)
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible shims (kept so older tests / callers don't break).
+# New code should call ``_detect_system_agent_intent`` /
+# ``_route_to_dedicated_system_agent`` directly.
+# ---------------------------------------------------------------------------
+
+
+def _detect_automation_setup_intent(user_content: str | None) -> bool:
+    """Deprecated: use ``_detect_system_agent_intent`` and check the
+    intent name. Kept for backward compatibility — returns True iff
+    the detected intent is ``automation_setup``.
+    """
+    detected = _detect_system_agent_intent(user_content)
+    return bool(detected) and detected[0] == "automation_setup"
+
+
+def _apply_automation_setup_routing(
+    conv,
+    user_content: str,
+    user_role: str,
+    db,
+) -> bool:
+    """Deprecated: use ``_route_to_dedicated_system_agent``. Returns
+    True iff a rebind happened AND it was to ``automation_agent``.
+    """
+    result = _route_to_dedicated_system_agent(
+        conv, user_content, user_role, db
+    )
+    return bool(result) and result[1] == "automation_agent"
+
+
 def _tool_was_called(tool_calls_for_frontend: list[dict], tool_name: str) -> bool:
     """Check whether a specific tool was called during this turn."""
     return any(tc.get("name") == tool_name for tc in tool_calls_for_frontend)
@@ -1437,12 +1788,23 @@ def _build_selected_skill_runtime_block(db: Session, selected_skill: dict | None
 # (execute_query / execute_sql / sql_query); forecast_brief returns rows
 # for market reads. Anything not listed here is skipped by the structural
 # `result.get("rows")` gate anyway — the set only widens classification.
+#
+# ``fetch_data_batch`` (the direct-parallel-SQL fast path used by
+# ``automation_runtime_agent`` and cron-triggered report runs) returns
+# ``{"success": True, "results": [{"label": ..., "rows": [...], ...}, ...]}``
+# — the row array is NESTED inside each sub-query result, NOT at the top
+# level. ``_data_rows_fallback`` handles both shapes; we add it here so the
+# post-loop pipeline (and the v3 empty-bubble guarantee) treats its
+# results as ground-truth data instead of falling back to the generic
+# apology when the runtime turn emits empty content. Pinned by
+# tests/test_fetch_data_batch_data_fallback.py.
 DATA_PRODUCING_TOOLS: frozenset = frozenset({
     "ask_data_agent",
     "execute_query",
     "execute_sql",
     "sql_query",
     "forecast_brief",
+    "fetch_data_batch",
     # Institutional-grade research-analyst pipeline (2026-08-25)
     # comprehensive_data/profile="market" emits structured report_card
     # payloads; collect_enterprise_data emits the ExecutiveReport card.
@@ -4264,6 +4626,11 @@ async def add_message(
     messages = conv.messages or []
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
+    # 2026-08-25: auto-rebind conversation to the dedicated system agent
+    # when the user pastes an automation-setup / agent-creation /
+    # skill-creation template (EN/ZH/structural), so the LLM uses the
+    # correct toolset instead of misfiring on ask_data_agent.
+    _route_to_dedicated_system_agent(conv, user_content, user_role, db)
     user_model_v2: str | None = body.get("model")
     # FIX 2026-08-23: extract selected skill from chip so
     # _build_selected_skill_runtime_block can inject SKILL.md
@@ -8662,6 +9029,10 @@ async def add_message_stream(
     messages = conv.messages or []
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
+    # 2026-08-25: auto-rebind conversation to the dedicated system agent
+    # when the user pastes an automation-setup / agent-creation /
+    # skill-creation template (EN/ZH/structural).
+    _route_to_dedicated_system_agent(conv, user_content, user_role, db)
     selected_skill = body.get("selected_skill") if isinstance(body.get("selected_skill"), dict) else None
     selected_skill_id = body.get("selected_skill_id") or (selected_skill or {}).get("id")
     if selected_skill and selected_skill_id and not selected_skill.get("id"):
@@ -9726,9 +10097,56 @@ async def add_message_stream(
             "automatically.\n"
             "- Do NOT include a 'JSON Report Card' section or any raw JSON "
             "payload in the final answer.\n"
-            "- After the data returns, answer with a short executive "
-            "summary: key numbers, trends, and one recommendation.\n"
+            "- After the data returns, write an EXTENSIVE prose analysis "
+            "AROUND the data card: an executive summary (3-5 sentences), "
+            "key numbers with interpretation, trends and comparisons, "
+            "notable anomalies, and 1-3 actionable recommendations. The "
+            "user is paying for insight, not just a table.\n"
+            "- NEVER respond with only filler text like 'Analyzing N rows…' "
+            "or 'Here is the data…'. Every data turn MUST produce a real "
+            "written analysis paragraph (at least 4-6 sentences of prose).\n"
         )
+        # 2026-08-26: when the user explicitly asks for a written REPORT
+        # (review, dashboard, monthly/weekly report, performance, etc.),
+        # the analysis must be COMPREHENSIVE — not a brief summary.
+        # Triggered by report-style keywords in the user message.
+        _user_msg_text = ""
+        try:
+            for _m in (messages or []):
+                if isinstance(_m, dict) and _m.get("role") == "user":
+                    _c = _m.get("content")
+                    if isinstance(_c, str):
+                        _user_msg_text += " " + _c
+        except Exception:
+            _user_msg_text = ""
+        try:
+            from app.services.goal_contract import is_report_request
+            if is_report_request(_user_msg_text):
+                system_prompt += (
+                    "\n\n## RESPONSE DISCIPLINE (report request — STRICT)\n"
+                    "The user has explicitly asked for a written report "
+                    "(review, performance, dashboard, monthly/weekly "
+                    "report, KPI/metrics, ranking, etc.). You MUST "
+                    "produce a comprehensive written report. Structure:\n"
+                    "  1. **Executive Summary** — 4-6 sentence overview of "
+                    "the headline finding (what happened, why it matters).\n"
+                    "  2. **Key Numbers** — 5-10 concrete figures with "
+                    "their meaning (totals, comparisons to prior period, "
+                    "top/bottom performers).\n"
+                    "  3. **Trends & Comparisons** — patterns over time, "
+                    "vs. last month/quarter, vs. plan or benchmark.\n"
+                    "  4. **Notable Anomalies** — outliers, surprises, "
+                    "items needing attention.\n"
+                    "  5. **Recommendations** — 3-5 concrete next actions "
+                    "the user should take.\n"
+                    "Aim for 400-800 words of prose around the data card. "
+                    "Do NOT emit only the data card + a 1-line summary. "
+                    "Do NOT say 'Analyzing N rows…' — write the actual "
+                    "analysis. Markdown headings and bullet lists are "
+                    "welcome.\n"
+                )
+        except Exception:
+            pass
 
     # ── T15: weak re-export intent → nudge the system prompt (flag-gated) ──
     # Append before llm_messages is built so the directive reaches the loop.
@@ -12318,49 +12736,108 @@ async def add_message_stream(
                 # post-loop card never built → raw table + no deliverable.
                 # The legacy eager-synthesis elif below stays ask_data_agent-
                 # only so flag-OFF behavior is unchanged for other tools.
+                #
+                # 2026-08-25: ``fetch_data_batch`` carries its rows in a
+                # nested ``result["results"][*].rows`` shape (one entry per
+                # sub-query, each with its own ``label`` / ``sql``). The
+                # gate below now also fires for that tool, and the body
+                # iterates per-sub-query so each lands in
+                # ``_contract.answer_datasets()`` separately — this is what
+                # enables ``_force_llm_synthesis`` to receive the runtime
+                # agent's fetched rows at all (the empty-bubble guarantee's
+                # _last_rows comes from goal_contract.answer_datasets()).
                 if (
                     tool_name in DATA_PRODUCING_TOOLS
                     and isinstance(result, dict)
-                    and result.get("rows")
                     and settings.QUERY_PURPOSE_TAGGING_ENABLED
-                ):
-                    # Deferred deliverable pipeline (Bug 1/2 fix): tag the
-                    # query result purpose (probe/auxiliary/answer) and
-                    # collect answer datasets on the contract. NO synthesis
-                    # runs mid-loop — the card is built ONCE, post-loop,
-                    # from the final answer dataset.
-                    try:
-                        _purpose = classify_query_purpose(
-                            sql=result.get("sql"),
-                            rows=result.get("rows"),
-                            table_roles=(
-                                _purpose_resolver.roles_for(
-                                    extract_tables_from_sql(result.get("sql") or "")
-                                )
-                                if _purpose_resolver is not None
-                                else {}
-                            ),
+                    and (
+                        result.get("rows")
+                        or (
+                            tool_name == "fetch_data_batch"
+                            and result.get("results")
                         )
-                    except Exception as purpose_err:
-                        logger.warning(
-                            "v3 query-purpose classification failed (fail-open "
-                            "answer) conv=%s: %s", conversation_id, purpose_err,
-                        )
-                        _purpose = "answer"
-                    result["query_purpose"] = _purpose
-                    if _purpose == "answer" and _contract is not None:
-                        _contract.record_dataset(
-                            rows=result.get("rows"),
-                            sql=result.get("sql"),
-                            source_name=result.get("source_name"),
-                            source_id=result.get("source_id"),
-                            purpose=_purpose,
-                            tool_call_id=tool_call_id,
-                        )
-                    logger.info(
-                        "v3 query purpose=%s rows=%d conv=%s (card deferred to post-loop)",
-                        _purpose, len(result.get("rows", [])), conversation_id,
                     )
+                ):
+                    # Build the per-call dataset input(s). For top-level
+                    # data tools (ask_data_agent / execute_query / …) there's
+                    # exactly ONE entry. For fetch_data_batch the row array is
+                    # nested PER sub-query, so we record one dataset per sub-
+                    # query — they all carry their own sql + label.
+                    _dataset_inputs: list[dict] = []
+                    if tool_name == "fetch_data_batch":
+                        for _sub in result.get("results") or []:
+                            if not isinstance(_sub, dict):
+                                continue
+                            _sub_rows = _sub.get("rows") or []
+                            if not _sub_rows:
+                                continue
+                            _dataset_inputs.append({
+                                "rows": _sub_rows,
+                                "sql": _sub.get("sql"),
+                                "source_name": (
+                                    str(_sub.get("label") or "") or None
+                                ),
+                                "source_id": _sub.get("source_id"),
+                            })
+                    elif result.get("rows"):
+                        _dataset_inputs.append({
+                            "rows": result.get("rows"),
+                            "sql": result.get("sql"),
+                            "source_name": result.get("source_name"),
+                            "source_id": result.get("source_id"),
+                        })
+
+                    # Classify each dataset's purpose (probe/auxiliary/answer)
+                    # and call ``record_dataset`` only on answer-tagged ones.
+                    # Falls back to ``"answer"`` on classifier error so we
+                    # never lose data to a transient failure.
+                    for _ds in _dataset_inputs:
+                        try:
+                            _purpose = classify_query_purpose(
+                                sql=_ds["sql"],
+                                rows=_ds["rows"],
+                                table_roles=(
+                                    _purpose_resolver.roles_for(
+                                        extract_tables_from_sql(
+                                            _ds["sql"] or ""
+                                        )
+                                    )
+                                    if _purpose_resolver is not None
+                                    else {}
+                                ),
+                            )
+                        except Exception as purpose_err:
+                            logger.warning(
+                                "v3 query-purpose classification failed "
+                                "(fail-open answer) conv=%s: %s",
+                                conversation_id, purpose_err,
+                            )
+                            _purpose = "answer"
+                        if _purpose == "answer" and _contract is not None:
+                            _contract.record_dataset(
+                                rows=_ds["rows"],
+                                sql=_ds["sql"],
+                                source_name=_ds["source_name"],
+                                source_id=_ds["source_id"],
+                                purpose=_purpose,
+                                tool_call_id=tool_call_id,
+                            )
+                        logger.info(
+                            "v3 query purpose=%s rows=%d conv=%s "
+                            "(tool=%s, card deferred to post-loop)",
+                            _purpose, len(_ds["rows"]), conversation_id,
+                            tool_name,
+                        )
+                    # Surface the dominant purpose on the top-level result so
+                    # downstream callers that read ``result["query_purpose"]``
+                    # still see something useful (last sub-query wins for
+                    # fetch_data_batch; first/only wins otherwise). The gate
+                    # above ensures ``_dataset_inputs`` is non-empty here, so
+                    # ``_purpose`` is well-defined; the ``or "answer"`` is
+                    # belt-and-suspenders against any classifier exception
+                    # that left _purpose unset.
+                    if _dataset_inputs:
+                        result["query_purpose"] = _purpose or "answer"
                 elif tool_name == "ask_data_agent" and isinstance(result, dict) and result.get("rows"):
                     # Legacy eager synthesis (flag OFF) — behavior unchanged.
                     try:
