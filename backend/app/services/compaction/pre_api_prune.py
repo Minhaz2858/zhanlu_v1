@@ -408,6 +408,15 @@ def escalate(
 
     if action == "drop_old_tool_messages":
         # Drop the oldest half of tool-role messages (keep the rest).
+        # 2026-08-25: BUGFIX — when dropping a tool message, we must also
+        # remove the matching tool_call from the prior assistant message,
+        # otherwise DeepSeek/OpenAI reject the request with:
+        #   "An assistant message with 'tool_calls' must be followed by tool
+        #    messages responding to each 'tool_call_id' (insufficient tool
+        #    messages following tool_calls message)"
+        # Strategy: identify the tool messages we're about to drop, collect
+        # the tool_call_ids that are orphaned, and strip those tool_calls
+        # from the immediately-preceding assistant message.
         tool_indices = [
             i for i, m in enumerate(messages)
             if m.get("role") == "tool"
@@ -416,7 +425,27 @@ def escalate(
             return messages, action, None
         drop_n = max(1, len(tool_indices) // 2)
         drop_set = set(tool_indices[:drop_n])
-        new_msgs = [m for i, m in enumerate(messages) if i not in drop_set]
+        # Collect tool_call_ids that would be orphaned
+        orphaned_call_ids: set[str] = set()
+        for i in drop_set:
+            mm = messages[i]
+            tid = mm.get("tool_call_id")
+            if tid:
+                orphaned_call_ids.add(tid)
+        # Strip orphaned tool_calls from prior assistant messages
+        new_msgs: list[dict] = []
+        for i, m in enumerate(messages):
+            if i in drop_set:
+                continue
+            if m.get("role") == "assistant" and m.get("tool_calls"):
+                kept_tcs = [
+                    tc for tc in m["tool_calls"]
+                    if not (isinstance(tc, dict) and tc.get("id") in orphaned_call_ids)
+                ]
+                if len(kept_tcs) != len(m["tool_calls"]):
+                    # Make a shallow copy with filtered tool_calls
+                    m = {**m, "tool_calls": kept_tcs}
+            new_msgs.append(m)
         return new_msgs, action, None
 
     if action == "fallback_to_different_model":
