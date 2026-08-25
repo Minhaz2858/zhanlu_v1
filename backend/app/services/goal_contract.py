@@ -205,6 +205,7 @@ _METADATA_ONLY_COLUMN_RE = re.compile(
     r"^(?:"
     r"(?:min|max|count)"                    # bare word: count (psycopg2 unaliased)
     r"|(?:min|max|count)_[a-z0-9_]*"        # prefix: min_date, max_fdate, count_rows
+    r"|[a-z0-9_]*_(?:min|max|count)"        # suffix: row_count, ship_date_min
     r"|(?:min|max|count)\s*\([^)]*\)"       # function: min(x), max(FDATE), count(*), count(1)
     r")$",
     re.IGNORECASE,

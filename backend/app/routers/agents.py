@@ -665,14 +665,79 @@ def _data_rows_fallback(
                 continue
             # Metadata-only rows (MIN_DATE/MAX_DATE/ENTRY_COUNT) are not
             # meaningful business data — show a targeted message instead.
+            # 2026-08-26: when the user asked for a written REPORT, expand
+            # this into a full narrative explaining what was returned,
+            # what the date range means, and exactly how to ask for the
+            # detail. The user explicitly wants extensive answers.
             if is_metadata_only_rows(dict_rows):
-                return (
-                    f"The query against {src} returned only summary metadata "
-                    f"(date range / row count) rather than actual business data. "
-                    f"Please try rephrasing your request with more specific "
-                    f"dimensions (e.g. by product, customer, or time period) "
-                    f"so I can retrieve the detailed figures you need."
+                # Extract the values from the metadata row for context
+                meta_row = dict_rows[0]
+                min_d = max_d = None
+                rc = None
+                for k, v in meta_row.items():
+                    kn = (k or "").lower()
+                    if "min" in kn and ("date" in kn or "time" in kn):
+                        min_d = str(v)[:10]
+                    elif "max" in kn and ("date" in kn or "time" in kn):
+                        max_d = str(v)[:10]
+                    elif "count" in kn or "entry" in kn or "row" in kn:
+                        if isinstance(v, (int, float)):
+                            rc = int(v)
+                # Build a long-form explanation
+                out_lines: list[str] = []
+                out_lines.append("**Data Scope Note — only summary metadata was returned**\n")
+                out_lines.append(
+                    f"The data tool answered your question with aggregate "
+                    f"information about the **{src}** dataset rather than "
+                    f"individual business records. This usually means the "
+                    f"SQL behind the question ended with an aggregation "
+                    f"(e.g. `SELECT MIN(date), MAX(date), COUNT(*) FROM …`) "
+                    f"without a `GROUP BY`, so only one summary row came back."
                 )
+                out_lines.append("")
+                # What we DO know
+                out_lines.append("**What the data tells us**\n")
+                if rc is not None:
+                    out_lines.append(
+                        f"- **{_format_num(rc)} records** exist in the underlying table for the queried scope."
+                    )
+                if min_d and max_d:
+                    span = _date_span_days(min_d, max_d)
+                    if span is not None:
+                        out_lines.append(
+                            f"- Date span: **{min_d} to {max_d}** "
+                            f"({span} days, {span // 30 if span >= 30 else span} "
+                            f"{'months' if span >= 30 else 'days'})."
+                        )
+                    else:
+                        out_lines.append(f"- Date span: **{min_d} to {max_d}**.")
+                if not (rc is not None or (min_d and max_d)):
+                    out_lines.append(
+                        "- The returned row only contains metadata columns; no business fields are present."
+                    )
+                out_lines.append("")
+                # How to fix
+                out_lines.append("**How to get the actual report**\n")
+                out_lines.append(
+                    f"- {L_rephrase_1} by adding dimensions "
+                    f"such as *customer*, *product*, *region*, or *contract type* "
+                    f"to the `GROUP BY` clause so the query returns multiple rows."
+                )
+                out_lines.append(
+                    f"- {L_rephrase_2} — for example, ask for "
+                    f"`contract value by customer` or `top 20 products by revenue`."
+                )
+                if min_d and max_d:
+                    out_lines.append(
+                        f"- {L_rephrase_3} — your underlying data covers "
+                        f"`{min_d}` to `{max_d}`, so the question needs a "
+                        f"`WHERE` filter that matches your intended reporting period."
+                    )
+                out_lines.append(
+                    f"- {L_rephrase_4} — confirm the question is asking "
+                    f"for transaction-level data, not a `COUNT(*)` over the whole table."
+                )
+                return "\n".join(out_lines)
             # Hide system columns
             hide_cols = {
                 k for k in dict_rows[0]
@@ -848,6 +913,43 @@ def _format_qty(v: float, unit_hint: str = "") -> str:
     return f"{v:,.2f} {unit_hint}".strip()
 
 
+# 2026-08-26: helpers for the metadata-only fallback — used to build
+# the "what the data tells us" + "how to fix" sections of the
+# narrative returned when the SQL ended with a bare aggregate.
+def _format_num(v: int | float) -> str:
+    if v is None:
+        return "0"
+    if abs(v) >= 10_000:
+        return f"{v/10_000:,.2f}万"
+    return f"{int(v):,}"
+
+
+L_rephrase_1 = "Rephrase the request"
+L_rephrase_2 = "Be more specific about the grouping"
+L_rephrase_3 = "Adjust the date filter"
+L_rephrase_4 = "Avoid bare COUNT(*) over the whole table"
+L_underlying_1 = "records exist in the underlying table for the queried scope"
+
+
+def _date_span_days(date_min: str, date_max: str) -> int | None:
+    """Number of days between two YYYY-MM-DD strings. None on parse error."""
+    from datetime import date as _date
+    try:
+        d1 = _date.fromisoformat(date_min[:10])
+        d2 = _date.fromisoformat(date_max[:10])
+        return (d2 - d1).days
+    except Exception:
+        return None
+
+
+def _stddev(vals: list[float]) -> float:
+    """Population standard deviation."""
+    if len(vals) < 2:
+        return 0.0
+    mean = sum(vals) / len(vals)
+    return (sum((v - mean) ** 2 for v in vals) / len(vals)) ** 0.5
+
+
 def _build_aggregate_fallback(
     dict_rows: list[dict],
     src: str,
@@ -985,37 +1087,127 @@ def _build_aggregate_fallback(
     is_chinese = any("\u4e00" <= ch <= "\u9fff" for ch in (user_msg or ""))
     L = lambda en, zh: zh if is_chinese else en
 
-    # ── 5. Build the report ────────────────────────────────────────
+    # ── 5. Build the report (EXTENSIVE — 400-800 words minimum) ──
     out: list[str] = []
-    out.append(f"**{L('Performance Report', '绩效报告')} — {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])}**\n")
 
-    # Executive headline
-    headline_lines: list[str] = []
-    headline_lines.append(
-        f"Across **{len(dict_rows)} {L(terms['noun'], terms['noun_zh'])}** from `{src}`, the headline figure is driven by the leading metric column."
+    # ── 5a. Compute common aggregates for the narrative ───────────
+    headline_metric = terms["headline_metric"]
+    headline_vals: list = []
+    if headline_metric:
+        headline_vals = [r.get(headline_metric) for r in dict_rows if isinstance(r.get(headline_metric), (int, float))]
+    headline_total = sum(headline_vals) if headline_vals else 0
+    headline_avg = (headline_total / len(headline_vals)) if headline_vals else 0
+
+    # Per-day counts and date span
+    day_counter: dict[str, float] = {}
+    for r in dict_rows:
+        if not date_pick:
+            break
+        d = str(r.get(date_pick) or "")[:10]
+        if not d:
+            continue
+        if headline_metric and headline_metric in money_cols:
+            v = r.get(headline_metric)
+            if isinstance(v, (int, float)):
+                day_counter[d] = day_counter.get(d, 0.0) + v
+        elif headline_metric:
+            v = r.get(headline_metric)
+            if isinstance(v, (int, float)):
+                day_counter[d] = day_counter.get(d, 0.0) + v
+        else:
+            day_counter[d] = day_counter.get(d, 0.0) + 1
+
+    # Date range from data
+    date_min = date_max = None
+    if date_pick:
+        dates = sorted([str(r.get(date_pick) or "")[:10] for r in dict_rows if r.get(date_pick)])
+        dates = [d for d in dates if d]
+        if dates:
+            date_min = dates[0]
+            date_max = dates[-1]
+
+    # Header
+    out.append(f"# {L('Performance Report', '绩效报告')}\n")
+    out.append(
+        f"**{L('Scope', '范围')}:** {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])} "
+        f"{L('from', '来自')} `{src}`"
+        + (f" {L('covering', '覆盖')} `{date_min}` {L('to', '至')} `{date_max}`" if date_min and date_max else "")
+        + ".\n"
     )
-    if terms["headline_metric"]:
-        metric = terms["headline_metric"]
-        vals = [r.get(metric) for r in dict_rows if isinstance(r.get(metric), (int, float))]
-        if vals:
-            total = sum(vals)
-            avg = total / len(vals)
-            if metric in money_cols:
-                headline_lines.append(
-                    f"- **{L(terms['value_label'], terms['value_label_zh'])}** = **{_format_money(total)}** "
-                    f"({L('across', '共')} {len(vals)} {L(terms['noun'], terms['noun_zh'])})."
-                )
-                headline_lines.append(
-                    f"- **{L(terms['size_label'], terms['size_label_zh'])}** = **{_format_money(avg)}**."
-                )
+
+    # ── 5b. Executive Summary (4-6 sentence paragraph) ────────────
+    summary_sentences: list[str] = []
+    if headline_metric and headline_vals:
+        if headline_metric in money_cols:
+            summary_sentences.append(
+                f"{L(terms['value_label'], terms['value_label_zh'])} "
+                f"{L('over the period was', '为')} **{_format_money(headline_total)}** "
+                f"{L('across', '共')} {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])}, "
+                f"{L('with an average of', '平均每笔')} **{_format_money(headline_avg)}** "
+                f"{L('per record', '')}."
+            )
+            summary_sentences.append(
+                f"{L('The single largest', '单笔最大金额为')} "
+                f"**{_format_money(max(headline_vals))}** "
+                f"{L('and the smallest', '，最小为')} "
+                f"**{_format_money(min(headline_vals))}**, "
+                f"{L('giving a wide range that suggests significant variation in deal sizes', '，说明交易规模差异较大')}."
+            )
+        else:
+            summary_sentences.append(
+                f"{L('Total', '总计')} {headline_metric} {L('over the period was', '为')} "
+                f"**{headline_total:,.2f}** across {len(dict_rows)} rows, with an average of "
+                f"**{headline_avg:,.2f}** per record."
+            )
+    elif len(dict_rows) == 1 and date_min and date_max:
+        summary_sentences.append(
+            f"{L('The query returned a summary row covering', '本次查询返回了一行汇总记录，涵盖')} "
+            f"**{len(headline_vals)} {L('records', '条记录')}** {L('spanning', '时间跨度')} "
+            f"`{date_min}` {L('to', '至')} `{date_max}` "
+            f"({_date_span_days(date_min, date_max)} {L('days', '天')})."
+        )
+    else:
+        summary_sentences.append(
+            f"The query returned {len(dict_rows)} {L(terms['noun'], terms['noun_zh'])} from `{src}`."
+        )
+
+    # Add distribution insight
+    if headline_vals and len(headline_vals) >= 3:
+        sorted_vals = sorted(headline_vals, reverse=True)
+        top3_share = sum(sorted_vals[:3]) / headline_total * 100 if headline_total else 0
+        if top3_share > 50:
+            summary_sentences.append(
+                f"{L('Concentration is high', '集中度较高')} — "
+                f"{L('the top 3 records account for', '前 3 条记录占')} "
+                f"**{top3_share:.1f}%** {L('of the total', '的总额')}, "
+                f"{L('suggesting revenue/value is driven by a small number of large records', '说明总额主要由少数大额记录驱动')}."
+            )
+        else:
+            summary_sentences.append(
+                f"{L('Distribution is fairly even', '分布较为均衡')} — "
+                f"{L('the top 3 records account for', '前 3 条记录占')} "
+                f"**{top3_share:.1f}%** {L('of the total', '的总额')}, "
+                f"{L('with no single record dominating', '没有单一记录占据主导')}."
+            )
+
+    # Add period insight
+    if date_min and date_max and date_min != date_max:
+        span = _date_span_days(date_min, date_max)
+        if span and headline_total:
+            if headline_metric in money_cols:
+                per_day = _format_money(headline_total / max(span, 1))
             else:
-                headline_lines.append(
-                    f"- **{metric}** total = **{total:,.2f}**, average = **{avg:,.2f}** across {len(vals)} rows."
-                )
-    out.append("\n".join(headline_lines))
+                per_day = f"{headline_total / max(span, 1):,.2f}"
+            summary_sentences.append(
+                f"{L('Over the', '在')} {span} {L('day span', '天跨度内')} "
+                f"({date_min} {L('to', '至')} {date_max}), {L('the average daily value was', '日均值为')} "
+                f"**{per_day}**."
+            )
+    out.append("**" + L("Executive Summary", "执行摘要") + "**\n")
+    out.append(" ".join(summary_sentences))
     out.append("")
 
-    # Key money metrics
+    # ── 5c. Key Numbers (money, quantity, kpi) ────────────────────
     if money_pick:
         out.append(f"**{L('Revenue & Amounts', '金额指标')}**\n")
         for k in money_pick:
@@ -1026,13 +1218,15 @@ def _build_aggregate_fallback(
             avg = total / len(vals)
             mx = max(vals)
             mn = min(vals)
+            stddev = _stddev(vals)
+            spread_pct = ((mx - mn) / avg * 100) if avg else 0
             out.append(
                 f"- **{k}** — total {_format_money(total)}, average {_format_money(avg)}, "
-                f"range {_format_money(mn)} – {_format_money(mx)}."
+                f"range {_format_money(mn)} – {_format_money(mx)} "
+                f"({L('spread', '波动')}: {spread_pct:,.0f}%, std dev {_format_money(stddev)})."
             )
         out.append("")
 
-    # Key quantity metrics
     if qty_pick:
         out.append(f"**{L('Volumes & Quantities', '数量指标')}**\n")
         for k in qty_pick:
@@ -1042,13 +1236,13 @@ def _build_aggregate_fallback(
             total = sum(vals)
             avg = total / len(vals)
             mx = max(vals)
+            mn = min(vals)
             out.append(
                 f"- **{k}** — total {_format_qty(total)}, average {_format_qty(avg)}, "
-                f"max {_format_qty(mx)}."
+                f"max {_format_qty(mx)}, min {_format_qty(mn)}."
             )
         out.append("")
 
-    # KPI / margin / rate
     if kpi_pick:
         out.append(f"**{L('Margins & Rates', '毛利与比率')}**\n")
         for k in kpi_pick:
@@ -1063,41 +1257,88 @@ def _build_aggregate_fallback(
             )
         out.append("")
 
-    # Time pattern (if date column exists)
-    if date_pick:
-        from collections import Counter as _Counter
-        try:
-            day_counter: dict[str, float] = {}
-            for r in dict_rows:
-                d = str(r.get(date_pick) or "")[:10]
-                if not d:
-                    continue
-                # Sum the headline metric per day if possible
-                if terms["headline_metric"]:
-                    v = r.get(terms["headline_metric"])
-                    if isinstance(v, (int, float)):
-                        day_counter[d] = day_counter.get(d, 0.0) + v
-                else:
-                    day_counter[d] = day_counter.get(d, 0.0) + 1
-            if day_counter:
-                sorted_days = sorted(day_counter.items(), key=lambda kv: -kv[1])
-                out.append(f"**{L('Activity by Day', '每日活动')}**\n")
+    # ── 5d. Trends & Comparisons (time pattern) ───────────────────
+    out.append(f"**{L('Trends & Comparisons', '趋势与对比')}**\n")
+    if day_counter:
+        sorted_days = sorted(day_counter.items(), key=lambda kv: -kv[1])
+        out.append(
+            f"- {L('Active days', '活跃天数')}: **{len(day_counter)}**; "
+            f"{L('Peak day', '高峰日')}: `{sorted_days[0][0]}` "
+            f"({(_format_money(sorted_days[0][1]) if headline_metric in money_cols else f'{sorted_days[0][1]:,.0f}')})."
+        )
+        if len(sorted_days) >= 2:
+            out.append(
+                f"- {L('Slowest day', '最低日')}: `{sorted_days[-1][0]}` "
+                f"({(_format_money(sorted_days[-1][1]) if headline_metric in money_cols else f'{sorted_days[-1][1]:,.0f}')})."
+            )
+        # Concentration: top 3 days vs rest
+        if len(sorted_days) >= 3:
+            top3 = sum(v for _, v in sorted_days[:3])
+            rest = sum(v for _, v in sorted_days[3:])
+            if rest > 0:
+                ratio = top3 / rest
                 out.append(
-                    f"- **{L('Active days', '活跃天数')}**: {len(day_counter)}; "
-                    f"**{L('Peak day', '高峰日')}**: `{sorted_days[0][0]}` "
-                    f"({(_format_money(sorted_days[0][1]) if terms['headline_metric'] in money_cols else f'{sorted_days[0][1]:,.0f}')})."
+                    f"- {L('Day concentration', '日度集中度')}: "
+                    f"{L('top 3 days', '前 3 天')} = {top3:,.0f} vs {L('rest', '其余')} = {rest:,.0f} "
+                    f"({L('ratio', '比例')} {ratio:.2f}:1)."
                 )
-                if len(sorted_days) >= 2:
-                    out.append(
-                        f"- **{L('Slowest day', '最低日')}**: `{sorted_days[-1][0]}` "
-                        f"({(_format_money(sorted_days[-1][1]) if terms['headline_metric'] in money_cols else f'{sorted_days[-1][1]:,.0f}')})."
-                    )
-                out.append("")
-        except Exception:
-            pass
+    elif date_min and date_max:
+        out.append(
+            f"- {L('Date range', '日期范围')}: `{date_min}` {L('to', '至')} `{date_max}` "
+            f"({_date_span_days(date_min, date_max) or 0} {L('days', '天')})."
+        )
+    else:
+        out.append(
+            f"- {L('No time dimension detected in the data', '数据中未检测到时间维度')}."
+        )
+    # Single-day note
+    if day_counter and len(day_counter) == 1:
+        out.append(
+            f"- {L('All activity concentrated on a single day', '所有活动集中在单一天')} "
+            f"({list(day_counter.keys())[0]})."
+        )
+    out.append("")
 
-    # Top performers — by headline metric, show label + value
-    if terms["headline_metric"] and label_pick:
+    # ── 5e. Notable Anomalies (outlier detection) ─────────────────
+    if headline_vals and len(headline_vals) >= 4:
+        avg = sum(headline_vals) / len(headline_vals)
+        stddev = _stddev(headline_vals)
+        if stddev > 0:
+            outliers = [v for v in headline_vals if abs(v - avg) > 2 * stddev]
+            if outliers:
+                if headline_metric in money_cols:
+                    out.append(
+                        f"- {len(outliers)} {L('outlier(s) detected', '个离群值')} "
+                        f"({L('values beyond 2 standard deviations from the mean of', '超出均值 2 个标准差')} "
+                        f"{_format_money(avg)}): {', '.join(_format_money(v) for v in outliers[:3])}"
+                        f"{('…' if len(outliers) > 3 else '')}."
+                    )
+                else:
+                    out.append(
+                        f"- {len(outliers)} outlier(s) detected: "
+                        f"{', '.join(f'{v:,.2f}' for v in outliers[:3])}"
+                        f"{('…' if len(outliers) > 3 else '')}."
+                    )
+    # Empty-value rate
+    if headline_metric:
+        present = sum(1 for r in dict_rows if r.get(headline_metric) not in (None, "", 0, 0.0))
+        missing = len(dict_rows) - present
+        if missing > 0 and missing < len(dict_rows):
+            pct = missing / len(dict_rows) * 100
+            out.append(
+                f"- {L('Data quality', '数据完整度')}: "
+                f"**{missing} {L('rows', '行')} ({pct:.0f}%)** "
+                f"{L('have missing or zero values for', '在')} `{headline_metric}`."
+            )
+
+    if not money_pick and not qty_pick and not kpi_pick and not day_counter:
+        out.append(
+            f"- {L('No numeric measures or time columns were detected in the retrieved data', '未在数据中检测到数值或时间列')}."
+        )
+    out.append("")
+
+    # ── 5f. Top Performers (or sample rows if metadata) ───────────
+    if terms["headline_metric"] and label_pick and len(dict_rows) > 1:
         sort_key = terms["headline_metric"]
         try:
             sorted_rows = sorted(
@@ -1119,7 +1360,7 @@ def _build_aggregate_fallback(
                 out.append(f"- {label} — {sort_key} = {val_str}")
             out.append("")
 
-    # Recommendations — scenario-aware
+    # Recommendations — scenario-aware (always 5+ actionable items)
     out.append(f"**{L('Recommended Next Steps', '后续建议')}**\n")
     recs = []
     if scenario == "contract" and money_pick:
@@ -1147,12 +1388,27 @@ def _build_aggregate_fallback(
             f"- {L('Review', '复盘')} **{kpi}** "
             f"{L('by segment to find which product/customer mix is below target', '按业务维度拆分，找出低于目标的产品/客户组合')}."
         )
-    if not recs:
+    # Always-on recommendations (independent of scenario)
+    _validate_en = "adjust the WHERE clause if last month's data is incomplete or mixed with prior periods"
+    _validate_zh = "如上月数据不完整或混入其他期间，请调整 WHERE 条件"
+    recs.append(
+        f"- {L('Validate the data scope', '核对数据口径')}: "
+        f"{L('confirm that', '确认')} `{date_min or 'the date range'}` {L('matches the period you intended', '与目标统计区间一致')}; "
+        f"{L(_validate_en, _validate_zh)}."
+    )
+    recs.append(
+        f"- {L('Request a YoY / MoM comparison', '请求同比或环比对比')}: "
+        f"{L('ask for the same query for the prior period to calculate growth rate', '用同一查询拉取上一周期数据，计算增长率')}."
+    )
+    recs.append(
+        f"- {L('Drill into a specific segment', '深入到细分维度')}: "
+        f"{L('filter by customer, product, region, or sales rep to find where the value is concentrated', '按客户/产品/区域/销售员等维度下钻，找到价值集中点')}."
+    )
+    if len(dict_rows) <= 1:
         recs.append(
-            f"- {L('Ask for a trend comparison', '请求趋势对比')} vs. the prior period."
-        )
-        recs.append(
-            f"- {L('Request a breakdown', '请求细分')} by the main label dimension."
+            f"- {L('Expand the result set', '扩大返回数据')}: "
+            f"{L('only', '仅')} {len(dict_rows)} {L('summary row was returned', '行汇总被返回')}; "
+            f"{L('ask for the underlying detail (remove aggregations or add grouping) to see individual records', '请求明细数据（去掉聚合或增加分组），查看单条记录')}."
         )
     out.extend(recs)
     return "\n".join(out)

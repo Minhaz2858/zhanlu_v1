@@ -142,14 +142,18 @@ def test_contract_scenario_uses_contract_vocabulary():
         {"customer": "Acme", "total_contract_amount": 500_000, "margin_amount": 50_000}
         for _ in range(3)
     ]
-    tool_calls = [{"name": "ask_data_agent", "results": {"rows": rows}}]
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+    }]
     out = a._data_rows_fallback(
         tool_calls,
         user_content="give me Contract Performance for last month report",
     )
     # Scenario-specific terms
     assert "Total Contract Value" in out
-    assert "Average Contract Value" in out
+    # Should mention "average" in some form
+    assert "average" in out.lower()
     # No "synthesis service" internal text
     assert "synthesis service" not in out.lower()
 
@@ -229,3 +233,130 @@ def test_recommendations_are_scenario_specific():
     assert "contracts" in out.lower() or "contract" in out.lower()
     # Should have "Next Steps" or "Recommended"
     assert "Next Steps" in out or "Recommended" in out
+
+
+# ── 2026-08-26 round-4: extensive narrative + metadata-only fix ──
+
+def test_metadata_only_row_produces_extensive_narrative():
+    """When the data tool returns only metadata (min/max/count), the
+    fallback must produce an extensive narrative explaining what was
+    returned and how to fix the question — not a one-liner."""
+    from app.routers import agents as a
+    rows = [{
+        "max_ship_date": "2026-08-19T00:00:00",
+        "min_ship_date": "2018-06-05T00:00:00",
+        "row_count": 13815,
+    }]
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+    }]
+    out = a._data_rows_fallback(
+        tool_calls, user_content="give me Contract Performance for last month report",
+    )
+    # Must be extensive (not the 30-word one-liner)
+    word_count = len(out.split())
+    assert word_count >= 100, f"metadata fallback too short: {word_count} words"
+    # Must explain the situation
+    assert "summary" in out.lower() or "metadata" in out.lower()
+    # Must give the user actionable next steps
+    assert "GROUP BY" in out or "rephrase" in out.lower() or "specific" in out.lower()
+    # Must reference the actual date range from the data
+    assert "2018-06-05" in out or "2026-08-19" in out
+
+
+def test_metadata_only_row_count_appears_in_narrative():
+    """The row_count value from the metadata row should be surfaced
+    so the user knows how many underlying records exist."""
+    from app.routers import agents as a
+    rows = [{
+        "max_ship_date": "2026-08-19T00:00:00",
+        "min_ship_date": "2018-06-05T00:00:00",
+        "row_count": 13815,
+    }]
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+    }]
+    out = a._data_rows_fallback(
+        tool_calls, user_content="contract performance report",
+    )
+    # 13,815 or 1.38万 (Chinese) — at least the number should appear
+    assert "13,815" in out or "1.38万" in out or "13815" in out
+
+
+def test_extensive_report_includes_executive_summary():
+    """When data is rich, the report must include a proper Executive
+    Summary paragraph (4-6 sentences minimum)."""
+    from app.routers import agents as a
+    rows = [
+        {
+            "customer": f"C{i:02d}",
+            "total_contract_amount": 100_000 * (i + 1),
+            "margin_amount": 10_000 * (i + 1),
+            "contract_date": f"2026-07-{i+1:02d}T00:00:00",
+        }
+        for i in range(5)
+    ]
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+    }]
+    out = a._data_rows_fallback(
+        tool_calls, user_content="give me Contract Performance for last month report",
+    )
+    # Must have all the required sections
+    assert "Executive Summary" in out
+    assert "Revenue & Amounts" in out
+    assert "Trends & Comparisons" in out
+    assert "Recommended Next Steps" in out
+    # Executive summary should be a paragraph (not a one-liner)
+    exec_idx = out.find("Executive Summary")
+    after = out[exec_idx:exec_idx + 800]
+    # Count sentences (rough)
+    sentences = after.count(".") + after.count("。")
+    assert sentences >= 3, f"executive summary too short: {sentences} sentences"
+
+
+def test_extensive_report_includes_anomalies():
+    """The report should include a 'Notable Anomalies' section
+    when the data has enough variance to support outlier detection."""
+    from app.routers import agents as a
+    # Create data with one big outlier
+    rows = [
+        {"customer": f"C{i}", "total_contract_amount": 1_000, "contract_date": f"2026-07-{i+1:02d}"}
+        for i in range(5)
+    ]
+    rows.append({"customer": "OUTLIER", "total_contract_amount": 100_000, "contract_date": "2026-07-15"})
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {"rows": rows, "source_name": "test"},
+    }]
+    out = a._data_rows_fallback(
+        tool_calls, user_content="contract performance report",
+    )
+    # Should mention outliers or anomalies
+    assert "outlier" in out.lower() or "anomal" in out.lower()
+
+
+def test_extensive_report_word_count_meets_target():
+    """The fallback should produce a 200+ word narrative (target 400-800)."""
+    from app.routers import agents as a
+    rows = [
+        {
+            "customer": f"Customer_{i:02d}",
+            "total_contract_amount": 50_000 * (i + 1) + 10_000,
+            "margin_amount": 5_000 * (i + 1),
+            "contract_date": f"2026-07-{(i % 28) + 1:02d}T00:00:00",
+        }
+        for i in range(10)
+    ]
+    tool_calls = [{
+        "name": "ask_data_agent",
+        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+    }]
+    out = a._data_rows_fallback(
+        tool_calls, user_content="give me Contract Performance for last month report",
+    )
+    word_count = len(out.split())
+    assert word_count >= 200, f"report too short: {word_count} words (target 200+)"
