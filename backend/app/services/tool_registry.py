@@ -188,6 +188,22 @@ class ToolRegistry:
                         schema.update(overrides)
                 except Exception as exc:
                     logger.warning("dynamic_schema_overrides for %s raised %s; static schema", name, exc)
+            # 2026-08-25: BUGFIX — OpenAI/DeepSeek API requires every tool
+            # to have the structure {"type": "function", "function": {...}}.
+            # Some tools (e.g. collect_enterprise_data) were registered with
+            # just {"name", "description", "parameters"} and got sent to the
+            # LLM as-is, causing a Pydantic validation error:
+            #   1 validation error: tools.99.function - Field required
+            # Auto-wrap any tool that's missing the function envelope.
+            if "function" not in schema and "name" in schema:
+                schema = {
+                    "type": "function",
+                    "function": {
+                        "name": schema.get("name", name),
+                        "description": schema.get("description", ""),
+                        "parameters": schema.get("parameters", {"type": "object", "properties": {}}),
+                    },
+                }
             result.append(schema)
         return result
 
