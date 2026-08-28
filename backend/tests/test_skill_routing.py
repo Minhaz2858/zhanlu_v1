@@ -484,8 +484,8 @@ class TestRoutingIntegration(unittest.TestCase):
         self.assertEqual(decision.source, "user")
         self.assertFalse(decision.is_default)
         self.assertEqual(decision.reason, "exclusive_override")
-        # The built-in pptx must be in bypassed_defaults
-        self.assertIn("pptx", decision.bypassed_defaults)
+        # The built-in ppt-design (was pptx) must be in bypassed_defaults
+        self.assertIn("ppt-design", decision.bypassed_defaults)
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
     def test_custom_fallback_allowed_does_not_bypass_defaults(self, mock_detect):
