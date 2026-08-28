@@ -75,3 +75,98 @@ def build_profile_queries(table: str, columns: list[str], sample_limit: int = 3)
         )
         queries.append(f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}")
     return queries
+
+
+def profile_engine(
+    db_uri_or_path: str,
+    table: str,
+    columns: list[str],
+    sample_limit: int = 3,
+    max_columns: int = 20,
+) -> dict:
+    """Profile a table in a SQLite file/URI and return a JSON-ready dict.
+
+    Runs only standard SQL (COUNT(*), COUNT(DISTINCT), COUNT, MIN, MAX,
+    LIMIT) with every identifier quoted via quote_ident(..., "sqlite").
+    Never raises: failures are reported as status="error" with a
+    truncated error_message (200 chars).
+    """
+    import sqlite3
+
+    result: dict = {
+        "table": table,
+        "row_count": 0,
+        "status": "ok",
+        "error_message": None,
+        "columns": [],
+    }
+    try:
+        con = sqlite3.connect(db_uri_or_path)
+        try:
+            cur = con.cursor()
+            tq = quote_ident(table, "sqlite")
+            cur.execute(f"SELECT COUNT(*) AS row_count FROM {tq}")
+            row = cur.fetchone()
+            result["row_count"] = int(row[0]) if row and row[0] is not None else 0
+
+            # SQLite silently treats unknown double-quoted identifiers as
+            # string literals inside aggregates, so validate requested
+            # columns against the real schema up front for deterministic
+            # per-column errors.
+            cur.execute(f"PRAGMA table_info({tq})")
+            real_cols = {r[1] for r in cur.fetchall()}
+
+            for col in columns[:max_columns]:
+                try:
+                    if col not in real_cols:
+                        raise ValueError(f"Unknown column: {col!r}")
+                    cq = quote_ident(col, "sqlite")
+                    cur.execute(
+                        f"SELECT COUNT(DISTINCT {cq}) AS cardinality, "
+                        f"COUNT({cq}) AS non_null, "
+                        f"MIN({cq}) AS min_value, MAX({cq}) AS max_value FROM {tq}"
+                    )
+                    stats = cur.fetchone()
+                    cardinality = int(stats[0]) if stats and stats[0] is not None else 0
+                    non_null = int(stats[1]) if stats and stats[1] is not None else 0
+                    min_value = stats[2] if stats else None
+                    max_value = stats[3] if stats else None
+
+                    cur.execute(f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}")
+                    samples = [r[0] for r in cur.fetchall()]
+                    top_values = [v for v in samples if v is not None][:3]
+
+                    null_pct = (
+                        1.0 - (non_null / result["row_count"])
+                        if result["row_count"] > 0 else 1.0
+                    )
+                    col_type = "text"
+                    if any(looks_like_iso_date(v) for v in samples):
+                        col_type = "date"
+                    shape = infer_shape(
+                        col_type, result["row_count"], cardinality,
+                        null_pct, len(samples),
+                    )
+                    result["columns"].append({
+                        "name": col,
+                        "type": col_type,
+                        "cardinality": cardinality,
+                        "null_pct": null_pct,
+                        "min": min_value,
+                        "max": max_value,
+                        "top_values": top_values,
+                        "shape": shape,
+                    })
+                except Exception as e:  # per-column failure
+                    result["status"] = "error"
+                    result["error_message"] = str(e)[:200]
+                    break
+
+            if result["status"] == "ok" and result["row_count"] == 0:
+                result["status"] = "empty"
+        finally:
+            con.close()
+    except Exception as e:  # table-level failure
+        result["status"] = "error"
+        result["error_message"] = str(e)[:200]
+    return result
