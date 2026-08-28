@@ -241,10 +241,10 @@ class TestResolverFormatIntent(unittest.TestCase):
             user_message="Make a sales report PPT",
             picked_skill=None,
         )
-        self.assertEqual(decision.chosen_skill, "pptx")
+        self.assertEqual(decision.chosen_skill, "ppt-design")
         self.assertTrue(decision.is_default)
         self.assertEqual(decision.reason, "format_intent")
-        self.assertEqual(decision.namespace, "builtin:pptx")
+        self.assertEqual(decision.namespace, "builtin:ppt-design")
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
     def test_docx_format_routes_to_docx(self, mock_detect):
@@ -296,7 +296,7 @@ class TestResolverSoftIntent(unittest.TestCase):
             user_message="Make a sales report PPT",
             picked_skill=None,
         )
-        self.assertEqual(decision.chosen_skill, "pptx")
+        self.assertEqual(decision.chosen_skill, "ppt-design")
         self.assertEqual(decision.reason, "format_intent")
 
 
@@ -466,7 +466,7 @@ class TestRoutingIntegration(unittest.TestCase):
             user_message="Make a sales report PPT",
             picked_skill=None,
         )
-        self.assertEqual(decision.chosen_skill, "pptx")
+        self.assertEqual(decision.chosen_skill, "ppt-design")
         self.assertTrue(decision.is_default)
         self.assertEqual(decision.source, "builtin")
 
