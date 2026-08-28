@@ -45,7 +45,6 @@ from app.services.tool_handlers import code_execution_tool  # noqa: F401
 from app.services.tool_handlers import delegate_tool  # noqa: F401
 from app.services.tool_handlers import db_tools  # noqa: F401
 from app.services.tool_handlers import delegation_tools  # noqa: F401
-from app.services.tool_handlers import edia_delegation_tools  # noqa: F401
 from app.services.tool_handlers import enterprise_data_tools  # noqa: F401  # Phase 1C: collect_enterprise_data
 from app.services.tool_handlers import sandbox_tool  # noqa: F401
 from app.services.tool_handlers import sandbox_code  # noqa: F401
@@ -167,3 +166,19 @@ except Exception as _ua_err:  # pragma: no cover - defensive
     logger.warning(
         "universal_analytics registration failed (non-fatal): %s", _ua_err
     )
+
+# CAD: Fusion 360 bridge (fusion360_execute_python + fusion360_ping + the
+# granular modeling/IO tools). Talks to the local FusionMCP add-in over TCP
+# (host.docker.internal:9876 — see fusion360_tool.py) — no external deps.
+try:
+    from app.services.tool_handlers import fusion360_tool  # noqa: F401
+    from app.services.tool_handlers import fusion360_granular  # noqa: F401
+    from app.services.tool_handlers import fusion360_advanced  # noqa: F401
+    from app.services.tool_handlers import fusion360_io  # noqa: F401
+    from app.services.tool_handlers import fusion360_features  # noqa: F401
+    from app.services.tool_handlers import fusion360_probe  # noqa: F401
+    from app.services.tool_handlers import fusion360_sketch2  # noqa: F401
+    from app.services.tool_handlers import fusion360_assembly  # noqa: F401
+    from app.services.tool_handlers import fusion360_parametric  # noqa: F401
+except Exception as _f360_err:  # pragma: no cover - defensive
+    logger.warning("fusion360_tool registration failed (non-fatal): %s", _f360_err)
