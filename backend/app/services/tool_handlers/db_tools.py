@@ -46,7 +46,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _SCHEMA_CACHE: dict[str, tuple[float, dict]] = {}
-_SCHEMA_CACHE_TTL_SECONDS = 300  # 5 minutes
+_SCHEMA_CACHE_TTL_SECONDS = 3600  # 1 hour — schema rarely changes mid-session
 
 
 def _schema_cache_key(kb_id: str, table: str | None, full: bool, max_tables: int) -> str:
@@ -218,53 +218,7 @@ def _apply_schema_policy(
     return result
 
 
-# Columns that are deprecated in the EDIA warehouse and their replacements.
-# Scoped to the ecisco_bi_assistant only — the annotation is applied solely
-# when the calling agent matches, so other agents never see these notes.
-_DEPRECATED_COLUMNS: dict[str, str] = {
-    "material_model": "F_PAEZ_JC",
-}
-
-
-def _annotate_deprecated_columns(result: dict, agent_name: str | None) -> dict:
-    """Mark deprecated warehouse columns so the LLM prefers the replacement.
-
-    Defense-in-depth on top of the ecisco_bi_assistant prompt hint. Only fires
-    for the ecisco_bi_assistant (plus the flag gate), and only mutates the
-    ``columns`` lists in a SchemaService result (describe_table / describe_all
-    shapes). The ``list_tables`` shape (list of strings) is left untouched.
-    """
-    if not getattr(settings, "ECISCO_BI_SCHEMA_DEPRECATION_ENABLED", True):
-        return result
-    if not agent_name or agent_name != "ecisco_bi_assistant":
-        return result
-
-    def _annotate(columns: list) -> None:
-        for col in columns:
-            if not isinstance(col, dict):
-                continue
-            name = (col.get("name") or "").lower()
-            if name in _DEPRECATED_COLUMNS:
-                col["deprecated"] = True
-                col["note"] = (
-                    f"DEPRECATED — use {_DEPRECATED_COLUMNS[name]} instead"
-                )
-
-    # describe_table shape: {"table": ..., "columns": [...]}
-    if isinstance(result.get("columns"), list):
-        _annotate(result["columns"])
-        return result
-
-    # describe_all shape: {"tables": [{"table": ..., "columns": [...]}, ...]}
-    tables = result.get("tables")
-    if isinstance(tables, list):
-        for entry in tables:
-            if isinstance(entry, dict) and isinstance(entry.get("columns"), list):
-                _annotate(entry["columns"])
-    return result
-
-
-def _annotate_table_roles(result: dict, db: Session, kb_id: str) -> dict:
+def _annotate_table_roles(result: dict, db, kb_id: str | None) -> dict:
     """Annotate describe_table / describe_all results with ``table_role``.
 
     Loads the cached structural role (entity_master / fact / dimension /
@@ -530,9 +484,6 @@ async def _describe_schema(
     try:
         result = await asyncio.to_thread(_do_work)
         result = _apply_schema_policy(result, policy, kb_id, table)
-        result = _annotate_deprecated_columns(
-            result, (context or {}).get("agent_name")
-        )
         result = _annotate_table_roles(result, db, kb_id)
         _result = {"success": True, **result}
         if not restricted:
@@ -550,6 +501,17 @@ async def _describe_schema(
 # ---------------------------------------------------------------------------
 # profile_data
 # ---------------------------------------------------------------------------
+
+def _profile_error_entry(table: str, exc: Exception) -> dict:
+    """Per-table failure entry appended to profile_data results."""
+    return {
+        "table": table,
+        "row_count": 0,
+        "status": "error",
+        "error_message": str(exc)[:200],
+        "columns": [],
+    }
+
 
 async def _profile_data(
     args: dict,
@@ -569,22 +531,62 @@ async def _profile_data(
         logger.warning("profile_data: KB %s denied for user %s", kb_id, user_id)
         return {"success": False, "error": "Access to this data source is restricted."}
 
+    # Table/column-level policy filtering — same semantics as _apply_schema_policy
+    # so blocked tables / whitelist-mode KBs / column allowlists are enforced
+    # before any sampled data is returned.
+    blocked = {t.lower() for t in policy.blocked_tables_for_kb(kb_id)}
+    allowed = policy.allowed_tables_for_kb(kb_id)  # None or list of allowed tables
+    allowed_set = {t.lower() for t in allowed} if allowed is not None else None
+
+    def _table_visible(name: str | None) -> bool:
+        n = (name or "").lower()
+        if n in blocked:
+            return False
+        if allowed_set is not None and n not in allowed_set:
+            return False
+        return True
+
+    def _filter_columns(table_name: str | None, cols: list[str]) -> list[str]:
+        allowlist = policy.allowed_columns_for(kb_id, table_name)
+        if allowlist is None:
+            return cols
+        allow_lower = {c.lower() for c in allowlist}
+        return [c for c in cols if c.lower() in allow_lower]
+
     table = args.get("table")
-    columns = list(args.get("columns") or [])
+    raw_columns = args.get("columns") or []
+    # Guard against the LLM sending a JSON string instead of an array —
+    # `list("a,b")` would char-split it into single letters.
+    columns = raw_columns if isinstance(raw_columns, list) else []
+    columns = [c for c in columns if isinstance(c, str) and c]
     try:
         max_tables = min(max(int(args.get("max_tables", 8)), 1), 8)
     except (TypeError, ValueError):
         max_tables = 8
 
     if table:
+        if not _table_visible(table):
+            logger.warning(
+                "profile_data: table %s denied for user %s on KB %s",
+                table, user_id, kb_id,
+            )
+            return {"success": False, "error": "Access to this table is restricted."}
         tables = [table]
     else:
-        listing = await asyncio.to_thread(SchemaService(db).list_tables, kb_id)
-        tables = list(listing.get("tables") or [])[:max_tables]
+        try:
+            listing = await asyncio.to_thread(SchemaService(db).list_tables, kb_id)
+        except DriverUnavailable as e:
+            return {"success": False, "error": str(e), "error_kind": "driver_missing"}
+        except ValueError as e:
+            return {"success": False, "error": str(e)}
+        except Exception as e:
+            logger.warning("profile_data: list_tables failed on KB %s: %s", kb_id, e)
+            return {"success": False, "error": f"profile_data failed: {e}"}
+        tables = [t for t in (listing.get("tables") or []) if _table_visible(t)][:max_tables]
 
     results: list[dict] = []
     for t in tables:
-        cols = columns
+        cols = _filter_columns(t, columns) if columns else []
         if not cols:
             try:
                 info = await asyncio.to_thread(
@@ -595,26 +597,15 @@ async def _profile_data(
                     for c in (info.get("columns") or [])
                 ]
                 cols = [c for c in cols if c][:20]
+                cols = _filter_columns(t, cols)
             except Exception as exc:
-                results.append({
-                    "table": t,
-                    "row_count": 0,
-                    "status": "error",
-                    "error_message": str(exc)[:200],
-                    "columns": [],
-                })
+                results.append(_profile_error_entry(t, exc))
                 continue
         try:
             profiled = await asyncio.to_thread(profile_kb, db, kb_id, t, cols)
             results.append(profiled)
         except Exception as exc:
-            results.append({
-                "table": t,
-                "row_count": 0,
-                "status": "error",
-                "error_message": str(exc)[:200],
-                "columns": [],
-            })
+            results.append(_profile_error_entry(t, exc))
 
     return {"success": True, "tables": results}
 
@@ -1276,7 +1267,7 @@ ANSWER_FROM_DOCUMENTS_SCHEMA = {
     },
 }
 
-# Register all six tools. The `data_agent` subagent is the only caller —
+# Register all seven tools. The `data_agent` subagent is the only caller —
 # the runtime never auto-injects these onto the user-facing agent.
 # `enabled_by_default=False` is set so the registry's default-enable
 # logic does not surface them in places that don't explicitly opt in.
