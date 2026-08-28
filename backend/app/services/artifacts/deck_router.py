@@ -9,7 +9,10 @@ Routing rules (in order):
 1. A ``deck_type`` of ``investor_deck`` or ``marketing`` is design-heavy by
    nature → sandbox.
 2. Any design/pitch keyword in the user message → sandbox.
-3. Otherwise → structured.
+3. If ``PPT_DESIGN_BY_DEFAULT`` is off → structured (legacy default, kept
+   for backward compatibility).
+4. Any explicit plain/data-dump keyword in the user message → structured.
+5. Otherwise → sandbox (design is the default for pptx requests).
 
 When ``PPT_SMART_ROUTER_ENABLED`` is off, the pipeline ignores this and always
 renders structured — this module only *classifies*, it never forces a path.
@@ -60,6 +63,21 @@ _SANDBOX_KEYWORDS = (
     "招商",
 )
 
+# Keyword signals that the user wants a *plain* data report rather than a
+# designed deck.  Lowercase; matched as substrings against the lowercased
+# user message.  These override the design-by-default routing.
+_STRUCTURED_KEYWORDS = (
+    # English
+    "plain",
+    "simple text",
+    "data dump",
+    "text only",
+    # Chinese
+    "纯文本",
+    "简单",
+    "数据表",
+)
+
 
 def route_deck(plan: Optional[DeckPlan], user_message: str = "") -> str:
     """Classify a deck plan into ``"structured"`` or ``"sandbox"``.
@@ -86,7 +104,18 @@ def route_deck(plan: Optional[DeckPlan], user_message: str = "") -> str:
     if any(k in msg for k in _SANDBOX_KEYWORDS):
         return "sandbox"
 
-    return "structured"
+    from app.config import settings
+
+    # Legacy default: when the operator explicitly disabled design-by-default,
+    # fall back to the old behavior (structured unless a design signal fired).
+    if not settings.PPT_DESIGN_BY_DEFAULT:
+        return "structured"
+
+    # Explicit plain / data-dump intent wins over the design default.
+    if any(k in msg for k in _STRUCTURED_KEYWORDS):
+        return "structured"
+
+    return "sandbox"
 
 
 # ---------------------------------------------------------------------------

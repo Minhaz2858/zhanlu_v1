@@ -505,6 +505,12 @@ class Settings(BaseSettings):
     # opt-out/opt-in override in future releases.
     PPT_DECK_PLANNER_ENABLED: bool = False
     PPT_SMART_ROUTER_ENABLED: bool = False
+    # Design is the default routing target for pptx requests: route_deck sends
+    # every deck to the sandbox HTML design renderer unless the user explicitly
+    # asks for a plain data dump / simple text output (see _STRUCTURED_KEYWORDS
+    # in deck_router.py).  Set False to restore the legacy structured-first
+    # default.  Only consulted when PPT_SMART_ROUTER_ENABLED is on.
+    PPT_DESIGN_BY_DEFAULT: bool = True
     PPT_LLM_POLISH_ENABLED: bool = False
     PPT_AUDIT_ENABLED: bool = False
     # New: route create_artifact(type="pptx") through the professional deck
