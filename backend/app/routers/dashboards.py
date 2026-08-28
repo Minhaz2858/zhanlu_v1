@@ -2,6 +2,7 @@
 import importlib
 import logging
 import mimetypes
+import uuid
 from functools import lru_cache
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
@@ -248,24 +249,46 @@ def mark_dashboard_app_viewed(slug: str, db: Session = Depends(get_db), user=Dep
     return _record_with_meta(record)
 
 
+def _is_valid_uuid(s: str) -> bool:
+    """True when ``s`` parses as a UUID (used to disambiguate slug vs id)."""
+    try:
+        uuid.UUID(s)
+        return True
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 @router.delete("/app-records/{slug_or_id}", status_code=204)
 def delete_dashboard_app_record(slug_or_id: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
     """Hard-delete a full-stack dashboard app record and its artifacts.
 
     Resolves by record UUID or slug (org-scoped + T10 visibility: personal →
     creator only; company → whole org, but non-creators need the ``admin``
-    role). On success the cascade removes: the realtime poller task, the
-    generated app directory on disk, chat conversations bound via
-    ``metadata_`` (see ``delete_bound_conversations``), and finally the
-    record itself. Returns 204 with no body.
+    role). When the value parses as a UUID it is treated as a record id (a
+    slug that happens to be UUID-shaped is ambiguous; the id match wins). On
+    success the cascade removes: the realtime poller task, the generated app
+    directory on disk, chat conversations bound via ``metadata_`` (see
+    ``delete_bound_conversations``), and finally the record itself. Returns
+    204 with no body.
+
+    Multi-worker note: ``stop_poller`` is per-process — in a multi-worker
+    deployment a poller running on ANOTHER worker may keep running until its
+    poll loop notices the record is gone from the DB. Acceptable for now;
+    logged for awareness.
     """
-    record = db.query(DashboardApp).filter(
-        or_(
-            DashboardApp.slug == slug_or_id,
+    # UUID-vs-slug resolution: or_(slug == x, id == x) + .first() is
+    # nondeterministic when a slug is UUID-shaped, so prefer the id match
+    # when the value parses as a UUID, else match on slug. Org scope kept.
+    if _is_valid_uuid(slug_or_id):
+        record = db.query(DashboardApp).filter(
             DashboardApp.id == slug_or_id,
-        ),
-        DashboardApp.org_id == user.org_id,
-    ).first()
+            DashboardApp.org_id == user.org_id,
+        ).first()
+    else:
+        record = db.query(DashboardApp).filter(
+            DashboardApp.slug == slug_or_id,
+            DashboardApp.org_id == user.org_id,
+        ).first()
     if record is None or not _user_can_see_record(record, user):
         raise HTTPException(status_code=404, detail="Dashboard app not found")
     # Company-scope gate: anyone but the creator needs the admin role.
@@ -289,7 +312,13 @@ def delete_dashboard_app_record(slug_or_id: str, db: Session = Depends(get_db), 
         logger.exception("delete: failed to remove app dir for %s", slug)
     # Cascade: drop chat conversations bound to this dashboard.
     from app.services.dashboard_app.cascade import delete_bound_conversations
-    delete_bound_conversations(db, slug, record.id)
+    deleted = delete_bound_conversations(db, slug, record.id)
+    if deleted == 0:
+        logger.warning(
+            "delete: no bound conversations cascaded for dashboard app %s "
+            "(slug=%s) — chats bound via metadata_ may be orphaned",
+            record.id, slug,
+        )
     db.delete(record)
     db.commit()
     return None

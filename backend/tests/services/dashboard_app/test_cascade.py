@@ -91,6 +91,39 @@ def test_none_metadata_returns_zero(db_session):
     assert db_session.query(AgentConversation).count() == 2
 
 
+def test_non_dict_metadata_skipped_and_others_deleted(db_session):
+    # A malformed metadata_ row (JSON list/string instead of a dict) must be
+    # skipped, NOT crash the whole cascade (previously the AttributeError
+    # propagated and aborted every deletion → orphaned conversations).
+    bad_list = AgentConversation(
+        id=str(uuid.uuid4()),
+        agent_name="dashboard_builder",
+        title="malformed list metadata",
+        status="active",
+        metadata_=["mode", "dashboard", "dashboard_slug", "sales-overview"],
+    )
+    bad_str = AgentConversation(
+        id=str(uuid.uuid4()),
+        agent_name="dashboard_builder",
+        title="malformed string metadata",
+        status="active",
+        metadata_="mode=dashboard dashboard_slug=sales-overview",
+    )
+    db_session.add_all([bad_list, bad_str])
+    bound = _conv(db_session, slug="sales-overview")
+    other = _conv(db_session, slug="other-dashboard")
+
+    count = delete_bound_conversations(db_session, "sales-overview", "never-matching-id")
+
+    assert count == 1
+    remaining = db_session.query(AgentConversation).all()
+    remaining_ids = {c.id for c in remaining}
+    assert bound.id not in remaining_ids
+    assert bad_list.id in remaining_ids
+    assert bad_str.id in remaining_ids
+    assert other.id in remaining_ids
+
+
 def test_empty_db_returns_zero(db_session):
     assert db_session.query(AgentConversation).count() == 0
     assert delete_bound_conversations(db_session, "sales-overview", "dash-123") == 0

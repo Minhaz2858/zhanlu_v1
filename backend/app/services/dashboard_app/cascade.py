@@ -51,6 +51,11 @@ def delete_bound_conversations(db: Session, dashboard_slug: str, dashboard_id: s
 
 def _is_bound(conv, dashboard_slug: str, dashboard_id: str) -> bool:
     meta = conv.metadata_ or {}
+    if not isinstance(meta, dict):
+        # A malformed metadata_ row (JSON list/string instead of a dict) must
+        # not crash the whole cascade — skip it so other matching rows still
+        # get deleted instead of the top-level try/except aborting everything.
+        return False
     if meta.get("mode") != "dashboard":
         return False
     return (
