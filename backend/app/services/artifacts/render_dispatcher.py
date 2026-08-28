@@ -39,43 +39,50 @@ MAX_REPAIR_PASSES = 2
 # ---------------------------------------------------------------------------
 
 
-def _build_layout_ctx(ctx: Any) -> dict[str, Any]:
+def _build_layout_ctx(ctx: Any, *, plan: Any = None, user_message: str = "") -> dict[str, Any]:
     """Turn an ``ExportContext`` (or plain dict) into the dict ``layout_engine``
     expects: ``{"theme_tokens": {...hex...}, "style_recipe": "..."}``.
+
+    Theme resolution now honors the 12 ``ThemePreset``s (via
+    ``resolve_theme_tokens``): an explicit flat ``theme_tokens`` dict wins
+    (brand kit), otherwise a named ``theme`` / keyword / deck_type auto-select
+    resolves to a preset, falling back to the historical ``zhanlu-blue`` look.
     """
+    from app.services.artifacts.themes import resolve_theme_tokens
+
     style_recipe = "sharp"
-    theme_tokens: Optional[dict] = None
 
     if ctx is None:
-        return {"theme_tokens": {}, "style_recipe": style_recipe}
+        return {
+            "theme_tokens": resolve_theme_tokens(None),
+            "style_recipe": style_recipe,
+        }
 
     if isinstance(ctx, dict):
-        raw_tokens = ctx.get("theme_tokens")
-        theme_tokens = dict(raw_tokens) if isinstance(raw_tokens, dict) else None
-        style_recipe = (ctx.get("style_recipe") or ctx.get("style_recipe", "sharp") or "sharp")
+        style_recipe = ctx.get("style_recipe") or "sharp"
         if not isinstance(style_recipe, str):
             style_recipe = "sharp"
-        return {"theme_tokens": theme_tokens or {}, "style_recipe": style_recipe}
+        # Explicit flat tokens win as-is (brand kit / caller-supplied).
+        raw = ctx.get("theme_tokens")
+        if isinstance(raw, dict) and raw:
+            return {"theme_tokens": dict(raw), "style_recipe": style_recipe}
+        # Otherwise resolve preset / auto / default.
+        return {
+            "theme_tokens": resolve_theme_tokens(ctx, plan=plan, user_message=user_message),
+            "style_recipe": style_recipe,
+        }
 
     # ExportContext dataclass path.
-    raw_tokens = getattr(ctx, "theme_tokens", None)
-    theme_tokens = dict(raw_tokens) if isinstance(raw_tokens, dict) else None
     style_recipe = getattr(ctx, "style_recipe", None) or "sharp"
     if not isinstance(style_recipe, str):
         style_recipe = "sharp"
-
-    mode = getattr(ctx, "mode", "light") or "light"
-    # If no explicit token dict, let the engine resolve the named theme by
-    # passing a ``name`` hint in theme_tokens so apply_master picks the
-    # right template (blue vs dark).  The engine only reads ``theme_tokens``
-    # for colors; theme *name* selection is separate, so we inject it here.
-    if not theme_tokens:
-        named = getattr(ctx, "theme", None) or "zhanlu-blue"
-        theme_tokens = {"name": named}
-    theme_tokens = dict(theme_tokens)
-    if "name" not in theme_tokens:
-        theme_tokens["name"] = getattr(ctx, "theme", "zhanlu-blue") or "zhanlu-blue"
-    return {"theme_tokens": theme_tokens, "style_recipe": style_recipe}
+    raw = getattr(ctx, "theme_tokens", None)
+    if isinstance(raw, dict) and raw:
+        return {"theme_tokens": dict(raw), "style_recipe": style_recipe}
+    return {
+        "theme_tokens": resolve_theme_tokens(ctx, plan=plan, user_message=user_message),
+        "style_recipe": style_recipe,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +149,15 @@ def _audit_enabled() -> bool:
         from app.config import settings
 
         return bool(getattr(settings, "PPT_AUDIT_ENABLED", False))
+    except Exception:
+        return False
+
+
+def _blocking_enabled() -> bool:
+    try:
+        from app.config import settings
+
+        return bool(getattr(settings, "PPT_AUDIT_BLOCKING_ENABLED", False))
     except Exception:
         return False
 
@@ -220,8 +236,6 @@ async def render_pptx_from_plan(
         ``(pptx_bytes, audit_report_dict)``.  On catastrophic render failure
         returns ``(b"", FAIL_report)`` so callers can log + surface gracefully.
     """
-    layout_ctx = _build_layout_ctx(ctx)
-
     # Coerce a plain dict to a DeckPlan so the layout engine / polish path
     # get a valid, validated structure.  A malformed plan falls back to empty.
     plan_obj: DeckPlan
@@ -236,6 +250,10 @@ async def render_pptx_from_plan(
                 exc,
             )
             plan_obj = DeckPlan(title="", slides=[])
+
+    # Resolve theme tokens (presets / auto-select / brand kit) now that we
+    # have the validated plan + the user's original intent.
+    layout_ctx = _build_layout_ctx(ctx, plan=plan_obj, user_message=user_message)
 
     # 1) First render.
     try:
@@ -278,6 +296,18 @@ async def render_pptx_from_plan(
     else:
         logger.debug("render_dispatcher: PPT_AUDIT_ENABLED=False; skipping audit/repair")
 
+    # 2b) Blocking audit gate — a deck that still FAILs after the repair loop
+    # is NOT delivered: return empty bytes + the FAIL report so callers store
+    # nothing and can surface the failure to the user.
+    if report.get("status") == "FAIL" and _blocking_enabled():
+        fail_count = report.get("summary", {}).get("fail", 0)
+        logger.error(
+            "render_dispatcher: blocking audit gate — deck FAIL after repair; "
+            "refusing to deliver (%d fail rules)",
+            fail_count,
+        )
+        return b"", report
+
     # 3) Optional one-shot polish → re-render.
     polished = await _maybe_polish(plan_obj, rows, user_message)
     if polished is not plan_obj and polished is not None:
@@ -287,6 +317,16 @@ async def render_pptx_from_plan(
             # bytes the caller will actually store.
             if _audit_enabled():
                 report = _audit_bytes(data)
+                # The gate applies to this final state too: a polished deck
+                # that FAILs the re-audit must not be delivered either.
+                if report.get("status") == "FAIL" and _blocking_enabled():
+                    fail_count = report.get("summary", {}).get("fail", 0)
+                    logger.error(
+                        "render_dispatcher: blocking audit gate — polished deck "
+                        "FAIL; refusing to deliver (%d fail rules)",
+                        fail_count,
+                    )
+                    return b"", report
         except Exception as exc:  # noqa: BLE001 — keep the pre-polish bytes
             logger.warning(
                 "render_dispatcher: polish re-render failed; keeping original: %s", exc
