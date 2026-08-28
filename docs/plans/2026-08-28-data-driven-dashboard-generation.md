@@ -792,76 +792,7 @@ git commit -m "feat(prompts): data-driven chart rules via profile_data"
 
 ---
 
-## Task 7: Frontend — Empty card shows the reason
-
-**Objective:** The template's `Empty` widget renders the query error message when present, otherwise the neutral no-data text. No config persistence — the widget payload already carries `error`.
-
-**Files:**
-- Modify: `backend/app/dashboards/_template/frontend/src/widgets/index.jsx`
-- Modify: `backend/app/dashboards/_template/frontend/src/index.css` (error styling)
-
-**Step 1: Locate the Empty component and its call sites**
-
-```bash
-cd backend/app/dashboards/_template/frontend/src
-grep -n "function Empty" widgets/index.jsx
-grep -n "<Empty" widgets/index.jsx
-```
-
-**Step 2: Update the Empty component**
-
-```jsx
-function Empty({ error, compact }) {
-  const hasError = Boolean(error);
-  return (
-    <div className={`flex h-full w-full items-center justify-center ${compact ? 'py-4' : 'py-10'}`}>
-      <div className="text-center">
-        <div className={`mx-auto flex h-9 w-9 items-center justify-center rounded-full ${hasError ? 'bg-red-500/10' : 'bg-foreground/5'}`}>
-          {hasError ? '⚠️' : '📊'}
-        </div>
-        <p className={`mt-2 text-foreground/50 ${compact ? 'text-[11px]' : 'text-sm'}`}>
-          {hasError ? 'Query failed' : 'No data for this period'}
-        </p>
-        {hasError ? (
-          <p className="mx-auto mt-1 max-w-[260px] break-words text-[10px] leading-snug text-red-400/80">
-            {error}
-          </p>
-        ) : null}
-      </div>
-    </div>
-  );
-}
-```
-
-**Step 3: Update the three call sites to pass `error`**
-
-Each call site currently `<Empty compact />` or `<Empty />`. Pass the error from the widget's data payload. In `KpiWidget` and chart widgets the fetch result object carries `error` (verify the exact prop name at the fetch sites — the WS/REST payload uses `error`). Update:
-
-```jsx
-if (!objects.length) return <Empty compact error={error} />;
-if (!keys.length) return <Empty compact error={error} />;
-```
-
-(Where `error` is the `error` field from the widget's data prop — confirm at the widget top: `const { error } = data;`.)
-
-**Step 4: Build the template**
-
-```bash
-cd backend/app/dashboards/_template/frontend && npm run build
-```
-
-Expected: build succeeds (`✓ built in ~7-10s`)
-
-**Step 5: Commit**
-
-```bash
-git add backend/app/dashboards/_template/frontend/src/widgets/index.jsx backend/app/dashboards/_template/frontend/src/index.css
-git commit -m "feat(template): Empty card shows query failure reason"
-```
-
----
-
-## Task 8: Backend config guard — DB-agnostic sanity test
+## Task 7: Backend config guard — DB-agnostic sanity test
 
 **Objective:** Guard against accidental hardcoding. A test asserts no demo identifiers appear in the profiler source or the prompt rule.
 
@@ -902,7 +833,7 @@ git commit -m "test(profiler): DB-agnostic hardcoding guard"
 
 ---
 
-## Task 9: e2e verification against the bound datasource
+## Task 8: e2e verification against the bound datasource
 
 **Objective:** Prove the tool works against the real bound Ecisco datasource and that it would have guided the existing sales dashboard.
 
@@ -976,8 +907,8 @@ git add -A && git commit -m "fix(profiler): e2e verification adjustments"
 - [ ] 0-row table returns `status: empty`
 - [ ] No demo identifiers anywhere in `dashboard_profiler.py` or prompt rules
 - [ ] Existing prompt/dashboard tests still pass
-- [ ] Template builds; Empty card shows "Query failed: <msg>" on error
-- [ ] Agent build flow calls `profile_data` before `create_fullstack_dashboard`
+- [ ] Agent build flow calls `profile_data` before `create_fullstack_dashboard`; it
+      never designs on an empty/error table (no empty frontend at design time)
 
 ## Notes
 
@@ -989,3 +920,11 @@ git add -A && git commit -m "fix(profiler): e2e verification adjustments"
   agent can act on.
 - Freshness stamp in the header is deferred (YAGNI) — the profile min/max is
   available to the agent, so it can state freshness in its response instead.
+- No frontend Empty-card work needed (user decision, 2026-08-28): the template's
+  Empty component already renders `{error || 'No data yet — waiting for the
+  first refresh'}` (widgets/index.jsx:237) and the widget wrapper already passes
+  `data.error` through (widgets/index.jsx:913). More importantly, the profiling
+  gate PREVENTS empty widgets at design time — the agent analyzes data first,
+  decides the design, and only builds on tables that return `ok`. Empty cards
+  remain only as a runtime fallback for unexpected failures (DB down, table
+  dropped after build), which the existing code already handles.
