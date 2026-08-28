@@ -86,9 +86,13 @@ top 3 sample values).
 
 In `dashboard_tools.py` after the app is generated (both create and update):
 
-1. For each metric in the spec, call the existing `analytics._run_metric_sql`
-   with `LIMIT 1` wrapper applied to a copy of the SQL (never mutate the stored
-   SQL) — infra already exists and is non-raising.
+1. For each metric in the spec, run a validation query through the QueryService
+   path. NOTE: do NOT use `analytics._run_metric_sql` directly — it flattens
+   empty and error both to `[]`. Use a small local wrapper around
+   `dashboard_query.QueryService.execute` (same caps: `_MAX_ROWS`,
+   `_TIMEOUT_S`) that returns `(rows, error_str)` so empty and error are
+   distinguishable. Run the SQL as stored (it already carries its own LIMIT /
+   aggregation); never mutate the stored SQL.
 2. Classify:
    - `ok` — returned >= 1 row
    - `empty` — 0 rows returned (no error)
