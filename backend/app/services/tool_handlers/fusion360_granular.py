@@ -561,6 +561,26 @@ def _fusion360_verify_build(args, db, user_id):
                 continue
             _compare_probe(q, m, issues)
             probe_checks.append({"query": q, "measured": m, "ok": m.get("ok", False)})
+    # ── Contract mode (2026-08-28): validate against the STORED spec ────
+    # When contract_id is passed ('use_last' = newest contract for this
+    # conversation, or an explicit id), the backend compares the LIVE geometry
+    # against the contract persisted by fusion360_declare_spec — never against
+    # the model's hand-picked verify args. Greedy per-feature bbox matching.
+    contract_arg = args.get("contract_id")
+    if contract_arg:
+        try:
+            from app.services.agent_tools import TOOL_CONTEXT  # plain global dict
+            _ctx = TOOL_CONTEXT.get() or {}
+        except Exception:
+            _ctx = {}
+        contract = _load_contract(db, contract_arg, _ctx.get("conversation_id"))
+        if contract is None:
+            issues.append(
+                "no stored contract found for contract_id=%r — call "
+                "fusion360_declare_spec first" % contract_arg
+            )
+        else:
+            issues += _contract_issues(contract, bodies)
     ok = not issues
     return {
         "success": True,
@@ -624,6 +644,72 @@ def _check_expected_params(expected_params: list, values: dict[str, float]) -> l
                 issues.append(
                     f"parameter {name} = {actual}mm != expected {expected}mm"
                 )
+    return issues
+
+
+def _load_contract(db, contract_id: str, conversation_id: str | None) -> dict | None:
+    """Resolve contract_id ('use_last' → newest for this conversation)."""
+    from app.models.cad_build_contract import CadBuildContract
+    q = db.query(CadBuildContract)
+    if contract_id == "use_last":
+        if not conversation_id:
+            return None
+        row = (
+            q.filter(CadBuildContract.conversation_id == conversation_id)
+            .order_by(CadBuildContract.created_date.desc())
+            .first()
+        )
+    else:
+        row = q.filter(CadBuildContract.id == contract_id).first()
+    return row.contract_json if row else None
+
+
+def _feature_matches_body(feature: dict, body: dict, tol_mm: float = 0.5) -> list[str]:
+    """Compare ONE declared feature against ONE body's bbox (mm, from cm).
+    kind hex: across_flats = min(width, depth); height = z span."""
+    issues: list[str] = []
+    kind = (feature.get("kind") or "").lower()
+    w = (body["max"][0] - body["min"][0]) * 10.0
+    d = (body["max"][1] - body["min"][1]) * 10.0
+    h = (body["max"][2] - body["min"][2]) * 10.0
+    if kind == "hex":
+        across = min(w, d)
+        if "across_flats" in feature and abs(across - float(feature["across_flats"])) > tol_mm:
+            issues.append(f"hex across_flats {across:.1f}mm != declared {feature['across_flats']}mm")
+        if "height" in feature and abs(h - float(feature["height"])) > tol_mm:
+            issues.append(f"hex height {h:.1f}mm != declared {feature['height']}mm")
+    elif kind == "cylinder":
+        dia = (w + d) / 2.0
+        if "diameter" in feature and abs(dia - float(feature["diameter"])) > tol_mm:
+            issues.append(f"cylinder diameter {dia:.1f}mm != declared {feature['diameter']}mm")
+        if "height" in feature and abs(h - float(feature["height"])) > tol_mm:
+            issues.append(f"cylinder height {h:.1f}mm != declared {feature['height']}mm")
+    else:
+        issues.append(f"unsupported contract kind: {kind}")
+    return issues
+
+
+def _contract_issues(contract: dict, bodies: list[dict]) -> list[str]:
+    """Greedy nearest-match: each feature must match at least one body."""
+    issues: list[str] = []
+    features = contract.get("features") or []
+    used: set[int] = set()
+    for i, feat in enumerate(features):
+        best = None
+        for j, body in enumerate(bodies):
+            if j in used:
+                continue
+            fi = _feature_matches_body(feat, body)
+            if not fi:
+                best = j
+                break
+        if best is None:
+            issues.append(
+                f"contract feature[{i}] kind={feat.get('kind')} "
+                f"({feat}) has no matching body"
+            )
+        else:
+            used.add(best)
     return issues
 
 
@@ -753,6 +839,7 @@ registry.register(
         "FAIL, fix the discrepancy (or honestly report it) — never claim success on a FAIL.",
         {
             "expected_body_count": {"type": "integer", "description": "The number of separate bodies your plan calls for (e.g. 5 for the 5-part coilover)."},
+            "contract_id": {"type": "string", "description": "'use_last' (newest contract for this conversation) or a specific contract id. Validates live geometry against the STORED contract from fusion360_declare_spec."},
             "expected_params": {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"name": {"type": "string"}, "value": {"type": "number"}}, "required": ["name", "value"]}]}, "description": "Optional list of user parameters that must exist AND have the right value. Entries may be a plain name string (must exist — e.g. 'eye_to_eye') or {name, value} (value in MILLIMETRES, backend compares the LIVE Fusion parameter with 5% tolerance — e.g. {'name':'eye_to_eye','value':80})."},
             "expected_dimensions": {
                 "type": "array",
