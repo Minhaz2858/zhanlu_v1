@@ -35,6 +35,7 @@ def execute_plan_nodes(
     data_ctx_extras: Optional[dict] = None,
     on_plan_node=None,
     adaptive_revisions: int = 0,
+    endpoint=None,
 ) -> list[ObservationRecord]:
     """Execute all nodes in a plan in dependency order.
 
@@ -54,6 +55,11 @@ def execute_plan_nodes(
     the Manus-style activity feed. Exceptions in the callback are swallowed
     (observability must never break execution). ``node_dict`` carries
     ``seq``, ``name``, ``node_type``; ``detail`` carries an error/notice.
+
+    ``endpoint``: optional hierarchical LLMEndpoint forwarded to every LLM
+    call made while executing the plan (nl2sql narration, synthesize,
+    adaptive planner, corrective re-plan) so the whole run answers with the
+    pinned model.
     """
     observations = []
 
@@ -88,7 +94,7 @@ def execute_plan_nodes(
     def _adaptive_call_llm_fn(system_prompt, messages):
         # Sync wrapper around the async _synth_call_llm (run via the bridge)
         # so decide_adaptive_revision gets a plain {"content": ...} dict.
-        return _run_coro_sync(_synth_call_llm(system_prompt, messages))
+        return _run_coro_sync(_synth_call_llm(system_prompt, messages, endpoint=endpoint))
 
     for _idx, node in enumerate(ordered_nodes):
         # Check if dependencies are met
@@ -116,7 +122,10 @@ def execute_plan_nodes(
         _emit(node, "running")
 
         try:
-            obs = _execute_single_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
+            obs = _execute_single_node(
+                db, execution, node, user_id,
+                data_ctx_extras=data_ctx_extras, endpoint=endpoint,
+            )
             observations.append(obs)
 
             node.status = "completed" if obs.success else "failed"
@@ -196,6 +205,7 @@ def execute_plan_nodes(
                                 data_ctx_extras=data_ctx_extras,
                                 on_plan_node=on_plan_node,
                                 adaptive_revisions=_adaptive_revisions,
+                                endpoint=endpoint,
                             ))
                             break  # adaptive tail executed; stop original loop
 
@@ -233,6 +243,7 @@ def execute_plan_nodes(
                     agent_name=execution.agent_name or "general_assistant",
                     failure_context=recoverable,
                     plan_version=replan_depth + 2,
+                    endpoint=endpoint,
                 )
                 observations.extend(
                     execute_plan_nodes(
@@ -240,6 +251,7 @@ def execute_plan_nodes(
                         replan_depth=replan_depth + 1, max_replan_depth=_max,
                         data_ctx_extras=data_ctx_extras,
                         on_plan_node=on_plan_node,
+                        endpoint=endpoint,
                     )
                 )
             except Exception as e:
@@ -323,21 +335,23 @@ def _execute_single_node(
     node: PlanNode,
     user_id: Optional[str],
     data_ctx_extras: Optional[dict] = None,
+    endpoint=None,
 ) -> ObservationRecord:
     """Execute a single plan node and record an observation.
 
     ``data_ctx_extras`` is forwarded to tool nodes so project-scoped
     KBs (and any other data-source runtime fields) reach handlers like
-    ``ask_data_agent``. Non-tool nodes ignore it.
+    ``ask_data_agent``. Non-tool nodes ignore it. ``endpoint`` (hierarchical
+    LLMEndpoint) is forwarded to LLM-consuming nodes (nl2sql, synthesize).
     """
     node_type = node.node_type
 
     if node_type == "tool":
         return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
     elif node_type == "nl2sql":
-        return _execute_nl2sql_node(db, execution, node, data_ctx_extras=data_ctx_extras)
+        return _execute_nl2sql_node(db, execution, node, data_ctx_extras=data_ctx_extras, endpoint=endpoint)
     elif node_type == "synthesize":
-        return _execute_synthesize_node(db, execution, node)
+        return _execute_synthesize_node(db, execution, node, endpoint=endpoint)
     elif node_type == "sandbox":
         return _execute_sandbox_node(db, execution, node)
     elif node_type == "skill":
@@ -435,7 +449,93 @@ def _execute_tool_node(db, execution, node, user_id, data_ctx_extras=None) -> Ob
         )
 
 
-def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None) -> ObservationRecord:
+# ---------------------------------------------------------------------------
+# Market-intent KB grounding (Task B2)
+# ---------------------------------------------------------------------------
+# The C5_C9 project binds two KBs: the ERP warehouse and the Market Research
+# KB copy (name contains 'Market'). When the user intent mentions market /
+# industry keywords, the data query must ground on the Market Research KB
+# instead of blindly taking the first bound KB. Deterministic keyword
+# matching only — no LLM involved.
+_MARKET_INTENT_KEYWORDS = ("market", "industry", "research", "市场", "行业", "行情")
+
+
+def _contains_market_keyword(text) -> bool:
+    """True when ``text`` mentions any market/industry keyword (case-insensitive)."""
+    if not text:
+        return False
+    lowered = str(text).lower()
+    return any(kw in lowered for kw in _MARKET_INTENT_KEYWORDS)
+
+
+def _kb_is_market(kb_meta: dict) -> bool:
+    """True when a KB's name/description marks it as the Market Research source."""
+    if not kb_meta:
+        return False
+    haystack = " ".join(
+        [
+            str(kb_meta.get("name") or ""),
+            str(kb_meta.get("description") or ""),
+        ]
+    ).lower()
+    return any(kw in haystack for kw in _MARKET_INTENT_KEYWORDS)
+
+
+def _select_grounding_kb(
+    bound_kb_ids: list[str],
+    kb_meta_map: dict,
+    user_message,
+) -> Optional[str]:
+    """Pick the primary KB for a data query from the bound set.
+
+    Market-intent preference: when ``user_message`` mentions market/industry
+    keywords (market / industry / research / 市场 / 行业 / 行情), prefer the
+    bound KB whose name/description marks it as the Market Research source
+    (``kb_meta_map``: kb_id -> {"name": ..., "description": ...}). Otherwise
+    keep the existing behavior — the first bound KB. Pure and deterministic:
+    no LLM, no randomness. ``None``/empty messages are handled safely.
+    """
+    if not bound_kb_ids:
+        return None
+    if _contains_market_keyword(user_message):
+        for kb_id in bound_kb_ids:
+            if _kb_is_market((kb_meta_map or {}).get(kb_id)):
+                return kb_id
+    return bound_kb_ids[0]
+
+
+def _load_bound_kb_meta(db, bound_kb_ids: list[str]) -> dict:
+    """Load ``kb_id -> {"name", "description"}`` for the bound KBs.
+
+    Best-effort: returns {} on any DB failure so callers fall back to the
+    existing first-bound behavior instead of raising.
+    """
+    if not bound_kb_ids:
+        return {}
+    try:
+        from app.models.knowledge_base import KnowledgeBase
+
+        rows = (
+            db.query(KnowledgeBase)
+            .filter(
+                KnowledgeBase.id.in_(bound_kb_ids),
+                KnowledgeBase.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        return {
+            str(row.id): {
+                "name": row.name or "",
+                "description": row.description or "",
+            }
+            for row in rows
+        }
+    except Exception as e:
+        logger.warning("KB meta load failed for market grounding (fallback to first bound): %s", e)
+        return {}
+
+
+def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=None) -> ObservationRecord:
     """Execute an NL2SQL node — query a real data source when bound KBs exist.
 
     When ``data_ctx_extras`` carries ``bound_kb_ids`` (injected by
@@ -448,6 +548,10 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None) -> Observati
     When no bound KBs are available, falls back to the legacy
     ``DataSnapshotService.nl2sql()`` which generates SQL without executing
     it against a real database.
+
+    ``endpoint`` (hierarchical LLMEndpoint) is forwarded to
+    ``NLAnswerService.answer`` so SQL generation AND narration use the
+    pinned model.
     """
     from app.services.data_snapshot.snapshot_service import DataSnapshotService
 
@@ -459,10 +563,18 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None) -> Observati
         from app.services.db import NLAnswerService
         from app.services.db.connector_factory import DriverUnavailable
 
-        kb_id = bound_kb_ids[0]
+        # Market-intent grounding (Task B2): when the user message mentions
+        # market/industry keywords, prefer the Market Research KB over the
+        # first-bound ERP warehouse. Deterministic — no LLM.
+        user_message = getattr(execution, "user_message", None) or question
+        kb_id = _select_grounding_kb(
+            bound_kb_ids,
+            _load_bound_kb_meta(db, bound_kb_ids),
+            user_message,
+        )
         try:
             svc = NLAnswerService(db)
-            result = _run_coro_sync(svc.answer(kb_id, question))
+            result = _run_coro_sync(svc.answer(kb_id, question, endpoint=endpoint))
 
             # Defensive: NLAnswerService may return an error dict on some failures
             if isinstance(result, dict) and result.get("success") is False:
@@ -599,14 +711,19 @@ def _get_latest_skill_observation(db, execution) -> Optional[ObservationRecord]:
     )
 
 
-async def _synth_call_llm(system_prompt: str, messages: list[dict]) -> dict:
+async def _synth_call_llm(system_prompt: str, messages: list[dict], endpoint=None) -> dict:
     """Adapter bridging ``synthesize_report``'s ``call_llm_fn`` to async ``call_llm``.
 
     ``synthesize_report`` awaits ``call_llm_fn(system, messages)`` and expects
-    ``{"content": "..."}``; ``call_llm`` returns ``{"response": "..."}``.
+    ``{"content": "...", "kpis": [...]}``; ``call_llm`` returns
+    ``{"response": "..."}``. ``endpoint`` (hierarchical LLMEndpoint) pins the
+    call to the selected provider+model.
     """
     from app.services.llm_service import call_llm
-    result = await call_llm(prompt=system_prompt, messages=messages, temperature=0.7)
+    result = await call_llm(
+        prompt=system_prompt, messages=messages, temperature=0.7,
+        endpoint=endpoint,
+    )
     return {"content": result.get("response", "")}
 
 
@@ -655,12 +772,14 @@ def _select_finalize_report_card_payload(observations, artifact_payload):
     return None
 
 
-def _execute_synthesize_node(db, execution, node) -> ObservationRecord:
+def _execute_synthesize_node(db, execution, node, endpoint=None) -> ObservationRecord:
     """Execute a synthesize node — write an executive summary via LLM.
 
     This is the "Synthesizer" agent role.  It reads the previous node's
     result (e.g. nl2sql-generated data) and produces a narrative summary
     that serves as instructions for the Presentation Designer sandbox.
+
+    ``endpoint`` (hierarchical LLMEndpoint) pins the synthesis LLM calls.
     """
     from app.services.synexia import report_synthesis
 
@@ -695,13 +814,15 @@ def _execute_synthesize_node(db, execution, node) -> ObservationRecord:
     skill_methodology = skill_result.get("body") if isinstance(skill_result, dict) else None
 
     try:
+        from functools import partial
+
         finalize_result = _run_coro_sync(report_synthesis.synthesize_report(
             user_message=user_message,
             rows=rows,
             sql=sql,
             source_name=source_name,
             source_id=source_id,
-            call_llm_fn=_synth_call_llm,
+            call_llm_fn=partial(_synth_call_llm, endpoint=endpoint),
             skill_name=skill_name,
             skill_methodology=skill_methodology,
         ))
@@ -723,16 +844,21 @@ def _execute_synthesize_node(db, execution, node) -> ObservationRecord:
         logger.warning(
             "Rich synthesize_report failed, falling back to legacy LLM call: %s", e,
         )
-        return _legacy_synthesize_fallback(db, execution, node, user_message, task_spec, rows, sql)
+        return _legacy_synthesize_fallback(
+            db, execution, node, user_message, task_spec, rows, sql,
+            endpoint=endpoint,
+        )
 
 
-def _legacy_synthesize_fallback(db, execution, node, user_message, task_spec, rows, sql) -> ObservationRecord:
+def _legacy_synthesize_fallback(db, execution, node, user_message, task_spec, rows, sql, endpoint=None) -> ObservationRecord:
     """Pre-Phase-2 simple synthesize path, used when ``synthesize_report`` raises.
 
     Mirrors the original ``_execute_synthesize_node`` logic but correctly
     awaits the async ``call_llm`` via ``_run_coro_sync`` (the prior code
     called it without await, silently always falling through to the stub).
     Produces the same ``result_data`` shape, with ``report_card_payload=None``.
+
+    ``endpoint`` (hierarchical LLMEndpoint) pins the LLM call.
     """
     import json
     from app.services.llm_service import call_llm
@@ -772,6 +898,7 @@ def _legacy_synthesize_fallback(db, execution, node, user_message, task_spec, ro
     try:
         result = _run_coro_sync(call_llm(
             prompt=system_prompt, messages=[], temperature=0.3,
+            endpoint=endpoint,
         ))
         response_text = result.get("response", "").strip()
         if "```json" in response_text:
