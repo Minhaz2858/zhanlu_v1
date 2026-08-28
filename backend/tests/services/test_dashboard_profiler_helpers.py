@@ -1,0 +1,62 @@
+import pytest
+
+from app.services.dashboard_profiler import (
+    classify_column_type,
+    infer_shape,
+    looks_like_iso_date,
+)
+
+
+def test_classify_date_types_union():
+    for t in ("date", "datetime", "timestamp", "timestamp without time zone",
+              "datetime(6)", "timestamp(3)"):
+        assert classify_column_type(t) == "date", t
+
+
+def test_classify_numeric_types():
+    for t in ("int", "bigint", "decimal(18,2)", "numeric(10,4)", "float", "double"):
+        assert classify_column_type(t) == "number", t
+
+
+def test_classify_text_fallback():
+    assert classify_column_type("varchar(255)") == "text"
+    assert classify_column_type("nvarchar") == "text"
+    assert classify_column_type("TEXT") == "text"
+
+
+def test_classify_unknown_defaults_text():
+    assert classify_column_type("geography") == "unknown"
+    assert classify_column_type(None) == "unknown"
+
+
+def test_iso_date_strings():
+    assert looks_like_iso_date("2026-08-26")
+    assert looks_like_iso_date("2026-08-26T18:19:04")
+    assert looks_like_iso_date("2026/08/26")
+    assert not looks_like_iso_date("cracked_c5")
+    assert not looks_like_iso_date("not-a-date")
+    assert not looks_like_iso_date(None)
+
+
+def test_shape_empty_when_no_rows():
+    assert infer_shape("date", 0, 0, 1.0, 10) == "empty"
+
+
+def test_shape_sparse_when_null_heavy():
+    assert infer_shape("text", 100, 3, 0.9, 100) == "sparse"
+
+
+def test_shape_time_series_for_date():
+    assert infer_shape("date", 100, 50, 0.0, 100) == "time_series"
+
+
+def test_shape_category_low_cardinality():
+    assert infer_shape("text", 100, 3, 0.0, 100) == "category"
+
+
+def test_shape_continuous_high_cardinality_numeric():
+    assert infer_shape("number", 100, 90, 0.0, 100) == "continuous"
+
+
+def test_shape_high_cardinality_text_is_category():
+    assert infer_shape("text", 1000, 500, 0.0, 1000) == "category"
