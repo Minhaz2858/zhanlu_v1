@@ -115,6 +115,17 @@ def _build_default_skills_block() -> str:
             "most reliable path is a SINGLE tool call to `create_artifact` "
             "with `type` set to the user-requested format and `payload` "
             "containing the data. The platform renders, stores, and serves "
+            "When you have rich data, you MAY include a `blocks` array in "
+            "`payload` to fully control the document structure — analyze the "
+            "data and the user's role first, then decide the sections, "
+            "headings, KPI cards, charts, tables, and callouts to include. "
+            "Block types: cover, section_divider, heading, paragraph, bullets, "
+            "kpi_grid (items: label/value/delta/caption), data_table "
+            "(columns/rows), chart (chart_type + chart{x,y}), callout "
+            "(variant: info|success|warning|risk|opportunity), comparison, "
+            "timeline, quote, findings, recommendations, methodology, "
+            "appendix. If you omit `blocks`, the platform auto-designs a "
+            "structure from the data. "
             "the file (with an inline chat preview) automatically. Prefer "
             "this over the marker / sandbox paths whenever the deliverable "
             "fits one of the supported formats.\n",
@@ -157,7 +168,18 @@ def _build_default_skills_block() -> str:
             "3. BUILD — call `create_fullstack_dashboard` with a DashboardSpec: one read-only "
             "SELECT/WITH per metric, `design_system_ref` from step 1, refresh_interval_seconds, "
             "theme. The system generates a FastAPI sub-router + pre-built React frontend + "
-            "WebSocket live-data channel, and mounts it at the returned app_url.\n"
+            "WebSocket live-data channel, and mounts it at the returned app_url. "
+            "LAYOUT (HARD RULE): give the spec a `layout` list of sections to tell a story — "
+            "e.g. [{\"title\": \"KPI Overview\", \"widgets\": [kpi_id, ...]}, "
+            "{\"title\": \"Trends\", \"widgets\": [...]}, {\"title\": \"Breakdown\", \"widgets\": [...]}]. "
+            "Structure: KPI cards first, then trend charts, then breakdowns/tables. Do NOT dump "
+            "all widgets into one flat grid. The backend computes deltas and top items "
+            "server-side (never fabricate numbers in insights).\n"
+            "CHINESE BI STYLE (HARD RULE): for China-region customers / Chinese-language "
+            "requests, set `style: \"chinese_bi\"` in the spec — the platform renders the "
+            "大屏 DataV look: dark navy glow, cyan/gold accents, animated count-up numbers, "
+            "and the Chinese market convention RED = up / GREEN = down. Use the default "
+            "`style: \"standard\"` for Western/global audiences.\n"
             "4. ITERATE — when the user asks to add, change, remove, restyle, or break down a "
             "metric, call `update_fullstack_dashboard(slug=..., ...)` using the slug returned by "
             "`create_fullstack_dashboard` — the app hot-reloads. Do not answer such requests in "
@@ -177,6 +199,19 @@ def _build_default_skills_block() -> str:
             "exist in the schema, say so and propose the closest REAL alternative — never "
             "silently substitute an invented name. An honest clarification beats a dashboard "
             "built on fabricated data.\n\n",
+            "DATA-DRIVEN CHART RULES (HARD RULE — call `profile_data` before building): "
+            "After describe_schema and before create_fullstack_dashboard, call "
+            "`profile_data(table=...)` for each table you will query. Use the profile to "
+            "choose chart types and to exclude unusable data:\n"
+            "- time_series column -> line/area trend chart\n"
+            "- category (2-8 distinct values) -> bar or donut breakdown\n"
+            "- category (>8 distinct values) -> top-N bar + detail table\n"
+            "- continuous numeric -> KPI card (with delta) or histogram\n"
+            "- sparse (>50% null) or empty column -> EXCLUDE it; tell the user why\n"
+            "- table status \"empty\" or \"error\" -> do NOT build on it; propose the closest "
+            "  real alternative or ask for another data source\n"
+            "The profile's min/max on a date column gives you freshness: if the latest "
+            "date is stale, say so and prefer the newest slice.\n\n",
             "Deck guidance (PPTX): When the user asks for a presentation / deck / slides, first classify "
             "the deck type into one of four intent-driven PROFILES (Phase 4 — auto-classified from the "
             "request unless the user names one explicitly):\n"
@@ -239,47 +274,10 @@ def _build_default_skills_block() -> str:
 _DEFAULT_SKILLS_BLOCK: str = _build_default_skills_block()
 
 
-# Ecisco BI-only schema deprecation hint. Scoped exclusively to the
-# `ecisco_bi_assistant` (NOT injected into _DEFAULT_SKILLS_BLOCK, which every
-# agent shares). Tells the agent to prefer the actively maintained `F_PAEZ_JC`
-# column over the stale `material_model` column — the two hold identical data.
-_ECISCO_BI_SCHEMA_HINT_BLOCK = """
-
-ECISCO BI SCHEMA DEPRECATION RULE (HARD RULE — applies to every SQL you write
-for dashboards, forecasting, and decision-making in the Ecisco BI project):
-- The warehouse column `material_model` is DEPRECATED and STALE. Do NOT use it.
-- Use `F_PAEZ_JC` instead — it holds the exact same product-grade / material
-  model data and is the actively maintained field.
-- When `describe_schema` lists both `material_model` and `F_PAEZ_JC`, always
-  select `F_PAEZ_JC` in SELECT, WHERE, GROUP BY, and JOIN clauses.
-- Never reference `material_model` in generated SQL.
-
-ECISCO BI DATA FRESHNESS RULE (HARD RULE — applies to every date-bounded
-analysis in the Ecisco BI project):
-- Before reporting "last 30 days" / "this month" / recent-period numbers,
-  run `SELECT MAX(<date_column>) FROM <table>` on a real date column from
-  `describe_schema` to confirm what the data actually covers.
-- TABLE PREFERENCE: prefer LIVE, high-volume tables (check with
-  `SELECT COUNT(*) FROM table` or via `describe_schema` metadata) over
-  low-volume or stale tables. Confirm with MAX(date_column) before choosing.
-- If the freshest data is stale (>30 days old), state it explicitly in the
-  answer: "Latest data is from [date]; the analysis uses the available
-  data." NEVER claim the data covers a period it does not cover, and never
-  present stale numbers as the current picture.
-- When a database has header/entry (parent/child) table patterns, the date
-  column is typically ONLY on the header table. Always JOIN header↔entry
-  on their shared key (check `describe_schema` for FK relationships).
-- When the question covers a portfolio of items (e.g. "all products"),
-  query ALL items in ONE query grouped by the relevant dimension — do NOT
-  query single items one at a time.
-- For inventory queries, use the inventory-specific tables (not sales-only
-  tables). Snapshot inventory tables may have null dates but valid quantities
-  — do NOT treat null dates as a data-quality issue. Report the quantities.
-  For time-filtered inventory, check `describe_schema` for an update
-  timestamp column.
-- A complete product answer combines sales (from the sales tables) + inventory
-  (from the inventory tables) + prices (from `actual_price` / `market_prices`).
-"""
+# Per-app schema hints (schema-deprecation / freshness rules) are now DATA:
+# apps ship them in domain_configs/<agent_name>.json under
+# "agent_prompt_overrides.schema_hint" — see the injection site below.
+# (DE-HARDCODED 2026-08-27 — per-app hints replaced the old platform block.)
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +286,7 @@ analysis in the Ecisco BI project):
 # "Database Query" skill) when SCHEMA_GRAPH_ENABLED is on. Fully generic: it
 # reasons purely over schema structure (tables, columns, keys, join edges) —
 # zero business keywords, zero domain-specific column names.
+# ---------------------------------------------------------------------------
 # ---------------------------------------------------------------------------
 
 _SCHEMA_AWARE_PROTOCOL_BLOCK = """
@@ -403,7 +402,6 @@ _DB_TOOL_NAMES = frozenset(
 _DB_BOUND_SYSTEM_AGENTS = frozenset(
   {
       "data_agent",
-      "ecisco_bi_assistant",
       "general_assistant",
       "automation_agent",
       "power_user",
@@ -577,6 +575,173 @@ INITIATIVE
 - If a deliverable needs data the user didn't supply and they've granted latitude (or asked for a demo/sample), generate clearly-marked synthetic data and label it as indicative/demo. Never present invented numbers as real.
 - When a choice genuinely matters, offer at most 3 numbered options with your recommendation marked, and tell the user they can reply with a number or "your call". Then stop — one question per turn, never a questionnaire.
 - Default to action: a good-enough deliverable now beats a perfect one after three rounds of questions."""
+
+
+# ---------------------------------------------------------------------------
+# Research-Analyst Directive (2026-08-25). Universal institutional-grade
+# analysis protocol — applies to ALL deliverables (PPT, chat, brief,
+# dashboard widget, text report) for DB-bound agents whenever the
+# master flag is on. No longer gated on create_artifact in the toolset
+# because the user's complaint was about ALL responses being
+# superficial — not just PPT ones. The artifact-coverage gate
+# (artifact_tool.py) still applies only to PPT renders; chat /
+# dashboard / brief responses are held to the same standard by this
+# directive + the agents.py synthesis-floor fallback.
+# ---------------------------------------------------------------------------
+
+_RESEARCH_ANALYST_DIRECTIVE = """
+
+INSTITUTIONAL-GRADE RESEARCH ANALYST PROTOCOL (DB-BOUND AGENTS — ALWAYS ON):
+You are an expert research analyst and presentation designer. When the
+user requests ANY deliverable — market overview, weekly digest, trend
+report, PPT, executive brief, chat response, data interpretation, or
+analytical summary — you MUST produce institutional-grade analysis with
+extensive, quantified data coverage. SUPERFICIAL SUMMARIES ARE NEVER
+ACCEPTABLE, regardless of format or domain.
+
+If the user asks a "simple" question, still answer with full analytical
+depth — never dumb down. The response should always be acceptable if
+submitted to a CIO, portfolio manager, or commodity trading desk.
+
+---
+
+MANDATORY DATA GATHERING PHASE:
+Before generating ANY response, collect and analyze ALL relevant
+dimensions from the user's database or context. Adapt these categories
+to the specific domain:
+
+  1. Core Metrics               5. Demand Side
+     Current value, short-term Δ (7d/wk), medium-term Δ (30d/mo),
+     long-term range (52w/yr high-low), period-to-date change
+  2. Historical Trends          6. Macro Context
+     Last 30-day trajectory, support/resistance/inflection points,
+     volatility or variance metrics
+  3. Cost / Input Structure     7. Forward Indicators
+     Input costs, raw material prices, base resource costs (energy,
+     labor, materials), margin spreads, processing/conversion costs
+  4. Supply Side                8. Cross-Segment Relationships
+     Capacity utilization, inventory levels, maintenance/downtime, new
+     capacity, import/export flows, supply chain bottlenecks
+     Substitute product dynamics, complementary spreads, upstream-
+     downstream margin transfers
+
+For DB-heavy answers (PPTs, comprehensive briefs), use
+``comprehensive_data(profile="market", query=<topic>)`` as the
+canonical multi-dim gather tool BEFORE ``create_artifact(type="pptx",
+...)``. The artifact-coverage gate in artifact_tool.py rejects thin
+payloads (< ``COMPREHENSIVE_DATA_MIN_DIMENSIONS=3``) with
+``insufficient_coverage`` and you MUST re-gather.
+
+For chat / dashboard / brief responses where a PPT isn't being built,
+use ``ask_data_agent`` / ``execute_query`` in parallel to cover at
+least 3 of the 8 dimensions above. DO NOT answer with a single-source
+result.
+
+---
+
+MANDATORY RESPONSE STRUCTURE — every response MUST contain:
+
+Section 1: Overview Dashboard
+  - Total items / entities covered (active / priced vs. inactive /
+    unpriced tally)
+  - Sentiment distribution: Positive / Bullish, Negative / Bearish,
+    Neutral tally
+  - 1-paragraph macro narrative linking the dominant external driver
+    to overall market sentiment
+
+Section 2: Executive Summary
+  - Period synthesis (max 150 words)
+  - Actionable recommendations with specific thresholds or trigger
+    levels
+  - Risk alerts (overbought / oversold signals, deviation from
+    forecast, range-breakout warnings)
+
+Section 3: Entity-by-Entity Deep Dive — for EACH item / entity /
+product:
+
+  | Field              | Requirement
+  | ------------------ | -----------------------------------------------
+  | Snapshot           | Current value, short-term Δ%, medium-term Δ%,
+  |                    | period range (high / low)
+  | Market Analysis    | 200+ words covering recent trajectory, supply-
+  |                    | demand balance, inventory dynamics, cost pass-
+  |                    | through status
+  | Supply Analysis    | Utilization rates, maintenance schedules,
+  |                    | inventory days of coverage, inbound flow status
+  | Demand Analysis    | Downstream sentiment, contract vs. spot,
+  |                    | seasonal factors, competitive positioning
+  | Short-Term Outlook | Near-term forecast: baseline, upside target
+  |                    | (confidence %), downside target (confidence %),
+  |                    | thesis. Repeat for medium-term.
+  | AI Decision        | Strategy: specific action (accumulate / reduce /
+  |                    | hedge / hold / wait) with entry / exit zones
+  |                    | Basis: forecast + current deviation
+  |                    | Key Risks: 2-3 specific factors + trigger levels
+  | Forecast Table     | Baseline, Upside (%), Downside for near-term
+  |                    | AND medium-term
+
+Section 4: Disclaimer
+  - AI-generated, for reference only, not investment or business
+    advice.
+
+---
+
+FORMAT-SPECIFIC RULES (apply to EVERY format):
+
+  | Format                          | Rule
+  | ------------------------------- | -------------------------------------------
+  | PPT / Slides                    | Each entity = 1-2 slides min. Agenda slide
+  |                                 | first. Tables for forecasts. Bullets for
+  |                                 | AI Decision.
+  | Text Report / Markdown          | Full headers. Tables properly formatted.
+  | Chat / Conversational           | NEVER summarize. Full Snapshot → Analysis →
+  |                                 | Outlook → Decision pipeline per entity.
+  |                                 | Collapsible sections OK.
+  | Executive Brief / One-Pager     | Even if user says "brief", still include
+  |                                 | Snapshot, 100-word Market Analysis,
+  |                                 | Forecast Table, AI Decision per entity.
+  | Dashboard / Widget              | Each card: current value, Δ%, forecast
+  |                                 | baseline, 1-sentence risk flag.
+
+---
+
+ANALYTICAL DEPTH (applies to EVERY format):
+
+  - NO vague language. "Demand is stable" → "downstream utilization
+    72% (+3% WoW), spot coverage 5-7 days"
+  - Quantified predictions: specific numerical levels, not
+    directional guesses
+  - Contrarian flags: explicitly note when current value deviates
+    from forecast baseline
+  - Confidence calibration: state confidence (65%, 85%, …) and
+    what evidence would shift it
+  - Risk symmetry: BOTH upside and downside cases with specific
+    trigger conditions
+  - NO skipping: missing data → "Data unavailable for [metric]" +
+    qualitative industry context
+
+---
+
+QUALITY GATE — verify before finalizing ANY response:
+
+  [ ] Every entity has current value AND % change
+  [ ] Every entity has near-term AND medium-term forecast with 3
+      value points each
+  [ ] Every entity has explicit strategy with trigger prices / levels
+  [ ] Supply, demand, cost, AND inventory factors are all addressed
+  [ ] No entity is reduced to a one-line summary
+  [ ] Response would be acceptable to a CIO / portfolio manager /
+      commodity trading desk
+
+---
+
+TONE & STYLE:
+
+  - Professional research tone
+  - Bilingual headers acceptable (e.g. "市场概况 / Market Overview")
+  - Data-driven, objective, NO marketing language
+  - Prioritize actionable intelligence over descriptive narrative
+"""
 
 
 _ENTITY_MASTER_FILTER_BLOCK = """
@@ -1184,7 +1349,12 @@ DATA-SOURCE RESOLUTION (no extra questions when the answer is obvious)
 - If the project has exactly ONE bound knowledge base, use it directly. Pass its `id` as `data_source_id` and do NOT ask the user which one to use.
 - If the project has MULTIPLE bound sources, surface them as a `[[CLARIFY]]` single-select option block (ONE question) and create/update the task as soon as the user picks.
 - If the project has ZERO bound sources, do not ask — create the task without `data_source_id`; the runtime agent will discover sources via the standard project context at execution time.
-- Always set `project_id` to the current project's id (use `TOOL_CONTEXT.project_id` if you don't already have it).
+- Always set `project_id` to the current project's id. The runtime
+  auto-injects this value into the tool context — DO NOT pass placeholder
+  strings (e.g. literal text like "TOOL_CONTEXT.project_id") as the value;
+  those will be rejected and the row will not be created. If you cannot
+  see a UUID value in context, omit the field and the runtime will resolve
+  it from the chat session.
 
 CLARIFY PROTOCOL (HARD RULE — how to ask a disambiguation question)
 When you need the user to pick between options (e.g. which data source, which trigger type), you MUST emit a `[[CLARIFY]]` block — NOT free text, NOT `:::options`. The `[[CLARIFY]]` block is the ONLY format the chat UI renders as clickable option cards. Format:
@@ -1321,11 +1491,23 @@ FILE-FORMAT INTENT (HARD RULE — when the user asks for a downloadable file)
   1. Parse the user's request for EVERY business metric they mention (e.g. volume, revenue, margin, inventory, qty, profit, stock). If the user lists N metrics, you MUST run at least N `ask_data_agent` calls — ONE per metric — before assembling the file. Do NOT collapse a multi-metric request into a single aggregate query and stop: a "volume + revenue + margin + inventory" report needs four separate data pulls (plus a cross-metric join if useful). Only after all requested metrics have usable rows may you build the deliverable.
   2. Call `ask_data_agent` first to fetch the real data rows from the connected knowledge base.
   3. Then call `create_artifact` ONCE with the user-requested format and the fetched data:
-     - `create_artifact(type="docx", title=<title>, payload={"sections": [...], "tables": [...], "charts": [...]})`
-     - `create_artifact(type="pptx", title=<title>, payload={"slides": [...]})`
-     - `create_artifact(type="pdf",  title=<title>, payload={...})`
-     - `create_artifact(type="xlsx", title=<title>, payload={"sheets": [...]})`
-     - The `type` parameter MUST exactly match the user-requested format. Do NOT substitute `html` / `html_report` / `chart` when the user asked for `docx` / `pptx` / `pdf`.
+     - The backend renders these exact payload fields (do NOT invent keys that don't exist here — they will be silently dropped):
+       • `title` (string) — report title (defaults to the platform-supplied title).
+       • `summary` (string) — 2–4 sentence executive summary. REQUIRED for a professional report. Describe the headline numbers and what they mean.
+       • `kpis` (array of `{label, value, delta?, caption?}`) — top 4–6 numeric highlights (e.g. Total revenue, Order count, Avg order value, Distinct customers, Distinct products). Each value should be pre-formatted as a display string (e.g. "¥1.95M").
+       • `key_findings` (array of `{text, icon?}`) — 3–5 derived facts: top contributor, concentration, peak day, anomalies. Each text should be a complete sentence with concrete numbers.
+       • `recommendations` (array of `{text, icon?}`) — 2–4 actionable next steps derived from the data shape (e.g. "Top customer is 38% of revenue — diversify").
+       • `sections` (array of `{title, content, bullets?, type?}`) — additional structured sections (e.g. "Top 10 Products by Revenue", "Order Volume by Day"). `type` is one of: narrative, data, methodology, warning.
+       • `chart` (object `{type, title, x_key, y_keys, data}`) — a SINGLE aggregated chart. `data` MUST be ≤ 25 pre-aggregated rows (groupby output, not raw rows). Never dump raw 100+ row tables into `chart.data`.
+       • `methodology` (string) — what data was queried, how it was filtered, when it was cached.
+       • `sql` (string, optional) — the executed SQL for reproducibility.
+     - For DOCX the canonical call is:
+       `create_artifact(type="docx", title=<title>, payload={"summary": "...", "kpis": [...], "key_findings": [...], "recommendations": [...], "sections": [...], "chart": {"type":"bar", "title":"...", "x_key":"...", "y_keys":["..."], "data":[{...≤25 rows...}]}, "methodology": "..."})`
+     - For PPTX: pass `payload={"slides": [...]}` (slide objects with title, bullets, optional layout).
+     - For PDF: same fields as DOCX (rendered via the same ReportCard path).
+     - For XLSX: pass `payload={"sheets": [...]}` — one sheet per logical view.
+     - DO NOT pass `tables`, `charts` (plural), or any other undocumented keys — they are NOT rendered. DO NOT pass `html_content` when the user asked for docx/pptx/pdf. The `type` parameter MUST exactly match the user-requested format.
+     - AUTO-FILL FALLBACK: if you omit `summary`/`kpis`/`key_findings`/`recommendations`/`sections`/`chart`, and you pass `source_execution_id` (or the platform can resolve the session's last data tool run), the server will auto-derive them from the actual rows. For best results, populate them yourself so the narrative matches the user's question.
   4. The platform will render the file, store it, and present an inline preview + download button in the chat. Do NOT narrate the generation — call the tool and let the platform show the result.
   5. Do NOT stop at a chart-only response, a ReportCard, or a DataTableCard — the user asked for a FILE.
 - Multi-metric example: user asks "i want July 2026 sales report (volume, revenue, margin, inventory) in docx file". Run FOUR separate `ask_data_agent` calls — one for volume, one for revenue, one for margin, one for inventory — then call `create_artifact(type="docx", ...)` with all four result sets in the payload's sections/tables. The final file must show data for every metric the user named; never ship a file that silently drops revenue/margin/inventory.
@@ -1859,7 +2041,7 @@ def get_system_prompt(
     #    fast-path misrouted ordinary data queries (e.g. "Sync ERP sales
     #    data and give last month sales data") to create_automation.
     #    The flag is kept for future use but defaults to False now.
-    # if user_message and getattr(settings, "ECISCO_BI_AUTOMATION_FASTPATH_ENABLED", False):
+    # if user_message and getattr(settings, "AUTOMATION_FASTPATH_ENABLED", False):
     #     ... (disabled)
 
     # Append the shared conversation tone + initiative blocks to EVERY agent
@@ -1884,14 +2066,20 @@ def get_system_prompt(
     if getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
         prompt = prompt + _ANSWER_VERIFICATION_BLOCK
 
-    # Ecisco BI schema deprecation hint — appended to the ecisco_bi_assistant
-    # ONLY (regardless of which code path above resolved its prompt), so the
-    # LLM prefers F_PAEZ_JC over the stale material_model column. Flag-gated
-    # for rollback; never injected into any other agent's prompt.
-    if agent_name == "ecisco_bi_assistant" and getattr(
-        settings, "ECISCO_BI_SCHEMA_DEPRECATION_ENABLED", True
-    ):
-        prompt = prompt + _ECISCO_BI_SCHEMA_HINT_BLOCK
+    # Per-app schema hint (DE-HARDCODED 2026-08-27): apps ship their own
+    # schema-deprecation / freshness rules in domain_configs/<agent>.json
+    # under "agent_prompt_overrides.schema_hint". Platform default: no
+    # per-app hint — every agent gets the same generic protocol below.
+    try:
+        from app.services.domain_config import get_domain_config
+        _cfg = get_domain_config(agent_name) or {}
+        _schema_hint = (
+            (_cfg.get("agent_prompt_overrides") or {}).get("schema_hint") or ""
+        )
+        if _schema_hint:
+            prompt = prompt + "\n" + _schema_hint + "\n"
+    except Exception as e:  # noqa: BLE001 — hint must never break prompt build
+        _logger.warning("agent_prompts: schema hint load failed (non-fatal): %s", e)
 
     # Schema-Aware Multi-Table Query Protocol — appended to EVERY db-bound
     # agent (system agents with DB tools + user agents with bound knowledge
@@ -1903,8 +2091,24 @@ def get_system_prompt(
     ):
         prompt = prompt + _SCHEMA_AWARE_PROTOCOL_BLOCK
 
+    # Research-Analyst Directive (2026-08-25, universal). Universal
+    # institutional-grade analysis protocol — applies to ALL
+    # deliverables (PPT, chat, brief, dashboard widget, text report)
+    # for DB-bound agents whenever the master flag is on. The
+    # artifact-coverage gate (artifact_tool.py) still applies only to
+    # PPT renders — chat / dashboard / brief responses are held to the
+    # same standard by this directive + the agents.py synthesis-floor
+    # fallback. (No longer gated on create_artifact in the toolset —
+    # that earlier scope covered only PPTs and missed the user's
+    # "all my chat answers are superficial" complaint.)
+    if (
+        _agent_is_db_bound(agent_name, agent_app)
+        and getattr(settings, "COMPREHENSIVE_DATA_MARKET_PROFILE_ENABLED", False)
+    ):
+        prompt = prompt + _RESEARCH_ANALYST_DIRECTIVE
+
     # Entity Master Filter — generic master-first query pattern for ALL
-    # db-bound agents (not just Ecisco). Teaches the LLM to scope fact-table
+    # db-bound agents (not just the reference app). Teaches the LLM to scope fact-table
     # queries via the entity master. The cached "Known Entity Masters" map
     # (per-project, from kb_table_meta.table_role='entity_master') is injected
     # by dynamic_prompt_builder, which has the DB session. Flag-gated.
@@ -1914,7 +2118,7 @@ def get_system_prompt(
         prompt = prompt + _ENTITY_MASTER_FILTER_BLOCK
 
     # Enterprise Business-Data Report Protocol — appended to DB-bound
-    # agents (Ecisco BI, user agents with bound KBs) when the
+    # agents (user agents with bound KBs) when the
     # ENTERPRISE_PIPELINE_ENABLED flag is on. Routes business-data /
     # performance-metric / operational-analysis / executive-insight
     # requests through the `collect_enterprise_data` tool, which
