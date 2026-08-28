@@ -614,6 +614,32 @@ def check_alt_text(prs: Any) -> Finding:
     return Finding("alt_text", "Picture/chart alt text", "PASS", "")
 
 
+def check_source_citation(prs: Any) -> Finding:
+    """Every non-cover slide must carry a source citation footer.
+
+    Provenance rule: content slides cite the data source that produced them
+    (``Source: <label>`` in a footer).  The first slide — the cover/title
+    slide — is exempt; pure title slides elsewhere are not.
+    """
+    missing: list[str] = []
+    for idx, slide in enumerate(prs.slides, start=1):
+        if idx == 1:
+            continue  # cover / title slide is exempt
+        texts = [
+            shape.text_frame.text
+            for shape in slide.shapes
+            if shape.has_text_frame
+        ]
+        if not any(SOURCE_CITATION_RE.search(t or "") for t in texts):
+            missing.append(f"slide {idx}: no source citation footer")
+    if missing:
+        return Finding(
+            "source_citation", "Source citation footer on every content slide", "FAIL",
+            f"{len(missing)} slide(s) without a source citation", missing,
+        )
+    return Finding("source_citation", "Source citation footer", "PASS", "")
+
+
 CHECKS = (
     check_placeholder,
     check_density,
@@ -627,6 +653,7 @@ CHECKS = (
     check_contrast,
     check_alt_text,
     check_assertion_headline,
+    check_source_citation,
 )
 
 

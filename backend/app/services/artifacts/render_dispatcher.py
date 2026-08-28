@@ -51,37 +51,54 @@ def _build_layout_ctx(ctx: Any, *, plan: Any = None, user_message: str = "") -> 
     from app.services.artifacts.themes import resolve_theme_tokens
 
     style_recipe = "sharp"
+    # Provenance label threaded to layout_engine (source_citation footer).
+    # ExportContext carries it as ``source``; plain-dict callers may use
+    # either ``source`` or ``source_label``.
+    source_label = ""
 
     if ctx is None:
         return {
             "theme_tokens": resolve_theme_tokens(None),
             "style_recipe": style_recipe,
+            "source_label": source_label,
         }
 
     if isinstance(ctx, dict):
         style_recipe = ctx.get("style_recipe") or "sharp"
         if not isinstance(style_recipe, str):
             style_recipe = "sharp"
+        source_label = str(ctx.get("source_label") or ctx.get("source") or "").strip()
         # Explicit flat tokens win as-is (brand kit / caller-supplied).
         raw = ctx.get("theme_tokens")
         if isinstance(raw, dict) and raw:
-            return {"theme_tokens": dict(raw), "style_recipe": style_recipe}
+            return {
+                "theme_tokens": dict(raw),
+                "style_recipe": style_recipe,
+                "source_label": source_label,
+            }
         # Otherwise resolve preset / auto / default.
         return {
             "theme_tokens": resolve_theme_tokens(ctx, plan=plan, user_message=user_message),
             "style_recipe": style_recipe,
+            "source_label": source_label,
         }
 
     # ExportContext dataclass path.
     style_recipe = getattr(ctx, "style_recipe", None) or "sharp"
     if not isinstance(style_recipe, str):
         style_recipe = "sharp"
+    source_label = str(getattr(ctx, "source", "") or "").strip()
     raw = getattr(ctx, "theme_tokens", None)
     if isinstance(raw, dict) and raw:
-        return {"theme_tokens": dict(raw), "style_recipe": style_recipe}
+        return {
+            "theme_tokens": dict(raw),
+            "style_recipe": style_recipe,
+            "source_label": source_label,
+        }
     return {
         "theme_tokens": resolve_theme_tokens(ctx, plan=plan, user_message=user_message),
         "style_recipe": style_recipe,
+        "source_label": source_label,
     }
 
 

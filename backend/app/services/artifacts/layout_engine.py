@@ -232,6 +232,14 @@ def render(plan, rows: list[dict], ctx: Optional[dict] = None) -> bytes:
     ctx = ctx or {}
     theme = ctx.get("theme_tokens") or {}
     style_recipe = (ctx.get("style_recipe") or "sharp").lower()
+    # Provenance: the source label (data source name) cited in the footer of
+    # every content slide.  Accepts both ``source_label`` (orchestrator/
+    # sandbox convention) and ``source`` (ExportContext field) spellings.
+    source_label = (ctx.get("source_label") or ctx.get("source") or "").strip()
+
+    # Resolve the typeface for this render pass (thread-local) so every
+    # text run below uses the brand theme's font instead of Calibri.
+    _T.fonts = _resolve_fonts(theme)
 
     prs = apply_master(theme, style_recipe=style_recipe)
 
@@ -264,6 +272,8 @@ def render(plan, rows: list[dict], ctx: Optional[dict] = None) -> bytes:
         # Subtle slide number on every slide except the cover.
         if layout != "cover":
             add_slide_number(slide, idx, total_slides, theme)
+            # Provenance footer — cite the data source on content slides.
+            add_source_footer(slide, source_label, theme)
 
     buf = io.BytesIO()
     prs.save(buf)
@@ -323,6 +333,25 @@ def add_slide_number(slide, idx: int, total: int, theme: dict) -> None:
     run.text = f"{idx} / {total}"
     run.font.size = Pt(FOOTER_PT)
     run.font.color.rgb = _rgb(theme, "muted", "#64748B")
+
+
+def add_source_footer(slide, source_label: str, theme: dict) -> None:
+    """Add a subtle source-citation caption (bottom-left, FOOTER_PT).
+
+    Provenance footer — ``Source: <label>`` — so every content slide can be
+    traced back to the data that produced it.  Mirrors the slide-number
+    placement (same baseline, muted color) and is a no-op when no source
+    label is supplied.  The ``source_citation`` audit rule enforces that
+    non-cover slides carry this footer.
+    """
+    label = (source_label or "").strip()
+    if not label:
+        return
+    _add_textbox(
+        slide, MARGIN_IN, SLIDE_H_IN - 0.45, 10.0, 0.3,
+        f"Source: {label}", FOOTER_PT,
+        color=_rgb(theme, "muted", "#64748B"),
+    )
 
 
 # ----------------------------------------------------------------------------

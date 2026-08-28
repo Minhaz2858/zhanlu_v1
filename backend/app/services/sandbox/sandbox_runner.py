@@ -219,7 +219,12 @@ def generate_pptx(rows, config, instructions):
     if isinstance(theme_tokens, dict) and theme_tokens.get("name") is None:
         theme_tokens = dict(theme_tokens)
     style_recipe = config.get("style_recipe") or "sharp"
-    ctx = {"theme_tokens": theme_tokens, "style_recipe": style_recipe}
+    ctx = {
+        "theme_tokens": theme_tokens,
+        "style_recipe": style_recipe,
+        # Provenance label → layout_engine source_citation footer.
+        "source_label": config.get("source") or "",
+    }
 
     data = _render_engine(deck_plan, rows or [], ctx)
 
