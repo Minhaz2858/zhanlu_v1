@@ -33,6 +33,8 @@ from __future__ import annotations
 
 import io
 import logging
+import re
+import threading
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
@@ -65,7 +67,7 @@ TITLE_PT = 32       # main slide headlines (assertion form)
 SUBTITLE_PT = 18    # subtitles, KPI deltas, secondary info
 BODY_PT = 16        # body bullets, table cells
 CAPTION_PT = 12     # KPI labels, axis hints
-FOOTER_PT = 9       # slide numbers (subtle)
+FOOTER_PT = 10      # slide numbers + source footers (10pt caption floor)
 
 # Layout constants (16:9 13.333" × 7.5"; 0.6" margins all around)
 SLIDE_W_IN = 13.333
@@ -105,6 +107,57 @@ def _brand_palette(theme: dict) -> list[RGBColor]:
         _rgb(theme, "delta_down",     "#DC2626"),
         _rgb(theme, "muted",          "#64748B"),
     ]
+
+
+# ----------------------------------------------------------------------------
+# Typography / font resolution
+# ----------------------------------------------------------------------------
+#
+# The PPTX renderer must respect the resolved brand theme's typeface instead
+# of the PowerPoint default ("Calibri").  ``DeckTheme`` already carries
+# ``font_heading`` / ``font_body`` / ``font_cjk`` (defaults: Inter /
+# Microsoft YaHei), but the layout builders below used to hardcode
+# "Calibri", which is what made decks read as unstyled Office templates.
+#
+# Fonts are resolved once per render and stashed on a thread-local so that
+# concurrent renders (the exporter runs via a thread-pool coroutine runner)
+# cannot clobber each other's typeface.
+
+_CJK_RE = re.compile(
+    r"[\u2e80-\u9fff\u3000-\u303f\uf900-\ufaff\uff00-\uffef]"
+)
+
+_T = threading.local()
+
+_DEFAULT_FONTS = {
+    "heading": "Inter",
+    "body": "Inter",
+    "cjk": "Microsoft YaHei",
+}
+
+
+def _resolve_fonts(theme: dict) -> dict:
+    """Build the {heading, body, cjk} font map from a theme token dict."""
+    theme = theme or {}
+    return {
+        "heading": theme.get("font_heading") or _DEFAULT_FONTS["heading"],
+        "body": theme.get("font_body") or _DEFAULT_FONTS["body"],
+        "cjk": theme.get("font_cjk") or _DEFAULT_FONTS["cjk"],
+    }
+
+
+def _font_for(text: str, role: str = "body") -> str:
+    """Pick the correct font for a run.
+
+    East-Asian runs always use the CJK typeface (Inter has no CJK glyphs,
+    so without this PowerPoint silently falls back to SimSun/DengXian,
+    which looks unprofessional in a Chinese deck).  Latin runs use the
+    heading or body face depending on ``role``.
+    """
+    fonts = getattr(_T, "fonts", None) or _DEFAULT_FONTS
+    if text and _CJK_RE.search(text):
+        return fonts["cjk"]
+    return fonts["heading"] if role == "heading" else fonts["body"]
 
 
 # ----------------------------------------------------------------------------
@@ -377,7 +430,7 @@ def _add_textbox(
     p.alignment = align
     run = p.add_run()
     run.text = text or ""
-    run.font.name = "Calibri"
+    run.font.name = _font_for(text, "heading" if bold else "body")
     run.font.size = Pt(size)
     run.font.bold = bold
     if color is not None:
@@ -795,6 +848,7 @@ def _layout_recommendations(slide, sp, theme, idx, total) -> None:
         p.space_after = Pt(10)
         run = p.add_run()
         run.text = f"{i}.  {rec}"
+        run.font.name = _font_for(rec, "body")
         run.font.size = Pt(BODY_PT)
         run.font.color.rgb = _rgb(theme, "text", "#0F172A")
 
@@ -866,7 +920,7 @@ def _layout_data_table(slide, sp, theme, idx, total) -> None:
         cell.text = c
         for p in cell.text_frame.paragraphs:
             for r in p.runs:
-                r.font.name = "Calibri"
+                r.font.name = _font_for(r.text, "body")
                 r.font.size = Pt(CAPTION_PT)
                 r.font.bold = True
                 r.font.color.rgb = _rgb(theme, "text", "#0F172A")
@@ -883,7 +937,7 @@ def _layout_data_table(slide, sp, theme, idx, total) -> None:
             cell.text = sv
             for p in cell.text_frame.paragraphs:
                 for r in p.runs:
-                    r.font.name = "Calibri"
+                    r.font.name = _font_for(r.text, "body")
                     r.font.size = Pt(CAPTION_PT)
                     r.font.color.rgb = _rgb(theme, "text", "#0F172A")
             if ri <= 3:

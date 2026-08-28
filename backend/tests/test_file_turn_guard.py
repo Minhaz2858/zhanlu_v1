@@ -479,6 +479,35 @@ class TestDetectGiveUp:
     def test_empty_text(self):
         assert detect_give_up("") is False
 
+    # ── precision: negated / generic phrases must NOT fire (2026-08-28) ──
+
+    def test_wont_give_up_not_detected(self):
+        """\"I won't give up\" is a commitment to continue, not a give-up."""
+        assert detect_give_up("I won't give up — I'll keep working on it.") is False
+
+    def test_will_not_give_up_not_detected(self):
+        assert detect_give_up("I will not give up until the report is done.") is False
+
+    def test_never_give_up_not_detected(self):
+        assert detect_give_up("I never give up on a deliverable.") is False
+
+    def test_bare_please_try_again_not_detected(self):
+        assert detect_give_up("Please try again.") is False
+
+    def test_bare_didnt_work_out_not_detected(self):
+        assert detect_give_up("It didn't work out.") is False
+
+    def test_full_qa_reproducer_still_detected(self):
+        """The original QA trace must still fire (strong signals present)."""
+        assert detect_give_up(
+            "I gathered some information but had trouble putting it all together. "
+            "Could you try again with a more specific request?"
+        ) is True
+
+    def test_direct_give_up_still_detected(self):
+        assert detect_give_up("I give up on producing this file.") is True
+        assert detect_give_up("I gave up after the third attempt.") is True
+
 
 class TestBuildGiveUpReprompt:
     def test_contains_create_artifact_and_format(self):

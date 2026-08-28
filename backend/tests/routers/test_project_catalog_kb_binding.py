@@ -71,7 +71,12 @@ def test_clone_kb_for_project_scoped_copy(db):
     p1 = str(uuid.uuid4())  # Data Analysis
     p2 = str(uuid.uuid4())  # C5_C9
 
-    src = _make_kb(p1)
+    src = _make_kb(
+        p1,
+        username="readonly_user",
+        password="s3cret-value",
+        api_url="https://db.internal:5432",
+    )
     db.add(src)
     db.commit()
     db.refresh(src)
@@ -81,6 +86,13 @@ def test_clone_kb_for_project_scoped_copy(db):
     db.commit()
 
     copy = clone_kb_for_project(db, src.id, p2)
+
+    # The helper does NOT commit — the caller owns the transaction, so the
+    # new row must not be visible to a fresh query yet.
+    assert db.query(KnowledgeBase).count() == 1
+    db.commit()
+    db.refresh(copy)
+    assert db.query(KnowledgeBase).count() == 2
 
     # New row exists, bound to the NEW project, same content fields
     assert copy.id != src.id
@@ -93,6 +105,12 @@ def test_clone_kb_for_project_scoped_copy(db):
     assert copy.item_count == src.item_count
     assert copy.status == src.status
     assert copy.created_by_id == src.created_by_id
+
+    # Credential isolation: username rides along but the password NEVER
+    # crosses project boundaries.
+    assert copy.username == src.username
+    assert copy.password is None
+    assert copy.api_url == src.api_url
 
     # Inverse isolation: the original KB is STILL bound to P1 (never repointed)
     db.expire_all()
@@ -129,11 +147,14 @@ def test_clone_kb_for_project_soft_deleted_source(db):
 
     # include_deleted=True: scoped copy still created; source untouched.
     copy = clone_kb_for_project(db, src.id, p2, include_deleted=True)
+    db.commit()
+    db.refresh(copy)
     assert copy.id != src.id
     assert copy.project_id == p2
     assert copy.is_deleted is False
     assert copy.name == src.name
     assert copy.item_count == src.item_count
+    assert copy.password is None
 
     db.expire_all()
     original = db.query(KnowledgeBase).filter(KnowledgeBase.id == src.id).one()

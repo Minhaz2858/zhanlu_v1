@@ -62,6 +62,32 @@ def test_layout_engine_emits_source_footer_on_content_slides():
     assert "Source: erp_v_sale_orderentry" in _slide_text(slides[1])
 
 
+def test_footer_runs_meet_10pt_caption_floor():
+    """Footers must sit at/above the 10pt caption floor (audit font_floor).
+
+    Regression: FOOTER_PT was 9pt, below the audit's CAPTION_FLOOR_PT (10pt),
+    so every rendered deck FAILed the font_floor rule.
+    """
+    data = _render_pptx({"source_label": "erp_v_sale_orderentry"})
+    prs = Presentation(BytesIO(data))
+    sizes: list[float] = []
+    for slide in prs.slides:
+        for shape in slide.shapes:
+            if not shape.has_text_frame:
+                continue
+            text = shape.text_frame.text
+            if "Source:" not in text and "/" not in text:
+                continue  # only footer / slide-number runs
+            for p in shape.text_frame.paragraphs:
+                for r in p.runs:
+                    if r.font.size is not None:
+                        sizes.append(r.font.size.pt)
+    assert sizes, "expected footer / slide-number runs in the deck"
+    assert all(s >= 10.0 for s in sizes), (
+        f"footer run below the 10pt caption floor: {sizes}"
+    )
+
+
 def test_audit_passes_when_source_footer_present(tmp_path):
     data = _render_pptx({"source_label": "erp_v_sale_orderentry"})
     path = tmp_path / "with_source.pptx"

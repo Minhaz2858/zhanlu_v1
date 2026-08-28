@@ -90,7 +90,14 @@ def clone_kb_for_project(
     Never repoints another project's KB: creates a NEW KnowledgeBase row
     (fresh uuid) bound to ``new_project_id``, leaving the source row fully
     intact. Content fields (name, description, type, source_kind, file/db
-    connection fields, item_count, status) are copied from the source.
+    connection fields, item_count, status) are copied from the source, but
+    the source's ``password`` credential is NEVER copied — cross-project
+    credential duplication is a security leak, so the copy's password is
+    always None (username, if present, rides along).
+
+    The caller owns the transaction: this helper only ``db.add()``s the new
+    row and never commits, so the caller decides when (or whether) to
+    persist the clone.
 
     ``include_deleted=True`` allows cloning from a soft-deleted source row
     (used when the content must be preserved for a new project without
@@ -118,7 +125,7 @@ def clone_kb_for_project(
         database_name=src.database_name,
         schema=src.schema,
         username=src.username,
-        password=src.password,
+        password=None,  # credentials never cross project boundaries
         api_url=src.api_url,
         file_type=src.file_type,
         file_url=src.file_url,
@@ -134,8 +141,8 @@ def clone_kb_for_project(
         app_id=src.app_id,
     )
     db.add(copy)
-    db.commit()
-    db.refresh(copy)
+    # No commit here — the caller owns the transaction (migration/API paths
+    # may want to batch the clone with other writes).
     return copy
 
 

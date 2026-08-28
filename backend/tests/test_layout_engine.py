@@ -92,16 +92,17 @@ def test_slide_numbers_present():
 def test_body_font_floor():
     """BODY text (bullets, titles, KPI values) must be >= BODY_PT (14).
 
-    Footer/slide-number runs (FOOTER_PT = 9) are explicitly exempt — they are
-    the only sub-14pt runs allowed. This guards against the layout engine
-    silently shrinking readable body text.
+    Footer/slide-number runs (FOOTER_PT = 10) and caption runs (CAPTION_PT =
+    12 — cover "Prepared for …" line, KPI labels, axis hints) are explicitly
+    exempt — they are the only sub-14pt runs allowed. This guards against the
+    layout engine silently shrinking readable body text.
     """
     data = render(_plan(), [], {"theme_tokens": {"name": "zhanlu-blue"},
                                  "style_recipe": "sharp"})
     prs = Presentation(BytesIO(data))
 
     BODY_PT = 14.0
-    FOOTER_PT = 9.0
+    CAPTION_PT = 12.0
     min_body = 999.0
     min_overall = 999.0
     footer_seen = False
@@ -115,14 +116,16 @@ def test_body_font_floor():
                         continue
                     pt = r.font.size.pt
                     min_overall = min(min_overall, pt)
-                    # Footer/slide-number caption exemption: "N / total".
-                    if pt <= FOOTER_PT + 0.01 and "/" in (sh.text_frame.text or ""):
-                        footer_seen = True
+                    # Caption/footer exemption (sub-14pt runs allowed): the
+                    # slide-number "N / total" runs are the footers.
+                    if pt <= CAPTION_PT + 0.01:
+                        if "/" in (sh.text_frame.text or ""):
+                            footer_seen = True
                         continue
                     min_body = min(min_body, pt)
 
-    assert footer_seen, "expected at least one footor/caption run at 9pt"
-    assert min_overall >= 9.0, f"min font {min_overall} below 9pt caption floor"
+    assert footer_seen, "expected at least one footer/slide-number run at 10pt"
+    assert min_overall >= 10.0, f"min font {min_overall} below 10pt caption floor"
     # The real assertion: actual body text must not drop below 14pt.
     assert min_body >= BODY_PT, f"body font {min_body} below 14pt floor"
 

@@ -51,15 +51,15 @@ class Settings(BaseSettings):
             )
         return v
 
-    # ── EDIA Market Dashboard — read-only mirror of EDIA's MySQL warehouse.
+    # ── External MySQL warehouse — optional read-only mirror (empty = off).
     # Empty = dashboard routes return 503 (the rest of zhanlu is unaffected).
-    # Example: mysql+pymysql://root:PASSWORD@10.10.10.49:3306/aipdp_data_warehouse_prod
-    EDIA_MYSQL_URL: str = ""
+    # Example: mysql+pymysql://user:password@10.10.10.49:3306/aipdp_data_warehouse_prod
+    MYSQL_URL: str = ""
 
     @property
-    def is_edia_enabled(self) -> bool:
-        """True when EDIA_MYSQL_URL is set (the dashboard will at least try)."""
-        return bool(self.EDIA_MYSQL_URL)
+    def has_external_mysql(self) -> bool:
+        """True when MYSQL_URL is set (the dashboard will at least try)."""
+        return bool(self.MYSQL_URL)
 
     # Auth
     JWT_SECRET: str = ""
@@ -229,7 +229,7 @@ class Settings(BaseSettings):
     # ── Institutional-grade PPT/research-analyst pipeline (2026-08-25) ──
     # When True, the universal _RESEARCH_ANALYST_DIRECTIVE is appended to
     # the system prompt of every DB-bound agent (data_agent,
-    # ecisco_bi_assistant, general_assistant, power_user, automation_agent,
+    # general_assistant, power_user, automation_agent,
     # plus any user agent with bound KBs or the "Database Query" skill).
     # The directive tells the LLM to use comprehensive_data(query, profile=
     # "market") for multi-dimensional data coverage on PPT / chat / brief
@@ -407,7 +407,7 @@ class Settings(BaseSettings):
     RETRIEVAL_HYBRID_MIN_SCORE: float = 0.5
 
     # ── NLU / Intent (Part 2 Gap Analysis) ────────────────────────────
-    EDIA_INTENT_PLANNER_ENABLED: bool = False
+    INTENT_PLANNER_ENABLED: bool = False
     QUERY_REWRITE_ENABLED: bool = False
 
     # ── Eval Pipeline (Part 2 Gap Analysis) ───────────────────────────
@@ -495,10 +495,15 @@ class Settings(BaseSettings):
     SYNEXIA_QUALITY_GATE_THRESHOLD_AUTOMATION: float = 0.6
 
     # ── PPT generation pipeline (multi-stage deck exporter) ──────────────
-    # All four flags default OFF so the existing report-card renderer path is
-    # byte-for-byte unchanged until a deployment opts in.  When enabled they
-    # add: LLM deck planning (content structuring), deterministic smart routing
-    # (structured vs sandbox html2pptx), and a one-shot LLM copy-polish pass.
+    # The four stage toggles (deck planner, smart router, LLM polish, audit)
+    # default OFF so the existing report-card renderer path is byte-for-byte
+    # unchanged until a deployment opts in.  When enabled they add: LLM deck
+    # planning (content structuring), deterministic smart routing (structured
+    # vs sandbox html2pptx), and a one-shot LLM copy-polish pass.  Two
+    # downstream flags default ON — PPT_DESIGN_BY_DEFAULT (design is the
+    # default routing target) and PPT_AUDIT_BLOCKING_ENABLED (a failed
+    # semantic audit blocks delivery); set either False to restore the
+    # legacy behavior.
     # NOTE: the P0 audit/repair loop (audit_deck.py → repair_deck.py) is a
     # pre-existing always-on safety net gated by ZHANLU_AUDIT_REPAIR_CYCLES and
     # is NOT toggled here — PPT_AUDIT_ENABLED is reserved for an explicit
@@ -552,7 +557,14 @@ class Settings(BaseSettings):
     # Synthesis-boundary nudge (cap 1/turn) + T-3 tool_choice forcing toward
     # create_artifact(type="pptx"); the dashboard guard takes precedence.
     PPT_TURN_GUARD_ENABLED: bool = False
-    FILE_TURN_GUARD_ENABLED: bool = False
+    FILE_TURN_GUARD_ENABLED: bool = True
+    # Phase 1B-REPORTS: server-side auto-analysis of cached DataExecution
+    # rows when create_artifact builds a docx/pptx/pdf. Derives summary,
+    # kpis, key_findings, recommendations, breakdown sections and an
+    # aggregated chart from the data — so a bare LLM payload becomes a
+    # real report (not a 25-row table dump). LLM-provided fields still
+    # override; auto-analysis only fills blanks.
+    REPORT_AUTO_ANALYSIS_ENABLED: bool = True
     # Phase 1B: layout-engine / data-table tuning (all defaults safe-off).
     LAYOUT_ENGINE_TEMPLATE_PATH: str = ""
     PPTX_DARK_THEME_PATH: str = ""
@@ -601,6 +613,15 @@ class Settings(BaseSettings):
     # behavior (all detectors/guards run their legacy paths).
     GOAL_CONTRACT_ENABLED: bool = False
     GOAL_CONTRACT_MAX_FORCES: int = 3
+
+    # ── LIVE REASONING STREAM (2026-08-27) ──────────────────────────────
+    # When True, the streaming LLM payload requests the provider's
+    # chain-of-thought mode (vLLM qwen3: chat_template_kwargs
+    # enable_thinking=True) so the agent loop receives per-token
+    # `reasoning` deltas and relays them to the frontend as
+    # `reasoning_delta` SSE events (the one-line "Live" status line).
+    # Off = current behavior (no thinking requested, reasoning empty).
+    LLM_ENABLE_THINKING: bool = False
     # Fix 1c: cap on turn-end "verify on stop" nudges. Shares the goal-contract
     # force budget when the contract is active (a nudge is bounded by
     # min(VERIFY_NUDGE_MAX, GOAL_CONTRACT_MAX_FORCES)); otherwise used as the
@@ -685,22 +706,55 @@ class Settings(BaseSettings):
     # — does not hardcode table names; agents discover via describe_schema.
     DATA_DOMAIN_HINTS_ENABLED: bool = True
 
-    # ── qwen3.6-27b Local Fast Mode (2026-08-25) ──────────────────────
-    # Per-model overrides that fire ONLY when the user's selected model is
-    # a qwen3.* served on local vLLM. DeepSeek-chat path is unaffected.
-    # Goal: 8-15 LLM calls/turn → 3-5 calls/turn; 200s → 42-52s turn time.
-    QWEN3_FAST_MODE_ENABLED: bool = True
-    QWEN3_MAX_TOOL_ITERATIONS: int = 10                 # was 40
-    QWEN3_GOAL_CONTRACT_ENABLED: bool = False           # was True
-    QWEN3_VERIFY_NUDGE_MAX: int = 0                     # was 2
-    QWEN3_DATA_AGENT_BUDGET_SECONDS: float = 30.0        # was 60
-    QWEN3_FORCE_SYNTHESIS_MAX_RETRIES: int = 0          # was 1
+    # ── Agent fast mode (2026-08-25, universalized 2026-08-27) ───────────
+    # Per-model overrides were originally gated to qwen3-local vLLM only;
+    # proven to cut turn time 200s → 42-52s while KEEPING answer quality
+    # (8-15 LLM calls/turn → 3-5). Applied to ALL models now — big cloud
+    # models (deepseek, etc.) are equally capable and faster, so the same
+    # lean loop produces smoother, faster, high-quality answers.
+    AGENT_FAST_MODE_ENABLED: bool = True
+    AGENT_FAST_MAX_TOOL_ITERATIONS: int = 10                 # was 40
+    # Dashboard builds (2026-08-27): a full-stack dashboard turn is a LONG
+    # multi-phase pipeline (design system → schema → data collection → build →
+    # verify). Fast-mode budgets (10 tool iterations / 180s wall clock) fire
+    # BEFORE the build finishes — the user gets the canned "turn ended" note
+    # instead of the live app. Dashboard turns therefore get their own
+    # generous budget: 40 iterations and a 30-minute wall clock (effectively
+    # no cap; the per-conversation AGENT_MAX_ITERATIONS=100 stays the outer
+    # bound, and long-running tools emit progress frames to keep the SSE
+    # connection alive).
+    DASHBOARD_BUILD_MAX_TOOL_ITERATIONS: int = 40
+    DASHBOARD_BUILD_WALL_CLOCK_CAP_S: float = 1800.0
+    # Per-delegate wall-clock for ask_data_agent DURING dashboard turns.
+    # The default delegate budget (60s) truncates data collection before all
+    # metrics are gathered. Dashboard delegates get 10 minutes (no practical
+    # cap — ask_data_agent is a long-running tool, so progress frames keep
+    # the SSE connection alive). Injected via the `budget_seconds` arg.
+    DASHBOARD_DELEGATE_BUDGET_SECONDS: float = 600.0
+    # Turn planning (2026-08-27): deterministic intent-derived plan (todo
+    # list) emitted BEFORE the loop (plan_step_added SSE) and injected into
+    # the model context so the agent visibly plans then follows the plan.
+    # Previously planning was optional model prose that weak local LLMs never
+    # produced — the loop freewheeled into repeated data-source calls.
+    # Flag-off = legacy behavior (plan events only from voluntary model prose).
+    TURN_PLAN_ENABLED: bool = True
+    # Dynamic per-request plans (2026-08-27): one cheap LLM planning call
+    # tailors the turn plan to the SPECIFIC request (metrics, regions, tools
+    # named by the user) instead of the fixed intent template. Falls back to
+    # the fixed template when the LLM output is invalid or the call fails/
+    # times out. Flag-off = fixed templates only.
+    TURN_PLAN_DYNAMIC_ENABLED: bool = True
+    TURN_PLAN_DYNAMIC_TIMEOUT_S: float = 20.0
+    AGENT_FAST_GOAL_CONTRACT_ENABLED: bool = False           # was True
+    AGENT_FAST_VERIFY_NUDGE_MAX: int = 0                     # was 2
+    AGENT_FAST_DATA_AGENT_BUDGET_SECONDS: float = 30.0        # was 60
+    AGENT_FAST_FORCE_SYNTHESIS_MAX_RETRIES: int = 0          # was 1
     # Self-eval KEPT per user decision (safety net), but tightened:
-    QWEN3_SELF_EVAL_MAX_REPLANS: int = 1                 # was 3
-    QWEN3_SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 5.0      # was 15.0
-    # Synthesis quality knobs (Component 4):
-    QWEN3_SYNTHESIS_MAX_TOKENS: int = 3072              # was 1536
-    QWEN3_SYNTHESIS_TEMPERATURE: float = 0.3            # was default
+    AGENT_FAST_SELF_EVAL_MAX_REPLANS: int = 1                 # was 3
+    AGENT_FAST_SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 5.0      # was 15.0
+    # Synthesis quality knobs:
+    AGENT_FAST_SYNTHESIS_MAX_TOKENS: int = 3072              # was 1536
+    AGENT_FAST_SYNTHESIS_TEMPERATURE: float = 0.3            # was default
 
     # D4 (2026-08-20): deterministic category-subset coverage check for the
     # verification gate. When True, an answer to a category/portfolio request
@@ -766,7 +820,7 @@ class Settings(BaseSettings):
     FORECAST_CASCADE_ENABLED: bool = True
     FORECAST_ADAPTIVE_WEIGHTS_FACTOR: float = 0.3
     FORECAST_DRIFT_THRESHOLD_PCT: float = 20.0
-    # Domain-signal overlay (naphtha→C5 elasticities + seasonal rules).
+    # Domain-signal overlay (feedstock elasticities + seasonal rules).
     # Enable per A/B validation (tests/test_domain_signals_ab.py).
     FORECAST_DOMAIN_SIGNALS_ENABLED: bool = False
     # LLM analyst brief writer. When False, the deterministic template
@@ -793,7 +847,6 @@ class Settings(BaseSettings):
     FORECAST_ERP_VOLUME_EXOG_ENABLED: bool = False
     FORECAST_DEMAND_SIGNAL_EXOG_ENABLED: bool = False
     FORECAST_EXTERNAL_EXOG_ENABLED: bool = False
-    FORECAST_OILCHEM_EXOG_ENABLED: bool = False
     FORECAST_TECHNICAL_INDICATORS_ENABLED: bool = False
     FORECAST_FOURIER_FEATURES_ENABLED: bool = False
     FORECAST_REGIME_DETECTION_ENABLED: bool = False
@@ -844,129 +897,55 @@ class Settings(BaseSettings):
     FORECAST_DEMAND_SIGNAL_ENABLED: bool = False
     FORECAST_EXTERNAL_SIGNAL_ENABLED: bool = False
 
-    # ── Ecisco BI feature flags (EDIA 5.1.2 → zhanlu migration) ─────────
-    # Master switch for EDIA-specific delegated tools in the ecisco_bi_assistant
-    # agent.  When False, the agent runs as a plain general assistant with
-    # standard zhanlu tools only.
-    ECISCO_BI_AGENT_ENABLED: bool = False
-
-    # Per-module gates — each enables one category of EDIA ported services.
+    # ── Feature flags (legacy reference migration) ─────────────────────
+    # Per-module gates — each enables one category of ported services.
     # All default False so the agent is safe to register in every deployment;
     # enable progressively as phases 5A→5F are completed and tested.
-    ECISCO_BI_KNOWLEDGE_GRAPH_ENABLED: bool = False   # 5A
-    ECISCO_BI_PRICING_ENABLED: bool = False           # 5B
-    ECISCO_BI_PERCEPTION_ENABLED: bool = False        # 5C
-    ECISCO_BI_INTEL_ENHANCED_ENABLED: bool = False    # 5D
-    ECISCO_BI_ERP_WRITEBACK_ENABLED: bool = False     # 5F
-    ECISCO_BI_ALERTS_ENABLED: bool = False           # 5G — proactive market alert detection + UI
-    ECISCO_BI_SCHEMA_DEPRECATION_ENABLED: bool = True  # F_PAEZ_JC over material_model hint for ecisco_bi_assistant
+    KNOWLEDGE_GRAPH_ENABLED: bool = False   # 5A
+    PRICING_ENABLED: bool = False           # 5B
+    PERCEPTION_ENABLED: bool = False        # 5C
+    INTEL_ENHANCED_ENABLED: bool = False    # 5D
+    ERP_WRITEBACK_ENABLED: bool = False     # 5F
+    SCHEMA_DEPRECATION_ENABLED: bool = True  # legacy column over material_model hint
 
-    # ── Ecisco BI Project Knowledge Cache (2026-08-25) ─────────────
+    # ── Project Knowledge Cache (2026-08-25) ───────────────────────────
     # Project-scoped facade over project_entity / project_entity_link /
     # project_metric / project_catalog_overlay / catalog tables. Scoped to
-    # ECISCO_BI_AGENT_NAMES (default: ecisco_bi_assistant). All default False.
-    ECISCO_BI_KG_PROJECT_CACHE_ENABLED: bool = False   # master gate; enables cache facade
-    ECISCO_BI_KG_QWEN_FAST_PATH: bool = False          # inject cached answer into agent loop pre-LLM
+    # PROJECT_KNOWLEDGE_AGENT_NAMES. All default False.
+    PROJECT_KNOWLEDGE_CACHE_ENABLED: bool = False   # master gate; enables cache facade
+    PROJECT_KNOWLEDGE_QWEN_FAST_PATH: bool = False  # inject cached answer into agent loop pre-LLM
     QWEN_FAST_PATH_MODEL_PREFIXES: list[str] = ["qwen", "Qwen"]
-    ECISCO_BI_AGENT_NAMES: list[str] = ["ecisco_bi_assistant"]
+    # These flags are generic no-op gates kept for deployment compat — the
+    # default BI agent was REMOVED 2026-08-27 (industry-specific default).
+    # Runtime reads per-app domain config;
+    # PROJECT_KNOWLEDGE_AGENT_NAMES stays empty so no agent ever matches
+    # the legacy project-cache / allowlist triggers.
+    PROJECT_KNOWLEDGE_AGENT_NAMES: list[str] = []
     PROJECT_KNOWLEDGE_INGEST_BG_WORKER: bool = True    # run ingestion in asyncio.to_thread
-    ECISCO_BI_KG_LAYER_ENTITIES_ENABLED: bool = True   # Layer 2 (entity lookup) on/off
-    ECISCO_BI_KG_LAYER_METRICS_ENABLED: bool = True    # Layer 3 (metric lookup) on/off
+    PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED: bool = True   # Layer 2 (entity lookup) on/off
+    PROJECT_KNOWLEDGE_LAYER_METRICS_ENABLED: bool = True    # Layer 3 (metric lookup) on/off
 
-    # ── Ecisco BI Schema Linker Allowlist (2026-08-25) ─────────────
-    # When the calling agent is in ECISCO_BI_AGENT_NAMES, restrict the
-    # schema-linker top-K to a curated list of business views/tables.
-    # This dramatically reduces wrong-table picks (e.g. AI tables like
-    # decision_log / intelligence_events shadowing real sales data) and
-    # cuts search time by ~3-5x.
-    #
-    # Per the warehouse doc (docs/aipdp_data_warehouse_prod.md):
-    #   "Prefer business VIEWS over raw erp_t_* tables -- views already
-    #    resolve material names, customer names, and org names."
-    ECISCO_BI_SCHEMA_LINKER_ALLOWLIST_ENABLED: bool = False
-    ECISCO_BI_SCHEMA_LINKER_TABLE_ALLOWLIST: list[str] = [
-        # ── SALES (the primary domain) ─────────────────────────────────
-        # Business views -- contain CUST_NAME, material_name, FAMOUNT etc.
-        # These answer >80% of "sales/revenue/customer/top-N" questions.
-        "erp_v_sale_orderentry",   # 14,359 rows, primary sales view (CUST_NAME, FAMOUNT)
-        "erp_v_sale_huizhou",      # 14,031 rows, sales by Huizhou plant
-        "erp_v_sale_guangdong",    # 299 rows, sales by Guangdong plant
-        "erp_product_sales_details",  # 1,387 rows, enriched contract+shipment+payment
-        # ── CONTRACTS ────────────────────────────────────────────────
-        "erp_v_contract",          # 98K rows, contract lines
-        "erp_v_contract_execution",  # contract+delivery view
-        "erp_t_crm_contract",      # 11,719 rows, contract headers
-        "erp_t_crm_contractentry", # 13,797 rows, contract lines
-        # ── INVENTORY / STOCK ────────────────────────────────────────
-        "erp_v_stk_inventory",     # 154 rows, current stock snapshot
-        "erp_t_stk_inventory",     # 47,969 rows, historical stock
-        "erp_v_raw_material_receiving",  # 400 rows, monthly raw material
-        "erp_v_product_grade",     # 1,075 rows, quality grades
-        # ── PRICING (market + own) ───────────────────────────────────
-        "v_lz_data",               # 11,117 rows, unified Longzhong market
-        "lz_v_裂解c5_data",         # market data
-        "lz_v_异戊二烯_data",
-        "lz_v_双环戊二烯_data",
-        "lz_v_苯乙烯_data",
-        "lz_v_工业用裂解碳九_data",  # C9 market
-        "lz_v_间戊二烯_data",
-        "actual_price",            # company's own quotes
-        "v_actual_price",
-        "forecast_price",          # AI forecast prices
-        "v_forecast_price",
-        "partner_forecast_price",
-        "v_partner_forecast_price",
-        "intelligence_events",     # market intelligence (curated AI domain)
-        # ── MASTER DATA ──────────────────────────────────────────────
-        "erp_t_bd_customer",       # 745 customer master (PK=FCUSTID)
-        "material",                # 25,707 material master
-        "_ref_material_mapping",   # 26,538 FMATERIALID -> name bridge
-        "sale_erp_v_戊烷发泡剂_data",  # per-product sales views
-        "sale_erp_v_碳五石油树脂_data",
-        "sale_erp_v_双环戊二烯_data",
-        "sale_erp_v_异戊二烯_data",
-        "sale_erp_v_间戊二烯_data",
-        "sale_erp_v_工业用裂解碳九_data",
-    ]
+    # ── Schema Linker Allowlist (DE-HARDCODED 2026-08-27) ──────────────
+    # The table allowlist no longer lives in code. Per-app domain configs
+    # (backend/app/domain_configs/<agent_name>.json) carry each app's own
+    # curated table list; platform default is NO allowlist (fully generic
+    # schema discovery). These settings are retained as legacy no-op flags
+    # for backward compatibility — the runtime reads domain_config.
+    SCHEMA_LINKER_ALLOWLIST_ENABLED: bool = False
+    SCHEMA_LINKER_TABLE_ALLOWLIST: list[str] = []
 
     # ── Supply Chain Snapshot (per-product ERP panel under RegionalTable) ──
     SUPPLY_CHAIN_SNAPSHOT_ENABLED: bool = False      # Gate for GET /market-dashboard/supply-chain/{product_id}
 
-    # ── CEO Morning Digest (built on top of 5G alerts) ────────────────
-    ALERT_DIGEST_ENABLED: bool = False              # Master gate for CEO morning digest
-    ALERT_DIGEST_LLM_ENABLED: bool = True           # LLM narrator (default ON, template is fallback)
-    ALERT_DIGEST_HOUR_UTC: int = 0                  # Digest generation hour (0 = 08:00 CST)
-    ALERT_DIGEST_TOP_N: int = 5                     # Top-N items in digest
-
-    # ── Market alert detection thresholds (tunable without code edits) ──
-    # 7-day % change required to trigger a price_spike / price_drop alert,
-    # and the magnitude for a "high" severity classification. Defaults match
-    # the historical hardcoded constants in alert_service.py.
-    ALERT_PRICE_SPIKE_THRESHOLD: float = 3.0        # +3% 7d change → price_spike
-    ALERT_PRICE_DROP_THRESHOLD: float = -3.0        # -3% 7d change → price_drop
-    ALERT_HIGH_SEVERITY_THRESHOLD: float = 6.0      # >= |6|% → high severity
-
-    # ── Smart Alerts (adaptive thresholds + context + recommendations) ──
-    # Master gate. When False, alert detection is byte-identical to the static
-    # ±3%/±6% thresholds above. When True, per-product LLM-judged baselines
-    # adapt the trigger, alerts carry ¥/day impact + templated recommendations,
-    # and user preferences + webhook delivery are honored.
-    SMART_ALERTS_ENABLED: bool = False               # Master gate for intelligent alerts
-    ALERT_BASELINE_LLM_ENABLED: bool = True          # LLM judges per-product weekly volatility baseline
-    ALERT_BASELINE_TTL_SECONDS: int = 604800         # Baseline cache TTL (7 days)
-    ALERT_BASELINE_DEFAULT_PCT: float = 2.5          # Seeded baseline when LLM unavailable
-    ALERT_IMPACT_ENABLED: bool = True                # ¥/day business impact on each alert
-    ALERT_RECOMMENDATIONS_ENABLED: bool = True       # Templated "why" + suggested next steps
-    ALERT_WEBHOOK_ENABLED: bool = True               # Webhook delivery channel (HMAC-signed)
-    ALERT_HIGH_SEVERITY_FLOOR: float = 6.0           # Floor for "high" severity in adaptive mode
-
-    # ── Unified Forecasting Service (Layer 1 backend facade) ────────────
-    # Thin facade ForecastingAgentService over the 4 fragmented forecasting
-    # data paths. When False, routers/tools keep calling the individual
-    # services directly; flip to True to route them through the unified API.
+    # ── Forecasting (legacy engine) ────────────────────────────────────
+    # The unified ForecastingAgentService facade was removed with the
+    # market dashboard feature; forecast tools call ForecastEngine directly.
     UNIFIED_FORECASTING_SERVICE_ENABLED: bool = False
 
     # ── Weekly Summary & Forecast Digest ────────────────────────────────
+    # REMOVED with the market dashboard feature (weekly_digest service was
+    # dashboard-only). Settings kept for config compatibility; no scheduler
+    # or API consumes them.
     WEEKLY_DIGEST_ENABLED: bool = False             # Master gate for weekly digest scheduler + API
     WEEKLY_DIGEST_HOUR_UTC: int = 0                 # Generation hour (0 = 08:00 CST Monday)
     WEEKLY_DIGEST_DAY_UTC: int = 0                  # Day of week (0=Monday, 6=Sunday)
@@ -1030,11 +1009,11 @@ class Settings(BaseSettings):
     #   Layer 3 (user profile): per-user-per-agent preferences (language,
     #     products, depth) injected into the prompt.
     # All default False — safe to ship; enable per phase after tests pass.
-    ECISCO_BI_RECIPE_LEARNING_ENABLED: bool = False   # Layer 1
-    ECISCO_BI_USER_PROFILE_ENABLED: bool = False      # Layer 3
-    ECISCO_BI_RESPONSE_CACHE_ENABLED: bool = False    # Layer 2
-    ECISCO_BI_FEEDBACK_ENABLED: bool = False          # Phase C wiring
-    ECISCO_BI_AUTOMATION_FASTPATH_ENABLED: bool = False  # DISABLED — automation only via UI "New Automation Task" button
+    RECIPE_LEARNING_ENABLED: bool = False   # Layer 1
+    USER_PROFILE_ENABLED: bool = False      # Layer 3
+    RESPONSE_CACHE_ENABLED: bool = False    # Layer 2
+    FEEDBACK_ENABLED: bool = False          # Phase C wiring
+    AUTOMATION_FASTPATH_ENABLED: bool = False  # DISABLED — automation only via UI "New Automation Task" button
 
     # ── Data Execution cache / cleanup / intent router ───────────────────
     # All default False — safe to ship; enable per phase after tests pass.
@@ -1187,14 +1166,14 @@ class Settings(BaseSettings):
     LLM_CRYPTO_KEY: str = ""
 
     # ── Unified Agent Harness (P1) ──────────────────────────────────────
-    # Master switch: when True, SwarmRuntime and EDIA _run_sub_agent
+    # Master switch: when True, SwarmRuntime _run_sub_agent
     # delegate to the AgentRunOrchestrator with persisted run records.
     AGENT_HARNESS_ENABLED: bool = False
 
     # Phase-2 fan-out: when BOTH this and AGENT_HARNESS_ENABLED are True,
     # ask_* tools accept an optional ``async: true`` param that returns a
     # run_id immediately instead of blocking (fire-and-collect pattern).
-    EDIA_DELEGATION_ASYNC_ENABLED: bool = False
+    DELEGATION_ASYNC_ENABLED: bool = False
 
     # ── P2 Durability & Observability ────────────────────────────────────
     # When AGENT_HARNESS_ENABLED + AGENT_TRACING_ENABLED are both True,
@@ -1214,7 +1193,7 @@ class Settings(BaseSettings):
     RESEARCH_LOOP_ENABLED: bool = False
 
     # Enables the deep-research mode with parallel sub-agent fan-out.
-    # Requires AGENT_HARNESS_ENABLED + EDIA_DELEGATION_ASYNC_ENABLED +
+    # Requires AGENT_HARNESS_ENABLED + DELEGATION_ASYNC_ENABLED +
     # RESEARCH_LOOP_ENABLED.
     DEEP_RESEARCH_MODE_ENABLED: bool = False
 

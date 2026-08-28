@@ -39,6 +39,8 @@ exception above.
 
 from __future__ import annotations
 
+import re
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -62,7 +64,11 @@ _ALL_FILE_FORMATS = frozenset({"html", "docx", "pdf", "xlsx", "md", "pptx"})
 # the final assistant text at the synthesis boundary.  Deliberately
 # specific: bare "try again" / "could not" are too common in legitimate
 # text (and appear in our own disclosure sentence) — the give-up intent
-# must be explicit.
+# must be explicit.  Bare "please try again" / "didn't work out" alone are
+# NOT enough (false positives on ordinary closes); the "give up"/"gave up"
+# family is handled separately below with phrase boundaries and negation
+# stripping, so "I won't give up" / "will not give up" / "never give up"
+# (commitments to continue) never count as giving up.
 _GIVE_UP_PHRASES: tuple[str, ...] = (
     "trouble putting",
     "had trouble",
@@ -75,9 +81,6 @@ _GIVE_UP_PHRASES: tuple[str, ...] = (
     "was not able to put",
     "try again with a more specific request",
     "could you try again",
-    "please try again",
-    "give up",
-    "gave up",
     "unable to produce",
     "couldn't produce",
     "could not produce",
@@ -85,8 +88,19 @@ _GIVE_UP_PHRASES: tuple[str, ...] = (
     "couldn't create",
     "could not create",
     "failed to create",
-    "didn't work out",
-    "did not work out",
+)
+
+# The "give up" verb family — matched with phrase boundaries so substrings
+# can't fire.  Negated statements ("won't give up", "will not give up",
+# "never give up", ...) are stripped BEFORE matching: those are the agent
+# committing to continue, the opposite of the give-up pattern.
+_GIVE_UP_VERB = re.compile(r"\b(?:give\s+up|gave\s+up)\b", re.IGNORECASE)
+_NEGATED_GIVE_UP = re.compile(
+    r"(?:won'?t|will not|would not|wouldn'?t|should not|shouldn'?t|"
+    r"can'?t|cannot|can not|could not|couldn'?t|do not|don'?t|did not|"
+    r"didn'?t|must not|mustn'?t|shall not|shan'?t|never)\s+"
+    r"(?:give\s+up|gave\s+up)\b",
+    re.IGNORECASE,
 )
 
 
@@ -99,8 +113,10 @@ def detect_give_up(final_assistant_text: str | None) -> bool:
     """
     if not final_assistant_text:
         return False
-    lowered = final_assistant_text.lower()
-    return any(phrase in lowered for phrase in _GIVE_UP_PHRASES)
+    scrubbed = _NEGATED_GIVE_UP.sub(" ", final_assistant_text.lower())
+    if _GIVE_UP_VERB.search(scrubbed):
+        return True
+    return any(phrase in scrubbed for phrase in _GIVE_UP_PHRASES)
 
 
 # Tool names that can produce a file deliverable.  ``create_artifact`` is
