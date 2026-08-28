@@ -56,3 +56,36 @@ def test_profile_engine_unknown_column_reports_error(db_path):
     result = profile_engine(db_path, "sales_orders", ["nope"])
     assert result["status"] == "error"
     assert result["error_message"]
+
+
+def test_profile_uses_dialect_quote_ident(monkeypatch):
+    import app.services.dashboard_profiler as mod
+
+    seen = {}
+
+    class FakeConn:
+        def __init__(self, dialect):
+            self.dialect = dialect
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, sql, max_rows=5, timeout_s=10):
+            seen["sql"] = sql
+            if sql.strip().upper().startswith("SELECT COUNT(*)"):
+                return [{"row_count": 3}]
+            if "DISTINCT" in sql.upper():
+                return [{"cardinality": 2, "non_null": 3, "min_value": "a", "max_value": "c"}]
+            return [{"sample_value": "a"}, {"sample_value": "b"}]
+
+    mod.get_connector = lambda kb: FakeConn("mysql")
+    mod._load_kb = lambda db, kb_id: type("KB", (), {"db_type": "mysql"})()
+    mod._infer_col_type = lambda db, kb_id, table, col, samples: "text"
+
+    result = mod.profile_kb(None, "kb_1", "tbl", ["col_a"])
+    assert "`tbl`" in seen["sql"] and "`col_a`" in seen["sql"]
+    assert result["status"] == "ok"
+    assert result["row_count"] == 3

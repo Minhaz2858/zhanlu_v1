@@ -20,6 +20,9 @@ import re
 from datetime import datetime  # noqa: F401  (kept for API parity/future use)
 
 from app.services.db.base import quote_ident
+from app.services.db.connector_factory import get_connector
+from app.services.db.schema_service import SchemaService
+from app.models.knowledge_base import KnowledgeBase
 
 
 def classify_column_type(sql_type: str | None) -> str:
@@ -167,6 +170,128 @@ def profile_engine(
         finally:
             con.close()
     except Exception as e:  # table-level failure
+        result["status"] = "error"
+        result["error_message"] = str(e)[:200]
+    return result
+
+
+def _load_kb(db, kb_id: str) -> KnowledgeBase:
+    """Load a non-deleted KnowledgeBase row, raising ValueError if missing."""
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if not kb:
+        raise ValueError(f"KnowledgeBase not found: {kb_id}")
+    return kb
+
+
+def _infer_col_type(db, kb_id: str, table: str, col: str, samples: list) -> str:
+    """Best-effort column type classification for the connector path.
+
+    Tries the live schema (SchemaService.describe_table) first via
+    classify_column_type(), then falls back to looking at sample values
+    (looks_like_iso_date -> "date", else "text"). Never raises.
+    """
+    try:
+        info = SchemaService(db).describe_table(kb_id, table)
+        for c in info.get("columns", []):
+            if str(c.get("name", "")).lower() == col.lower():
+                sql_type = c.get("type") or c.get("data_type")
+                if sql_type:
+                    return classify_column_type(sql_type)
+                break
+    except Exception:
+        pass
+    if any(looks_like_iso_date(v) for v in samples):
+        return "date"
+    return "text"
+
+
+def profile_kb(
+    db,
+    kb_id: str,
+    table: str,
+    columns: list[str],
+    sample_limit: int = 3,
+    max_columns: int = 20,
+    timeout_s: int = 12,
+) -> dict:
+    """Profile a table on a live KnowledgeBase connection (dialect-aware).
+
+    Dialect comes from kb.db_type; every identifier is validated and
+    quoted via quote_ident(name, dialect). Only standard SQL is emitted.
+    Never raises: failures are reported as status="error" with a truncated
+    error_message (200 chars).
+    """
+    result: dict = {
+        "table": table,
+        "row_count": 0,
+        "status": "ok",
+        "error_message": None,
+        "columns": [],
+    }
+    try:
+        kb = _load_kb(db, kb_id)
+        dialect = kb.db_type or "default"
+        tq = quote_ident(table, dialect)
+        with get_connector(kb) as conn:
+            rows = conn.execute(
+                f"SELECT COUNT(*) AS row_count FROM {tq}",
+                max_rows=5, timeout_s=timeout_s,
+            )
+            result["row_count"] = int(rows[0]["row_count"]) if rows else 0
+
+            for col in columns[:max_columns]:
+                try:
+                    cq = quote_ident(col, dialect)
+                    stats = conn.execute(
+                        f"SELECT COUNT(DISTINCT {cq}) AS cardinality, "
+                        f"COUNT({cq}) AS non_null, "
+                        f"MIN({cq}) AS min_value, MAX({cq}) AS max_value FROM {tq}",
+                        max_rows=5, timeout_s=timeout_s,
+                    )
+                    s = stats[0] if stats else {}
+                    cardinality = int(s.get("cardinality") or 0)
+                    non_null = int(s.get("non_null") or 0)
+                    min_value = s.get("min_value")
+                    max_value = s.get("max_value")
+
+                    sample_rows = conn.execute(
+                        f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}",
+                        max_rows=sample_limit, timeout_s=timeout_s,
+                    )
+                    sample_values = [r.get("sample_value") for r in sample_rows]
+                    top_values = [v for v in sample_values if v is not None][:3]
+
+                    null_pct = (
+                        1.0 - (non_null / result["row_count"])
+                        if result["row_count"] > 0 else 1.0
+                    )
+                    col_type = _infer_col_type(db, kb_id, table, col, sample_values)
+                    shape = infer_shape(
+                        col_type, result["row_count"], cardinality,
+                        null_pct, len(sample_values),
+                    )
+                    result["columns"].append({
+                        "name": col,
+                        "type": col_type,
+                        "cardinality": cardinality,
+                        "null_pct": null_pct,
+                        "min": min_value,
+                        "max": max_value,
+                        "top_values": top_values,
+                        "shape": shape,
+                    })
+                except Exception as e:  # per-column failure
+                    result["status"] = "error"
+                    result["error_message"] = str(e)[:200]
+                    break
+
+            if result["status"] == "ok" and result["row_count"] == 0:
+                result["status"] = "empty"
+    except Exception as e:  # table-level / connector failure
         result["status"] = "error"
         result["error_message"] = str(e)[:200]
     return result
