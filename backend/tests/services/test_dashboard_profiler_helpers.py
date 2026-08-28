@@ -88,3 +88,24 @@ def test_build_profile_queries_rejects_unsafe_identifiers():
         build_profile_queries("t; DROP TABLE x", ["a"])
     with pytest.raises(ValueError):
         build_profile_queries("t", ["a; DELETE FROM t"])
+
+
+def test_profiler_source_has_no_demo_identifiers():
+    """HARD RULE: profiler must be DB-agnostic — no demo table/column names."""
+    import pathlib
+    src = pathlib.Path(__file__).parents[2] / "app" / "services" / "dashboard_profiler.py"
+    text = src.read_text()
+    # The module docstring is allowed to NAME the rule's examples; strip the
+    # docstring region before scanning so a naive scan passes only if the
+    # identifiers are never USED as values in code.
+    body = text.split('"""', 2)[-1]  # everything after the module docstring
+    for bad in ("erp_v_sale_orderentry", "PLANDATE", "FALLAMOUNT", "FDATE", "forgid"):
+        assert bad not in body, f"hardcoded identifier leaked into profiler code: {bad}"
+
+
+def test_prompt_mentions_profile_data():
+    """The build prompt must instruct calling profile_data before building."""
+    import pathlib
+    src = pathlib.Path(__file__).parents[2] / "app" / "services" / "agent_prompts.py"
+    text = src.read_text()
+    assert "profile_data" in text
