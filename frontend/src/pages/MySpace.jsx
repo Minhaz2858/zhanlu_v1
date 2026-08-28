@@ -12,10 +12,11 @@ import ProjectsView from '@/components/project/ProjectsView';
 import StepsAgentBuilder from '@/components/agentbuilder/StepsAgentBuilder';
 import ProjectCreateDialog from '@/components/project/ProjectCreateDialog';
 import { Button } from '@/components/ui/button';
-import { Plus, Bot, Database, Trash2, Play, Loader2, Folder, FileEdit, FolderKanban, Archive } from 'lucide-react';
+import { Plus, Bot, Database, Trash2, Play, Loader2, Folder, FileEdit, FolderKanban, Archive, LayoutDashboard } from 'lucide-react';
 import { hasDraft as hasDraftData, clearDraft, flushDraft, loadDraft } from '@/lib/draftManager';
 import { filterUserAgents } from '@/lib/systemAgents';
 import AgentsView from '@/components/agent/AgentsView';
+import { listDashboards, listDashboardApps, deleteDashboard, deleteDashboardApp } from '@/api/dashboards';
 
 const AGENT_DRAFT_KEYS = {
   form: 'agent_steps_form',
@@ -69,6 +70,7 @@ export default function MySpace() {
     { key: 'project', label: t.mySpace.tabs.project || 'Projects', icon: FolderKanban, entity: 'Project' },
     { key: 'agent', label: t.mySpace.tabs.agent, icon: Bot, entity: 'AgentApp' },
     { key: 'kb', label: t.mySpace.tabs.kb, icon: Database, entity: 'KnowledgeBase' },
+    { key: 'dashboard', label: t.mySpace.tabs.dashboard, icon: LayoutDashboard, entity: 'Dashboard' },
   ];
   const current = TABS.find((x) => x.key === tab);
 
@@ -121,6 +123,21 @@ export default function MySpace() {
   async function load() {
     setLoading(true);
     try {
+      if (tab === 'dashboard') {
+        // Merge BOTH dashboard kinds: legacy SQL-widget dashboards
+        // (GET /api/dashboards) + full-stack realtime apps
+        // (GET /api/dashboards/app-records — create_fullstack_dashboard).
+        // Each item is tagged `kind` so open/delete can route correctly.
+        const [legacy, apps] = await Promise.all([
+          listDashboards().catch(() => []),
+          listDashboardApps().catch(() => []),
+        ]);
+        setItems([
+          ...(Array.isArray(apps) ? apps : []).map((a) => ({ ...a, kind: 'app', id: a.slug })),
+          ...(Array.isArray(legacy) ? legacy : []).map((d) => ({ ...d, kind: 'legacy' })),
+        ]);
+        return;
+      }
       const raw = await base44.entities[current.entity].list('-updated_date', 200);
       // My Space → Agents shows the USER's own agents only. Platform
       // system agents (general_assistant, agent_builder, skill_agent,
@@ -135,6 +152,18 @@ export default function MySpace() {
   }
   async function remove(id) {
     await base44.entities[current.entity].delete(id);
+    load();
+  }
+  async function removeDashboard(item) {
+    // Full-stack apps delete via DELETE /api/dashboards/app-records/{slug};
+    // legacy SQL-widget dashboards via DELETE /api/dashboards/{id}.
+    const label = item.name || item.title || '';
+    const ok = lang === 'en'
+      ? window.confirm(`Delete "${label}"? This removes the dashboard and its data.`)
+      : window.confirm(`确定删除“${label}”吗？此操作将删除仪表盘及其数据。`);
+    if (!ok) return;
+    if (item.kind === 'app') await deleteDashboardApp(item.id);
+    else await deleteDashboard(item.id);
     load();
   }
   function openNewKb() { setKbEdit(null); setKbOpen(true); }
@@ -218,6 +247,47 @@ export default function MySpace() {
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
           {items.map((it) => (
             <KbCard key={it.id} item={it} t={t} translate={translate} onClick={() => navigate(`/my-space/kb/${it.id}`)} onEdit={openEditKb} onTogglePause={togglePauseKb} onDelete={(item) => remove(item.id)} onReindex={reindexKb} />
+          ))}
+        </div>
+      ) : tab === 'dashboard' ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {items.map((d) => (
+            <div
+              key={d.id}
+              onClick={() => navigate(`/dashboard/${d.id}`)}
+              className="group cursor-pointer rounded-xl border border-border bg-card p-4 shadow-sm transition-colors hover:border-primary/40"
+            >
+              <div className="mb-1.5 flex items-center gap-2">
+                <LayoutDashboard className="h-4 w-4 shrink-0 text-primary" />
+                <h3 className="min-w-0 flex-1 truncate font-display text-sm text-foreground">{translate(d.name)}</h3>
+                {d.kind === 'app' && (
+                  <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[hsl(var(--chart-2))]/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[hsl(var(--chart-2))]">
+                    <span className="relative flex h-1.5 w-1.5">
+                      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-[hsl(var(--chart-2))] opacity-75" />
+                      <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-[hsl(var(--chart-2))]" />
+                    </span>
+                    {lang === 'en' ? 'LIVE' : '实时'}
+                  </span>
+                )}
+              </div>
+              <p className="mb-3 line-clamp-2 min-h-[2rem] text-xs text-muted-foreground">
+                {translate(d.description) || (lang === 'en' ? 'Live dashboard' : '实时仪表盘')}
+              </p>
+              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <button
+                  onClick={() => navigate(`/dashboard/${d.id}`)}
+                  className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs transition-colors hover:bg-secondary"
+                >
+                  <Play className="h-3 w-3" /> {t.common.run}
+                </button>
+                <button
+                  onClick={() => removeDashboard(d)}
+                  className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+                >
+                  <Trash2 className="h-3 w-3" /> {t.common.delete}
+                </button>
+              </div>
+            </div>
           ))}
         </div>
       ) : null}

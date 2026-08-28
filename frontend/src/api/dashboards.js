@@ -29,6 +29,10 @@ export function deleteDashboard(id) {
   return authFetch(`${BASE}/${id}`, { method: 'DELETE' }).then(j);
 }
 
+export function deleteDashboardApp(slugOrId) {
+  return authFetch(`${BASE}/app-records/${encodeURIComponent(slugOrId)}`, { method: 'DELETE' }).then(j);
+}
+
 export function queryDashboard(id, params = {}) {
   return authFetch(`${BASE}/${id}/query`, {
     method: 'POST',
