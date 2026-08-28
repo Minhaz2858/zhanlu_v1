@@ -604,15 +604,23 @@ def _check_expected_params(expected_params: list, values: dict[str, float]) -> l
                 issues.append(f"missing parameter: {ep}")
         elif isinstance(ep, dict):
             name = ep.get("name")
+            if not name:
+                issues.append("expected_params entry missing 'name'")
+                continue
             if name not in values:
                 issues.append(f"missing parameter: {name}")
                 continue
             expected = ep.get("value")
             if expected is None:
                 continue
+            try:
+                expected_f = float(expected)
+            except (TypeError, ValueError):
+                issues.append(f"parameter {name} has non-numeric expected value {expected!r}")
+                continue
             actual = values[name]
-            tol = max(abs(float(expected)) * 0.05, 0.01)
-            if abs(actual - float(expected)) > tol:
+            tol = max(abs(expected_f) * 0.05, 0.01)
+            if abs(actual - expected_f) > tol + 1e-9:
                 issues.append(
                     f"parameter {name} = {actual}mm != expected {expected}mm"
                 )
@@ -745,7 +753,7 @@ registry.register(
         "FAIL, fix the discrepancy (or honestly report it) — never claim success on a FAIL.",
         {
             "expected_body_count": {"type": "integer", "description": "The number of separate bodies your plan calls for (e.g. 5 for the 5-part coilover)."},
-            "expected_params": {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"name": {"type": "string"}, "value": {"type": "number"}}, "required": ["name", "value"]}]}, "description": "Optional list of user parameters that must exist AND have the right value. Entries may be a plain name string (must exist — e.g. 'eye_to_eye') or {name, value} (value in MILLIMETRES, backend compares the LIVE Fusion parameter with 5%% tolerance — e.g. {'name':'eye_to_eye','value':80})."},
+            "expected_params": {"type": "array", "items": {"oneOf": [{"type": "string"}, {"type": "object", "properties": {"name": {"type": "string"}, "value": {"type": "number"}}, "required": ["name", "value"]}]}, "description": "Optional list of user parameters that must exist AND have the right value. Entries may be a plain name string (must exist — e.g. 'eye_to_eye') or {name, value} (value in MILLIMETRES, backend compares the LIVE Fusion parameter with 5% tolerance — e.g. {'name':'eye_to_eye','value':80})."},
             "expected_dimensions": {
                 "type": "array",
                 "description": "Optional per-body dimension expectations the backend MEASURES and compares (mm). Each entry: {body_index, kind:'box'|'cylinder'|'hex', dims:{w,d,h} for box | {dia,len} for cylinder | {across_flats,height,faces?} for hex, tolerance_mm? default 0.5}. Declare the dims from YOUR plan for every body you built. Box uses the bbox w×d×h; cylinder uses the two near-equal bbox dims as diameter and the third as length; hex computes across-flats as min(w,d) (orientation-proof — the bbox measures corner-to-corner on one axis) and can optionally check faces (=8 for an unmodified hex prism).",
