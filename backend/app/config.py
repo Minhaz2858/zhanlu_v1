@@ -511,8 +511,26 @@ class Settings(BaseSettings):
     # in deck_router.py).  Set False to restore the legacy structured-first
     # default.  Only consulted when PPT_SMART_ROUTER_ENABLED is on.
     PPT_DESIGN_BY_DEFAULT: bool = True
+    # Phase: fully-dynamic document generation. When on, the docx / pptx
+    # renderers execute an explicit ordered `blocks` plan (agent-authored or
+    # produced by the server-side architect from the gathered data) instead of
+    # a fixed template — yielding richer, data-tailored documents.
+    DYNAMIC_DOCUMENT_PLANNING_ENABLED: bool = True
+    # Phase (hybrid): after the deterministic architect builds the structure, an
+    # LLM enriches the narrative (executive summary prose, hand-picked findings,
+    # targeted recommendations) — the part the rule-based architect cannot do
+    # well. Falls back to the deterministic narrative silently if the LLM is
+    # unavailable. This is the "skill → LLM plans narrative, platform owns
+    # structure" pattern that matches modern report agents (Kimi / MiniMax).
+    DYNAMIC_DOCUMENT_LLM_NARRATIVE_ENABLED: bool = True
     PPT_LLM_POLISH_ENABLED: bool = False
     PPT_AUDIT_ENABLED: bool = False
+    # Blocking audit gate: when the deck still FAILs the semantic audit after
+    # the deterministic repair loop (and after the polish re-audit), the
+    # dispatcher returns empty bytes + the FAIL report instead of delivering
+    # the deck.  Default True (quality is a hard gate); set False to restore
+    # the historical ship-anyway behavior.
+    PPT_AUDIT_BLOCKING_ENABLED: bool = True
     # New: route create_artifact(type="pptx") through the professional deck
     # pipeline (planner → router → layout engine → audit/repair/polish) so the
     # in-chat artifact matches the download. Precondition: PPT_DECK_PLANNER_ENABLED.
