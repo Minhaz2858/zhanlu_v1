@@ -65,6 +65,40 @@ def invalidate_schema_cache(kb_id: str | None = None) -> None:
             _SCHEMA_CACHE.pop(key, None)
 
 
+def connection_fingerprint(db: Session, kb_id: str) -> str:
+    """Stable fingerprint of a KB's connection identity.
+
+    Used in every schema cache key so that re-pointing a KnowledgeBase at a
+    DIFFERENT database (same kb_id, new host/port/db) is an automatic cache
+    miss — the agent can never be served the old database's table names.
+
+    Identity = (db_type, host, port, database_name, schema). The password is
+    deliberately excluded: a credential rotation must not invalidate the
+    schema cache, and a secret must never appear in a cache key.
+
+    Fail-soft: any error or missing row returns "" so callers degrade to the
+    legacy kb_id-only key instead of raising into the hot path.
+    """
+    try:
+        kb = db.get(KnowledgeBase, kb_id) if db is not None else None
+        if kb is None:
+            return ""
+        parts = [
+            kb.db_type or "",
+            kb.host or "",
+            str(kb.port or ""),
+            kb.database_name or "",
+            kb.schema or "",
+        ]
+        if not any(parts):
+            return ""
+        import hashlib
+
+        return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()[:16]
+    except Exception:
+        return ""
+
+
 class SchemaService:
     """High-level schema introspection for a KnowledgeBase.
 
@@ -91,7 +125,8 @@ class SchemaService:
 
     def list_tables(self, kb_id: str) -> dict:
         """Return {"source": {...}, "tables": [...]} for a KB."""
-        key = (kb_id, "list_tables")
+        fp = connection_fingerprint(self._db, kb_id)
+        key = (kb_id, fp, "list_tables")
         cached = _cache_get(key)
         if cached is not None:
             return cached
@@ -112,7 +147,8 @@ class SchemaService:
 
     def describe_table(self, kb_id: str, table: str) -> dict:
         """Return full column metadata for one table."""
-        key = (kb_id, "table", table)
+        fp = connection_fingerprint(self._db, kb_id)
+        key = (kb_id, fp, "table", table)
         cached = _cache_get(key)
         if cached is not None:
             return cached
@@ -128,18 +164,42 @@ class SchemaService:
             "table": table,
             "columns": columns,
         }
+        # Generic freshness: annotate the single table so the agent knows
+        # whether it still receives data (works for any connected DB).
+        try:
+            from app.services.knowledge_graph.freshness import (
+                annotate_tables, stale_flag,
+            )
+            _probe = [{"table_name": table, "columns": columns}]
+            annotate_tables(self._db, kb_id, _probe)
+            if _probe[0].get("last_data_date"):
+                result["freshness"] = {
+                    "last_data_date": _probe[0]["last_data_date"],
+                    "stale_days": _probe[0].get("stale_days"),
+                    "flag": stale_flag(_probe[0]),
+                }
+        except Exception:
+            pass
         _cache_put(key, result)
         return result
 
     def describe_all(self, kb_id: str, max_tables: int = 50) -> dict:
-        """Return schema for every table (capped at max_tables)."""
+        """Return schema for every table (capped at max_tables).
+
+        ``all_table_names`` always carries the FULL table list (names only —
+        one cheap query, no per-table introspection), so the agent knows every
+        table exists even when the detailed entries are capped. Without this,
+        alphabetical truncation hides business views past the cap and the LLM
+        guesses table names instead of describing them.
+        """
         key = (kb_id, "all", max_tables)
         cached = _cache_get(key)
         if cached is not None:
             return cached
         kb = self._load_kb(kb_id)
         with get_connector(kb) as conn:
-            tables = conn.list_tables()[:max_tables]
+            all_names = conn.list_tables()
+            tables = all_names[:max_tables]
             out = []
             for t in tables:
                 try:
@@ -150,6 +210,22 @@ class SchemaService:
                 except Exception as e:
                     logger.debug("describe_all: skipping %s: %s", t, e)
                     out.append({"table": t, "error": str(e)})
+        # Generic freshness: probe MAX(date) concurrently (TTL-cached,
+        # fail-soft) so STALE tables are flagged in the schema the LLM sees.
+        try:
+            from app.services.knowledge_graph.freshness import (
+                annotate_tables_parallel, stale_flag,
+            )
+            annotate_tables_parallel(self._db, kb_id, out)
+            for _t in out:
+                if _t.get("last_data_date"):
+                    _t["freshness"] = {
+                        "last_data_date": _t["last_data_date"],
+                        "stale_days": _t.get("stale_days"),
+                        "flag": stale_flag(_t),
+                    }
+        except Exception as exc:
+            logger.debug("describe_all: freshness annotation skipped: %s", exc)
         result = {
             "source": {
                 "id": kb.id,
@@ -157,6 +233,7 @@ class SchemaService:
                 "db_type": kb.db_type,
             },
             "tables": out,
+            "all_table_names": all_names,
             "truncated": len(tables) >= max_tables,
         }
         _cache_put(key, result)

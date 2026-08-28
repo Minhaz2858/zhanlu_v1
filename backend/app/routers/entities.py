@@ -23,7 +23,16 @@ _KB_CONNECTION_FIELDS = frozenset({
 
 
 def _maybe_fire_catalog_index(record) -> None:
-    """Auto-trigger catalog discovery for a newly created database KnowledgeBase."""
+    """Auto-trigger catalog discovery for a newly created database KnowledgeBase.
+
+    Also drops the in-process schema cache for this KB so the agent never
+    sees a stale table list after a new connection is saved.
+    """
+    try:
+        from app.services.db.schema_service import invalidate_schema_cache
+        invalidate_schema_cache(getattr(record, "id", None))
+    except Exception:
+        pass  # cache invalidation is best-effort
     try:
         from app.config import settings
         if not settings.SEMANTIC_CATALOG_ENABLED:
@@ -38,21 +47,31 @@ def _maybe_fire_catalog_index(record) -> None:
 
 
 def _maybe_fire_catalog_index_on_update(prev, payload: dict, record) -> None:
-    """Auto-trigger catalog discovery if KnowledgeBase connection fields changed."""
+    """Auto-trigger catalog discovery if KnowledgeBase connection fields changed.
+
+    Also drops the in-process schema cache for this KB whenever connection
+    fields change — the agent must not keep querying the old database.
+    """
     try:
         from app.config import settings
+        connection_changed = False
+        if prev is not None:
+            connection_changed = any(
+                f in payload and payload.get(f) != getattr(prev, f, None)
+                for f in _KB_CONNECTION_FIELDS
+            )
+        # Invalidate the schema cache on ANY connection-field change (even
+        # when the semantic catalog is disabled or db_type is non-catalog).
+        if connection_changed:
+            from app.services.db.schema_service import invalidate_schema_cache
+            invalidate_schema_cache(getattr(record, "id", None))
         if not settings.SEMANTIC_CATALOG_ENABLED:
             return
         db_type = (getattr(record, "db_type", "") or "").lower()
         if db_type not in ("mysql", "postgres", "postgresql"):
             return
-        if prev is not None:
-            changed = any(
-                f in payload and payload.get(f) != getattr(prev, f, None)
-                for f in _KB_CONNECTION_FIELDS
-            )
-            if not changed:
-                return
+        if prev is not None and not connection_changed:
+            return
         from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog_bg
         maybe_reindex_catalog_bg(record)
     except Exception:
@@ -331,7 +350,18 @@ def register_entity_router(
         prev = None
         if entity_name == "KnowledgeBase":
             prev = entity_service.get_record(model_class, record_id, db)
-        result = entity_service.update_record(model_class, record_id, data, db, owner_id=_owner_id(entity_name, user))
+        # Tool supports "claim" semantics — the Skills tab UI sends
+        # ``{ created_by_id: <user.id> }`` to mark a tool as added to
+        # My Skills. Tool is not in USER_SCOPED_ENTITIES so owner_id is
+        # None, but the claim helper still needs the caller's id. We
+        # forward it as ``claim_user_id`` only for claimable entities.
+        # (2026-08-28 Skills-tab fix — see entity_service docstring.)
+        claim_user_id = getattr(user, "id", None) if entity_name == "Tool" else None
+        result = entity_service.update_record(
+            model_class, record_id, data, db,
+            owner_id=_owner_id(entity_name, user),
+            claim_user_id=claim_user_id,
+        )
         if not result:
             raise HTTPException(status_code=404, detail=f"{entity_name} not found")
         # Auto-trigger catalog discovery if connection fields changed

@@ -28,6 +28,7 @@ from app.config import settings
 from app.services.db import NLAnswerService, QueryService, SchemaService
 from app.services.db.connector_factory import DriverUnavailable
 from app.services.db.schema_graph import SchemaGraph
+from app.services.db.schema_service import connection_fingerprint
 from app.services import access_policy_service
 from app.services.tool_registry import registry
 
@@ -49,12 +50,18 @@ _SCHEMA_CACHE: dict[str, tuple[float, dict]] = {}
 _SCHEMA_CACHE_TTL_SECONDS = 3600  # 1 hour — schema rarely changes mid-session
 
 
-def _schema_cache_key(kb_id: str, table: str | None, full: bool, max_tables: int) -> str:
-    return f"{kb_id}|{table or ''}|{int(full)}|{max_tables}"
+def _schema_cache_key(
+    kb_id: str, table: str | None, full: bool, max_tables: int, fingerprint: str = ""
+) -> str:
+    # fingerprint = connection identity (host/port/db/dialect hash) so that
+    # re-pointing a KB at a DIFFERENT database is an automatic cache miss.
+    return f"{kb_id}|{fingerprint}|{table or ''}|{int(full)}|{max_tables}"
 
 
-def _schema_cache_get(kb_id: str, table: str | None, full: bool, max_tables: int) -> dict | None:
-    key = _schema_cache_key(kb_id, table, full, max_tables)
+def _schema_cache_get(
+    kb_id: str, table: str | None, full: bool, max_tables: int, fingerprint: str = ""
+) -> dict | None:
+    key = _schema_cache_key(kb_id, table, full, max_tables, fingerprint)
     hit = _SCHEMA_CACHE.get(key)
     if not hit:
         return None
@@ -66,8 +73,10 @@ def _schema_cache_get(kb_id: str, table: str | None, full: bool, max_tables: int
     return payload
 
 
-def _schema_cache_put(kb_id: str, table: str | None, full: bool, max_tables: int, payload: dict) -> None:
-    key = _schema_cache_key(kb_id, table, full, max_tables)
+def _schema_cache_put(
+    kb_id: str, table: str | None, full: bool, max_tables: int, payload: dict, fingerprint: str = ""
+) -> None:
+    key = _schema_cache_key(kb_id, table, full, max_tables, fingerprint)
     _SCHEMA_CACHE[key] = (time.monotonic(), payload)
     # Opportunistic eviction: keep the cache bounded (~256 entries).
     if len(_SCHEMA_CACHE) > 256:
@@ -212,6 +221,12 @@ def _apply_schema_policy(
             entry["columns"] = _filter_columns(tname, entry.get("columns", []))
             filtered.append(entry)
         result["tables"] = filtered
+        # all_table_names (describe_all full name list) must be filtered too —
+        # otherwise restricted users see blocked table names.
+        if isinstance(result.get("all_table_names"), list):
+            result["all_table_names"] = [
+                t for t in result["all_table_names"] if _table_visible(t)
+            ]
         return result
 
     result["tables"] = [t for t in tables if _table_visible(t)]
@@ -367,8 +382,11 @@ async def _describe_schema(
     # Policy-restricted KBs are excluded (their output depends on per-user
     # table allow/block lists).
     restricted = policy.is_kb_restricted(kb_id)
+    # Connection identity — re-pointing the KB at a different database must
+    # invalidate the schema cache automatically (see _schema_cache_key).
+    _fp = connection_fingerprint(db, kb_id)
     if not restricted:
-        cached = _schema_cache_get(kb_id, table, full, max_tables)
+        cached = _schema_cache_get(kb_id, table, full, max_tables, _fp)
         if cached is not None:
             return cached
 
@@ -433,7 +451,7 @@ async def _describe_schema(
                             "source": "schema_graph",
                         }
                         if not restricted:
-                            _schema_cache_put(kb_id, table, full, max_tables, _result)
+                            _schema_cache_put(kb_id, table, full, max_tables, _result, _fp)
                         return _result
                 except Exception as exc:
                     logger.warning("describe_schema: schema_graph failed: %s", exc)
@@ -467,7 +485,7 @@ async def _describe_schema(
                     "source": "catalog",
                 }
                 if not restricted:
-                    _schema_cache_put(kb_id, table, full, max_tables, _result)
+                    _schema_cache_put(kb_id, table, full, max_tables, _result, _fp)
                 return _result
         except Exception:
             pass  # fall through to describe_all
@@ -487,7 +505,7 @@ async def _describe_schema(
         result = _annotate_table_roles(result, db, kb_id)
         _result = {"success": True, **result}
         if not restricted:
-            _schema_cache_put(kb_id, table, full, max_tables, _result)
+            _schema_cache_put(kb_id, table, full, max_tables, _result, _fp)
         return _result
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}

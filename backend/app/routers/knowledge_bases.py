@@ -210,7 +210,14 @@ async def reindex_catalog(app_id: str, kb_id: str, db: Session = Depends(get_db)
 
     Spawns the catalog indexer as a background task and returns 202 immediately.
     Only meaningful when SEMANTIC_CATALOG_ENABLED=True and db_type in (mysql, postgres).
+    Also drops the in-process schema cache so describe_schema picks up the
+    rebuilt catalog immediately.
     """
+    try:
+        from app.services.db.schema_service import invalidate_schema_cache
+        invalidate_schema_cache(kb_id)
+    except Exception:
+        pass
     kb = (
         db.query(KnowledgeBase)
         .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
@@ -416,6 +423,13 @@ async def discover_kb(app_id: str, kb_id: str, db: Session = Depends(get_db)):
         )
 
     # Run the scanner (synchronous — may take 10-60 seconds on large DBs).
+    # Drop the schema cache first so the agent sees the freshly discovered
+    # tables immediately (user explicitly asked for a re-scan).
+    try:
+        from app.services.db.schema_service import invalidate_schema_cache
+        invalidate_schema_cache(kb_id)
+    except Exception:
+        pass
     candidates = await asyncio.to_thread(run_discovery, db, kb_id)
 
     # Write ForecastTarget rows, skipping duplicates.
