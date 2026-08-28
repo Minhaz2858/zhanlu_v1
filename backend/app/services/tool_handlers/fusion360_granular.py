@@ -234,6 +234,16 @@ def _fusion360_sketch_polygon(args, db, user_id):
 # ---------------------------------------------------------------------------
 # 6. extrude
 # ---------------------------------------------------------------------------
+def _extrude_guard_code(sketch_index: int) -> str:
+    """Pre-flight: bail with a clear error if the sketch has no closed profile."""
+    return (
+        f"sk = root.sketches.item({int(sketch_index)})\n"
+        + "if sk.profiles.count == 0:\n"
+        + "    print('NO_PROFILE_ERROR')\n"
+        + "    raise SystemExit(1)\n"
+    )
+
+
 def _fusion360_extrude(args, db, user_id):
     si = args.get("sketch_index")
     if si is None:
@@ -249,7 +259,7 @@ def _fusion360_extrude(args, db, user_id):
     profile = int(args.get("profile_index", 0) or 0)
     op = _OPERATIONS[operation]
 
-    code = MM + f"sk = root.sketches.item({int(si)})\n"
+    code = MM + _extrude_guard_code(si)
     code += f"e = root.features.extrudeFeatures.createInput(sk.profiles.item({profile}), {op})\n"
     if direction == "pos":
         code += f"e.setTwoSidesDistanceExtent({_mm_expr(distance)}, {_mm_expr(overlap)})\n"
@@ -264,6 +274,12 @@ def _fusion360_extrude(args, db, user_id):
     code = _apply_component(code, args.get("component_index"))
     r = _run(code, db)
     if not r["success"]:
+        if "NO_PROFILE_ERROR" in (r.get("stdout") or ""):
+            return _bad(
+                "the sketch has no closed profile — its curves are not joined into "
+                "a loop. Re-run the sketch tool (it auto-closes endpoints), then "
+                "retry the extrude. Do NOT draw a new sketch on top."
+            )
         return r
     return {"success": True, "body_index": _last_int(r["stdout"], "BODY_INDEX"), "stdout": r["stdout"]}
 
