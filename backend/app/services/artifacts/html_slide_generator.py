@@ -15,10 +15,18 @@ from app.services.synexia.contracts import SlidePlan
 
 
 def _theme_css(theme: ThemePreset) -> str:
-    """Build a ``:root { --token: value; ... }`` block from the theme's tokens."""
+    """Build a ``:root { --token: value; ... }`` block from the theme's tokens.
+
+    Emits BOTH underscore and hyphenated forms (``--bg_primary`` AND
+    ``--bg-primary``) so layout CSS can use either naming convention.
+    (Historically the token dict used underscores while layout CSS used
+    hyphens — emitting both aliases fixes the mismatch.)
+    """
     lines = [":root {"]
     for k, v in theme.color_tokens.items():
         lines.append(f"  --{k}: {v};")
+        if "_" in k:
+            lines.append(f"  --{k.replace('_', '-')}: {v};")
     lines.append(f"  --font-display: '{theme.font_display}', serif;")
     lines.append(f"  --font-body: '{theme.font_body}', sans-serif;")
     lines.append("}")
@@ -561,7 +569,8 @@ def build_stage(slide_htmls: List[str], source_label: str = "") -> str:
   bottom: 40px;
   font-family: 'Work Sans', sans-serif;
   font-size: 22px;
-  color: rgba(255,255,255,0.55);
+  color: var(--text-primary, #0a0a0a);
+  opacity: 0.55;
   letter-spacing: 0.02em;
 }
 """

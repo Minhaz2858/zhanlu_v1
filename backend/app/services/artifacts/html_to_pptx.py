@@ -71,7 +71,8 @@ def _split_stage_into_slides(stage_html: str) -> List[str]:
     ``SAMPLE_STAGE`` has two sections sharing one head-level style).
     """
     pattern = re.compile(
-        r'(<style>.*?</style>\s*)?<section class="slide[^"]*"[^>]*>.*?</section>',
+        r'(<style>.*?</style>\s*)?<section class="slide[^"]*"[^>]*>.*?</section>'
+        r'(\s*<script>.*?</script>)?',
         re.DOTALL,
     )
     matches = []
@@ -101,6 +102,25 @@ def _wrap_slide_html(slide_chunk: str) -> str:
     overflow: hidden;
   }}
   body {{ font-family: 'Work Sans', sans-serif; }}
+  /* .slide base rules live in the stage head <style>, which the splitter
+     only carries into the FIRST chunk.  Re-declare them here so every
+     standalone chunk positions its sections and source footer correctly. */
+  .slide {{
+    position: relative;
+    width: 1920px; height: 1080px;
+    overflow: hidden;
+    page-break-inside: avoid;
+  }}
+  .source-footer {{
+    position: absolute;
+    left: 64px;
+    bottom: 40px;
+    font-family: 'Work Sans', sans-serif;
+    font-size: 22px;
+    color: var(--text-primary, #0a0a0a);
+    opacity: 0.55;
+    letter-spacing: 0.02em;
+  }}
 </style>
 </head><body>
 {slide_chunk}
