@@ -69,6 +69,13 @@ PLACEHOLDER_RE = re.compile(
     r"\b(xxxx|lorem|ipsum|todo|tbd|click to add|placeholder)\b", re.IGNORECASE
 )
 
+# A source citation is a line STARTING with "Source:" (the footer convention
+# used by both the layout engine and the legacy pptx_export renderer).  The
+# pattern is anchored to the start of a line so body text that merely
+# CONTAINS "source:" mid-word (e.g. "Resources: ...") never satisfies the
+# rule.
+SOURCE_CITATION_RE = re.compile(r"(?m)^\s*source\s*:", re.IGNORECASE)
+
 
 # --- Report model ---------------------------------------------------------
 

@@ -46,7 +46,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.artifact import Artifact, ArtifactBlob, ArtifactVersion
-from app.services.synexia.contracts import ReportCardPayload
+from app.services.synexia.contracts import DeckPlan, ReportCardPayload
 from app.services.artifacts.exporters import (
     ExportContext,
     SUPPORTED_FORMATS,
@@ -125,6 +125,7 @@ class ExportService:
         *,
         user_message: str = "",
         sql: Optional[str] = None,
+        force: bool = False,
         source: Optional[str] = None,
         theme: Optional[str] = None,
         mode: Optional[str] = None,
@@ -172,7 +173,10 @@ class ExportService:
         # variants are fresh).  Brand-kit renders consult the cache too,
         # but only accept the entry when its fingerprint matches the
         # current kit (a kit edit invalidates the old render).
-        if not themed:
+        # `force=True` bypasses the cache entirely so a caller can always
+        # obtain a freshly-rendered artifact (e.g. after a render-code
+        # fix, or to discard a stale cached blob).
+        if not themed and not force:
             cached = self._find_cached_format_blob(artifact, fmt)
             if cached is not None:
                 if brand_fp is None:
@@ -553,6 +557,110 @@ class ExportService:
         )
         return data, mime, ext
 
+    @staticmethod
+    def _rich_payload_to_deck_plan(
+        payload: Optional[ReportCardPayload],
+        user_message: str = "",
+    ) -> Optional[DeckPlan]:
+        """Convert a rich ReportCardPayload into a DeckPlan, or return None.
+
+        A payload is "rich" when it carries narrative the agent already
+        synthesized: agent-authored ``blocks``, an executive ``summary``,
+        ``key_findings``, ``recommendations``, ``sections``, or a populated
+        chart. When any of these are present we render THAT story instead of
+        asking the row-only planner to build a generic data_report skeleton.
+        """
+        if payload is None:
+            return None
+
+        # Detect narrative richness. KPIs alone are NOT enough — they
+        # produce the generic "Key Metrics" slide the user is complaining
+        # about. We need story-bearing fields.
+        raw_blocks = getattr(payload, "blocks", None)
+        has_blocks = isinstance(raw_blocks, list) and len(raw_blocks) > 0
+        has_summary = bool(getattr(payload, "summary", ""))
+        has_findings = bool(getattr(payload, "key_findings", None))
+        has_recs = bool(getattr(payload, "recommendations", None))
+        has_sections = bool(getattr(payload, "sections", None))
+        chart = getattr(payload, "chart", None)
+        has_chart_data = bool(
+            chart and getattr(chart, "data", None)
+        )
+
+        if not any((has_blocks, has_summary, has_findings, has_recs, has_sections, has_chart_data)):
+            return None
+
+        try:
+            from app.services.artifacts.document_plan import DocumentPlan
+
+            if has_blocks:
+                meta = {
+                    "title": getattr(payload, "title", "") or "Report",
+                    "subtitle": getattr(payload, "subtitle", "") or "",
+                    "theme": getattr(payload, "theme", "") or "zhanlu-blue",
+                }
+                doc_plan = DocumentPlan.from_blocks(list(raw_blocks), meta=meta)
+            else:
+                doc_plan = DocumentPlan.from_reportcard(payload)
+
+            # Enrich the cover subtitle when the payload didn't supply one.
+            if doc_plan.subtitle:
+                pass
+            elif user_message:
+                doc_plan.subtitle = user_message[:120]
+            elif getattr(payload, "source", None):
+                doc_plan.subtitle = str(payload.source)[:120]
+
+            return doc_plan.to_deck_plan()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "ExportService: rich-payload DeckPlan conversion failed; "
+                "falling back to row-based planner: %s",
+                exc,
+            )
+            return None
+
+    def _ensure_source_label(
+        self,
+        ctx: ExportContext,
+        payload: Optional[ReportCardPayload],
+        rows: list[dict[str, Any]],
+    ) -> None:
+        """ALWAYS put a source label on the export context.
+
+        ``source_citation`` is a non-repairable FAIL audit rule: every content
+        slide must carry a ``Source: <label>`` footer, which the layout engine
+        emits from ``ctx.source``.  The chat path historically built the
+        context WITHOUT a source, so with the blocking gate on, every deck
+        came back ``b""`` and the tool stored a 0-byte artifact.  This
+        guarantees a label in this order of preference:
+
+        1. an explicit label already on the context (caller intent wins),
+        2. the payload's own ``source`` (e.g. the SQL view / KB the agent
+           queried),
+        3. a grounding KB marker embedded in the recovered rows
+           (``_source_kb`` / ``kb_name`` / ``data_source``),
+        4. the sensible generic default ``company data``.
+        """
+        if (getattr(ctx, "source", "") or "").strip():
+            return  # explicit caller label — never override
+        if payload is not None:
+            payload_source = (getattr(payload, "source", "") or "").strip()
+            if payload_source:
+                ctx.source = payload_source
+                return
+        for row in (rows or [])[:20]:
+            if not isinstance(row, dict):
+                continue
+            kb = (
+                str(row.get("_source_kb") or row.get("kb_name") or row.get("data_source") or "")
+                .strip()
+            )
+            if kb:
+                ctx.source = kb
+                return
+        ctx.source = "company data"
+
     def _render_deck_pipeline(
         self,
         payload: Optional[ReportCardPayload],
@@ -590,6 +698,39 @@ class ExportService:
             route_deck,
         )
         from app.services.artifacts.render_dispatcher import render_pptx_from_plan_sync
+
+        # ------------------------------------------------------------------
+        # Provenance: ALWAYS carry a source label on the context (payload
+        # source → grounding KB marker → "company data") so the layout-engine
+        # footer renders on every content slide and the source_citation audit
+        # rule is satisfiable.  Without this the chat path (which never sets
+        # ctx.source) blocks EVERY deck at the audit gate.
+        # ------------------------------------------------------------------
+        self._ensure_source_label(ctx, payload, rows)
+
+        # ------------------------------------------------------------------
+        # Rich-narrative short-circuit (2026-08-28).
+        #
+        # The incoming ReportCardPayload often carries a complete analysis
+        # (summary, key_findings, recommendations, sections, agent-authored
+        # blocks) that the agent already produced for the in-chat report.
+        # When that narrative is present, render it DIRECTLY via the dynamic
+        # DocumentPlan → DeckPlan bridge instead of throwing it away and
+        # asking the row-only deck planner to re-invent the story. This fixes
+        # the common user complaint: "the text answer was rich, but the PPT
+        # was generic / ignored the analysis."
+        # ------------------------------------------------------------------
+        plan = self._rich_payload_to_deck_plan(payload, user_message)
+        if plan is not None:
+            ctx.deck_type = plan.deck_type or "data_report"
+            ctx.deck_plan = plan
+            logger.info(
+                "ExportService: rendering deck from rich ReportCardPayload "
+                "narrative (%d slides, title=%.60s)",
+                len(plan.slides), getattr(plan, "title", "")
+            )
+            data, audit_report = render_pptx_from_plan_sync(plan, rows, ctx)
+            return data, "application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx", audit_report
 
         # Phase 4: classify the deck profile from the user's intent. The
         # deterministic classifier runs sync (no LLM); an explicit profile
@@ -645,20 +786,39 @@ class ExportService:
                 if html_design_available():
                     try:
                         data = render_html_deck(plan, ctx)
-                        audit_report = {
-                            "status": "PASS",
-                            "summary": "html_design_renderer",
-                            "details": "rendered via Firefox image_fill pipeline",
-                        }
-                        logger.info(
-                            "ExportService: deck rendered via html_design (type=%s)",
-                            plan.deck_type,
+                        # The HTML design path is NOT exempt from the semantic
+                        # audit: run the SHARED audit on the rendered bytes
+                        # (same one the layout-engine path uses).  On FAIL the
+                        # un-audited HTML bytes are discarded and the deck
+                        # falls back to the structured layout-engine path
+                        # below, which runs the full audit → deterministic
+                        # repair → blocking loop.  On PASS the REAL audit
+                        # report is returned — never a fabricated summary.
+                        from app.services.artifacts.render_dispatcher import (
+                            _audit_bytes,
+                            _audit_enabled,
+                            _empty_report,
                         )
-                        return (
-                            data,
-                            "application/vnd.openxmlformats-"
-                            "officedocument.presentationml.presentation",
-                            "pptx", audit_report,
+                        if _audit_enabled():
+                            audit_report = _audit_bytes(data)
+                        else:
+                            audit_report = _empty_report()
+                        if audit_report.get("status") != "FAIL":
+                            logger.info(
+                                "ExportService: deck rendered via html_design "
+                                "(type=%s, audit=%s)",
+                                plan.deck_type, audit_report.get("status"),
+                            )
+                            return (
+                                data,
+                                "application/vnd.openxmlformats-"
+                                "officedocument.presentationml.presentation",
+                                "pptx", audit_report,
+                            )
+                        logger.warning(
+                            "ExportService: html_design deck audit FAIL — "
+                            "falling back to layout engine: %s",
+                            audit_report.get("summary"),
                         )
                     except RenderError as exc:
                         logger.warning(
@@ -1065,11 +1225,31 @@ class ExportService:
         ``metadata_json['report_card_payload']`` — we reuse it on
         every render.  This means we don't need to plumb the payload
         all the way from the chat loop into the download route.
+
+        When ``report_card_payload`` is absent (e.g. artifacts created
+        via ``create_artifact`` / ``run_sandbox_skill``, which only
+        persist the raw payload), fall back to the artifact's stored
+        ``source_json`` (the full payload the agent supplied).  Without
+        this fallback the re-render path (``GET /download?format=…``)
+        collapsed to a MINIMAL payload with empty kpis / insights /
+        chart / sections — so the exported .docx/.pdf came out as a bare
+        cover page even though the original blob was rich.  pydantic
+        ignores any extra keys (subtitle, user_signal, blocks) by
+        default, so ``model_validate`` is safe on the raw payload.
         """
         from app.services.synexia.contracts import ReportCardPayload
 
         meta = artifact.metadata_json or {}
         raw = meta.get("report_card_payload")
+        if not isinstance(raw, dict):
+            # Fallback to the artifact's stored source_json (the full
+            # create_artifact / run_sandbox_skill payload).
+            version = self._current_version(artifact)
+            if version is not None:
+                sj = getattr(version, "source_json", None)
+                if isinstance(sj, dict):
+                    raw = sj
+
         if isinstance(raw, dict):
             try:
                 return ReportCardPayload.model_validate(raw)

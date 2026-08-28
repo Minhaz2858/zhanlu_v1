@@ -145,3 +145,57 @@ def test_check_source_citation_single_cover_slide_passes():
     s.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(8.0), Inches(0.8)) \
         .text_frame.paragraphs[0].add_run().text = "Cover"
     assert check_source_citation(prs).level == "PASS"
+
+
+def test_resources_body_text_is_not_a_citation():
+    """Word-boundary anchor: 'Resources: ...' body text must NOT satisfy the
+    citation rule — only a line STARTING with 'Source:' counts."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    s1 = prs.slides.add_slide(blank)
+    s1.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(8.0), Inches(0.8)) \
+        .text_frame.paragraphs[0].add_run().text = "Cover"
+    s2 = prs.slides.add_slide(blank)
+    tb = s2.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(10.0), Inches(2.0))
+    tb.text_frame.paragraphs[0].add_run().text = "Resources: see appendix for details"
+    finding = check_source_citation(prs)
+    assert finding.level == "FAIL", finding
+    assert any("slide 2" in ev for ev in finding.evidence)
+
+
+def test_resources_line_after_newline_is_not_a_citation():
+    """A body line that merely CONTAINS 'source:' mid-word (e.g. a
+    'Resources:' paragraph) does not satisfy the rule even when it follows a
+    newline — the citation must start the line."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    s1 = prs.slides.add_slide(blank)
+    s1.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(8.0), Inches(0.8)) \
+        .text_frame.paragraphs[0].add_run().text = "Cover"
+    s2 = prs.slides.add_slide(blank)
+    tb = s2.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(10.0), Inches(2.0))
+    tb.text_frame.paragraphs[0].add_run().text = "Overview"
+    tb.text_frame.add_paragraph().text = "Resources: budget deep-dive"
+    finding = check_source_citation(prs)
+    assert finding.level == "FAIL", finding
+
+
+def test_source_line_anywhere_in_frame_counts():
+    """A real 'Source: X' line inside a multi-paragraph frame satisfies the
+    rule (the footer convention the layout engine emits)."""
+    prs = Presentation()
+    prs.slide_width = Inches(13.333)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+    s1 = prs.slides.add_slide(blank)
+    s1.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(8.0), Inches(0.8)) \
+        .text_frame.paragraphs[0].add_run().text = "Cover"
+    s2 = prs.slides.add_slide(blank)
+    tb = s2.shapes.add_textbox(Inches(0.6), Inches(0.4), Inches(10.0), Inches(2.0))
+    tb.text_frame.paragraphs[0].add_run().text = "Findings"
+    tb.text_frame.add_paragraph().text = "Source: Market Research Data"
+    assert check_source_citation(prs).level == "PASS"

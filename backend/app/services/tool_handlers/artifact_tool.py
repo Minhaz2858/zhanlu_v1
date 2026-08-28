@@ -31,6 +31,7 @@ handled by the post-processing step in agents.py.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Optional
@@ -440,6 +441,209 @@ def _enrich_payload_from_sibling_html_report(
         return payload
 
 
+def _is_payload_sparse_or_garbage(payload: dict) -> bool:
+    """Return True when the payload is too thin to render a useful
+    DOCX/PPTX/PDF — even when ``summary``/``kpis`` are present.
+
+    A payload is considered sparse when ANY of the following holds:
+
+    - The "narrative-story" fields (the ones the renderer uses to
+      build the body of the report) are all missing or empty:
+      ``key_findings``, ``recommendations``, ``sections``.
+      A payload with only summary/kpis/chart still produces a
+      near-empty docx because none of the body sections render.
+    - ``summary`` contains raw ``<tool_call>`` XML leaking from the
+      agent's planning text (the most common garbage signature).
+    - KPI labels are obvious SQL aggregate spam
+      (``Total yr``, ``Max mo``, …) — they don't summarise
+      the data the user actually wants.
+    """
+    if not isinstance(payload, dict):
+        return True
+
+    narrative_keys = ("key_findings", "recommendations", "sections")
+    has_narrative = any(payload.get(k) for k in narrative_keys)
+    if not has_narrative:
+        # The body of the report has no story — this is the single
+        # most common reason DOCX comes out thin. Trigger enrichment.
+        return True
+
+    # Even with narrative present, swap out obviously broken summary
+    # (raw tool-call XML leaking from agent planning).
+    summary = (payload.get("summary") or "")
+    if "<|" in summary or "|>" in summary or "<tool_call>" in summary:
+        return True
+
+    # KPI labels that look like raw SQL aggregates suggest the agent
+    # scraped a ``SELECT`` statement's column summaries.  These don't
+    # summarise the data the user wants, but we keep them if a
+    # narrative already exists — the renderer uses them as labels.
+    return False
+
+
+def _enrich_payload_from_ask_data_results(
+    *,
+    payload: dict,
+    db,
+    conversation_id: str,
+    title: str,
+    artifact_type: str,
+) -> dict:
+    """Second-pass enrichment: when the payload is still sparse/garbage
+    AFTER the sibling-html-report pass, pull rows from the
+    conversation's most recent ``ask_data_agent`` tool results and run
+    data auto-analysis to populate Claude-style fields
+    (summary / methodology / kpis / insights / key_findings /
+    recommendations / sections / chart).
+
+    The agent's own ``summary`` / ``kpis`` are preserved when present
+    — we only fill in blanks and replace obviously-broken values
+    (raw ``<tool_call>`` XML, SQL-aggregate KPIs).
+    """
+    if not _is_payload_sparse_or_garbage(payload):
+        return payload
+    try:
+        from app.models.agent_conversation import AgentConversation
+
+        conv = (
+            db.query(AgentConversation)
+            .filter(AgentConversation.id == conversation_id)
+            .first()
+        )
+        if conv is None:
+            return payload
+
+        messages = conv.messages if hasattr(conv, "messages") else None
+        if not messages:
+            try:
+                messages = json.loads(conv.raw_messages_json or "[]")
+            except Exception:
+                messages = []
+        if not isinstance(messages, list):
+            return payload
+
+        # Walk messages newest → oldest; collect rows from
+        # ask_data_agent results.  We keep the latest set of rows per
+        # unique row-count / signature so we feed the auto-analysis
+        # the most informative data the conversation produced.
+        candidate_data = []  # list of dict rows
+        candidate_columns = []  # list of column names for auto-analyze
+        seen_signatures = set()
+        for m in reversed(messages):
+            tcs = m.get("tool_calls", []) if isinstance(m, dict) else []
+            for t in tcs or []:
+                if not isinstance(t, dict):
+                    continue
+                if t.get("name") != "ask_data_agent":
+                    continue
+                results = t.get("results") or {}
+                if not isinstance(results, dict):
+                    continue
+                rows = results.get("rows")
+                if not isinstance(rows, list) or not rows:
+                    continue
+                # take rows that are dicts with numeric/text content
+                dict_rows = [r for r in rows if isinstance(r, dict)]
+                if not dict_rows:
+                    continue
+                sig = json.dumps(sorted(dict_rows[0].keys()), default=str)
+                if sig in seen_signatures:
+                    continue
+                seen_signatures.add(sig)
+                candidate_data = dict_rows
+                candidate_columns = list(dict_rows[0].keys())
+                break
+            if candidate_data:
+                break
+
+        if not candidate_data:
+            return payload
+
+        # Run auto-analysis on the gathered rows.
+        from app.services.tool_handlers._report_auto_analysis import (
+            auto_analyze,
+        )
+
+        analysis = auto_analyze(
+            rows=candidate_data,
+            columns=candidate_columns,
+            tool_name=f"create_artifact-{artifact_type}",
+            title_hint=title or "",
+        )
+        if not isinstance(analysis, dict):
+            return payload
+
+        # Inject fields, respecting existing values. Replace obviously
+        # broken ``summary`` (raw tool-call XML) with the auto-generated one.
+        existing_summary = (payload.get("summary") or "").strip()
+        if (
+            not existing_summary
+            or "<|" in existing_summary
+            or "|>" in existing_summary
+            or "<tool_call>" in existing_summary
+        ):
+            new_summary = (analysis.get("summary") or "").strip()
+            if new_summary:
+                payload["summary"] = new_summary
+
+        if not payload.get("methodology"):
+            md = (analysis.get("methodology") or analysis.get("sql") or "").strip()
+            if md:
+                payload["methodology"] = md
+
+        if not payload.get("kpis") and analysis.get("kpis"):
+            payload["kpis"] = analysis["kpis"]
+
+        if analysis.get("insights") and not payload.get("insights"):
+            payload["insights"] = analysis["insights"]
+
+        if analysis.get("key_findings") and not payload.get("key_findings"):
+            payload["key_findings"] = analysis["key_findings"]
+
+        if analysis.get("recommendations") and not payload.get("recommendations"):
+            payload["recommendations"] = analysis["recommendations"]
+
+        if analysis.get("sections") and not payload.get("sections"):
+            payload["sections"] = analysis["sections"]
+
+        if not payload.get("chart") and analysis.get("chart"):
+            payload["chart"] = analysis["chart"]
+
+        if not payload.get("next_step") and analysis.get("next_step"):
+            payload["next_step"] = analysis["next_step"]
+
+        # Make sure title is sensible (replace literal request strings)
+        if title:
+            t = (title or "").strip()
+            # If the agent passed the raw user prompt as the title
+            # ("give me a   sales report in docx format. query…"), keep
+            # what's already stored on the artifact (auto-generated
+            # from user message). Don't fight the explicit user message.
+            import re as _re
+            looks_like_prompt = bool(
+                t
+                and len(t) > 60
+                and _re.search(r"\b(give me|please|can you|i want|need)\b", t, flags=_re.I)
+                and _re.search(r"\b(docx|pptx|pdf|xlsx|html|file|report)\b", t, flags=_re.I)
+            )
+            if not looks_like_prompt and not payload.get("title"):
+                payload["title"] = t
+
+        logger.info(
+            "[enrich_ask_data] conv=%s filled_fields=%s rows_used=%d",
+            conversation_id,
+            [k for k in ("summary","methodology","kpis","insights","key_findings","recommendations","sections","chart","next_step") if payload.get(k)],
+            len(candidate_data),
+        )
+        return payload
+    except Exception as exc:
+        logger.warning(
+            "[enrich_ask_data] failed for conv=%s: %s",
+            conversation_id, exc,
+        )
+        return payload
+
+
 def _create_sidecar_preview(
     service,
     parent_artifact,
@@ -587,6 +791,93 @@ def _collect_rows_for_tool(
     return rows
 
 
+# ---------------------------------------------------------------------------
+# Institutional-grade PPT coverage gate (2026-08-25).
+#
+# Activated only for ``create_artifact(type="pptx", ...)`` calls.
+# Inspects the payload's ``coverage_dimensions`` field (populated by
+# ``comprehensive_data(profile="market", ...)``). When the count is
+# below ``COMPREHENSIVE_DATA_MIN_DIMENSIONS``, the gate either:
+#   - HARD-FAIL (default): returns an ``insufficient_coverage`` error
+#     so the agent LLM sees it in the tool result and retries.
+#   - SOFT-BLOCK (COMPREHENSIVE_DATA_GATE_SOFT_BLOCK=True): logs a
+#     warning and lets the artifact render. For rollout.
+#   - BYPASS (COMPREHENSIVE_DATA_GATE_BYPASS=True): fully disabled.
+#
+# Important: when the gate is OFF, this function returns ``None``
+# (no-op) so existing decks render as before. Zero regression.
+# ---------------------------------------------------------------------------
+def _ppt_coverage_gate(payload: dict, logger_) -> dict | None:
+    """Return ``None`` to allow the artifact, or an error-dict to abort."""
+    if not bool(getattr(settings, "COMPREHENSIVE_DATA_GATE_ENABLED", False)):
+        return None
+    if bool(getattr(settings, "COMPREHENSIVE_DATA_GATE_BYPASS", False)):
+        return None
+
+    coverage_dimensions = (
+        payload.get("coverage_dimensions") if isinstance(payload, dict) else None
+    )
+    if not isinstance(coverage_dimensions, list):
+        # LLM didn't follow the institutional-PPT directive (no
+        # comprehensive_data call). Pass through — gate only enforces
+        # the floor WHEN the LLM did call comprehensive_data. Pitch
+        # decks and design-heavy HTML decks keep working.
+        return None
+
+    min_dimensions = max(
+        1,
+        int(getattr(settings, "COMPREHENSIVE_DATA_MIN_DIMENSIONS", 3) or 3),
+    )
+    covered_count = len(coverage_dimensions)
+    if covered_count >= min_dimensions:
+        return None  # passes — allowed to render
+
+    target_dims = (
+        "core_metrics", "historical_trends", "cost_structure", "supply_side",
+        "demand_side", "macro_context", "forward_indicators",
+        "cross_segment_relationships",
+    )
+    covered_set = set(coverage_dimensions or [])
+    missing = [d for d in target_dims if d not in covered_set]
+
+    soft = bool(getattr(settings, "COMPREHENSIVE_DATA_GATE_SOFT_BLOCK", False))
+    if soft:
+        logger_.warning(
+            "coverage_gate (SOFT-BLOCK): payload has %d coverage_dimensions "
+            "(< %d); missing=%s — allowing render",
+            covered_count, min_dimensions, missing,
+        )
+        return None
+
+    # Hard fail
+    logger_.info(
+        "coverage_gate (HARD-FAIL): payload coverage_dimensions count=%d "
+        "< min=%d; missing=%s",
+        covered_count, min_dimensions, missing,
+    )
+    return {
+        "success": False,
+        "reason": "insufficient_coverage",
+        "coverage_dimensions": coverage_dimensions,
+        "coverage_count": covered_count,
+        "min_dimensions": min_dimensions,
+        "missing_dimensions": missing,
+        "hint": (
+            'comprehensive_data(profile="market", query=<topic>) MUST '
+            "be called BEFORE create_artifact(type=\"pptx\", ...) for "
+            "market-overview / weekly-digest / trend-report requests. "
+            "Re-call with a query that spans the missing dimensions "
+            "and try create_artifact again."
+        ),
+        "error": (
+            f"insufficient_coverage: payload has {covered_count} "
+            f"coverage_dimensions, minimum is {min_dimensions}. "
+            f"Missing: {missing}. Re-call comprehensive_data to "
+            "cover the gaps."
+        ),
+    }
+
+
 async def _create_artifact_tool(
     args: dict,
     db: Optional[Session] = None,
@@ -652,11 +943,35 @@ async def _create_artifact_tool(
     # GUARD 2 resolved ``execution``; map its cached result into the
     # ReportCard payload, letting the LLM's explicit payload fields win.
     if execution:
-        cached_payload = _payload_from_execution(execution)
+        # Thread the USER'S ACTUAL QUESTION into the dynamic pipeline so the
+        # report's perspective (e.g. CEO / executive) and narrative are driven
+        # by what the user asked — not just the agent-derived artifact title.
+        _user_q = str(args.get("user_message") or "").strip()
+        _role = _infer_report_role(_user_q)
+        cached_payload = _payload_from_execution(
+            execution,
+            request_text=_user_q,
+            user_context={"role": _role} if _role else None,
+        )
         payload = {**cached_payload, **payload}
         args["payload"] = payload
         rows = (execution.result or {}).get("rows") or []
-        if len(rows) == 0:
+        # 2026-08-26 (run3): only append the "0 rows" Data Quality Note when
+        # the FINAL payload is actually data-empty. Previously the note fired
+        # whenever the cached execution had empty rows — even when the LLM's
+        # own payload carried real KPIs/chart (the execution could be a failed
+        # schema-validation attempt while the real query succeeded). That
+        # produced a docx claiming "returned 0 rows" next to real numbers.
+        _has_data = bool(
+            payload.get("kpis")
+            or payload.get("chart")
+            or payload.get("data_table")
+            or payload.get("summary")
+            or payload.get("slides")
+            or payload.get("html_content")
+            or payload.get("sql")
+        )
+        if len(rows) == 0 and not _has_data:
             payload.setdefault("sections", []).append({
                 "title": "Data Quality Note",
                 "content": (
@@ -703,6 +1018,33 @@ async def _create_artifact_tool(
             db=db,
             conversation_id=conversation_id,
             title=title,
+        )
+        args["payload"] = payload
+        print(
+            f"[ENRICH_SIBLING] conv={conversation_id} "
+            f"sparse_after={_is_payload_sparse_or_garbage(payload)}",
+            file=__import__('sys').stderr, flush=True,
+        )
+
+    # SECOND-PASS enrichment: when the payload is still sparse/garbage
+    # AFTER the sibling-html-report pass — i.e. the agent emitted
+    # `create_artifact` with empty or self-referential summary/kpis and
+    # there was no rich html_report sibling to copy from — fall back
+    # to data auto-analysis on the most recent ``ask_data_agent``
+    # rows in the conversation.
+    if conversation_id and artifact_type in ("docx", "pptx", "pdf"):
+        print(
+            f"[ENRICH_ASKDATA] ENTRY conv={conversation_id} "
+            f"title={(title or '')[:60]!r} "
+            f"keys={list(payload.keys())[:12]}",
+            file=__import__('sys').stderr, flush=True,
+        )
+        payload = _enrich_payload_from_ask_data_results(
+            payload=payload,
+            db=db,
+            conversation_id=conversation_id,
+            title=title,
+            artifact_type=artifact_type,
         )
         args["payload"] = payload
 
@@ -800,6 +1142,26 @@ async def _create_artifact_tool(
                     )
                     file_name = _safe_filename(title, ext)
                     used_pipeline = True
+                    # Empty-bytes guard (pipeline branch): a deck BLOCKED by
+                    # the audit gate comes back b'' + FAIL.  Refuse BEFORE any
+                    # blob registration so neither the format_export cache nor
+                    # the original blob ever stores a 0-byte "successful" deck.
+                    if not data:
+                        logger.error(
+                            "create_artifact tool: audit gate blocked pptx "
+                            "render for artifact %s (empty bytes) — refusing "
+                            "to register/store a 0-byte deck",
+                            artifact.id,
+                        )
+                        return {
+                            "success": False,
+                            "reason": "render_empty",
+                            "error": (
+                                f"Rendering {file_name} produced no bytes "
+                                "(blocked by the deck audit gate). Try a "
+                                "simpler payload or fewer slides."
+                            ),
+                        }
                     # Byte-consistency: register the exact bytes as the cached
                     # format_export blob so GET /download?format=pptx returns
                     # THIS deck (not a fresh LLM re-render with different rows).
@@ -842,6 +1204,25 @@ async def _create_artifact_tool(
                     f"Rendering {file_name} timed out after "
                     f"{ARTIFACT_RENDER_TIMEOUT_S}s; the file format is too "
                     "complex - try a simpler artifact."
+                ),
+            }
+
+        # 3b. Empty-bytes guard: a deck BLOCKED by the audit gate comes back
+        # as b'' + FAIL report from the dispatcher.  NEVER store a 0-byte
+        # artifact as a successful render — surface the failure so the agent
+        # LLM sees it in the tool result and can retry with a fixable payload.
+        if not data:
+            logger.error(
+                "create_artifact tool: renderer returned EMPTY bytes for %s "
+                "(artifact %s) — refusing to store a 0-byte artifact",
+                file_name, artifact.id,
+            )
+            return {
+                "success": False,
+                "reason": "render_empty",
+                "error": (
+                    f"Rendering {file_name} produced no bytes (blocked by the "
+                    "deck audit gate). Try a simpler payload or fewer slides."
                 ),
             }
 
@@ -993,13 +1374,44 @@ async def _create_artifact_tool(
         return {"success": False, "error": f"Artifact creation failed: {exc}"}
 
 
+def _infer_report_role(request_text: str) -> str:
+    """Map a free-form user question to an audience role the dynamic pipeline
+    can use to pick tone (CEO / executive / analyst / general).
+
+    The user's question is the single source of truth for perspective — this
+    keeps reports data-driven AND question-driven (never hardcoded).
+    """
+    if not request_text:
+        return "general"
+    t = request_text.lower()
+    ceo_signals = ["ceo", "首席", "董事长", "总裁", "总经理", "决策", "战略",
+                   "decision", "strategy", "汇报给", "致"]
+    exec_signals = ["exec", "executive", "leadership", "boss", "cfo", "manager",
+                    "board", "汇报", "领导", "管理层", "summary for"]
+    if any(s in t for s in ceo_signals):
+        return "ceo"
+    if any(s in t for s in exec_signals):
+        return "executive"
+    analyst_signals = ["analyst", "analysis", "明细", "分析", "deep dive", "explore"]
+    if any(s in t for s in analyst_signals):
+        return "analyst"
+    return "general"
+
+
 def _payload_to_reportcard(payload: dict, title: str) -> ReportCardPayload:
     """Convert a dict payload (from the LLM) into a ReportCardPayload instance."""
     from app.services.synexia.contracts import ActionSpec, ChartSpec, InsightSpec, KPISpec, SectionSpec
 
     def _chart_data(p: dict) -> list[dict]:
-        cd = p.get("chart", {}).get("data") if isinstance(p.get("chart"), dict) else None
+        chart = p.get("chart") if isinstance(p.get("chart"), dict) else None
+        if not chart:
+            return []
+        cd = chart.get("data")
         if isinstance(cd, list):
+            return cd
+        # A ``{labels, values}`` dict is normalized by ChartSpec's
+        # field_validator — return it as-is so the chart is built.
+        if isinstance(cd, dict):
             return cd
         return []
 
@@ -1014,7 +1426,7 @@ def _payload_to_reportcard(payload: dict, title: str) -> ReportCardPayload:
         # when the agent omits them. First dict key -> x-axis, remaining
         # keys -> y-axis series. If we can't infer a usable y axis, drop
         # the chart (the artifact still renders with KPIs / insights).
-        if (not x_key or not y_keys) and isinstance(chart_data[0], dict):
+        if (not x_key or not y_keys) and isinstance(chart_data, list) and chart_data and isinstance(chart_data[0], dict):
             first_keys = list(chart_data[0].keys())
             if not x_key and first_keys:
                 x_key = first_keys[0]
@@ -1066,14 +1478,32 @@ def _payload_to_reportcard(payload: dict, title: str) -> ReportCardPayload:
         recommendations=_to_insights(payload.get("recommendations")),
         sections=[
             SectionSpec(
-                title=s.get("title", ""),
-                content=s.get("content", "") or "",
-                bullets=list(s.get("bullets") or []),
+                # Tolerate multiple naming conventions the LLM may use:
+                #   {title, content}                       — what the renderer expects
+                #   {heading, body}                        — system prompt teach
+                #   {heading, paragraphs} / {heading, bullets} — v3 prompt teach
+                #   {name, text}                           — common fallback
+                title=s.get("title") or s.get("heading") or s.get("name") or "",
+                content=(
+                    s.get("content")
+                    or s.get("body")
+                    or s.get("text")
+                    or ""
+                ),
+                bullets=list(
+                    s.get("bullets")
+                    or s.get("paragraphs")
+                    or []
+                ),
                 type=s.get("type", "narrative") or "narrative",
             )
             for s in (payload.get("sections") or [])
         ],
         sql=payload.get("sql") or "",
+        # Phase: fully-dynamic document generation. Carries an explicit
+        # ordered block plan (agent-authored or architect-synthesized) so the
+        # docx/pptx renderers produce a tailored, data-driven document.
+        blocks=payload.get("blocks") or [],
         # Fields not previously propagated — now passed through so
         # payload assemblers (e.g. ForecastPayloadAssembler) can
         # supply their own warnings and actions.
