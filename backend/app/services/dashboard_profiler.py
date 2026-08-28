@@ -19,6 +19,8 @@ from __future__ import annotations
 import re
 from datetime import datetime  # noqa: F401  (kept for API parity/future use)
 
+from app.services.db.base import quote_ident
+
 
 def classify_column_type(sql_type: str | None) -> str:
     if not sql_type:
@@ -53,3 +55,23 @@ def infer_shape(col_type: str, row_count: int, cardinality: int, null_pct: float
     if col_type == "number":
         return "category" if cardinality <= 30 else "continuous"
     return "category"
+
+
+def build_profile_queries(table: str, columns: list[str], sample_limit: int = 3) -> list[str]:
+    """Build bounded, dialect-neutral profile SQL for a table and its columns.
+
+    Only standard SQL is emitted (COUNT(*), COUNT(DISTINCT c), COUNT(c),
+    MIN(c), MAX(c), LIMIT n). Every identifier goes through quote_ident()
+    so it is validated and dialect-quoted at runtime.
+    """
+    tq = quote_ident(table, "default")
+    queries = [f"SELECT COUNT(*) AS row_count FROM {tq}"]
+    for col in columns:
+        cq = quote_ident(col, "default")
+        queries.append(
+            f"SELECT COUNT(DISTINCT {cq}) AS cardinality, "
+            f"COUNT({cq}) AS non_null, "
+            f"MIN({cq}) AS min_value, MAX({cq}) AS max_value FROM {tq}"
+        )
+        queries.append(f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}")
+    return queries

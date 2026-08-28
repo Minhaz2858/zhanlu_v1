@@ -60,3 +60,27 @@ def test_shape_continuous_high_cardinality_numeric():
 
 def test_shape_high_cardinality_text_is_category():
     assert infer_shape("text", 1000, 500, 0.0, 1000) == "category"
+
+
+def test_build_profile_queries_uses_quote_ident():
+    from app.services.dashboard_profiler import build_profile_queries
+    qs = build_profile_queries("sales_orders", ["product", "amount", "created_at"])
+    joined = "\n".join(qs)
+    assert "`sales_orders`" in joined or '"sales_orders"' in joined
+    assert "COUNT(DISTINCT `product`)" in joined or 'COUNT(DISTINCT "product")' in joined
+    assert "MIN(`amount`)" in joined or 'MIN("amount")' in joined
+    assert "MAX(`created_at`)" in joined or 'MAX("created_at")' in joined
+
+
+def test_build_profile_queries_has_row_count():
+    from app.services.dashboard_profiler import build_profile_queries
+    qs = build_profile_queries("t", ["a"])
+    assert any(q.strip().upper().startswith("SELECT COUNT(*)") for q in qs)
+
+
+def test_build_profile_queries_rejects_unsafe_identifiers():
+    from app.services.dashboard_profiler import build_profile_queries
+    with pytest.raises(ValueError):
+        build_profile_queries("t; DROP TABLE x", ["a"])
+    with pytest.raises(ValueError):
+        build_profile_queries("t", ["a; DELETE FROM t"])
