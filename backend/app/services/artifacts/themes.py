@@ -210,6 +210,12 @@ _KEYWORD_OVERRIDES: List[tuple] = [
     ("technical", "neon_cyber"),
     ("calm", "paper_and_ink"),
     ("modern", "swiss_modern"),
+    # Market / industry / business intel (EN + CJK) → business preset.
+    ("market", "swiss_modern"),
+    ("industry", "swiss_modern"),
+    ("市场", "swiss_modern"),
+    ("行业", "swiss_modern"),
+    ("行情", "swiss_modern"),
 ]
 
 
