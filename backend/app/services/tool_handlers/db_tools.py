@@ -548,6 +548,78 @@ async def _describe_schema(
 
 
 # ---------------------------------------------------------------------------
+# profile_data
+# ---------------------------------------------------------------------------
+
+async def _profile_data(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Profile real data (row counts, cardinality, null ratio, shapes) of a bound data source."""
+    from app.services.dashboard_profiler import profile_kb
+
+    kb_id, err = _require_kb_id(args, context)
+    if err:
+        return err
+
+    policy = _resolve_user_policy(db, user_id, context)
+    if policy.is_kb_fully_denied(kb_id):
+        logger.warning("profile_data: KB %s denied for user %s", kb_id, user_id)
+        return {"success": False, "error": "Access to this data source is restricted."}
+
+    table = args.get("table")
+    columns = list(args.get("columns") or [])
+    try:
+        max_tables = min(max(int(args.get("max_tables", 8)), 1), 8)
+    except (TypeError, ValueError):
+        max_tables = 8
+
+    if table:
+        tables = [table]
+    else:
+        listing = await asyncio.to_thread(SchemaService(db).list_tables, kb_id)
+        tables = list(listing.get("tables") or [])[:max_tables]
+
+    results: list[dict] = []
+    for t in tables:
+        cols = columns
+        if not cols:
+            try:
+                info = await asyncio.to_thread(
+                    SchemaService(db).describe_table, kb_id, t
+                )
+                cols = [
+                    c.get("name") or c.get("column_name") or ""
+                    for c in (info.get("columns") or [])
+                ]
+                cols = [c for c in cols if c][:20]
+            except Exception as exc:
+                results.append({
+                    "table": t,
+                    "row_count": 0,
+                    "status": "error",
+                    "error_message": str(exc)[:200],
+                    "columns": [],
+                })
+                continue
+        try:
+            profiled = await asyncio.to_thread(profile_kb, db, kb_id, t, cols)
+            results.append(profiled)
+        except Exception as exc:
+            results.append({
+                "table": t,
+                "row_count": 0,
+                "status": "error",
+                "error_message": str(exc)[:200],
+                "columns": [],
+            })
+
+    return {"success": True, "tables": results}
+
+
+# ---------------------------------------------------------------------------
 # execute_query
 # ---------------------------------------------------------------------------
 
@@ -1030,6 +1102,53 @@ DESCRIBE_SCHEMA_SCHEMA = {
     },
 }
 
+PROFILE_DATA_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "profile_data",
+        "description": (
+            "Profile real data of a bound data source before designing dashboards. "
+            "Returns per-table row counts and per-column stats: cardinality, "
+            "null ratio, min/max, top sample values, and a shape hint "
+            "(time_series / category / continuous / sparse / empty), plus an "
+            "ok/empty/error status per table. Call with the `table` you intend "
+            "to query, and optionally `columns`; omit `columns` to profile the "
+            "first 20 columns. Do NOT build a dashboard on tables whose profile "
+            "status is empty or error."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "data_source_id": {
+                    "type": "string",
+                    "description": "The id of the bound data source to profile.",
+                },
+                "table": {
+                    "type": "string",
+                    "description": "Optional. If set, profile just this table.",
+                },
+                "columns": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Optional. Columns to profile; omit to profile the "
+                        "first 20 columns of the table."
+                    ),
+                },
+                "max_tables": {
+                    "type": "integer",
+                    "description": (
+                        "Cap on number of tables profiled when `table` is "
+                        "omitted (default 8)."
+                    ),
+                    "default": 8,
+                },
+            },
+            "required": ["data_source_id"],
+        },
+    },
+}
+
 EXECUTE_QUERY_SCHEMA = {
     "type": "function",
     "function": {
@@ -1166,6 +1285,8 @@ for _name, _schema, _handler, _desc in (
      "List data sources bound to this agent."),
     ("describe_schema", DESCRIBE_SCHEMA_SCHEMA, _describe_schema,
      "Introspect the schema of a bound data source."),
+    ("profile_data", PROFILE_DATA_SCHEMA, _profile_data,
+     "Profile real data (row counts, cardinality, null ratio, shapes) of a bound data source."),
     ("execute_query", EXECUTE_QUERY_SCHEMA, _execute_query,
      "Run a SQL statement against a bound data source."),
     ("answer_from_database", ANSWER_FROM_DATABASE_SCHEMA, _answer_from_database,
