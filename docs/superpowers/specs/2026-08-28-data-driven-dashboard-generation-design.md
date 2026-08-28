@@ -31,14 +31,54 @@ Make dashboard generation depend on real data, not guesses:
 
 ## Scope
 
-- Backend: new `profile_data` capability (service + tool registration), build-time
-  metric dry-run validation in `_create_fullstack_dashboard` / `_update_fullstack_dashboard`.
-- Template frontend: Empty widget shows the reason; optional "as of" freshness stamp.
+- Backend: new `profile_data` capability (service + tool registration). The
+  profiler is **fully DB-agnostic** — it never references a specific database,
+  table, or column name. All identifiers come from the bound datasource's own
+  schema discovery at runtime.
+- Re-scoped validation: **free byproduct of profiling, not a separate pass**.
+  The profiler already executes each metric's SQL to compute stats, so it
+  returns ok/empty/error from that same run. No dedicated per-widget dry-run
+  machinery, no `_validation` persistence in config.json (YAGNI — 0/53 widgets
+  broken across all current dashboards; add later only if a real failure appears).
+- Template frontend: Empty widget shows the reason (no data / query failed).
+  Header "As of <date>" freshness stamp only when the profiler exposes a clean
+  primary date column.
 - Agent prompt: chart-type rules driven by profile output.
-- Tests: unit tests for profiler + validation; e2e verify against sales dashboard.
+- Tests: unit tests for profiler shape inference + validation classification on
+  a seeded throwaway schema; e2e verify against the sales dashboard.
 
-Out of scope (C, deferred): runtime data-adaptive chart swapping in the frontend,
-auto-fixing SQL, profile caching across sessions (TTL cache within turn only).
+Out of scope (deferred): runtime data-adaptive chart swapping in the frontend,
+auto-fixing SQL, profile caching across sessions (TTL cache within turn only),
+dedicated post-build validation pass.
+
+## DB-Agnostic Requirement (HARD RULE)
+
+The entire feature must work against ANY datasource a user binds — MySQL,
+PostgreSQL, or anything the QueryService supports. Concretely:
+
+- **No hardcoded identifiers.** No table names, column names, or schema names
+  from this project's ERP/EDIA demo data (e.g. `erp_v_sale_orderentry`,
+  `PLANDATE`, `FALLAMOUNT`) may appear in profiler code, prompts, or defaults.
+- **Identifiers come from the schema, at runtime.** The agent obtains real table
+  and column names via `describe_schema` (existing, already DB-agnostic), then
+  passes them to `profile_data(table=..., columns=[...])`. The profiler builds
+  SQL only from those caller-supplied identifiers.
+- **Identifier quoting is dialect-safe.** Table/column names are quoted using
+  the QueryService's existing quoting helpers (or ANSI double-quotes where the
+  dialect allows) so reserved words and mixed-case names don't break on either
+  MySQL or Postgres.
+- **No dialect-specific SQL.** The profiler uses only standard SQL:
+  `COUNT(*)`, `COUNT(DISTINCT col)`, `COUNT(col)`, `MIN(col)`, `MAX(col)`,
+  `LIMIT n`. NO `DATE_FORMAT`, `to_char`, `::date`, backticks, or vendor
+  functions. Type/date inspection uses the schema's own type metadata, not
+  formatting functions.
+- **Type mapping is dialect-tolerant.** Date detection accepts the union of
+  common type names (date, datetime, timestamp, timestamp without time zone,
+  and string columns that parse as ISO dates in sample values).
+- **Policy respected.** The profiler goes through the same user KB policy
+  checks as describe_schema (deny/restrict lists apply).
+- **Any count of tables/columns.** Works for 1 table or 8, 1 column or 20 —
+  caps are limits, not assumptions about a schema shape.
 
 ## Architecture
 
@@ -82,37 +122,31 @@ Reuses the same KB resolution + policy checks as describe_schema. Response is
 compact JSON the LLM can reason over; heavy tables are capped (first 20 columns,
 top 3 sample values).
 
-### B. Post-Build Validation
+### B. Validation as a free byproduct of profiling
 
-In `dashboard_tools.py` after the app is generated (both create and update):
+The profiler's per-column queries already exercise the tables; validation rides
+the same QueryService path with no extra machinery:
 
-1. For each metric in the spec, run a validation query through the QueryService
-   path. NOTE: do NOT use `analytics._run_metric_sql` directly — it flattens
-   empty and error both to `[]`. Use a small local wrapper around
-   `dashboard_query.QueryService.execute` (same caps: `_MAX_ROWS`,
-   `_TIMEOUT_S`) that returns `(rows, error_str)` so empty and error are
-   distinguishable. Run the SQL as stored (it already carries its own LIMIT /
-   aggregation); never mutate the stored SQL.
-2. Classify:
-   - `ok` — returned >= 1 row
-   - `empty` — 0 rows returned (no error)
-   - `error` — SQL failed (syntax, bad column, timeout)
-3. Attach to the tool result:
+1. `_describe_schema`-style KB resolution + policy check.
+2. For each table, run the profile queries. If any query fails (syntax, bad
+   column, timeout), classify that table's profile as `error` with the message;
+   a 0-row table is `empty`; otherwise `ok`.
+3. The profile payload per table carries:
+   `{ "status": "ok|empty|error", "error_message": null | "..." , "row_count": N, ... }`
+4. The agent prompt tells the LLM: if any table you profile comes back
+   `empty` or `error`, do NOT build on it — tell the user why and propose the
+   closest real alternative (or ask for another data source). This replaces the
+   separate post-build dry-run entirely.
+5. The frontend Empty card is still improved to show a reason — the widget
+   payload already carries `error` from the runtime query, so `Empty` renders
+   "Query failed: <message>" when present, "No data for this period" otherwise.
+   No config.json `_validation` persistence needed.
 
-```
-"validation": [
-  { "widget_id": "revenue_trend", "status": "ok", "rows": 120 },
-  { "widget_id": "orders_region", "status": "empty", "rows": 0 },
-  { "widget_id": "margin", "status": "error", "message": "column 'margin_pct' does not exist" }
-]
-```
-
-4. The agent prompt tells the LLM to report non-`ok` widgets to the user and
-   fix them via `update_fullstack_dashboard` (not silently leave them).
-5. Also persist `_validation` into config.json per metric (runtime status for
-   the Empty card), but generation NEVER fails the build on validation — a
-   dashboard with a broken widget is still better than no dashboard. Empty/error
-   widgets render with the reason instead of a blank box.
+Why this is enough: evidence shows 0/53 widgets broken across all current
+dashboards (2026-08-28 audit). A dedicated validation pass would catch nothing
+today. The profiler's status fields + prompt rule + Empty-reason cover the real
+failure paths (agent builds on a bad table) at zero extra cost. If a broken
+widget ever appears in production, promote this to a full post-build pass then.
 
 ### Template frontend (Empty card with reason)
 
@@ -145,32 +179,37 @@ choose chart types:
 
 ## Error handling
 
-- Profiler failures (unreachable DB, permission denied) are non-fatal: log +
-  return `{"success": False, "error": ...}`; the agent proceeds with
-  describe_schema-only (today's behavior). A profiling failure must never block
-  a dashboard build.
-- Validation dry-runs never raise: `_run_metric_sql` is already non-raising and
-  capped (max rows, timeout). Extra safety: wrap the LIMIT-1 copy in its own
-  try/except.
-- Empty/error widgets never fail the build — they degrade to a reason-bearing
-  Empty card.
+- Profiler failures (unreachable DB, permission denied, dialect quirks) are
+  non-fatal: log + return `{"success": False, "error": ...}`; the agent proceeds
+  with describe_schema-only (today's behavior). A profiling failure must never
+  block a dashboard build.
+- Per-table query failures classify that table `error` with the message — the
+  agent sees it in the profile and avoids building on it.
+- All queries go through the QueryService path (bounded rows + timeout), so a
+  runaway table can't hang the tool.
+- Empty/error tables never fail the tool — they degrade to status fields the
+  agent acts on.
 
 ## Testing
 
-- `tests/unit/test_dashboard_profiler.py` — shape inference on a small seeded
-  table set (empty/sparse/time_series/category/continuous), null-pct math,
-  column cap, timeout guard.
-- `tests/unit/test_dashboard_validation.py` — metric SQL classified ok/empty/
-  error; stored SQL never mutated; build not failed on validation.
-- e2e: regenerate `sales-performance-dashboard-v2` with profiling enabled; assert
-  config.json carries `_validation` and every widget reports ok (or a fix loop
-  runs). Verify in browser that Empty cards show reasons.
+- `tests/unit/test_dashboard_profiler.py` — shape inference on a seeded
+  throwaway schema (empty/sparse/time_series/category/continuous), null-pct
+  math, column cap, timeout guard, and the DB-agnostic rule: profiler code must
+  contain ZERO hardcoded table/column identifiers (assert no demo table names in
+  source). Dialect-tolerant date detection (MySQL date/datetime, Postgres
+  timestamp).
+- e2e: profile `erp_v_sale_orderentry` through the tool handler against the
+  bound Ecisco datasource; assert the JSON shape (row_count, per-column
+  cardinality/null_pct/min/max/top_values/shape/status) and that a broken table
+  name returns `error` status. Verify in browser that Empty cards show reasons.
+- The validation-byproduct path is covered implicitly: profiling a table the
+  agent would build on must yield ok/empty/error status the prompt can act on.
 
 ## Open decisions (resolved)
 
 - Profile every table or only queried ones? → Only tables named in the agent's
   profile_data calls (agent decides; prompt says "for each table you will query").
-- Should validation block builds? → No. Non-ok widgets are surfaced + fixable,
-  not fatal. (Matches user rule: minimal working version first, iterate.)
+- Should validation block builds? → No. Non-ok tables are surfaced + avoided by
+  the agent, not fatal. (Matches user rule: minimal working version first, iterate.)
 - Where does freshness stamp live? → MVE: only if profile exposes a clean primary
   date column; else skip (YAGNI).
