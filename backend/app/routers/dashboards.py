@@ -7,6 +7,7 @@ from functools import lru_cache
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -144,17 +145,26 @@ def _user_can_see_record(record: DashboardApp, user) -> bool:
     return str(record.created_by_id) == str(getattr(user, "id", None))
 
 
-@router.get("/app-records/{slug}")
-def get_dashboard_app_record(slug: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
-    """Return the DashboardApp record for a full-stack dashboard slug.
+@router.get("/app-records/{slug_or_id}")
+def get_dashboard_app_record(slug_or_id: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
+    """Return the DashboardApp record for a full-stack dashboard.
 
-    Org-scoped + T10 scope visibility. 404 when the slug does not exist,
+    Accepts either the record **UUID** (what the frontend puts in
+    ``/dashboard/:id`` and passes straight through to this endpoint) or the
+    **slug** (``sales-performance-dashboard``). Resolving by id is the
+    primary path — the frontend has no slug at navigation time, only the
+    record id from the app-records list.
+
+    Org-scoped + T10 scope visibility. 404 when the record does not exist,
     belongs to another org, or is a personal app owned by someone else.
     The frontend uses this to decide whether ``/dashboard/:id`` is a
     full-stack app (render iframe) vs a legacy SQL-widget dashboard.
     """
     record = db.query(DashboardApp).filter(
-        DashboardApp.slug == slug,
+        or_(
+            DashboardApp.slug == slug_or_id,
+            DashboardApp.id == slug_or_id,
+        ),
         DashboardApp.org_id == user.org_id,
     ).first()
     if record is None or not _user_can_see_record(record, user):
@@ -238,6 +248,53 @@ def mark_dashboard_app_viewed(slug: str, db: Session = Depends(get_db), user=Dep
     return _record_with_meta(record)
 
 
+@router.delete("/app-records/{slug_or_id}", status_code=204)
+def delete_dashboard_app_record(slug_or_id: str, db: Session = Depends(get_db), user=Depends(get_current_user_required)):
+    """Hard-delete a full-stack dashboard app record and its artifacts.
+
+    Resolves by record UUID or slug (org-scoped + T10 visibility: personal →
+    creator only; company → whole org, but non-creators need the ``admin``
+    role). On success the cascade removes: the realtime poller task, the
+    generated app directory on disk, chat conversations bound via
+    ``metadata_`` (see ``delete_bound_conversations``), and finally the
+    record itself. Returns 204 with no body.
+    """
+    record = db.query(DashboardApp).filter(
+        or_(
+            DashboardApp.slug == slug_or_id,
+            DashboardApp.id == slug_or_id,
+        ),
+        DashboardApp.org_id == user.org_id,
+    ).first()
+    if record is None or not _user_can_see_record(record, user):
+        raise HTTPException(status_code=404, detail="Dashboard app not found")
+    # Company-scope gate: anyone but the creator needs the admin role.
+    if record.scope == "company" and str(record.created_by_id) != str(user.id):
+        if getattr(user, "role", "user") != "admin":
+            raise HTTPException(status_code=404, detail="Dashboard app not found")
+    slug = record.slug
+    # Stop the realtime poller (best effort — the task may not be running).
+    try:
+        dashboard_app_manager.stop_poller(slug)
+    except Exception:
+        logger.exception("delete: failed to stop poller for %s", slug)
+    # Remove the generated app directory from disk (best effort).
+    try:
+        import shutil
+        from app.services.dashboard_app.generator import get_generator
+        app_dir = get_generator().app_dir(slug)
+        if app_dir.exists():
+            shutil.rmtree(app_dir, ignore_errors=True)
+    except Exception:
+        logger.exception("delete: failed to remove app dir for %s", slug)
+    # Cascade: drop chat conversations bound to this dashboard.
+    from app.services.dashboard_app.cascade import delete_bound_conversations
+    delete_bound_conversations(db, slug, record.id)
+    db.delete(record)
+    db.commit()
+    return None
+
+
 # ── Full-stack dashboard app serving (T17) ──
 # These GLOBAL catch-all routes replace the per-app `app.mount(StaticFiles)`
 # that DashboardAppManager used to install at startup.  The old mount was
@@ -290,8 +347,16 @@ def app_metrics(slug: str):
 
 
 @router.get("/apps/{slug}/metrics/{metric_id}")
-def app_metric(slug: str, metric_id: str, request: Request):
-    """Return the live payload for one metric of a generated dashboard app."""
+async def app_metric(slug: str, metric_id: str, request: Request, db: Session = Depends(get_db)):
+    """Return the live payload for one metric of a generated dashboard app.
+
+    Async endpoint: ``run_metric`` is a coroutine that must be awaited on the
+    event loop. The previous sync version called
+    ``asyncio.get_event_loop().run_until_complete()`` from FastAPI's threadpool
+    thread — where no event loop exists — so every widget 500'd and the
+    frontend rendered "No data" on all cards. ``db`` is required because
+    ``QueryService`` resolves the datasource KB through the SQLAlchemy session.
+    """
     try:
         mod = _resolve_module(slug)
     except ImportError:
@@ -300,14 +365,10 @@ def app_metric(slug: str, metric_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Dashboard app not found")
     filters = dict(request.query_params)
     try:
-        result = mod.run_metric(None, metric_id, filters)
+        result = await mod.run_metric(db, metric_id, filters)
     except Exception as exc:  # metric not found / query error → surface cleanly
         logger.warning("dashboard app %s metric %s failed: %s", slug, metric_id, exc)
         raise HTTPException(status_code=404, detail=f"metric not found: {metric_id}")
-    # run_metric may be sync (template) or async; normalize.
-    if hasattr(result, "__await__"):
-        import asyncio
-        result = asyncio.get_event_loop().run_until_complete(result)
     return {"metric_id": metric_id, "data": result}
 
 
@@ -333,7 +394,11 @@ def serve_dashboard_app(slug: str, path: str):
     # present, otherwise fall through to the dist/ lookup below.
     if path == "config.json" and (app_dir / "config.json").exists():
         safe = (app_dir / "config.json").resolve()
-        return FileResponse(safe, media_type=_media_type_for(safe.name))
+        return FileResponse(
+            safe,
+            media_type=_media_type_for(safe.name),
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     # The built SPA lives in the app's `dist/` directory; assets + index.html
     # are served from there. SPA client routes fall back to index.html.
@@ -349,7 +414,18 @@ def serve_dashboard_app(slug: str, path: str):
         safe = base / "index.html"  # SPA fallback for client routes
     if not safe.exists():
         raise HTTPException(status_code=404, detail="Not found")
-    return FileResponse(safe, media_type=_media_type_for(safe.name))
+    # Cache policy: the SPA shell (index.html) MUST revalidate on every load so
+    # a redeploy's new hashed bundle reference is picked up — without this,
+    # browsers heuristically cache index.html and keep requesting the OLD
+    # bundle name (which 404s or serves stale JS) after a rebuild. Hashed
+    # assets are content-addressed (index-<hash>.js/css) so they are safe to
+    # cache immutably.
+    headers = {}
+    if safe.name == "index.html":
+        headers["Cache-Control"] = "no-cache, must-revalidate"
+    else:
+        headers["Cache-Control"] = "public, max-age=31536000, immutable"
+    return FileResponse(safe, media_type=_media_type_for(safe.name), headers=headers)
 
 
 @router.websocket("/apps/{slug}/ws")
