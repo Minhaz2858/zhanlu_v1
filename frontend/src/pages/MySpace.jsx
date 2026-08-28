@@ -17,6 +17,7 @@ import { hasDraft as hasDraftData, clearDraft, flushDraft, loadDraft } from '@/l
 import { filterUserAgents } from '@/lib/systemAgents';
 import AgentsView from '@/components/agent/AgentsView';
 import { listDashboards, listDashboardApps, deleteDashboard, deleteDashboardApp } from '@/api/dashboards';
+import { toast } from 'sonner';
 
 const AGENT_DRAFT_KEYS = {
   form: 'agent_steps_form',
@@ -162,9 +163,14 @@ export default function MySpace() {
       ? window.confirm(`Delete "${label}"? This removes the dashboard and its data.`)
       : window.confirm(`确定删除“${label}”吗？此操作将删除仪表盘及其数据。`);
     if (!ok) return;
-    if (item.kind === 'app') await deleteDashboardApp(item.id);
-    else await deleteDashboard(item.id);
-    load();
+    try {
+      if (item.kind === 'app') await deleteDashboardApp(item.id);
+      else await deleteDashboard(item.id);
+    } catch (e) {
+      toast.error(lang === 'en' ? 'Failed to delete dashboard' : '删除仪表盘失败');
+    } finally {
+      load();
+    }
   }
   function openNewKb() { setKbEdit(null); setKbOpen(true); }
   function openEditKb(item) { setKbEdit(item); setKbOpen(true); }

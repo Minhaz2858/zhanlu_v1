@@ -147,7 +147,7 @@ export default function FilesView({ scope = 'all' }) {
           project: task.project || null,
           project_id: task.project_id || null,
           session_id: task.session_id || null,
-          // Resolve to the real producer agent (e.g. "ecisco_bi_assistant")
+          // Resolve to the real producer agent
           // via task.agent_id → AgentApp.name. Falls back to the generic
           // "automation_agent" only when the agent is missing/renamed, so
           // the dropdown can still show *something* rather than "(none)".
@@ -316,8 +316,9 @@ export default function FilesView({ scope = 'all' }) {
     }
   }
   async function remove(item) {
-    // Dashboard apps have no delete endpoint yet — skip (the record is owned
-    // by the chat pipeline; T6 adds the versioned delete flow).
+    // Full-stack dashboard apps are deleted from My Space → Dashboards via
+    // DELETE /api/dashboards/app-records/{slug}; FilesView does not manage
+    // the dashboard lifecycle.
     if (isDashboardApp(item)) return;
     await entityFor(item).delete(item.id);
     load();
