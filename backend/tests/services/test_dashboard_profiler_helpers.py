@@ -58,6 +58,10 @@ def test_shape_continuous_high_cardinality_numeric():
     assert infer_shape("number", 100, 90, 0.0, 100) == "continuous"
 
 
+def test_shape_numeric_low_cardinality_is_category():
+    assert infer_shape("number", 100, 10, 0.0, 100) == "category"
+
+
 def test_shape_high_cardinality_text_is_category():
     assert infer_shape("text", 1000, 500, 0.0, 1000) == "category"
 

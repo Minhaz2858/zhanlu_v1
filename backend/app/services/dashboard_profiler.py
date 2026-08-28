@@ -17,9 +17,8 @@ HARD DB-AGNOSTIC RULE (non-negotiable):
 from __future__ import annotations
 
 import re
-from datetime import datetime  # noqa: F401  (kept for API parity/future use)
 
-from app.services.db.base import quote_ident
+from app.services.db.base import _safe_jsonify, quote_ident
 from app.services.db.connector_factory import get_connector
 from app.services.db.schema_service import SchemaService
 from app.models.knowledge_base import KnowledgeBase
@@ -117,11 +116,11 @@ def profile_engine(
             # columns against the real schema up front for deterministic
             # per-column errors.
             cur.execute(f"PRAGMA table_info({tq})")
-            real_cols = {r[1] for r in cur.fetchall()}
+            real_cols = {str(r[1]).casefold() for r in cur.fetchall()}
 
             for col in columns[:max_columns]:
                 try:
-                    if col not in real_cols:
+                    if col.casefold() not in real_cols:
                         raise ValueError(f"Unknown column: {col!r}")
                     cq = quote_ident(col, "sqlite")
                     cur.execute(
@@ -132,12 +131,12 @@ def profile_engine(
                     stats = cur.fetchone()
                     cardinality = int(stats[0]) if stats and stats[0] is not None else 0
                     non_null = int(stats[1]) if stats and stats[1] is not None else 0
-                    min_value = stats[2] if stats else None
-                    max_value = stats[3] if stats else None
+                    min_value = _safe_jsonify(stats[2]) if stats else None
+                    max_value = _safe_jsonify(stats[3]) if stats else None
 
                     cur.execute(f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}")
                     samples = [r[0] for r in cur.fetchall()]
-                    top_values = [v for v in samples if v is not None][:3]
+                    top_values = [_safe_jsonify(v) for v in samples if v is not None][:sample_limit]
 
                     null_pct = (
                         1.0 - (non_null / result["row_count"])
@@ -243,8 +242,26 @@ def profile_kb(
             )
             result["row_count"] = int(rows[0]["row_count"]) if rows else 0
 
+            # Validate requested columns against the live schema up front.
+            # Some engines (SQLite especially) silently coerce unknown
+            # double-quoted identifiers into string literals inside
+            # aggregates, which would yield bogus "profiles" — fail
+            # deterministically instead of returning garbage.
+            try:
+                schema_info = SchemaService(db).describe_table(kb_id, table)
+                real_cols = {
+                    str(c.get("name") or c.get("column_name") or "").casefold()
+                    for c in schema_info.get("columns", [])
+                }
+            except Exception as e:
+                result["status"] = "error"
+                result["error_message"] = str(e)[:200]
+                return result
+
             for col in columns[:max_columns]:
                 try:
+                    if str(col).casefold() not in real_cols:
+                        raise ValueError(f"unknown column: {col}")
                     cq = quote_ident(col, dialect)
                     stats = conn.execute(
                         f"SELECT COUNT(DISTINCT {cq}) AS cardinality, "
@@ -255,15 +272,15 @@ def profile_kb(
                     s = stats[0] if stats else {}
                     cardinality = int(s.get("cardinality") or 0)
                     non_null = int(s.get("non_null") or 0)
-                    min_value = s.get("min_value")
-                    max_value = s.get("max_value")
+                    min_value = _safe_jsonify(s.get("min_value"))
+                    max_value = _safe_jsonify(s.get("max_value"))
 
                     sample_rows = conn.execute(
                         f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}",
                         max_rows=sample_limit, timeout_s=timeout_s,
                     )
                     sample_values = [r.get("sample_value") for r in sample_rows]
-                    top_values = [v for v in sample_values if v is not None][:3]
+                    top_values = [_safe_jsonify(v) for v in sample_values if v is not None][:sample_limit]
 
                     null_pct = (
                         1.0 - (non_null / result["row_count"])
