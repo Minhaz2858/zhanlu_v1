@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from app.services.tool_registry import registry
 from app.services.tool_handlers.fusion360_tool import _call
+from app.services.tool_handlers.fusion360_sketch_common import _CLOSE_SKETCH
 
 MM = "def mm(v):\n    return adsk.core.ValueInput.createByReal(v / 10.0)\n"
 
@@ -175,6 +176,7 @@ def _fusion360_sketch_circle(args, db, user_id):
         MM
         + f"sk = root.sketches.item({int(si)})\n"
         + f"sk.sketchCurves.sketchCircles.addByCenterRadius(adsk.core.Point3D.create({cx}, {cy}, 0), {r})\n"
+        + _CLOSE_SKETCH + "\n"
         + "print('OK circle')\n"
     )
     return _run(_apply_component(code, args.get("component_index")), db)
@@ -195,6 +197,7 @@ def _fusion360_sketch_rectangle(args, db, user_id):
         MM
         + f"sk = root.sketches.item({int(si)})\n"
         + f"sk.sketchCurves.sketchLines.addTwoPointRectangle(adsk.core.Point3D.create({x1}, {y1}, 0), adsk.core.Point3D.create({x2}, {y2}, 0))\n"
+        + _CLOSE_SKETCH + "\n"
         + "print('OK rectangle')\n"
     )
     return _run(_apply_component(code, args.get("component_index")), db)
@@ -222,6 +225,7 @@ def _fusion360_sketch_polygon(args, db, user_id):
         + "pts = [adsk.core.Point3D.create(cx + R * math.cos(math.radians(a)), cy + R * math.sin(math.radians(a)), 0) for a in range(0, 360, 360 // n)]\n"
         + "for i in range(n):\n"
         + "    lines.addByTwoPoints(pts[i], pts[(i + 1) % n])\n"
+        + _CLOSE_SKETCH + "\n"
         + "print('OK polygon')\n"
     )
     return _run(_apply_component(code, args.get("component_index")), db)
