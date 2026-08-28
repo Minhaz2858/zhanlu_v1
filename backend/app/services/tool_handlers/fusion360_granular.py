@@ -570,17 +570,26 @@ def _fusion360_verify_build(args, db, user_id):
     if contract_arg:
         try:
             from app.services.agent_tools import TOOL_CONTEXT  # plain global dict
-            _ctx = TOOL_CONTEXT.get() or {}
-        except Exception:
-            _ctx = {}
-        contract = _load_contract(db, contract_arg, _ctx.get("conversation_id"))
+            # TOOL_CONTEXT is a plain dict — dict.get() REQUIRES a key arg
+            # (zero-arg .get() raises TypeError and silently killed use_last).
+            _conversation_id = (
+                TOOL_CONTEXT.get("conversation_id")
+                if isinstance(TOOL_CONTEXT, dict)
+                else None
+            )
+        except Exception:  # noqa: BLE001 — context plumbing must never break the tool
+            _conversation_id = None
+        contract = _load_contract(db, contract_arg, _conversation_id)
         if contract is None:
             issues.append(
                 "no stored contract found for contract_id=%r — call "
                 "fusion360_declare_spec first" % contract_arg
             )
         else:
-            issues += _contract_issues(contract, bodies)
+            try:
+                issues += _contract_issues(contract, bodies)
+            except Exception as e:  # noqa: BLE001 — contract check must never crash the tool
+                issues.append(f"contract check failed: {e}")
     ok = not issues
     return {
         "success": True,
@@ -661,29 +670,70 @@ def _load_contract(db, contract_id: str, conversation_id: str | None) -> dict | 
         )
     else:
         row = q.filter(CadBuildContract.id == contract_id).first()
-    return row.contract_json if row else None
+    if row is None or row.contract_json is None:
+        return None
+    # Return a COPY — never hand the live ORM-held dict to callers (a later
+    # mutation/expire on the session would corrupt the stored contract).
+    return dict(row.contract_json)
+
+
+def _num(value, name: str, issues: list[str]) -> float | None:
+    """Defensively convert a declared dim to float; record an issue if not."""
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        issues.append(f"feature dim not numeric: {name}={value!r}")
+        return None
 
 
 def _feature_matches_body(feature: dict, body: dict, tol_mm: float = 0.5) -> list[str]:
     """Compare ONE declared feature against ONE body's bbox (mm, from cm).
-    kind hex: across_flats = min(width, depth); height = z span."""
+    kind hex: across_flats = min(width, depth); height = z span.
+    kind cylinder: diameter = the two near-equal bbox dims; height = z span.
+    kind box: width/height/depth map to the bbox w/h/d axes."""
     issues: list[str] = []
-    kind = (feature.get("kind") or "").lower()
+    kind = (feature.get("kind") or "").strip().lower()
     w = (body["max"][0] - body["min"][0]) * 10.0
     d = (body["max"][1] - body["min"][1]) * 10.0
     h = (body["max"][2] - body["min"][2]) * 10.0
     if kind == "hex":
         across = min(w, d)
-        if "across_flats" in feature and abs(across - float(feature["across_flats"])) > tol_mm:
-            issues.append(f"hex across_flats {across:.1f}mm != declared {feature['across_flats']}mm")
-        if "height" in feature and abs(h - float(feature["height"])) > tol_mm:
-            issues.append(f"hex height {h:.1f}mm != declared {feature['height']}mm")
+        if "across_flats" in feature:
+            exp = _num(feature["across_flats"], "across_flats", issues)
+            if exp is not None and abs(across - exp) > tol_mm:
+                issues.append(f"hex across_flats {across:.1f}mm != declared {feature['across_flats']}mm")
+        if "height" in feature:
+            exp = _num(feature["height"], "height", issues)
+            if exp is not None and abs(h - exp) > tol_mm:
+                issues.append(f"hex height {h:.1f}mm != declared {feature['height']}mm")
     elif kind == "cylinder":
-        dia = (w + d) / 2.0
-        if "diameter" in feature and abs(dia - float(feature["diameter"])) > tol_mm:
-            issues.append(f"cylinder diameter {dia:.1f}mm != declared {feature['diameter']}mm")
-        if "height" in feature and abs(h - float(feature["height"])) > tol_mm:
-            issues.append(f"cylinder height {h:.1f}mm != declared {feature['height']}mm")
+        # The two near-equal bbox dims = diameter; the odd one = length.
+        # (same logic as expected_dimensions: rotation/axis-proof)
+        dims_mm = [w, d, h]
+        best = min(((0, 1), (0, 2), (1, 2)),
+                   key=lambda p: abs(dims_mm[p[0]] - dims_mm[p[1]]))
+        dia = (dims_mm[best[0]] + dims_mm[best[1]]) / 2.0
+        if "diameter" in feature:
+            exp = _num(feature["diameter"], "diameter", issues)
+            if exp is not None and abs(dia - exp) > tol_mm:
+                issues.append(f"cylinder diameter {dia:.1f}mm != declared {feature['diameter']}mm")
+        if "height" in feature:
+            exp = _num(feature["height"], "height", issues)
+            if exp is not None and abs(h - exp) > tol_mm:
+                issues.append(f"cylinder height {h:.1f}mm != declared {feature['height']}mm")
+    elif kind == "box":
+        # width (alias: length) -> w, depth -> d, height -> h
+        for label, actual, keys in (
+            ("width", w, ("width", "length")),
+            ("depth", d, ("depth",)),
+            ("height", h, ("height",)),
+        ):
+            for key in keys:
+                if key in feature:
+                    exp = _num(feature[key], key, issues)
+                    if exp is not None and abs(actual - exp) > tol_mm:
+                        issues.append(f"box {label} {actual:.1f}mm != declared {feature[key]}mm")
+                    break
     else:
         issues.append(f"unsupported contract kind: {kind}")
     return issues
@@ -693,6 +743,8 @@ def _contract_issues(contract: dict, bodies: list[dict]) -> list[str]:
     """Greedy nearest-match: each feature must match at least one body."""
     issues: list[str] = []
     features = contract.get("features") or []
+    if not features:
+        return ["contract has no features"]
     used: set[int] = set()
     for i, feat in enumerate(features):
         best = None

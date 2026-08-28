@@ -83,9 +83,15 @@ def _validate_spec(args: dict) -> str | None:
     features = args.get("features")
     if not isinstance(features, list) or not features:
         return "features must be a non-empty list of feature objects"
+    # Contract verification (_feature_matches_body) only implements these
+    # kinds — declare-time validation must match verify-time capability.
+    supported = {"hex", "box", "cylinder"}
     for i, feat in enumerate(features):
         if not isinstance(feat, dict) or not str(feat.get("kind") or "").strip():
-            return f"features[{i}] must be an object with a non-empty 'kind' (hex, box, cylinder, sphere, torus, tube)"
+            return f"features[{i}] must be an object with a non-empty 'kind' (hex, box, cylinder)"
+        kind = str(feat.get("kind") or "").strip().lower()
+        if kind not in supported:
+            return f"unsupported contract kind: {kind} (contract verification supports hex, box, cylinder)"
     return None
 
 
@@ -177,7 +183,7 @@ FUSION360_DECLARE_SPEC_SCHEMA = {
         "description": (
             "Declare the design-intent contract for the CURRENT build BEFORE any "
             "modeling tool call. features = one object per sub-part/body with 'kind' "
-            "(hex, box, cylinder, sphere, torus, tube) plus its dimensions in mm "
+            "(hex, box, cylinder) plus its dimensions in mm "
             "(e.g. {kind:'hex', across_flats:8}, {kind:'cylinder', diameter:5, "
             "height:20}). The backend stores the contract and verify_build validates "
             "the live geometry against it — the model cannot fudge the spec. Returns "
