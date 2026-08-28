@@ -66,8 +66,9 @@ def render_html_deck(plan: DeckPlan, ctx: ExportContext) -> bytes:
     if not slide_htmls:
         raise RenderError("no slides could be rendered as HTML")
 
-    # 2. Build printable index.html
-    stage_html = build_stage(slide_htmls)
+    # 2. Build printable index.html (source footer baked in for image-fill)
+    source_label = getattr(ctx, "source", "") or getattr(ctx, "source_label", "") or ""
+    stage_html = build_stage(slide_htmls, source_label=source_label)
 
     # 3. Convert to PPTX (image fill)
     try:

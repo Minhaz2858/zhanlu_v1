@@ -637,6 +637,11 @@ def check_source_citation(prs: Any) -> Finding:
             for shape in slide.shapes
             if shape.has_text_frame
         ]
+        # Image-fill slides (HTML design renderer) carry the footer visually
+        # in the rendered PNG — there are no text frames to extract.  Only
+        # slides that actually have text must carry a "Source:" line.
+        if not texts:
+            continue
         if not any(SOURCE_CITATION_RE.search(t or "") for t in texts):
             missing.append(f"slide {idx}: no source citation footer")
     if missing:

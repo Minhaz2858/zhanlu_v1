@@ -199,3 +199,17 @@ def test_source_line_anywhere_in_frame_counts():
     tb.text_frame.paragraphs[0].add_run().text = "Findings"
     tb.text_frame.add_paragraph().text = "Source: Market Research Data"
     assert check_source_citation(prs).level == "PASS"
+
+
+def test_build_stage_injects_source_footer():
+    """The HTML design stage bakes 'Source: <label>' into every slide so the
+    image-fill PPTX shows the citation visually."""
+    from app.services.artifacts.html_slide_generator import build_stage
+
+    html = build_stage(
+        ["<section class='slide'><h1>One</h1></section>",
+         "<section class='slide'><h1>Two</h1></section>"],
+        source_label="Market Research Data",
+    )
+    assert html.count("Source: Market Research Data") == 2
+    assert "source-footer" in html

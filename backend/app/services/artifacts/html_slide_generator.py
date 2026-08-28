@@ -542,20 +542,53 @@ html, body {
 """
 
 
-def build_stage(slide_htmls: List[str]) -> str:
+def build_stage(slide_htmls: List[str], source_label: str = "") -> str:
     """Wrap a list of per-slide HTML strings into a printable index.html.
 
     The output is a full HTML document LibreOffice can convert to PDF
     (one page per slide) and python-pptx can then turn into a 16:9 deck
     of image-fill slides.
+
+    ``source_label`` (when non-empty) is baked into every slide as a
+    ``.source-footer`` element so the rendered PNG carries the citation
+    visually — the image-fill PPTX has no text frames to audit, so the
+    footer must be part of the image.
     """
+    footer_css = """
+.source-footer {
+  position: absolute;
+  left: 64px;
+  bottom: 40px;
+  font-family: 'Work Sans', sans-serif;
+  font-size: 22px;
+  color: rgba(255,255,255,0.55);
+  letter-spacing: 0.02em;
+}
+"""
     body = "\n".join(slide_htmls)
+    if source_label:
+        footer = (
+            "<div class='source-footer'>Source: "
+            + source_label.replace("<", "&lt;").replace(">", "&gt;")
+            + "</div>"
+        )
+        # inject before the closing </section> of every slide
+        import re as _re
+
+        body = _re.sub(
+            r"</section>",
+            footer + "</section>",
+            body,
+        )
+        _STAGE_CSS_FULL = _STAGE_CSS + footer_css
+    else:
+        _STAGE_CSS_FULL = _STAGE_CSS
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <title>Generated Deck</title>
-<style>{_STAGE_CSS}</style>
+<style>{_STAGE_CSS_FULL}</style>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=Space+Grotesk:wght@400;500&family=Manrope:wght@400;500;800&family=Syne:wght@700;800&family=Fraunces:wght@400;700&family=Work+Sans:wght@400;500&family=Caveat&family=DM+Serif+Display&family=DM+Sans&family=Plus+Jakarta+Sans&family=Orbitron&family=Rajdhani&family=JetBrains+Mono&family=Crimson+Pro&family=Source+Sans+3:wght@400;500&display=swap" rel="stylesheet">
