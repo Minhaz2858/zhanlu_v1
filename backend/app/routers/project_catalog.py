@@ -82,6 +82,63 @@ def _bound_kbs(db: Session, project: Any) -> list[Any]:
     )
 
 
+def clone_kb_for_project(
+    db: Session, kb_id: str, new_project_id: str, include_deleted: bool = False
+):
+    """Scoped copy of a KB for another project (app isolation rule).
+
+    Never repoints another project's KB: creates a NEW KnowledgeBase row
+    (fresh uuid) bound to ``new_project_id``, leaving the source row fully
+    intact. Content fields (name, description, type, source_kind, file/db
+    connection fields, item_count, status) are copied from the source.
+
+    ``include_deleted=True`` allows cloning from a soft-deleted source row
+    (used when the content must be preserved for a new project without
+    reviving the source project's row). Default keeps the helper safe.
+    """
+    from app.models.knowledge_base import KnowledgeBase
+
+    q = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id)
+    if not include_deleted:
+        q = q.filter(KnowledgeBase.is_deleted == False)  # noqa: E712
+    src = q.first()
+    if src is None:
+        raise ValueError(f"KnowledgeBase {kb_id!r} not found")
+
+    copy = KnowledgeBase(
+        name=src.name,
+        project=None,  # legacy name-binding column stays empty; FK is authoritative
+        project_id=new_project_id,
+        description=src.description,
+        type=src.type,
+        source_kind=src.source_kind,
+        db_type=src.db_type,
+        host=src.host,
+        port=src.port,
+        database_name=src.database_name,
+        schema=src.schema,
+        username=src.username,
+        password=src.password,
+        api_url=src.api_url,
+        file_type=src.file_type,
+        file_url=src.file_url,
+        item_count=src.item_count,
+        status=src.status,
+        indexing_status=src.indexing_status,
+        chunk_count=src.chunk_count,
+        index_error=src.index_error,
+        last_indexed_at=src.last_indexed_at,
+        catalog_status=src.catalog_status,
+        created_by_id=src.created_by_id,
+        org_id=src.org_id,
+        app_id=src.app_id,
+    )
+    db.add(copy)
+    db.commit()
+    db.refresh(copy)
+    return copy
+
+
 # ── router ─────────────────────────────────────────────────────────────────
 
 def register_project_catalog_router() -> APIRouter:
