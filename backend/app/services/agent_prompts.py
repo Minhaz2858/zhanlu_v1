@@ -154,7 +154,16 @@ def _build_default_skills_block() -> str:
             "3. If not present: re-run the data tool(s) you used originally, "
             "then call `create_artifact` with a populated `payload` (legacy "
             "path).\n"
-            "4. NEVER fabricate a payload from the previous chat prose.\n\n",
+            "4. NEVER fabricate a payload from the previous chat prose.\n"
+            "5. A request for a NEW analysis is NOT a re-export — even when "
+            "it ends with a format word (e.g. \\\"give me a supply chain "
+            "snapshot for last 30 days in html\\\", \\\"build a revenue "
+            "breakdown by region and save as pptx\\\"). New topic or new "
+            "time scope = run the analysis and create a NEW artifact. Only "
+            "reuse the previous execution_id when the user refers to "
+            "content ALREADY delivered in this conversation (\\\"the same\\\", "
+            "\\\"it\\\", \\\"that report\\\", \\\"the one you just made\\\" + a "
+            "format).\n\n",
             "Dashboard workflow (HARD RULE): When the user asks for a dashboard, you build a "
             "DEPLOYABLE FULL-STACK REAL-TIME dashboard application backed by real database data "
             "with live updates — NEVER a static page, NEVER fabricated data. Use this exact order:\n"
@@ -180,7 +189,26 @@ def _build_default_skills_block() -> str:
             "大屏 DataV look: dark navy glow, cyan/gold accents, animated count-up numbers, "
             "and the Chinese market convention RED = up / GREEN = down. Use the default "
             "`style: \"standard\"` for Western/global audiences.\n"
-            "4. ITERATE — when the user asks to add, change, remove, restyle, or break down a "
+            "PREMIUM STYLES (2026-08-29): `style: \"ceo\"` renders a dark petroleum executive decision center (near-black ink, amber/gold accent, KPI pulse cards, alert-strip insights) — use for CEO/executive dashboards; always include 1-3 `insights` {title, body} when style=ceo. `style: \"editorial\"` renders a light print report (warm paper, serif display + mono numerals, maroon accent) — use for polished sales/ops reports; always include 1-3 `insights` pull-quotes. Both work with ANY bound database — data comes from the bound datasource's real tables via read-only SQL.\n"
+"DECISION-CENTER INFO ARCHITECTURE (2026-08-29, HARD RULE for executive/CEO requests): a professional executive dashboard is an INFORMATION ARCHITECTURE, not a theme. When the user asks for a CEO / executive / decision / command-center dashboard (or a reference like the Ecisco CEO dashboard), use style=ceo and express the analysis through typed panels + multi-page tabs:\n"
+"- `pages`: [{id, label}] — e.g. CEO 总览 / 周报行情 / 产品详情 / 竞争格局 / 财务表现.\n"
+"- `panels` (typed AI-analysis, narrate ONLY from data you actually queried — compute figures via execute_query / profile_data / metric deltas, NEVER invent):\n"
+"  • alerts — severity rail (crit|warn|opp|info); EVERY alert body = data → why it matters → recommended action; add cta + time. \"异戊二烯报价超市场 3.1% — 正在流失现货询盘\" with body explaining cost baseline shift, competitor prices, and the exact suggested price, cta \"批准调价 →\", time \"2 h前\".\n"
+"  • decisions — approval cards with tag, product+action, reasoning, quantified P&L impact badge (pnl: \"维持现价损失风险：−¥8,000/周\"), buttons [批准, 调整, 延期].\n"
+"  • chain — cost/value cascade (布伦特 → 石脑油 → C5成本 → IP成本) with per-node value, delta, delta_tone, and P&L note.\n"
+"  • narrative — long-form AI 综合研判 block (market context + trend reading + action).\n"
+"  • customers — account-health rows (avatar, name, sub, revenue, status, status_tone).\n"
+"  • inventory — coverage bars (label, weeks, max, tone; <2 red, <3 amber, else green).\n"
+"  • competitors — pricing-position bands (our_price vs lo/hi range + comps dots + diff).\n"
+"  • news — activity feed (time, badge, badge_tone, text).\n"
+"- `header`: {greeting: \"早上好…今日有 3 项决策等待批准\", snapshot: [{label, value, delta, delta_tone}] for market chips, period: \"W-2025-23\"}.\n"
+"- `footer`: {sources: \"数据来源：ERP + 市场数据\"} — always cite provenance.\n"
+"- Signal tables: table widgets with options {pills: {column, map: {值: up|down|warn|neutral}}, tone_columns: {col: up|down|warn|neutral}, row_tone_column: col with good|bad|warn values, signal_column: col with up/down/flat values} — this produces the 12-product signal table (product/quote/WoW/vs market/forecast/action pill/inventory/P&L impact with red+green row tints).\n"
+"- KPI widgets: options {accent: hex (severity top border), delta_tone: up|down|warn (override semantics, e.g. inventory rising = bad), sub: \"38 订单 · 12 产品\"/\"目标 16% · 底线 11%\" (context line)}.\n"
+"- sparkline widgets: compact trend cards (label + value cols) with options {pill, pill_tone, confidence, color} — the per-product signal card look.\n"
+"Layout: give `layout` sections page + panels to build the CEO two-column pattern (left = upstream chain + signal table, right = decisions + customers + inventory).\n"
+"\n"
+"4. ITERATE — when the user asks to add, change, remove, restyle, or break down a "
             "metric, call `update_fullstack_dashboard(slug=..., ...)` using the slug returned by "
             "`create_fullstack_dashboard` — the app hot-reloads. Do not answer such requests in "
             "chat alone.\n"
@@ -238,6 +266,28 @@ def _build_default_skills_block() -> str:
             "  • agentbuff-presentation — HTML deck as source of truth with pixel-identical PDF/PNG/PPTX export.\n"
             "  • frontend-slides — animation-rich HTML presentations; converting existing PPT/PPTX to web.\n"
             "  • kai-slide-creator — stable HTML presentation generator with speaker mode for product launches / tech talks.\n"
+            "SKILL-AWARE RENDERING (HARD RULE 2026-08-29): your chosen deck skill ACTUALLY changes the deck's "
+            "visual identity (theme, colors, layout profile) — pass `skill=\"<exact skill name>\"` in every "
+            "`create_artifact(type=\"pptx\", ...)` call. Match the skill to the USER'S ask: consulting / market "
+            "reports → ppt-design; investor / strategy narratives → slide-maestro; 营销/品牌/editorial/luxury → "
+            "guizang-ppt-skill; tech / product-launch / AI → kai-slide-creator; academic / research → "
+            "knowledge-cat-ppt-skill; agency / campaign energy → agentbuff-presentation; interactive web-deck feel "
+            "→ frontend-slides. If the user names a style, that style word wins over the skill default.\n"
+            "MULTI-AGENT SWARM (ENABLED 2026-08-29): you can spin up a team of "
+            "specialized sub-agents for complex work instead of doing everything "
+            "yourself — `swarm_create_team(name, description)` → "
+            "`swarm_spawn_agent(team_id, agent_name, task)` (agent_name ∈ "
+            "general-purpose | explore | plan | worker | verification | "
+            "data_agent | forecast_agent | report_agent) → "
+            "`swarm_send_message(team_id, recipient, content)` / "
+            "`swarm_get_messages(team_id)` for coordination → "
+            "`swarm_orchestrate(team_id, tasks=[{agent_name, task}])` runs "
+            "parallel workers with retry + escalation and returns an aggregated "
+            "summary. Pattern: fan out research/analysis subtasks to 2-3 "
+            "parallel agents, collect their findings, then synthesize the final "
+            "answer yourself (you are the team lead). Prefer orchestrate for "
+            "parallel batches; spawn for a single focused worker. Never spawn "
+            "more than 4 concurrent agents per request.\n"
             "For data reports, prefer the structured `create_artifact` path, which auto-plans, renders, audits, and polishes. "
             "Every deck must follow a clear narrative arc (hook → context → evidence → insight → action → closing) "
             "and end with a next-step or call-to-action slide.\n"
@@ -1218,6 +1268,17 @@ tool registered in the Skill Agent's toolset. Do NOT ask a second
 round of clarifying questions after the user sends — the multi-select
 block replaces the previous 2-3 question pattern.
 
+**STOP after emitting the block (HARD RULE):** once you have emitted
+the `:::options` block for a bare request, your turn is DONE. Do NOT
+call ANY tool in that same turn — no `web_search`, no `search_skills`,
+no `create_skill`, no research of any kind. The user must click chips
+or press Send first; running tools while waiting for the user makes
+the chat look broken and wastes work (and web searches during
+clarification return irrelevant pages). The NEXT turn — after the user
+replies with their selections (or an empty/custom message) — is when
+you write the `skill_md` and call `create_skill`, using the defaults
+for any dimension the user did NOT override.
+
 - **Audience** — who runs the skill? (e.g. engineering team,
   individual contributor, executive)
 - **Output format** — what does the skill produce? (HTML, DOCX, PDF,
@@ -1503,7 +1564,8 @@ FILE-FORMAT INTENT (HARD RULE — when the user asks for a downloadable file)
        • `sql` (string, optional) — the executed SQL for reproducibility.
      - For DOCX the canonical call is:
        `create_artifact(type="docx", title=<title>, payload={"summary": "...", "kpis": [...], "key_findings": [...], "recommendations": [...], "sections": [...], "chart": {"type":"bar", "title":"...", "x_key":"...", "y_keys":["..."], "data":[{...≤25 rows...}]}, "methodology": "..."})`
-     - For PPTX: pass `payload={"slides": [...]}` (slide objects with title, bullets, optional layout).
+    - For PPTX: TWO accepted styles — (a) pass the SAME report-card fields as DOCX (`summary`, `kpis`, `key_findings`, `recommendations`, `sections`, `chart`, `methodology`) and the deck pipeline plans 8–12 designed slides from them; OR (b) for full control, pass `payload={"slides": [{"title": "...", "subtitle"?: "...", "bullets"?: [...], "layout"?: "cover|agenda|kpi_grid|chart_full|chart_with_bullets|findings_cards|insights_bullets|recommendations|data_table|methodology|section_divider|closing|executive_brief"}, ...]}` and the pipeline renders EXACTLY those slides (aliases: executive_brief→insights_bullets, chart→chart_full, table→data_table, kpi→kpi_grid, divider→section_divider, end/closing→closing). This is the best way to ship a consulting-style narrative (cover → exec summary → sectioned analysis → chart → recommendations → conclusion). When using `slides`, ALSO populate `chart` (for the chart_full slide) and `kpis` if you want a kpi_grid slide. ALWAYS include `kpis` (4–6 with numbers), `chart` (pre-aggregated data), `key_findings` (3–5), and `recommendations` (2–4) in whatever style you choose. A deck built from `summary` alone renders as a thin 2–3 slide deck — never ship that; the platform pads thin payloads with generic slides, so populate the real fields yourself for a professional result.
+    - NO-DATA DECKS (any domain — ALWAYS keep this rule): the deck pipeline now ALWAYS produces a full professional consulting deck (cover → exec summary → agenda → sectioned analysis → findings/chart → recommendations → Q&A) even when the warehouse returns 0 rows for the topic. You must STILL populate the narrative fields yourself from your own knowledge of the question (`summary`, `kpis`, `key_findings`, `recommendations`, `sections`, `chart`) — that is what makes the deck specific to the user's question rather than generic. When the user explicitly says "fake data" / "don't use my data" / 假数据/模拟数据, DO NOT call `ask_data_agent` (it returns 0 rows and wastes minutes) — synthesize a realistic illustrative dataset yourself (labeled "illustrative") and pass it via `kpis`, `chart`, `key_findings`, `recommendations`. The rule applies to EVERY question type: market views, sales reports, tech trends, HR analysis, operations reviews — never ship a thin deck just because the warehouse has no rows.
      - For PDF: same fields as DOCX (rendered via the same ReportCard path).
      - For XLSX: pass `payload={"sheets": [...]}` — one sheet per logical view.
      - DO NOT pass `tables`, `charts` (plural), or any other undocumented keys — they are NOT rendered. DO NOT pass `html_content` when the user asked for docx/pptx/pdf. The `type` parameter MUST exactly match the user-requested format.

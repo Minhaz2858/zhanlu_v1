@@ -459,6 +459,12 @@ DEFAULT_TOOLS_BY_AGENT: dict[str, list[str]] = {
         # agent answers "what if brent rises 5%?" with the causal-chain
         # elasticity math (no dashboard UI; scenario questions in chat).
         "forecast_what_if",
+        # Phase 9: multi-agent swarm — chat agent can create teams, spawn
+        # sub-agents, exchange messages, orchestrate parallel workers.
+        "swarm_create_team", "swarm_spawn_agent",
+        "swarm_send_message", "swarm_get_messages",
+        "swarm_list_teams", "swarm_scratch_set", "swarm_scratch_get",
+        "swarm_orchestrate",
     ],
     # Phase 9 will expand this and add a "power_user" agent; kept in sync
     # via DEFAULT_POWER_USER_TOOLS in system_agents.py.

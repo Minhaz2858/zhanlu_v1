@@ -21,6 +21,13 @@ from app.services.swarm.mailbox import (
     register_role,
     spawn_subagent,
 )
+from app.services.swarm.team_registry import (
+    Team,
+    TeamRegistry,
+    SwarmCoordinator,
+    get_team_registry,
+    get_swarm_coordinator,
+)
 
 __all__ = [
     "Handoff",
@@ -31,4 +38,9 @@ __all__ = [
     "list_roles",
     "register_role",
     "spawn_subagent",
+    "Team",
+    "TeamRegistry",
+    "SwarmCoordinator",
+    "get_team_registry",
+    "get_swarm_coordinator",
 ]

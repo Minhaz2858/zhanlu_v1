@@ -37,9 +37,6 @@ ALL_TOOL_NAMES = [
     "forecast_discover", "forecast_run", "forecast_get",
     "forecast_accuracy", "forecast_rules", "forecast_report", "forecast_ppt",
     "ask_forecast_agent", "ask_report_agent",
-    # EDIA pipeline delegation (Ecisco BI project)
-    "ask_orchestrator", "ask_perception", "ask_rag_research",
-    "ask_diagnosis", "ask_pricing",
     # Web
     "web_search", "web_extract", "x_search", "url_safety",
     # Memory / planning
@@ -85,6 +82,20 @@ ALL_TOOL_NAMES = [
     "mcp", "mcp_oauth", "mcp_oauth_manager",
     # Admin
     "update_env_config", "docker_compose_restart", "cronjob",
+    # Institutional-grade research-analyst pipeline (2026-08-25).
+    # Universal directive tells the LLM to call comprehensive_data
+    # BEFORE create_artifact, but it can only do that if the tool
+    # is actually in the agent's toolset. Adding both the new name
+    # AND the legacy alias covers any model-side confusion.
+    "comprehensive_data",
+    "collect_enterprise_data",
+    # Phase 9: multi-agent swarm (team creation / spawning / messaging /
+    # orchestration). Registered in swarm_tools.py; gated by the
+    # AGENT_HARNESS_ENABLED runtime switch for the harness execution path.
+    "swarm_create_team", "swarm_spawn_agent",
+    "swarm_send_message", "swarm_get_messages",
+    "swarm_list_teams", "swarm_scratch_set", "swarm_scratch_get",
+    "swarm_orchestrate",
 ]
 
 # 2026-07-28: Skill Agent must not call `create_artifact` to produce
@@ -300,7 +311,7 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "retention_days": 30,
             },
             # Hidden from the agent picker, My Space, and the active-
-            # agent chip — same as ecisco_bi_assistant. Chats that
+            # agent chip. Chats that
             # originate from the Automation dialog / draft card auto-
             # bind to this agent via Chat.jsx's isAutomationOrigin
             # check; other chats keep their current agent.
@@ -342,6 +353,13 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                     "update_env_config", "docker_compose_restart",
                     "create_artifact",
                     "execute_automation",  # chat can trigger user's own tasks
+                    # Phase 9: multi-agent swarm — the chat agent can create
+                    # teams, spawn sub-agents, exchange messages, and
+                    # orchestrate parallel workers (AGENT_HARNESS_ENABLED).
+                    "swarm_create_team", "swarm_spawn_agent",
+                    "swarm_send_message", "swarm_get_messages",
+                    "swarm_list_teams", "swarm_scratch_set", "swarm_scratch_get",
+                    "swarm_orchestrate",
                 ]),
             },
             **_BASE_HARNESS,
@@ -407,92 +425,6 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "allowed_domains": [],
                 "retention_days": 30,
             },
-        },
-        # ── Ecisco BI Assistant Agent ────────────────────────────────────
-        # Default agent for the Ecisco BI project.  Replaces the old
-        # ``orchestrator_agent`` and ``ecisco_bi`` single-agent configs.
-        # Covers the full EDIA pipeline: perception, RAG research,
-        # diagnosis, forecast, pricing, decision, knowledge graph,
-        # weekly report, ERP writeback, and intelligence layers.
-        # Uses hybrid routing: direct Python calls for fast paths,
-        # delegation tools for complex reasoning.
-        # Auto-selected when the user is in the Ecisco BI project.
-        {
-            "name": "ecisco_bi_assistant",
-            "description": (
-                "Ecisco BI Assistant — default general-purpose agent for "
-                "the Ecisco BI C5/C9 petrochemical domain intelligence "
-                "platform. Covers market perception, diagnosis, forecasting, "
-                "pricing, decision, knowledge graph, weekly reports, ERP "
-                "writeback, and intelligence layers. Uses hybrid routing: "
-                "direct Python service calls for fast paths, delegation "
-                "tools for complex multi-step reasoning."
-            ),
-            "project": "Ecisco BI",
-            "capabilities": [
-                "orchestration", "perception", "diagnosis", "forecasting",
-                "pricing", "decision", "knowledge_graph", "reporting",
-                "weekly_report", "erp_writeback", "data_query",
-                "intelligence", "web_research",
-            ],
-            "model": "gpt-4o",
-            "agent_type": "sequential",
-            "topology": "standalone",
-            "status": "active",
-            "tool_config": {
-                "enabled_tools": _tools_in_registry(registry, list(dict.fromkeys(
-                    ALL_TOOL_NAMES +
-                    # EDIA pipeline delegation tools (14 ask_* tools)
-                    [
-                        "ask_perception", "ask_rag_research", "ask_diagnosis",
-                        "ask_forecast_agent", "ask_pricing", "ask_data_agent",
-                        "ask_report_agent", "ask_intelligence",
-                        "ask_knowledge_graph", "ask_decision", "ask_macro_override",
-                        "ask_erp_kpi", "ask_erp_writeback",
-                        # Direct forecast read path
-                        "forecast_brief",
-                        # What-if scenario simulation (Brent/Naphtha shocks)
-                        "forecast_what_if",
-                    ]
-                ))),
-            },
-            **_BASE_HARNESS,
-            "manifest_json": {
-                "agent_name": "ecisco_bi_assistant",
-                "version": "1.1.0",
-                "mission": "Serve as the default Ecisco BI assistant for C5/C9 petrochemical domain intelligence, covering the full EDIA 6-stage pipeline",
-                "task_scope": [
-                    "market_analysis", "forecasting", "pricing",
-                    "decision", "diagnosis", "weekly_report",
-                    "knowledge_graph", "erp_writeback", "data_analysis",
-                    "dashboard", "data_query", "automation",
-                ],
-                "boundaries": {
-                    "allowed": ["all_registered_tools"],
-                    "forbidden": [],
-                },
-                "risk_tier": "low",
-                "created_by": "system",
-            },
-            "policy_profile": {
-                "risk_tier": "low",
-                "requires_confirmation": False,
-                "max_concurrent_calls": 5,
-                "rate_limit_per_minute": 30,
-                "allowed_domains": [],
-                "retention_days": 30,
-            },
-            # ecisco_bi_assistant is a silent platform system agent.
-            # Frontend/src/pages/Chat.jsx auto-selects it when the user
-            # opens a chat in the "Ecisco BI" project, so users never need
-            # to see it. Hiding it via is_system=True means
-            # filterUserAgents() drops it from My Space, the agent picker,
-            # the active-agent chip, and the Company Agents section. The
-            # flag is also enforced at the API layer (see
-            # entity_service.soft_delete_record) so it cannot be removed
-            # through any HTTP path. ensure_system_agents() back-fills
-            # this flag on every backend startup.
-            "is_system": True,
         },
     ]
 
@@ -634,120 +566,158 @@ def ensure_system_agents(db=None) -> None:
         else:
             logger.debug("System agents already present — nothing to do")
 
-        # ── Ensure the Ecisco BI project exists and the ecisco_bi_assistant
-        # is linked to it via ProjectAgent.  This makes the EDIA pipeline
-        # available on every deployment without requiring a manual re-seed.
-        #
-        # The Ecisco BI project is a *system* project (is_system=True) and
-        # has created_by_id=NULL, so the entity_service.py filter
-        # ``(created_by_id == owner_id) OR created_by_id IS NULL`` includes
-        # it in every user's "My Space → Projects" listing.
+        # ── Purge removed default BI agent (2026-08-27) ────────────────
+        # The enterprise_bi_assistant / ecisco_bi_assistant /
+        # orchestrator_agent default agents were REMOVED from the platform
+        # (industry-specific default). Any rows left in existing DBs
+        # are hard-deleted here (plus their ProjectAgent links and the
+        # system "Enterprise BI" project that only existed to host them).
+        # Idempotent — runs on every startup.
         try:
             from app.models.project import Project
             from app.models.project_agent import ProjectAgent
 
-            # ── One-time rename: orchestrator_agent → ecisco_bi_assistant ──
-            # Idempotent — renames any remaining old rows on each startup.
-            # If both old and new rows exist, deletes the old one (dedup).
-            old_agent = db.query(AgentApp).filter(
-                AgentApp.name == "orchestrator_agent",
-                AgentApp.is_deleted == False,
-            ).first()
-            new_agent_check = db.query(AgentApp).filter(
-                AgentApp.name == "ecisco_bi_assistant",
-                AgentApp.is_deleted == False,
-            ).first()
-            if old_agent and new_agent_check:
-                # Both exist — soft-delete the old row, keep the new one.
-                old_agent.is_deleted = True
+            _REMOVED_AGENT_NAMES = (
+                "ecisco_bi_assistant",
+                "enterprise_bi_assistant",
+                "orchestrator_agent",
+            )
+            removed_agent_ids: list[str] = []
+            for _name in _REMOVED_AGENT_NAMES:
+                _rows = db.query(AgentApp).filter(
+                    AgentApp.name == _name,
+                    AgentApp.is_deleted == False,  # noqa: E712
+                ).all()
+                for _row in _rows:
+                    removed_agent_ids.append(str(_row.id))
+                    db.delete(_row)
+            if removed_agent_ids:
+                # Remove ProjectAgent links pointing at the deleted agents.
+                db.query(ProjectAgent).filter(
+                    ProjectAgent.agent_id.in_(removed_agent_ids)
+                ).delete(synchronize_session=False)
                 db.commit()
                 logger.info(
-                    "Dedup: soft-deleted leftover orchestrator_agent row "
-                    "(agent_id=%s, newer ecisco_bi_assistant at agent_id=%s)",
-                    old_agent.id, new_agent_check.id,
-                )
-            elif old_agent:
-                old_agent.name = "ecisco_bi_assistant"
-                db.commit()
-                logger.info(
-                    "Renamed orchestrator_agent → ecisco_bi_assistant "
-                    "(agent_id=%s)", old_agent.id,
+                    "Purged removed default BI agents (hard delete): %s",
+                    removed_agent_ids,
                 )
 
-            ecisco_project = db.query(Project).filter(
-                Project.name == "Ecisco BI",
-                Project.is_deleted == False,
-            ).first()
-            if not ecisco_project:
-                ecisco_project = Project(
-                    name="Ecisco BI",
-                    description=(
-                        "Ecisco BI — EDIA pipeline for C5/C9 petrochemical "
-                        "domain intelligence. Contains Ecisco BI Assistant, "
-                        "Perception, RAG Research, Diagnosis, Forecasting, "
-                        "Pricing, Decision, Knowledge Graph, Weekly Report, "
-                        "ERP Writeback, and Report Generation agents."
+            # Delete the system projects that only existed to host the
+            # removed default agents (is_system=True, created_by_id NULL).
+            # Legacy names: "Enterprise BI", "Ecisco BI".
+            # Cascade: dependent rows reference projects via FK, so delete
+            # them in dependency order first (hard delete, no orphans).
+            _bi_projects = db.query(Project).filter(
+                Project.name.in_(["Enterprise BI", "Ecisco BI"]),
+                Project.is_deleted == False,  # noqa: E712
+                Project.is_system == True,  # noqa: E712
+            ).all()
+            for _proj in _bi_projects:
+                from sqlalchemy import text as _sql_text
+                _pid = _proj.id
+                # Hard-delete ALL rows that reference this project, in every
+                # table that has a project_id column, plus the transitive
+                # children (kb_table_meta/kb_column_meta, chat_messages,
+                # dashboard_versions, automation_files/executions, agent
+                # bindings) which reference the project indirectly. FK checks
+                # are disabled for this transaction (SET LOCAL, auto-restored
+                # on commit) so delete order cannot block the purge.
+                db.execute(
+                    _sql_text("SET LOCAL session_replication_role = 'replica'")
+                )
+                # Tables with a direct project_id column.
+                _direct_tables = [
+                    "agent_conversations", "chat_sessions", "automation_tasks",
+                    "dashboards", "knowledge_bases", "project_agents",
+                    "project_memories", "user_files", "agent_apps",
+                ]
+                _has_col = (
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema='public' AND table_name=:t "
+                    "AND column_name='project_id'"
+                )
+                for _tbl in _direct_tables:
+                    _n = db.execute(
+                        _sql_text(_has_col), {"t": _tbl}
+                    ).scalar()
+                    if _n:
+                        db.execute(
+                            _sql_text(
+                                f"DELETE FROM {_tbl} WHERE project_id = :pid"
+                            ),
+                            {"pid": _pid},
+                        )
+                # Transitive children (no direct project_id) — delete via
+                # subquery from their parent. Missing tables are skipped.
+                _transitive = [
+                    (
+                        "kb_column_meta",
+                        "DELETE FROM kb_column_meta WHERE table_meta_id IN "
+                        "(SELECT id FROM kb_table_meta WHERE kb_id IN "
+                        "(SELECT id FROM knowledge_bases WHERE project_id = :pid))",
                     ),
-                    color="#8B5CF6",
-                    status="active",
-                    is_system=True,
-                    # created_by_id left NULL so the entity_service filter
-                    # surfaces this project in every user's listing.
+                    (
+                        "kb_table_relation",
+                        "DELETE FROM kb_table_relation WHERE kb_id IN "
+                        "(SELECT id FROM knowledge_bases WHERE project_id = :pid)",
+                    ),
+                    (
+                        "kb_table_meta",
+                        "DELETE FROM kb_table_meta WHERE kb_id IN "
+                        "(SELECT id FROM knowledge_bases WHERE project_id = :pid)",
+                    ),
+                    (
+                        "chat_messages",
+                        "DELETE FROM chat_messages WHERE session_id IN "
+                        "(SELECT id FROM chat_sessions WHERE project_id = :pid)",
+                    ),
+                    (
+                        "dashboard_versions",
+                        "DELETE FROM dashboard_versions WHERE dashboard_id IN "
+                        "(SELECT id FROM dashboards WHERE project_id = :pid)",
+                    ),
+                    (
+                        "automation_executions",
+                        "DELETE FROM automation_executions WHERE automation_task_id IN "
+                        "(SELECT id FROM automation_tasks WHERE project_id = :pid)",
+                    ),
+                    (
+                        "automation_files",
+                        "DELETE FROM automation_files WHERE automation_task_id IN "
+                        "(SELECT id FROM automation_tasks WHERE project_id = :pid)",
+                    ),
+                    (
+                        "agent_data_bindings",
+                        "DELETE FROM agent_data_bindings WHERE agent_app_id IN "
+                        "(SELECT id FROM agent_apps WHERE project_id = :pid)",
+                    ),
+                    (
+                        "agent_skill_bindings",
+                        "DELETE FROM agent_skill_bindings WHERE agent_app_id IN "
+                        "(SELECT id FROM agent_apps WHERE project_id = :pid)",
+                    ),
+                ]
+                _existing = {
+                    row[0]
+                    for row in db.execute(
+                        _sql_text(
+                            "SELECT table_name FROM information_schema.tables "
+                            "WHERE table_schema = 'public'"
+                        )
+                    ).fetchall()
+                }
+                for _tbl, _sql in _transitive:
+                    if _tbl in _existing:
+                        db.execute(_sql_text(_sql), {"pid": _pid})
+                db.delete(_proj)
+                db.commit()
+                logger.info(
+                    "Purged legacy BI system project (id=%s) — hosted removed default agent",
+                    _proj.id,
                 )
-                db.add(ecisco_project)
-                db.commit()
-                db.refresh(ecisco_project)
-                logger.info("Created Ecisco BI system project (id=%s)", ecisco_project.id)
-            else:
-                # Promote any pre-existing Ecisco BI row to system status
-                # so it surfaces in every user's listing.
-                if not getattr(ecisco_project, "is_system", False):
-                    ecisco_project.is_system = True
-                if ecisco_project.created_by_id is not None:
-                    ecisco_project.created_by_id = None
-                # Always force status='active' on the system project — a
-                # stale row from before this migration may have been
-                # archived by a user, which hides it from the default
-                # "active" filter in the My Space → Projects view.
-                if ecisco_project.status != "active":
-                    logger.info(
-                        "Un-archiving Ecisco BI project (was status=%r)",
-                        ecisco_project.status,
-                    )
-                    ecisco_project.status = "active"
-                db.commit()
-                logger.info("Promoted Ecisco BI project to is_system=True (id=%s)", ecisco_project.id)
-
-            # Link the ecisco_bi_assistant AgentApp to the Ecisco BI project
-            bio_agent = db.query(AgentApp).filter(
-                AgentApp.name == "ecisco_bi_assistant",
-                AgentApp.is_deleted == False,
-            ).first()
-            if bio_agent:
-                # Sync the legacy string field too
-                bio_agent.project = "Ecisco BI"
-                bio_agent.project_id = ecisco_project.id
-
-                # Ensure the ProjectAgent many-to-many row exists
-                existing_pa = db.query(ProjectAgent).filter(
-                    ProjectAgent.project_id == ecisco_project.id,
-                    ProjectAgent.agent_id == bio_agent.id,
-                ).first()
-                if not existing_pa:
-                    pa = ProjectAgent(
-                        project_id=ecisco_project.id,
-                        agent_id=bio_agent.id,
-                        role="primary",
-                    )
-                    db.add(pa)
-                    db.commit()
-                    logger.info(
-                        "Linked ecisco_bi_assistant to Ecisco BI project (agent_id=%s)",
-                        bio_agent.id,
-                    )
-        except Exception as _proj_err:
+        except Exception as _purge_err:
             db.rollback()
-            logger.warning("ensure_system_agents: Ecisco BI project ensure failed (non-fatal): %s", _proj_err)
+            logger.warning("ensure_system_agents: removed-agent purge failed (non-fatal): %s", _purge_err)
 
         # Eager provisioning: ensure a runtime agent exists for every
         # (org, app) that already has automation tasks, and rebind any

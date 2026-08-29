@@ -190,7 +190,7 @@ def _registry():
 
 
 def _handle_create_team(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_team_registry
+    from app.services.swarm.team_registry import get_team_registry
     name = (arguments.get("name") or "").strip()
     if not name:
         return {"success": False, "error": "name is required"}
@@ -200,7 +200,7 @@ def _handle_create_team(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_spawn_agent(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_swarm_coordinator
+    from app.services.swarm.team_registry import get_swarm_coordinator
     team_id = arguments.get("team_id")
     agent_name = arguments.get("agent_name")
     task = arguments.get("task") or ""
@@ -214,6 +214,8 @@ def _handle_spawn_agent(arguments: dict, db, user_id) -> dict:
             agent_name=agent_name,
             task=task,
             member_name=member_name,
+            db=db,
+            user_id=user_id,
         )
 
     import asyncio
@@ -231,7 +233,7 @@ def _handle_spawn_agent(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_send_message(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_team_registry
+    from app.services.swarm.team_registry import get_team_registry
     team_id = arguments.get("team_id")
     sender = arguments.get("sender") or "main"
     recipient = arguments.get("recipient")
@@ -250,7 +252,7 @@ def _handle_send_message(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_get_messages(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_team_registry
+    from app.services.swarm.team_registry import get_team_registry
     team_id = arguments.get("team_id")
     member_name = arguments.get("member_name")
     if not (team_id and member_name):
@@ -260,12 +262,12 @@ def _handle_get_messages(arguments: dict, db, user_id) -> dict:
         "success": True,
         "messages": [
             {
-                "id": m.id,
-                "sender": m.sender,
-                "recipient": m.recipient,
-                "content": m.content,
-                "summary": m.summary,
-                "timestamp": m.timestamp,
+                "id": m.get("id"),
+                "sender": m.get("sender"),
+                "recipient": m.get("recipient"),
+                "content": m.get("content"),
+                "summary": m.get("summary"),
+                "timestamp": m.get("timestamp") or m.get("created_date"),
             }
             for m in messages
         ],
@@ -274,7 +276,7 @@ def _handle_get_messages(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_list_teams(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_team_registry
+    from app.services.swarm.team_registry import get_team_registry
     teams = get_team_registry().list_teams()
     return {
         "success": True,
@@ -284,7 +286,7 @@ def _handle_list_teams(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_scratch_set(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_team_registry
+    from app.services.swarm.team_registry import get_team_registry
     team_id = arguments.get("team_id")
     key = arguments.get("key")
     value = arguments.get("value")
@@ -295,7 +297,7 @@ def _handle_scratch_set(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_scratch_get(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_team_registry
+    from app.services.swarm.team_registry import get_team_registry
     team_id = arguments.get("team_id")
     key = arguments.get("key")
     if not (team_id and key):
@@ -305,7 +307,7 @@ def _handle_scratch_get(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_orchestrate(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm import get_swarm_coordinator
+    from app.services.swarm.team_registry import get_swarm_coordinator
     from app.services.swarm.orchestrator import (
         SwarmOrchestrator, OrchestratedTask, OrchestrationPolicy,
     )
