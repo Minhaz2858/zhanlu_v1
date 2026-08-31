@@ -216,8 +216,6 @@ export default function FilesView({ scope = 'all' }) {
     ...agentEntities.map((a) => a.name).filter(Boolean),
     ...items.map((i) => i.agent_name).filter(Boolean),
   ])].sort();
-  const unreadCount = items.filter((i) => i.read === false).length;
-
   // Determine which files match the requested scope using the two-signal
   // rule: Project wins → AgentApp fallback → default 'personal'.
   // Files with no `project_id` fall back to the agent's `resource_type`
@@ -252,6 +250,11 @@ export default function FilesView({ scope = 'all' }) {
     if (sortBy === 'timeOnly') return dir * moment(a.updated_date).format('HHmmss').localeCompare(moment(b.updated_date).format('HHmmss'));
     return dir * (new Date(a.updated_date) - new Date(b.updated_date));
   });
+
+  // Unread count must be derived from the SAME list the header displays
+  // (scoped + filtered), otherwise "N files · M unread" can show M > N
+  // when the scope/type filter hides unread items.
+  const unreadCount = filtered.filter((i) => i.read === false).length;
 
   const pinned = filtered.filter((i) => i.pinned === true);
   const others = filtered.filter((i) => i.pinned !== true);

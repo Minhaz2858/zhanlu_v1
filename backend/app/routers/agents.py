@@ -854,7 +854,9 @@ def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
     the same datasource render once.
     """
     citations: list[dict] = []
-    seen: set = set()
+    # source key → index into `citations` (keeps the first name seen, lets
+    # later calls upgrade the row count).
+    seen: dict = {}
 
     def _add_source(src_id, src_name, rows):
         # source_name may arrive as a nested OBJECT (e.g.
@@ -867,9 +869,20 @@ def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
         if not isinstance(src_name, str):
             src_name = None
         key = src_id or src_name or ""
-        if not key or key in seen:
+        if not key:
             return
-        seen.add(key)
+        if key in seen:
+            # A turn can call the same datasource multiple times (probe
+            # query, then the real query). Keep the most informative row
+            # count — a later non-zero count beats an earlier probe's 0,
+            # otherwise the chip shows "0 rows" for a source that DID
+            # return data.
+            idx = seen[key]
+            existing = citations[idx].get("rows")
+            if rows is not None and (existing is None or rows > existing):
+                citations[idx]["rows"] = rows
+            return
+        seen[key] = len(citations)
         citations.append({
             "source_id": src_id,
             "source_name": src_name or src_id or "data source",
@@ -6409,6 +6422,15 @@ async def add_message(
             logger.debug("Data source runtime prep failed (non-fatal): %s", e)
             data_ctx_extras = {}
 
+        # Dynamic tool loading (2026-08-31): always-on core + intent-relevant
+        # periphery for THIS turn. Fail-open: any error returns the full list.
+        try:
+            from app.services.dynamic_tools import select_tools_for_turn
+
+            tools = select_tools_for_turn(tools, user_content)
+        except Exception as _dt_err:
+            logger.debug("v2 dynamic tool loading skipped (non-fatal): %s", _dt_err)
+
         # Build LLM message history
         llm_messages = [{"role": "system", "content": system_prompt}]
         for msg in messages:
@@ -11539,6 +11561,32 @@ async def add_message_stream(
             from app.services.document_ingestion.service import prepare_for_context
             _attach_parts: list[str] = []
             _image_urls: list[str] = []
+            # Chat-upload RAG (2026-08-31): route LARGE files (and
+            # many-file turns) through the ChromaDB retrieval pipeline
+            # instead of dumping text past the ~30k-token wall. Small
+            # single-file turns keep the exact inline behavior. Fail-open:
+            # any RAG error degrades back to the plain text dump.
+            _rag_available = False
+            _upload_rag = None
+            if settings.RAG_UPLOADS_ENABLED:
+                try:
+                    from app.services.document_ingestion import upload_rag as _upload_rag
+                    _rag_available = _upload_rag.availability()
+                except Exception:
+                    _rag_available = False
+            _rag_session = conversation_id or "default"
+            _rag_org = "default"
+            # Full isolation scope: agent + project are stored as Chroma
+            # metadata so retrieval filters on the whole stack
+            # (org -> agent -> project -> session -> file).
+            _rag_agent = agent_name or ""
+            _rag_pid = locals().get("_v3_effective_pid") or ""
+            _rag_pname = locals().get("_v3_effective_pname") or ""
+            _rag_indexed: list[tuple[str, str]] = []
+            _rag_any_large = False
+            _rag_inlined_small = 0
+            _rag_max_files_inline = settings.RAG_UPLOADS_MAX_FILES_INLINE
+            _rag_inline_max = settings.RAG_UPLOADS_INLINE_MAX_CHARS
             for _furl in _all_attachment_urls:
                 _is_historical = _furl not in file_urls
                 _prep = prepare_for_context(_furl)
@@ -11555,12 +11603,80 @@ async def add_message_stream(
                             f"--- {_fname}{_origin} (image, no OCR text — see multimodal block) ---"
                         )
                 elif _prep.get("text"):
-                    _attach_parts.append(
-                        f"--- {_fname}{_origin} ---\n{_prep['text']}"
-                    )
+                    _text = _prep["text"]
+                    _large = len(_text) > _rag_inline_max
+                    _many = len(_all_attachment_urls) > _rag_max_files_inline
+                    if _rag_available and (_large or _many):
+                        # Index once (idempotent per session+file). If the
+                        # first extraction was truncated by the per-file
+                        # cap, re-extract the FULL text so retrieval can
+                        # answer from the whole document.
+                        _rag_text = _text
+                        if _prep.get("truncated"):
+                            try:
+                                _full_prep = prepare_for_context(
+                                    _furl, max_chars=5_000_000
+                                )
+                                if _full_prep.get("text"):
+                                    _rag_text = _full_prep["text"]
+                            except Exception:
+                                pass
+                        _n = _upload_rag.index_upload_text(
+                            _furl, _rag_session, _rag_org,
+                            _rag_text, file_name=_fname,
+                            agent=_rag_agent,
+                            project_id=_rag_pid,
+                            project_name=_rag_pname,
+                        )
+                        if _n and _n > 0:
+                            _rag_indexed.append((_furl, _fname))
+                            if _large:
+                                _rag_any_large = True
+                                _attach_parts.append(
+                                    f"--- {_fname}{_origin} "
+                                    "(large file — relevant passages retrieved below) ---"
+                                )
+                            elif _rag_inlined_small < _rag_max_files_inline:
+                                _attach_parts.append(
+                                    f"--- {_fname}{_origin} ---\n{_text}"
+                                )
+                                _rag_inlined_small += 1
+                            else:
+                                _attach_parts.append(
+                                    f"--- {_fname}{_origin} "
+                                    "(passages retrieved below) ---"
+                                )
+                        else:
+                            # Index failed — fall back to the plain dump.
+                            _attach_parts.append(
+                                f"--- {_fname}{_origin} ---\n{_text}"
+                            )
+                    else:
+                        _attach_parts.append(
+                            f"--- {_fname}{_origin} ---\n{_text}"
+                        )
                 elif _prep.get("error"):
                     _attach_parts.append(
                         f"--- {_fname}{_origin} [could not read: {_prep['error']}] ---"
+                    )
+            # Retrieval block: top-k chunks for THIS turn's question across
+            # every indexed upload in the session.
+            if _rag_indexed and (_rag_any_large or len(_all_attachment_urls) > _rag_max_files_inline):
+                try:
+                    _chunks = _upload_rag.retrieve_upload_chunks(
+                        _rag_session, _rag_org, user_content,
+                        agent=_rag_agent,
+                        project_id=_rag_pid,
+                    )
+                    _rag_block = _upload_rag.build_retrieval_block(
+                        user_content, _chunks
+                    )
+                    if _rag_block:
+                        _attach_parts.append(_rag_block)
+                except Exception as _rag_err:
+                    logger.debug(
+                        "v3 stream: upload retrieval failed (non-fatal): %s",
+                        _rag_err,
                     )
             if _attach_parts:
                 system_prompt += (
@@ -11661,6 +11777,16 @@ async def add_message_stream(
     except Exception as e:
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
     data_ctx_extras = _v3_data_ctx_extras or {}
+
+    # Dynamic tool loading (2026-08-31): keep the always-on core + the
+    # intent-relevant periphery tools for THIS turn. Cuts ~10-20k tokens of
+    # tool schemas per turn. Fail-open: any error returns the full list.
+    try:
+        from app.services.dynamic_tools import select_tools_for_turn
+
+        tools = select_tools_for_turn(tools, user_content)
+    except Exception as _dt_err:
+        logger.debug("v3 dynamic tool loading skipped (non-fatal): %s", _dt_err)
 
     # Concise-mode rule for data turns (2026-08-21): the model narrated the
     # SQL it planned to run and pasted raw results into the final answer —

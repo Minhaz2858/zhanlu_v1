@@ -83,6 +83,37 @@ class TestExtractCitationsFromToolCalls:
         citations = _extract_citations_from_tool_calls(tool_calls)
         assert len(citations) == 1
 
+    def test_duplicate_source_upgrades_rows_from_probe_zero(self):
+        # A turn often probes a datasource (0 rows) before the real query.
+        # The citation must keep the LATER non-zero count, not the first
+        # probe's 0 — otherwise the chip shows "0 rows" for data that exists.
+        tool_calls = [
+            {"name": "q", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 0}},
+            {"name": "q2", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 4}},
+        ]
+        citations = _extract_citations_from_tool_calls(tool_calls)
+        assert len(citations) == 1
+        assert citations[0]["rows"] == 4
+
+    def test_duplicate_source_keeps_highest_rows(self):
+        tool_calls = [
+            {"name": "q", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 3}},
+            {"name": "q2", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 7}},
+            {"name": "q3", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 5}},
+        ]
+        citations = _extract_citations_from_tool_calls(tool_calls)
+        assert len(citations) == 1
+        assert citations[0]["rows"] == 7
+
+    def test_duplicate_source_does_not_downgrade_rows(self):
+        tool_calls = [
+            {"name": "q", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 12}},
+            {"name": "q2", "result": {"source_id": "kb_1", "source_name": "DB", "rows": 0}},
+        ]
+        citations = _extract_citations_from_tool_calls(tool_calls)
+        assert len(citations) == 1
+        assert citations[0]["rows"] == 12
+
     def test_source_name_falls_back_to_id(self):
         tool_calls = [{"name": "q", "result": {"source_id": "kb_9"}}]
         citations = _extract_citations_from_tool_calls(tool_calls)

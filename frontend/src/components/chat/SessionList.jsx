@@ -1,5 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
+import { createPortal } from 'react-dom';
 import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard, Loader2, Search, Download, Link2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { useLanguage } from '@/lib/LanguageProvider';
@@ -80,6 +81,11 @@ export default function SessionList() {
   const [projectIdsByName, setProjectIdsByName] = useState({});
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuFor, setMenuFor] = useState(null);
+  // Fixed-position menu placement (px) for the portaled session menu —
+  // computed from the trigger button's rect so the menu escapes the
+  // sidebar's overflow clipping and still lands right under the row.
+  const [menuPos, setMenuPos] = useState(null);
+  const menuRef = useRef(null);
   // Global chat-history search (Kimi/GPT-style): the input lives above
   // the session groups; while a query is active the groups are replaced
   // by results from GET /api/chat/search (user-scoped, message ILIKE).
@@ -323,6 +329,9 @@ export default function SessionList() {
   useEffect(() => {
     if (!menuOpen && menuFor === null) return;
     function onDown(e) {
+      // The context menu is portaled to <body>, so it is NOT inside
+      // rootRef — clicks on it must not count as "outside".
+      if (menuRef.current && menuRef.current.contains(e.target)) return;
       if (rootRef.current && !rootRef.current.contains(e.target)) {
         setMenuOpen(false);
         setMenuFor(null);
@@ -675,30 +684,42 @@ export default function SessionList() {
                               and this button fades in, so they never visually
                               collide. */}
                           <div className="absolute right-1 top-1 flex items-center opacity-0 transition-opacity duration-150 group-hover:opacity-100" onClick={(e) => e.stopPropagation()}>
-                            <button onClick={() => setMenuFor(menuFor === s.id ? null : s.id)} className="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground">
+                            <button onClick={(e) => {
+                              if (menuFor === s.id) { setMenuFor(null); return; }
+                              const r = e.currentTarget.getBoundingClientRect();
+                              const MENU_H = 160; // ~5 rows of 28px + padding
+                              const right = Math.max(8, window.innerWidth - r.right);
+                              let top = r.bottom + 4;
+                              // Flip upward when the menu would overflow the viewport.
+                              if (top + MENU_H > window.innerHeight - 8) top = Math.max(8, r.top - MENU_H - 4);
+                              setMenuPos({ top, right });
+                              setMenuFor(s.id);
+                            }} className="rounded p-1 text-muted-foreground hover:bg-secondary hover:text-foreground">
                               <MoreHorizontal className="h-3.5 w-3.5" />
                             </button>
-                            {menuFor === s.id && (
-                              <>
-                                <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
-                                <div className="absolute right-0 top-full z-40 mt-1 w-32 rounded-md border border-border bg-popover py-1 shadow-md">
-                                  <button onClick={() => { starSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
-                                    <Star className="h-3 w-3" /> {s.starred ? t.sessionList.unpin : t.sessionList.pin}
-                                  </button>
-                                  <button onClick={() => { startEdit(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
-                                    <Pencil className="h-3 w-3" /> {t.sessionList.rename}
-                                  </button>
-                                  <button onClick={() => { handleExportSession(s); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
-                                    <Download className="h-3 w-3" /> {t.sessionList.export}
-                                  </button>
-                                  <button onClick={() => { handleShareSession(s); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
-                                    <Link2 className="h-3 w-3" /> {t.sessionList.share}
-                                  </button>
-                                  <button onClick={() => { deleteSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-secondary">
-                                    <Trash2 className="h-3 w-3" /> {t.sessionList.delete}
-                                  </button>
-                                </div>
-                              </>
+                            {menuFor === s.id && menuPos && createPortal(
+                              <div
+                                ref={menuRef}
+                                className="fixed z-[60] w-32 rounded-md border border-border bg-popover py-1 shadow-md"
+                                style={{ top: menuPos.top, right: menuPos.right }}
+                              >
+                                <button onClick={() => { starSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
+                                  <Star className="h-3 w-3" /> {s.starred ? t.sessionList.unpin : t.sessionList.pin}
+                                </button>
+                                <button onClick={() => { startEdit(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
+                                  <Pencil className="h-3 w-3" /> {t.sessionList.rename}
+                                </button>
+                                <button onClick={() => { handleExportSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
+                                  <Download className="h-3 w-3" /> {t.sessionList.export}
+                                </button>
+                                <button onClick={() => { handleShareSession(s); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
+                                  <Link2 className="h-3 w-3" /> {t.sessionList.share}
+                                </button>
+                                <button onClick={() => { deleteSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-secondary">
+                                  <Trash2 className="h-3 w-3" /> {t.sessionList.delete}
+                                </button>
+                              </div>,
+                              document.body
                             )}
                           </div>
                         </>
