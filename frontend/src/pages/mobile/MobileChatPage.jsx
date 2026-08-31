@@ -11,6 +11,7 @@ import useStreamState from '@/hooks/useStreamState';
 import { streamAgentResponse, createAgentConversation } from '@/api/agentEnhanced';
 import { detectLang } from '@/lib/detectLang';
 import { saveDraft, clearDraft } from '@/lib/draftManager';
+import { usePersistentStream } from '@/lib/PersistentStreamContext';
 
 /**
  * MobileChatPage — mobile-first chat (方案A).
@@ -46,6 +47,7 @@ export default function MobileChatPage() {
   const [streamingId, setStreamingId] = useState(null);
   const [streamingConvId, setStreamingConvId] = useState(null);
   const streamState = useStreamState();
+  const persistent = usePersistentStream();
   const genRef = useRef(0);
   const streamingIdRef = useRef(null);
   const scrollRef = useRef(null);
@@ -161,6 +163,11 @@ export default function MobileChatPage() {
 
     try {
       streamState.startStreaming();
+      // Register this session as "running silently" in the shared registry
+      // so the desktop sidebar can show a per-row spinner (concurrent-session
+      // support). The mobile chat doesn't render the sidebar, but a session
+      // started on mobile still shows as busy when viewed on desktop.
+      persistent.setRunStatus(sid, 'running');
       const stream = streamAgentResponse(
         convId,
         {
@@ -253,7 +260,10 @@ export default function MobileChatPage() {
           if (genNow === genRef.current) streamState.complete();
         }
       }
-      if (genNow === genRef.current && streamState.isActive) streamState.complete();
+      if (genNow === genRef.current && streamState.isActive) {
+        streamState.complete();
+        persistent.clearRunStatus(sid);
+      }
     } catch (streamErr) {
       if (streamErr && (streamErr.name === 'AbortError' || streamErr.code === 20)) {
         aborted = true;
@@ -270,11 +280,12 @@ export default function MobileChatPage() {
           : "抱歉，连接中断了，请重试。";
         fullContent = fullContent || friendlyErr;
         if (genNow === genRef.current) {
-          setMessages((prev) => prev.map((m) =>
-            m.id === aiMsg.id ? { ...m, content: fullContent } : m
-          ));
-          streamState.error();
-        }
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, content: fullContent } : m
+            ));
+            streamState.error();
+            persistent.setRunStatus(sid, 'error');
+          }
       }
     }
     // Persist the final assistant message + tool_calls + artifacts.
@@ -298,6 +309,9 @@ export default function MobileChatPage() {
     const current = messages;
     const userMsg = await base44.entities.ChatMessage.create({
       session_id: sid, role: 'user', content: fullText, order: current.length,
+      // Persist the attached files on the message so the file cards render
+      // in chat history (Kimi/ChatGPT-style) and survive a page refresh.
+      ...(attachments.length ? { attachments: attachments.map((a) => ({ name: a.name, file_url: a.file_url, ext: (a.name || '').split('.').pop()?.toLowerCase() || '', kind: 'document' })) } : {}),
     });
     const next = [...current, userMsg];
     setMessages(next);

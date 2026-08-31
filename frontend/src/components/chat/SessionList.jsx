@@ -1,10 +1,11 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard } from 'lucide-react';
+import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard, Loader2 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { base44 } from '@/api/base44Client';
 import { formatRelativeTime } from '@/lib/time';
 import { useChatSession } from '@/lib/ChatSessionContext';
+import { usePersistentStream } from '@/lib/PersistentStreamContext';
 
 // Per-group session display caps.  Keeps the sidebar scannable
 // when Ungrouped accumulates hundreds of conversations — the user
@@ -55,6 +56,9 @@ export default function SessionList() {
   const { t, lang } = useLanguage();
   const location = useLocation();
   const navigate = useNavigate();
+  // Per-session run status registry — drives the "running silently" spinner
+  // so the user can see which OTHER sessions are busy while focused elsewhere.
+  const { runStatuses } = usePersistentStream();
   const [editingId, setEditingId] = useState(null);
   const [editValue, setEditValue] = useState('');
   // The dropdown and "+" button reflect the current project context.
@@ -483,6 +487,38 @@ export default function SessionList() {
                               <MessageSquare
                                 className="mt-0.5 h-3 w-3 shrink-0 text-muted-foreground"
                                 data-has-automation="false"
+                              />
+                            )}
+                            {/* "Running silently" indicator (2026-08-31): a session
+                                with a live run (streaming agent reply OR a
+                                background automation) shows a small spinner here,
+                                so the user can see OTHER sessions are busy while
+                                focused elsewhere — without a popup or split pane.
+                                `error` leaves a red dot until the session is
+                                opened; `done` is a brief flash handled by the
+                                registry's 2s timeout. */}
+                            {runStatuses[s.id] === 'running' && (
+                              <Loader2
+                                className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-primary"
+                                aria-label={lang === 'en' ? 'Running' : '运行中'}
+                                title={lang === 'en' ? 'Running…' : '运行中…'}
+                                data-run-status="running"
+                              />
+                            )}
+                            {runStatuses[s.id] === 'queued' && (
+                              <Loader2
+                                className="mt-0.5 h-3 w-3 shrink-0 animate-spin text-muted-foreground"
+                                aria-label={lang === 'en' ? 'Queued' : '排队中'}
+                                title={lang === 'en' ? 'Queued (waiting for a free slot)' : '排队中（等待空闲槽位）'}
+                                data-run-status="queued"
+                              />
+                            )}
+                            {runStatuses[s.id] === 'error' && (
+                              <span
+                                className="mt-1.5 h-2 w-2 shrink-0 rounded-full bg-destructive"
+                                aria-label={lang === 'en' ? 'Run failed' : '运行失败'}
+                                title={lang === 'en' ? 'Run failed' : '运行失败'}
+                                data-run-status="error"
                               />
                             )}
                             {/* Unread dot — set by automation runs so the
