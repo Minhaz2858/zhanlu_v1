@@ -204,6 +204,8 @@ export const translations = {
       // Shown on chat sessions dedicated to building/editing a
       // dashboard (conversation metadata.mode === 'dashboard').
       dashboardBadge: '仪表盘会话',
+      // Global chat-history search (Kimi/GPT-style).
+      searchPlaceholder: '搜索历史会话', searchClear: '清除搜索', searchEmpty: '未找到相关会话',
     },
     userMenu: {
       language: '语言', zh: '中文', en: 'English',
@@ -1007,6 +1009,8 @@ export const translations = {
       // Shown on chat sessions dedicated to building/editing a
       // dashboard (conversation metadata.mode === 'dashboard').
       dashboardBadge: 'Dashboard session',
+      // Global chat-history search (Kimi/GPT-style).
+      searchPlaceholder: 'Search conversations', searchClear: 'Clear search', searchEmpty: 'No matching conversations',
     },
     userMenu: {
       language: 'Language', zh: '中文', en: 'English',

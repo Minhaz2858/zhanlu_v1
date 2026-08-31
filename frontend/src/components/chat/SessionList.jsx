@@ -1,8 +1,9 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard, Loader2 } from 'lucide-react';
+import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard, Loader2, Search } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { base44 } from '@/api/base44Client';
+import { chatSearch } from '@/api/agentEnhanced';
 import { formatRelativeTime } from '@/lib/time';
 import { useChatSession } from '@/lib/ChatSessionContext';
 import { usePersistentStream } from '@/lib/PersistentStreamContext';
@@ -77,6 +78,12 @@ export default function SessionList() {
   const [projectIdsByName, setProjectIdsByName] = useState({});
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuFor, setMenuFor] = useState(null);
+  // Global chat-history search (Kimi/GPT-style): the input lives above
+  // the session groups; while a query is active the groups are replaced
+  // by results from GET /api/chat/search (user-scoped, message ILIKE).
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchResults, setSearchResults] = useState(null);
+  const [searchBusy, setSearchBusy] = useState(false);
   // Set of ChatSession.id values that have created at least one
   // AutomationTask. Used to render a small clock icon in place of
   // the default MessageSquare on those sessions so users can
@@ -354,6 +361,35 @@ export default function SessionList() {
     newChat(project);
     ensureChatRoute();
   }
+  // Debounced chat-history search. Empty/whitespace query clears results;
+  // otherwise fetch user-scoped matches and replace the group list.
+  useEffect(() => {
+    const q = searchQuery.trim();
+    if (!q) {
+      setSearchResults(null);
+      setSearchBusy(false);
+      return;
+    }
+    setSearchBusy(true);
+    const timer = setTimeout(async () => {
+      try {
+        const body = await chatSearch(q, 20);
+        setSearchResults(body.results || []);
+      } catch {
+        setSearchResults([]);
+      } finally {
+        setSearchBusy(false);
+      }
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
+
+  function handleSearchSelect(id) {
+    setSearchQuery('');
+    setSearchResults(null);
+    handleSelectSession(id);
+  }
+
   async function handleNewProject() {
     const name = window.prompt(t.sessionList.newProject);
     if (name && name.trim()) {
@@ -404,12 +440,66 @@ export default function SessionList() {
             </div>
           )}
         </div>
+        {/* Global chat-history search box (Kimi/GPT-style). Results
+            replace the session groups while a query is active. */}
+        <div className="relative">
+          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/60" />
+          <input
+            data-testid="session-search-input"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder={t.sessionList.searchPlaceholder}
+            className="w-full rounded-md border border-border bg-card py-1.5 pl-8 pr-7 text-xs text-foreground placeholder:text-muted-foreground/60 focus:border-primary/40 focus:outline-none"
+          />
+          {searchQuery && (
+            <button
+              data-testid="session-search-clear"
+              onClick={() => setSearchQuery('')}
+              title={t.sessionList.searchClear}
+              className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground/60 hover:text-foreground"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+        </div>
       </div>
       <div className="flex-1 overflow-y-auto px-2 py-2">
-        {sessions.length === 0 && extraProjects.length === 0 && (
+        {searchQuery.trim() ? (
+          <div data-testid="session-search-results" className="space-y-0.5">
+            {searchBusy && (
+              <p className="px-3 py-4 text-center text-xs text-muted-foreground/60">
+                <Loader2 className="mx-auto h-3.5 w-3.5 animate-spin" />
+              </p>
+            )}
+            {!searchBusy && searchResults && searchResults.length === 0 && (
+              <p className="px-3 py-6 text-center text-xs text-muted-foreground">{t.sessionList.searchEmpty}</p>
+            )}
+            {!searchBusy &&
+              (searchResults || []).map((r) => (
+                <div
+                  key={r.session_id}
+                  data-testid="session-search-result"
+                  onClick={() => handleSearchSelect(r.session_id)}
+                  className="group cursor-pointer rounded-md border-l-2 border-transparent px-2.5 py-2 transition-colors hover:bg-sidebar-accent/40"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <MessageSquare className="h-3 w-3 shrink-0 text-muted-foreground/50" />
+                    <span className="min-w-0 flex-1 truncate text-xs text-foreground">{r.title}</span>
+                    {r.agent_name && (
+                      <span className="shrink-0 rounded bg-secondary px-1 py-0.5 text-[10px] text-muted-foreground">{r.agent_name}</span>
+                    )}
+                  </div>
+                  <p className="mt-1 truncate pl-[18px] text-[11px] text-muted-foreground/70">{r.matches?.[0]?.snippet || ''}</p>
+                </div>
+              ))}
+          </div>
+        ) : (
+          <></>
+        )}
+        {!searchQuery.trim() && sessions.length === 0 && extraProjects.length === 0 && (
           <p className="px-3 py-6 text-center text-xs text-muted-foreground">{t.sessionList.noSessions}</p>
         )}
-        {groups.map((g) => (
+        {!searchQuery.trim() && groups.map((g) => (
           <div key={g.project} className="mb-1">
             <div className="group/project flex w-full items-center px-2 pt-3 pb-1">
               <button onClick={() => toggleCollapse(g.project)} className="flex flex-1 items-center gap-1 text-[11px] font-semibold uppercase tracking-wider text-foreground/80 transition-colors hover:text-foreground">

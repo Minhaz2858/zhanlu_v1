@@ -21,11 +21,22 @@ const APP_ID = appParams.appId || 'undefined';
 const API_BASE = `/api/apps/${APP_ID}`;
 
 /**
- * Set the permission mode for a conversation.
- * @param {string} conversationId
- * @param {"default" | "plan" | "full_auto"} mode
- * @returns {Promise<{success: boolean, permission_mode: string}>}
+ * Search the caller's chat history by message content.
+ * @param {string} q search query
+ * @param {number} limit max results (1..50)
+ * @returns {Promise<{query: string, results: Array}>}
  */
+export async function chatSearch(q, limit = 20) {
+  const resp = await authFetch(
+    `/api/chat/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    { method: 'GET' }
+  );
+  if (!resp.ok) {
+    throw new Error(`Chat search failed: ${resp.statusText}`);
+  }
+  return resp.json();
+}
+
 export async function setPermissionMode(conversationId, mode) {
   const resp = await authFetch(
     `${API_BASE}/agents/conversations/${conversationId}/permission-mode`,
