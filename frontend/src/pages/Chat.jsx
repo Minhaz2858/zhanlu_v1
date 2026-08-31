@@ -12,12 +12,12 @@ import { postMessageFeedback, postRoleFeedback } from '@/api/agentFeedback';
 import RelatedContent from '@/components/chat/RelatedContent';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
+import FilePreviewPane from '@/components/chat/FilePreviewPane';
 import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock, LayoutDashboard } from 'lucide-react';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import ChatFilesModal from '@/components/chat/ChatFilesModal';
 import ScheduledPanel from '@/components/chat/ScheduledPanel';
 import ArtifactCanvasEditor from '@/components/chat/ArtifactCanvasEditor';
-import ChatThinkingIndicator from '@/components/chat/ChatThinkingIndicator';
 import AutomationDraftCard from '@/components/chat/AutomationDraftCard';
 import { buildSkillContext, buildDefaultSkillContext } from '@/lib/skillContext';
 import { watchForDashboardEdits } from '@/lib/dashboardStreamWatcher';
@@ -32,6 +32,9 @@ import { dedupeMessagesByFingerprint } from './messageDedup';
 import { useScreenSize } from '@/hooks/useScreenSize';
 import { classifyIntent, formatHint } from '@/lib/intentClassifier';
 import { detectLang } from '@/lib/detectLang';
+import { shouldNotify, notificationBody } from '@/lib/completionNotify';
+import SessionTabs from '@/components/chat/SessionTabs';
+import { openTab, closeTab } from '@/lib/sessionTabs';
 import { detectFileFormatRequest } from '@/lib/fileFormatRequest';
 import { saveDraft, clearDraft } from '@/lib/draftManager';
 import { decideRefresh, isRunInFlight } from '@/lib/chatPoll';
@@ -221,6 +224,10 @@ export default function Chat() {
   const [activeSkill, setActiveSkill] = useState(null);
   const [activeAgent, setActiveAgent] = useState(null);
   const [previewResult, setPreviewResult] = useState(null);
+  // File preview pane (right side) for attachment cards clicked in chat
+  // history — same FilePreviewer the draft-chip modal uses, but anchored
+  // in a resizable right panel (Kimi/ChatGPT-style) instead of a new tab.
+  const [openFilePreview, setOpenFilePreview] = useState(null);
   const [openArtifact, setOpenArtifact] = useState(null);
   const [filesOpen, setFilesOpen] = useState(false);
   // Scheduled automation panel (Manus-style). Only shown when the current
@@ -258,6 +265,35 @@ export default function Chat() {
   const [attachments, setAttachments] = useState([]);
   const [streamingId, setStreamingId] = useState(null);
   const [streamingConvId, setStreamingConvId] = useState(null);  // P2: conv id of the in-flight v3 stream (for steer routing)
+  // Completion notifications (Kimi/GPT-style): dedupe per run so a
+  // run that completes through multiple code paths fires one toast.
+  const notifiedRunIds = useRef(new Set());
+  function onRunComplete(runId, finalText) {
+    if (!runId || notifiedRunIds.current.has(runId)) return;
+    notifiedRunIds.current.add(runId);
+    if (!shouldNotify({
+      hidden: typeof document !== 'undefined' && !!document.hidden,
+      permission: typeof Notification !== 'undefined' ? Notification.permission : 'denied',
+      hasFinalMessage: typeof finalText === 'string' && finalText.trim().length > 0,
+    })) return;
+    try {
+      new Notification('Zhanlu', { body: notificationBody(finalText) });
+    } catch { /* some browsers need a service worker — best-effort */ }
+  }
+  // Parallel session tabs (Kimi/GPT-style): open a tab whenever the
+  // active session changes; closing one falls back to a neighbor.
+  const [tabs, setTabs] = useState([]);
+  useEffect(() => {
+    if (!activeId) return;
+    const sess = sessions?.find((s) => s.id === activeId) || getSession?.(activeId) || null;
+    setTabs((prev) => openTab(prev, activeId, sess?.title || 'Chat'));
+  }, [activeId, sessions]);
+  function handleCloseTab(sessionId) {
+    const { tabs: next, fallbackId } = closeTab(tabs, sessionId);
+    setTabs(next);
+    if (fallbackId && fallbackId !== activeId) selectSession(fallbackId);
+    else if (!fallbackId && sessionId === activeId) contextNewChat?.();
+  }
   // Mirror streamingId into a ref so async helpers (loadMessages merge) can
   // read the latest value without capturing a stale closure — the polling
   // effect only depends on activeId, so it would otherwise freeze streamingId.
@@ -267,7 +303,6 @@ export default function Chat() {
   // merge inside the functional updater can reject stale messages from a
   // previous session. Set synchronously before every loadMessages call.
   const loadSessionRef = useRef(null);
-  const [steerMarkers, setSteerMarkers] = useState([]);  // P2: inline markers rendered next to the messages
   // Experience layer (Phase C): per-message feedback state for the
   // thumbs up/down buttons on assistant bubbles. Optimistic — set
   // immediately, reverted if the API call fails.
@@ -713,6 +748,7 @@ export default function Chat() {
     const _isNewSession = activeId && (!_s || !_s.conversation_id);
     setOpenArtifact(null);
     setPreviewResult(null);
+    setOpenFilePreview(null);
     setChips([]);
     setActiveSkill(null);
     if (!_isNewSession) setActiveAgent(null);
@@ -1181,9 +1217,7 @@ export default function Chat() {
 
   // P2 mid-turn steer: post the current input to the in-flight v3 stream
   // without starting a new stream. Best-effort; a 429 (queue full) or 404
-  // (conversation gone) surfaces a toast. On success the input is cleared
-  // and an optimistic local marker is rendered immediately — the
-  // authoritative marker arrives as a `steer` SSE event a moment later.
+  // (conversation gone) surfaces a toast. On success the input is cleared.
   async function handleSteer(text) {
     const trimmed = (text || '').trim();
     if (!trimmed) return;
@@ -1191,15 +1225,11 @@ export default function Chat() {
       // No in-flight stream — fall through to the normal send path.
       return handleSend(trimmed);
     }
-    const localId = `steer-local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    setSteerMarkers((prev) => [...prev, { id: localId, text: trimmed, status: 'pending' }]);
     setInputValue('');
     clearDraft('chat_input_draft');
     try {
       await steerAgentConversation(streamingConvId, trimmed);
-      setSteerMarkers((prev) => prev.map((m) => (m.id === localId ? { ...m, status: 'sent' } : m)));
     } catch (e) {
-      setSteerMarkers((prev) => prev.map((m) => (m.id === localId ? { ...m, status: 'error', error: e?.message } : m)));
       toast.error(e?.message || 'Steer failed');
     }
   }
@@ -1266,6 +1296,9 @@ export default function Chat() {
     }
     const userMsg = await base44.entities.ChatMessage.create({
       session_id: sid, role: 'user', content: fullText, order: current.length,
+      // Persist the attached files on the message so the file cards render
+      // in chat history (Kimi/ChatGPT-style) and survive a page refresh.
+      ...(attachments.length ? { attachments: attachments.map((a) => ({ name: a.name, file_url: a.file_url, ext: a.ext, kind: a.kind })) } : {}),
     });
     // Mark synthetic / auto-injected user messages so the renderer can
     // hide them. The text is still sent to the LLM (so it sees the
@@ -1967,6 +2000,7 @@ export default function Chat() {
       if (gen !== genRef.current) return;
       setMessages((prev) => prev.map((m) => (m.id === aiMsg.id ? { ...m, content: reply, ...(trace ? { trace } : {}) } : m)));
       setStreamingId(null);
+      onRunComplete(aiMsg.id, reply);
       await base44.entities.ChatMessage.update(aiMsg.id, { content: reply, ...(trace ? { trace } : {}) });
       await base44.entities.ChatSession.update(sid, { last_message_at: new Date().toISOString() });
       touchSession(sid);
@@ -1984,6 +2018,7 @@ export default function Chat() {
       });
       if (gen !== genRef.current) return;
       setMessages((prev) => [...prev, errMsg]);
+      onRunComplete(errMsg.id, errMsg.content || '');
       if (gen === genRef.current) stream.complete();
     } finally {
       if (gen === genRef.current) {
@@ -2021,6 +2056,12 @@ export default function Chat() {
   }
 
   async function handleAgentSend(text, { activeAgent, activeSkill, sid, gen, sessionId, aiMsg, fileUrls, lang, regenerate = false }) {
+    // Ask for notification permission once, on the first send (user gesture).
+    try {
+      if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
+        Notification.requestPermission();
+      }
+    } catch { /* best-effort */ }
     // Lazily create a backend conversation bound to this agent. The
     // v3 endpoint keys off ``conv.agent_name`` and runs the data-source
     // runtime against the matching AgentApp.
@@ -2141,7 +2182,6 @@ export default function Chat() {
     // P2: publish the conv id so subsequent Send clicks can route to
     // the steer endpoint while this stream is in flight.
     setStreamingConvId(convId);
-    setSteerMarkers([]);  // clear any markers from a prior stream
     let fullContent = '';
     let toolCalls = [];
     let activitySteps = [];
@@ -2410,23 +2450,6 @@ export default function Chat() {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id ? { ...m, content: fullContent } : m
             ));
-          }
-        } else if (evt.type === 'steer' && Array.isArray(evt.messages) && evt.messages.length) {
-          // P2: server-side ack that one or more steer messages were
-          // drained and injected as user messages. The local optimistic
-          // markers were already added by handleSteer (status: 'pending')
-          // — flip matching ones to 'sent' so the UI confirms delivery.
-          // Defensive: we match by exact text content so out-of-order
-          // SSE acks still reconcile.
-          if (gen === genRef.current) {
-            setSteerMarkers((prev) => {
-              const remaining = [...prev];
-              for (const sm of evt.messages) {
-                const idx = remaining.findIndex((m) => m.text === sm && m.status === 'pending');
-                if (idx >= 0) remaining[idx] = { ...remaining[idx], status: 'sent' };
-              }
-              return remaining;
-            });
           }
         } else if (evt.type === 'done') {
           // Defensive merge (2026-08-20): the `done` event's content is the
@@ -3014,6 +3037,12 @@ export default function Chat() {
           <div className="flex h-full flex-col">
             {activeId || messages.length > 0 ? (
               <>
+                <SessionTabs
+                  tabs={tabs}
+                  activeId={activeId}
+                  onSelect={selectSession}
+                  onClose={handleCloseTab}
+                />
                 <div className="flex items-center justify-between border-b border-border px-6 py-2">
                   {/* Project context banner — shown when the user entered
                   chat from a project page (via the "chat with agent"
@@ -3120,58 +3149,17 @@ export default function Chat() {
                             const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
                             const canRegenerate = m.role === 'assistant' && !!m.content && m.id === lastId && idle && !isStreaming;
                             return (
-                              <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onArtifactEdit={setCanvasArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} onRegenerate={canRegenerate ? handleRegenerate : null} />
+                              <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onArtifactEdit={setCanvasArtifact} onPreviewFile={setOpenFilePreview} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} onRegenerate={canRegenerate ? handleRegenerate : null} />
                             );
                           });
                         })()}
                       </div>
                     )}
-                    {loading && <ChatThinkingIndicator />}
-                    {/* "Agent is working" indicator for an in-flight automation
-                    run. The executor runs async (trigger_now returns
-                    immediately), so without this the user clicks Run Now, sees
-                    the request bubble, then silence until the result lands —
-                    which read as "not responding".
-
-                    We show the SAME 3-placeholder indicator a normal LLM chat
-                    uses ONLY while the executor hasn't yet written the empty
-                    assistant bubble + first activity step. As soon as the
-                    assistant bubble for this execution has content or
-                    activity_steps, ``MessageBubble`` renders the real
-                    ``<ActivitySteps>`` ("✨ Fabricating — Building your
-                    deliverable" / "Crystallizing — Wrapping everything up"),
-                    so we hide the generic placeholders to avoid the visual
-                    double-up. */}
-                    {!loading && isRunInFlight(latestExecution) && !hasAssistantBubbleForRun && (
-                      <ChatThinkingIndicator />
-                    )}
-                    {steerMarkers.length > 0 && (
-                      <div className="flex flex-col items-center gap-1 pt-2">
-                        {steerMarkers.map((sm) => {
-                          const prefix = lang === 'en' ? '→ steer' : '→ 引导';
-                          const statusText = sm.status === 'pending'
-                            ? (lang === 'en' ? 'sending…' : '发送中…')
-                            : sm.status === 'error'
-                              ? (lang === 'en' ? 'failed' : '失败')
-                              : '';
-                          const tone = sm.status === 'error'
-                            ? 'text-red-500'
-                            : sm.status === 'pending'
-                              ? 'text-amber-600 dark:text-amber-400'
-                              : 'text-muted-foreground';
-                          return (
-                            <div
-                              key={sm.id}
-                              className={`inline-flex items-center gap-1.5 rounded-full border border-border bg-secondary/40 px-2.5 py-0.5 text-xs ${tone}`}
-                              title={sm.status === 'error' ? sm.error : undefined}
-                            >
-                              <span className="italic">{prefix}: {sm.text}</span>
-                              {statusText && <span className="text-[10px] opacity-75">· {statusText}</span>}
-                            </div>
-                          );
-                        })}
-                      </div>
-                    )}
+                    {/* 2026-08-31: removed ChatThinkingIndicator and steerMarkers.
+                    The assistant bubble now renders LiveActivityStream from the
+                    very first frame (rich placeholder while no events have
+                    arrived), so the legacy "Understanding your request" phase
+                    list and the "→ steer" pills are no longer needed. */}
                   </div>
                 </div>
                 <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} />
@@ -3238,6 +3226,16 @@ export default function Chat() {
                   onClose={() => setCanvasArtifact(null)}
                   onSaved={() => { /* preview/download endpoints serve latest version */ }}
                 />
+              </div>
+            </Panel>
+          </>
+        )}
+        {openFilePreview && (
+          <>
+            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
+            <Panel id="file-preview-panel" order={6} defaultSize={38} minSize={25} maxSize={70}>
+              <div className="h-full overflow-hidden">
+                <FilePreviewPane file={openFilePreview} onClose={() => setOpenFilePreview(null)} />
               </div>
             </Panel>
           </>
