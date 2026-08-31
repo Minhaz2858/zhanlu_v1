@@ -1,9 +1,11 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard, Loader2, Search } from 'lucide-react';
+import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard, Loader2, Search, Download, Link2 } from 'lucide-react';
+import { toast } from 'sonner';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { base44 } from '@/api/base44Client';
-import { chatSearch } from '@/api/agentEnhanced';
+import { chatSearch, chatShare } from '@/api/agentEnhanced';
+import { downloadConversationMarkdown } from '@/lib/exportConversation';
 import { formatRelativeTime } from '@/lib/time';
 import { useChatSession } from '@/lib/ChatSessionContext';
 import { usePersistentStream } from '@/lib/PersistentStreamContext';
@@ -390,6 +392,37 @@ export default function SessionList() {
     handleSelectSession(id);
   }
 
+  // Kimi/GPT-style conversation export: fetch the session messages and
+  // download a client-side .md file. Best-effort — a failure never
+  // blocks the menu.
+  async function handleExportSession(s) {
+    try {
+      const msgs = await base44.entities.ChatMessage.filter({ session_id: s.id }, 'created_date', 200);
+      downloadConversationMarkdown(s, msgs);
+    } catch {
+      /* export is best-effort — never block the menu */
+    }
+    setMenuFor(null);
+  }
+
+  // Kimi/GPT-style conversation share: create (or reuse) the public
+  // token and copy the /share/c/<token> URL to the clipboard.
+  async function handleShareSession(s) {
+    try {
+      const { share_url } = await chatShare(s.id);
+      const url = `${window.location.origin}${share_url}`;
+      try {
+        await navigator.clipboard.writeText(url);
+      } catch {
+        /* clipboard can be denied — the toast still shows the URL */
+      }
+      toast.success(t.sessionList.shareCopied, { description: url });
+    } catch {
+      toast.error(t.sessionList.shareFailed);
+    }
+    setMenuFor(null);
+  }
+
   async function handleNewProject() {
     const name = window.prompt(t.sessionList.newProject);
     if (name && name.trim()) {
@@ -648,12 +681,18 @@ export default function SessionList() {
                             {menuFor === s.id && (
                               <>
                                 <div className="fixed inset-0 z-30" onClick={() => setMenuFor(null)} />
-                                <div className="absolute right-0 top-full z-40 mt-1 w-28 rounded-md border border-border bg-popover py-1 shadow-md">
+                                <div className="absolute right-0 top-full z-40 mt-1 w-32 rounded-md border border-border bg-popover py-1 shadow-md">
                                   <button onClick={() => { starSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
                                     <Star className="h-3 w-3" /> {s.starred ? t.sessionList.unpin : t.sessionList.pin}
                                   </button>
                                   <button onClick={() => { startEdit(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
                                     <Pencil className="h-3 w-3" /> {t.sessionList.rename}
+                                  </button>
+                                  <button onClick={() => { handleExportSession(s); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
+                                    <Download className="h-3 w-3" /> {t.sessionList.export}
+                                  </button>
+                                  <button onClick={() => { handleShareSession(s); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-foreground hover:bg-secondary">
+                                    <Link2 className="h-3 w-3" /> {t.sessionList.share}
                                   </button>
                                   <button onClick={() => { deleteSession(s); setMenuFor(null); }} className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-destructive hover:bg-secondary">
                                     <Trash2 className="h-3 w-3" /> {t.sessionList.delete}

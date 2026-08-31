@@ -206,6 +206,10 @@ export const translations = {
       dashboardBadge: '仪表盘会话',
       // Global chat-history search (Kimi/GPT-style).
       searchPlaceholder: '搜索历史会话', searchClear: '清除搜索', searchEmpty: '未找到相关会话',
+      // Conversation export (Kimi/GPT-style).
+      export: '导出 Markdown',
+      // Conversation share (Kimi/GPT-style).
+      share: '分享链接', shareCopied: '链接已复制', shareFailed: '分享失败',
     },
     userMenu: {
       language: '语言', zh: '中文', en: 'English',
@@ -1011,6 +1015,10 @@ export const translations = {
       dashboardBadge: 'Dashboard session',
       // Global chat-history search (Kimi/GPT-style).
       searchPlaceholder: 'Search conversations', searchClear: 'Clear search', searchEmpty: 'No matching conversations',
+      // Conversation export (Kimi/GPT-style).
+      export: 'Export Markdown',
+      // Conversation share (Kimi/GPT-style).
+      share: 'Share link', shareCopied: 'Link copied', shareFailed: 'Share failed',
     },
     userMenu: {
       language: 'Language', zh: '中文', en: 'English',

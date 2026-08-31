@@ -14,8 +14,8 @@ const __dirname = dirname(__filename);
 const src = readFileSync(resolve(__dirname, './SessionList.jsx'), 'utf8');
 
 describe('SessionList global chat search', () => {
-  it('imports chatSearch from agentEnhanced', () => {
-    expect(src).toMatch(/import\s*\{\s*chatSearch\s*\}\s*from\s*'@\/api\/agentEnhanced'/);
+  it('imports chatSearch (and chatShare) from agentEnhanced', () => {
+    expect(src).toMatch(/import\s*\{\s*chatSearch[\s\S]*?\}\s*from\s*'@\/api\/agentEnhanced'/);
   });
 
   it('imports the Search icon from lucide-react', () => {

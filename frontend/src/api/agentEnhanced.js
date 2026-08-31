@@ -37,6 +37,33 @@ export async function chatSearch(q, limit = 20) {
   return resp.json();
 }
 
+/**
+ * Create (or reuse) a public share for a chat session.
+ * @param {string} sessionId
+ * @returns {Promise<{token: string, share_url: string}>}
+ */
+export async function chatShare(sessionId) {
+  const resp = await authFetch(`/api/chat/shares`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ session_id: sessionId }),
+  });
+  if (!resp.ok) {
+    throw new Error(`Failed to create share: ${resp.statusText}`);
+  }
+  return resp.json();
+}
+
+/**
+ * Revoke the public share for a chat session.
+ * @param {string} sessionId
+ */
+export async function chatRevokeShare(sessionId) {
+  await authFetch(`/api/chat/shares/${encodeURIComponent(sessionId)}`, {
+    method: 'DELETE',
+  });
+}
+
 export async function setPermissionMode(conversationId, mode) {
   const resp = await authFetch(
     `${API_BASE}/agents/conversations/${conversationId}/permission-mode`,

@@ -60,6 +60,7 @@ from app.routers.admin_invocations import router as admin_invocations_router
 from app.routers.resource_shares import router as resource_shares_router
 from app.routers.access_policies import router as access_policies_router
 from app.routers.chat_tools import router as chat_tools_router
+from app.routers.chat_tools import public_router as chat_share_public_router
 from app.routers.llm import router as llm_router
 from app.routers.app_logs import router as app_logs_router
 from app.routers.project_memories import router as project_memories_router  # project-scoped memory review/edit
@@ -793,6 +794,9 @@ def create_app() -> FastAPI:
     app.include_router(resource_shares_router, prefix="/api")
     app.include_router(access_policies_router, prefix="/api")
     app.include_router(chat_tools_router, prefix="/api")
+    # Public read-only share pages — registered WITHOUT the /api prefix so
+    # /share/c/<token> is a short, shareable URL (no auth required).
+    app.include_router(chat_share_public_router)
     app.include_router(llm_router)
     app.include_router(app_logs_router, prefix="/api")
     app.include_router(project_memories_router, prefix="/api")  # /api/projects/{id}/memories
