@@ -33,8 +33,6 @@ import { useScreenSize } from '@/hooks/useScreenSize';
 import { classifyIntent, formatHint } from '@/lib/intentClassifier';
 import { detectLang } from '@/lib/detectLang';
 import { shouldNotify, notificationBody } from '@/lib/completionNotify';
-import SessionTabs from '@/components/chat/SessionTabs';
-import { openTab, closeTab } from '@/lib/sessionTabs';
 import { detectFileFormatRequest } from '@/lib/fileFormatRequest';
 import { saveDraft, clearDraft } from '@/lib/draftManager';
 import { decideRefresh, isRunInFlight } from '@/lib/chatPoll';
@@ -279,20 +277,6 @@ export default function Chat() {
     try {
       new Notification('Zhanlu', { body: notificationBody(finalText) });
     } catch { /* some browsers need a service worker — best-effort */ }
-  }
-  // Parallel session tabs (Kimi/GPT-style): open a tab whenever the
-  // active session changes; closing one falls back to a neighbor.
-  const [tabs, setTabs] = useState([]);
-  useEffect(() => {
-    if (!activeId) return;
-    const sess = sessions?.find((s) => s.id === activeId) || getSession?.(activeId) || null;
-    setTabs((prev) => openTab(prev, activeId, sess?.title || 'Chat'));
-  }, [activeId, sessions]);
-  function handleCloseTab(sessionId) {
-    const { tabs: next, fallbackId } = closeTab(tabs, sessionId);
-    setTabs(next);
-    if (fallbackId && fallbackId !== activeId) selectSession(fallbackId);
-    else if (!fallbackId && sessionId === activeId) contextNewChat?.();
   }
   // Mirror streamingId into a ref so async helpers (loadMessages merge) can
   // read the latest value without capturing a stale closure — the polling
@@ -3037,12 +3021,6 @@ export default function Chat() {
           <div className="flex h-full flex-col">
             {activeId || messages.length > 0 ? (
               <>
-                <SessionTabs
-                  tabs={tabs}
-                  activeId={activeId}
-                  onSelect={selectSession}
-                  onClose={handleCloseTab}
-                />
                 <div className="flex items-center justify-between border-b border-border px-6 py-2">
                   {/* Project context banner — shown when the user entered
                   chat from a project page (via the "chat with agent"

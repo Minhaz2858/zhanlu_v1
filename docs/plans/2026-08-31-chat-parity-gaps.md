@@ -1,6 +1,8 @@
-# Chat Parity Gaps — Implementation Plan (2026-08-31)
+# Chat Parity Gaps — Implementation Plan (2026-08-31) ✅ COMPLETE
 
 **Goal:** Close 4 verified chat-parity gaps vs Kimi/GPT: global chat-history search, conversation export + share link, completion notifications, parallel session tabs.
+
+**Status: ALL 4 SHIPPED + LIVE-VERIFIED + COMMITTED (3 commits).** Auto-title was already implemented (not a gap).
 
 **Architecture:** One backend endpoint for search (ILIKE across user's chat_messages joined to chat_sessions/agent_conversations), token-based public share (new ChatShare model + public route), frontend-only export (client-side markdown), frontend-only notifications (browser Notification API), frontend-only tabs (state in Chat.jsx over the existing selectSession path).
 
@@ -114,7 +116,7 @@
 
 ---
 
-## F4 — Parallel session tabs (P3)
+## F4 — Parallel session tabs (P3) — REMOVED 2026-08-31 (user decision: not needed; all code + tests deleted)
 
 ### Task 4.1: SessionTabs component (TDD)
 
@@ -140,7 +142,7 @@
 1. F1 (search) — backend endpoint → tests → frontend box → tests → restart + curl + browser smoke.
 2. F2 (export/share) — export first (no backend) → share model/migration → API → UI → restart + curl smoke.
 3. F3 (notify) — pure helper → wiring → tests.
-4. F4 (tabs) — component → wiring → tests → full chat suite.
+4. F4 (tabs) — REMOVED by user decision before completion.
 5. Full regression: `npx vitest run` chat suite + backend pytest sweep; `docker restart zhanlu-backend`; live browser pass on 8088.
 
 ## Pitfalls (from skill references)
