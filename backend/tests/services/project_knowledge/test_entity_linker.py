@@ -32,7 +32,7 @@ def db():
 
 
 def test_seed_is_idempotent(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
     a = seed_products_as_entities(db, "p1")
     db.commit()
     b = seed_products_as_entities(db, "p1")
@@ -44,14 +44,14 @@ def test_seed_is_idempotent(db):
 
 
 def test_seed_skips_when_flag_off(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = False
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = False
     n = seed_products_as_entities(db, "p1")
     assert n == 0
 
 
 def test_link_falls_back_to_name_match(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
-    settings.ECISCO_BI_KG_LAYER_ENTITIES_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED = True
     # create a fake KB + 1 table whose name matches an alias
     from app.models.knowledge_base import KnowledgeBase
     kb_id = str(uuid.uuid4())

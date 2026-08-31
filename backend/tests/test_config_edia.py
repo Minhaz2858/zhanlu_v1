@@ -1,4 +1,4 @@
-"""EDIA_MYSQL_URL config — empty by default, populated from env."""
+"""MYSQL_URL config — empty by default, populated from env."""
 import importlib
 import sys
 
@@ -9,18 +9,18 @@ def _reload_settings():
     return importlib.import_module("app.config").settings
 
 
-def test_edia_mysql_url_default_empty(monkeypatch):
-    monkeypatch.delenv("EDIA_MYSQL_URL", raising=False)
+def test_mysql_url_default_empty(monkeypatch):
+    monkeypatch.delenv("MYSQL_URL", raising=False)
     s = _reload_settings()
-    assert s.EDIA_MYSQL_URL == ""
-    assert s.is_edia_enabled is False
+    assert s.MYSQL_URL == ""
+    assert s.has_external_mysql is False
 
 
-def test_edia_mysql_url_set_enables(monkeypatch):
+def test_mysql_url_set_enables(monkeypatch):
     monkeypatch.setenv(
-        "EDIA_MYSQL_URL",
-        "mysql+pymysql://root:pw@10.10.10.49:3306/aipdp_data_warehouse_prod",
+        "MYSQL_URL",
+        "mysql+pymysql://root:***@10.10.10.49:3306/aipdp_data_warehouse_prod",
     )
     s = _reload_settings()
-    assert s.EDIA_MYSQL_URL.startswith("mysql+pymysql://")
-    assert s.is_edia_enabled is True
+    assert s.MYSQL_URL.startswith("mysql+pymysql://")
+    assert s.has_external_mysql is True

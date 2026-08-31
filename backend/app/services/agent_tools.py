@@ -27,6 +27,50 @@ from app.models.market_agent import MarketAgent
 
 logger = logging.getLogger(__name__)
 
+# UUID-shaped string matcher used to detect LLM-emitted placeholder values
+# (e.g. "TOOL_CONTEXT.project_id") passed in tool args. The create_automation
+# path observed on 2026-08-25 that LLMs will happily emit such placeholders
+# verbatim, bypassing naive `args.get(...) or TOOL_CONTEXT.get(...)` fallbacks
+# and triggering FK violations downstream. See _create_automation, lines below.
+_UUID_SHAPE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def _looks_like_uuid(value) -> bool:
+    """True when ``value`` is a UUID-shaped string (36 chars, 4 dashes)."""
+    if not isinstance(value, str):
+        return False
+    return bool(_UUID_SHAPE.match(value.strip()))
+
+
+def _looks_like_llm_placeholder(value) -> bool:
+    """True when ``value`` is a truthy-but-placeholder string the LLM might emit.
+
+    Examples caught: ``"TOOL_CONTEXT.project_id"``, ``"$org_id"``, ``"<id>"``,
+    ``"None"``, ``"undefined"``. Used to override the LLM's passed arg with the
+    runtime-injected TOOL_CONTEXT value before the row hits the FK constraint.
+    """
+    if not isinstance(value, str):
+        return False
+    s = value.strip()
+    if not s:
+        return False
+    lower = s.lower()
+    if lower in {"null", "none", "undefined", "n/a", "na", "nan"}:
+        return True
+    # Dotted identifiers (TOOL_CONTEXT.x), template tokens ($x, %x%, {{x}}),
+    # or angle-bracket placeholders (<x>) are uniformly unsafe to persist.
+    if "." in s:
+        return True
+    if s.startswith("$") or s.endswith("$"):
+        return True
+    if "{{" in s or "}}" in s or "%" in s:
+        return True
+    if s.startswith("<") or s.endswith(">"):
+        return True
+    return False
+
 # System meta-agents whose tool calls never pause for user approval.
 # These are the "builder"/"agent-of-agents" roles that orchestrate work
 # (creating new agents, skills, automations). Pausing them on every
@@ -1178,20 +1222,27 @@ def _create_skill(args: dict, db: Session, user_id: str | None) -> dict:
     db.refresh(tool)
 
     # Write-through to filesystem so SkillsRegistry picks it up immediately
-    if skill_md:
-        try:
-            from app.services.skill_sync import write_skill_md, reload_skills_registry
-            write_skill_md(
-                name=name,
-                description=description,
-                body=skill_md,
-                category=category,
-                trigger=trigger,
-                author=args.get("publisher", "user"),
-            )
-            reload_skills_registry()
-        except Exception as e:
-            logger.warning("Skill filesystem write-through failed (non-fatal): %s", e)
+    # FIX 2026-08-29: NEVER skip the FS write — a DB-only skill is invisible
+    # to list_skills (the chat catalog), load_skill_body and the Skill tool,
+    # so the user sees "skill created" but can never use it. When skill_md is
+    # empty, write a minimal body so the skill still registers.
+    try:
+        from app.services.skill_sync import write_skill_md, reload_skills_registry
+        _body = skill_md or (
+            f"# {name}\n\n## Overview\n{description or name}.\n\n"
+            "## Instructions\n1. Follow the description above.\n"
+        )
+        write_skill_md(
+            name=name,
+            description=description,
+            body=_body,
+            category=category,
+            trigger=trigger,
+            author=args.get("publisher", "user"),
+        )
+        reload_skills_registry()
+    except Exception as e:
+        logger.warning("Skill filesystem write-through failed (non-fatal): %s", e)
 
     result = tool.to_dict()
     result["success"] = True
@@ -1402,17 +1453,44 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
         )
         status = _default_status
 
-    # Resolve session_id: explicit arg wins, else chat session from context.
-    # The fallback is what makes the Manus-style "Scheduled" button appear
-    # in the chat header — the task gets linked to the chat it was created
-    # from, so the per-session endpoint finds it.
-    session_id = args.get("session_id") or TOOL_CONTEXT.get("chat_session_id")
+    # Resolve session_id: explicit arg wins (if UUID-shaped) else chat session
+    # from context. The fallback is what makes the Manus-style "Scheduled"
+    # button appear in the chat header — the task gets linked to the chat it
+    # was created from, so the per-session endpoint finds it. The placeholder
+    # guard rejects truthy-but-non-UUID strings (e.g. "TOOL_CONTEXT.foo") that
+    # would otherwise match the wrong ChatSession row.
+    _arg_sid = args.get("session_id")
+    if _looks_like_uuid(_arg_sid):
+        session_id = _arg_sid.strip()
+    else:
+        if _arg_sid and _looks_like_llm_placeholder(_arg_sid):
+            logger.warning(
+                "create_automation: ignoring placeholder session_id %r; "
+                "falling back to TOOL_CONTEXT.get('chat_session_id')",
+                _arg_sid,
+            )
+        session_id = TOOL_CONTEXT.get("chat_session_id")
 
-    # Resolve project_id. Prefer the explicit arg; else look it up from the
-    # chat session (the user picked the project when starting this chat). If
+    # Resolve project_id. Prefer a UUID-shaped explicit arg; else fall back to
+    # the auto-injected TOOL_CONTEXT (the LLM frequently echoes back
+    # placeholder strings like "TOOL_CONTEXT.project_id" verbatim — see the
+    # 2026-08-25 FK-violation bug where that literal string blew through the
+    # `args.get("project_id") or TOOL_CONTEXT.get(...)` chain and caused a
+    # ForeignKeyViolation on insert). After TOOL_CONTEXT, look up the chat
+    # session's project; after that, resolve the legacy `project` name. If
     # still unknown, leave it None and fall back to the legacy `project`
     # string for the project label.
-    project_id = args.get("project_id") or TOOL_CONTEXT.get("project_id")
+    _arg_pid = args.get("project_id")
+    if _looks_like_uuid(_arg_pid):
+        project_id = _arg_pid.strip()
+    else:
+        if _arg_pid and _looks_like_llm_placeholder(_arg_pid):
+            logger.warning(
+                "create_automation: ignoring placeholder project_id %r; "
+                "falling back to TOOL_CONTEXT / session / name resolution",
+                _arg_pid,
+            )
+        project_id = TOOL_CONTEXT.get("project_id")
     if not project_id and session_id:
         try:
             from app.models.chat_session import ChatSession
@@ -1433,6 +1511,27 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
     # org/app-scoped, case-insensitive). Tasks created before this
     # fallback existed are covered by the executor's runtime adoption
     # (``_resolve_task_project``).
+
+    # When we resolved a project_id via fallback (placeholders rejected
+    # or session-derived) but the LLM did not also pass the legacy
+    # ``project`` name string, look it up from the Project row so the
+    # stored name matches the FK rather than defaulting to "global".
+    # Without this, the row's project_id FK is correct but its
+    # ``project`` label is "global", which messes up the executor's
+    # runtime project resolution and KB scoping.
+    #
+    # We write the resolved name back into ``args`` rather than a local
+    # variable because line ~1709 reads ``args.get("project", "global")``
+    # at SQL construction time.
+    if project_id and not (args.get("project") or "").strip():
+        try:
+            from app.models.project import Project
+            _proj_row = db.get(Project, project_id)
+            if _proj_row is not None and _proj_row.name:
+                args["project"] = _proj_row.name
+        except Exception:
+            pass
+
     if not project_id:
         try:
             from sqlalchemy import func as _func
@@ -1628,6 +1727,11 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
         app_id=args.get("app_id") or TOOL_CONTEXT.get("app_id") or "default-app",
         output_format=output_format,
         notify_chat=str(args.get("notify_chat", True)).lower() in ("1", "true", "yes"),
+        # LLM-informed tick (opt-in): when True the executor injects a
+        # per-tick LLM briefing ("what to focus on THIS run") into the
+        # agent prompt. Parse tolerant of 1/true/yes strings from the LLM.
+        llm_informed_tick=str(args.get("llm_informed_tick", False)).lower()
+        in ("1", "true", "yes"),
         status=status,
         created_by_id=user_id,
     )
@@ -1732,6 +1836,7 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
         "name", "type", "description", "schedule", "project", "project_id",
         "status", "prompt", "output_format", "notify_chat", "max_retries",
         "skip_confirmation", "agent_id", "session_id", "data_source_id", "skills",
+        "llm_informed_tick",
     }
 
     schedule_changed = False
@@ -1842,7 +1947,23 @@ def _list_knowledge_bases(args: dict, db: Session, user_id: str | None) -> dict:
 
     q = db.query(KnowledgeBase).filter(KnowledgeBase.is_deleted == False)
     if project_id:
-        q = q.filter(KnowledgeBase.project_id == project_id)
+        # Dual-column parity with the UI and _extend_with_project_kbs:
+        # a KB is "bound" to a project via the FK (project_id) OR the
+        # legacy `project` name string. Rows created before the FK
+        # existed (or bound via name in the Resources panel) carry only
+        # the name; filtering by FK alone would hide them from the
+        # agent's data-source enumeration and make the runtime report
+        # "no databases" even though the UI shows them connected.
+        from sqlalchemy import func as _func, or_
+        from app.models.project import Project
+        name_clauses = []
+        proj = db.query(Project).filter(
+            Project.id == project_id,
+            Project.is_deleted == False,  # noqa: E712
+        ).first()
+        if proj is not None and proj.name and proj.name.lower() != "global":
+            name_clauses.append(_func.lower(KnowledgeBase.project) == proj.name.lower())
+        q = q.filter(or_(KnowledgeBase.project_id == project_id, *name_clauses))
     kbs = q.order_by(KnowledgeBase.name.asc()).all()
 
     return {

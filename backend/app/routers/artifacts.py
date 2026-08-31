@@ -263,6 +263,81 @@ def create_version(artifact_id: str, req: CreateVersionRequest, db: Session = De
     return version.to_dict()
 
 
+# ── Interactive canvas: save a user-edited HTML snapshot as a new version ──
+
+class CanvasSaveRequest(BaseModel):
+    """Body for the interactive-canvas edit loop.
+
+    ``html`` is the full edited HTML document the user produced in the
+    canvas editor.  Saving creates an immutable new version (source_json
+    carries the HTML), stores the original + preview blobs, and marks the
+    version built — so the chat preview and download both reflect the
+    edit without an LLM round-trip.
+    """
+    html: str = Field(..., min_length=1, description="Full edited HTML document")
+    changelog: Optional[str] = Field(default="Edited in canvas")
+    source: str = Field(default="user", description="user | llm")
+
+
+@router.post("/artifacts/{artifact_id}/canvas/save", response_model=dict)
+def canvas_save(
+    artifact_id: str,
+    req: CanvasSaveRequest,
+    db: Session = Depends(get_db),
+):
+    """Save user-edited HTML from the interactive canvas as a new version.
+
+    Pipeline (mirrors the LLM create_artifact flow, minus the LLM call):
+      1. create_version with source_json={"html": ..., "source": req.source}
+      2. store original blob (text/html, UTF-8)
+      3. store preview blob (same HTML — self-contained preview)
+      4. mark_version_built
+    Returns {artifact_id, version_id, version_number, preview_url}.
+    """
+    service = ArtifactService(db)
+    artifact = service.get_artifact(artifact_id)
+    if not artifact:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    html_bytes = req.html.encode("utf-8")
+    version = service.create_version(
+        artifact_id=artifact_id,
+        changelog=req.changelog,
+        source_json={"html": req.html, "source": req.source},
+        produced_by_skill=None,
+    )
+    if not version:
+        raise HTTPException(status_code=404, detail="Artifact not found")
+
+    # Original blob (text/html)
+    service.store_blob(
+        version_id=version.id,
+        blob_type="original",
+        file_name=f"{artifact.title or 'artifact'}.html",
+        mime_type="text/html",
+        data=html_bytes,
+    )
+    # Preview blob — same self-contained HTML for the inline iframe.
+    service.store_blob(
+        version_id=version.id,
+        blob_type="preview",
+        file_name=f"{artifact.title or 'artifact'}.html",
+        mime_type="text/html",
+        data=html_bytes,
+    )
+    service.mark_version_built(version.id)
+
+    return {
+        "success": True,
+        "artifact_id": artifact_id,
+        "version_id": version.id,
+        "version_number": version.version_number,
+        "source": req.source,
+        "preview_url": f"/api/artifacts/{artifact_id}/preview",
+        "download_url": f"/api/artifacts/{artifact_id}/download",
+    }
+
+
 @router.post("/artifacts/{artifact_id}/versions/{version_id}/blobs")
 def store_blob(
     artifact_id: str,
@@ -684,6 +759,12 @@ def download_artifact(
             "(not cached)."
         ),
     ),
+    force: bool = Query(
+        False,
+        description="Re-render the artifact from its source payload instead of "
+                    "returning a cached format blob. Use after a render-code fix "
+                    "or to discard a stale cached document.",
+    ),
     db: Session = Depends(get_db),
 ):
     """Download the artifact file.
@@ -734,6 +815,7 @@ def download_artifact(
         data, mime, file_name = exporter.get_or_render(
             artifact, fmt,
             theme=theme, mode=mode, style_recipe=style_recipe, doc_type=doc_type,
+            force=force,
         )
     except ExportError as e:
         raise HTTPException(status_code=400, detail=str(e))

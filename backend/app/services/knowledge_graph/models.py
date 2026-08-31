@@ -1,6 +1,6 @@
-"""Pure-Python data structures for the Ecisco BI knowledge graph.
+"""Pure-Python data structures for the enterprise knowledge graph.
 
-Adapted from EDIA 5.1.2 backend/src/domain/models.py.
+Domain models for the knowledge-graph catalog.
 Replaces pydantic BaseModel with standard dataclasses for zero-dependency port.
 """
 

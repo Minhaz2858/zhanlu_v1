@@ -1,6 +1,6 @@
 import { useState, useMemo, useRef, useEffect } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
-import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock } from 'lucide-react';
+import { Plus, Star, Trash2, Pencil, Check, X, MessageSquare, Folder, ChevronRight, ChevronDown, FolderPlus, MoreHorizontal, Clock, LayoutDashboard } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { base44 } from '@/api/base44Client';
 import { formatRelativeTime } from '@/lib/time';
@@ -82,6 +82,11 @@ export default function SessionList() {
   // the active session changes, because a session is most likely
   // to acquire its first automation while it's the active one.
   const [sessionIdsWithAutomation, setSessionIdsWithAutomation] = useState(() => new Set());
+  // Set of AgentConversation ids whose metadata.mode === 'dashboard'
+  // (dashboard-dedicated sessions). Rendered with a LayoutDashboard icon
+  // instead of the default MessageSquare so users can instantly find every
+  // chat that builds/edits a dashboard. Same fetch pattern as automation.
+  const [dashboardConversationIds, setDashboardConversationIds] = useState(() => new Set());
   const rootRef = useRef(null);
 
   // Fetch existing projects from the backend on mount so previously-
@@ -157,6 +162,38 @@ export default function SessionList() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId]);
 
+  // Fetch dashboard-mode conversations (metadata.mode === 'dashboard').
+  // The sidebar's ChatSession rows carry only ``conversation_id``; the
+  // dashboard stamp lives on the linked AgentConversation.metadata, so we
+  // build a Set of conv ids here and look up per-row below — same pattern
+  // as the automation set above. Refetch when the active session changes
+  // (a dashboard is most often created from the session that's open) and
+  // when a new dashboard artifact arrives (zhanlu:dashboard-created).
+  useEffect(() => {
+    let cancelled = false;
+    function refresh() {
+      base44.entities.AgentConversation.list()
+        .then((list) => {
+          if (cancelled) return;
+          const ids = new Set();
+          for (const c of (list || [])) {
+            const meta = c.metadata || c.metadata_ || {};
+            if (meta.mode === 'dashboard') ids.add(c.id);
+          }
+          setDashboardConversationIds(ids);
+        })
+        .catch(() => { /* best-effort — keep previous set */ });
+    }
+    refresh();
+    const onDashboardCreated = () => refresh();
+    window.addEventListener('zhanlu:dashboard-created', onDashboardCreated);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('zhanlu:dashboard-created', onDashboardCreated);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId]);
+
   // All groups default to collapsed (including the current project), so
   // the sidebar shows a clean, scannable header list instead of a wall of
   // sessions. The user can expand any group manually via its header —
@@ -206,7 +243,7 @@ export default function SessionList() {
     //   1. Consistency with My Space → Projects, which is already
     //      filtered by ownership (the `Project` entity is in
     //      USER_SCOPED_ENTITIES). A user with 0 owned active projects
-    //      sees 0 project groups here too — not a confusing "ECISCO"
+    //      sees 0 project groups here too — not a confusing "ENTERPRISE"
     //      / "TEST" header that looks like a project record but
     //      actually contains the user's own chats under a text label.
     //   2. The previous behaviour surfaced group headers for projects
@@ -419,7 +456,23 @@ export default function SessionList() {
                               tests and future styling can target
                               automation rows precisely.
                             */}
-                            {sessionIdsWithAutomation.has(s.id) ? (
+                            {/* Session icon. Dashboard-dedicated sessions
+                                (conversation metadata.mode === 'dashboard')
+                                show a LayoutDashboard icon so the user can
+                                instantly find every chat that builds/edits a
+                                dashboard — the same pattern as the Clock for
+                                automations below. Sessions with an automation
+                                keep the Clock. The `data-has-dashboard` /
+                                `data-has-automation` attrs let tests and
+                                future styling target the rows precisely. */}
+                            {(s.metadata && s.metadata.mode === 'dashboard') || dashboardConversationIds.has(s.conversation_id) ? (
+                              <LayoutDashboard
+                                className="mt-0.5 h-3 w-3 shrink-0 text-primary"
+                                aria-label={t.sessionList.dashboardBadge}
+                                title={t.sessionList.dashboardBadge}
+                                data-has-dashboard="true"
+                              />
+                            ) : sessionIdsWithAutomation.has(s.id) ? (
                               <Clock
                                 className="mt-0.5 h-3 w-3 shrink-0 text-primary"
                                 aria-label={t.sessionList.automationBadge}

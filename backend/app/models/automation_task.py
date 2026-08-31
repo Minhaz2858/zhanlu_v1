@@ -110,3 +110,13 @@ class AutomationTask(TimestampedBase):
     notify_emails: Mapped[list | None] = mapped_column(JSON, nullable=True)
     notify_on: Mapped[str | None] = mapped_column(String(20), nullable=True, default="always")
     attach_file: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=True)
+    # ── LLM-informed tick (2026-08-27) ──────────────────────────────────
+    # When True, the dispatcher enriches each fired execution with a
+    # lightweight LLM-generated "context preamble" (last run summary +
+    # fresh prompt interpretation) before the deterministic executor runs.
+    # Default False — keeps scheduled runs cheap and reliable (the
+    # dispatcher's "No LLM in the tick" guarantee is preserved unless the
+    # user explicitly opts in for Kimi-style smart scheduled research).
+    llm_informed_tick: Mapped[bool | None] = mapped_column(
+        Boolean, nullable=True, default=False
+    )

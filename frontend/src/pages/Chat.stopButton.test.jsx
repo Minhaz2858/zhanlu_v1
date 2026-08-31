@@ -55,6 +55,12 @@ vi.mock('@/api/base44Client', () => ({
       },
       KnowledgeBase: { list: vi.fn().mockResolvedValue([]) },
       AgentApp: { get: vi.fn().mockResolvedValue(null), list: vi.fn().mockResolvedValue([]) },
+      // Chat.jsx's ?conv= rehydration path calls AgentConversation.get();
+      // without this entity the effect throws before rendering.
+      AgentConversation: {
+        get: vi.fn().mockResolvedValue(null),
+        update: vi.fn().mockResolvedValue({}),
+      },
       Report: { update: vi.fn().mockResolvedValue({}) },
       UserFile: { create: vi.fn().mockResolvedValue({}) },
     },
@@ -202,6 +208,13 @@ vi.mock('@/lib/utils', () => ({
 function makeStream(events) {
   return vi.fn(async function* () {
     for (const evt of events) {
+      // Yield across a MACROTASK boundary so React flushes the
+      // intermediate streaming state. Without this, the sync mock
+      // generator runs start→done inside a single microtask drain and
+      // the transient btn-stop (isStreaming=true) is never rendered —
+      // React batches all state updates until the macrotask boundary.
+      // A real SSE socket has natural macrotask gaps between events.
+      await new Promise((r) => setTimeout(r, 0));
       yield evt;
     }
     // After emitting all events, hang forever — simulates the SSE socket
@@ -301,34 +314,9 @@ describe('Chat — Stop button visibility after agent stream emits `done`', () =
     await waitFor(() => expect(screen.getByTestId('btn-send')).toBeInTheDocument(), { timeout: 2000 });
     expect(latestIsStreaming.value).toBe(false);
   });
-
-  it('hides the Stop button after the 30s watchdog when the stream never terminates', async () => {
-    vi.useFakeTimers();
-    try {
-      // Stream that yields nothing and never closes — worst case.
-      genStream.mockImplementation(
-        vi.fn(async function* () {
-          await new Promise(() => {});
-        })
-      );
-
-      renderChat();
-      await waitFor(() => expect(screen.getByTestId('btn-pick-agent')).toBeInTheDocument());
-      fireEvent.click(screen.getByTestId('btn-pick-agent'));
-      await waitFor(() => expect(screen.getByTestId('active-agent-badge')).toBeInTheDocument());
-      fireEvent.click(screen.getByTestId('btn-send'));
-
-      // Stop button appears once streaming starts
-      await waitFor(() => expect(screen.getByTestId('btn-stop')).toBeInTheDocument(), { timeout: 2000 });
-
-      // Advance past the 30s watchdog.
-      await vi.advanceTimersByTimeAsync(31_000);
-
-      // The watchdog must force the state back to idle so the Stop button
-      // hides even though the SSE stream never produced a `done` event.
-      await waitFor(() => expect(screen.getByTestId('btn-send')).toBeInTheDocument(), { timeout: 2000 });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
+  // NOTE (2026-08-31): the old "30s watchdog" test was REMOVED — the
+  // auto-reset watchdog no longer exists in Chat.jsx (the current design
+  // keeps the Stop button visible until the user clicks it or the stream
+  // errors, instead of force-resetting after a fixed timeout). The test
+  // pinned behavior that was deliberately deleted.
 });

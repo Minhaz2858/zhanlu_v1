@@ -39,11 +39,11 @@ def _patch_deps(monkeypatch):
         lambda d: type("E", (), {"compute_target_anchored": lambda self, tid: None})(),
     )
     monkeypatch.setattr(
-        "app.services.forecasting.seed_ecisco_targets.seed_ecisco_forecast_targets",
+        "app.services.forecasting.seed_targets.seed_forecast_targets",
         lambda db: 0,
     )
     monkeypatch.setattr(
-        "app.services.forecasting.seed_ecisco_targets.discover_and_seed_sku_targets",
+        "app.services.forecasting.seed_targets.discover_and_seed_sku_targets",
         lambda db: 0,
     )
 

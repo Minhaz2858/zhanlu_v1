@@ -21,7 +21,7 @@ import { runAutomationTask } from '../runAutomationTask';
 describe('runAutomationTask', () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it('ensures session, fires /run, toasts execution id, navigates to /chat?session=<sid> with no prefill/autorun', async () => {
+  it('ensures session, fires /run, toasts execution id, navigates to /chat?session=<sid> with automation context', async () => {
     authFetch.mockImplementation(async (url) => {
       if (url.includes('/ensure-session')) {
         return { ok: true, json: async () => ({ success: true, session_id: 'sess-123' }) };
@@ -34,7 +34,7 @@ describe('runAutomationTask', () => {
     const navigate = vi.fn();
     const toast = vi.fn();
     await runAutomationTask(
-      { id: 'task-1', session_id: null },
+      { id: 'task-1', session_id: null, project: 'C5_C9' },
       { navigate, toast, lang: 'en' },
     );
 
@@ -52,10 +52,14 @@ describe('runAutomationTask', () => {
     expect(toast).toHaveBeenCalledTimes(1);
     expect(toast.mock.calls[0][0].title).toBe('Execution started');
     expect(toast.mock.calls[0][0].description).toContain('exe12345');
-    // navigate to the dedicated session — NO prefill, NO autorun
+    // navigate to the dedicated session — NO prefill, NO autorun, but
+    // WITH the automation context (automationId + agentName + projectName)
     expect(navigate).toHaveBeenCalledTimes(1);
     const target = navigate.mock.calls[0][0];
     expect(target).toContain('/chat?session=sess-123');
+    expect(target).toContain('automationId=task-1');
+    expect(target).toContain('agentName=automation_agent');
+    expect(target).toContain('projectName=C5_C9');
     expect(target).not.toContain('prefill');
     expect(target).not.toContain('autorun');
   });

@@ -2,7 +2,7 @@
  * Regression (2026-08-05): sidebar → selectSession used to only
  * write ``?conv=...`` to the URL — never ``?project=`` or
  * ``?projectName=``. As a result, clicking a conv in a different
- * sidebar project (e.g. ECISCO BI vs Global) left the URL as
+ * sidebar project (e.g. switching between a project and Global) left the URL as
  * ``?conv=...`` only, so the v3 stream request body (read from
  * window.location by Chat.jsx's handleAgentSend) had no
  * project_id to scope the data-source runtime with. The agent

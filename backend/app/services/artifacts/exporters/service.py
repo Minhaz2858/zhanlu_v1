@@ -57,6 +57,29 @@ from app.services.artifacts.exporters import (
 from app.services.artifacts.exporters._common import chart_rows, stamp_filename
 from app.services.artifacts.deck_data import build_deck_user_context, collect_grounded_rows
 
+# Canonical DeckPlan layouts the renderers dispatch on (used to validate
+# agent-authored ``payload.slides`` layout names).
+_KNOWN_DECK_LAYOUTS = {
+    "cover",
+    "agenda",
+    "kpi_grid",
+    "chart_full",
+    "chart_with_bullets",
+    "findings_cards",
+    "insights_bullets",
+    "recommendations",
+    "data_table",
+    "methodology",
+    "section_divider",
+    "closing",
+    "timeline",
+    "roadmap",
+    "comparison",
+    "swot",
+    "quote",
+    "process_flow",
+}
+
 logger = logging.getLogger(__name__)
 
 
@@ -84,6 +107,179 @@ def _repair_cycles() -> int:
         return max(0, int(os.environ.get("ZHANLU_AUDIT_REPAIR_CYCLES", "2")))
     except ValueError:
         return 2
+
+
+# Layouts that do NOT carry substantive content (a deck made of only these
+# is a skeleton, not a deliverable).
+_NON_CONTENT_LAYOUTS = frozenset({"cover", "closing", "section_divider"})
+
+
+def _deck_has_enough_content(plan) -> bool:
+    """A rich-payload plan must have ≥3 content slides to be trusted.
+
+    The rich-payload bridge (DocumentPlan → DeckPlan) collapses a
+    summary-only payload into a 1-2 slide skeleton (cover + paragraph +
+    closing) that the layout engine renders as a plain text deck.  Only
+    accept the rich plan when it carries real substance; otherwise the
+    caller falls back to the row-based deck planner, which builds the full
+    8-12 slide narrative arc.
+    """
+    if plan is None:
+        return False
+    slides = getattr(plan, "slides", None) or []
+    content = [s for s in slides if getattr(s, "layout", "") not in _NON_CONTENT_LAYOUTS]
+    return len(content) >= 3
+
+
+def _empty_report_fail() -> dict[str, Any]:
+    """A FAIL audit report for the 'planner returned no plan' path.
+
+    Matches the shape render_dispatcher uses so callers can log + surface
+    the failure consistently (no fabricated PASS).
+    """
+    return {
+        "tool": "audit_deck",
+        "status": "FAIL",
+        "summary": {"pass": 0, "warn": 0, "fail": 1, "total": 1},
+        "rules": [
+            {
+                "id": "no_deck_plan",
+                "title": "No deck plan produced",
+                "level": "FAIL",
+                "detail": "The deck planner returned no plan; nothing was rendered.",
+                "evidence": [],
+            }
+        ],
+    }
+
+
+def _enrich_thin_plan(plan, payload) -> None:
+    """Guarantee a minimum deck structure (≥3 content slides) in place.
+
+    Every planner path (rich-payload bridge, LLM planner, deterministic
+    fallback) can collapse to a cover+closing skeleton when the input data
+    is thin (e.g. a summary-only payload with no rows).  A 2-slide deck is
+    not a deliverable — it ships as "Data Overview / Thank you" and the user
+    sees a low-quality PPT.  This pads the plan with deterministic content
+    slides built from whatever the payload does carry:
+
+      * summary   → insights_bullets (split into ≤3 bullets)
+      * kpis      → kpi_grid
+      * findings  → findings_cards
+      * recs      → recommendations
+      * fallback  → an honest "Scope & Method" insights slide
+
+    Never drops existing slides; only appends until the floor is met.
+    ``plan`` is mutated in place (SlidePlan append).
+    """
+    if plan is None:
+        return
+    slides = getattr(plan, "slides", None)
+    if not isinstance(slides, list):
+        return
+    content = [s for s in slides if getattr(s, "layout", "") not in _NON_CONTENT_LAYOUTS]
+    if len(content) >= 3:
+        return  # already substantive — leave untouched
+
+    from app.services.synexia.contracts import SlidePlan
+
+    existing_layouts = {getattr(s, "layout", "") for s in slides}
+
+    # 1) KPIs → kpi_grid (if the payload carries any and no kpi slide yet).
+    if "kpi_grid" not in existing_layouts:
+        kpis = getattr(payload, "kpis", None) or []
+        if kpis:
+            kpi_specs = []
+            for k in kpis[:6]:
+                if isinstance(k, dict):
+                    kpi_specs.append({
+                        "label": k.get("label") or k.get("name") or "KPI",
+                        "value": k.get("value") or k.get("display") or "",
+                        "delta": k.get("delta") or "",
+                        "caption": k.get("caption") or "",
+                    })
+                elif hasattr(k, "label"):
+                    kpi_specs.append({
+                        "label": getattr(k, "label", None) or "KPI",
+                        "value": getattr(k, "value", None) or getattr(k, "display", "") or "",
+                        "delta": getattr(k, "delta", None) or "",
+                        "caption": getattr(k, "caption", None) or "",
+                    })
+            if kpi_specs:
+                slides.append(SlidePlan(layout="kpi_grid", title="Key Metrics",
+                                        kpi_specs=kpi_specs, narrative_role="context"))
+                existing_layouts.add("kpi_grid")
+
+    # 2) Summary / findings → insights or findings slide.
+    if "insights_bullets" not in existing_layouts and "findings_cards" not in existing_layouts:
+        findings = getattr(payload, "key_findings", None) or getattr(payload, "insights", None) or []
+        if findings:
+            bullets = []
+            for f in findings[:5]:
+                text = getattr(f, "text", "") if not isinstance(f, dict) else (f.get("text") or "")
+                if text:
+                    bullets.append(text)
+            if bullets:
+                slides.append(SlidePlan(layout="findings_cards", title="Key Findings",
+                                        bullets=bullets, narrative_role="context"))
+                existing_layouts.add("findings_cards")
+        else:
+            summary = getattr(payload, "summary", "") or ""
+            if summary:
+                # Split long summary into ≤3 punchy insight bullets.
+                sentences = [s.strip() for s in summary.replace("。", ". ").split(". ") if len(s.strip()) > 12]
+                bullets = (sentences or [summary])[:3]
+                slides.append(SlidePlan(layout="insights_bullets",
+                                        title="Executive Summary",
+                                        bullets=bullets, narrative_role="context"))
+                existing_layouts.add("insights_bullets")
+
+    # 3) Recommendations (if the payload carries any and none present).
+    if "recommendations" not in existing_layouts:
+        recs = getattr(payload, "recommendations", None) or []
+        bullets = []
+        for r in recs[:4]:
+            text = getattr(r, "text", "") if not isinstance(r, dict) else (r.get("text") or "")
+            if text:
+                bullets.append(text)
+        if bullets:
+            slides.append(SlidePlan(layout="recommendations", title="Recommendations",
+                                    bullets=bullets, narrative_role="action"))
+            existing_layouts.add("recommendations")
+
+    # 4) Absolute floor: keep appending honest, varied slides until the
+    #    deck carries ≥3 content slides — a data-less request still gets a
+    #    professional 3-4 slide deck, never a 2-slide "Thank you".
+    title = getattr(plan, "title", "") or "Overview"
+    _scope_variants = [
+        (
+            "Scope & Approach",
+            [
+                f"Coverage: {title}",
+                "Data grounding: queried the bound knowledge bases for this analysis",
+                "Findings below summarize the available market and operational data",
+            ],
+        ),
+        (
+            "Sources & Method",
+            [
+                "Figures are drawn from the project's bound knowledge bases",
+                "Market context uses the Market Research data source when available",
+                "All numbers carry a source footer on the slide",
+            ],
+        ),
+    ]
+    while True:
+        content = [s for s in slides if getattr(s, "layout", "") not in _NON_CONTENT_LAYOUTS]
+        if len(content) >= 3:
+            break
+        variant = _scope_variants[len(content) % len(_scope_variants)]
+        slides.append(SlidePlan(
+            layout="insights_bullets",
+            title=variant[0],
+            bullets=variant[1],
+            narrative_role="context",
+        ))
 
 
 # What to render at finalize time, by user_signal.  If the user_signal
@@ -586,9 +782,32 @@ class ExportService:
         has_chart_data = bool(
             chart and getattr(chart, "data", None)
         )
+        # A slides-only payload is ALSO rich — the agent authored a complete
+        # deck structure with no report-card narrative (2026-08-29).
+        has_slides = bool(getattr(payload, "slides", None))
 
-        if not any((has_blocks, has_summary, has_findings, has_recs, has_sections, has_chart_data)):
+        if not any((has_blocks, has_summary, has_findings, has_recs, has_sections, has_chart_data, has_slides)):
             return None
+
+        # ── Agent-authored slide structure wins (2026-08-29) ───────────────
+        # When the agent wrote `payload.slides` (a complete slide-by-slide
+        # consulting structure), render EXACTLY that instead of rebuilding a
+        # generic plan from summary/kpis/sections.  This is the fix for the
+        # "deck ignored my narrative" complaint: the stored payload for the
+        # C5/C9 deck carried a beautiful 7-slide story (cover → exec summary
+        # → product structure → monthly trend → org contribution → strategy
+        # → conclusion) that the OLD path silently discarded, producing the
+        # generic "Notes / Key Metrics / Methodology" 12-slide deck.
+        try:
+            slides_plan = ExportService._slides_to_deck_plan(payload, user_message)
+            if slides_plan is not None:
+                return slides_plan
+        except Exception as exc:  # noqa: BLE001 — never block the deck
+            logger.warning(
+                "ExportService: slides-authored DeckPlan conversion failed; "
+                "falling back to the report-card path: %s",
+                exc,
+            )
 
         try:
             from app.services.artifacts.document_plan import DocumentPlan
@@ -619,6 +838,200 @@ class ExportService:
                 exc,
             )
             return None
+
+    # Layout aliases accepted in agent-authored `slides` (normalized to the
+    # canonical DeckPlan layout names the renderers dispatch on).
+    _SLIDES_LAYOUT_ALIASES = {
+        "executive_brief": "insights_bullets",
+        "exec_summary": "insights_bullets",
+        "summary": "insights_bullets",
+        "bullets": "insights_bullets",
+        "title": "cover",
+        "title_slide": "cover",
+        "kpis": "kpi_grid",
+        "kpi": "kpi_grid",
+        "metrics": "kpi_grid",
+        "chart": "chart_full",
+        "chart_and_bullets": "chart_with_bullets",
+        "findings": "findings_cards",
+        "table": "data_table",
+        "divider": "section_divider",
+        "section": "section_divider",
+        "end": "closing",
+        "thank_you": "closing",
+        "qa": "closing",
+    }
+
+    @staticmethod
+    def _slides_to_deck_plan(
+        payload: Optional[ReportCardPayload],
+        user_message: str = "",
+    ) -> Optional[Any]:
+        """Convert an agent-authored ``payload.slides`` list into a DeckPlan.
+
+        The agent may hand the deck pipeline a complete slide-by-slide
+        structure instead of report-card fields.  Each slide entry is a
+        dict: ``{"title", "subtitle"?, "bullets"?, "layout"?}``.  Layouts
+        are normalized through ``_SLIDES_LAYOUT_ALIASES`` (so the natural
+        names agents use — executive_brief, chart, table, kpi — map onto
+        the canonical renderer layouts).
+
+        Returns None when the payload has no usable ``slides`` list (or the
+        list is too thin to be meaningful), so the caller falls through to
+        the report-card path.
+        """
+        if payload is None:
+            return None
+        raw = getattr(payload, "slides", None)
+        if not isinstance(raw, list) or not raw:
+            return None
+
+        from app.services.synexia.contracts import DeckPlan, SlidePlan
+
+        slides: list[SlidePlan] = []
+        for idx, entry in enumerate(raw):
+            if not isinstance(entry, dict):
+                continue
+            title = str(entry.get("title") or "").strip()
+            if not title:
+                # Skip entries without a title — they'd render as empty
+                # "Notes" filler anyway.
+                continue
+            subtitle = str(entry.get("subtitle") or "").strip()
+            bullets_raw = entry.get("bullets") or []
+            if isinstance(bullets_raw, str):
+                bullets_raw = [bullets_raw]
+            bullets = [str(b) for b in bullets_raw if str(b).strip()][:9]
+            layout_raw = str(entry.get("layout") or "").strip().lower()
+            layout = ExportService._SLIDES_LAYOUT_ALIASES.get(
+                layout_raw, layout_raw.replace("-", "_").replace(" ", "_")
+            )
+            if layout not in _KNOWN_DECK_LAYOUTS:
+                layout = "cover" if idx == 0 else "insights_bullets"
+            # A kpi_grid / data_table slide WITHOUT its structured data
+            # (kpi_specs / table_rows) would render EMPTY (kpi_grid shows
+            # "No KPIs"; data_table early-returns a bare black section).
+            # When the agent only supplied bullets, degrade gracefully to
+            # insights_bullets so the content actually renders (2026-08-29).
+            if layout == "kpi_grid":
+                has_kpi_specs = bool(
+                    getattr(payload, "kpis", None)
+                    or entry.get("kpis")
+                    or entry.get("kpi_specs")
+                )
+                if not has_kpi_specs and not bullets:
+                    layout = "insights_bullets"
+            if layout == "data_table":
+                has_table = bool(
+                    entry.get("table_rows")
+                    or entry.get("rows")
+                    or entry.get("table_cols")
+                    or entry.get("columns")
+                )
+                if not has_table:
+                    layout = "insights_bullets"
+            slide = SlidePlan(
+                layout=layout,
+                title=title,
+                subtitle=subtitle,
+                bullets=bullets,
+            )
+            # kpi_grid: attach the payload KPIs so the grid renders tiles.
+            if layout == "kpi_grid":
+                from app.services.synexia.contracts import KPISpecInSlide
+
+                kpi_src = entry.get("kpis") or entry.get("kpi_specs") or getattr(payload, "kpis", None)
+                if kpi_src:
+                    specs = []
+                    for k in kpi_src:
+                        if isinstance(k, dict):
+                            specs.append(KPISpecInSlide(
+                                label=str(k.get("label") or k.get("name") or ""),
+                                value=str(k.get("value") or k.get("display") or ""),
+                                delta=k.get("delta") or None,
+                                caption=k.get("caption") or None,
+                            ))
+                        else:
+                            specs.append(KPISpecInSlide(
+                                label=getattr(k, "label", "") or "",
+                                value=str(getattr(k, "value", "") or ""),
+                                delta=getattr(k, "delta", None),
+                                caption=getattr(k, "caption", None),
+                            ))
+                    slide.kpi_specs = specs
+            # data_table: attach table rows/cols when the agent supplied them.
+            if layout == "data_table":
+                table_cols = entry.get("table_cols") or entry.get("columns") or []
+                table_rows = entry.get("table_rows") or entry.get("rows") or []
+                if isinstance(table_cols, list) and table_cols:
+                    slide.table_cols = [str(c) for c in table_cols]
+                if isinstance(table_rows, list) and table_rows:
+                    slide.table_rows = table_rows[:30]
+            # Chart slides: attach the payload chart so the chart_full /
+            # chart_with_bullets renderer has data (falls back to the
+            # slide's own inline chart if present).
+            if layout in ("chart_full", "chart_with_bullets"):
+                chart = getattr(payload, "chart", None)
+                if chart is None:
+                    chart = entry.get("chart")
+                if chart is not None:
+                    from app.services.synexia.contracts import ChartSpecInSlide
+
+                    chart_type = (
+                        getattr(chart, "type", None)
+                        or (chart.get("type") if isinstance(chart, dict) else None)
+                        or "bar"
+                    )
+                    # Normalize combo → grouped_bar so both renderers have a
+                    # concrete chart type (combo isn't a pptx chart kind).
+                    if chart_type == "combo":
+                        chart_type = "grouped_bar"
+                    title_c = (
+                        getattr(chart, "title", None)
+                        or (chart.get("title") if isinstance(chart, dict) else None)
+                        or title
+                    )
+                    slide.chart_spec = ChartSpecInSlide(
+                        chart_type=chart_type,
+                        x_key=(
+                            getattr(chart, "x_key", None)
+                            or (chart.get("x_key") if isinstance(chart, dict) else None)
+                            or ""
+                        ),
+                        y_keys=list(
+                            getattr(chart, "y_keys", None)
+                            or (chart.get("y_keys") if isinstance(chart, dict) else None)
+                            or []
+                        ),
+                        title=title_c,
+                    )
+                    chart_data = (
+                        getattr(chart, "data", None)
+                        or (chart.get("data") if isinstance(chart, dict) else None)
+                        or []
+                    )
+                    if isinstance(chart_data, list):
+                        slide.chart_rows = chart_data[:40]
+            slides.append(slide)
+
+        if len(slides) < 2:
+            return None
+
+        title = getattr(payload, "title", None) or "Report"
+        subtitle = ""
+        for entry in raw:
+            if isinstance(entry, dict) and entry.get("subtitle"):
+                subtitle = str(entry["subtitle"])
+                break
+        summary = getattr(payload, "summary", "") or ""
+        return DeckPlan(
+            title=title,
+            deck_type="data_report",
+            theme_recommendation="",
+            slides=slides,
+            summary=summary or subtitle,
+            methodology=getattr(payload, "methodology", "") or "",
+        )
 
     def _ensure_source_label(
         self,
@@ -721,7 +1134,50 @@ class ExportService:
         # was generic / ignored the analysis."
         # ------------------------------------------------------------------
         plan = self._rich_payload_to_deck_plan(payload, user_message)
-        if plan is not None:
+        # ── General no-data override (2026-08-29) ────────────────────────
+        # ANY request with no grounded rows must still produce a full
+        # professional deck.  When the rich-payload plan (or the row-based
+        # planner) would be thinner than the general synthetic structure,
+        # prefer the synthetic plan — domain-agnostic, built from the
+        # payload narrative (summary/kpis/findings/recs/sections/chart) with
+        # honest illustrative framing when empty.  A genuinely detailed
+        # agent-authored deck is never replaced.
+        _use_synth_for_no_data = False
+        # An agent-authored `payload.slides` deck is the STRONGEST signal —
+        # never replace it with the synthetic generic structure, even when
+        # the synth would have more slides (2026-08-29).  The agent wrote a
+        # specific consulting narrative; the synth is only a no-data fallback.
+        _slides_authored = bool(getattr(payload, "slides", None))
+        if not rows and not _slides_authored:
+            try:
+                from app.services.artifacts.synthetic_deck import (
+                    build_synthetic_deck_plan,
+                )
+                _synth_plan = build_synthetic_deck_plan(user_message, payload)
+                if _synth_plan is not None:
+                    _rich_content = (
+                        sum(1 for s in plan.slides if s.layout not in ("cover", "closing"))
+                        if plan is not None else 0
+                    )
+                    _synth_content = sum(
+                        1 for s in _synth_plan.slides
+                        if s.layout not in ("cover", "closing")
+                    )
+                    if _synth_content > _rich_content:
+                        plan = _synth_plan
+                        _use_synth_for_no_data = True
+                        logger.info(
+                            "ExportService: no-rows → synthetic consulting "
+                            "plan wins (%d slides, was %d)",
+                            len(_synth_plan.slides), _rich_content,
+                        )
+            except Exception as _synth_err:  # noqa: BLE001 — never block the deck
+                logger.warning(
+                    "ExportService: synthetic no-data override failed (non-fatal): %s",
+                    _synth_err,
+                )
+
+        if plan is not None and (_deck_has_enough_content(plan) or _use_synth_for_no_data):
             ctx.deck_type = plan.deck_type or "data_report"
             ctx.deck_plan = plan
             logger.info(
@@ -729,54 +1185,140 @@ class ExportService:
                 "narrative (%d slides, title=%.60s)",
                 len(plan.slides), getattr(plan, "title", "")
             )
-            data, audit_report = render_pptx_from_plan_sync(plan, rows, ctx)
-            return data, "application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx", audit_report
-
-        # Phase 4: classify the deck profile from the user's intent. The
-        # deterministic classifier runs sync (no LLM); an explicit profile
-        # carried on the context always wins.
-        profile_name = self._run_coro(
-            classify_profile(
-                user_message,
-                explicit=getattr(ctx, "deck_profile", None),
-                allow_llm_fallback=False,
+        else:
+            if plan is not None:
+                logger.warning(
+                    "ExportService: rich payload produced a thin deck "
+                    "(%d slides, content=%d) — falling back to the "
+                    "row-based planner",
+                    len(plan.slides),
+                    sum(1 for s in plan.slides if s.layout not in ("cover", "closing")),
+                )
+            # Phase 4: classify the deck profile from the user's intent. The
+            # deterministic classifier runs sync (no LLM); an explicit profile
+            # carried on the context always wins.
+            profile_name = self._run_coro(
+                classify_profile(
+                    user_message,
+                    explicit=getattr(ctx, "deck_profile", None),
+                    allow_llm_fallback=False,
+                )
             )
-        )
 
-        # Personalization + brand: hand the planner the resolved theme name,
-        # the brand palette, and the user/brand context so its copy matches
-        # the audience and the customer palette instead of a generic template.
-        theme_name = self._resolved_theme_name(ctx)
-        theme_tokens = getattr(ctx, "theme_tokens", None)
-        user_context = build_deck_user_context(
-            self.db,
-            artifact=artifact,
-            user_id=user_id,
-            conversation_id=getattr(ctx, "conversation_id", None),
-            user_message=user_message,
-            org_id=org_id,
-            app_id=app_id,
-        )
-
-        plan, _profile = self._run_coro(
-            build_deck_plan(
-                user_message, rows,
-                theme_recommendation=theme_name,
-                profile_name=profile_name,
-                theme_tokens=theme_tokens,
-                user_context=user_context,
+            # Personalization + brand: hand the planner the resolved theme name,
+            # the brand palette, and the user/brand context so its copy matches
+            # the audience and the customer palette instead of a generic template.
+            theme_name = self._resolved_theme_name(ctx)
+            theme_tokens = getattr(ctx, "theme_tokens", None)
+            user_context = build_deck_user_context(
+                self.db,
+                artifact=artifact,
+                user_id=user_id,
+                conversation_id=getattr(ctx, "conversation_id", None),
+                user_message=user_message,
+                org_id=org_id,
+                app_id=app_id,
             )
-        )
+
+            plan, _profile = self._run_coro(
+                build_deck_plan(
+                    user_message, rows,
+                    theme_recommendation=theme_name,
+                    profile_name=profile_name,
+                    theme_tokens=theme_tokens,
+                    user_context=user_context,
+                    skill_name=getattr(ctx, "skill_name", "") or "",
+                )
+            )
+            if plan is None:
+                logger.error(
+                    "ExportService: deck planner returned no plan — "
+                    "cannot render pptx for artifact %s",
+                    getattr(artifact, "id", "?"),
+                )
+                return b"", "application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx", _empty_report_fail()
 
         ctx.deck_type = plan.deck_type or "data_report"
         ctx.deck_plan = plan
+
+        # Minimum-deck guarantee: no planner path may ship a 2-slide skeleton
+        # (cover + closing).  Pad thin plans with deterministic content slides
+        # built from the payload (KPIs / summary / findings / recs) so the
+        # user always receives a real deliverable, even on empty rows.
+        _enrich_thin_plan(plan, payload)
+
+        # Skill-aware deck personality (2026-08-29): the deck skill the agent
+        # loaded (create_artifact skill=...) now actually changes the deck.
+        # When the planner left theme/palette/deck_type unset or legacy, the
+        # skill's profile supplies them — so "make a ppt" with kai-slide-
+        # creator looks different from guizang-ppt-skill, etc.  Conservative:
+        # explicit planner picks are never overridden.
+        try:
+            from app.services.artifacts.skill_deck_profiles import apply_skill_profile
+
+            if apply_skill_profile(plan, getattr(ctx, "skill_name", "") or ""):
+                ctx.deck_type = plan.deck_type or ctx.deck_type
+                logger.info(
+                    "ExportService: skill-aware profile applied (skill=%s, "
+                    "theme=%s, palette=%s, deck_type=%s)",
+                    getattr(ctx, "skill_name", ""),
+                    plan.theme_recommendation,
+                    plan.palette_recommendation,
+                    plan.deck_type,
+                )
+        except Exception as _skp_err:  # noqa: BLE001 — never block the deck
+            logger.warning(
+                "ExportService: skill-aware profile skipped (non-fatal): %s",
+                _skp_err,
+            )
 
         route = "structured"
         if settings.PPT_SMART_ROUTER_ENABLED:
             route = route_deck(plan, user_message)
 
         if route == "sandbox":
-            # Design-heavy deck.  Try the HTML design path first if opted in;
+            # Design-heavy deck.  If the user explicitly asked for an
+            # EDITABLE deck (tweak/modify later), prefer slide-skill's
+            # native-editable .pptx (real text frames) over the image-fill
+            # path — a baked-PNG deck cannot be edited in PowerPoint.
+            # On any slide-skill failure we fall through to the HTML
+            # image-fill path (never block the deck on the editable tier).
+            if settings.HTML_DESIGN_EDITABLE_ENABLED:
+                from app.services.artifacts.deck_router import pick_pptx_mode
+                from app.services.artifacts.render_dispatcher import _empty_report
+                from app.services.artifacts.slideskill_bridge import (
+                    SlideSkillError,
+                    editable_available,
+                    render_editable_deck,
+                )
+                try:
+                    if pick_pptx_mode(plan, user_message) == "editable_text":
+                        if editable_available():
+                            data = render_editable_deck(plan, ctx, rows, user_message)
+                            audit_report = _empty_report()
+                            logger.info(
+                                "ExportService: deck rendered via slide-skill "
+                                "editable-native path (type=%s)",
+                                plan.deck_type,
+                            )
+                            return (
+                                data,
+                                "application/vnd.openxmlformats-"
+                                "officedocument.presentationml.presentation",
+                                "pptx", audit_report,
+                            )
+                except SlideSkillError as exc:
+                    logger.warning(
+                        "ExportService: editable-native render failed, "
+                        "falling back to html_design: %s", exc,
+                    )
+                except Exception as exc:  # noqa: BLE001 — never break the deck
+                    logger.warning(
+                        "ExportService: editable-native render raised, "
+                        "falling back to html_design: %s", exc,
+                    )
+
+            # Try the HTML design path first if opted in;
             # fall back to the structured layout engine (the original behavior)
             # when the new path is disabled or fails.
             if settings.HTML_DESIGN_RENDERER_ENABLED:

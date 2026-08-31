@@ -1,4 +1,4 @@
-import useIsMobile from "./useIsMobile"
+import useIsMobileCanonical from "./useIsMobile"
 
 // Backward-compatible mobile hook.
 //
@@ -9,5 +9,5 @@ import useIsMobile from "./useIsMobile"
 // desktop window. Existing callers import `useIsMobile` from this module;
 // we keep that export name and delegate to the canonical implementation.
 export function useIsMobile() {
-  return useIsMobile(1024);
+  return useIsMobileCanonical(1024);
 }

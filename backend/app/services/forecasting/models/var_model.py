@@ -4,8 +4,9 @@ VAR/VECM multivariate forecasting model for correlated products.
 Fits a statsmodels VAR on a matrix of cross-correlated products, forecasts
 jointly, and extracts the target product's row.
 
-Correlated chain (value-chain upstream → downstream):
-    naphtha → C5 → isoprene → DCPD → C5_resin
+Correlated chain (value-chain upstream → downstream). The product groups
+themselves are loaded from the app's domain config ("correlated_groups" key);
+empty config = no correlated groups (VAR degrades to the naive fallback).
 
 Flag: FORECAST_VAR_ENABLED (default false)
 """
@@ -16,23 +17,15 @@ import logging
 import numpy as np
 import pandas as pd
 
+from app.services.domain_config import get_domain_config
 from app.services.forecasting.models.base import ForecastModel
 
 logger = logging.getLogger(__name__)
 
-# ---- Correlated product groups ----
-_CORRELATED_GROUPS: dict[str, list[str]] = {
-    # C5 value chain
-    "C5": ["naphtha", "isoprene", "DCPD", "C5_resin"],
-    "naphtha": ["C5", "isoprene"],
-    "isoprene": ["naphtha", "C5", "DCPD"],
-    "DCPD": ["C5", "isoprene", "C5_resin"],
-    "C5_resin": ["C5", "DCPD"],
-    # Benzene-toluene-xylene (BTX) chain
-    "benzene": ["toluene", "mixed_xylene"],
-    "toluene": ["benzene", "mixed_xylene"],
-    "mixed_xylene": ["benzene", "toluene"],
-}
+# ---- Correlated product groups (config-driven; empty = generic) ----
+_CORRELATED_GROUPS: dict[str, list[str]] = dict(
+    (get_domain_config("") or {}).get("correlated_groups") or {}
+)
 
 _VAR_MIN_ROWS = 60  # Minimum data points per product to include
 _VAR_MIN_PRODUCTS = 3  # Minimum correlated products to form a VAR

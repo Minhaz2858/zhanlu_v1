@@ -22,14 +22,18 @@
  * data-source runtime see the right project context even for convs
  * that originally had no project params.
  *
- * Note (2026-08-06): the conv rehydration does NOT write agentName
- * back into the URL. The agent context is bound via setActiveAgent
- * (React state) and consumed by handleAgentSend from there — no code
- * reads agentName from the URL for the v3 stream body. Writing it
- * to the URL on reload changed the visible URL bar with no
- * functional benefit, so the URL stays minimal. ``?agentName=`` is
- * only set on user-initiated navigations (sidebar session select,
- * ProjectDetail recent-chats click).
+ * Note (2026-08-06 → 2026-08-31): the conv rehydration previously did
+ * NOT write agentName back into the URL (agent was bound via
+ * setActiveAgent React state). The user explicitly requested the URL
+ * carry the FULL context — project + agent + conv — matching other AI
+ * agents' shareable-conversation URLs (Kimi/Claude/GPT). So
+ * rehydration now writes ``?agentName=`` from the conv's agent_name,
+ * and the ?conv= deep-link restore reads it back as an override.
+ *
+ * Also (2026-08-31): projectName was never restored because the
+ * AgentConversation model has NO project_name/project columns — the
+ * name lives inside ``conv.metadata``. The rehydration now reads
+ * ``conv.metadata.project_name || conv.metadata.project``.
  */
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'fs';
@@ -76,19 +80,21 @@ describe('Chat.jsx URL keeps project context on mount', () => {
     );
     expect(projectIdSync, 'URL sync block (project_id → window.history.replaceState) not found').not.toBeNull();
     const body = projectIdSync[0];
-    // Must set projectName from conv.project_name (or conv.project).
-    expect(body).toMatch(/url\.searchParams\.set\(['"]projectName['"]\s*,\s*(conv\.project_name|conv\.project|pname)/);
-    // Must NOT set agentName — the agent context is bound via
-    // setActiveAgent (React state) and consumed from there, not
-    // from the URL. Writing it on reload would mutate the visible
-    // URL bar with no functional benefit.
+    // Must set projectName — and because the AgentConversation model
+    // has NO project_name/project columns, it must read the name from
+    // conv.metadata (where createAgentConversation stores it).
+    expect(body).toMatch(/conv\.metadata/);
+    expect(body).toMatch(/url\.searchParams\.set\(['"]projectName['"]\s*,\s*pname/);
+    // (2026-08-31) MUST write agentName back into the URL so a
+    // refresh keeps the LLM bound to the same agent — the user
+    // explicitly requested full context (project + agent + conv).
     expect(
       body,
-      'conv rehydration must NOT write agentName into the URL (agent is bound via setActiveAgent React state)',
-    ).not.toMatch(/url\.searchParams\.set\(['"]agentName['"]\s*,\s*conv\.agent_name/);
+      'conv rehydration must write agentName into the URL (user-requested full-context URLs)',
+    ).toMatch(/url\.searchParams\.set\(['"]agentName['"]/);
     // Must seed the input's pendingProject state so the project
     // chip in the chat input shows the right project on reload.
-    expect(body).toMatch(/setPendingProjectState/);
-    expect(body).toMatch(/setPendingProjectId/);
+    // setPendingProject is the context's combined (name, id) setter.
+    expect(body).toMatch(/setPendingProject\s*\(/);
   });
 });

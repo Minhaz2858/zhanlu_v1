@@ -42,7 +42,7 @@ describe('isUngroupedProjectName', () => {
   });
 
   it('returns false for real project names', () => {
-    expect(isUngroupedProjectName('ecisco')).toBe(false);
+    expect(isUngroupedProjectName('Acme Corp')).toBe(false);
     expect(isUngroupedProjectName('Marketing Team')).toBe(false);
     expect(isUngroupedProjectName('Customer Support')).toBe(false);
   });

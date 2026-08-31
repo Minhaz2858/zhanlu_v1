@@ -1,8 +1,8 @@
-"""AI analysis for Contract Performance report – ported from EDIA server.py:20075-20479.
+"""AI analysis for Contract Performance report.
 
-Key design differences vs EDIA:
+Key design notes:
 1. Uses zhanlu's `stream_chat_completion` (async generator) directly, no
-   `asyncio.to_thread` needed. EDIA used thread-based sync stream + queue fan-in.
+   `asyncio.to_thread` needed for the sync stream + queue fan-in.
 2. LLM prompt is a single string (zhanlu API), not (system, user) pair.
    System instructions are prepended to the user data with a blank separator.
 3. 5 parallel LLM calls fan into a shared asyncio.Queue; the SSE producer
@@ -37,13 +37,13 @@ def _sse(event: str, data: dict | str) -> bytes:
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
 
 
-# ── Prompt templates (from EDIA server.py:20345-20376) ───────────────────
+# ── Prompt templates ─────────────────────────────────────────────────────
 
 def _make_stream_prompt(system: str, user: str) -> str:
     """Combine system instruction + user data into a single prompt.
 
     Zhanlu's stream_chat_completion accepts only one `prompt` string.
-    EDIA's generate_completion_stream expects (system, user) tuple.
+    generate_completion_stream expects a (system, user) tuple.
     We concatenate with a clear separator.
     """
     return f"指令：{system}\n\n数据：{user}"
@@ -90,7 +90,7 @@ async def stream_ai_analysis(
 ) -> AsyncGenerator[bytes, None]:
     """SSE stream generator for contract-performance AI analysis.
 
-    Event protocol (matches EDIA):
+    Event protocol:
       meta:    {"status": "started" | "cached"}
       delta:   {"field": "...", "text": "<incremental>"}
       partial: {"summary_bullets": ["..."]}

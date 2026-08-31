@@ -1,6 +1,6 @@
 """Hybrid dense+sparse retrieval with Reciprocal Rank Fusion (RRF).
 
-Ported from EDIA 5.1.2 backend/src/rag/hybrid_retrieval.py.
+Hybrid retrieval combining vector + keyword search.
 
 Pure Python module — no DB, no I/O, no LLM dependency. The functions
 here can be unit-tested in isolation and reused by any caller that has

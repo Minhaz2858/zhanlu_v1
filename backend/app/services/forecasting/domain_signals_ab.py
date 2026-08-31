@@ -2,7 +2,7 @@
 
 Compares forecast MAPE/directional accuracy with domain signal overlay
 ON vs OFF on walk-forward backtest data. The domain signal overlay
-encodes petrochem supply-chain economics (naphtha→C5→downstream
+encodes supply-chain economics (feedstock→intermediate→downstream
 elasticities + per-product seasonal rules).
 
 Decision logic:
@@ -14,7 +14,7 @@ Decision logic:
 
 Usage:
     cd backend && venv/bin/python -m pytest tests/test_domain_signals_ab.py -v -s
-    # OR run the ab_backtest() function with real EDIA MySQL data
+    # OR run the ab_backtest() function with real warehouse data
 """
 from __future__ import annotations
 
@@ -69,7 +69,7 @@ def apply_overlay(
 
 def ab_evaluate(
     y: pd.Series,
-    naphtha: pd.Series | None,
+    feedstock_pct: pd.Series | None,
     forecast_fn,
     product_id: str,
     horizons: tuple[int, ...] = (7,),
@@ -81,7 +81,7 @@ def ab_evaluate(
     ----------
     y : pd.Series
         Target price series, datetime index.
-    naphtha : pd.Series | None
+    feedstock_pct : pd.Series | None
         Naphtha price series (same index), or None if not available.
     forecast_fn : callable
         ``forecast_fn(train_y, h) -> np.ndarray`` of length h.
@@ -130,10 +130,10 @@ def ab_evaluate(
 
         pred_off = float(fc[-1])
 
-        # Compute naphtha % change in the training window
+        # Compute feedstock % change in the training window
         naphtha_pct = None
-        if naphtha is not None:
-            n_train = naphtha.iloc[:origin].dropna()
+        if feedstock_pct is not None:
+            n_train = feedstock_pct.iloc[:origin].dropna()
             if len(n_train) >= 2:
                 naphtha_pct = (n_train.iloc[-1] - n_train.iloc[0]) / n_train.iloc[0] * 100.0
 

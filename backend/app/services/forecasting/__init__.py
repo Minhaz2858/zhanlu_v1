@@ -1,4 +1,4 @@
-"""Forecasting Engine (Section 2 — Ecisco BI Agent).
+"""Forecasting Engine (generic — serves any bound data source).
 
 This package provides:
 

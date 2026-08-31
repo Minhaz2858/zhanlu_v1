@@ -45,8 +45,8 @@ class _ConceptEntry:
     """Parsed concept from the catalog."""
 
     name: str  # "Sales (销售)"
-    tables: list[str]  # ["erp_t_sal_outstockentry", "erp_t_sal_outstock"]
-    measures: dict[str, str]  # {"Volume": "FREALQTY", "Revenue": "FYKSBGHAMOUNT"}
+    tables: list[str]  # ["sales_orders", "order_lines"]
+    measures: dict[str, str]  # {"Volume": "qty", "Revenue": "amount"}
     columns: list[str]  # all column names
     date_column: str | None = None
 

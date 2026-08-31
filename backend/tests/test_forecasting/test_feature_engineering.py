@@ -4,8 +4,7 @@ Wave 5 — Feature Engineering Expansion tests.
 Coverage:
 - technical_indicators: RSI, MACD, Bollinger Bands
 - fourier_features: sin/cos harmonics
-- oilchem_loader: OilchemLoader class
-- feature_builder integration: tech/fourier/oilchem columns in FeatureMatrix
+- feature_builder integration: tech/fourier columns in FeatureMatrix
 """
 
 import numpy as np
@@ -26,18 +25,6 @@ def make_test_series(n: int = 180, seed: int = 42) -> pd.Series:
     season = 3 * np.sin(2 * np.pi * np.arange(n) / 7)  # weekly
     noise = rng.normal(0, 1.5, n)
     return pd.Series(trend + season + noise, index=dr, name="price")
-
-
-def make_test_oilchem_df(n: int = 80) -> pd.DataFrame:
-    """Generate fake oilchem data."""
-    rng = np.random.default_rng(99)
-    dr = pd.date_range("2026-04-01", periods=n, freq="D")
-    return pd.DataFrame({
-        "brent_crude": rng.normal(75, 3, n),
-        "japan_naphtha": rng.normal(650, 15, n),
-        "C5": rng.normal(5200, 100, n),
-        "C9": rng.normal(4800, 90, n),
-    }, index=dr)
 
 
 # ================================================================
@@ -159,55 +146,6 @@ class TestFourierFeatures:
 
 
 # ================================================================
-# Oilchem Loader
-# ================================================================
-
-class TestOilchemLoader:
-    """Test OilchemLoader for 隆众资讯 Brent/naphtha/C5/C9 data."""
-
-    def test_loader_instantiation(self):
-        from app.services.forecasting.features.oilchem_loader import OilchemLoader
-
-        loader = OilchemLoader()
-        assert loader is not None
-
-    def test_get_dataframe_returns_dataframe(self):
-        """Mock the DB call by setting _data directly."""
-        from app.services.forecasting.features.oilchem_loader import OilchemLoader
-
-        loader = OilchemLoader()
-        loader._data = make_test_oilchem_df(30)
-        df = loader.get_dataframe()
-        assert isinstance(df, pd.DataFrame)
-        assert not df.empty
-        assert len(df) == 30
-
-    def test_get_latest_prices(self):
-        from app.services.forecasting.features.oilchem_loader import OilchemLoader
-
-        df = make_test_oilchem_df(30)
-        loader = OilchemLoader()
-        # Set internal cache directly (bypasses SQLAlchemy query)
-        loader._data = df
-        latest = loader.get_latest_prices()
-        assert isinstance(latest, dict)
-        # Should have keys for each column
-        for col in ["brent_crude", "japan_naphtha", "C5", "C9"]:
-            assert col in latest
-
-    def test_get_pct_change(self):
-        from app.services.forecasting.features.oilchem_loader import OilchemLoader
-
-        df = make_test_oilchem_df(30)
-        loader = OilchemLoader()
-        loader._data = df
-        pct = loader.get_pct_change(window=7)
-        assert isinstance(pct, dict)
-        for col in pct:
-            assert isinstance(pct[col], float)
-
-
-# ================================================================
 # Feature Builder Integration — Tech Indicators + Fourier
 # ================================================================
 
@@ -251,7 +189,6 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=None,
             tech_indicators_enabled=True,
             fourier_enabled=False,
-            oilchem_exog_enabled=False,
         )
         assert fm.feature_names is not None
         assert "rsi_14" in fm.feature_names
@@ -276,7 +213,6 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=None,
             tech_indicators_enabled=False,
             fourier_enabled=True,
-            oilchem_exog_enabled=False,
         )
         assert fm.feature_names is not None
         assert "fourier_sin_1" in fm.feature_names
@@ -298,7 +234,6 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=None,
             tech_indicators_enabled=True,
             fourier_enabled=True,
-            oilchem_exog_enabled=False,
         )
         assert fm.feature_names is not None
         for col in ["rsi_14", "macd", "bb_bandwidth",
@@ -319,12 +254,10 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=None,
             tech_indicators_enabled=False,
             fourier_enabled=False,
-            oilchem_exog_enabled=False,
         )
         assert fm.feature_names is not None
         assert "rsi_14" not in fm.feature_names
         assert "fourier_sin_1" not in fm.feature_names
-        assert not any(c.startswith("oilchem_") for c in fm.feature_names)
 
     def test_future_rows_have_tech_indicators(self):
         """Future rows (cascade mode) should have tech indicators carried forward."""
@@ -340,7 +273,6 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=cascade,
             tech_indicators_enabled=True,
             fourier_enabled=False,
-            oilchem_exog_enabled=False,
         )
         assert fm.X_future is not None
         assert fm.X_future.shape[0] == 7  # horizon rows
@@ -363,52 +295,11 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=cascade,
             tech_indicators_enabled=False,
             fourier_enabled=True,
-            oilchem_exog_enabled=False,
         )
         assert fm.X_future is not None
         sin1_col = fm.feature_names.index("fourier_sin_1")
         future_sin1 = fm.X_future.iloc[:, sin1_col]
         assert np.all(np.abs(future_sin1) <= 1.0)
-
-    def test_oilchem_integration(self):
-        """When oilchem_exog_enabled=True, oilchem lag columns exist."""
-        from app.services.forecasting.features.feature_builder import build_features
-
-        y = make_test_series(180)
-        oilchem = make_test_oilchem_df(80)
-        feed, fx, event = self._make_mock_loaders()
-        fm = build_features(
-            "test_product", y, self._make_spec(),
-            feed, fx, event, horizon=7,
-            cascade_forecasts=None,
-            oilchem_df=oilchem,
-            tech_indicators_enabled=False,
-            fourier_enabled=False,
-            oilchem_exog_enabled=True,
-        )
-        assert fm.feature_names is not None
-        # Should have lag columns for each oilchem column × 7 lags
-        for col in ["brent_crude", "japan_naphtha", "C5", "C9"]:
-            for lag in range(1, 8):
-                assert f"oilchem_{col}_lag{lag}" in fm.feature_names
-
-    def test_oilchem_disabled_no_columns(self):
-        """When oilchem_exog_enabled=False, no oilchem columns."""
-        from app.services.forecasting.features.feature_builder import build_features
-
-        y = make_test_series(180)
-        oilchem = make_test_oilchem_df(80)
-        feed, fx, event = self._make_mock_loaders()
-        fm = build_features(
-            "test_product", y, self._make_spec(),
-            feed, fx, event, horizon=7,
-            cascade_forecasts=None,
-            oilchem_df=oilchem,
-            tech_indicators_enabled=False,
-            fourier_enabled=False,
-            oilchem_exog_enabled=False,
-        )
-        assert not any(c.startswith("oilchem_") for c in fm.feature_names)
 
     def test_short_series_tech_skipped(self):
         """Very short series (<30 pts): tech columns present but filled with neutral values."""
@@ -422,7 +313,6 @@ class TestFeatureBuilderWave5:
             cascade_forecasts=None,
             tech_indicators_enabled=True,
             fourier_enabled=False,
-            oilchem_exog_enabled=False,
         )
         assert fm.feature_names is not None
         # Columns exist but filled with neutral defaults (50.0, 0.0, 0.0)
@@ -433,7 +323,7 @@ class TestFeatureBuilderWave5:
     def test_external_only_matrix_wave5(self):
         """
         When no feedstock keys but Wave 5 enabled, _build_external_only_matrix
-        should also include tech/fourier/oilchem columns.
+        should also include tech/fourier columns.
         """
         from app.services.forecasting.features.feature_builder import build_features
         from app.services.forecasting.features.feature_registry import FeatureSpec
@@ -447,7 +337,6 @@ class TestFeatureBuilderWave5:
         )
 
         y = make_test_series(100)
-        oilchem = make_test_oilchem_df(80)
         feed, fx, event = self._make_mock_loaders()
 
         # With volume enabled (needed to avoid early return)
@@ -461,13 +350,10 @@ class TestFeatureBuilderWave5:
             volume_df=pd.DataFrame({
                 "volume": np.random.default_rng(1).normal(500, 50, len(y)),
             }, index=y.index),
-            oilchem_df=oilchem,
             tech_indicators_enabled=True,
             fourier_enabled=True,
-            oilchem_exog_enabled=True,
         )
         assert fm.feature_names is not None
         # tech + fourier should still be present
         assert "rsi_14" in fm.feature_names
         assert "fourier_sin_1" in fm.feature_names
-        assert any(c.startswith("oilchem_") for c in fm.feature_names)

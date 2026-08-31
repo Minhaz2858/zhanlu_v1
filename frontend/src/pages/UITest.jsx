@@ -65,7 +65,7 @@ const MOCK_EXECUTION_DONE = {
 // will fail.
 const MOCK_REPORT_CARD = {
   title: 'Sales report — top materials by revenue',
-  source: 'erp_v_sale_orderentry · db_zhanlu_no1',
+  source: 'sales_orders · demo_db',
   generated_at: '2026-07-13T08:30:00Z',
   summary: 'Top 7 materials account for 76% of revenue; \u78b3\u4e94\u77f3\u6cb9\u6811\u8102 alone is 35%.',
   kpis: [

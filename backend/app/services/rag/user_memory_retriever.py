@@ -4,7 +4,7 @@ Persists user-specific facts, preferences, and notes into the
 ``user_memory`` semantic collection, then retrieves them at query time
 to inject into LLM prompts as context.
 
-Port of EDIA 5.1.2 ``backend/src/rag/user_memory_retriever.py``, adapted
+User-memory retriever adapted
 to zhanlu's ``app.services.rag.knowledge_base.create_knowledge_base()``
 factory and ``app.services.rag.collection_names.USER_MEMORY``.
 

@@ -144,19 +144,25 @@ def test_touch_chat_thread_missing_slug_returns_false(mgr):
     assert manager.touch_chat_thread("never-existed", "conv-q") is False
 
 
-def test_mount_requires_init_app(mgr):
+def test_mount_without_init_app_is_graceful(mgr):
+    """T17 contract: mount() no longer requires init_app(app).
+
+    The per-app FastAPI mount was removed (T17) — serving is done by the GLOBAL
+    catch-all routes in routers/dashboards.py, so ``init_app`` is now only a
+    stored reference and mount() must degrade gracefully (log + skip the
+    poller when there is no running event loop) instead of raising.
+    """
     manager, fake = mgr
     manager.create_app_record({"name": "A", "slug": "a", "datasource_id": "kb", "metrics": []}, "org1", "u1")
-    # Documented contract: mount() before init_app(app) must raise.
-    with pytest.raises(RuntimeError):
-        manager.mount("a")
+    # mount() without init_app must not raise (pre-T17 this raised RuntimeError).
+    manager.mount("a")
 
 
 def test_unmount_missing_is_noop(mgr):
     manager, fake = mgr
     # unmounting a slug that was never mounted must not raise
     manager.unmount("never-mounted")
-    assert "never-mounted" not in manager._mounted
+    assert "never-mounted" not in manager._tasks
 
 
 def _tmp_generator(monkeypatch, tmp_path):

@@ -124,6 +124,12 @@ class DeckTheme:
     # identity
     name: str = DEFAULT_THEME
     mode: str = DEFAULT_MODE
+    # Human-readable theme metadata carried over from the theme JSON so the
+    # deck planner / restyle logic can read tone hints (``best_for``) and a
+    # description without re-parsing the file. Both default to "" and are
+    # purely advisory — never used for rendering colors.
+    description: str = ""
+    best_for: str = ""
 
     # core palette
     primary: RGBColor = field(default_factory=lambda: _to_rgbcolor("#2563eb"))
@@ -372,9 +378,14 @@ def list_theme_names() -> list[str]:
 def validate_theme_name(name: Optional[str]) -> str:
     """Resolve a user/LLM theme string to a real theme name.
 
-    Accepts aliases and case-insensitive matches. Raises ``ValueError``
-    with the full available list when the name cannot be resolved, so
-    callers (e.g. ``restyle_deck``) can surface a helpful error.
+    Accepts aliases and case-insensitive matches against BOTH catalogs:
+    the legacy JSON-file catalog (``_theme.py``, zhanlu-blue / sunset /
+    midnight...) AND the 12-ThemePreset renderer catalog (``themes.py``,
+    neon_cyber / bold_signal / swiss_modern...). The deck-edit tools use
+    this so a conversation like "make it techy/dark" (agent passes
+    ``neon_cyber``, a real renderer theme) is not refused. Raises
+    ``ValueError`` with the full available list when the name cannot be
+    resolved, so callers (e.g. ``restyle_deck``) can surface a helpful error.
     """
     if not name:
         raise ValueError("theme name is required")
@@ -383,10 +394,19 @@ def validate_theme_name(name: Optional[str]) -> str:
         return _THEME_ALIASES[key]
     if key in list_theme_names():
         return key
-    # Case-insensitive exact file match.
+    # Case-insensitive exact file match (legacy catalog).
     for nm in list_theme_names():
         if nm.lower() == key:
             return nm
+    # Renderer ThemePreset catalog — the catalog the HTML/structured
+    # renderers actually resolve against (2026-08-29 integration fix).
+    try:
+        from app.services.artifacts.themes import THEME_CATALOG
+        for preset_name in THEME_CATALOG:
+            if preset_name.lower() == key:
+                return preset_name
+    except Exception:
+        pass
     available = ", ".join(sorted(set(_THEME_ALIASES.values())))
     raise ValueError(
         f"unknown theme '{name}'. Available themes: {available}"
@@ -446,6 +466,12 @@ def load_theme(name: Optional[str], mode: str = DEFAULT_MODE) -> DeckTheme:
     return DeckTheme(
         name=name,
         mode=mode,
+        description=(tj.get("description") or "") if isinstance(tj.get("description"), str) else "",
+        best_for=(
+            ", ".join(tj["best_for"])
+            if isinstance(tj.get("best_for"), list)
+            else (tj.get("best_for") or "")
+        ),
         primary=_to_rgbcolor(primary),
         primary_dark=_to_rgbcolor(primary_dark),
         text=_to_rgbcolor(text),

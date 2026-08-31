@@ -1,34 +1,42 @@
 """Warehouse-backed Tier 3 loaders — read fundamental data directly from
-the customer's ERP data warehouse (aipdp_data_warehouse_prod @ 10.10.10.49).
+the enterprise's ERP data warehouse mirror (external MySQL, configured per app).
 
 These loaders bypass the PG external-feed store and read directly from MySQL
-tables that the customer updates daily. They serve as automatic fallbacks
+tables that the enterprise updates daily. They serve as automatic fallbacks
 for the Wave 3 PG-backed loaders (OperatingRateLoader, InventoryLoader,
 ImportPriceLoader) which return empty when no external data has been
 ingested into PG.
 
 Design rules (mirrors exogenous_loaders.py):
-- NEVER leak future data: queries use only rows with FDATE <= today.
-- All quantities in tons (FBASEQTY / FREALQTY are already in base unit).
-- Material mapping: product_key → Chinese name patterns, matched via LIKE
-  against ``material.material_name`` after JOINing on
-  ``FMATERIALID = CAST(material.material_id AS UNSIGNED)``.
+- NEVER leak future data: queries use only rows with date <= today.
+- All quantities in tons (base-unit columns are already converted).
+- Material mapping: product_key → name patterns, matched via LIKE against the
+  configured material-name column after JOINing on the configured ids.
 - Graceful no-op: return empty DataFrame on any error (zero regression risk).
 
-Tables used:
-  T3.1 Production Throughput:
-    erp_t_sp_instock (header: FID, FDATE) 
-    JOIN erp_t_sp_instockentry (line: FMATERIALID, FREALQTY)
-    JOIN material (FMATERIALID → material_name)
-  T3.2 Inventory:
-    erp_t_stk_inventory (FMATERIALID, FBASEQTY, FUPDATETIME)
-    JOIN material
-  T3.3 Purchase Price:
-    erp_t_stk_instock (header: FID, FDATE, FSUPPLIERID)
-    JOIN erp_t_stk_instockentry (line: FMATERIALID, FREALQTY, FALLAMOUNTEXCEPTDISCOUNT)
-    JOIN material + erp_t_bd_supplier
-  T3.4 Upstream Market:
-    oilchem_data (price_date, brent_crude, japan_naphtha, industrial_cracking_c5, industrial_cracking_c9)
+Schema is fully config-driven. The app's domain config supplies a
+"warehouse_schema" block naming the tables/columns for each loader, e.g.::
+
+    {
+      "production": {"header": "erp_production", "line": "erp_production_line",
+                     "material": "material", "date_col": "FDATE",
+                     "material_id_col": "FMATERIALID", "qty_col": "FREALQTY",
+                     "material_name_col": "material_name"},
+      "inventory":  {"table": "erp_inventory", "material": "material",
+                     "update_col": "FUPDATETIME", "qty_col": "FBASEQTY",
+                     "material_id_col": "FMATERIALID",
+                     "material_name_col": "material_name"},
+      "purchase":   {"header": "erp_purchase", "line": "erp_purchase_line",
+                     "material": "material", "supplier": "erp_supplier",
+                     "date_col": "FDATE", "material_id_col": "FMATERIALID",
+                     "qty_col": "FREALQTY", "amount_col": "FALLAMOUNTEXCEPTDISCOUNT",
+                     "supplier_id_col": "FSUPPLIERID",
+                     "supplier_name_col": "FNAME",
+                     "currency_col": "CURRENCY_NAME",
+                     "material_name_col": "material_name"}
+    }
+
+Empty config (or a missing block) = loaders no-op cleanly — fully generic.
 """
 
 from __future__ import annotations
@@ -40,25 +48,46 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.services.domain_config import get_domain_config
+
 logger = logging.getLogger(__name__)
 
-# product_key → list of Chinese name patterns for LIKE matching.
-# Multiple patterns per product handle grade variants (e.g. "30#工业用裂解碳五").
-_PRODUCT_NAME_PATTERNS: dict[str, list[str]] = {
-    "isoprene":               ["异戊二烯"],
-    "piperylene":             ["间戊二烯"],
-    "dcpd":                   ["双环戊二烯"],
-    "cracked_c5":             ["裂解碳五", "裂解C5"],
-    "cracked_c9":             ["裂解碳九", "裂解C9"],
-    "sis":                    ["SIS"],
-    "blowing_agent":          ["戊烷"],
-    "mixed_trimethylbenzene": ["混三甲苯"],
-    "styrene":                ["苯乙烯"],
-    "c5_resin":               ["碳五石油树脂", "石油树脂"],
-    "ethylene_carbon_black":  ["乙烯炭黑"],
-    "industrial_hexane":      ["工业己烷"],
-    "raffinate_c5":           ["抽余碳五"],
-}
+# product_key → list of material-name patterns for LIKE matching. Patterns
+# come from the app's domain config ("warehouse_grade_patterns" block);
+# empty config = empty dict → no grade matching (loaders no-op cleanly).
+_PRODUCT_NAME_PATTERNS: dict[str, list[str]] = dict(
+    (get_domain_config("") or {}).get("warehouse_grade_patterns") or {}
+)
+
+# Table/column schema for each loader, from the app's domain config
+# ("warehouse_schema" block). Empty config = no loader can run.
+_WAREHOUSE_SCHEMA: dict[str, dict[str, str]] = dict(
+    (get_domain_config("") or {}).get("warehouse_schema") or {}
+)
+
+
+def _name_patterns(product_id: str) -> list[str]:
+    return _PRODUCT_NAME_PATTERNS.get(product_id, [])
+
+
+def _build_name_where(patterns: list[str]) -> tuple[str, dict]:
+    clauses = []
+    params: dict[str, str] = {}
+    for i, pat in enumerate(patterns):
+        key = f"p{i}"
+        clauses.append(f"m.{_WAREHOUSE_SCHEMA_JOIN_MATERIAL_NAME_COL} LIKE :{key}")
+        params[key] = f"%{pat}%"
+    return " OR ".join(clauses), params
+
+
+# Columns used for material-name matching. Keep in sync with the schema
+# material_name_col value so name filters reference the configured column.
+_WAREHOUSE_SCHEMA_JOIN_MATERIAL_NAME_COL = (
+    (_WAREHOUSE_SCHEMA.get("production") or {}).get("material_name_col")
+    or (_WAREHOUSE_SCHEMA.get("inventory") or {}).get("material_name_col")
+    or (_WAREHOUSE_SCHEMA.get("purchase") or {}).get("material_name_col")
+    or "material_name"
+)
 
 
 def _resolve_mysql_engine() -> Engine | None:
@@ -69,45 +98,23 @@ def _resolve_mysql_engine() -> Engine | None:
         return None
 
 
-def _name_patterns(product_id: str) -> list[str]:
-    """Return Chinese name LIKE patterns for a product_key."""
-    return _PRODUCT_NAME_PATTERNS.get(product_id, [])
-
-
-def _build_name_where(patterns: list[str]) -> tuple[str, dict]:
-    """Build a WHERE clause fragment for material name LIKE matching."""
-    if not patterns:
-        return "1=1", {}
-    clauses = []
-    params: dict = {}
-    for i, p in enumerate(patterns):
-        key = f"nm{i}"
-        clauses.append(f"m.material_name LIKE :{key}")
-        params[key] = f"%{p}%"
-    return " OR ".join(clauses), params
-
-
 # ---------------------------------------------------------------------------
 # T3.1 Production Throughput Loader
 # ---------------------------------------------------------------------------
 
+
 class WarehouseProductionLoader:
-    """Load daily production volume from ERP production instock records.
+    """Load daily production volume from the ERP instock ledger.
 
-    Reads ``erp_t_sp_instock`` (header, has FDATE) JOIN ``erp_t_sp_instockentry``
-    (line items, has FREALQTY + FMATERIALID) JOIN ``material`` (name mapping).
-
-    Returns DataFrame with columns ``['date', 'production_t']`` — daily SUM
-    of FREALQTY (actual received quantity) for the given product.
-
-    This is a direct production throughput proxy: when daily throughput
-    drops, operating rate has dropped.
+    Reads the configured production header/line/material tables and sums the
+    configured qty column per date. Requires a domain-config "warehouse_schema"
+    block plus material-name patterns; otherwise returns empty (no-op).
     """
 
     def __init__(
         self,
         product_id: str,
-        lookback_days: int = 365,
+        lookback_days: int = 30,
         org_id: str | None = None,
     ):
         self.product_id = product_id
@@ -132,20 +139,32 @@ class WarehouseProductionLoader:
         if not patterns:
             return pd.DataFrame(columns=["date", "production_t"])
 
+        schema = _WAREHOUSE_SCHEMA.get("production")
+        if not schema:
+            return pd.DataFrame(columns=["date", "production_t"])
+
+        hdr = schema["header"]
+        line = schema["line"]
+        mat = schema["material"]
+        dcol = schema["date_col"]
+        mid = schema["material_id_col"]
+        qty = schema["qty_col"]
+        mname = schema["material_name_col"]
+
         name_where, name_params = _build_name_where(patterns)
         cutoff = date.today() - timedelta(days=self.lookback_days)
 
         sql = text(f"""
-            SELECT h.FDATE AS ds,
-                   SUM(e.FREALQTY) AS qty
-            FROM erp_t_sp_instock h
-            JOIN erp_t_sp_instockentry e ON e.FID = h.FID
-            JOIN material m ON e.FMATERIALID = CAST(m.material_id AS UNSIGNED)
-            WHERE h.FDATE >= :cutoff
-              AND h.FDATE <= :today
+            SELECT h.{dcol} AS ds,
+                   SUM(e.{qty}) AS qty
+            FROM {hdr} h
+            JOIN {line} e ON e.FID = h.FID
+            JOIN {mat} m ON e.{mid} = CAST(m.material_id AS UNSIGNED)
+            WHERE h.{dcol} >= :cutoff
+              AND h.{dcol} <= :today
               AND ({name_where})
-            GROUP BY h.FDATE
-            ORDER BY h.FDATE ASC
+            GROUP BY h.{dcol}
+            ORDER BY h.{dcol} ASC
         """)
 
         params = {
@@ -184,17 +203,13 @@ class WarehouseProductionLoader:
 # ---------------------------------------------------------------------------
 
 class WarehouseInventoryLoader:
-    """Load inventory levels over time from ERP stock ledger.
+    """Load inventory levels over time from the ERP stock ledger.
 
-    Reads ``erp_t_stk_inventory`` (50K rows, FUPDATETIME, FBASEQTY)
-    JOIN ``material`` for name mapping.
+    Reads the configured inventory table (update time + qty columns) JOIN the
+    configured material table for name mapping.
 
     Returns DataFrame with columns ``['date', 'inventory_t']`` — inventory
-    level (sum of FBASEQTY across all lots/warehouses) per update date.
-
-    Unlike the PG-backed ``InventoryLoader`` (which reads from
-    ``forecast_external_points``), this reads the raw ERP stock ledger
-    directly — no ingestion pipeline needed.
+    level (sum of qty across all lots/warehouses) per update date.
     """
 
     def __init__(
@@ -225,18 +240,29 @@ class WarehouseInventoryLoader:
         if not patterns:
             return pd.DataFrame(columns=["date", "inventory_t"])
 
+        schema = _WAREHOUSE_SCHEMA.get("inventory")
+        if not schema:
+            return pd.DataFrame(columns=["date", "inventory_t"])
+
+        tbl = schema["table"]
+        mat = schema["material"]
+        ucol = schema["update_col"]
+        qty = schema["qty_col"]
+        mid = schema["material_id_col"]
+        mname = schema["material_name_col"]
+
         name_where, name_params = _build_name_where(patterns)
         cutoff = date.today() - timedelta(days=self.lookback_days)
 
         sql = text(f"""
-            SELECT DATE(i.FUPDATETIME) AS ds,
-                   SUM(i.FBASEQTY) AS qty
-            FROM erp_t_stk_inventory i
-            JOIN material m ON i.FMATERIALID = CAST(m.material_id AS UNSIGNED)
-            WHERE i.FUPDATETIME >= :cutoff
-              AND i.FUPDATETIME <= :today
+            SELECT DATE(i.{ucol}) AS ds,
+                   SUM(i.{qty}) AS qty
+            FROM {tbl} i
+            JOIN {mat} m ON i.{mid} = CAST(m.material_id AS UNSIGNED)
+            WHERE i.{ucol} >= :cutoff
+              AND i.{ucol} <= :today
               AND ({name_where})
-            GROUP BY DATE(i.FUPDATETIME)
+            GROUP BY DATE(i.{ucol})
             ORDER BY ds ASC
         """)
 
@@ -278,17 +304,13 @@ class WarehouseInventoryLoader:
 class WarehousePurchasePriceLoader:
     """Load purchase unit prices from ERP procurement instock records.
 
-    Reads ``erp_t_stk_instock`` (header: FID, FDATE, FSUPPLIERID)
-    JOIN ``erp_t_stk_instockentry`` (line: FMATERIALID, FREALQTY,
-    FALLAMOUNTEXCEPTDISCOUNT) JOIN ``material`` + ``erp_t_bd_supplier``.
-
-    Computes unit_price = FALLAMOUNTEXCEPTDISCOUNT / FREALQTY per transaction.
+    Reads the configured purchase header/line/material/supplier tables and
+    computes unit_price = amount / qty per transaction. The ``is_import``
+    flag is True when the supplier's configured currency column differs from
+    the configured local-currency value (default CNY).
 
     Returns DataFrame with columns:
       ``['date', 'purchase_price', 'supplier_name', 'is_import']``
-
-    The ``is_import`` flag is True when the supplier's CURRENCY_NAME is not
-    "人民币" (CNY), indicating a foreign-currency transaction (import proxy).
     """
 
     def __init__(
@@ -323,26 +345,64 @@ class WarehousePurchasePriceLoader:
                 columns=["date", "purchase_price", "supplier_name", "is_import"]
             )
 
+        schema = _WAREHOUSE_SCHEMA.get("purchase")
+        if not schema:
+            return pd.DataFrame(
+                columns=["date", "purchase_price", "supplier_name", "is_import"]
+            )
+
+        hdr = schema["header"]
+        line = schema["line"]
+        mat = schema["material"]
+        sup = schema.get("supplier")
+        dcol = schema["date_col"]
+        mid = schema["material_id_col"]
+        qty = schema["qty_col"]
+        amount = schema["amount_col"]
+        sup_id = schema["supplier_id_col"]
+        sup_name = schema["supplier_name_col"]
+        cur_col = schema["currency_col"]
+        mname = schema["material_name_col"]
+        local_currency = schema.get("local_currency", "人民币")
+
         name_where, name_params = _build_name_where(patterns)
         cutoff = date.today() - timedelta(days=self.lookback_days)
 
-        sql = text(f"""
-            SELECT h.FDATE AS ds,
-                   e.FALLAMOUNTEXCEPTDISCOUNT AS amount,
-                   e.FREALQTY AS qty,
-                   s.FNAME AS supplier_name,
-                   s.CURRENCY_NAME AS currency
-            FROM erp_t_stk_instock h
-            JOIN erp_t_stk_instockentry e ON e.FID = h.FID
-            JOIN material m ON e.FMATERIALID = CAST(m.material_id AS UNSIGNED)
-            LEFT JOIN erp_t_bd_supplier s ON h.FSUPPLIERID = s.FSUPPLIERID
-            WHERE h.FDATE >= :cutoff
-              AND h.FDATE <= :today
-              AND ({name_where})
-              AND e.FREALQTY > 0
-              AND e.FALLAMOUNTEXCEPTDISCOUNT > 0
-            ORDER BY h.FDATE ASC
-        """)
+        if sup:
+            sql = text(f"""
+                SELECT h.{dcol} AS ds,
+                       e.{amount} AS amount,
+                       e.{qty} AS qty,
+                       s.{sup_name} AS supplier_name,
+                       s.{cur_col} AS currency
+                FROM {hdr} h
+                JOIN {line} e ON e.FID = h.FID
+                JOIN {mat} m ON e.{mid} = CAST(m.material_id AS UNSIGNED)
+                LEFT JOIN {sup} s ON h.{sup_id} = s.{sup_id}
+                WHERE h.{dcol} >= :cutoff
+                  AND h.{dcol} <= :today
+                  AND ({name_where})
+                  AND e.{qty} > 0
+                  AND e.{amount} > 0
+                ORDER BY h.{dcol} ASC
+            """)
+        else:
+            sql = text(f"""
+                SELECT h.{dcol} AS ds,
+                       e.{amount} AS amount,
+                       e.{qty} AS qty,
+                       '' AS supplier_name,
+                       NULL AS currency
+                FROM {hdr} h
+                JOIN {line} e ON e.FID = h.FID
+                JOIN {mat} m ON e.{mid} = CAST(m.material_id AS UNSIGNED)
+                WHERE h.{dcol} >= :cutoff
+                  AND h.{dcol} <= :today
+                  AND ({name_where})
+                  AND e.{qty} > 0
+                  AND e.{amount} > 0
+                ORDER BY h.{dcol} ASC
+            """)
 
         params = {
             **name_params,
@@ -381,7 +441,7 @@ class WarehousePurchasePriceLoader:
             )
 
         df["purchase_price"] = df["amount"] / df["qty"]
-        df["is_import"] = df["currency"].fillna("人民币") != "人民币"
+        df["is_import"] = df["currency"].fillna(local_currency) != local_currency
         df["supplier_name"] = df["supplier_name"].fillna("")
 
         return df[["date", "purchase_price", "supplier_name", "is_import"]]
@@ -400,87 +460,3 @@ class WarehousePurchasePriceLoader:
             .reset_index()
         )
         return daily
-
-
-# ---------------------------------------------------------------------------
-# T3.4 Upstream Market Data Loader (隆众资讯 / Oilchem)
-# ---------------------------------------------------------------------------
-
-class WarehouseUpstreamLoader:
-    """Load daily upstream market prices from oilchem_data table.
-
-    Reads ``oilchem_data`` (scraped from oilchem.net / 隆众资讯):
-      - brent_crude: Brent crude oil price (USD/bbl)
-      - japan_naphtha: Japan naphtha price
-      - industrial_cracking_c5: Cracking C5 price (CNY)
-      - industrial_cracking_c9: Cracking C9 price (CNY)
-
-    Returns DataFrame indexed by date with all four columns.
-
-    Note: The price columns may be NULL in some rows (only source_status
-    JSON is populated). This loader filters to rows where at least one
-    price column is non-null.
-    """
-
-    def __init__(self, lookback_days: int = 365):
-        self.lookback_days = lookback_days
-        self._engine: Engine | None = None
-
-    @property
-    def source_label(self) -> str:
-        return "warehouse_upstream"
-
-    @property
-    def engine(self) -> Engine | None:
-        return self._engine or _resolve_mysql_engine()
-
-    def load(self) -> pd.DataFrame:
-        """Return DataFrame with upstream market prices, indexed by date."""
-        if self.engine is None:
-            return pd.DataFrame()
-
-        cutoff = date.today() - timedelta(days=self.lookback_days)
-
-        sql = text("""
-            SELECT price_date AS ds,
-                   brent_crude,
-                   japan_naphtha,
-                   industrial_cracking_c5,
-                   industrial_cracking_c9
-            FROM oilchem_data
-            WHERE price_date >= :cutoff
-              AND price_date <= :today
-            ORDER BY price_date ASC
-        """)
-
-        try:
-            with self.engine.connect() as conn:
-                rows = conn.execute(sql, {
-                    "cutoff": cutoff.isoformat(),
-                    "today": date.today().isoformat(),
-                }).fetchall()
-        except Exception as exc:
-            logger.warning("WarehouseUpstreamLoader failed: %s", exc)
-            return pd.DataFrame()
-
-        if not rows:
-            return pd.DataFrame()
-
-        df = pd.DataFrame(
-            rows,
-            columns=["ds", "brent_crude", "japan_naphtha",
-                     "cracking_c5", "cracking_c9"],
-        )
-        df["ds"] = pd.to_datetime(df["ds"], errors="coerce")
-        for col in ["brent_crude", "japan_naphtha", "cracking_c5", "cracking_c9"]:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
-
-        df = df.dropna(subset=["ds"])
-        # Keep rows where at least one price is non-null
-        price_cols = ["brent_crude", "japan_naphtha", "cracking_c5", "cracking_c9"]
-        df = df.dropna(subset=price_cols, how="all")
-        if df.empty:
-            return pd.DataFrame()
-
-        df = df.set_index("ds").sort_index()
-        return df[price_cols]

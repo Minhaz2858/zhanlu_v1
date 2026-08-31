@@ -5,8 +5,9 @@ from app.services.forecasting.analyst.evidence_pack import compute_model_agreeme
 from app.services.forecasting.domain_signals import get_elasticity
 
 
-def test_get_elasticity_dcpd():
-    assert get_elasticity("dcpd") == 0.663
+def test_get_elasticity_configured_product(domain_signals_config):
+    """Configured product → effective elasticity from the domain config."""
+    assert get_elasticity("widget") == 0.5
 
 
 def test_get_elasticity_unknown():

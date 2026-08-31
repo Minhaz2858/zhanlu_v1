@@ -1,8 +1,8 @@
 """Cross-product panel XGBoost model with product embeddings.
 
-Trains a single global XGBoost model across ALL petrochem products, using
+Trains a single global XGBoost model across ALL products, using
 product_id one-hot embeddings.  Learns cross-product spillover effects
-(e.g., when naphtha rises, C5 usually follows with a 2-day lag).
+(e.g., when a feedstock rises, related products usually follow with a short lag).
 
 Deployed as a challenger in the champion/challenger system.  If it wins
 for a product, it becomes the champion model for that product.

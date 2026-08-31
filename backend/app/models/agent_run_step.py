@@ -36,6 +36,14 @@ class AgentRunStep(TimestampedBase):
     iteration = Column(Integer, default=0)
     duration_ms = Column(Integer, nullable=True)
 
+    # P0-3 observability: token usage + outcome per step (2026-08-27).
+    prompt_tokens = Column(Integer, nullable=True)
+    completion_tokens = Column(Integer, nullable=True)
+    total_tokens = Column(Integer, nullable=True)
+    status = Column(String(20), nullable=True)  # ok | error | cancelled
+    error = Column(Text, nullable=True)
+    retry_count = Column(Integer, default=0)
+
     # P0-3 — explicit checkpoint marker.  When set, this step is a
     # resumption point: the harness restores from this row's
     # messages_snapshot on resume.  ``None`` means "regular step, not

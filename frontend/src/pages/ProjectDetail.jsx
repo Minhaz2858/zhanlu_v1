@@ -25,11 +25,11 @@ import {
   ArrowUpRight, Zap, Settings2, ListChecks,
   Pencil, Save, MoreVertical, FileStack, Layers,
   Clock, Calendar, ChevronRight, Activity, AlertCircle, Users, Cpu, Lock, ShieldCheck,
+  Brain, Pin, Star,
 } from 'lucide-react';
 import {
   Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription,
 } from '@/components/ui/sheet';
-import brandLogo from '../../logo/logo.png';
 
 // Color presets removed: the user asked for a simple, color-free
 // project detail view. The ``color`` field on the Project model is
@@ -46,6 +46,7 @@ const SECTIONS = [
   { key: 'agents', icon: Bot, scrollable: true },
   { key: 'resources', icon: Layers, scrollable: false },
   { key: 'chats', icon: MessageSquare, scrollable: true },
+  { key: 'memory', icon: Brain, scrollable: true },
   { key: 'access', icon: Users, scrollable: false, action: 'access' },
   { key: 'policy', icon: ShieldCheck, scrollable: false, action: 'policy' },
 ];
@@ -150,6 +151,7 @@ export default function ProjectDetail() {
   const [kbs, setKbs] = useState([]);
   const [conversations, setConversations] = useState([]);
   const [automations, setAutomations] = useState([]);
+  const [memories, setMemories] = useState([]);
 
   // ── Modals / sheets ──
   const [agentDialogOpen, setAgentDialogOpen] = useState(false);
@@ -235,7 +237,7 @@ export default function ProjectDetail() {
         return memberAgents;
       };
 
-      const [ag, kb, cs, au] = await Promise.allSettled([
+      const [ag, kb, cs, au, me] = await Promise.allSettled([
         loadAgents(),
         // Project-bundle KB sharing: use the dedicated project-KB
         // endpoint that returns ALL KBs bound to this project
@@ -272,11 +274,25 @@ export default function ProjectDetail() {
             base44.entities.AutomationTask.filter({ project: legacyName }, '-updated_date', 200)
           ) : rows)
           .catch(() => []),
+        // Project-scoped memory: the agent's persistent memory for this
+        // project (Shared Memory panel). Uses the dedicated router
+        // (backend/app/routers/project_memories.py) — strict project_id
+        // scoping, no legacy name fallback needed.
+        (async () => {
+          const res = await authFetch(`/api/projects/${projectId}/memories`);
+          if (!res.ok) {
+            console.warn(`[ProjectDetail] Failed to load project memories (${res.status})`);
+            return [];
+          }
+          const data = await res.json();
+          return Array.isArray(data.entries) ? data.entries : [];
+        })(),
       ]);
       setAgents(settled(ag, []));
       setKbs(settled(kb, []));
       setConversations(settled(cs, []));
       setAutomations(settled(au, []));
+      setMemories(settled(me, []));
     } finally {
       setLoading(false);
     }
@@ -460,6 +476,90 @@ export default function ProjectDetail() {
     }
   }
 
+  // ── Shared Memory (project-scoped AgentMemory via project_memories router) ──
+  async function addMemory({ content, importance = 0 }) {
+    try {
+      const res = await authFetch(`/api/projects/${projectId}/memories`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content, importance, target: 'memory', pinned: false }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast({
+          title: isEn ? `Add failed: ${data.detail || res.status}` : `添加失败：${data.detail || res.status}`,
+          variant: 'destructive',
+        });
+        return false;
+      }
+      setMemories((prev) => [data, ...prev]);
+      toast({ title: isEn ? 'Memory added' : '已添加记忆' });
+      return true;
+    } catch (e) {
+      console.error('addMemory failed:', e);
+      toast({
+        title: isEn ? 'Network error' : '网络错误',
+        description: e?.message || String(e),
+        variant: 'destructive',
+      });
+      return false;
+    }
+  }
+
+  async function updateMemory(id, patchBody) {
+    try {
+      const res = await authFetch(`/api/projects/${projectId}/memories/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patchBody),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast({
+          title: isEn ? `Update failed: ${data.detail || res.status}` : `更新失败：${data.detail || res.status}`,
+          variant: 'destructive',
+        });
+        return false;
+      }
+      setMemories((prev) => prev.map((m) => (m.id === id ? data : m)));
+      return true;
+    } catch (e) {
+      console.error('updateMemory failed:', e);
+      toast({
+        title: isEn ? 'Network error' : '网络错误',
+        description: e?.message || String(e),
+        variant: 'destructive',
+      });
+      return false;
+    }
+  }
+
+  async function deleteMemory(id) {
+    if (!window.confirm(
+      isEn ? 'Delete this memory? This cannot be undone.' : '确定要删除这条记忆吗？此操作不可撤销。'
+    )) return;
+    try {
+      const res = await authFetch(`/api/projects/${projectId}/memories/${id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast({
+          title: isEn ? `Delete failed: ${data.detail || res.status}` : `删除失败：${data.detail || res.status}`,
+          variant: 'destructive',
+        });
+        return;
+      }
+      setMemories((prev) => prev.filter((m) => m.id !== id));
+      toast({ title: isEn ? 'Memory deleted' : '记忆已删除' });
+    } catch (e) {
+      console.error('deleteMemory failed:', e);
+      toast({
+        title: isEn ? 'Network error' : '网络错误',
+        description: e?.message || String(e),
+        variant: 'destructive',
+      });
+    }
+  }
+
   // ── Render ──
   if (loading) {
     return (
@@ -500,11 +600,7 @@ export default function ProjectDetail() {
 
           <div className="flex items-start gap-4">
             <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-border">
-              {(project.name || '').toLowerCase().includes('ecisco') || (project.name || '').includes('伊斯科') ? (
-                <img src={brandLogo} alt="Ecisco AI logo" className="h-full w-full object-contain p-2" />
-              ) : (
-                <Folder className="h-7 w-7 text-muted-foreground" />
-              )}
+              <Folder className="h-7 w-7 text-muted-foreground" />
             </div>
             <div className="min-w-0 flex-1">
               {editing ? (
@@ -644,7 +740,7 @@ export default function ProjectDetail() {
               return true;
             }).map((s) => {
               const Icon = s.icon;
-              const count = countFor(s.key, { agents, kbs, conversations });
+              const count = countFor(s.key, { agents, kbs, conversations, memories });
               const active = s.scrollable && activeSection === s.key;
               const onClick = s.scrollable
                 ? () => scrollToSection(s.key)
@@ -853,6 +949,44 @@ export default function ProjectDetail() {
               T={T}
               onOpenTask={setHistoryTask}
               onCreateClick={() => setCreateAutoOpen(true)}
+            />
+          </section>
+
+          {/* ── Shared Memory ──
+              Project-scoped agent memory (AgentMemory rows via the
+              project_memories router). Users can see what the agent
+              remembers for THIS project, add facts/decisions/insights,
+              pin important entries, edit, and hard-delete. Strictly
+              project-scoped — no cross-project leakage. */}
+          <section
+            id="project-section-memory"
+            ref={setRef('memory')}
+            className="scroll-mt-20 rounded-xl border border-border bg-card p-5 shadow-sm"
+          >
+            <header className="mb-4 flex items-center justify-between border-b border-border pb-3">
+              <div className="flex items-center gap-2">
+                <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                  <Brain className="h-4 w-4" />
+                </span>
+                <h2 className="font-display text-base font-semibold text-foreground">
+                  {t.projectDetail?.sections?.memory || (isEn ? 'Shared Memory' : '共享记忆')}
+                </h2>
+                <span className="rounded-full bg-secondary px-2 py-0.5 text-[11px] text-muted-foreground">
+                  {memories.length}
+                </span>
+              </div>
+              <span className="text-xs text-muted-foreground">
+                {isEn ? 'What this project remembers' : '本项目智能体持续记住的事实、决策与洞察'}
+              </span>
+            </header>
+            <MemorySection
+              memories={memories}
+              lang={lang}
+              T={T}
+              canEdit={canEditProject}
+              onAdd={addMemory}
+              onUpdate={updateMemory}
+              onDelete={deleteMemory}
             />
           </section>
         </main>
@@ -1114,6 +1248,7 @@ function countFor(key, s) {
     case 'agents': return s.agents.length;
     case 'resources': return s.kbs.length;
     case 'chats': return s.conversations.length;
+    case 'memory': return s.memories.length;
     default: return 0;
   }
 }
@@ -1463,6 +1598,12 @@ function TaskCard({ task, isEn, T, lang, onClick }) {
                 {task.type.replace(/_/g, ' ')}
               </span>
             )}
+            {task.llm_informed_tick && (
+              <span className="inline-flex items-center gap-1 rounded-full bg-primary/10 px-1.5 py-0 text-[10px] font-medium text-primary" title={T('每次执行前由智能体生成执行简报', 'Agent receives a briefing before each scheduled run')}>
+                <Sparkles className="h-2.5 w-2.5" />
+                {T('智能调度', 'LLM-informed')}
+              </span>
+            )}
             {task.schedule && (
               <span className="inline-flex items-center gap-1">
                 <Clock className="h-2.5 w-2.5" />
@@ -1519,4 +1660,248 @@ function RunStatusIcon({ status }) {
     return <Clock className="h-3.5 w-3.5 text-amber-600" />;
   }
   return <Clock className="h-3.5 w-3.5 text-muted-foreground" />;
+}
+
+
+/* ─────────────────────────────────────────────────────────────────
+ * MemorySection — project-scoped Shared Memory panel.
+ *
+ * Renders the AgentMemory rows for this project (fetched via the
+ * project_memories router): a usage bar (2200-char budget), an
+ * inline add form, and a list of entries. Each entry supports
+ * pin/unpin, inline edit (content + importance), and hard delete.
+ * All mutations go straight to the backend — no LLM round-trip.
+ * ──────────────────────────────────────────────────────────────── */
+function MemorySection({ memories, lang, T, canEdit = true, onAdd, onUpdate, onDelete }) {
+  const isEn = lang === 'en';
+  const [adding, setAdding] = useState(false);
+  const [draft, setDraft] = useState('');
+  const [draftImportance, setDraftImportance] = useState(0);
+  const [saving, setSaving] = useState(false);
+  const [editingId, setEditingId] = useState(null);
+  const [editDraft, setEditDraft] = useState('');
+  const [editImportance, setEditImportance] = useState(0);
+
+  const LIMIT = 2200;
+  const totalChars = memories.reduce((s, m) => s + (m.char_count || (m.content || '').length), 0);
+  const usagePct = Math.min(100, Math.round((totalChars / LIMIT) * 100));
+
+  async function submitAdd() {
+    const content = draft.trim();
+    if (!content || saving) return;
+    setSaving(true);
+    try {
+      const ok = await onAdd({ content, importance: draftImportance });
+      if (ok) {
+        setDraft('');
+        setDraftImportance(0);
+        setAdding(false);
+      }
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  async function submitEdit(m) {
+    const content = editDraft.trim();
+    if (!content) return;
+    const ok = await onUpdate(m.id, { content, importance: editImportance });
+    if (ok) setEditingId(null);
+  }
+
+  function startEdit(m) {
+    setEditingId(m.id);
+    setEditDraft(m.content || '');
+    setEditImportance(m.importance || 0);
+  }
+
+  return (
+    <div className="space-y-3">
+      {/* Usage bar + add button */}
+      <div className="flex items-center justify-between gap-3">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center justify-between text-[11px] text-muted-foreground">
+            <span>
+              {totalChars} / {LIMIT} {isEn ? 'chars' : '字符'}
+            </span>
+            <span className={usagePct >= 90 ? 'font-medium text-red-500' : ''}>{usagePct}%</span>
+          </div>
+          <div className="mt-1 h-1.5 w-full overflow-hidden rounded-full bg-secondary">
+            <div
+              className={`h-full rounded-full transition-all ${usagePct >= 90 ? 'bg-red-500' : 'bg-primary/70'}`}
+              style={{ width: `${usagePct}%` }}
+            />
+          </div>
+        </div>
+        {canEdit && !adding && (
+          <Button size="sm" variant="outline" className="gap-1.5 shrink-0" onClick={() => setAdding(true)}>
+            <Plus className="h-3.5 w-3.5" />
+            {T('添加记忆', 'Add Memory')}
+          </Button>
+        )}
+      </div>
+
+      {/* Inline add form */}
+      {adding && (
+        <div className="rounded-lg border border-border bg-background p-3">
+          <Textarea
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            placeholder={T('记录一条项目内的事实、决策或洞察…', 'Record a fact, decision or insight for this project…')}
+            rows={3}
+            className="mb-2 resize-none text-sm"
+            autoFocus
+          />
+          <div className="flex items-center justify-between gap-2">
+            <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+              {T('重要性', 'Importance')}
+              <select
+                value={draftImportance}
+                onChange={(e) => setDraftImportance(Number(e.target.value))}
+                className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs"
+              >
+                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                  <option key={n} value={n}>{n}</option>
+                ))}
+              </select>
+            </label>
+            <div className="flex gap-2">
+              <Button size="sm" variant="outline" onClick={() => setAdding(false)}>
+                {T('取消', 'Cancel')}
+              </Button>
+              <Button size="sm" onClick={submitAdd} disabled={!draft.trim() || saving}>
+                {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Check className="h-3.5 w-3.5" />}
+                {T('保存', 'Save')}
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Empty state */}
+      {memories.length === 0 ? (
+        <EmptyState
+          icon={Brain}
+          label={T(
+            '该项目暂无共享记忆。点击「添加记忆」记录智能体应持续记住的事实、决策或洞察。',
+            'No shared memory yet. Add a fact, decision or insight the agent should remember for this project.'
+          )}
+          action={canEdit ? (
+            <Button size="sm" variant="outline" className="mt-2 gap-1.5" onClick={() => setAdding(true)}>
+              <Plus className="h-3.5 w-3.5" />
+              {T('添加记忆', 'Add Memory')}
+            </Button>
+          ) : null}
+        />
+      ) : (
+        <ul className="space-y-2">
+          {memories.map((m) => (
+            <li key={m.id} className="rounded-lg border border-border bg-background p-3">
+              {editingId === m.id ? (
+                /* ── Edit mode ── */
+                <div>
+                  <Textarea
+                    value={editDraft}
+                    onChange={(e) => setEditDraft(e.target.value)}
+                    rows={3}
+                    className="mb-2 resize-none text-sm"
+                    autoFocus
+                  />
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      {T('重要性', 'Importance')}
+                      <select
+                        value={editImportance}
+                        onChange={(e) => setEditImportance(Number(e.target.value))}
+                        className="rounded-md border border-border bg-background px-1.5 py-0.5 text-xs"
+                      >
+                        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((n) => (
+                          <option key={n} value={n}>{n}</option>
+                        ))}
+                      </select>
+                    </label>
+                    <div className="flex gap-2">
+                      <Button size="sm" variant="outline" onClick={() => setEditingId(null)}>
+                        {T('取消', 'Cancel')}
+                      </Button>
+                      <Button size="sm" onClick={() => submitEdit(m)} disabled={!editDraft.trim()}>
+                        <Check className="mr-1 h-3 w-3" />
+                        {T('保存', 'Save')}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              ) : (
+                /* ── View mode ── */
+                <div>
+                  <div className="flex items-start justify-between gap-2">
+                    <p className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-foreground">
+                      {m.content}
+                    </p>
+                    {canEdit && (
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        <button
+                          type="button"
+                          onClick={() => onUpdate(m.id, { pinned: !m.pinned })}
+                          className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
+                            m.pinned
+                              ? 'bg-primary/10 text-primary'
+                              : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+                          }`}
+                          title={m.pinned ? T('取消置顶', 'Unpin') : T('置顶', 'Pin')}
+                          aria-label={m.pinned ? T('取消置顶', 'Unpin') : T('置顶', 'Pin')}
+                        >
+                          <Pin className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => startEdit(m)}
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                          title={T('编辑', 'Edit')}
+                          aria-label={T('编辑', 'Edit')}
+                        >
+                          <Pencil className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => onDelete(m.id)}
+                          className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-red-100 hover:text-red-500 dark:hover:bg-red-900/30"
+                          title={T('删除', 'Delete')}
+                          aria-label={T('删除', 'Delete')}
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {m.pinned && (
+                      <Badge variant="outline" className="border-primary/40 text-[10px] text-primary">
+                        <Pin className="mr-1 h-2.5 w-2.5" />
+                        {T('已置顶', 'Pinned')}
+                      </Badge>
+                    )}
+                    {m.importance > 0 && (
+                      <Badge variant="secondary" className="text-[10px]">
+                        <Star className="mr-1 h-2.5 w-2.5" />
+                        {m.importance}
+                      </Badge>
+                    )}
+                    {m.target === 'user' && (
+                      <Badge variant="outline" className="text-[10px] text-muted-foreground">
+                        {T('用户画像', 'Profile')}
+                      </Badge>
+                    )}
+                    <span className="text-[10px] text-muted-foreground">
+                      · {formatRelativeTime(m.updated_at || m.updated_date, lang)}
+                    </span>
+                  </div>
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
 }

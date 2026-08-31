@@ -458,3 +458,116 @@ def test_mixed_db_and_file_kbs_both_appear_in_prompt(db_session):
     # ask_data_agent is exposed so the LLM can reach either kind.
     tool_names = {t.get("function", {}).get("name") for t in tools}
     assert "ask_data_agent" in tool_names
+
+
+# ---------------------------------------------------------------------------
+# Contract 6: dashboard build toolset injected for data-bound agents
+# ---------------------------------------------------------------------------
+# 2026-08-27 regression (conv 3e7fa92b, C5_C9): a chat served by
+# general_assistant (whose enabled_tools lack create_fullstack_dashboard)
+# could explore the schema via injected data tools but could NEVER call the
+# build tool — the dashboard guards are all inert when the tool is absent,
+# so the turn ended with a "readiness assessment" report instead of the app.
+# Fix: prepare_data_source_runtime injects the full dashboard pipeline
+# (build + design + grounding) alongside ask_data_agent/fetch_data_batch
+# whenever the agent has bound data sources and the fullstack flag is on.
+
+
+def test_dashboard_tools_injected_when_kbs_bound_and_fullstack_on(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "FULLSTACK_DASHBOARD_ENABLED", True)
+    monkeypatch.setattr(settings, "LEGACY_DASHBOARD_ENABLED", False)
+
+    bound_kb = _make_kb("bound")
+    db_session.add(bound_kb)
+    db_session.commit()
+
+    agent = _make_agent("agent", [bound_kb.id])
+    db_session.add(agent)
+    db_session.commit()
+
+    tools, _prompt, _ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=[],
+        base_system_prompt="base",
+    )
+    tool_names = {t.get("function", {}).get("name") for t in tools}
+
+    # Build pipeline
+    assert "create_fullstack_dashboard" in tool_names
+    assert "update_fullstack_dashboard" in tool_names
+    # Design intelligence
+    assert "uiux_design_system" in tool_names
+    assert "uiux_search" in tool_names
+    # Schema grounding (the dashboard guards require describe_schema evidence)
+    assert "list_data_sources" in tool_names
+    assert "describe_schema" in tool_names
+    # Data tools still injected
+    assert "ask_data_agent" in tool_names
+    assert "fetch_data_batch" in tool_names
+
+
+def test_dashboard_tools_NOT_injected_when_fullstack_off(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "FULLSTACK_DASHBOARD_ENABLED", False)
+
+    bound_kb = _make_kb("bound")
+    db_session.add(bound_kb)
+    db_session.commit()
+
+    agent = _make_agent("agent", [bound_kb.id])
+    db_session.add(agent)
+    db_session.commit()
+
+    tools, _prompt, _ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=[],
+        base_system_prompt="base",
+    )
+    tool_names = {t.get("function", {}).get("name") for t in tools}
+    assert "create_fullstack_dashboard" not in tool_names
+
+
+def test_dashboard_tools_NOT_injected_when_no_kbs_bound(db_session, monkeypatch):
+    monkeypatch.setattr(settings, "FULLSTACK_DASHBOARD_ENABLED", True)
+
+    agent = _make_agent("agent", [])
+    db_session.add(agent)
+    db_session.commit()
+
+    tools, _prompt, _ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=[],
+        base_system_prompt="base",
+    )
+    tool_names = {t.get("function", {}).get("name") for t in tools}
+    assert "create_fullstack_dashboard" not in tool_names
+
+
+def test_dashboard_tools_injection_is_idempotent(db_session, monkeypatch):
+    """If the agent already whitelists create_fullstack_dashboard, the
+    runtime must not duplicate its schema."""
+    monkeypatch.setattr(settings, "FULLSTACK_DASHBOARD_ENABLED", True)
+
+    bound_kb = _make_kb("bound")
+    db_session.add(bound_kb)
+    db_session.commit()
+
+    from app.services.tool_registry import normalize_tool_schema, registry
+
+    dash_entry = registry.get_entry("create_fullstack_dashboard")
+    base_tools = [normalize_tool_schema(dash_entry.schema, fallback_name=dash_entry.name)]
+
+    agent = _make_agent("agent", [bound_kb.id])
+    db_session.add(agent)
+    db_session.commit()
+
+    tools, _prompt, _ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=base_tools,
+        base_system_prompt="base",
+    )
+    names = [t.get("function", {}).get("name") for t in tools]
+    assert names.count("create_fullstack_dashboard") == 1

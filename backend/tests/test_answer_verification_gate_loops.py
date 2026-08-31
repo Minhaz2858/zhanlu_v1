@@ -173,7 +173,10 @@ def test_gate_impossible_returns_disclose(monkeypatch):
         "current inventory levels",
         _tool_calls(("execute_query", {"rows": [{"price": 1}]})),
         "the price is 1",
-        attempts=0,
+        # attempts=1: the 2026-08-26 fast-path short-circuits attempts=0
+        # turns that already have rows (evaluator never called), which
+        # would defeat this test's purpose.
+        attempts=1,
         budget_remaining=38,
     ))
     assert result.action == "disclose"
@@ -243,7 +246,7 @@ def test_gate_extracts_results_from_various_record_shapes(monkeypatch):
         return _result("COMPLETE")
 
     monkeypatch.setattr(agents, "evaluate_answer", _recorder)
-    _run(agents._check_answer_verification_gate(
+    result = _run(agents._check_answer_verification_gate(
         "show me prices",
         [
             {"name": "execute_query", "results": {"rows": [{"price": 1}], "columns": ["price"]}},
@@ -252,7 +255,10 @@ def test_gate_extracts_results_from_various_record_shapes(monkeypatch):
             {"name": "web_search"},
         ],
         "the price is 1",
-        attempts=0,
+        # attempts=1: the 2026-08-26 fast-path short-circuits attempts=0
+        # turns that already have rows (evaluator never called), which
+        # would defeat this test's purpose.
+        attempts=1,
         budget_remaining=38,
     ))
     names = [r.get("tool") for r in captured["results"]]

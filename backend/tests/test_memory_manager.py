@@ -1,7 +1,7 @@
 """Tests for memory manager -- semantic dedup and consolidation."""
 import os
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 _BACKEND_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -106,6 +106,44 @@ def test_archive_stale():
     assert important.is_deleted is False
     assert used.is_deleted is False
     assert fresh.is_deleted is False
+
+
+def test_archive_stale_aware_created_no_crash():
+    """Regression (2026-08-28): an AWARE created_date must not raise
+    'can't compare offset-naive and offset-aware datetimes'. Observed live
+    as the recurring 'Memory consolidation failed for <agent>' log line."""
+    stale = _make_memory(
+        "1", "stale", importance=0, usage=0,
+        created=datetime.now(timezone.utc) - timedelta(days=60),
+    )
+    fresh = _make_memory(
+        "2", "fresh", importance=0, usage=0,
+        created=datetime.now(timezone.utc),
+    )
+    db = MagicMock()
+    db.query.return_value.filter.return_value.all.return_value = [stale, fresh]
+
+    count = archive_stale(db, "agent-1", stale_days=30)
+    assert count == 1
+    assert stale.is_deleted is True
+    assert fresh.is_deleted is False
+
+
+def test_is_expired_aware_created_no_crash():
+    """Regression (2026-08-28): is_expired must handle AWARE created dates
+    (normalized to naive UTC) without raising naive/aware TypeError."""
+    from app.services.memory_advanced import is_expired
+
+    expired = _make_memory(
+        "1", "old", ttl=1,
+        created=datetime.now(timezone.utc) - timedelta(days=10),
+    )
+    fresh = _make_memory(
+        "2", "new", ttl=30,
+        created=datetime.now(timezone.utc),
+    )
+    assert is_expired(expired) is True
+    assert is_expired(fresh) is False
 
 
 def test_promote_frequently_used():

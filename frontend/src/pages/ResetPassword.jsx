@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { base44 } from "@/api/base44Client";
+import { appParams } from "@/lib/app-params";
 import { useLanguage } from "@/lib/LanguageProvider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,7 +11,8 @@ import AuthLayout from "@/components/AuthLayout";
 export default function ResetPassword() {
   const { t } = useLanguage();
   const [searchParams] = useSearchParams();
-  const resetToken = searchParams.get("token");
+  // The backend emails the link as ?reset_token=... (see auth.py reset-password-request).
+  const resetToken = searchParams.get("reset_token");
 
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -27,7 +28,13 @@ export default function ResetPassword() {
     }
     setLoading(true);
     try {
-      await base44.auth.resetPassword({ resetToken, newPassword });
+      const resp = await fetch(`/api/apps/${appParams.appId}/auth/reset-password`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reset_token: resetToken, new_password: newPassword }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(data.detail || t.auth.failedToReset);
       window.location.href = "/login";
     } catch (err) {
       setError(err.message || t.auth.failedToReset);

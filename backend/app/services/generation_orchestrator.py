@@ -614,7 +614,7 @@ def _mine_ask_data_rows(
     """Pull row dicts out of non-superseded data-producing tool calls.
 
     Scans ALL tools in ``DATA_PRODUCING_TOOLS`` (ask_data_agent, execute_query,
-    ask_erp_kpi, etc.).  EDIA structured-data tools (ask_erp_kpi, etc.) have
+    ask_erp_kpi, etc.).  Legacy structured-data tools (ask_erp_kpi, etc.) have
     their results normalized into rows by ``_normalize_tool_result_to_rows``
     at the v3 stream level, so by the time we see them here they already
     contain a ``rows`` key.
@@ -825,7 +825,7 @@ def _is_internal_id_column(col: str) -> bool:
 
     Detects:
     - Common generic ID names (id, rowid, uid, pk, etc.)
-    - F-prefixed internal IDs (FMATERIALID, FENTRYID, etc. — common in ERP systems)
+    - F-prefixed internal IDs (FMATERIALID, FENTRYID — common in ERP systems)tems)
     - Any column ending in _id or _ID (order_id, customer_id, etc.) when short
     - Columns ending in just "ID" in uppercase (FID, FSTOCKID, etc.)
     """
@@ -1460,7 +1460,7 @@ async def ensure_artifact_for_doc_request(
                     "source": source_name,
                     "user_signal": "export",
                     "methodology": (
-                        f"Data sourced from {source_name} (SQL: {sql[:80]}…) "
+                        f"Data sourced from {source_name} (SQL: {str(sql)[:80]}…) "
                         f"returning {len(rows)} rows — DATA QUALITY WARNING: "
                         f"{_dq['reason']}"
                     ),
@@ -1477,7 +1477,7 @@ async def ensure_artifact_for_doc_request(
                 # include a superseded query's dead source.
                 methodology = (
                     f"Data sourced from {source_name}"
-                    + (f" (SQL: {sql[:80]}\u2026)" if sql else "")
+                    + (f" (SQL: {str(sql)[:80]}\u2026)" if sql else "")
                     + f" returning {len(rows)} rows."
                 )
                 payload = {

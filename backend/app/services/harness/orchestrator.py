@@ -15,7 +15,7 @@ Design principles (from the P1 spec):
   callables, no owned DB/LLM clients → unit-testable with fakes.
 - Run-store writes are best-effort side effects — failures are logged
   at WARNING and never raised into the loop.
-- All guardrails from EDIA (denied-tools, iteration budget, guard
+- All guardrails from the reference deployment (denied-tools, iteration budget, guard
   controller, forced synthesis turn) are preserved.
 """
 
@@ -102,9 +102,9 @@ class AgentRunOrchestrator:
         Tool names blocked even if present in allowed_tools / schemas
         (recursion protection).
     max_iterations : int
-        Max tool-calling iterations (default 8, matching EDIA).
+        Max tool-calling iterations (default 8).
     temperature : float
-        LLM sampling temperature (default 0.3, matching EDIA sub-agents).
+        LLM sampling temperature (default 0.3 for sub-agents).
     event_sink : EventSink | None
         Optional callback for per-turn events (logs, metrics, streaming).
     run_store : RunStore | None

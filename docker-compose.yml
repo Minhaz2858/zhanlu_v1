@@ -26,6 +26,9 @@ services:
       - ./backend:/app:cached
       - ./scripts:/app/scripts:cached
       - ~/.cache/chroma:/home/zhanlu/.cache/chroma:cached  # Persist ChromaDB model cache across restarts
+      # FIX 2026-08-29: persist user-created personal skills (source=user,
+      # written to ~/.zhanlu/skills) across container recreations.
+      - zhanlu_user_skills:/home/zhanlu/.zhanlu/skills
     depends_on:
       postgres:
         condition: service_healthy
@@ -53,10 +56,14 @@ services:
       dockerfile: docker/sandbox-worker.Dockerfile
     image: zhanlu-sandbox-worker:latest
     container_name: zhanlu-sandbox-worker
-    # Host docker.sock group id on this server is 994. Add it at runtime so
-    # the non-root worker can access Docker without switching to root.
+    # Host docker.sock group id on Linux servers is usually 994 (docker
+    # group). On macOS Docker Desktop the socket presents as root:root, so
+    # the non-root worker also needs gid 0 to open it. group_add 0 is a
+    # no-op security-wise here: a worker with docker.sock access is already
+    # host-root-equivalent; the spawned sandboxes stay fully sandboxed.
     group_add:
       - "994"
+      - "0"
     env_file: .env
     environment:
       PYTHONPATH: ""
@@ -220,3 +227,8 @@ volumes:
   redis_data:
   minio_data:
   sandbox_tmp:
+  # FIX 2026-08-29: user-created personal skills (written by create_skill /
+  # write_skill_md to ~/.zhanlu/skills inside the container) previously lived
+  # in the container's ephemeral layer and vanished on every `docker compose
+  # down`/recreate. Named volume keeps personal skills durable across deploys.
+  zhanlu_user_skills:

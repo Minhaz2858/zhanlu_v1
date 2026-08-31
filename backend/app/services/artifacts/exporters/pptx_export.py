@@ -86,6 +86,21 @@ def _extract_period(text: str) -> str | None:
 def render(payload: ReportCardPayload, ctx: Optional[ExportContext] = None) -> tuple[bytes, str, str]:
     ctx = ctx or ExportContext()
 
+    # Fully-dynamic path: an explicit ``blocks`` list drives the layout engine
+    # (the same engine the Pro deck pipeline uses) instead of the catalog order.
+    _raw_blocks = getattr(payload, "blocks", None)
+    if _raw_blocks:
+        try:
+            from app.services.artifacts.document_plan import DocumentPlan
+            _plan = DocumentPlan.from_blocks(
+                list(_raw_blocks),
+                meta={"title": getattr(payload, "title", ""),
+                      "theme": getattr(payload, "theme", "")},
+            )
+            return render_deck(_plan.to_deck_plan(), ctx, rows=[])
+        except Exception:
+            pass  # fall through to the catalog renderer
+
     # Resolve the design tokens once and thread them through every builder.
     # Defaults (zhanlu-blue + sharp) reproduce the legacy branded deck; a
     # tenant brand kit (ctx.theme_tokens) takes precedence when set.

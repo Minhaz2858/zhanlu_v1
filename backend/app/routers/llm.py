@@ -56,6 +56,7 @@ class LlmModelUpdate(BaseModel):
     context_window: int | None = None
     max_output_tokens: int | None = None
     supports_structured_tool_calls: bool | None = None
+    force: bool = False  # admin override for the golden-eval regression gate
 
 
 class TestConnectionBody(BaseModel):
@@ -213,6 +214,62 @@ def create_model(
     return _to_out(row)
 
 
+def _run_inline_gate(db: Session, row: LlmModel, user: User) -> dict | None:
+    """Run the golden-eval regression gate against *row* as candidate.
+
+    Executes the golden suite on a SEPARATE session (the runner commits
+    EvalResult rows + case counters internally) so a rejected change never
+    persists on the request session — ``update_model`` raises 409 before
+    ``db.commit()`` and the request session is rolled back on close.
+
+    Returns a fail dict {candidate_pass_rate, champion_pass_rate, floor}
+    when the candidate fails the gate, None when it passes or warns.
+    """
+    import asyncio
+
+    from app.database import SessionLocal
+    from app.routers.admin_evals import _current_champion_label
+    from app.services.golden_eval_runner import run_golden_suite
+    from app.services.llm_router import LLMEndpoint
+
+    candidate = LLMEndpoint(
+        base_url=row.base_url,
+        api_key=decrypt_value(row.api_key) if row.api_key else "",
+        model_id=row.model_id,
+        is_private=bool(row.is_private),
+        bypass_hallucination_guardrail=bool(row.bypass_hallucination_guardrail),
+        provider=row.provider or "",
+        context_window=row.context_window,
+        max_output_tokens=row.max_output_tokens,
+        supports_structured_tool_calls=bool(row.supports_structured_tool_calls),
+    )
+
+    gate_db = SessionLocal()
+    try:
+        champion_label = _current_champion_label(gate_db)
+        report = asyncio.run(
+            run_golden_suite(
+                gate_db,
+                endpoint=candidate,
+                model_label=row.model_id,
+                champion_label=champion_label,
+                user_id=getattr(user, "id", None) or "golden-runner",
+            )
+        )
+    finally:
+        gate_db.close()
+
+    if report.get("status") != "fail":
+        return None
+    cand = report.get("candidate") or {}
+    champ = report.get("champion") or {}
+    return {
+        "candidate_pass_rate": cand.get("pass_rate"),
+        "champion_pass_rate": champ.get("pass_rate") if champ else None,
+        "floor": getattr(settings, "EVAL_GATE_FLOOR", 0.8),
+    }
+
+
 @router.put("/models/{model_id}", response_model=LlmModelOut)
 def update_model(
     model_id: str,
@@ -263,6 +320,34 @@ def update_model(
             LlmModel.id != row.id,
         ).update({"is_default": False})
         row.is_default = True
+
+    # ── Golden-eval regression gate (2026-08-29) ─────────────────────
+    # When EVAL_GATE_ENABLED, an admin change to the effective model
+    # (model_id / provider / base_url / api_key / enabled / is_default)
+    # must pass the golden suite at champion parity or the change is
+    # rejected with 409 BEFORE the row is committed. force=true bypasses
+    # (emergency rollouts) — the row then saves without a gate run.
+    _eff_changed = any(
+        getattr(body, f) is not None
+        for f in ("model_id", "provider", "base_url", "api_key", "enabled", "is_default")
+    )
+    if (
+        getattr(settings, "EVAL_GATE_ENABLED", False)
+        and _eff_changed
+        and not body.force
+    ):
+        _gate_fail = _run_inline_gate(db, row, user)
+        if _gate_fail is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Model change blocked by golden-eval regression gate: "
+                    f"candidate pass_rate {_gate_fail['candidate_pass_rate']} "
+                    f"vs champion {_gate_fail['champion_pass_rate']}, floor "
+                    f"{_gate_fail['floor']}. Run POST /api/admin/evals/regression "
+                    "for the full report, or retry with force=true to override."
+                ),
+            )
 
     db.commit()
     db.refresh(row)

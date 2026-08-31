@@ -4,7 +4,7 @@ P1: Extracts the two data-fetching paths from ForecastEngine._fetch_series()
 into a Strategy pattern, so new source types can be registered without
 modifying the engine.
 
-- EdiaMysqlStrategy  → delegates to edia_source.EdiaMysqlDataSource (fast path)
+- EdiaMysqlStrategy  → delegates to mysql_data_source.MysqlDataSource (fast path)
 - GenericKBStrategy  → generic KB-backed path via QueryService
 
 Usage::
@@ -70,22 +70,22 @@ class BaseDataSource(ABC):
         ...
 
 
-# ── EDIA MySQL strategy ────────────────────────────────────────────
+# ── External MySQL strategy ────────────────────────────────────────────
 
 
 class EdiaMysqlStrategy(BaseDataSource):
-    """Fast path for EDIA MySQL mirror.
+    """Fast path for the external MySQL mirror.
 
-    Delegates to the existing edia_source.EdiaMysqlDataSource, which
-    reads directly from the EDIA MySQL mirror (md_t_lz_price etc.)
+    Delegates to the existing mysql_data_source.MysqlDataSource, which
+    reads directly from the external MySQL mirror (md_t_lz_price etc.)
     bypassing the KB/QueryService path.
     """
 
     def fetch(self, target, db: Session) -> pd.Series | None:
-        from app.services.forecasting.edia_source import EdiaMysqlDataSource
+        from app.services.forecasting.mysql_data_source import MysqlDataSource
 
         try:
-            src = EdiaMysqlDataSource()
+            src = MysqlDataSource()
             df = src.read_history(target.datasource or {})
             return pd.Series(df["y"].values, index=df["ds"])
         except Exception as exc:

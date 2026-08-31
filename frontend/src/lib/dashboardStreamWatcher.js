@@ -108,6 +108,12 @@ export function watchForDashboardEdits(toolCalls, seenCount, handlers) {
   } else {
     onOpen();
   }
+  // Notify the sidebar that a dashboard was just created/edited so the
+  // dashboard-dedicated session icon (LayoutDashboard) appears immediately,
+  // without waiting for a page reload. SessionList.jsx listens for this.
+  try {
+    window.dispatchEvent(new Event('zhanlu:dashboard-created'));
+  } catch { /* non-browser env — best-effort */ }
   // Defer the refresh so the panel mounts + DashboardViewer can attach its
   // forwardRef before we call refresh(). Without this, the first refresh
   // after a stream-final 'done' event can race the mount and silently no-op.

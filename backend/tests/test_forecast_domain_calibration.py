@@ -206,11 +206,17 @@ def test_get_calibrated_elasticity_with_override():
     assert val == 0.50, f"Override should return 0.50, got {val}"
 
 
-def test_get_calibrated_elasticity_fallback_to_static():
-    """When no override exists, fall back to static _ELASTICITIES table."""
+def test_get_calibrated_elasticity_empty_config_returns_none():
+    """No domain config → no static elasticity table → None (generic platform)."""
     val = get_calibrated_elasticity("c5_resin", overrides={})
-    # c5_resin static: 0.62 × 0.72 = 0.4464
-    assert abs(val - 0.4464) < 0.001, f"Expected ~0.4464, got {val}"
+    assert val is None
+
+
+def test_get_calibrated_elasticity_fallback_to_configured(domain_signals_config):
+    """When no override exists, fall back to the config-loaded _ELASTICITIES."""
+    val = get_calibrated_elasticity("widget", overrides={})
+    # widget configured raw 0.5 × damp 1.0 = 0.5
+    assert val == 0.5, f"Expected 0.5, got {val}"
 
 
 def test_get_calibrated_elasticity_unknown_product():

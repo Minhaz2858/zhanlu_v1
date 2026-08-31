@@ -130,7 +130,7 @@ def generate_mock_series(
 
 def seed_mock_feeds(
     db: Session,
-    product_key: str = "isoprene",
+    product_key: str = "",
     n_weeks: int = 104,
     end_date: datetime | None = None,
 ) -> dict[str, dict[str, Any]]:
@@ -144,7 +144,7 @@ def seed_mock_feeds(
     dict mapping domain → series summary::
 
         {
-            "operating_rate": {"series_key": "mock_op_rate_isoprene",
+            "operating_rate": {"series_key": "mock_op_rate_<product>",
                                 "row_count": 104, ...},
             "inventory": {...},
             "import_price": {...},

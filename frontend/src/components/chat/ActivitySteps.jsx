@@ -88,8 +88,8 @@ function shouldShowCommand(step) {
 
 /**
  * Strip raw SQL/ERP internals from activity step text so the user only sees
- * human-readable language, not table names like erp_t_sal_outstock or column
- * IDs like FMATERIALID.
+ * human-readable language, not raw table or column
+ * IDs like FMATERIALID (common in ERP systems).
  */
 function sanitizeActivityText(text) {
   if (!text) return text;
@@ -161,11 +161,11 @@ export default function ActivitySteps({ steps, phase, reasoning }) {
             className={`h-3.5 w-3.5 shrink-0 text-amber-500 ${isFinalized ? '' : 'animate-pulse'}`}
           />
           <span className={`text-xs font-medium ${isFinalized ? 'text-muted-foreground' : 'text-foreground'}`}>
-            {t.chat.phase[phase.state]?.verb || phase.verb || phase.state}
+            {t.chat.phase?.[phase.state]?.verb || phase.verb || phase.state}
           </span>
-          {(t.chat.phase[phase.state]?.title || phase.title) && (
+          {(t.chat.phase?.[phase.state]?.title || phase.title) && (
             <span className="text-xs text-muted-foreground truncate">
-              {t.chat.phase[phase.state]?.title || phase.title}
+              {t.chat.phase?.[phase.state]?.title || phase.title}
             </span>
           )}
         </div>

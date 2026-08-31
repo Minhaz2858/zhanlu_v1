@@ -54,7 +54,6 @@ def seed():
         Project(name="Marketing Team", description="Marketing automation project", color="#10B981", status="active", created_by_id=admin.id),
         Project(name="Data Analysis", description="Data analysis and reporting", color="#F59E0B", status="active", created_by_id=admin.id),
         Project(name="Customer Support", description="Customer support automation", color="#EF4444", status="active", created_by_id=admin.id),
-        Project(name="Ecisco BI", description="EDIA pipeline for C5/C9 petrochemical domain intelligence — Orchestrator, Perception, RAG Research, Diagnosis, Forecasting, Pricing, Data, and Report Generation agents", color="#8B5CF6", status="active", is_system=True),
     ]
     db.add_all(projects)
     db.flush()
@@ -143,8 +142,6 @@ def seed():
         AgentApp(name="Report Writer", description="Generates professional reports from data", project="global", capabilities=["report_generation", "data_analysis"], model="gpt-4o", agent_type="sequential", topology="standalone", status="active", skills=["Chart Generator", "PDF Generator"], created_by_id=admin.id),
         AgentApp(name="Data Analyst", description="Analyzes data and creates visualizations", project="Data Analysis", capabilities=["data_analysis", "visualization", "sql"], model="gpt-4o", agent_type="reactive", topology="standalone", status="draft", skills=["Database Query", "Chart Generator"], created_by_id=admin.id),
         AgentApp(name="Customer Support Agent", description="Handles customer inquiries and support tickets", project="Customer Support", capabilities=["customer_support", "ticket_routing"], model="gpt-4o-mini", agent_type="deliberative", topology="standalone", status="active", skills=["Email Sender", "Web Search"], created_by_id=admin.id),
-        # Ecisco BI — Ecisco BI Assistant (user-facing default agent)
-        AgentApp(name="ecisco_bi_assistant", description="Ecisco BI Assistant — default general-purpose agent for the Ecisco BI C5/C9 petrochemical domain intelligence platform. Covers market perception, diagnosis, forecasting, pricing, decision, knowledge graph, weekly reports, ERP writeback, and intelligence layers.", project="Ecisco BI", capabilities=["orchestration", "perception", "diagnosis", "forecasting", "pricing", "decision", "knowledge_graph", "reporting", "weekly_report", "erp_writeback", "data_query", "intelligence", "web_research"], model="gpt-4o", agent_type="sequential", topology="standalone", status="active", tool_config={"enabled_tools": ["ask_perception", "ask_rag_research", "ask_diagnosis", "ask_forecast_agent", "ask_pricing", "ask_data_agent", "ask_report_agent", "ask_intelligence", "ask_knowledge_graph", "ask_decision", "ask_macro_override", "ask_weekly_report", "ask_erp_kpi", "ask_erp_writeback", "create_artifact", "execute_automation", "web_search", "web_extract", "url_safety", "x_search", "agent_browser", "memory", "todo", "kanban", "session_search", "read_file", "write_file", "image_generation", "execute_code", "delegate_task", "run_sandbox_skill", "fuzzy_match", "patch_parser", "process_registry_list", "process_registry_tail", "process_registry_kill", "clarify", "slash_confirm", "approval", "interrupt", "checkpoint_manager", "osv_check", "tirith_security", "skills", "skills_hub", "skills_guard", "skill_provenance", "skill_usage", "Skill", "load_skill_body", "update_env_config", "docker_compose_restart"]}, **_base_harness, manifest_json={"agent_name":"ecisco_bi_assistant","version":"1.0.0","mission":"Serve as the default Ecisco BI assistant for C5/C9 petrochemical domain intelligence, covering the full EDIA 6-stage pipeline","task_scope":["market_analysis","forecasting","pricing","decision","diagnosis","weekly_report","knowledge_graph","erp_writeback","data_analysis"],"boundaries":{"allowed":["ask_perception","ask_rag_research","ask_diagnosis","ask_forecast_agent","ask_pricing","ask_data_agent","ask_report_agent","ask_intelligence","ask_knowledge_graph","ask_decision","ask_macro_override","ask_weekly_report","ask_erp_kpi","ask_erp_writeback","create_artifact","execute_automation","web_search","web_extract","url_safety","x_search","agent_browser","memory","todo","kanban","session_search","read_file","write_file","image_generation","execute_code","delegate_task","run_sandbox_skill","fuzzy_match","patch_parser","process_registry_list","process_registry_tail","process_registry_kill","clarify","slash_confirm","approval","interrupt","checkpoint_manager","osv_check","tirith_security","skills","skills_hub","skills_guard","skill_provenance","skill_usage","Skill","load_skill_body","update_env_config","docker_compose_restart"],"forbidden":["agent_creation","skill_creation","automation_creation"]},"risk_tier":"low","created_by":"system"}, policy_profile={"risk_tier":"low","requires_confirmation":False,"max_concurrent_calls":5,"rate_limit_per_minute":30,"allowed_domains":[],"retention_days":30}, is_system=False, created_by_id=admin.id),
     ]
     db.add_all(agents)
 
@@ -214,13 +211,13 @@ def seed():
 
     db.commit()
 
-    # ── Ecisco BI forecast targets ──────────────────────────────
+    # ── Enterprise BI forecast targets ──────────────────────────
     # Ensure the 12 dashboard product targets exist so the nightly
     # forecast scheduler has something to compute against.
-    from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
-    new_targets = seed_ecisco_forecast_targets(db)
+    from app.services.forecasting.seed_targets import seed_forecast_targets
+    new_targets = seed_forecast_targets(db)
     if new_targets:
-        print(f"  Seeded {new_targets} new Ecisco BI forecast targets")
+        print(f"  Seeded {new_targets} new enterprise BI forecast targets")
 
     db.close()
     print("Seed complete!")

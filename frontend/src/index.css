@@ -156,7 +156,7 @@
    semantic class names (.overview-product-unit, .overview-regional-row, …)
    so it can be reskinned for both light and dark without rewriting JSX.
    In `dark` mode we also use these selectors directly (the `.dark` class is
-   applied to <html> by next-themes, mirroring EDIA's `html.dark` pattern). */
+   applied to <html> by next-themes, mirroring a `html.dark` pattern). */
 
 .overview-product-unit {
   background-color: #ffffff;

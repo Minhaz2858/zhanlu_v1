@@ -23,10 +23,6 @@ EVAL_QUESTIONS: list[dict] = [
         "expected_tables": ["erp_t_sp_instock", "erp_t_sp_instockentry"],
     },
     {
-        "question": "布伦特原油和日本石脑油的最新价格？",
-        "expected_tables": ["oilchem_data"],
-    },
-    {
         "question": "惠州工厂最近的销售量和成交价？",
         "expected_tables": ["erp_v_sale_huizhou"],
     },
@@ -61,9 +57,5 @@ EVAL_QUESTIONS: list[dict] = [
     {
         "question": "最近有没有重要的市场事件？",
         "expected_tables": ["intelligence_events"],
-    },
-    {
-        "question": "裂解C5和C9的市场价格如何？",
-        "expected_tables": ["lz_v_c5", "lz_v_c9", "oilchem_data"],
     },
 ]

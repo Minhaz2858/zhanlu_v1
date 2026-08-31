@@ -5,7 +5,7 @@ values), infers join edges of two kinds beyond declared FKs:
 
 - **VALUE_OVERLAP**: containment between the sampled distinct values of two
   type-compatible columns across different tables. Language-agnostic — works
-  on opaque abbreviations like ``FMATERIALID`` / ``material_id``. Confidence
+  on opaque abbreviations like ``FMATERIALID`` / ``material_id`` (common in ERP). Confidence
   = containment score.
 - **NAME_MATCH**: identical column name + compatible type across two tables,
   *excluding* structural-noise columns. Fixed confidence ``0.5``.

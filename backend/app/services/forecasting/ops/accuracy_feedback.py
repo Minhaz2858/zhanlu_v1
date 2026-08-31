@@ -200,7 +200,7 @@ def recommend_iteration(
         recs.append(f"  1. Re-run XGBoost tuning: tune_xgboost_params('{product_key}')")
 
     recs.append(f"  2. Check ensemble weights — may need regime-aware pool adjustment.")
-    recs.append(f"  3. Review feature freshness (technical indicators, Fourier, Oilchem).")
+    recs.append(f"  3. Review feature freshness (technical indicators, Fourier, upstream market data).")
 
     if mape > 30.0:
         recs.append(f"  4. [EXTREME] Disable ML models, fall back to statistical baseline.")

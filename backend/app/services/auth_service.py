@@ -14,6 +14,7 @@ from app.models.otp_code import OtpCode
 from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_token import RevokedToken
+from app.models.user import User
 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -134,17 +135,19 @@ class AuthService:
 
     # --- OTP (database-backed) ---
 
-    def generate_otp(self, email: str, db: Session) -> str:
+    def generate_otp(self, email: str, db: Session, purpose: str = "registration") -> str:
         """Generate a 6-digit OTP, store it in the database, and return it.
 
         Uses ``secrets.randbelow`` (cryptographic RNG) instead of
         ``random.randint`` (Mersenne Twister, predictable). Also
-        invalidates any previous unused OTPs for this email so only
-        the most recent code is valid (prevents OTP accumulation attacks).
+        invalidates any previous unused OTPs for this email AND purpose so only
+        the most recent code is valid (prevents OTP accumulation attacks) while
+        leaving codes of a different purpose untouched.
         """
-        # Invalidate all previous unused OTPs for this email
+        # Invalidate previous unused OTPs for this email + purpose only.
         db.query(OtpCode).filter(
             OtpCode.email == email,
+            OtpCode.purpose == purpose,
             OtpCode.used == False,  # noqa: E712
             OtpCode.is_deleted == False,  # noqa: E712
         ).update({OtpCode.used: True})
@@ -153,17 +156,19 @@ class AuthService:
         record = OtpCode(
             email=email,
             code=otp,
+            purpose=purpose,
             expires_at=self._utcnow() + timedelta(minutes=10),
         )
         db.add(record)
         db.commit()
         return otp
 
-    def verify_otp(self, email: str, otp_code: str, db: Session) -> bool:
+    def verify_otp(self, email: str, otp_code: str, db: Session, purpose: str = "registration") -> bool:
         """Verify an OTP code against the database. Marks it as used on success."""
         record = db.query(OtpCode).filter(
             OtpCode.email == email,
             OtpCode.code == otp_code,
+            OtpCode.purpose == purpose,
             OtpCode.used == False,
             OtpCode.is_deleted == False,
         ).order_by(OtpCode.created_date.desc()).first()
@@ -176,6 +181,46 @@ class AuthService:
         record.used = True
         db.commit()
         return True
+
+    # --- Passwordless email-code login (SaaS style) ---
+
+    def request_login_code(self, email: str, db: Session) -> str | None:
+        """Generate a login OTP for an already-registered user.
+
+        Returns the raw OTP string when a registered, non-deleted user exists
+        (so the caller can email it), or ``None`` when the email is unknown.
+        The caller must return a generic success either way to avoid leaking
+        which emails are registered (account enumeration).
+        """
+        user = db.query(User).filter(
+            User.email == email, User.is_deleted == False
+        ).first()
+        if not user:
+            return None
+        return self.generate_otp(email, db, purpose="login")
+
+    def login_with_code(self, email: str, code: str, db: Session) -> dict | None:
+        """Authenticate a user via a login OTP and issue a token pair.
+
+        Returns ``{"access_token", "refresh_token", "user": <dict>}`` on success,
+        or ``None`` when the code is missing, invalid, expired, or used.
+        """
+        if not email or not code:
+            return None
+        if not self.verify_otp(email, code, db, purpose="login"):
+            return None
+        user = db.query(User).filter(
+            User.email == email, User.is_deleted == False
+        ).first()
+        if not user:
+            return None
+        access_token = self.create_access_token(user.id, db)
+        refresh_token = self.create_refresh_token(user.id, db)
+        return {
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "user": user.to_dict(),
+        }
 
     # --- Password reset tokens (database-backed) ---
 

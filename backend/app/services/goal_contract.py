@@ -29,7 +29,7 @@ _DASHBOARD_RE = re.compile(
 
 _DELIVERABLE_PATTERNS: List[Tuple[str, "re.Pattern"]] = [
     ("pptx", re.compile(r"(?<![a-zA-Z])pptx?(?![a-zA-Z])|powerpoint|slide[-\s]?deck|演示文稿|幻灯片", re.IGNORECASE)),
-    ("docx", re.compile(r"\bdocx\b|word\s*document|word\s*doc|word文档|公文", re.IGNORECASE)),
+    ("docx", re.compile(r"\bdocx?\b|word\s*document|word\s*doc|word文档|公文|文档", re.IGNORECASE)),
     ("xlsx", re.compile(r"\bxlsx\b|\bxls\b|excel|电子表格|\b表格文件\b", re.IGNORECASE)),
     ("html", re.compile(r"\bhtml\b|\bhtm\b|web\s*page|网页", re.IGNORECASE)),
     ("md", re.compile(r"\bmarkdown\b|\.md\b|md文件", re.IGNORECASE)),
@@ -107,6 +107,17 @@ def normalize_deliverable_intent(text: Optional[str]) -> Optional[str]:
     typo-tolerant source of truth (dashboard first: fuzzy/typo-tolerant)."""
     if not text:
         return None
+    # ── READ / ANALYZE guard (2026-08-31) ─────────────────────────────
+    # Same discrimination as detect_file_intent: "read this docx" points at
+    # an existing file — no deliverable kind is being requested, so return
+    # None instead of routing to the format's creation skill.  Lazy import
+    # avoids a module cycle (intent_router imports goal_contract lazily).
+    try:
+        from app.services.synexia.intent_router import is_file_read_request
+        if is_file_read_request(text):
+            return None
+    except Exception:
+        pass
     low = re.sub(r"\s+", " ", text.lower()).strip()
     if not low:
         return None

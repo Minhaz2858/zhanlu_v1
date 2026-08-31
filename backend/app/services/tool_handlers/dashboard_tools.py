@@ -21,6 +21,48 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _stamp_dashboard_conversation(db, conv_id: str | None, *, dashboard_id: str | None = None,
+                                  dashboard_slug: str | None = None,
+                                  dashboard_name: str | None = None) -> None:
+    """Mark a chat session as DASHBOARD-DEDICATED (dashboard mode).
+
+    Writes ``metadata_.mode = 'dashboard'`` plus the bound dashboard's
+    id/slug/name onto the AgentConversation so:
+      - the chat header can show a "Dashboard" badge (project / dashboard /
+        model), telling the user AND the agent this session is dedicated to
+        building/editing one dashboard;
+      - the sidebar can render a distinct dashboard icon for the session;
+      - reopening the session later (``?conv=<id>``) restores full context —
+        the agent sees its own dashboard build history and knows which app
+        to ``update_fullstack_dashboard``.
+
+    No-op when ``conv_id`` is missing or the conversation doesn't exist.
+    """
+    if not conv_id:
+        return
+    try:
+        from app.models.agent_conversation import AgentConversation
+        conv = db.query(AgentConversation).filter(AgentConversation.id == conv_id).first()
+        if conv is None:
+            return
+        meta = dict(conv.metadata_ or {})
+        meta["mode"] = "dashboard"
+        if dashboard_id:
+            meta["dashboard_id"] = dashboard_id
+        if dashboard_slug:
+            meta["dashboard_slug"] = dashboard_slug
+        if dashboard_name:
+            meta["dashboard_name"] = dashboard_name
+        conv.metadata_ = meta
+        # Legacy binding column (FK to dashboards.id) kept in sync for
+        # existing /from-conv consumers; fullstack apps use metadata.slug.
+        if dashboard_id:
+            conv.dashboard_id = dashboard_id
+        db.commit()
+    except Exception:
+        logger.exception("stamp dashboard conversation failed (conv=%s)", conv_id)
+
 ALLOWED_WIDGET_TYPES = {
     "kpi", "line", "bar", "pie", "table",
     "area", "stacked-bar", "scatter", "gauge", "radar",
@@ -181,16 +223,18 @@ async def _create_dashboard(args: dict, db, user_id, context: dict | None = None
     db.add(d)
     db.commit()
     db.refresh(d)
-    # Bind this dashboard to the active conversation (1:1). If the
+    # Bind this dashboard to the active conversation (1:1) AND mark the
+    # session as dashboard-dedicated so the header/sidebar show the badge and
+    # reopening the session restores full build/edit context. If the
     # conversation already had a bound dashboard, the new one replaces the
     # binding — the old dashboard is NOT deleted (still findable in MySpace).
     conv_id = ctx.get("conversation_id")
     if conv_id:
-        from app.models.agent_conversation import AgentConversation
-        conv = db.query(AgentConversation).filter(AgentConversation.id == conv_id).first()
-        if conv is not None:
-            conv.dashboard_id = d.id
-            db.commit()
+        _stamp_dashboard_conversation(
+            db, conv_id,
+            dashboard_id=d.id,
+            dashboard_name=d.name,
+        )
     return {
         "success": True,
         "dashboard": d.to_dict(),
@@ -551,8 +595,57 @@ except Exception:
 import re as _re
 
 FULLSTACK_ALLOWED_TYPES = {
-    "kpi", "line", "bar", "pie", "table", "area", "gauge", "radar",
+    "kpi", "line", "bar", "pie", "table", "area", "gauge", "radar", "combo",
+    # Compact dual-pane trend card (12-month + 30-day style mini charts):
+    # renders a small line chart with optional action pill + confidence badge
+    # (the Ecisco CEO "product signal card" look). Data = label + value cols.
+    "sparkline",
 }
+
+# Typed AI-analysis panels (the decision-center information architecture).
+# Each panel is AI-authored from REAL queried data (the agent computes the
+# figures via execute_query / metric deltas, then narrates — never invents).
+# See CREATE_FULLSTACK_DASHBOARD_SCHEMA for the full per-type field docs.
+ALLOWED_PANEL_TYPES = {
+    "alerts", "decisions", "narrative", "chain",
+    "customers", "inventory", "competitors", "news",
+}
+
+ALLOWED_SEVERITIES = {"crit", "warn", "opp", "info"}
+ALLOWED_TONES = {"up", "down", "neutral", "warn", "good", "bad"}
+
+
+def _validate_panels(panels: list) -> None:
+    """Lightweight structural validation for typed analysis panels.
+
+    Kept permissive (extra fields ignored) so the LLM can narrate rich
+    analysis without fighting a rigid schema — but the `type` must be a
+    known panel type and required per-type fields must be present, so a
+    malformed spec fails fast instead of rendering an empty card.
+    """
+    for p in panels:
+        ptype = (p or {}).get("type")
+        if ptype not in ALLOWED_PANEL_TYPES:
+            raise ValueError(
+                f"panels[].type must be one of {sorted(ALLOWED_PANEL_TYPES)}, got {ptype!r}"
+            )
+        items = p.get("items") or p.get("rows") or []
+        if ptype in ("alerts", "decisions", "customers", "inventory", "competitors", "news"):
+            if not isinstance(items, list) or not items:
+                raise ValueError(f"panel type '{ptype}' requires a non-empty items/rows list")
+        if ptype == "chain":
+            nodes = p.get("nodes")
+            if not isinstance(nodes, list) or not nodes:
+                raise ValueError("panel type 'chain' requires a non-empty nodes list")
+        if ptype == "narrative":
+            if not p.get("body"):
+                raise ValueError("panel type 'narrative' requires a body")
+
+
+def _validate_pages(pages: list) -> None:
+    for pg in pages:
+        if not (pg or {}).get("id") or not (pg or {}).get("label"):
+            raise ValueError("pages[] entries require both 'id' and 'label'")
 
 _SLUG_RE = _re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 
@@ -598,9 +691,59 @@ class CreateFullstackDashboardArgs(BaseModel):
     metrics: list[FullstackMetricSpec] = Field(min_length=1)
     refresh_interval_seconds: int = 30
     theme: str = "light"
+    # Visual style variant. "standard" = light/dark BI; "chinese_bi" = 大屏
+    # Chinese BI style (dark navy glow, red-up/green-down semantics, Chinese
+    # font stack, animated numbers) for China-region customers.
+    # "ceo" = dark petroleum decision center (near-black ink, amber/gold
+    # accent, alert-strip insights) — the Ecisco CEO Command Center look.
+    # "editorial" = light print report (warm paper, Fraunces/Newsreader serif
+    # + IBM Plex Mono numerals, maroon accent) — the EDIA Sales Report look.
+    style: str = "standard"
     # T10: "personal" (creator only) or "company" (whole org). The agent
     # should ask the user at creation time; falls back to the config default.
     scope: str = "personal"
+    # AI insight strip: 1-3 {"title", "body"} pairs rendered above the grid.
+    insights: list[dict] = Field(default_factory=list)
+    # Optional sectioned layout: [{"title": str, "widgets": [metric_id, ...]}].
+    # Groups widgets into titled sections (KPI strip → trends → breakdown) so
+    # the dashboard tells a story instead of one flat grid. Metrics not listed
+    # fall into a trailing "Other" section at render time.
+    # Sections may also carry:
+    #   "page": str       — which tab (pages[].id) the section belongs to
+    #   "panels": [id]    — panel ids rendered in a right-hand rail (2-column
+    #                       split on wide screens; left = widgets, right = panels)
+    #   "columns": 2      — force the 2-column split (default when panels given)
+    layout: list[dict] = Field(default_factory=list)
+    # Multi-page tabs (the Ecisco CEO decision center has 5 pages). Each entry
+    # {"id": "overview", "label": "CEO 总览"}. When empty, a single "Overview"
+    # page is rendered (backward compatible). Panels and layout sections can
+    # target a page via their "page" key; anything without a page lands on the
+    # first page.
+    pages: list[dict] = Field(default_factory=list)
+    # Typed AI-analysis panels — the decision-center information architecture.
+    # Each panel: {"id", "type", "page"?, "span"? ("full"|"half"|"third"),
+    #              ...type-specific fields}. The agent narrates these from REAL
+    # queried data (execute_query results / computed deltas) — never fabricate
+    # figures. Supported types:
+    #   alerts     {"items": [{severity: crit|warn|opp|info, icon, title,
+    #              body (data → why → recommendation), cta, time}]}
+    #   decisions  {"items": [{tag, tag_tone, title, action, action_tone,
+    #              body, pnl, pnl_tone, buttons: [..]}]}
+    #   narrative  {"title", "body"}  — long-form AI analysis block (AI badge)
+    #   chain      {"title", "nodes": [{label, value, unit, delta, delta_tone,
+    #              note, note_tone}]} — upstream cost / value cascade
+    #   customers  {"rows": [{avatar, name, sub, revenue, status, status_tone}]}
+    #   inventory  {"rows": [{label, weeks, max, tone}]} — coverage bars
+    #   competitors{"rows": [{name, our_price, lo, hi,
+    #              comps: [{name, price}], diff, diff_tone}]} — position bands
+    #   news       {"rows": [{time, badge, badge_tone, text}]} — activity feed
+    panels: list[dict] = Field(default_factory=list)
+    # Page header extras (executive dashboard): {"greeting": str,
+    #   "snapshot": [{label, value, delta, delta_tone}], "period": str}.
+    # Snapshot chips render like "布伦特 $79.4 ↓$1.2 · 石脑油 $642 ↓$9".
+    header: Optional[dict] = None
+    # Page footer (data provenance): {"sources": str} — e.g. "数据来源：ERP + 市场数据".
+    footer: Optional[dict] = None
 
     @field_validator("slug")
     def _slug_ok(cls, v: str) -> str:
@@ -616,10 +759,30 @@ class CreateFullstackDashboardArgs(BaseModel):
             raise ValueError("theme must be 'light' or 'dark'")
         return v
 
+    @field_validator("style")
+    def _style_ok(cls, v: str) -> str:
+        if v not in ("standard", "chinese_bi", "ceo", "editorial"):
+            raise ValueError(
+                "style must be 'standard', 'chinese_bi', 'ceo' or 'editorial'"
+            )
+        return v
+
     @field_validator("scope")
     def _scope_ok(cls, v: str) -> str:
         if v not in ("personal", "company"):
             raise ValueError("scope must be 'personal' or 'company'")
+        return v
+
+    @field_validator("pages")
+    @classmethod
+    def _pages_ok(cls, v: list) -> list:
+        _validate_pages(v)
+        return v
+
+    @field_validator("panels")
+    @classmethod
+    def _panels_ok(cls, v: list) -> list:
+        _validate_panels(v)
         return v
 
 
@@ -633,11 +796,32 @@ class UpdateFullstackDashboardArgs(BaseModel):
     metrics: Optional[list[FullstackMetricSpec]] = None
     refresh_interval_seconds: Optional[int] = None
     theme: Optional[str] = None
+    style: Optional[str] = None
+    insights: Optional[list[dict]] = None
+    layout: Optional[list[dict]] = None
+    pages: Optional[list[dict]] = None
+    panels: Optional[list[dict]] = None
+    header: Optional[dict] = None
+    footer: Optional[dict] = None
 
     @field_validator("slug")
     def _slug_ok(cls, v: str) -> str:
         if not _SLUG_RE.match(v):
             raise ValueError("slug must be lowercase [a-z0-9_-], 1-64 chars")
+        return v
+
+    @field_validator("pages")
+    @classmethod
+    def _pages_ok(cls, v: Optional[list]) -> Optional[list]:
+        if v is not None:
+            _validate_pages(v)
+        return v
+
+    @field_validator("panels")
+    @classmethod
+    def _panels_ok(cls, v: Optional[list]) -> Optional[list]:
+        if v is not None:
+            _validate_panels(v)
         return v
 
     @field_validator("theme")
@@ -655,6 +839,117 @@ class RevertFullstackDashboardArgs(BaseModel):
         if not _SLUG_RE.match(v):
             raise ValueError("slug must be lowercase [a-z0-9_-], 1-64 chars")
         return v
+
+
+# ── Professional quality gate (2026-08-28) ──────────────────────────────
+# After a dashboard is generated, compute a deterministic quality report so
+# the agent gets instant feedback and can iterate via update_fullstack_
+# dashboard instead of shipping a thin/one-chart board. Mechanical counts —
+# "Python computes, LLM narrates": the agent reads `quality.recommendations`
+# and acts on them, it never invents these figures.
+
+_TREND_TYPES = {"line", "area", "combo"}
+_BREAKDOWN_TYPES = {"bar", "pie", "table", "radar", "gauge"}
+
+
+def _dashboard_quality_report(spec: dict) -> dict:
+    """Score a DashboardSpec against the professional-visual standard.
+
+    Returns a dict with mechanical widget-mix counts + a passing verdict +
+    concrete recommendations (what to change to reach the standard). The
+    create/update tools embed this in their result so the agent can
+    self-correct in the same turn.
+    """
+    metrics = spec.get("metrics") or []
+    layout = spec.get("layout") or []
+    insights = spec.get("insights") or []
+
+    kpi_count = sum(1 for m in metrics if (m.get("type") or "") == "kpi")
+    trend_count = sum(1 for m in metrics if (m.get("type") or "") in _TREND_TYPES)
+    breakdown_count = sum(1 for m in metrics if (m.get("type") or "") in _BREAKDOWN_TYPES)
+    filter_count = sum(
+        1 for m in metrics if (m.get("options") or {}).get("filters")
+    )
+
+    recommendations: list[str] = []
+    hard_gaps: list[str] = []
+    if not metrics:
+        hard_gaps.append("widget_count")
+        recommendations.append(
+            "No metrics defined — a dashboard needs at least 3 widgets."
+        )
+    else:
+        if len(metrics) < 5:
+            hard_gaps.append("widget_count")
+            recommendations.append(
+                f"Only {len(metrics)} widget(s); reach 5+ by adding angles: "
+                "KPI row, time trend, comparison bar, composition, detail table."
+            )
+        if kpi_count < 2:
+            hard_gaps.append("kpi_count")
+            recommendations.append(
+                "Add at least 2 KPI cards (headline numbers with options.delta "
+                "for the vs-prev-period change)."
+            )
+        if trend_count < 1:
+            hard_gaps.append("trend_count")
+            recommendations.append(
+                "Add a time trend (line/area/combo) over the data's date column "
+                "— a dashboard with no trend is not a dashboard."
+            )
+        if breakdown_count < 1:
+            hard_gaps.append("breakdown_count")
+            recommendations.append(
+                "Add a breakdown angle (bar for comparison, pie/donut for "
+                "composition, table for detail)."
+            )
+        if len(layout) < 2:
+            hard_gaps.append("sections")
+            recommendations.append(
+                "Structure the layout into at least 2 sections (KPI cards first, "
+                "then trends, then breakdowns/tables) — a single flat grid is "
+                "not a professional board."
+            )
+        if filter_count == 0:
+            hard_gaps.append("filters")
+            recommendations.append(
+                "Declare cross-widget filters (options.filters on the metric SQL "
+                "with the BARE :dim_<key> token) so users can slice by "
+                "product/category/date — every professional board has filters."
+            )
+        if len(metrics) > 8:
+            recommendations.append(
+                f"{len(metrics)} widgets is crowded; consolidate to ≤8 and merge "
+                "redundant charts so every widget is a distinct analytical angle."
+            )
+    if not insights:
+        hard_gaps.append("insights")
+        recommendations.append(
+            "Add an insights strip (1-3 titled bullets) narrating the real "
+            "numbers — never fabricate figures."
+        )
+    if not spec.get("design_system_ref"):
+        hard_gaps.append("design_tokens")
+        recommendations.append(
+            "No design_system_ref — run uiux_design_system(persist=True) first "
+            "so the board wears the project's palette and typography."
+        )
+
+    passing = not hard_gaps
+    return {
+        "passing": passing,
+        "grade": "A" if not recommendations else ("B" if passing else "C"),
+        "hard_gaps": hard_gaps,
+        "widget_count": len(metrics),
+        "kpi_count": kpi_count,
+        "trend_count": trend_count,
+        "breakdown_count": breakdown_count,
+        "section_count": len(layout) or 1,
+        "insights_count": len(insights),
+        "filter_count": filter_count,
+        "design_system_applied": bool(spec.get("design_system_ref")),
+        "recommendations": recommendations,
+    }
 
 
 async def _create_fullstack_dashboard(
@@ -686,20 +981,40 @@ async def _create_fullstack_dashboard(
         return {"success": False, "error": "Datasource not accessible in this project/org."}
 
     from app.models.dashboard_app import DashboardApp
-    existing = db.query(DashboardApp).filter(DashboardApp.slug == parsed.slug).first()
-    if existing:
-        return {
-            "success": False,
-            "error": (
-                f"A dashboard app with slug '{parsed.slug}' already exists. "
-                "Use update_fullstack_dashboard or pick a different slug."
-            ),
-        }
+    # Slug-collision auto-recovery (2026-08-28): the LLM frequently reuses a
+    # slug from an earlier build ("sales-performance-dashboard-v2" twice), and
+    # failing hard made the whole dashboard turn die with "Sorry, I hit an
+    # error while responding" (conv 5f2c2c39). Instead of erroring, determin-
+    # istically uniquify: keep the requested slug if free, else append a
+    # numeric suffix. The dashboard NAME is unchanged; only the URL slug moves.
+    _final_slug = parsed.slug
+    if db.query(DashboardApp).filter(DashboardApp.slug == _final_slug).first():
+        _suffix = 2
+        while db.query(DashboardApp).filter(
+            DashboardApp.slug == f"{_final_slug}-{_suffix}"
+        ).first():
+            _suffix += 1
+        _final_slug = f"{_final_slug}-{_suffix}"
+        logger.warning(
+            "create_fullstack_dashboard: slug '%s' taken; auto-uniquified to '%s'",
+            parsed.slug, _final_slug,
+        )
+    parsed.slug = _final_slug
 
     from app.services.dashboard_app.generator import get_generator
     from app.services.dashboard_app.manager import dashboard_app_manager
 
     spec = parsed.model_dump()
+    # 0) Lock server-side analytics BEFORE generating: run every metric's
+    #    own SQL through the shared QueryService path and attach computed
+    #    deltas (KPI options.delta) + top items + deterministic insight
+    #    bullets. "Python computes, LLM narrates" — the LLM never invents
+    #    these figures (see analytics.py docstring / Aug 2026 failure).
+    try:
+        from app.services.dashboard_app.analytics import enrich_spec
+        spec = enrich_spec(db, kb.id, spec)
+    except Exception as exc:  # noqa: BLE001 — analytics is best-effort
+        logger.warning("create_fullstack_dashboard: analytics enrichment failed (non-fatal): %s", exc)
     # 1) Write the app files FIRST. T17: the global catch-all routes in
     #    routers/dashboards.py resolve the on-disk app dir per-request, so we no
     #    longer need a per-app mount. But we MUST verify the generator actually
@@ -731,6 +1046,16 @@ async def _create_fullstack_dashboard(
         spec, org_id=org_id, created_by_id=user_id, project_id=project_id,
         chat_thread_id=chat_thread_id, scope=scope,
     )
+    # Mark the originating chat session as DASHBOARD-DEDICATED. The header
+    # badge, the sidebar icon and the reopen-with-context flow all key off
+    # conversation metadata.mode == 'dashboard' — without this stamp the
+    # session looks like a generic chat and the agent can forget it owns a
+    # dashboard (the Aug 2026 "delivered a text report instead" failure).
+    _stamp_dashboard_conversation(
+        db, chat_thread_id,
+        dashboard_slug=parsed.slug,
+        dashboard_name=parsed.name,
+    )
     try:
         dashboard_app_manager.mount(parsed.slug)
     except Exception as exc:
@@ -760,6 +1085,10 @@ async def _create_fullstack_dashboard(
         logger.exception("create_fullstack_dashboard: artifact persistence failed for %s",
                           parsed.slug)
     logger.info("full-stack dashboard created: %s (%d metrics)", parsed.slug, len(parsed.metrics))
+    # Professional quality gate (2026-08-28): score the generated spec and
+    # surface the verdict to the agent so it can self-correct the same turn
+    # (e.g. add a trend/insights/filters) via update_fullstack_dashboard.
+    _quality = _dashboard_quality_report(spec)
     return {
         "success": True,
         "dashboard_app": {
@@ -769,6 +1098,7 @@ async def _create_fullstack_dashboard(
             "app_url": app_url,
             "metric_count": len(parsed.metrics),
         },
+        "quality": _quality,
         "artifact": {
             "source": "dashboard_app",
             "slug": parsed.slug,
@@ -818,10 +1148,32 @@ async def _update_fullstack_dashboard(
         current["design_system_ref"] = parsed.design_system_ref
     if parsed.metrics is not None:
         current["metrics"] = [m.model_dump() for m in parsed.metrics]
+        # Lock server-side analytics for the CHANGED metrics before
+        # regenerating — recompute deltas / top items from live data so the
+        # edited dashboard shows fresh, non-fabricated figures.
+        try:
+            from app.services.dashboard_app.analytics import enrich_spec
+            current = enrich_spec(db, record.datasource_kb_id, current)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("update_fullstack_dashboard: analytics enrichment failed (non-fatal): %s", exc)
     if parsed.refresh_interval_seconds is not None:
         current["refresh_interval_seconds"] = parsed.refresh_interval_seconds
     if parsed.theme is not None:
         current["theme"] = parsed.theme
+    if parsed.style is not None:
+        current["style"] = parsed.style
+    if parsed.insights is not None:
+        current["insights"] = parsed.insights
+    if parsed.layout is not None:
+        current["layout"] = parsed.layout
+    if parsed.pages is not None:
+        current["pages"] = parsed.pages
+    if parsed.panels is not None:
+        current["panels"] = parsed.panels
+    if parsed.header is not None:
+        current["header"] = parsed.header
+    if parsed.footer is not None:
+        current["footer"] = parsed.footer
     current["datasource_id"] = record.datasource_kb_id  # immutable after creation
 
     from app.services.dashboard_app.manager import dashboard_app_manager
@@ -842,7 +1194,18 @@ async def _update_fullstack_dashboard(
     if conv_id and record.chat_thread_id != conv_id:
         record.chat_thread_id = conv_id
     db.commit()
+    # Stamp the editing conversation as dashboard-dedicated too — so the
+    # sidebar shows the dashboard icon and the header badge on this session.
+    _stamp_dashboard_conversation(
+        db, conv_id,
+        dashboard_slug=parsed.slug,
+        dashboard_name=current.get("name") or parsed.slug,
+    )
     logger.info("full-stack dashboard updated: %s", parsed.slug)
+    # Professional quality gate (2026-08-28): same verdict as create so an
+    # edit that regresses the widget mix (e.g. a layout-only update that
+    # dropped the trend) is flagged back to the agent immediately.
+    _quality = _dashboard_quality_report(current)
     return {
         "success": True,
         "dashboard_app": {
@@ -851,6 +1214,7 @@ async def _update_fullstack_dashboard(
             "status": "running",
             "app_url": record.app_url or f"/api/dashboards/apps/{parsed.slug}/",
         },
+        "quality": _quality,
     }
 
 
@@ -935,11 +1299,68 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
                     "default": 30,
                 },
                 "theme": {"type": "string", "enum": ["light", "dark"], "default": "light"},
+                "style": {
+                    "type": "string",
+                    "enum": ["standard", "chinese_bi", "ceo", "editorial"],
+                    "default": "standard",
+                    "description": (
+                        "Visual style variant. standard = clean light/dark BI. "
+                        "chinese_bi = 大屏 China BI (dark navy glow, red=up/green=down) "
+                        "for China-region customers. ceo = dark petroleum decision "
+                        "center (near-black ink + amber/gold accent, alert-strip "
+                        "insights) — use for executive/CEO dashboards with KPI pulse "
+                        "cards and decision summaries. editorial = light print report "
+                        "(warm paper, serif display + mono numerals, maroon accent) — "
+                        "use for polished sales/ops reports. Add 1-3 insights (title+"
+                        "body) whenever style=ceo or editorial — they render as "
+                        "severity-rail alert cards / pull quotes."
+                    ),
+                },
                 "scope": {
                     "type": "string",
                     "enum": ["personal", "company"],
                     "default": "personal",
                     "description": "personal = creator only; company = whole org. Ask the user if unspecified.",
+                },
+                "insights": {
+                    "type": "array",
+                    "description": "AI insight strip: 1-3 {title, body} pairs summarizing what the numbers mean (Python-computed, LLM-narrated). Never fabricate figures.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "body": {"type": "string"},
+                        },
+                    },
+                },
+                "layout": {
+                    "type": "array",
+                    "description": "Sectioned layout: [{\"title\", \"widgets\": [metric_id,...], \"page\"?, \"panels\"?: [panel_id,...]}]. Sections tell a story (KPI strip → trends → breakdown). A section with \"panels\" renders a 2-column split (left = widgets, right = panels rail). Sections with \"page\" land on that tab (pages[].id).",
+                    "items": {"type": "object"},
+                },
+                "pages": {
+                    "type": "array",
+                    "description": "Multi-page tabs — the Ecisco CEO decision center has 5 pages. Each {\"id\", \"label\"} (e.g. {\"id\": \"overview\", \"label\": \"CEO 总览\"}). Panels and layout sections target a page via their \"page\" key; entries without a page land on the first tab. Omit for a single-page dashboard.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                        },
+                    },
+                },
+                "panels": {
+                    "type": "array",
+                    "description": "Typed AI-analysis panels — the decision-center information architecture (what makes an executive dashboard professional). Each panel: {\"id\", \"type\", \"page\"?, \"span\"? (full|half|third), ...fields}. NARRATE FROM REAL QUERIED DATA — compute figures via execute_query / metric deltas, NEVER invent numbers. Types: alerts {\"items\": [{severity: crit|warn|opp|info, icon, title, body, cta, time}]} — each alert body = data → why it matters → recommended action; decisions {\"items\": [{tag, tag_tone, title, action, action_tone, body, pnl, pnl_tone, buttons}]} — approval cards with quantified P&L impact badge; narrative {\"title\", \"body\"} — long-form AI analysis block; chain {\"title\", \"nodes\": [{label, value, unit, delta, delta_tone, note, note_tone}]} — cost/value cascade (e.g. Brent → Naphtha → cost baseline); customers {\"rows\": [{avatar, name, sub, revenue, status, status_tone}]} — account health; inventory {\"rows\": [{label, weeks, max, tone}]} — coverage bars; competitors {\"rows\": [{name, our_price, lo, hi, comps: [{name, price}], diff, diff_tone}]} — pricing position bands; news {\"rows\": [{time, badge, badge_tone, text}]} — activity feed.",
+                    "items": {"type": "object"},
+                },
+                "header": {
+                    "type": "object",
+                    "description": "Executive page header extras: {\"greeting\": \"早上好，刘总 — 今日有 3 项决策等待批准\", \"snapshot\": [{\"label\": \"布伦特\", \"value\": \"$79.4\", \"delta\": \"↓$1.2\", \"delta_tone\": \"down\"}], \"period\": \"W-2025-23\"}.",
+                },
+                "footer": {
+                    "type": "object",
+                    "description": "Page footer (data provenance): {\"sources\": \"数据来源：ERP + 市场数据\"}.",
                 },
             },
             "required": ["name", "slug", "datasource_id", "metrics"],
@@ -980,6 +1401,40 @@ UPDATE_FULLSTACK_DASHBOARD_SCHEMA = {
                 },
                 "refresh_interval_seconds": {"type": "integer", "minimum": 5, "maximum": 3600},
                 "theme": {"type": "string", "enum": ["light", "dark"]},
+                "insights": {
+                    "type": "array",
+                    "description": "AI insight strip: 1-3 {title, body} pairs. Omit to keep current insights.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "title": {"type": "string"},
+                            "body": {"type": "string"},
+                        },
+                    },
+                },
+                "layout": {
+                    "type": "array",
+                    "description": "Sectioned layout (see create_fullstack_dashboard). Omit to keep current layout.",
+                    "items": {"type": "object"},
+                },
+                "pages": {
+                    "type": "array",
+                    "description": "Multi-page tabs [{id, label}]. Omit to keep current pages.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": {"type": "string"},
+                            "label": {"type": "string"},
+                        },
+                    },
+                },
+                "panels": {
+                    "type": "array",
+                    "description": "Typed AI-analysis panels (see create_fullstack_dashboard). Omit to keep current panels.",
+                    "items": {"type": "object"},
+                },
+                "header": {"type": "object", "description": "Executive header extras {greeting, snapshot, period}."},
+                "footer": {"type": "object", "description": "Page footer {sources}."},
             },
             "required": ["slug"],
         },

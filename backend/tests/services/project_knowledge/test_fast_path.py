@@ -30,13 +30,13 @@ def db():
 
 
 def _enable():
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
-    settings.ECISCO_BI_KG_QWEN_FAST_PATH = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH = True
 
 
 def test_fast_path_disabled_when_flag_off(db):
-    settings.ECISCO_BI_KG_QWEN_FAST_PATH = False
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH = False
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
     assert try_fast_path(db, "p1", "isoprene", "qwen3.6-27b") is None
 
 

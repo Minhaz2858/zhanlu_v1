@@ -32,10 +32,10 @@ def db():
 
 
 def _enable():
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
-    settings.ECISCO_BI_KG_QWEN_FAST_PATH = True
-    settings.ECISCO_BI_KG_LAYER_ENTITIES_ENABLED = True
-    settings.ECISCO_BI_KG_LAYER_METRICS_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH = True
+    settings.PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_LAYER_METRICS_ENABLED = True
 
 
 def test_layer1_resolver_hit(db):
@@ -84,8 +84,8 @@ def test_layer3_metric_hit(db):
 
 
 def test_query_returns_none_when_flag_off(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = False
-    settings.ECISCO_BI_KG_QWEN_FAST_PATH = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = False
+    settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH = True
     cache = ProjectKnowledgeCache("p1")
     assert cache.query(db, "isoprene", model_id="qwen3.6-27b") is None
 

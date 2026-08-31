@@ -1,0 +1,5 @@
+# Generated dashboard app — build artifacts & version snapshots
+dist/
+.versions/
+__pycache__/
+*.pyc

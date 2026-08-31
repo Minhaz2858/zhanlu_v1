@@ -216,22 +216,32 @@ logger = logging.getLogger(__name__)
 # image_fill and editable_text rendering per deck.
 # ---------------------------------------------------------------------------
 
-_EDITABLE_KEYWORDS = (
-    "edit", "editable", "tweak", "modify", "update later",
-    "我需要编辑", "可以编辑", "修改",
+# Users overwhelmingly expect a downloaded deck to be editable in PowerPoint.
+# With HTML_DESIGN_EDITABLE_ENABLED, editable_text (native text frames via
+# slide-skill) is the DEFAULT for sandbox-routed decks; image_fill (baked PNGs)
+# is reserved for explicit requests for a static/picture deck. Reversed
+# 2026-08-29 after the user complaint "the ppt is not editable after download".
+_IMAGE_KEYWORDS = (
+    "static", "image", "as picture", "as image", "not editable",
+    "keep the design", "picture only", "锁定", "静态", "图片形式", "不要编辑",
 )
 
 
 def pick_pptx_mode(plan, user_message: str = "") -> str:
-    """Decide between ``image_fill`` (v1.0) and ``editable_text`` (v1.1).
+    """Decide between ``editable_text`` (v1.1, default) and ``image_fill`` (v1.0).
 
-    v1.0 always returns ``"image_fill"`` because the editable_text path
-    is not implemented yet (gated by ``HTML_DESIGN_EDITABLE_ENABLED``).
-    Architecture in place so v1.1 is a single-task drop-in.
+    ``editable_text`` produces a native .pptx with REAL text frames — every
+    shape editable in PowerPoint.  ``image_fill`` bakes each slide as a
+    1920x1080 PNG (beautiful, static).  Default is editable_text whenever
+    ``HTML_DESIGN_EDITABLE_ENABLED`` is on; the caller additionally guards on
+    ``slideskill_bridge.editable_available()`` and falls back to image_fill
+    on any slide-skill failure (never blocks a deck).
     """
     from app.config import settings
 
+    if not settings.HTML_DESIGN_EDITABLE_ENABLED:
+        return "image_fill"
     msg = (user_message or "").lower()
-    if settings.HTML_DESIGN_EDITABLE_ENABLED and any(k in msg for k in _EDITABLE_KEYWORDS):
-        return "editable_text"
-    return "image_fill"
+    if any(k in msg for k in _IMAGE_KEYWORDS):
+        return "image_fill"
+    return "editable_text"

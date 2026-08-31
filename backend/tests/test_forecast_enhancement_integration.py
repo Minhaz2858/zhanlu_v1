@@ -19,18 +19,44 @@ class TestConfigFlags:
 
 
 class TestEngineTopologicalOrder:
-    def test_targets_sorted_in_compute_all(self):
-        # This verifies the plumbing doesn't crash on topo sort
+    def test_targets_sorted_in_compute_all(self, monkeypatch):
+        # The knowledge graph is config-driven and empty by default. Inject a
+        # tiny generic value chain (feedstock → intermediate → derivative) the
+        # same way a real app domain config would populate it.
+        import app.services.knowledge_graph.graph as kg_graph
+        from app.services.knowledge_graph.graph import (
+            ProductNode, ProductType, Relationship, RelationshipType,
+        )
         from app.services.forecasting.features.feature_registry import topological_order
-        from app.services.knowledge_graph.graph import build_c5_c9_graph
 
-        kg = build_c5_c9_graph()
-        products = ["isoprene", "crude_oil", "naphtha", "cracked_c5"]
+        nodes = [
+            ProductNode(id="raw_material", name_en="Raw Material", name_cn="原料",
+                        type=ProductType.FEEDSTOCK),
+            ProductNode(id="intermediate", name_en="Intermediate", name_cn="中间体",
+                        type=ProductType.OLEFIN),
+            ProductNode(id="derivative_a", name_en="Derivative A", name_cn="衍生品A",
+                        type=ProductType.DOWNSTREAM),
+            ProductNode(id="derivative_b", name_en="Derivative B", name_cn="衍生品B",
+                        type=ProductType.DOWNSTREAM),
+        ]
+        edges = [
+            Relationship(source_id="raw_material", target_id="intermediate",
+                         relation=RelationshipType.PRODUCES),
+            Relationship(source_id="intermediate", target_id="derivative_a",
+                         relation=RelationshipType.PRODUCES),
+            Relationship(source_id="derivative_a", target_id="derivative_b",
+                         relation=RelationshipType.PRODUCES),
+        ]
+        monkeypatch.setattr(kg_graph, "_C5_C9_NODES", nodes)
+        monkeypatch.setattr(kg_graph, "_C5_C9_EDGES", edges)
+
+        kg = kg_graph.build_c5_c9_graph()
+        products = ["derivative_b", "raw_material", "intermediate", "derivative_a"]
         ordered = topological_order(products, kg)
         assert len(ordered) == len(products)
         # Feedstock before derivative
-        assert ordered.index("crude_oil") < ordered.index("naphtha")
-        assert ordered.index("naphtha") < ordered.index("cracked_c5")
+        assert ordered.index("raw_material") < ordered.index("intermediate")
+        assert ordered.index("intermediate") < ordered.index("derivative_a")
 
 
 class TestPipelineIntegration:

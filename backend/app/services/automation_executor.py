@@ -903,6 +903,97 @@ def _previous_run_context(
 
 
 # ---------------------------------------------------------------------------
+# LLM-informed tick (2026-08-27): opt-in smart scheduled research.
+#
+# The dispatcher's "No LLM in the tick" guarantee is preserved by default.
+# When AutomationTask.llm_informed_tick is True, EACH fired execution gets
+# a lightweight LLM-generated "context preamble" — a fresh interpretation
+# of the task prompt in light of NOW + the previous run's summary — so
+# scheduled runs behave like Kimi-style smart research instead of a fixed
+# script.  The preamble is best-effort: any LLM failure falls back to the
+# deterministic prompt unchanged (the run still happens).
+# ---------------------------------------------------------------------------
+
+_LLM_TICK_PROMPT_TMPL = (
+    "You are the intelligence layer for a scheduled automation task.\n"
+    "Task name: {name}\n"
+    "Original instructions: {prompt}\n"
+    "Current time (UTC): {now}\n"
+    "{prev_block}"
+    "\nProduce a concise 'run briefing' (max 220 words, plain text, no "
+    "markdown headers) that a reporting agent will prepend to its task "
+    "prompt. Include: (1) what to focus on THIS run, (2) what changed since "
+    "the previous run if any prior context is shown, (3) anything the user "
+    "should know (risks, anomalies, follow-ups). Do NOT execute tools; this "
+    "is a thinking-only step."
+)
+
+
+def _llm_tick_preamble(
+    task: AutomationTask,
+    prev_context: str | None,
+    db: Session,
+) -> str:
+    """Best-effort LLM preamble for an llm_informed_tick automation.
+
+    Returns the generated briefing block, or \"\" on any failure (the
+    deterministic prompt is used unchanged — the run must never be
+    blocked by the enrichment step).
+    """
+    try:
+        if not getattr(task, "llm_informed_tick", False):
+            return ""
+        prompt = (task.prompt or task.description or task.name or "").strip()
+        if not prompt:
+            return ""
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        prev_block = ""
+        if prev_context:
+            prev_block = (
+                f"Previous run context (provided by the system):\n{prev_context}\n"
+            )
+        llm_prompt = _LLM_TICK_PROMPT_TMPL.format(
+            name=task.name or "unnamed",
+            prompt=prompt[:2000],
+            now=now_str,
+            prev_block=prev_block,
+        )
+        from app.services.llm_service import call_llm
+
+        # One small call, no tools, tight budget — a tick enrichment must
+        # never eat the whole run budget.  temperature=0.3 keeps it stable.
+        import asyncio
+
+        resp = asyncio.run(
+            call_llm(
+                messages=[
+                    {"role": "system", "content": (
+                        "You are a concise automation briefing writer. "
+                        "Return only the briefing text."
+                    )},
+                    {"role": "user", "content": llm_prompt},
+                ],
+                temperature=0.3,
+            )
+        )
+        text = (resp or {}).get("response") or (resp or {}).get("content") or ""
+        text = str(text).strip()
+        if not text:
+            return ""
+        return (
+            f"## Run briefing (LLM-informed tick)\n"
+            f"Generated at {now_str} by the scheduled-task intelligence "
+            f"layer. Use this as your primary focus for THIS run:\n\n{text}\n"
+        )
+    except Exception as exc:
+        logger.warning(
+            "execute_automation: LLM-informed tick preamble failed (non-fatal): %s",
+            exc,
+        )
+        return ""
+
+
+# ---------------------------------------------------------------------------
 # The actual run
 # ---------------------------------------------------------------------------
 
@@ -1115,6 +1206,11 @@ def execute_automation(execution_id: str) -> None:
                 "execute_automation: %s carrying structured context from prev run %s",
                 execution.id, prev_exec_id,
             )
+        # LLM-informed tick (opt-in): when the task has llm_informed_tick
+        # set, generate a fresh LLM briefing so scheduled runs adapt to
+        # NOW + last run instead of replaying a fixed script.  Best-effort:
+        # any failure returns "" and the deterministic prompt runs as-is.
+        llm_tick_block = _llm_tick_preamble(task, prev_context, db)
         agent_prompt = (
             f"{user_prompt}\n\n"
             f"## Automation context\n"
@@ -1126,6 +1222,7 @@ def execute_automation(execution_id: str) -> None:
             + _format_guidance(getattr(task, "output_format", None))
             + "\n\n"
             + _HONESTY_GUARDRAIL
+            + (f"\n\n{llm_tick_block}" if llm_tick_block else "")
             + (f"\n\n{prev_context}" if prev_context else "")
             + (_memory_context or "")
             + (f"\n\n{_skills_context}" if _skills_context else "")
@@ -1900,7 +1997,7 @@ def _heal_conv_agent_name(conv, agent) -> bool:
     Sets the identity ONLY when falsy — origin sessions keep their real
     agent identity (e.g. ``automation_agent``), which also satisfies the
     ``general_assistant`` zero-guard in data_source_runtime.py: assigning
-    the task's real agent (e.g. ``ecisco_bi_assistant``) bypasses that
+    the task's real agent bypasses that
     guard's "no project → empty" branch for automation runs.
 
     Returns True when a heal happened.

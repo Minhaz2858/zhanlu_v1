@@ -2,7 +2,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import StreamingMarkdown from './StreamingMarkdown';
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil } from 'lucide-react';
+import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, Database, Table2 } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
 import ClarifyBatchForm from './ClarifyBatchForm';
@@ -13,7 +13,6 @@ import ReportCard from './ReportCard';
 import ArtifactPreviewCard from './ArtifactPreviewCard';
 import ArtifactCardList from './ArtifactCardList';
 import InlineArtifactPreview from './InlineArtifactPreview';
-import PlanEditor from './PlanEditor';
 import { partitionArtifacts } from './partitionArtifacts';
 import DashboardCard from '@/components/dashboard/DashboardCard';
 import MessageActions from './MessageActions';
@@ -29,11 +28,25 @@ import MessageActions from './MessageActions';
 function preProcessContent(text) {
   if (!text) return text;
 
+  let result = text;
+
+  // --- Inline-header reflow (2026-08-28) ---
+  // When a line has leading prose glued to a 3+ cell pipe-table header
+  // (e.g. "Total revenue: ¥X. | Product | Units | Revenue | ...")
+  // GFM refuses to recognise the table because the header is part of
+  // a paragraph. Split before the first pipe so the header starts its
+  // own line and GFM picks it up. Existing single-line reflow (next
+  // block) only fires when there are NO \n-|-prefixed lines, so this
+  // case was previously missed.
+  result = result.replace(
+    /^([^\n|]+?)(\s*\|\s*[^\n|]+\s*(?:\|\s*[^\n|]+\s*){2,}\|[^\n]*)$/gm,
+    (_match, prefix, tablePart) => `${prefix.trimEnd()}\n${tablePart.trimStart()}`,
+  );
+
   // --- Pipe-reflow: detect inline tables on a single line ---
   // A real markdown table has a separator row (|---|---|).
   // If we find pipe chars but no newline + pipe (which would indicate
   // proper row separation), insert newlines.
-  let result = text;
   if (/\|.*\|/.test(result) && !/\n\s*\|/.test(result)) {
     // Split on " | " boundary between cells — this turns
     // "| H1 | H2 | | row | row |" into proper rows.
@@ -218,7 +231,7 @@ function parseContent(content) {
   return parts;
 }
 
-export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating }) {
+export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onArtifactEdit, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating, onRegenerate }) {
   const { lang } = useLanguage();
   const isUser = message.role === 'user';
   const parts = isUser ? null : parseContent(message.content || '');
@@ -263,6 +276,19 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
       return tc.results.type === 'report_card' || (payload.title && (payload.kpis || payload.chart || payload.insights));
     })
     : null;
+
+  // Detect a formal file deliverable on this message (docx/pptx/pdf/xlsx/html/md).
+  // When the agent chose to produce a polished file we suppress the raw
+  // `ask_data_agent` rows card so the deliverable is the single visible
+  // surface — the user explicitly asked for a file, not a warehouse preview.
+  // (2026-08-28 UX fix: prior to this, "give me last month sales report in
+  // docx file" rendered BOTH the 175×15 raw table AND the DOCX card.)
+  const DELIVERABLE_TYPES = new Set(['docx', 'pptx', 'pdf', 'xlsx', 'html', 'md', 'html_report']);
+  const hasDeliverableArtifact = Array.isArray(message.artifacts)
+    && message.artifacts.some((a) => {
+      const t = (a?.type || a?.file_type || a?.artifact_type || '').toLowerCase();
+      return DELIVERABLE_TYPES.has(t);
+    });
 
   // Artifact previews are NOT auto-opened: the user explicitly clicks
   // "Open" on the artifact card (ArtifactPreviewCard) to open the
@@ -385,6 +411,8 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
               streamingSearchQueries={message.streaming_search_queries}
               streamingPlanSteps={message.streaming_plan_steps}
               streamingDataPreviews={message.streaming_data_previews}
+              streamingReasoning={message.streaming_reasoning}
+              streamingAction={message.streaming_action}
             />
             {message.phase?.execution_id && onOpenRun && (
               <button
@@ -404,7 +432,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 answer (markdown section headers signal a real inline report).
                 Raw data stays visible inside the collapsible activity steps
                 instead. Mid-flight: only step indicators should show. */}
-            {!isStreaming && !reportToolResult && dataToolResult && !(/##\s+/.test(message.content || '')) && (
+            {!isStreaming && !reportToolResult && dataToolResult && !hasDeliverableArtifact && !(/##\s+/.test(message.content || '')) && (
               <DataTableCard
                 rows={dataToolResult.results.rows}
                 sql={dataToolResult.results.sql}
@@ -446,7 +474,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 // O(N²) re-parse on every token. Falls back to the
                 // existing react-markdown for the non-streaming case.
                 isStreaming ? (
-                  <StreamingMarkdown content={preProcessContent(p.text)} isStreaming={true} />
+                  <StreamingMarkdown content={preProcessContent(p.text)} isStreaming={true} components={components} />
                 ) : (
                   <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={components}>
                     {preProcessContent(p.text)}
@@ -467,11 +495,6 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 {lang === 'en' ? 'Refining answer…' : '正在优化答案…'}
               </div>
             )}
-            {message.plan_summary && (
-              <div className="mt-3">
-                <PlanEditor plan={message.plan_summary} readOnly={!isStreaming} />
-              </div>
-            )}
             {htmlMatch && !hasResult && (
               <button onClick={() => onPreview?.({ type: 'file', name: 'HTML Preview', draft: true, fields: { file_type: 'html', html_content: htmlMatch[1].trim(), source: 'ai_generated', resource_kind: 'html_file' } })} className="mt-3 inline-flex items-center gap-1.5 rounded-md border border-border bg-secondary/40 px-2.5 py-1.5 text-xs font-medium text-foreground hover:bg-secondary">
                 <Eye className="h-3.5 w-3.5" /> {lang === 'en' ? 'Preview HTML in Artifacts' : '在产物中预览 HTML'}
@@ -483,7 +506,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
              * Suppress while streaming to prevent mid-flight artifact card
              * leaks (e.g. "Database inventory — schema overview" cards). */}
             {!isStreaming && (
-              <ArtifactCardList artifacts={cardArtifacts} onPreview={onArtifactPreview} userRequestedFormat={userRequestedFormat} />
+              <ArtifactCardList artifacts={cardArtifacts} onPreview={onArtifactPreview} onEdit={onArtifactEdit} userRequestedFormat={userRequestedFormat} />
             )}
             {/**
              * Manus-style inline deliverable: when a chat message attaches a
@@ -513,6 +536,30 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 )}
               </div>
             )}
+            {/* Kimi/GPT-style data-source citations: rendered as small chips
+                under the assistant answer when the turn queried datasources.
+                Each chip shows the source name + row count. */}
+            {!isUser && !isStreaming && Array.isArray(message.sources) && message.sources.length > 0 && (
+              <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
+                  <Database className="h-3 w-3" />
+                  {lang === 'en' ? 'Sources' : '数据来源'}
+                </span>
+                {message.sources.slice(0, 6).map((src, i) => (
+                  <span
+                    key={`${src.source_id || src.source_name || ''}-${i}`}
+                    className="inline-flex max-w-[220px] items-center gap-1 rounded-full border border-border bg-secondary/50 px-2 py-0.5 text-[11px] text-muted-foreground"
+                    title={src.source_name || src.source_id || ''}
+                  >
+                    <Table2 className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{src.source_name || src.source_id || 'data source'}</span>
+                    {typeof src.rows === 'number' && (
+                      <span className="shrink-0 text-muted-foreground/60">{src.rows} rows</span>
+                    )}
+                  </span>
+                ))}
+              </div>
+            )}
             {/* Message actions: copy, share, like, dislike */}
             {!isStreaming && message.id && (
               <MessageActions
@@ -524,6 +571,7 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
                 showRoleRating={showRoleRating}
                 onRoleRelevance={onRoleRelevance}
                 roleRelevanceRating={roleRelevanceRating}
+                onRegenerate={onRegenerate}
               />
             )}
           </div>

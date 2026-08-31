@@ -42,10 +42,10 @@ class InvalidateBody(BaseModel):
 
 
 def _require_flag():
-    if not getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
+    if not getattr(settings, "PROJECT_KNOWLEDGE_CACHE_ENABLED", False):
         raise HTTPException(
             status_code=503,
-            detail="ECISCO_BI_KG_PROJECT_CACHE_ENABLED is False",
+            detail="PROJECT_KNOWLEDGE_CACHE_ENABLED is False",
         )
 
 

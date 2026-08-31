@@ -10,7 +10,7 @@ This module supports two deployment modes:
    - Module-level helpers: ``upsert_chunks``, ``query``, ``delete_kb``,
      ``count``. Unchanged signatures; safe to call from existing callers.
 
-2. **Multi-collection per org** (new, EDIA 5.1.2 hybrid RAG):
+2. **Multi-collection per org** (hybrid RAG):
    - 9 semantic collections per org (industry_reports, weekly_reports,
      past_decisions, …) named ``domain_{org_id}_{collection_name}``.
    - Use ``CollectionStore`` to operate on a single collection.
@@ -340,7 +340,7 @@ class MultiCollectionStore:
     """Owns one CollectionStore per semantic collection for a single org.
 
     Use ``get_or_create(name)`` to lazily instantiate / re-use a
-    CollectionStore for each of the 9 EDIA semantic collections.
+    CollectionStore for each of the semantic collections.
     """
 
     def __init__(

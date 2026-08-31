@@ -19,6 +19,7 @@ import SkillsSection from '@/components/agent/SkillsSection';
 import CapabilitiesSection from '@/components/agent/CapabilitiesSection';
 import DataSourcesSection from '@/components/agent/DataSourcesSection';
 import HarnessAgentSections from '@/components/agent/HarnessAgentSections';
+import FusionBridgeSection from '@/components/agent/FusionBridgeSection';
 import { normalizeTopology } from '@/lib/agentArchitecture';
 import {
   getFlowStep, updateFlowStep, removeFlowStep,
@@ -88,6 +89,18 @@ function removeNodeAtPath(node, path) {
   if (path.length === 1) return { ...node, sub_agents: (node.sub_agents || []).filter((_, i) => i !== path[0]) };
   const [idx, ...rest] = path;
   return { ...node, sub_agents: (node.sub_agents || []).map((s, i) => (i === idx ? removeNodeAtPath(s, rest) : s)) };
+}
+
+// True only when the agent EXPLICITLY carries Fusion 360 tools (e.g. the
+// CAD Agent's enabled_tools lists fusion360_* names). The all-tools sentinel
+// "*" is deliberately NOT counted — that would surface the Fusion bridge on
+// every generic agent, which is noise. The endpoint only matters for agents
+// that actually drive Fusion.
+function hasFusion360Tools(toolConfig) {
+  if (!toolConfig || typeof toolConfig !== 'object') return false;
+  const enabled = toolConfig.enabled_tools;
+  if (!Array.isArray(enabled)) return false;
+  return enabled.some((t) => typeof t === 'string' && t.startsWith('fusion360'));
 }
 
 export default function AgentConfig() {
@@ -324,6 +337,9 @@ export default function AgentConfig() {
               <div id="agent-section-skills" className="scroll-mt-2"><SkillsSection form={selectedNode} update={update} t={t} /></div>
               <div id="agent-section-data" className="scroll-mt-2"><DataSourcesSection form={selectedNode} update={update} onChange={saveField} t={t} /></div>
               <div id="agent-section-caps" className="scroll-mt-2"><CapabilitiesSection form={selectedNode} update={update} t={t} /></div>
+              {isRoot && hasFusion360Tools(form.tool_config) && (
+                <div id="agent-section-fusion" className="scroll-mt-2"><FusionBridgeSection form={selectedNode} update={update} /></div>
+              )}
               <div id="agent-section-harness" className="scroll-mt-2"><HarnessAgentSections form={selectedNode} update={update} /></div>
             </>
           )}

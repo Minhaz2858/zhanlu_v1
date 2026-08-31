@@ -92,6 +92,11 @@ def render_widget_sql(sql: str, params: dict | None, dimensions: list[dict] | No
     """
     params = params or {}
     dimensions = dimensions or []
+    # LLM-output hygiene (2026-08-28): models sometimes emit Python-style
+    # doubled percents (DATE_FORMAT(x, '%%Y-%%m')) which MySQL rejects with
+    # 1064. Normalize BEFORE token substitution + validation so both the
+    # create-time analytics pass and query-time execution get clean SQL.
+    sql = sql.replace("%%", "%")
     frm, to = _resolve_window(params)
     dim_map = {d["token"]: d["column"] for d in dimensions}
     active_dims = params.get("filters") or {}

@@ -49,16 +49,20 @@ class PostgresConnector:
         return f'-csearch_path="{safe}"'
 
     def __enter__(self) -> "PostgresConnector":
+        # Reuse a process-wide pooled engine (per connection signature) so
+        # repeated queries don't pay a fresh handshake each time.
+        from app.services.db.engine_cache import acquire_engine
+
         connect_args: dict[str, Any] = {}
         opt = self._search_path_option()
         if opt:
             connect_args["options"] = opt
-        self._engine = create_engine(
-            self._build_url(),
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            future=True,
-            connect_args=connect_args,
+        # psycopg2 connect_timeout (seconds) so an unreachable datasource
+        # fails fast instead of holding a pooled connection (and an app-pool
+        # slot) for the OS TCP timeout.
+        connect_args.setdefault("connect_timeout", 15)
+        self._engine = acquire_engine(
+            self.dialect, self._build_url(), connect_args=connect_args
         )
         return self
 
@@ -66,12 +70,9 @@ class PostgresConnector:
         self.close()
 
     def close(self) -> None:
-        if self._engine is not None:
-            try:
-                self._engine.dispose()
-            except Exception as e:
-                logger.debug("Postgres engine dispose failed: %s", e)
-            self._engine = None
+        # The engine is cached for reuse across queries — do NOT dispose it
+        # here. Only clear our local reference so the pool stays warm.
+        self._engine = None
 
     def list_tables(self) -> list[str]:
         assert self._engine is not None

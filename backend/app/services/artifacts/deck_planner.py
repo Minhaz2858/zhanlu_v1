@@ -43,6 +43,8 @@ _VALID_LAYOUTS = {
     "cover", "agenda", "kpi_grid", "chart_full", "chart_with_bullets",
     "findings_cards", "insights_bullets", "recommendations", "data_table",
     "methodology", "section_divider", "closing",
+    # New archetypes (2026-08-29)
+    "timeline", "roadmap", "comparison", "swot", "quote", "process_flow",
 }
 
 # Compact methodology distilled from skills/document-skills/pptx/SKILL.md — the
@@ -103,7 +105,18 @@ _PLAN_SCHEMA: dict[str, Any] = {
             "type": "string",
             "enum": ["data_report", "investor_deck", "marketing", "executive_brief"],
         },
-        "theme_recommendation": {"type": "string", "enum": ["zhanlu-blue", "zhanlu-dark"]},
+        "theme_recommendation": {"type": "string", "enum": [
+            "bold_signal", "electric_studio", "creative_voltage",
+            "dark_botanical", "notebook_tabs", "pastel_geometry",
+            "split_pastel", "vintage_editorial", "neon_cyber",
+            "terminal_green", "swiss_modern", "paper_and_ink",
+        ]},
+        "palette_recommendation": {"type": "string", "enum": [
+            "saas_blue", "micro_indigo", "commerce_green", "luxury_gold",
+            "b2b_navy", "finance_dark", "analytics_amber", "health_teal",
+            "edu_indigo", "agency_pink", "gaming_violet", "ai_violet",
+            "logistics_blue", "energy_green", "travel_sky", "legal_royal",
+        ]},
         "summary": {"type": "string"},
         "methodology": {"type": "string"},
         "headline_style": {"type": "string", "enum": ["topic", "assertion"]},
@@ -120,6 +133,8 @@ _PLAN_SCHEMA: dict[str, Any] = {
                             "cover", "agenda", "kpi_grid", "chart_full",
                             "chart_with_bullets", "findings_cards", "insights_bullets",
                             "recommendations", "data_table", "section_divider", "closing",
+                            "timeline", "roadmap", "comparison", "swot", "quote",
+                            "process_flow",
                         ],
                     },
                     "title": {"type": "string"},
@@ -180,6 +195,7 @@ def _build_planner_prompt(
     *,
     theme_tokens: Optional[dict[str, Any]] = None,
     personalization: Optional[dict[str, Any]] = None,
+    skill_structure: str = "",
 ) -> str:
     chart_lines = "\n".join(
         f"- {c['chart_type']} | x={c['x_key']} | y={c['y_keys']} | {c['title']}"
@@ -187,14 +203,30 @@ def _build_planner_prompt(
     ) or "(none)"
     methodology = _load_skill_methodology()
     theme_guidance = (
-        f"\nTHEME: the deck will render in the '{theme_name}' theme"
+        "\nTHEME: pick ONE theme from the catalog that best fits this deck's "
+        "content and audience, and set theme_recommendation to it. Do NOT "
+        "just echo the context theme.\n"
+        "Catalog (name — mood):\n"
+        "- bold_signal — bold, confident, high-contrast investor energy\n"
+        "- electric_studio — modern, tech-forward, vibrant\n"
+        "- creative_voltage — playful, colorful, marketing energy\n"
+        "- dark_botanical — calm, premium, dark natural\n"
+        "- notebook_tabs — academic, structured, study notes\n"
+        "- pastel_geometry — soft, friendly, approachable\n"
+        "- split_pastel — balanced two-tone, editorial\n"
+        "- vintage_editorial — classic magazine, serif elegance\n"
+        "- neon_cyber — futuristic, high-energy, tech\n"
+        "- terminal_green — hacker/monospace aesthetic\n"
+        "- swiss_modern — clean grid, strict, Swiss typography (business default)\n"
+        "- paper_and_ink — editorial, minimalist, print feel\n"
+        + f"Context theme is '{theme_name}'"
         + (f" ({theme_mood})" if theme_mood else "")
-        + ". Match the copy tone to its mood — e.g. an authoritative/executive "
-          "theme wants punchy assertion headlines; a warm/creative theme can use "
-          "more evocative phrasing. Set theme_recommendation to '"
-        + theme_name
-        + "'.\n"
+        + " — use it only if it truly fits; otherwise pick the best catalog "
+          "match. Match copy tone to the chosen theme's mood: an "
+          "authoritative/executive theme wants punchy assertion headlines; "
+          "a warm/creative theme can use more evocative phrasing.\n"
     )
+    palette_guidance = _build_palette_guidance()
     brand_guidance = _build_brand_guidance(theme_tokens)
     audience_guidance = _build_audience_guidance(personalization)
     return (
@@ -209,11 +241,25 @@ def _build_planner_prompt(
         "layout 'cover', last 'closing'.\n"
         "- Use layouts only from the schema enum: cover, agenda, kpi_grid, "
         "chart_full, chart_with_bullets, findings_cards, insights_bullets, "
-        "recommendations, data_table, section_divider, closing.\n"
+        "recommendations, data_table, section_divider, closing, timeline, "
+        "roadmap, comparison, swot, quote, process_flow.\n"
+        "- LAYOUT SELECTION (use the new archetypes deliberately): 'timeline' "
+        "for chronological milestones (bullets 'date | label'), 'roadmap' for "
+        "Now/Next/Later phases (bullets 'phase | item'), 'comparison' for "
+        "two-option trade-offs (bullets 'A vs B'), 'swot' for strengths/"
+        "weaknesses/opportunities/threats (bullets 'S|...'/'W|...'/'O|...'/"
+        "'T|...'), 'quote' for a pull-quote slide (title=quote, "
+        "subtitle=attribution), 'process_flow' for numbered steps. Prefer "
+        "these over generic insights_bullets when the content fits.\n"
         "- ASSERTION HEADLINES: every slide 'title' must be a complete "
         "assertion sentence stating the takeaway, NOT a topic label. "
         "Rewrite 'Key Findings' -> 'Enterprise drove 60% of net new bookings'. "
         "Set slide.headline_style='assertion'. Keep title <= 12 words.\n"
+        "- SPEAKER NOTES (MANDATORY): every slide must carry a 'notes' field "
+        "with 1-2 sentences of presenter script — what to say, why it "
+        "matters, and the bridge to the next slide. Never leave notes "
+        "empty. These are written into PowerPoint's notes pane so the "
+        "deck is presentation-ready out of the box.\n"
         "- DENSITY BUDGET: at most 5 bullets per slide; each bullet <= 12 "
         "words; set slide.max_bullets=5 and slide.max_words_per_bullet=12. "
         "Prefer 3-4 bullets; split long bullets.\n"
@@ -236,11 +282,37 @@ def _build_planner_prompt(
         "'investor_deck' or 'marketing' and lean on cover / section_divider / "
         "kpi_grid layouts.\n\n"
         f"{theme_guidance}\n"
+        f"{palette_guidance}\n"
         f"{brand_guidance}\n"
         f"{audience_guidance}"
+        f"{skill_structure}"
         "METHODOLOGY (from the pptx skill — follow it):\n"
         f"{methodology}\n"
     )
+
+
+def _build_palette_guidance() -> str:
+    """Return a PALETTE block so the planner picks a color identity per deck.
+
+    Theme = structure/mood; palette = color identity.  The two are
+    independent axes: the same market deck can carry an Analytics-blue
+    identity on a Swiss grid or a Luxury-gold identity on Paper & Ink.
+    """
+    from app.services.artifacts.palettes import PALETTE_CATALOG
+
+    lines = [
+        "\nPALETTE: pick ONE color identity from the catalog that fits the "
+        "deck's industry and audience, and set palette_recommendation to it. "
+        "This sets the deck's primary/accent/chart colors ON TOP of the "
+        "theme. Choose deliberately — a fintech deck wants finance_dark or "
+        "b2b_navy, a consumer brand wants agency_pink or commerce_green, a "
+        "data report wants analytics_amber or saas_blue.",
+        "Palette catalog (name — mood):",
+    ]
+    lines += [
+        f"- {p.name} — {p.mood}" for p in PALETTE_CATALOG.values()
+    ]
+    return "\n".join(lines) + "\n"
 
 
 def _build_brand_guidance(
@@ -303,6 +375,7 @@ async def _llm_deck_plan(
     *,
     theme_tokens: Optional[dict[str, Any]] = None,
     personalization: Optional[dict[str, Any]] = None,
+    skill_structure: str = "",
 ) -> Optional[DeckPlan]:
     """Make the single bounded LLM call and coerce the result into a DeckPlan.
 
@@ -314,6 +387,7 @@ async def _llm_deck_plan(
         user_intent, profile_summary, chart_hints, row_count,
         theme_name=theme_name, theme_mood=theme_mood,
         theme_tokens=theme_tokens, personalization=personalization,
+        skill_structure=skill_structure,
     )
     try:
         result = await asyncio.wait_for(
@@ -633,6 +707,24 @@ def _is_topic_label(title: str) -> bool:
     return len(words) <= 3 and not any(p in title for p in [".", "!", "?"])
 
 
+def _run_coro(coro):
+    """Run a coroutine to completion regardless of the current async context.
+
+    ``asyncio.get_event_loop().run_until_complete`` raises
+    "This event loop is already running" when called from inside a running
+    loop (e.g. the polish pass invoked from ``render_pptx_from_plan``).  This
+    helper falls back to a dedicated thread with its own loop so the rewrite
+    always executes instead of silently failing.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    import concurrent.futures
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def _enforce_assertion_headlines(plan: DeckPlan) -> DeckPlan:
     """Post-process: rewrite topic-label slide titles into assertion headlines.
 
@@ -651,7 +743,7 @@ def _enforce_assertion_headlines(plan: DeckPlan) -> DeckPlan:
         label = slide.title.strip().strip(".:")
         if settings.PPT_LLM_POLISH_ENABLED:
             try:
-                rewritten = asyncio.get_event_loop().run_until_complete(
+                rewritten = _run_coro(
                     _llm_assertion_rewrite(slide.title, slide.bullets)
                 )
                 if rewritten and not _is_topic_label(rewritten):
@@ -661,7 +753,7 @@ def _enforce_assertion_headlines(plan: DeckPlan) -> DeckPlan:
             except Exception as exc:  # pragma: no cover — best-effort
                 logger.warning("deck_planner: assertion rewrite failed: %s", exc)
         # Deterministic fallback: keep the label as a prefix so the takeaway
-        # is at least hinted; mark as topic (layout still renders fine).
+        # is at least hinted; mark as topic; layout still renders fine.
         slide.headline_style = "topic"
     return plan
 
@@ -699,6 +791,7 @@ async def build_deck_plan(
     *,
     theme_tokens: Optional[dict[str, Any]] = None,
     user_context: Optional[dict[str, Any]] = None,
+    skill_name: Optional[str] = None,
 ) -> tuple[DeckPlan, dict[str, dict[str, Any]]]:
     """Entry point: profile the data, then plan the deck.
 
@@ -718,6 +811,29 @@ async def build_deck_plan(
     profile_summary = summarize_profile(profile)
     chart_hints = suggest_charts(profile)
     row_count = len(rows)
+
+    # ── General no-data short-circuit (2026-08-29) ──────────────────────
+    # ANY request with NO grounded rows must still produce a professional
+    # deck.  The deterministic builder structures a full consulting deck
+    # (cover → exec framing → agenda → sections → findings/chart → recs →
+    # Q&A) from the payload narrative — domain-agnostic, never hardcodes
+    # facts.  Runs BEFORE the LLM planner so a data-less turn always ships a
+    # real deliverable instead of a thin skeleton.  Real rows always take
+    # the normal path.
+    if row_count == 0:
+        try:
+            from app.services.artifacts.synthetic_deck import build_synthetic_deck_plan
+
+            synth = build_synthetic_deck_plan(user_intent)
+            if synth is not None:
+                logger.info(
+                    "deck_planner: synthetic no-data plan built "
+                    "(slides=%d, title=%.60s)",
+                    len(synth.slides), getattr(synth, "title", ""),
+                )
+                return _enforce_assertion_headlines(synth), profile
+        except Exception as exc:  # noqa: BLE001 — never block the deck
+            logger.warning("deck_planner: synthetic plan failed (non-fatal): %s", exc)
 
     # Resolve the theme name + mood for planner awareness (alias-tolerant).
     theme_name = "zhanlu-blue"
@@ -764,10 +880,25 @@ async def build_deck_plan(
         plan = _fallback_plan(user_intent, profile, rows, profile_name=resolved_profile_name)
         return _enforce_assertion_headlines(plan), profile
 
+    # Skill structure steer (2026-08-31): when a deck skill was loaded
+    # (create_artifact skill=...), inject its preferred narrative framing +
+    # archetype mix into the planner prompt so the SKILL shapes the deck
+    # structure, not just the colors (closes the "different skill, same
+    # structure" gap).  Non-fatal: unknown skills yield empty steer.
+    skill_structure = ""
+    if skill_name:
+        try:
+            from app.services.artifacts.skill_deck_profiles import skill_structure_steer
+
+            skill_structure = skill_structure_steer(skill_name)
+        except Exception as _steer_err:  # noqa: BLE001 — never block the deck
+            logger.warning("deck_planner: skill structure steer skipped: %s", _steer_err)
+
     plan = await _llm_deck_plan(
         user_intent, profile_summary_text, chart_hints, row_count,
         theme_name=theme_name, theme_mood=theme_mood,
         theme_tokens=theme_tokens, personalization=user_context,
+        skill_structure=skill_structure,
     )
     if plan is None:
         plan = _fallback_plan(user_intent, profile, rows, profile_name=resolved_profile_name)

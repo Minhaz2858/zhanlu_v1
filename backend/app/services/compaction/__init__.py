@@ -90,7 +90,7 @@ MAX_COMPACT_RETRIES = 2
 MAX_PTL_RETRIES = 3
 SESSION_MEMORY_KEEP_RECENT = 12
 DEFAULT_PRESERVE_RECENT = 6
-DEFAULT_CONTEXT_WINDOW = 128_000  # Conservative for DeepSeek/OpenAI models
+DEFAULT_CONTEXT_WINDOW = 32_000  # Conservative unknown-model default (any model must work)
 
 
 def get_context_window(model: str, *, context_window_tokens: int | None = None) -> int:
@@ -114,6 +114,18 @@ def get_context_window(model: str, *, context_window_tokens: int | None = None) 
     if context_window_tokens is not None and context_window_tokens > 0:
         return int(context_window_tokens)
     m = (model or "").lower()
+    # Auto-detected real window (probed from the endpoint's /v1/models or
+    # /api/show at LLM resolution time).  Beats name heuristics because it
+    # is the model's ACTUAL window — an unknown local model (Ollama 8k,
+    # vLLM 32k, custom 16k) gets its true budget instead of a cloud
+    # default that would overflow it.
+    try:
+        from app.services.context_probe import get_registered_context_window
+        _probed = get_registered_context_window(model)
+        if _probed and _probed > 0:
+            return _probed
+    except Exception:  # never let probe lookup break context resolution
+        pass
     # Config-driven per-model override (substring match, longest key first
     # so a more specific model name wins over a generic family prefix).
     try:

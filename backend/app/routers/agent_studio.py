@@ -116,19 +116,19 @@ def add_data_binding(
     db.commit()
     db.refresh(binding)
 
-    # ── 2026-08-25: trigger project_knowledge ingestion for ecisco_bi_assistant ─
-    # When a new data binding is added to the Ecisco BI AgentApp, schedule a
-    # background ingestion into the project knowledge cache. Idempotent.
+    # Project-scoped KB ingestion trigger (flag-gated; the default BI
+    # agent that used it was removed 2026-08-27 — PROJECT_KNOWLEDGE_AGENT_NAMES
+    # is empty so this block is inert unless an app opts in by name).
     try:
         from app.config import settings
         from app.models.agent_app import AgentApp
         from app.models.knowledge_base import KnowledgeBase
-        if getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
-            ecisco_names = getattr(settings, "ECISCO_BI_AGENT_NAMES", ["ecisco_bi_assistant"]) or []
+        if getattr(settings, "PROJECT_KNOWLEDGE_CACHE_ENABLED", False):
+            agent_names = getattr(settings, "PROJECT_KNOWLEDGE_AGENT_NAMES", []) or []
             agent_row = db.query(AgentApp).filter(
                 AgentApp.id == agent_id, AgentApp.is_deleted == False,  # noqa: E712
             ).first()
-            if agent_row and agent_row.name in ecisco_names:
+            if agent_row and agent_row.name in agent_names:
                 # The datasource may be a KnowledgeBase or a regular datasource.
                 # The cache's ingest step uses catalog_indexer.index_kb_catalog which
                 # works on KB rows; for non-KB bindings we just skip the trigger.

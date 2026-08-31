@@ -614,3 +614,164 @@ def _build_risk_section(
         ),
         "risks": risks,
     }
+
+
+# ---------------------------------------------------------------------------
+# Institutional-grade market profile (2026-08-25). Profile-aware
+# additions.
+# ---------------------------------------------------------------------------
+
+# 8 mandatory market dimensions from the institutional-grade spec.
+MARKET_DIMENSIONS: tuple[str, ...] = (
+    "core_metrics", "historical_trends", "cost_structure",
+    "supply_side", "demand_side", "macro_context",
+    "forward_indicators", "cross_segment_relationships",
+)
+
+
+def _coverage_dimensions_for(
+    intent: dict,
+    facets: dict[str, dict] | None,
+) -> list[str]:
+    """Derive the ``coverage_dimensions`` list from the facet results.
+
+    Walks each facet; an available facet with non-empty rows contributes
+    its canonical dimension (resolved via the profile's ``facet_to_dim``
+    map with a prefix-match fallback for LLM variant facet IDs like
+    ``core_metrics_brent``).
+
+    Returns:
+        Sorted list of dimension names that have available data. Empty
+        when no facets produced rows.
+    """
+    from app.services.enterprise_orchestrator.profiles import (
+        get_profile,
+        resolve_dimension,
+    )
+    profile_name = (intent or {}).get("profile_name") or "enterprise"
+    try:
+        profile = get_profile(profile_name)
+    except Exception:
+        return []
+    covered: set[str] = set()
+    facets = facets or {}
+    for fid, fdata in facets.items():
+        if not isinstance(fdata, dict):
+            continue
+        if not fdata.get("available"):
+            continue
+        rows = fdata.get("rows") or []
+        if not rows:
+            continue
+        dim = resolve_dimension(profile, fid)
+        if dim:
+            covered.add(dim)
+    return sorted(covered)
+
+
+def synthesize_market_report(
+    intent: dict,
+    facets: dict[str, dict],
+) -> dict:
+    """Assemble the institutional-grade market overview payload.
+
+    Schema:
+      {
+        "enterprise_report_kind": "market_overview",
+        "title": ...,
+        "period_label": ...,
+        "overview_dashboard": { items, sentiment, macro_narrative },
+        "executive_summary": { summary, recommendations, risk_alerts },
+        "entity_deep_dive": [ {entity_id, snapshot, market_analysis,
+                                 supply_analysis, demand_analysis,
+                                 short_term_outlook, medium_term_outlook,
+                                 ai_decision, forecast_table}, ... ],
+        "disclaimer": str,
+        "coverage_dimensions": List[str],
+      }
+    """
+    intent = intent or {}
+    facets = facets or {}
+    period = intent.get("period")
+    domain = intent.get("domain") or "market"
+    primary_metric = intent.get("primary_metric") or "value"
+
+    # Coverage signal (drives the artifact-coverage gate).
+    coverage = _coverage_dimensions_for(intent, facets)
+
+    # Simple entity list — for each non-empty facet with rows, emit an
+    # entity stub. Real entity deep-dive content requires LLM synthesis,
+    # which happens via the normal flow downstream of this payload.
+    entity_deep_dive: list[dict] = []
+    seen_entities: set[str] = set()
+    for fid, fdata in facets.items():
+        rows = (fdata.get("rows") or []) if isinstance(fdata, dict) else []
+        if not rows:
+            continue
+        for row in rows[:5]:
+            if not isinstance(row, dict):
+                continue
+            entity_id = (
+                row.get("entity") or row.get("name") or row.get("id")
+                or fid
+            )
+            if entity_id in seen_entities:
+                continue
+            seen_entities.add(entity_id)
+            entity_deep_dive.append({
+                "entity_id": entity_id,
+                "snapshot": {
+                    "current_value": row.get(primary_metric) or row.get("value"),
+                    "primary_metric": primary_metric,
+                },
+                "facet_id": fid,
+            })
+
+    # Overview dashboard (placeholder — fills with counts / sentiment).
+    items_covered = sum(
+        1
+        for fdata in facets.values()
+        if isinstance(fdata, dict) and fdata.get("rows")
+    )
+    active = sum(
+        1
+        for row in (e for entity in entity_deep_dive for e in [entity])
+        if isinstance(row, dict)
+    )
+
+    payload = {
+        "enterprise_report_kind": "market_overview",
+        "title": f"{domain.title()} Market Overview",
+        "period_label": (
+            _format_period(period) if period else "current period"
+        ),
+        "overview_dashboard": {
+            "items_covered": items_covered,
+            "active_count": active,
+            "inactive_count": max(0, items_covered - active),
+            "sentiment": {"positive": 0, "negative": 0, "neutral": items_covered},
+            "macro_narrative": (
+                "The dominant driver across the 8 institutional-grade "
+                "dimensions is the prevailing supply-demand balance for "
+                f"{domain}; sentiment distribution depends on which "
+                "dimensions have available data."
+            ),
+        },
+        "executive_summary": {
+            "summary": (
+                f"Across {items_covered} entities and {len(coverage)} of 8 "
+                "institutional-grade dimensions, the analytical picture "
+                "will be sharpened by the LLM synthesis step that follows "
+                "this payload."
+            ),
+            "recommendations": [],
+            "risk_alerts": [],
+        },
+        "entity_deep_dive": entity_deep_dive,
+        "disclaimer": (
+            "AI-generated, for reference only, not investment or "
+            "business advice."
+        ),
+        "coverage_dimensions": coverage,
+    }
+    return payload

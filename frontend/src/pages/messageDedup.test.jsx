@@ -88,13 +88,13 @@ describe('dedupeMessagesByFingerprint', () => {
     const chatCopy = {
       id: 'msg-table-uuid',
       role: 'assistant',
-      content: "Hello! I'm your EDIA assistant.",
+      content: "Hello! I'm your assistant.",
       created_date: '2026-08-06T10:00:01.000000',
     };
     const convCopy = {
       id: 'conv-json-uuid',
       role: 'assistant',
-      content: "Hello! I'm your EDIA assistant.",
+      content: "Hello! I'm your assistant.",
       created_date: '2026-08-06T10:00:01.500000',
     };
     const out = dedupeMessagesByFingerprint([chatCopy, convCopy]);
@@ -165,13 +165,13 @@ describe('dedupeMessagesByFingerprint', () => {
     const run1 = {
       id: 'm1',
       role: 'user',
-      content: 'Run Automation Task：\n- Name：Daily Sync\n- Type：Data Sync\n- Schedule：Daily 08:00\n- Output format：HTML report\n- Project：Ecisco BI',
+      content: 'Run Automation Task：\n- Name：Daily Sync\n- Type：Data Sync\n- Schedule：Daily 08:00\n- Output format：HTML report\n- Project：ACME',
       phase: { execution_id: 'exe-A', kind: 'run_request' },
     };
     const run2 = {
       id: 'm2',
       role: 'user',
-      content: 'Run Automation Task：\n- Name：Daily Sync\n- Type：Data Sync\n- Schedule：Daily 08:00\n- Output format：HTML report\n- Project：Ecisco BI',
+      content: 'Run Automation Task：\n- Name：Daily Sync\n- Type：Data Sync\n- Schedule：Daily 08:00\n- Output format：HTML report\n- Project：ACME',
       phase: { execution_id: 'exe-B', kind: 'run_request' },
     };
     const out = dedupeMessagesByFingerprint([run1, run2]);

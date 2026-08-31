@@ -2,7 +2,7 @@
  * Regression (2026-08-11): automation-origin chats were not bound to the
  * real ``automation_agent`` — the frontend nulled out ``effectiveAgent``
  * for CREATE requests and injected an ``AUTOMATION_AGENT_PROMPT`` overlay
- * onto whatever agent resolved (in Ecisco BI: ``ecisco_bi_assistant``),
+ * onto whatever agent resolved (e.g. a project-scoped agent),
  * whose report/data tools hijacked the free-text data-source answer.
  *
  * The fix binds automation-origin chats to the real ``automation_agent``
@@ -75,15 +75,5 @@ describe('Chat.jsx automation_agent binding', () => {
     const block = doneBlock[0];
     expect(block).toMatch(/zhanlu:automation-created/);
     expect(block).toMatch(/toolCalls\.some/);
-  });
-
-  it('preserves the !convId guard on the ecisco_bi_assistant auto-select', () => {
-    // The mount-time ecisco_bi_assistant auto-select must still be gated
-    // on !convId so it doesn't race against conv rehydration. This is
-    // the lesson from Chat.projectContextLeak — we must not reintroduce
-    // the leak.
-    const autoSelectMatch = SOURCE.match(/if\s*\(\s*!agentId\s*&&\s*projectName([\s\S]{0,400}?)\{[\s\S]{0,800}?setActiveAgent\(eciscoAgent\)/);
-    expect(autoSelectMatch, 'ecisco_bi_assistant auto-select block not found').not.toBeNull();
-    expect(autoSelectMatch[0]).toMatch(/convId/);
   });
 });

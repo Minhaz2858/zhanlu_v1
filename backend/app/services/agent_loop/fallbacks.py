@@ -186,6 +186,14 @@ def _data_summary_fallback(titles: list[str], user_content: str = "") -> str:
     )
 
 
+# NOTE: ``_automation_scheduled_confirmation`` lives in
+# ``app.routers.agents`` (router-local pattern, alongside
+# ``_artifact_aware_fallback`` and ``_data_summary_fallback``) so that
+# ``_choose_fallback`` can call it without an import. The agents router
+# is the source of truth for this helper; this module is intentionally
+# kept free of redundant copies.
+
+
 _SYS_COL_PREFIXES = ("FENTRYID", "FID", "FCUSTMATID", "FCUSTMATNAME")
 
 

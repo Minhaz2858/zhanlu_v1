@@ -15,6 +15,17 @@ engine = create_engine(
     settings.DATABASE_URL,
     connect_args=connect_args,
     echo=False,
+    # 2026-08-31: the SQLAlchemy defaults (pool_size=5, max_overflow=10)
+    # were too small for this app's concurrency — frontend polling + SSE
+    # chat streams + background tasks (experience layer, memory
+    # consolidation) routinely exhausted the pool, and every request then
+    # queued 30s before failing with "QueuePool limit ... reached" (visible
+    # as login 500s and frozen turns). Sized for the dev stack; Postgres
+    # max_connections is 100 so 20+40 is safe. pool_pre_ping drops stale
+    # connections after postgres restarts instead of serving dead sockets.
+    pool_size=20,
+    max_overflow=40,
+    pool_pre_ping=True,
 )
 
 # Enable foreign key enforcement for SQLite

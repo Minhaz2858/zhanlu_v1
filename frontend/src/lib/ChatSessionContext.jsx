@@ -137,7 +137,7 @@ export function ChatSessionProvider({ children }) {
       // couldn't be backfilled. Migration 020 only matches by
       // name + created_by_id, so sessions whose project was
       // created by a different user (or after the migration
-      // ran) keep ``project = "ECISCO"`` but have
+      // ran) keep ``project = "ACME"`` but have
       // ``project_id = null``. Gating the chip on the FK would
       // hide the project name on reopen even though the sidebar
       // groups the session correctly — so gate on the string
@@ -171,7 +171,7 @@ export function ChatSessionProvider({ children }) {
       // and include it in the v3 stream body — the backend then
       // scopes the data-source runtime to the right project.
       // Without this, clicking a conv in a different project (e.g.
-      // ECISCO BI vs Global) leaves the URL as ``?conv=...`` only,
+      // between a project and Global) leaves the URL as ``?conv=...`` only,
       // the agent has no project_id to extend its bound KBs with,
       // and the user sees the same generic "user-memory" response
       // across every project (because the only thing the runtime
@@ -192,13 +192,21 @@ export function ChatSessionProvider({ children }) {
         if (s.project_id) {
           url.searchParams.set('project', s.project_id);
         } else {
-          url.searchParams.delete('project');
+          // (2026-08-31) PRESERVE any pre-existing ?project= — the
+          // session row may lack the FK (legacy rows, or a conv whose
+          // project context lives in the URL already). The previous
+          // delete() here wiped ?project= / ?projectName= on every
+          // sidebar click of a session without an FK, so a reload
+          // ended up as ``?conv=...&agentName=...`` with no project
+          // context — exactly the bug the user reported. Keep the
+          // URL's project context unless the session explicitly
+          // carries a different project.
         }
         if (projectName) {
           url.searchParams.set('projectName', projectName);
-        } else {
-          url.searchParams.delete('projectName');
         }
+        // Same preservation rule for ?projectName= — only overwrite
+        // when the session has its own project name.
         if (s.agent_name) {
           url.searchParams.set('agentName', s.agent_name);
         } else {
@@ -258,7 +266,7 @@ export function ChatSessionProvider({ children }) {
     setPendingProjectState(normalizedName);
     // Sync the URL with the project context the same way
     // selectSession does. Without this, "+ New Chat" in a sidebar
-    // group (e.g. Marketing Team, ECISCO BI) leaves the URL as
+    // group (e.g. Marketing Team) leaves the URL as
     // ``/?`` with no projectName, so the v3 stream request body
     // (read from window.location by Chat.jsx's handleAgentSend)
     // has no project_id to scope the data-source runtime with —

@@ -34,16 +34,9 @@ VALID_DOMAINS = frozenset(
 
 # Services the executor may invoke by reflection. Anything else emitted by
 # the LLM is flagged unavailable at execution time (enforced in code, never
-# trusted to the LLM).
-SERVICE_WHITELIST = frozenset(
-    {
-        "ErpKpiService.sales_summary_for_period",
-        "ErpKpiService.inventory_position",
-        "ErpKpiService.top_customers",
-        "ErpKpiService.top_orders",
-        "PerceptionService.build_snapshot",
-    }
-)
+# trusted to the LLM). Currently empty: no reflected service classes are
+# registered on the generic platform — every facet goes through ad_hoc_query.
+SERVICE_WHITELIST = frozenset()
 
 MIN_FACETS = 3
 MAX_FACETS = 6
@@ -84,8 +77,8 @@ Output JSON matching EXACTLY this schema:
 {schema}
 
 Rules:
-- Prefer service_call facets when the requested metric is covered by an
-  existing service (ErpKpiService, PerceptionService). Use ad_hoc_query
+- Prefer service_call facets when the requested metric is covered by a
+  registered whitelisted service (see SERVICE_WHITELIST). Use ad_hoc_query
   for everything else.
 - Always include at least one "primary" facet for the main metric.
 - For "why is X dropping" questions, include both the metric facet AND

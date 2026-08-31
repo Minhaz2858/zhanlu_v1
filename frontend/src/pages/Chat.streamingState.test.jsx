@@ -13,9 +13,11 @@ describe('Chat.jsx streaming state', () => {
     expect(src).toMatch(/reasoning_delta/);
   });
 
-  it('handles search_query_delta event', () => {
-    expect(src).toMatch(/search_query_delta/);
-    expect(src).toMatch(/streaming_search_queries/);
+  it('does not handle search_query_delta (removed 2026-08-25)', () => {
+    // The live-streaming Search section was removed per user request; the
+    // backend still emits the event but Chat.jsx must NOT store it on the
+    // message. This pins the deliberate non-handling.
+    expect(src).not.toMatch(/streaming_search_queries/);
   });
 
   it('handles plan_step_added event', () => {
@@ -23,8 +25,16 @@ describe('Chat.jsx streaming state', () => {
     expect(src).toMatch(/streaming_plan_steps/);
   });
 
-  it('handles data_preview event', () => {
-    expect(src).toMatch(/data_preview/);
-    expect(src).toMatch(/streaming_data_previews/);
+  it('handles plan_step_completed event', () => {
+    // 2026-08-27: the backend ticks plan steps off by tool evidence; the
+    // frontend must mark the matching step done in the live checklist.
+    expect(src).toMatch(/plan_step_completed/);
+    expect(src).toMatch(/status: 'done'/);
+  });
+
+  it('does not handle data_preview (removed 2026-08-25)', () => {
+    // Same deliberate removal as search_query_delta — inline data previews
+    // are now attached to tool rows via typed live_event `data_offer`.
+    expect(src).not.toMatch(/streaming_data_previews/);
   });
 });

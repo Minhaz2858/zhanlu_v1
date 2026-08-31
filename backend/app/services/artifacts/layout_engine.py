@@ -309,6 +309,13 @@ def render(plan, rows: list[dict], ctx: Optional[dict] = None) -> bytes:
         "methodology": _layout_methodology,
         "section_divider": _layout_section_divider,
         "closing": _layout_closing,
+        # New archetypes (2026-08-29)
+        "timeline": _layout_timeline,
+        "roadmap": _layout_roadmap,
+        "comparison": _layout_comparison,
+        "swot": _layout_swot,
+        "quote": _layout_quote,
+        "process_flow": _layout_process_flow,
     }
 
     total_slides = len(plan_dict.get("slides", [])) or 1
@@ -327,6 +334,22 @@ def render(plan, rows: list[dict], ctx: Optional[dict] = None) -> bytes:
             add_slide_number(slide, idx, total_slides, theme)
             # Provenance footer — cite the data source on content slides.
             add_source_footer(slide, source_label, theme)
+        # Speaker notes (professional decks carry a presenter script).
+        notes_text = slide_plan.get("notes") or ""
+        if notes_text:
+            try:
+                slide.notes_slide.notes_text_frame.text = notes_text
+            except Exception:
+                pass
+
+    # Fade transitions (settings-gated, best-effort XML addition).
+    # Guarded: the sandbox runner vendors layout_engine flat WITHOUT the
+    # app package, so the dotted import must never crash a deck there.
+    try:
+        from app.services.artifacts.pptx_motion import add_fade_transitions
+        add_fade_transitions(prs)
+    except Exception:
+        pass
 
     buf = io.BytesIO()
     prs.save(buf)
@@ -698,7 +721,7 @@ def _chart_type_const(chart_kind: str):
         return XL_CHART_TYPE.LINE
     if kind in ("pie", "donut"):
         return XL_CHART_TYPE.PIE
-    if kind in ("grouped_bar", "bar_clustered"):
+    if kind in ("grouped_bar", "bar_clustered", "combo"):
         return XL_CHART_TYPE.BAR_CLUSTERED
     if kind in ("stacked_bar", "bar_stacked"):
         return XL_CHART_TYPE.BAR_STACKED
@@ -1009,6 +1032,187 @@ def _layout_closing(slide, sp, theme, idx, total) -> None:
         run2.text = body
         run2.font.size = Pt(SUBTITLE_PT + 2)
         run2.font.color.rgb = _rgb(theme, "text", "#0F172A")
+
+
+# ----------------------------------------------------------------------------
+# New archetypes (2026-08-29): timeline / roadmap / comparison / swot / quote / process_flow
+# ----------------------------------------------------------------------------
+
+
+def _layout_timeline(slide, sp, theme, idx, total) -> None:
+    """Horizontal milestone timeline — dated dots across the slide."""
+    _section_title(slide, _assertify_headline(sp.get("title", "Timeline"), "timeline"), theme)
+    bullets = (sp.get("bullets") or [])[:6]
+    n = max(len(bullets), 1)
+    col_w = (SLIDE_W_IN - 2 * MARGIN_IN) / n
+    accent = _rgb(theme, "accent", "#7C3AED")
+    for i, b in enumerate(bullets):
+        date, _, label = b.partition("|")
+        date = date.strip()
+        label = label.strip() or date
+        cx = MARGIN_IN + col_w * i + col_w / 2
+        # connector line
+        if i < len(bullets) - 1:
+            _add_rect(slide, cx + 0.15, 1.75, col_w - 0.3, 0.06,
+                      fill=_rgb(theme, "muted", "#64748B"))
+        # dot
+        dot = slide.shapes.add_shape(
+            MSO_SHAPE.OVAL, Inches(cx - 0.22), Inches(1.55), Inches(0.44), Inches(0.44)
+        )
+        dot.fill.solid()
+        dot.fill.fore_color.rgb = accent
+        dot.line.color.rgb = _rgb(theme, "slide_bg", "#FFFFFF")
+        dot.line.width = Pt(3)
+        _add_textbox(
+            slide, cx - col_w / 2, 2.2, col_w, 0.5,
+            date, SUBTITLE_PT, bold=True, color=accent, align=PP_ALIGN.CENTER,
+        )
+        _add_textbox(
+            slide, cx - col_w / 2, 2.8, col_w, 1.4,
+            label, BODY_PT - 2, color=_rgb(theme, "text", "#0F172A"),
+            align=PP_ALIGN.CENTER,
+        )
+
+
+def _layout_roadmap(slide, sp, theme, idx, total) -> None:
+    """Three-phase roadmap — Now / Next / Later columns."""
+    _section_title(slide, _assertify_headline(sp.get("title", "Roadmap"), "roadmap"), theme)
+    bullets = (sp.get("bullets") or [])[:9]
+    buckets: dict[str, list[str]] = {"Now": [], "Next": [], "Later": []}
+    for b in bullets:
+        phase, _, item = b.partition("|")
+        phase = phase.strip()
+        item = item.strip() or phase
+        key = phase if phase in buckets else "Later"
+        buckets[key].append(item)
+    colors = [_rgb(theme, "accent", "#7C3AED"), _rgb(theme, "primary", "#2563EB"), _rgb(theme, "muted", "#64748B")]
+    col_w = (SLIDE_W_IN - 2 * MARGIN_IN - 0.8) / 3
+    for i, phase in enumerate(["Now", "Next", "Later"]):
+        left = MARGIN_IN + i * (col_w + 0.4)
+        _add_rect(slide, left, 1.6, col_w, 5.2,
+                  fill=_rgb(theme, "card_bg", "#FFFFFF"),
+                  border=colors[i], rounded=True, radius_in=0.06)
+        _add_rect(slide, left, 1.6, col_w, 0.14, fill=colors[i])
+        _add_textbox(slide, left + 0.3, 1.9, col_w - 0.6, 0.6,
+                     phase, SUBTITLE_PT + 4, bold=True, color=colors[i])
+        y = 2.7
+        for item in buckets[phase][:5]:
+            _add_textbox(slide, left + 0.3, y, col_w - 0.6, 0.7,
+                         item, BODY_PT - 2, color=_rgb(theme, "text", "#0F172A"))
+            y += 0.85
+
+
+def _layout_comparison(slide, sp, theme, idx, total) -> None:
+    """Two-column comparison — A vs B rows."""
+    _section_title(slide, _assertify_headline(sp.get("title", "Comparison"), "comparison"), theme)
+    left_head = sp.get("subtitle") or "Option A"
+    right_head = sp.get("notes") or "Option B"
+    col_w = (SLIDE_W_IN - 2 * MARGIN_IN - 0.8) / 2
+    accent = _rgb(theme, "accent", "#7C3AED")
+    muted = _rgb(theme, "muted", "#64748B")
+    _add_textbox(slide, MARGIN_IN, 1.5, col_w, 0.6, left_head, SUBTITLE_PT, bold=True, color=accent)
+    _add_textbox(slide, MARGIN_IN + col_w + 0.8, 1.5, col_w, 0.6, right_head, SUBTITLE_PT, bold=True, color=muted)
+    y = 2.3
+    for b in (sp.get("bullets") or [])[:8]:
+        if "||" in b:
+            a, _, bb = b.partition("||")
+        elif " vs " in b:
+            a, _, bb = b.partition(" vs ")
+        else:
+            a, bb = b, "—"
+        _add_textbox(slide, MARGIN_IN, y, col_w, 0.5, a.strip(), BODY_PT - 1,
+                     color=_rgb(theme, "text", "#0F172A"))
+        _add_textbox(slide, MARGIN_IN + col_w + 0.8, y, col_w, 0.5, bb.strip(), BODY_PT - 1,
+                     color=muted)
+        y += 0.62
+
+
+def _layout_swot(slide, sp, theme, idx, total) -> None:
+    """2x2 SWOT grid."""
+    _section_title(slide, _assertify_headline(sp.get("title", "SWOT"), "swot"), theme)
+    quad: dict[str, list[str]] = {"S": [], "W": [], "O": [], "T": []}
+    for b in (sp.get("bullets") or [])[:16]:
+        key = b[:1].upper()
+        if key in quad:
+            quad[key].append(b[1:].strip().lstrip("|").strip() or b)
+        else:
+            quad["S"].append(b)
+    labels = [("S", "Strengths"), ("W", "Weaknesses"), ("O", "Opportunities"), ("T", "Threats")]
+    colors = [
+        _rgb(theme, "delta_up", "#059669"), _rgb(theme, "delta_down", "#DC2626"),
+        _rgb(theme, "accent", "#7C3AED"), _rgb(theme, "warn_accent", "#F59E0B"),
+    ]
+    cell_w = (SLIDE_W_IN - 2 * MARGIN_IN - 0.6) / 2
+    cell_h = 2.4
+    for i, ((key, label), color) in enumerate(zip(labels, colors)):
+        row, col = divmod(i, 2)
+        left = MARGIN_IN + col * (cell_w + 0.6)
+        top = 1.6 + row * (cell_h + 0.4)
+        _add_rect(slide, left, top, cell_w, cell_h,
+                  fill=_rgb(theme, "card_bg", "#FFFFFF"),
+                  border=color, rounded=True, radius_in=0.06)
+        _add_textbox(slide, left + 0.3, top + 0.15, cell_w - 0.6, 0.5,
+                     label, SUBTITLE_PT, bold=True, color=color)
+        y = top + 0.8
+        for item in quad[key][:3]:
+            _add_textbox(slide, left + 0.3, y, cell_w - 0.6, 0.5,
+                         item, BODY_PT - 3, color=_rgb(theme, "text", "#0F172A"))
+            y += 0.55
+
+
+def _layout_quote(slide, sp, theme, idx, total) -> None:
+    """Big pull quote — title = quote, subtitle = attribution."""
+    quote = _assertify_headline(sp.get("title", ""), "quote")
+    attribution = sp.get("subtitle", "")
+    _add_rect(slide, 0, 0, SLIDE_W_IN, SLIDE_H_IN,
+              fill=_rgb(theme, "slide_bg", "#FFFFFF"))
+    _add_textbox(
+        slide, MARGIN_IN + 1.0, 1.2, 1.2, 1.2,
+        "“", TITLE_PT + 40, bold=True, color=_rgb(theme, "accent", "#7C3AED"),
+        align=PP_ALIGN.CENTER,
+    )
+    _add_textbox(
+        slide, MARGIN_IN + 0.5, 2.4, SLIDE_W_IN - 2 * MARGIN_IN - 1.0, 2.6,
+        quote, TITLE_PT + 10, bold=True, color=_rgb(theme, "text", "#0F172A"),
+        align=PP_ALIGN.CENTER,
+    )
+    if attribution:
+        _add_textbox(
+            slide, MARGIN_IN + 0.5, 5.4, SLIDE_W_IN - 2 * MARGIN_IN - 1.0, 0.6,
+            f"— {attribution}", SUBTITLE_PT, color=_rgb(theme, "muted", "#64748B"),
+            align=PP_ALIGN.CENTER,
+        )
+
+
+def _layout_process_flow(slide, sp, theme, idx, total) -> None:
+    """Numbered chevron process flow — steps 1..N."""
+    _section_title(slide, _assertify_headline(sp.get("title", "Process"), "process_flow"), theme)
+    bullets = (sp.get("bullets") or [])[:6]
+    n = max(len(bullets), 1)
+    col_w = (SLIDE_W_IN - 2 * MARGIN_IN) / n
+    accent = _rgb(theme, "accent", "#7C3AED")
+    for i, b in enumerate(bullets):
+        cx = MARGIN_IN + col_w * i + col_w / 2
+        num = slide.shapes.add_shape(
+            MSO_SHAPE.OVAL, Inches(cx - 0.6), Inches(1.7), Inches(1.2), Inches(1.2)
+        )
+        num.fill.solid()
+        num.fill.fore_color.rgb = accent
+        num.line.fill.background()
+        tf = num.text_frame
+        tf.margin_left = Inches(0)
+        tf.margin_right = Inches(0)
+        tf.margin_top = Inches(0.2)
+        p = tf.paragraphs[0]
+        p.alignment = PP_ALIGN.CENTER
+        run = p.add_run()
+        run.text = f"{i+1:02d}"
+        run.font.size = Pt(SUBTITLE_PT + 2)
+        run.font.bold = True
+        run.font.color.rgb = RGBColor.from_string("FFFFFF")
+        _add_textbox(slide, cx - col_w / 2, 3.1, col_w, 1.6,
+                     b, BODY_PT - 2, color=_rgb(theme, "text", "#0F172A"),
+                     align=PP_ALIGN.CENTER)
 
 
 # ----------------------------------------------------------------------------

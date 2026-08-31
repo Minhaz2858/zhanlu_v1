@@ -4,10 +4,10 @@
 //   { ...parsedFields, session_id, project: pendingProject || ungrouped }
 // so `project:` came AFTER the spread and OVERRODE the LLM-parsed
 // `fields.project`. The create-dialog reliably fills that field from the
-// "- Project：Ecisco" prefill line (and the system prompt tells the LLM to
+// "- Project：" prefill line (and the system prompt tells the LLM to
 // echo it into create_resource.fields.project), but when no project chip was
 // set in the chat (pendingProject empty) the task was stamped "Ungrouped"
-// even though the user explicitly picked Ecisco in the dialog.
+// even though the user explicitly picked a project in the dialog.
 //
 // Correct precedence: explicit (parsed from the user's request) > contextual
 // (the chat's project chip) > default (Ungrouped). Sentinel values the LLM

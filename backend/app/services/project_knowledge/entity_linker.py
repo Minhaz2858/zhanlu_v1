@@ -1,12 +1,14 @@
-"""C5/C9 product entity seeding and catalog linking.
+"""Domain product entity seeding and catalog linking.
 
-Promotes the 12 static C5/C9 product nodes into per-project
-``project_entity`` rows and links each to the best matching
-``kb_table_meta`` row via embedding similarity (ChromaDB hybrid).
+Promotes the configured domain product nodes (from the per-app domain
+config, key ``seed_products``) into per-project ``project_entity`` rows
+and links each to the best matching ``kb_table_meta`` row via embedding
+similarity (ChromaDB hybrid).
 
 Idempotent -- re-running just refreshes timestamps and link confidence.
 Failures are logged and never raised; layer 2 stays functional even
-when the embedding service is unavailable.
+when the embedding service is unavailable.  With no domain config the
+seed list is empty and nothing is inserted (fully generic behavior).
 """
 from __future__ import annotations
 
@@ -22,42 +24,50 @@ from app.models.knowledge_catalog import (
     ProjectEntity,
     ProjectEntityLink,
 )
+from app.services.domain_config import get_domain_config
 
 logger = logging.getLogger(__name__)
 
 
-# Layer 1 data -- the 12 C5/C9 products
-# Sourced from app.services.knowledge_graph.graph._C5_C9_NODES so the
-# domain graph stays the single source of truth.
-_C5_C9_SEED_PRODUCTS: list[dict[str, Any]] = [
-    {"id": "crude_oil",    "name": "Crude Oil",    "name_cn": "原油"},
-    {"id": "naphtha",      "name": "Naphtha",      "name_cn": "石脑油"},
-    {"id": "cracked_c5",   "name": "Cracked C5",   "name_cn": "裂解C5"},
-    {"id": "mixed_c5",     "name": "Mixed C5",     "name_cn": "混合碳五"},
-    {"id": "isoprene",     "name": "Isoprene",     "name_cn": "异戊二烯"},
-    {"id": "piperylene",   "name": "Piperylene",   "name_cn": "间戊二烯"},
-    {"id": "dcpd",         "name": "DCPD",         "name_cn": "双环戊二烯"},
-    {"id": "sis",          "name": "SIS",          "name_cn": "苯乙烯-异戊二烯-苯乙烯"},
-    {"id": "cracked_c9",   "name": "Cracked C9",   "name_cn": "裂解C9"},
-    {"id": "styrene",      "name": "Styrene",      "name_cn": "苯乙烯"},
-    {"id": "c5_resin",     "name": "C5 Resin",     "name_cn": "C5石油树脂"},
-    {"id": "raffinate_c5", "name": "Raffinate C5", "name_cn": "抽余C5"},
-    {"id": "blowing_agent","name": "Blowing Agent","name_cn": "发泡剂"},
-]
+def _load_seed_products() -> list[dict[str, Any]]:
+    """Load seed product definitions from the app's domain config.
+
+    Key ``seed_products`` is a list of ``{"id", "name", "name_cn"}`` dicts.
+    Missing/invalid config → empty list (generic — nothing is seeded).
+    """
+    cfg = get_domain_config("") or {}
+    raw = cfg.get("seed_products") or []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        out.append(
+            {
+                "id": str(item["id"]),
+                "name": str(item.get("name") or item["id"]),
+                "name_cn": str(item.get("name_cn") or ""),
+            }
+        )
+    return out
 
 
 def seed_products_as_entities(db: Session, project_id: str) -> int:
-    """Insert/update 12 C5/C9 product rows in ``project_entity``.
+    """Insert/update configured product rows in ``project_entity``.
 
-    Idempotent on (project_id, name). Sets source='c5c9_seed'.
+    The product list comes from the app's domain config (key
+    ``seed_products``); with no config this seeds nothing and returns 0.
+    Idempotent on (project_id, name). Sets source='domain_seed'.
     Returns count of rows upserted.
     """
-    if not getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
+    if not getattr(settings, "PROJECT_KNOWLEDGE_CACHE_ENABLED", False):
         return 0
     if not project_id:
         return 0
+    seed_products = _load_seed_products()
+    if not seed_products:
+        return 0
     count = 0
-    for p in _C5_C9_SEED_PRODUCTS:
+    for p in seed_products:
         name = p["name"]
         aliases = [p["id"], p["name_cn"]]
         try:
@@ -76,16 +86,16 @@ def seed_products_as_entities(db: Session, project_id: str) -> int:
                     name=name,
                     aliases=aliases,
                     entity_type="product",
-                    description=f"C5/C9 product: {p['name_cn']} ({p['id']})",
-                    source="c5c9_seed",
+                    description=f"Domain product: {p['name_cn']} ({p['id']})",
+                    source="domain_seed",
                 )
                 db.add(row)
             else:
                 # enrich aliases but never widen the entity_type
                 existing = set(row.aliases or [])
                 row.aliases = list(existing | set(aliases))
-                if row.source != "c5c9_seed":
-                    row.source = "c5c9_seed"
+                if row.source != "domain_seed":
+                    row.source = "domain_seed"
             count += 1
         except Exception as e:
             logger.warning("entity_linker.seed failed for %s/%s: %s", project_id, name, e)
@@ -225,21 +235,21 @@ def _fallback_name_link(
 def link_entities_to_catalog_for_project(
     db: Session, project_id: str, kb_id: str
 ) -> int:
-    """Embed each C5/C9-seeded entity and link to best catalog table.
+    """Embed each domain-seeded entity and link to best catalog table.
 
     Falls back to name-match (lower confidence 0.55) if embedding service
     is unavailable. Returns count of links created/updated.
     """
-    if not getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
+    if not getattr(settings, "PROJECT_KNOWLEDGE_CACHE_ENABLED", False):
         return 0
-    if not getattr(settings, "ECISCO_BI_KG_LAYER_ENTITIES_ENABLED", True):
+    if not getattr(settings, "PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED", True):
         return 0
 
     entities = (
         db.query(ProjectEntity)
         .filter(
             ProjectEntity.project_id == project_id,
-            ProjectEntity.source == "c5c9_seed",
+            ProjectEntity.source == "domain_seed",
             ProjectEntity.is_deleted == False,  # noqa: E712
         )
         .all()

@@ -211,10 +211,10 @@ def main(product_keys: list[str]) -> int:
 
 if __name__ == "__main__":
     import sys
-    keys = sys.argv[1:] or [
-        "ecisco.crude_oil",
-        "ecisco.naphtha",
-        "ecisco.cracked_c5",
-        "ecisco.cracked_c9",
-    ]
+    # Default to the targets defined in the app's domain config (if any);
+    # pass explicit product_keys as CLI args to override.
+    keys = sys.argv[1:]
+    if not keys:
+        from app.services.domain_config import get_domain_config
+        keys = [t["product_key"] for t in get_domain_config("").get("forecast_targets", [])][:4]
     main(keys)

@@ -1200,7 +1200,7 @@ def bootstrap_nightly_forecast(
     """Create the idempotent nightly forecast automation task.
 
     Ensures:
-      1. The 12 Ecisco BI forecast targets exist (via seed_ecisco_forecast_targets)
+      1. Forecast targets exist (seeded from per-app domain config)
       2. The automation_runtime_agent exists for this (org, app)
       3. An AutomationTask with cron=0 2 * * *, skip_confirmation=true exists
 
@@ -1212,8 +1212,8 @@ def bootstrap_nightly_forecast(
         raise HTTPException(status_code=403, detail="Nightly forecast is disabled")
 
     from app.services.automation_runtime import ensure_automation_runtime_agent
-    from app.services.forecasting.seed_ecisco_targets import (
-        seed_ecisco_forecast_targets,
+    from app.services.forecasting.seed_targets import (
+        seed_forecast_targets,
         discover_and_seed_sku_targets,
     )
 
@@ -1222,7 +1222,7 @@ def bootstrap_nightly_forecast(
     cron = getattr(settings, "NIGHTLY_FORECAST_CRON", "0 2 * * *")
 
     # 1. Ensure targets exist (idempotent)
-    seed_ecisco_forecast_targets(db, org_id=org_id, app_id=app_id)
+    seed_forecast_targets(db, org_id=org_id, app_id=app_id)
     # 1b. Discover and seed ERP SKU targets (idempotent)
     sku_count = discover_and_seed_sku_targets(db, org_id=org_id, app_id=app_id)
     if sku_count:
@@ -1233,7 +1233,7 @@ def bootstrap_nightly_forecast(
 
     # 3. Find or create the automation task (idempotent by name + org)
     existing = db.query(AutomationTask).filter(
-        AutomationTask.name == "Nightly Ecisco BI Forecast",
+        AutomationTask.name == "Nightly Forecast",
         AutomationTask.org_id == org_id,
         AutomationTask.is_deleted == False,  # noqa: E712
     ).first()
@@ -1241,12 +1241,11 @@ def bootstrap_nightly_forecast(
         return {"task_id": existing.id, "status": "exists", "cron": cron}
 
     task = AutomationTask(
-        name="Nightly Ecisco BI Forecast",
+        name="Nightly Forecast",
         type="scheduled",
         description=(
-            "Silent nightly ML forecast for all 12 Ecisco BI dashboard "
-            "products. Writes to forecast_runs; dashboard reads via "
-            "/forecast-base-batch."
+            "Silent nightly ML forecast for all active forecast targets "
+            "in this org. Writes to forecast_runs."
         ),
         org_id=org_id,
         app_id=app_id,

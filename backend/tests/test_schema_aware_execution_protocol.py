@@ -11,7 +11,7 @@ Verifies the schema-aware query protocol no longer induces cautious
 - Preserves the existing structural rules (best-table, edges, auto-join,
   cite, no-hallucination).
 
-The block is only appended to `ecisco_bi_assistant` when
+The block is only appended to `data_agent` when
 `SCHEMA_GRAPH_ENABLED` is on, so the tests monkeypatch that flag on/off.
 """
 
@@ -32,7 +32,7 @@ def enabled(monkeypatch):
 
 
 def _prompt(enabled):
-    return get_system_prompt("ecisco_bi_assistant")
+    return get_system_prompt("data_agent")
 
 
 class TestExecutionFirstRules:
@@ -167,7 +167,7 @@ class TestFlagGatingAndScoping:
         from app.services.agent_prompts import settings
 
         monkeypatch.setattr(settings, "SCHEMA_GRAPH_ENABLED", False)
-        prompt = get_system_prompt("ecisco_bi_assistant")
+        prompt = get_system_prompt("data_agent")
         text = prompt.lower()
         assert "command classification" not in text
         assert "data quality reporter" not in text

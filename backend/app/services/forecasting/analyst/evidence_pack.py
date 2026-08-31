@@ -6,32 +6,39 @@ from typing import Optional
 
 import pandas as pd  # noqa: F401  (type context for forecast series)
 
-from app.models.market_dashboard import PRODUCT_GROUP_MAP
+from app.services.domain_config import get_domain_config
 from app.services.forecasting import narrative as fn
 from app.services.forecasting.domain_signals import (
     compute_seasonal_adjustment, get_elasticity,
 )
 
-UPSTREAM_MAP: dict[str, list[str]] = {
-    "isoprene": ["cracked_c5"], "piperylene": ["cracked_c5"],
-    "dcpd": ["cracked_c5"], "raffinate_c5": ["cracked_c5"],
-    "sis": ["cracked_c5"], "c5_resin": ["cracked_c5"],
-    "styrene": ["cracked_c9"], "blowing_agent": ["cracked_c9"],
-    "cracked_c5": ["naphtha"], "cracked_c9": ["naphtha"],
-    "naphtha": ["crude_oil"], "crude_oil": [],
-}
+# Supply-chain map (downstream product → upstream product ids) — loaded
+# from the app's domain config ("upstream_map" key). Empty config = empty
+# map: no upstream evidence, and callers degrade gracefully (unknown
+# product group, no upstream series).
+UPSTREAM_MAP: dict[str, list[str]] = dict(
+    (get_domain_config("") or {}).get("upstream_map") or {}
+)
 
-_UPSTREAM_NAME_ZH = {
-    "crude_oil": "原油", "naphtha": "石脑油",
-    "cracked_c5": "裂解碳五", "cracked_c9": "裂解碳九",
-}
+# Display labels for upstream products — from the app's domain config
+# ("product_labels" block). Absent labels fall back to the product id.
+_PRODUCT_LABELS: dict[str, str] = dict(
+    (get_domain_config("") or {}).get("product_labels") or {}
+)
 
 
 def _get_product_group(product_id: str) -> str:
-    """Classify a product as upstream/midstream/downstream via PRODUCT_GROUP_MAP."""
-    for group, pids in PRODUCT_GROUP_MAP.items():
-        if product_id in pids:
-            return group
+    """Classify a product as upstream/midstream/downstream.
+
+    ``UPSTREAM_MAP`` keys are downstream products; their upstream values
+    form the midstream set. Anything else is unknown (the market
+    dashboard group map was removed with that feature).
+    """
+    for _down, ups in UPSTREAM_MAP.items():
+        if product_id in ups:
+            return "upstream"
+    if product_id in UPSTREAM_MAP:
+        return "downstream"
     return "unknown"
 
 
@@ -103,7 +110,7 @@ def build_pack(*, product_id, name_zh, day, history_rows, upstream_histories,
         trend = fn.compute_trend_stats(rows)
         upstream.append({
             "product_id": up_id,
-            "name_zh": _UPSTREAM_NAME_ZH.get(up_id, up_id),
+            "name_zh": _PRODUCT_LABELS.get(up_id, up_id),
             "chg_30d_pct": (round(trend["chg_30d_pct"] * 100, 1)
                             if trend.get("chg_30d_pct") is not None else None),
             "percentile": compute_price_percentile(rows),

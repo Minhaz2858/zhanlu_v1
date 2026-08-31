@@ -10,7 +10,7 @@ Canonical volatility thresholds (single source of truth):
   HIGH_VOL_THRESHOLD = 5.0%   (daily std)
   MODERATE_VOL_THRESHOLD = 1.5%  (daily std)
 
-Ported from EDIA 5.1.2 (service/forecast_policy_service.py) and adapted for
+Ported from the legacy forecast policy service and adapted for
 Zhanlu's PostgreSQL-based ForecastAccuracyLog.
 
 Provides:

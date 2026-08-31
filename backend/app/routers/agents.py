@@ -41,7 +41,6 @@ from app.services.tracing import TraceContext
 from app.services.data_execution.session_state import SessionState, SessionStateService
 from app.services.data_execution.cache import cache_data_execution
 from app.services.data_execution.prompt_block import build_session_state_block
-from app.services.intent.export_intent import detect_export_intent
 from app.services.tool_handlers.artifact_tool import _create_artifact_tool
 from app.services.llm_service import llm_headers, llm_url, get_model, model_has_fixed_temperature
 from app.services.llm_router import resolve_effective_llm, resolve_message_project_id, EffectiveLLM
@@ -70,6 +69,7 @@ from app.services.dashboard_turn_guard import (
     is_live_dashboard_request,
     should_force_create_dashboard,
     dashboard_guard_blocked_tools,
+    dashboard_guard_should_block_queries,
     contract_confirmation_needed,
     dashboard_build_tool,
     fuzzy_dashboard_request,
@@ -83,6 +83,7 @@ from app.services.dashboard_turn_guard import (
     dashboard_narration_needs_nudge,
     build_dashboard_narration_nudge_message,
     dashboard_orchestrator_should_block,
+    verify_dashboard_build_produced_app,
 )
 from app.services.dashboard_intent import (
     dashboard_intent,
@@ -200,6 +201,14 @@ from app.services.goal_contract import (  # noqa: E402 — Goal-Contract closed 
     is_metadata_only_rows,
     pending_action_phrase,
 )
+from app.services.turn_planner import (  # noqa: E402 — deterministic turn plan
+    build_turn_plan,
+    mark_final_step_completed,
+    plan_completed_steps,
+    plan_step_added_frame,
+    plan_step_completed_frame,
+    plan_to_system_block,
+)
 from app.services.query_purpose import (  # noqa: E402 — query-purpose classifier
     TableRoleResolver,
     classify_query_purpose,
@@ -311,6 +320,33 @@ def _collect_artifact_titles(
             seen.add(t)
             out.append(t)
     return out
+
+
+def _phase_lock_should_block(parsed_call: dict) -> bool:
+    """Decide whether the deliverable phase-lock should block one parsed tool call.
+
+    Blocks ``create_artifact`` / ``run_sandbox_skill`` while the contract
+    requires data and no answer-tagged dataset exists yet.
+
+    Re-export exemption (2026-08-29): a ``create_artifact`` call carrying
+    ``source_execution_id`` builds from the CACHED execution of a PREVIOUS
+    turn — no new data collection is needed, so it must NOT be blocked.
+    Otherwise the documented re-export path (prompt RE-EXPORT HARD RULE +
+    SESSION STATE block) is impossible while the phase lock is on, and the
+    agent flails (re-runs data, tries sandbox, or fabricates a completion).
+    The tool itself TTL- and session-validates the id.
+    """
+    tool_name = parsed_call.get("tool_name")
+    if tool_name not in ("create_artifact", "run_sandbox_skill"):
+        return False
+    if tool_name == "create_artifact":
+        try:
+            args = json.loads(parsed_call.get("args_str") or "{}")
+        except (ValueError, TypeError):
+            args = {}
+        if (args or {}).get("source_execution_id"):
+            return False
+    return True
 
 
 def _artifact_aware_fallback(titles: list[str]) -> str:
@@ -450,6 +486,163 @@ def _data_summary_fallback(titles: list[str], user_content: str = "") -> str:
     )
 
 
+def _cad_build_fallback(tool_calls_for_frontend: list[dict]) -> str | None:
+    """Deterministic CAD build summary (2026-08-27).
+
+    The CAD Agent's Fusion tool loop returns structured, machine-readable
+    results (fusion360_verify_build PASS/FAIL + body bboxes, fusion360_info
+    scene dumps). The local LLM (qwen3.6-27b) frequently fails to synthesize
+    these into prose and emits the generic apology instead — so when a turn
+    actually ran Fusion 360 tools, build the answer deterministically from
+    the tool results rather than letting the model (or the generic fallback)
+    speak.
+
+    Returns a user-facing summary, or None when the turn had no Fusion 360
+    activity (caller falls through to the normal fallback chain).
+    """
+    if not tool_calls_for_frontend:
+        return None
+    fusion_calls = [
+        tc for tc in tool_calls_for_frontend
+        if isinstance(tc.get("name"), str) and tc["name"].startswith("fusion360")
+    ]
+    if not fusion_calls:
+        return None
+
+    def _res(tc: dict) -> dict:
+        r = tc.get("results") or {}
+        return r if isinstance(r, dict) else {}
+
+    any_success = any(_res(tc).get("success") for tc in fusion_calls)
+
+    if not any_success:
+        # Every Fusion call failed — surface the bridge-help text.
+        err = ""
+        for tc in reversed(fusion_calls):
+            e = _res(tc).get("error") or ""
+            if e:
+                err = e
+                break
+        if "not reachable" in err or "add-in" in err or "bridge" in err.lower():
+            return (
+                "Fusion 360 is not reachable right now. Open Autodesk Fusion 360 "
+                "and start the FusionMCP add-in (Tools > Add-Ins > Scripts and "
+                "Add-Ins > Add-Ins tab > FusionMCP > Run), then ask me to build again."
+            )
+        return "The Fusion 360 build did not complete: %s" % (err[:300] or "unknown error")
+
+    # Build succeeded — report from verify_build (ground truth) when present.
+    verify = next(
+        (tc for tc in reversed(fusion_calls) if tc.get("name") == "fusion360_verify_build"),
+        None,
+    )
+    if verify and _res(verify).get("ok"):
+        v = _res(verify)
+        parts = []
+        for b in (v.get("bodies") or []):
+            bb = b.get("bbox_mm")
+            if isinstance(bb, (list, tuple)) and len(bb) == 6:
+                w = abs(bb[3] - bb[0])
+                d = abs(bb[4] - bb[1])
+                h = abs(bb[5] - bb[2])
+                label = "box" if b.get("faces") == 6 else ("cylindrical" if b.get("faces") == 3 else "solid")
+                parts.append("%d×%d×%d mm %s" % (round(w), round(d), round(h), label))
+            else:
+                parts.append("body %d" % (b.get("index", "?")))
+        body_txt = ", ".join(parts) if parts else "%d bodies" % v.get("body_count", 0)
+        return (
+            "Build complete and verified (PASS): %s on the Fusion 360 canvas."
+            % body_txt
+        )
+    if verify:
+        # verify ran but returned FAIL — surface the REAL reasons (count /
+        # duplicates / params / dimension mismatches) instead of guessing.
+        v = _res(verify)
+        issues = v.get("issues") or []
+        dc = v.get("dimension_checks") or []
+        txt = "; ".join(str(i) for i in issues) if issues else "unknown"
+        if dc:
+            bad = [c for c in dc if not c.get("ok")]
+            if bad:
+                txt += "; measured: " + "; ".join(
+                    "%s %s" % (c.get("body_index"), c.get("actual")) for c in bad
+                )
+        return (
+            "The build did NOT pass verification: %s. Fix the discrepancy "
+            "and re-verify, or tell me exactly what is wrong." % txt
+        )
+
+    # No verify_build but info ran — report the body count from the scene dump.
+    # 2026-08-28: ONLY trust the info count when no modeling tool ran AFTER the
+    # last info call. A build that sketched→extruded after the info shows a
+    # stale count (observed: info said 0 bodies, then extrude built the part —
+    # the fallback wrongly told the user the canvas was empty).
+    info = next(
+        (tc for tc in reversed(fusion_calls) if tc.get("name") == "fusion360_info"),
+        None,
+    )
+    if info:
+        _info_idx = fusion_calls.index(info)
+        _modeled_after_info = any(
+            tc.get("name") not in _FUSION_READONLY_TOOLS
+            and i > _info_idx
+            for i, tc in enumerate(fusion_calls)
+        )
+    else:
+        _modeled_after_info = False
+    stdout = _res(info).get("stdout") or "" if info else ""
+    if not _modeled_after_info and "BODIES:" in stdout:
+        try:
+            nb = int(stdout.split("BODIES:")[1].split()[0])
+            return (
+                "Build complete — %d bod%s on the Fusion 360 canvas."
+                % (nb, "y" if nb == 1 else "ies")
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    if _modeled_after_info:
+        return (
+            "Fusion 360 modeling tools ran this turn, but the build was not "
+            "verified (no fusion360_verify_build call). The model may be on the "
+            "canvas — call fusion360_info or fusion360_verify_build to inspect "
+            "the current scene and confirm it matches what you asked for."
+        )
+    return "Fusion 360 tools ran this turn, but the build was not verified. Use fusion360_info to inspect the current model and confirm it matches what you asked for."
+
+
+# Fusion 360 tools that never create/modify geometry. Used by the CAD
+# destructive-reclear guard: a successful modeling tool in THIS turn means
+# a model is being built, so a later `fusion360_clear` would wipe it.
+_FUSION_READONLY_TOOLS = frozenset({
+    "fusion360_clear", "fusion360_ping", "fusion360_info", "fusion360_project",
+    "fusion360_verify_build", "fusion360_lookup_api",
+    "fusion360_make_drawing", "fusion360_export_geometry", "fusion360_save",
+    "fusion360_user_parameter", "fusion360_measure", "fusion360_physical_properties",
+})
+
+
+def _fusion_build_progress_this_turn(tool_calls_for_frontend: list[dict]) -> bool:
+    """True when a non-readonly fusion360 tool succeeded this turn (build in progress).
+
+    Read-only tools (info/ping/project/verify/lookup/export/drawing/param) do
+    NOT count — they never create or modify geometry, so a clear after them is
+    legitimate. Any other fusion360 tool (sketch_*, extrude, revolve, box,
+    cylinder, sweep, loft, coil, fillet, thread, hole, ...) with success=True
+    means the model is being built — a subsequent clear would wipe it.
+    """
+    for tc in tool_calls_for_frontend or []:
+        name = tc.get("name")
+        if not (isinstance(name, str) and name.startswith("fusion360")):
+            continue
+        if name in _FUSION_READONLY_TOOLS:
+            continue
+        r = tc.get("results") or {}
+        if isinstance(r, dict) and r.get("success"):
+            return True
+    return False
+
+
+
 def _choose_fallback(
     tool_calls_for_frontend: list[dict],
     orch_created: list[dict],
@@ -458,11 +651,18 @@ def _choose_fallback(
     """Choose the best fallback message based on what was produced this turn.
 
     Priority:
+    0. If Fusion 360 tools ran this turn → ``_cad_build_fallback`` (deterministic)
     1. If data-agent report cards exist → ``_data_summary_fallback``
     2. If any artifact exists → ``_artifact_aware_fallback``
     3. If user asked for a dashboard → ``_DASHBOARD_REDIRECT_FALLBACK``
     4. Otherwise → ``_GENERIC_EMPTY_CONTENT_FALLBACK``
     """
+    # FIX 2026-08-27 (CAD): a Fusion tool loop returns structured results the
+    # local LLM often fails to summarize (it emits the generic apology). Build
+    # the answer deterministically from the tool results instead.
+    _cad_msg = _cad_build_fallback(tool_calls_for_frontend)
+    if _cad_msg:
+        return _cad_msg
     titles = _collect_artifact_titles(tool_calls_for_frontend, orch_created)
     # Check if any data-agent report cards or raw rows were produced
     from app.services.goal_contract import is_metadata_only_rows  # lazy
@@ -591,6 +791,140 @@ def _is_degenerate_dataset(rows: list[dict] | None) -> bool:
     return True
 
 
+def _resolve_regenerate_turn(
+    messages: list[dict],
+    user_role: str,
+    user_content: str,
+    file_urls: list,
+    selected_skill,
+    selected_skill_id,
+):
+    """Resolve a ``regenerate: true`` turn by REUSING the last user message.
+
+    When the user clicks Regenerate, the frontend re-sends the SAME user
+    content — the original user message (with its file_urls / skill) is
+    already in ``conv.messages``. This helper walks back to it, copies its
+    context (content, uploaded files, skill) into the current turn so the
+    regenerated run is contextually identical to the original, then pops
+    the previous assistant reply so the model does not see its own old
+    answer (ChatGPT/Kimi replace the prior answer, they don't continue
+    from it) and the history stays [.., user, NEW assistant].
+
+    Pure function over the messages list (mutates it by popping the last
+    assistant message) — unit-testable without a DB.
+    """
+    for _m in reversed(messages):
+        if _m.get("role") == user_role:
+            if not user_content:
+                user_content = _m.get("content") or ""
+            if not file_urls:
+                _prev_urls = _m.get("file_urls") or []
+                file_urls = [
+                    u for u in _prev_urls
+                    if isinstance(u, str) and u.startswith("/api/uploads/")
+                ]
+            if not selected_skill and not selected_skill_id:
+                _prev_skill = _m.get("selected_skill")
+                _prev_skill_id = _m.get("selected_skill_id")
+                if _prev_skill:
+                    selected_skill = _prev_skill
+                if _prev_skill_id:
+                    selected_skill_id = _prev_skill_id
+            break
+    # Pop the previous assistant reply so (a) the model does not see
+    # its own old answer while regenerating, and (b) the conversation
+    # history stays [.., user, NEW assistant] with no stale duplicates.
+    for _i in range(len(messages) - 1, -1, -1):
+        if messages[_i].get("role") == "assistant":
+            messages.pop(_i)
+            break
+    return user_content, file_urls, selected_skill, selected_skill_id
+
+
+def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
+    """Extract Kimi/GPT-style data-source citations from a turn's tool calls.
+
+    Walks the tool calls a run produced (FSM ``tool_calls`` with a
+    ``result`` key carrying ``source_id`` / ``source_name`` / ``rows``,
+    or legacy ``tool_calls_for_frontend`` with a ``results`` dict) and
+    collects unique, human-readable sources the answer is grounded in.
+    Each citation is ``{"source_id": str|None, "source_name": str,
+    "rows": int|None}``.  Defensive: malformed shapes are skipped, and
+    the list is deduped by source id/name so repeated queries against
+    the same datasource render once.
+    """
+    citations: list[dict] = []
+    seen: set = set()
+
+    def _add_source(src_id, src_name, rows):
+        # source_name may arrive as a nested OBJECT (e.g.
+        # ``result["source"]`` is a dict {id, name, db_type}) — never
+        # feed a dict into the seen-set (unhashable) or into the chip.
+        if not isinstance(src_id, str):
+            src_id = None
+        if isinstance(src_name, dict):
+            src_name = src_name.get("name") or src_name.get("id") or src_name.get("label") or None
+        if not isinstance(src_name, str):
+            src_name = None
+        key = src_id or src_name or ""
+        if not key or key in seen:
+            return
+        seen.add(key)
+        citations.append({
+            "source_id": src_id,
+            "source_name": src_name or src_id or "data source",
+            "rows": rows,
+        })
+
+    for tc in tool_calls or []:
+        if not isinstance(tc, dict):
+            continue
+        # FSM shape: {"result": <result_data>}; legacy: {"results": <result>}
+        result = tc.get("result") if isinstance(tc.get("result"), dict) else tc.get("results")
+        if not isinstance(result, dict):
+            continue
+        src_id = result.get("source_id")
+        src_name = (
+            result.get("source_name")
+            or result.get("source")
+            or result.get("kb_name")
+            or result.get("database_name")
+        )
+        rows = result.get("rows")
+        if isinstance(rows, (list, tuple)):
+            row_count = len(rows)
+        elif isinstance(rows, int):
+            row_count = rows
+        else:
+            row_count = None
+        if src_id or src_name:
+            _add_source(src_id, src_name, row_count)
+        # fetch_data_batch / multi-query shapes: nested results[*]
+        sub_results = result.get("results")
+        if isinstance(sub_results, list):
+            for sub in sub_results:
+                if not isinstance(sub, dict):
+                    continue
+                sub_rows = sub.get("rows")
+                if isinstance(sub_rows, (list, tuple)):
+                    sub_row_count = len(sub_rows)
+                elif isinstance(sub_rows, int):
+                    sub_row_count = sub_rows
+                else:
+                    sub_row_count = None
+                sub_name = (
+                    sub.get("source_name")
+                    or sub.get("source")
+                    or sub.get("label")
+                    or sub.get("kb_name")
+                    or sub.get("database_name")
+                )
+                sub_id = sub.get("source_id")
+                if sub_id or sub_name:
+                    _add_source(sub_id, sub_name, sub_row_count)
+    return citations
+
+
 def _extract_data_rows_from_tool_call(tc: dict) -> tuple[list[dict], str] | None:
     """Best-effort extraction of (rows, source_label) from a tool call.
 
@@ -611,7 +945,13 @@ def _extract_data_rows_from_tool_call(tc: dict) -> tuple[list[dict], str] | None
     # Shape A — direct rows at top level (ask_data_agent, execute_query, …).
     direct_rows = result.get("rows")
     if isinstance(direct_rows, (list, tuple)) and direct_rows:
-        src = result.get("source_name") or "the data source"
+        src = (
+            result.get("source_name")
+            or result.get("source")
+            or result.get("kb_name")
+            or result.get("database_name")
+            or "the data source"
+        )
         return (list(direct_rows), src)
     # Shape B — fetch_data_batch: nested ``results[*].rows``.
     sub_results = result.get("results")
@@ -624,6 +964,28 @@ def _extract_data_rows_from_tool_call(tc: dict) -> tuple[list[dict], str] | None
                 # Use the first non-empty sub-query as the primary one.
                 return (list(sub_rows), str(sub.get("label") or "the data source"))
     return None
+
+
+# 2026-08-26: strip-residue threshold. The post-loop hygiene strips
+# (promise / internal-reference / SQL-narration) can leave a SHORT fragment
+# behind (e.g. "Let me check the warehouse…", a partial sentence) that is
+# neither empty nor a recognized placeholder prefix. Such residue must not
+# block the deferred synthesis prose from reaching the bubble — otherwise
+# the user sees a mangled fragment while the real analysis sits unused.
+# A genuinely short answer (e.g. "¥165.03M, up 5.7%.") stays untouched:
+# the replacement rule below requires the synthesis candidate to be
+# substantially richer than the residue.
+_WEAK_CONTENT_MAX_CHARS = 160
+_WEAK_CONTENT_SYNTH_MIN_CHARS = 400
+
+
+def _is_weak_strip_residue(acc_text: str, synth_text: str) -> bool:
+    """True when ``acc_text`` looks like stripped residue AND ``synth_text``
+    is a substantially richer candidate that should replace it."""
+    return (
+        0 < len(acc_text) < _WEAK_CONTENT_MAX_CHARS
+        and len(synth_text) >= _WEAK_CONTENT_SYNTH_MIN_CHARS
+    )
 
 
 def _data_rows_fallback(
@@ -777,6 +1139,27 @@ def _data_rows_fallback(
             # So we now ALWAYS run the aggregate fallback when there are
             # actual data rows. The user gets a real written narrative
             # around the data card, never just "Analyzing N rows…".
+            # 2026-08-26: business-aware deterministic report FIRST — for
+            # known intents (contract performance) build the real business
+            # report from the rows (contracted vs delivered, execution
+            # rate, top customers, MoM) instead of generic stats. The
+            # report uses ## headers so the frontend suppresses the raw
+            # data table and shows the report as the answer.
+            try:
+                from app.services.db.business_reports import (
+                    try_build_business_report,
+                )  # lazy
+
+                biz_report = try_build_business_report(
+                    user_content or "", dict_rows, src,
+                )
+                if biz_report:
+                    return biz_report
+            except Exception as _biz_exc:
+                logger.warning(
+                    "_data_rows_fallback: business report builder failed: %s",
+                    _biz_exc,
+                )
             try:
                 return _build_aggregate_fallback(dict_rows, src, user_content or "")
             except Exception as _fallback_exc:
@@ -936,18 +1319,18 @@ def _classify_column(name: str, sample_value) -> str:
 
 
 def _format_money(v: float) -> str:
+    # Report-consistent money: M for >= 1M, plain with commas below.
+    # Avoid mixing 万 (Chinese unit) with M/plain inside one report.
     if abs(v) >= 1_000_000_000:
         return f"¥{v/1_000_000_000:,.2f}B"
     if abs(v) >= 1_000_000:
         return f"¥{v/1_000_000:,.2f}M"
-    if abs(v) >= 10_000:
-        return f"¥{v/10_000:,.2f}万"
     return f"¥{v:,.2f}"
 
 
 def _format_qty(v: float, unit_hint: str = "") -> str:
-    if abs(v) >= 10_000:
-        return f"{v/10_000:,.2f}万 {unit_hint}".strip()
+    # Plain comma-separated quantity with optional unit; never 万 — the
+    # mixed unit style reads inconsistently next to M-formatted money.
     return f"{v:,.2f} {unit_hint}".strip()
 
 
@@ -1007,6 +1390,40 @@ def _build_aggregate_fallback(
     """
     if not dict_rows:
         return _GENERIC_EMPTY_CONTENT_FALLBACK
+
+    # ── 0. Honesty guard — a single metadata/summary row with NO numeric
+    #    values (e.g. an aggregate over zero rows, a MAX(date) probe, or a
+    #    COUNT(*) = 0) is NOT a real report. Narration would fabricate a
+    #    confident story ("0 records spanning X to X") from thin air. Say
+    #    so plainly instead, with the query source, so the user knows the
+    #    bound data source simply has no data for what they asked.
+    _row0 = dict_rows[0]
+    _has_numeric = any(
+        isinstance(v, (int, float)) for r in dict_rows for v in r.values()
+    )
+    if len(dict_rows) == 1 and not _has_numeric:
+        _zh = any("\u4e00" <= ch <= "\u9fff" for ch in (user_msg or ""))
+        _scope = " ".join(
+            str(v) for v in _row0.values() if v is not None and str(v).strip()
+        )
+        _snippet = f" ({_scope})" if _scope else ""
+        return (
+            (
+                f"No data found for the requested period/scope in `{src}`. "
+                f"The only row returned was a metadata/summary row{_snippet} "
+                "with no actual numbers — the bound data source has no "
+                "matching records (table may be stale or the period has no "
+                "data). Try a different date range, or ask to check which "
+                "table/data source holds the data."
+            )
+            if not _zh
+            else (
+                f"在 `{src}` 中未找到所请求时段/范围的数据。"
+                f"返回的唯一一行是元数据/汇总行{_snippet}，不含任何实际数值——"
+                "说明绑定的数据源没有匹配记录（表数据可能已过期，或该时段无数据）。"
+                "请尝试其他日期范围，或询问数据存放在哪张表/哪个数据源。"
+            )
+        )
 
     # ── 1. Classify every column ───────────────────────────────────
     first = dict_rows[0]
@@ -1153,8 +1570,30 @@ def _build_aggregate_fallback(
             date_min = dates[0]
             date_max = dates[-1]
 
-    # Header — generic, derived from the actual data
-    out.append(f"# {L('Data Report', '数据报告')}\n")
+    # Header — title derived from the user's actual request when possible
+    # ("give me top customer in docx" → "Top Customer Report"), falling
+    # back to a generic label. Avoids a generic "Data Report" on every
+    # deliverable regardless of what was asked.
+    _title = ""
+    if user_msg:
+        _t = re.sub(r"\s+", " ", (user_msg or "").strip())
+        _t = re.sub(
+            r"\s+(in|as|using|into)\s+(a\s+)?(docx|word|pdf|pptx|powerpoint|excel|xlsx|"
+            r"markdown|md|html|file|document|deck|spreadsheet|formate?|format)\s*"
+            r"(file|document|deck|spreadsheet)?\s*[\\.\\?]?\s*$",
+            "", _t, flags=re.IGNORECASE,
+        ).strip()
+        _t = re.sub(
+            r"^(please\s+|can\s+you\s+|i\s+want\s+|i\s+need\s+|give\s+me\s+|"
+            r"show\s+me\s+|make\s+me\s+|generate\s+|create\s+)\s*",
+            "", _t, flags=re.IGNORECASE,
+        ).strip()
+        if _t and len(_t) >= 3:
+            _title = _t[0].upper() + _t[1:]
+            _title = re.sub(r"\s+", " ", _title).rstrip(" .?!")
+            if not _title.lower().endswith("report"):
+                _title = f"{_title} Report"
+    out.append(f"# {L(_title or 'Data Report', _title or '数据报告')}\n")
     out.append(
         f"**{L('Scope', '范围')}:** {len(dict_rows)} {noun_plural} "
         f"{L('from', '来自')} `{src}`"
@@ -1165,9 +1604,21 @@ def _build_aggregate_fallback(
     # ── 5b. Executive Summary (4-6 sentence paragraph) ────────────
     summary_sentences: list[str] = []
     if headline_metric and headline_vals:
-        # Generic, data-driven label — no hardcoded scenario terms
-        value_label_en = f"Total {headline_label}" if headline_label else "Total value"
-        value_label_zh = headline_label if headline_label and any("\u4e00" <= c <= "\u9fff" for c in headline_label) else f"{headline_label or '数值'}总额"
+        # Generic, data-driven label — no hardcoded scenario terms.
+        # Avoid "Total Total Revenue": the column may already be named
+        # "Total Revenue" / "总金额", so strip a leading "Total " / "总计"
+        # before prepending our own label.
+        _base_label = (headline_label or headline_metric or "").strip()
+        if _base_label.lower().startswith("total "):
+            _base_label = _base_label[6:].strip()
+        elif _base_label.startswith("总计"):
+            _base_label = _base_label[2:].strip()
+        value_label_en = f"Total {_base_label}" if _base_label else "Total value"
+        value_label_zh = (
+            _base_label
+            if _base_label and any("\u4e00" <= c <= "\u9fff" for c in _base_label)
+            else f"{_base_label or '数值'}总额"
+        )
         if headline_metric in money_cols:
             summary_sentences.append(
                 f"{L(value_label_en, value_label_zh)} "
@@ -1473,7 +1924,8 @@ async def _research_analyst_fallback(
     agent_name: str | None,
     agent_app,
     max_data_chars: int = 6000,
-    timeout_s: float = 25.0,
+    timeout_s: float = 60.0,
+    endpoint=None,
 ) -> str | None:
     """One-shot forced-synthesis for the institutional-grade protocol.
 
@@ -1558,7 +2010,7 @@ async def _research_analyst_fallback(
         import asyncio
         messages = [{"role": "user", "content": user_prompt}]
         result = await asyncio.wait_for(
-            _call_synthesis_llm(sys_prompt, messages),
+            _call_synthesis_llm(sys_prompt, messages, endpoint=endpoint),
             timeout=timeout_s,
         )
         text = (result.get("content") or "").strip() if isinstance(result, dict) else ""
@@ -1693,12 +2145,10 @@ async def _force_llm_synthesis(
     """
     import time as _time
     _synth_t0 = _time.monotonic()
-    _is_qwen = _is_qwen_local_model(endpoint) if endpoint is not None else False
     logger.info(
-        "DIAG _force_llm_synthesis entry: rows=%d, endpoint=%s, is_qwen=%s",
+        "DIAG _force_llm_synthesis entry: rows=%d, endpoint=%s",
         len(rows) if rows else 0,
         getattr(endpoint, "model_id", "?") if endpoint else "None",
-        _is_qwen,
     )
     if not rows:
         logger.warning("DIAG _force_llm_synthesis: rows empty, returning '' immediately")
@@ -1742,61 +2192,29 @@ async def _force_llm_synthesis(
         preagg_block = ""
 
     for attempt in range(max_retries):
-        if _is_qwen:
-            # qwen3.6-27b: use the CEO-grade 5-section prompt
-            # (re-applied 2026-08-25 — the file was reverted by an
-            # external process; this restores the Session 16 fix)
-            prompt = _build_qwen3_synthesis_prompt(
-                user_question=user_msg,
-                data_rows=rows,
-                columns=_columns,
-                table_name="query_result",
-            )
-            prompt += (
-                f"\n\nADDITIONAL CONTEXT (use these to compute specific numbers):\n"
-                f"{preagg_block}\n\n"
-                f"Column value ranges:\n{col_summary}\n\n"
-                f"Data sample (first {min(len(rows), _MAX_ROWS_IN_PROMPT)} rows):\n{rows_sample}\n\n"
-                f"REMINDER: You MUST produce ALL 5 sections in order: "
-                f"Executive Summary, Key Metrics, Detailed Breakdown, "
-                f"Risks & Opportunities, Recommended Actions. Do NOT stop "
-                f"after the Executive Summary — the user expects a complete "
-                f"report with all sections filled in."
-            )
-        elif attempt == 0:
-            # 2026-08-26: rewrite for "use ALL the data" — no more
-            # 5-8 sentence minimum. Demand a full 400-800 word report
-            # based on the actual data, generic enough to work for any
-            # database / schema (no hardcoded column names).
-            prompt = (
-                f"You are a senior data analyst. The user asked: \"{user_msg[:300]}\"\n\n"
-                f"The database returned **{len(rows)} rows** of real business data. "
-                f"You have been given the FULL dataset below (or a representative sample if the dataset is very large).\n\n"
-                "Write a COMPREHENSIVE 400-800 word business report based on what you see in the data. "
-                "Use the user's specific question as your framing. Structure your answer as:\n\n"
-                "1. **Executive Summary** (4-6 sentences) — the headline finding. State what the data shows overall, with specific numbers (totals, averages, top items). Use business terms, not raw column names.\n\n"
-                "2. **Key Numbers** (5-10 bullet points) — concrete figures with their meaning. Pick the most important columns for this question (typically the largest numeric columns or columns matching the user's intent). For each: total, average, range, top contributor.\n\n"
-                "3. **Trends & Comparisons** (3-5 sentences) — patterns over time if there's a date column, comparisons between groups if there's a category column, or distribution insights (concentration, skew, spread).\n\n"
-                "4. **Notable Anomalies** (2-4 bullets) — outliers, surprises, missing data, anything that needs attention.\n\n"
-                "5. **Recommended Next Steps** (3-5 bullets) — concrete actions the user should take based on the findings.\n\n"
-                "CRITICAL RULES (apply to every database, any schema):\n"
-                "- USE THE ACTUAL DATA: compute sums, averages, and rankings YOURSELF from the rows. Do NOT just describe column names or the SQL.\n"
-                "- USE BUSINESS TERMS: instead of column names, use what the data represents (e.g. 'total contract value', 'revenue per customer', 'daily volume' — pick the term that fits the user's question).\n"
-                "- The user asked in: " + ("English" if not any('\u4e00' <= c <= '\u9fff' for c in user_msg) else "Chinese") + ". Respond in the same language.\n"
-                "- NEVER say 'I've completed your request' / 'Here is the artifact' / 'The data has been retrieved' / 'I have analyzed'. Start directly with the analysis.\n"
-                "- NEVER just list column names. Every number must come from the data.\n"
-                "- If a column is an ID (ends with _id / id / code / no.) or a date/time, DO NOT report it as a 'Key Number' — focus on amount/quantity/margin/rate columns instead.\n"
-                "- If the dataset has <5 rows or appears to be only metadata (min/max/count), explain what was returned and suggest how to ask a more specific question.\n\n"
-                f"=== PRE-AGGREGATED STATISTICS (computed from ALL {len(rows)} rows) ===\n"
-                f"{preagg_block or '(no aggregates computed)'}\n\n"
-                f"=== COLUMN SUMMARY (value ranges per column) ===\n"
-                f"{col_summary or '(no column summary)'}\n\n"
-                f"=== DATA ROWS ({min(len(rows), _MAX_ROWS_IN_PROMPT)} of {len(rows)} rows shown) ===\n"
-                f"{rows_sample}\n\n"
-                "Write the report now. Use the structure above. Compute numbers FROM the data, do not invent them."
-            )
-        else:
-            # Attempt 2: even more explicit + give up on 5-8 sentence cap
+        # 2026-08-27: CEO-grade 5-section prompt used for ALL models
+        # (was qwen3-local-only; the generic prompt below is now the retry
+        # fallback, keeping quality high on first attempt for deepseek etc.)
+        prompt = _build_ceo_synthesis_prompt(
+            user_question=user_msg,
+            data_rows=rows,
+            columns=_columns,
+            table_name="query_result",
+        )
+        prompt += (
+            f"\n\nADDITIONAL CONTEXT (use these to compute specific numbers):\n"
+            f"{preagg_block}\n\n"
+            f"Column value ranges:\n{col_summary}\n\n"
+            f"Data sample (first {min(len(rows), _MAX_ROWS_IN_PROMPT)} rows):\n{rows_sample}\n\n"
+            f"REMINDER: You MUST produce ALL 5 sections in order: "
+            f"Executive Summary, Key Metrics, Detailed Breakdown, "
+            f"Risks & Opportunities, Recommended Actions. Do NOT stop "
+            f"after the Executive Summary — the user expects a complete "
+            f"report with all sections filled in."
+        )
+        if attempt > 0:
+            # Retry fallback: even more explicit "previous attempt failed"
+            # prompt so the model cannot dodge the report.
             prompt = (
                 "IMPORTANT: Your previous attempt did not produce a real "
                 "analysis. You MUST write actual content now.\n\n"
@@ -1816,15 +2234,11 @@ async def _force_llm_synthesis(
             )
 
         try:
-            # Wrap synthesis LLM call in a timeout so a hung vLLM
-            # doesn't make the user wait forever. qwen3.6-27b needs
-            # a longer cap (60s) because the CEO-grade prompt is larger
-            # and the model can take 30-50s to produce a full report.
-            # Non-qwen (e.g. deepseek-chat) needs at least 30s to produce
-            # a 400-800 word report based on the full data; 12s is too
-            # tight (2026-08-26 — was 12s, raised to 45s).
-            # Re-applied 2026-08-25 — the file was reverted.
-            _SYNTH_TIMEOUT_S = 60.0 if _is_qwen else 45.0
+            # Wrap synthesis LLM call in a timeout so a hung endpoint
+            # doesn't make the user wait forever. 60s gives big models
+            # (qwen3.6-27b local vLLM, deepseek, etc.) room to produce a
+            # full CEO-grade 5-section report (30-50s typical).
+            _SYNTH_TIMEOUT_S = 60.0
             result = await asyncio.wait_for(
                 synth_call_fn(prompt, conversation_history),
                 timeout=_SYNTH_TIMEOUT_S,
@@ -2613,11 +3027,7 @@ DATA_PRODUCING_TOOLS: frozenset = frozenset({
 # collapse to the generic "I gathered some information" fallback because
 # the row pipeline ignores them entirely.
 TEXT_PRODUCING_TOOLS: frozenset = frozenset({
-    "ask_perception",
-    "ask_intelligence",
-    "ask_diagnosis",
     "ask_decision",
-    "ask_pricing",
     "ask_forecast_pricing",
 })
 
@@ -2686,12 +3096,9 @@ EXPERIENCE_HOOK_TIMEOUT_S = float(os.environ.get("ZHANLU_EXPERIENCE_HOOK_TIMEOUT
 # ``tool_progress`` SSE frames so the client sees liveness and proxies
 # don't idle-kill the connection. Fast utility tools are excluded.
 _LONG_RUNNING_TOOLS = frozenset({
-    "ask_perception", "ask_intelligence", "ask_diagnosis",
-    "ask_perception_intelligence_diagnosis", "ask_forecast_pricing",
-    "ask_data_agent", "ask_orchestrator", "ask_weekly_report",
-    "ask_pricing", "ask_forecast", "ask_report", "ask_rag_research",
+    "ask_data_agent", "ask_weekly_report",
+    "ask_forecast", "ask_report",
     "ask_knowledge_graph", "ask_decision", "ask_macro_override",
-    "ask_erp_kpi", "ask_erp_writeback",
     "web_search", "execute_automation", "execute_code",
     # Artifact / dashboard generation can take tens of seconds to minutes
     # (Jinja scaffold + DB writes + optional git commits + poller start).
@@ -2708,93 +3115,73 @@ def _is_long_running_tool(tool_name: str) -> bool:
     return is_long_running_tool(tool_name, _LONG_RUNNING_TOOLS)
 
 
-# ── qwen3.6-27b Local Fast Mode (2026-08-25) ────────────────────────────────
-# Per-model overrides that fire ONLY when the user's selected model is a
-# qwen3.* served on local vLLM. DeepSeek-chat path is unaffected.
-
-def _is_qwen_local_model(endpoint) -> bool:
-    """True iff the user's selected model is a qwen3.* served on local vLLM.
-
-    Used to gate the per-model fast-mode overrides (QWEN3_* config flags).
-    Detection: model_id starts with "qwen3" AND the endpoint is private OR
-    the api_key is empty/\"EMPTY\" (vLLM doesn't validate keys).
-
-    Returns False for:
-    - deepseek-chat (cloud API)
-    - qwen3 with a real API key (cloud-hosted qwen, not local vLLM)
-    - None/empty endpoint
-    """
-    if not endpoint or not getattr(endpoint, "model_id", None):
-        return False
-    mid = str(endpoint.model_id).lower()
-    if not mid.startswith("qwen3"):
-        return False
-    if getattr(endpoint, "is_private", False):
-        return True
-    api_key = str(getattr(endpoint, "api_key", "") or "").strip()
-    return api_key in {"", "EMPTY"}
-
+# ── Agent fast mode (2026-08-25, universalized 2026-08-27) ────────────────
+# Originally gated to qwen3-local vLLM; proven to cut turn time 200s → 42-52s
+# while keeping answer quality (8-15 LLM calls/turn → 3-5). Now applied to
+# ALL models — big cloud models (deepseek, etc.) are equally capable and
+# faster, so the same lean loop produces smoother, faster, high-quality
+# answers. No per-model hardcoding.
 
 def _effective_max_tool_iterations(endpoint) -> int:
     """Return the effective MAX_TOOL_ITERATIONS for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_MAX_TOOL_ITERATIONS
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_MAX_TOOL_ITERATIONS
     return MAX_TOOL_ITERATIONS
 
 
 def _effective_goal_contract_enabled(endpoint) -> bool:
     """Return whether goal-contract is enabled for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_GOAL_CONTRACT_ENABLED
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_GOAL_CONTRACT_ENABLED
     return settings.GOAL_CONTRACT_ENABLED
 
 
 def _effective_verify_nudge_max(endpoint) -> int:
     """Return the effective VERIFY_NUDGE_MAX for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_VERIFY_NUDGE_MAX
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_VERIFY_NUDGE_MAX
     return settings.VERIFY_NUDGE_MAX
 
 
 def _effective_data_agent_budget_seconds(endpoint) -> float:
     """Return the effective DATA_AGENT_BUDGET_SECONDS for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_DATA_AGENT_BUDGET_SECONDS
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_DATA_AGENT_BUDGET_SECONDS
     from app.services.tool_handlers.delegation_tools import DATA_AGENT_BUDGET_SECONDS
     return DATA_AGENT_BUDGET_SECONDS
 
 
 def _effective_self_eval_max_replans(endpoint) -> int:
     """Return the effective SELF_EVAL_MAX_REPLANS for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_SELF_EVAL_MAX_REPLANS
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_SELF_EVAL_MAX_REPLANS
     return settings.SELF_EVAL_MAX_REPLANS
 
 
 def _effective_self_eval_timeout(endpoint) -> float:
     """Return the effective SELF_EVAL_LLM_GATE_TIMEOUT_S for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_SELF_EVAL_LLM_GATE_TIMEOUT_S
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_SELF_EVAL_LLM_GATE_TIMEOUT_S
     return settings.SELF_EVAL_LLM_GATE_TIMEOUT_S
 
 
 def _effective_force_synthesis_max_retries(endpoint) -> int:
     """Return the effective max_retries for _force_llm_synthesis."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_FORCE_SYNTHESIS_MAX_RETRIES
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_FORCE_SYNTHESIS_MAX_RETRIES
     return 1  # legacy default
 
 
 def _effective_synthesis_max_tokens(endpoint) -> int:
     """Return the effective synthesis max_tokens for the user's model."""
-    if _is_qwen_local_model(endpoint) and settings.QWEN3_FAST_MODE_ENABLED:
-        return settings.QWEN3_SYNTHESIS_MAX_TOKENS
+    if settings.AGENT_FAST_MODE_ENABLED:
+        return settings.AGENT_FAST_SYNTHESIS_MAX_TOKENS
     return 1536  # legacy default
 
 
-# ── Component 4: CEO-grade synthesis prompt for qwen3.6-27b ─────────────────
+# ── Component 4: CEO-grade synthesis prompt (all models) ─────────────────
 
-_QWEN3_SYNTHESIS_TEMPLATE = """\
+_CEO_SYNTHESIS_TEMPLATE = """\
 You are a CEO-grade business analyst. Using ONLY the data below, write a \
 comprehensive answer in this exact structure:
 
@@ -2824,13 +3211,13 @@ _MAX_INLINE_ROWS = 100
 _MAX_INLINE_CHARS = 4000
 
 
-def _build_qwen3_synthesis_prompt(
+def _build_ceo_synthesis_prompt(
     user_question: str,
     data_rows: list,
     columns: list,
     table_name: str = "data",
 ) -> str:
-    """Build the CEO-grade synthesis prompt for qwen3.6-27b.
+    """Build the CEO-grade 5-section synthesis prompt (all models).
 
     Inlines up to 100 rows / 4000 chars of data directly in the prompt so
     the model doesn't have to "look up" the data from a tool result.
@@ -2900,7 +3287,7 @@ def _build_qwen3_synthesis_prompt(
                 date_range = f"{dates[0]} to {dates[-1]}"
             break
 
-    return _QWEN3_SYNTHESIS_TEMPLATE.format(
+    return _CEO_SYNTHESIS_TEMPLATE.format(
         measure_label=measure_label,
         currency_symbol=currency_symbol,
         total=total,
@@ -3173,6 +3560,80 @@ async def _guarantee_done(agen):
             pass
 
 
+async def _disconnect_safe_stream(agen_factory):
+    """Run the agent-loop SSE generator detached from the client connection.
+
+    The v3 stream runs the WHOLE agent loop inside an async generator that
+    is consumed by a StreamingResponse. When the SSE client disconnects
+    (browser tab closed, remote-browser session recycled, proxy idle
+    timeout), Starlette calls ``aclose()`` on the generator — the loop is
+    cancelled mid-turn and the final assistant message is NEVER persisted
+    (symptom: conversation frozen with an empty assistant reply, dashboard
+    build silently dead, no ``done`` frame). The unstable remote browser
+    recycled every few minutes, killing multi-step dashboard builds
+    repeatedly.
+
+    Fix: consume the generator in a background asyncio task that pushes
+    SSE frames into a queue; this wrapper yields from the queue. When the
+    client disconnects, the wrapper's ``finally`` does NOT cancel the pump
+    task — the agent loop keeps running to completion, persists its final
+    message (the loop owns its own DB session, see event_stream's
+    stream_db shadow), and only then exits.
+
+    ``agen_factory`` must be a zero-arg CALLABLE returning a fresh async
+    generator (e.g. the ``event_stream`` / ``_fsm_event_stream`` closures)
+    — the pump creates exactly one instance.
+    """
+    queue: asyncio.Queue = asyncio.Queue()
+    _SENTINEL = object()
+    pump_task: "asyncio.Task | None" = None
+
+    async def _pump():
+        agen = None
+        try:
+            agen = agen_factory()
+            async for frame in agen:
+                await queue.put(frame)
+        except (GeneratorExit, asyncio.CancelledError):
+            raise
+        except BaseException as exc:  # noqa: BLE001 — surface loop failures as SSE error frames
+            logger.error(
+                "v3 stream: background agent-loop pump failed: %s",
+                exc,
+                exc_info=True,
+            )
+            try:
+                await queue.put(
+                    'data: ' + json.dumps({
+                        "type": "error",
+                        "message": f"Agent loop failed: {exc}",
+                    }) + '\n\n'
+                )
+            except Exception:
+                pass
+        finally:
+            if agen is not None:
+                try:
+                    await agen.aclose()
+                except Exception:
+                    pass
+            await queue.put(_SENTINEL)
+
+    try:
+        pump_task = asyncio.create_task(_pump())
+        while True:
+            frame = await queue.get()
+            if frame is _SENTINEL:
+                break
+            yield frame
+    finally:
+        # Client disconnect / response closed: stop streaming frames but
+        # DO NOT cancel the pump task — the agent loop continues and
+        # persists its final message in the background.
+        if pump_task is not None and not pump_task.done():
+            pass  # detached by design: the loop finishes on its own
+
+
 def _estimate_ask_data_agent_cap(user_content: str) -> int:
     """Estimate how many ``ask_data_agent`` calls the query likely needs.
 
@@ -3333,7 +3794,13 @@ def _detect_tool_call_loop(
     return None
 
 
-def _persisted_result_str(tool_name: str, result: dict, conversation_id: str) -> str:
+def _persisted_result_str(
+    tool_name: str,
+    result: dict,
+    conversation_id: str,
+    *,
+    context_window_tokens: int | None = None,
+) -> str:
     """Serialize a tool result dict, applying Layer 2 (per-result) persistence.
 
     Large results are written to disk and replaced with an inline preview +
@@ -3346,7 +3813,13 @@ def _persisted_result_str(tool_name: str, result: dict, conversation_id: str) ->
             getattr(settings, "AGENT_WORKSPACE_DIR", "agent_workspace"),
             settings.TOOL_RESULT_STORAGE_DIR,
         )
-        _ctx_window = get_context_window(get_model())
+        # The real, per-model context window (admin-set or auto-probed)
+        # drives persistence budgets — NOT the model-name heuristic, so an
+        # unknown/small-window model never overflows and a large one is
+        # fully used.  Falls back to the heuristic when not available.
+        _ctx_window = get_context_window(
+            get_model(), context_window_tokens=context_window_tokens,
+        )
         config = budget_for_context_window(_ctx_window)
         new_str, _meta = persist_tool_result(
             tool_name, result_str, storage_dir, config, conversation_id
@@ -3362,6 +3835,8 @@ def _apply_turn_budget_to_messages(
     batch_tool_call_ids: list[str],
     batch_tool_names: list[str],
     conversation_id: str,
+    *,
+    context_window_tokens: int | None = None,
 ) -> None:
     """Layer 3: if total tool output in this turn exceeds budget, spill largest.
 
@@ -3386,7 +3861,9 @@ def _apply_turn_budget_to_messages(
 
         total = sum(len(c) for _, _, c in batch_contents)
         config = budget_for_context_window(
-            get_context_window(get_model())
+            get_context_window(
+                get_model(), context_window_tokens=context_window_tokens,
+            )
         )
         if total <= config.turn_budget_chars:
             return
@@ -3591,10 +4068,68 @@ ACTIVITY_STEP_DESCRIPTIONS = {
     "process_registry_list": "Listing running processes",
     "process_registry_tail": "Tailing process logs",
     "process_registry_kill": "Stopping a running process",
+
+    # ── CAD (Fusion 360) tools ─────────────────────────────────────
+    # Human-readable verbs so the live feed shows WHAT the agent is doing
+    # (e.g. "Extruding the profile 4 mm (pos)") instead of generic
+    # "Running tool: fusion360_extrude". Unfilled {placeholders} are
+    # stripped by _format_activity_description when args don't carry them.
+    "fusion360_ping":                "Pinging the Fusion 360 bridge",
+    "fusion360_info":                "Inspecting the Fusion 360 scene",
+    "fusion360_execute_python":      "Running Fusion 360 Python",
+    "fusion360_lookup_api":          "Looking up the Fusion 360 API",
+    "fusion360_sketch_create":       "Creating a sketch on the active plane",
+    "fusion360_sketch_line":         "Drawing a sketch line",
+    "fusion360_sketch_rectangle":    "Drawing a rectangle on the sketch",
+    "fusion360_sketch_circle":       "Drawing a circle (r={radius_mm} mm)",
+    "fusion360_sketch_polygon":      "Drawing a {sides}-sided polygon (r={circumradius_mm} mm)",
+    "fusion360_sketch_arc":          "Drawing an arc",
+    "fusion360_sketch_arc_3point":   "Drawing a 3-point arc",
+    "fusion360_sketch_spline":       "Drawing a spline",
+    "fusion360_extrude":             "Extruding the profile {distance_mm} mm ({direction})",
+    "fusion360_revolve":             "Revolving the profile",
+    "fusion360_loft":                "Lofting between profiles",
+    "fusion360_sweep":               "Sweeping the profile",
+    "fusion360_cylinder":            "Creating a cylinder ({diameter_mm} mm × {height_mm} mm)",
+    "fusion360_sphere":              "Creating a sphere",
+    "fusion360_torus":               "Creating a torus",
+    "fusion360_coil":                "Creating a coil",
+    "fusion360_shell":               "Shelling the body",
+    "fusion360_hole":                "Drilling a hole",
+    "fusion360_thread":              "Adding a thread",
+    "fusion360_chamfer":             "Chamfering the body {distance_mm} mm",
+    "fusion360_edge_chamfer":        "Chamfering edges {distance_mm} mm",
+    "fusion360_fillet":              "Filleting edges",
+    "fusion360_move":                "Moving body {body_index} by ({dx_mm}, {dy_mm}, {dz_mm}) mm",
+    "fusion360_extend_face":         "Extending body {body_index} {distance_mm} mm ({face})",
+    "fusion360_mirror":              "Mirroring the body",
+    "fusion360_combine":             "Combining bodies",
+    "fusion360_project":             "Projecting geometry onto the sketch",
+    "fusion360_construction_plane":  "Adding a construction plane",
+    "fusion360_rectangular_pattern": "Creating a rectangular pattern",
+    "fusion360_circular_pattern":    "Creating a circular pattern",
+    "fusion360_component":           "Creating a component",
+    "fusion360_revolute_joint":      "Adding a revolute joint",
+    "fusion360_rigid_joint":         "Adding a rigid joint",
+    "fusion360_slider_joint":        "Adding a slider joint",
+    "fusion360_joint_limits":        "Setting joint limits",
+    "fusion360_probe":               "Probing the live geometry",
+    "fusion360_verify_build":        "Verifying the build against the spec",
+    "fusion360_measure":             "Measuring geometry",
+    "fusion360_physical_properties": "Reading physical properties",
+    "fusion360_export_geometry":     "Exporting geometry",
+    "fusion360_import_dxf":          "Importing a DXF",
+    "fusion360_make_drawing":        "Creating a drawing",
+    "fusion360_save":                "Saving the design",
+    "fusion360_user_parameter":      "Setting a user parameter",
 }
 
 # ── Helper: format an activity_step description with optional args ──────
-_VAR_PATTERN = "{}"
+# Named placeholders like {skill} / {path} / {query} are resolved from the
+# tool-call args. (Legacy `_VAR_PATTERN = "{}"` made the resolver dead code:
+# no template contains a literal empty-brace pair, so every template with a
+# named placeholder early-returned unresolved — e.g. "Running the {skill}…".)
+_PLACEHOLDER_RE = re.compile(r"\{\w+\}")
 
 # Per-tool key priority: when filling a placeholder like {data_source_id},
 # try these arg keys in order and use the first non-None non-empty value.
@@ -3602,6 +4137,9 @@ _VAR_PATTERN = "{}"
 _ARG_KEY_PRIORITY: dict[str, list[tuple[str, list[str]]]] = {
     "ask_data_agent": [
         ("data_source_id", ["data_source_id", "question"]),
+    ],
+    "run_sandbox_skill": [
+        ("skill", ["skill_name", "skill", "format"]),
     ],
 }
 
@@ -3620,14 +4158,17 @@ def _format_activity_description(tool_name: str, args: dict | None = None) -> st
     template = ACTIVITY_STEP_DESCRIPTIONS.get(tool_name)
     if not template:
         return f"Running tool: {tool_name}"
-    if not args or _VAR_PATTERN not in template:
+    if not args:
+        # No args to fill named placeholders — never surface a literal
+        # "{skill}" / "{path}" template; strip and collapse whitespace.
+        return re.sub(r"\s{2,}", " ", _PLACEHOLDER_RE.sub("", template)).strip()
+    if not _PLACEHOLDER_RE.search(template):
         return template
     try:
         priorities = _ARG_KEY_PRIORITY.get(tool_name, [])
         prio_map: dict[str, list[str]] = {ph: keys for ph, keys in priorities}
         result = template
         # Find all {placeholder} occurrences and resolve them
-        import re
         placeholders = re.findall(r"\{(\w+)\}", result)
         for ph in placeholders:
             placeholder = "{" + ph + "}"
@@ -3648,6 +4189,9 @@ def _format_activity_description(tool_name: str, args: dict | None = None) -> st
                 if len(value) > 40:
                     value = value[:37] + "..."
                 result = result.replace(placeholder, value)
+        # Strip any placeholders that could not be resolved from args so
+        # the UI never shows a literal "{skill}" / "{path}" template.
+        result = re.sub(r"\{\w+\}", "", result).strip()
         return result
     except Exception:
         return template
@@ -3666,13 +4210,13 @@ _MAX_OUTPUT_CHARS = 500
 
 # Regex to strip raw SQL/DB internals from displayed command text.
 # Matches [Schema: ...] blocks and common ERP-style internal column IDs
-# (F-prefixed uppercase like FMATERIALID, FREALQTY, etc.).
+# (F-prefixed uppercase identifiers common in ERP systems).
 # NOTE: We intentionally do NOT strip generic table/column names since
 # different databases use different naming conventions. Only strip clearly
 # internal/technical identifiers that users wouldn't understand.
 _SQL_HINT_PATTERN = re.compile(
     r"\[Schema:[^\]]*\]"            # [Schema: ...] blocks
-    r"|\bF[A-Z][A-Z0-9_]+\b",      # F-prefixed internal IDs (FMATERIALID, etc.)
+    r"|\bF[A-Z][A-Z0-9_]+\b",      # F-prefixed internal IDs (common in ERP systems)
     re.IGNORECASE,
 )
 
@@ -4167,6 +4711,36 @@ def _internal_tool_projection(tool_name: str) -> dict:
 # So:
 #   - no_progress_warn_after=2  →  2nd identical call is warned
 #   - no_progress_block_after=2 →  3rd identical call is blocked
+#: Tool calls allowed to pair with a :::options clarification block — the
+#: skill/agent-writing tools whose methodology text may legitimately mention
+#: the block syntax inside their skill_md / definition.
+_OPTIONS_SAFE_TOOLS = frozenset({
+    "create_skill", "update_skill", "delete_skill",
+    "create_agent", "update_agent",
+    "create_automation", "update_automation",
+})
+
+
+def _options_clarification(content: str, tool_names: list[str]) -> bool:
+    """True when the assistant message asks a :::options clarifying question
+    and the turn must end here.
+
+    An options block is a question to the user — running research tools while
+    waiting for an answer is the mid-clarify bug (weak LLMs ignore the prose
+    rule). Returns True (→ suppress tools + break) when the content contains
+    an options block AND any tool call is NOT a skill/agent-writing tool
+    (those may legitimately reference the block syntax in their output).
+    Also returns True with no tool calls: a clarification block always ends
+    the turn (skip the verification / goal-contract gates, which would
+    misread a question as an unmet deliverable).
+    """
+    if ":::options" not in content:
+        return False
+    if not tool_names:
+        return True
+    return not all(n in _OPTIONS_SAFE_TOOLS for n in tool_names)
+
+
 def _loop_guard_config_for(agent_app) -> ToolGuardrailConfig:
     if agent_app is not None and getattr(agent_app, "name", None) == "skill_agent":
         return ToolGuardrailConfig(
@@ -4916,9 +5490,37 @@ async def _check_answer_verification_gate(
         return _AnswerGateResult("none", "")
     if not tool_calls_for_frontend:
         return _AnswerGateResult("none", "")
+    # CAD turns (Fusion 360 tools) skip the DATA-oriented self-eval gate.
+    # The CAD loop has its own geometry verification (fusion360_verify_build);
+    # the data evaluator does not understand CAD payloads and produces false
+    # gaps — e.g. "requested dimensions not found in the data: taller, verify"
+    # appended to a build that verified PASS. Verify-before-build tools are
+    # the source of truth for these turns.
+    for _tc in tool_calls_for_frontend:
+        _tn = _tc.get("name") or _tc.get("tool_name") or ""
+        if _tn.startswith("fusion360_"):
+            return _AnswerGateResult("none", "")
     tool_results = _gate_tool_results_from_frontend(tool_calls_for_frontend)
     if not tool_results:
         return _AnswerGateResult("none", "")
+    # Change 1 (2026-08-26): gate fast-path on the FIRST check. When the
+    # turn already produced substantive data rows, skip the self-eval LLM
+    # call entirely — rich answers are not second-guessed. This stops the
+    # gate's nudge → re-synthesis → content_replace chain from mutating
+    # content the user has already seen (the visual-collapse bug). The gate
+    # still runs when attempts > 0 (genuine re-plan) and when NO data rows
+    # were produced (the wrong/empty-table failure mode it exists to catch).
+    if attempts == 0:
+        from app.services.goal_contract import is_metadata_only_rows  # lazy
+        for _gr in tool_results:
+            _grows = _gr.get("rows")
+            if isinstance(_grows, list) and _grows and not is_metadata_only_rows(_grows):
+                logger.info(
+                    "answer-verification gate: fast-path pass "
+                    "(attempts=0, %d rows present)",
+                    len(_grows),
+                )
+                return _AnswerGateResult("none", "")
     timeout_s = getattr(settings, "SELF_EVAL_LLM_GATE_TIMEOUT_S", 15.0)
     try:
         result = await asyncio.wait_for(
@@ -5610,6 +6212,9 @@ async def add_message(
                         org_id=getattr(conv, "org_id", None) or "default-org",
                         app_id=app_id or "default-app",
                         conversation_context=_conv_ctx,
+                        # Hierarchical LLM pin: FSM internals use the
+                        # project/agent resolved endpoint, not .env defaults.
+                        endpoint=_eff_llm_v2.endpoint,
                     )
                 )
                 # Persist the assistant reply into the conversation so the
@@ -5712,81 +6317,42 @@ async def add_message(
             except Exception:
                 pass  # Skill injection is best-effort
 
-        # Full skill catalog injection (dynamic discovery). Every agent
-        # sees ALL available skills — not just its bound ones — so it can
-        # autonomously discover and use any skill via the `Skill` meta-tool.
-        # This replaces the former passive "Recommended Skills" hint that
-        # only suggested skills to the user.  Best-effort, token-budgeted.
+        # Full skill catalog context injection (dynamic discovery + routed
+        # skill). Every agent sees ALL available skills — not just its
+        # bound ones — so it can autonomously discover and use any skill.
+        # The block is assembled by skill_routing.runtime_catalog:
+        #   • truthful tool instructions (only tools that actually exist —
+        #     FIX 2026-08-29: the old text promised `load_skill_body` /
+        #     `Skill`, which were not registered → "Unknown tool" failures)
+        #   • relevance-forced catalog (search hits + routed skill survive
+        #     the character budget even when it truncates 894 → ~52)
+        #   • auto-routed skill body (format_intent/soft_intent → full
+        #     SKILL.md directive, so methodology is followed WITHOUT the
+        #     model having to discover + load the skill itself)
+        #   • context-scaled budget (15K..40K chars by model window)
+        # Best-effort, token-budgeted.
         if agent_app:
             try:
-                from app.services.skills_loader import (
-                    list_skills as loader_list_skills,
-                    unified_search,
+                from app.services.skill_routing.runtime_catalog import (
+                    build_skill_catalog_context,
                 )
-                from app.services.skill_routing.catalog import build_catalog
-                from app.services.skill_routing.post_router_hook import (
-                    build_agent_forced_skill_directive,
-                    post_router_pick,
+                _explicit_skill_name = None
+                if isinstance(selected_skill_v2, dict):
+                    _explicit_skill_name = selected_skill_v2.get("name")
+                elif isinstance(selected_skill_v2, str):
+                    _explicit_skill_name = selected_skill_v2
+                _skill_ctx_block = build_skill_catalog_context(
+                    user_content,
+                    db,
+                    bound_skills=set(agent_app.skills or []),
+                    context_window_tokens=(
+                        _eff_llm_v2.endpoint.context_window
+                        if _eff_llm_v2.endpoint else None
+                    ),
+                    explicit_skill_name=_explicit_skill_name,
                 )
-
-                all_skills = [s.to_dict() for s in loader_list_skills()]
-                catalog_block = build_catalog(all_skills)
-                if catalog_block:
-                    # Contextual priority hint: surface skills whose
-                    # name/description match the user's message first,
-                    # so the agent knows where to start looking.
-                    priority_hint = ""
-                    forced_skill_directive = ""
-                    if user_content:
-                        bound_skills = set(agent_app.skills or [])
-                        results = unified_search(user_content, limit=5, db=db)
-                        # Reuse the search results for the post-router-hook
-                        # strong-match check, avoiding a second
-                        # ``unified_search`` call.  When the hook fires,
-                        # inject a HARD directive telling the LLM to
-                        # invoke the matched skill as its first action.
-                        forced = post_router_pick(
-                            user_content,
-                            db=db,
-                            candidates=results,
-                        )
-                        if forced:
-                            forced_skill_directive = (
-                                build_agent_forced_skill_directive(
-                                    forced["skill_name"],
-                                    score=forced.get("score"),
-                                )
-                            )
-                        unbound = [
-                            r for r in results
-                            if r["name"] not in bound_skills
-                        ][:3]
-                        if unbound:
-                            hints = "\n".join(
-                                f"- **{r['name']}**: {r['description']}"
-                                for r in unbound
-                            )
-                            priority_hint = (
-                                "\n### Priority matches for this request\n"
-                                "These skills look most relevant to the "
-                                "user's message — consider loading them "
-                                "first:\n"
-                                f"{hints}\n"
-                            )
-                    system_prompt += forced_skill_directive
-                    system_prompt += (
-                        "\n\n## Skill Catalog (dynamic discovery)\n"
-                        "You have access to ALL skills below — not just the "
-                        "ones bound to you. Use the `Skill` tool to load or "
-                        "execute any skill by name (e.g. "
-                        '`Skill {command: "execute weekly-report-generation"}`). '
-                        "`load_skill_body` is a SEPARATE tool from the `Skill` "
-                        "dispatcher — call it directly with {name: '<skill-name>'} "
-                        "to read a skill's full methodology. NEVER pass a tool "
-                        "name (like 'load_skill_body') as a Skill command.\n"
-                        f"{priority_hint}\n<available_skills>\n"
-                        f"{catalog_block}\n</available_skills>"
-                    )
+                if _skill_ctx_block:
+                    system_prompt += _skill_ctx_block
             except Exception:
                 pass  # Catalog injection is best-effort
 
@@ -5824,12 +6390,19 @@ async def add_message(
                 selected_project_id=getattr(conv, "project_id", None),
                 selected_project_name=_sel_proj_name,
                 user_id=user.id if user else None,
+                user_message=user_content,
                 # P1-5: pass the user-selected model's context window so
                 # the Bound Data Sources block auto-compresses for small
                 # models (e.g. qwen3.6-27b 65k) and stays full for big
-                # models (deepseek 128k, claude 200k).
+                # models (deepseek 128k, claude 200k).  Uses the REAL
+                # resolved window (admin-set or auto-probed) so ANY model —
+                # not just names in the heuristic — gets the right budget.
                 target_context_window=get_context_window(
-                    user_model_v2 or get_model()
+                    user_model_v2 or get_model(),
+                    context_window_tokens=(
+                        _eff_llm_v2.endpoint.context_window
+                        if _eff_llm_v2.endpoint else None
+                    ),
                 ),
             )
         except Exception as e:
@@ -6005,14 +6578,13 @@ async def add_message(
             # schema/design pass, force the next LLM turn to call
             # `create_dashboard`. Without this, the agent dumps markdown
             # tables instead of producing an interactive dashboard artifact.
-            # Also fires in dashboard-capable projects (Ecisco BI /
-            # `ecisco_bi_assistant`) when the agent speculatively loads
+            # Also fires in dashboard-capable projects when the agent
+            # speculatively loads
             # dashboard skills before being asked — the user just said "hi"
             # but the agent is in a BI project with a bound datasource.
             _tool_names = _tool_names_from_schemas(tools)
             _is_dash_project = bool(agent_name and (
-                "ecisco_bi" in agent_name.lower()
-                or "bi_assistant" in agent_name.lower()
+                "bi_assistant" in agent_name.lower()
             ))
             _dash_build_tool = dashboard_build_tool()
             if (
@@ -6205,6 +6777,22 @@ async def add_message(
             assistant_content = llm_response.get("content", "")
             raw_tool_calls = llm_response.get("tool_calls", [])
 
+            # ── Clarification hard-stop (:::options) ──────────────────
+            # An options block is a question to the user — the turn is DONE.
+            # Suppress research tool calls in the same iteration and skip the
+            # verification / nudge gates (weak LLMs ignore the prose rule and
+            # research while waiting for the user).
+            _opt_names = [tc.get("function", {}).get("name", "") for tc in raw_tool_calls]
+            if _options_clarification(assistant_content, _opt_names):
+                if raw_tool_calls:
+                    logger.info(
+                        "Suppressing %d tool call(s) after :::options clarification "
+                        "block (conv=%s, iter=%d): %s",
+                        len(raw_tool_calls), conversation_id, iteration, _opt_names,
+                    )
+                    raw_tool_calls = []
+                break
+
             if not raw_tool_calls:
                 # No tool calls — LLM gave a final text response.
                 # Anti-hallucination guardrail: if the agent has bound data
@@ -6350,7 +6938,6 @@ async def add_message(
             # inject a synthetic tool result forcing a create_dashboard retry.
             if parsed_calls:
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
-                _v2_tool_names = _tool_names_from_schemas(tools)
                 _v2_build_tool = dashboard_build_tool()
                 # ── Data-contract confirmation gate (T7) ──────────────
                 # Same gate as the v3 stream: never let the build tool run on
@@ -6408,12 +6995,8 @@ async def add_message(
                         parsed_calls = _v2_non_build
                         if not _v2_non_build:
                             continue
-                if (
-                    _v2_build_tool in _dash_guard_names
-                    or _v2_build_tool in _v2_tool_names
-                ) and any(
-                    n in dashboard_guard_blocked_tools()
-                    for n in _dash_guard_names
+                if dashboard_guard_should_block_queries(
+                    _dash_guard_names, _v2_build_tool, dashboard_forced,
                 ):
                     _blocked_names = [
                         p["tool_name"]
@@ -6841,7 +7424,13 @@ async def add_message(
                     ],
                 })
                 # P0: apply Layer 2 (per-result) persistence to large results
-                _result_str = _persisted_result_str(tool_name, result, conversation_id)
+                _result_str = _persisted_result_str(
+                    tool_name, result, conversation_id,
+                    context_window_tokens=(
+                        _eff_llm_v2.endpoint.context_window
+                        if _eff_llm_v2.endpoint else None
+                    ),
+                )
                 llm_messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
@@ -6863,7 +7452,11 @@ async def add_message(
                 _batch_ids = [c["tool_call_id"] for c in parsed_calls]
                 _batch_names = [c["tool_name"] for c in parsed_calls]
                 _apply_turn_budget_to_messages(
-                    llm_messages, _batch_ids, _batch_names, conversation_id
+                    llm_messages, _batch_ids, _batch_names, conversation_id,
+                    context_window_tokens=(
+                        _eff_llm_v2.endpoint.context_window
+                        if _eff_llm_v2.endpoint else None
+                    ),
                 )
 
             # P0: if guardrail controller tripped a halt, inject nudge and break
@@ -7254,6 +7847,7 @@ async def add_message(
     if agent_app_id and len(messages) >= 4:
         asyncio.create_task(_bg_extract_memories(
             agent_app_id, list(messages), user.id if user else None,
+            project_id=getattr(conv, "project_id", None),
         ))
 
     # P2.3: Background self-improvement review — every N turns, spawn a
@@ -7654,6 +8248,20 @@ async def resume_conversation(
         assistant_content = llm_response.get("content", "")
         raw_tool_calls = llm_response.get("tool_calls", [])
 
+        # ── Clarification hard-stop (:::options) — same as the add_message
+        # loop: a message with an options block asks the user a question →
+        # turn done, no tools, no gates.
+        _opt_names = [tc.get("function", {}).get("name", "") for tc in raw_tool_calls]
+        if _options_clarification(assistant_content, _opt_names):
+            if raw_tool_calls:
+                logger.info(
+                    "Suppressing %d tool call(s) after :::options clarification "
+                    "block (resume, conv=%s, iter=%d): %s",
+                    len(raw_tool_calls), conversation_id, iteration, _opt_names,
+                )
+                raw_tool_calls = []
+            break
+
         if not raw_tool_calls:
             guardrail_result = _check_hallucination_guardrail(
                 user_content, data_ctx_extras, tool_calls_for_frontend,
@@ -7905,7 +8513,13 @@ async def resume_conversation(
                                  "tool_calls": [{"id": tool_call_id, "type": "function",
                                                  "function": {"name": tool_name, "arguments": args_str}}]})
             # P0: apply Layer 2 (per-result) persistence + guardrail after_call
-            _result_str = _persisted_result_str(tool_name, result, conversation_id)
+            _result_str = _persisted_result_str(
+                tool_name, result, conversation_id,
+                context_window_tokens=(
+                    _resume_eff_llm.endpoint.context_window
+                    if _resume_eff_llm.endpoint else None
+                ),
+            )
             llm_messages.append({"role": "tool", "tool_call_id": tool_call_id, "content": _result_str})
             guard_ctrl.after_call(tool_name, call["args"], _result_str)
 
@@ -7946,7 +8560,11 @@ async def resume_conversation(
             _batch_ids = [c["tool_call_id"] for c in parsed_calls]
             _batch_names = [c["tool_name"] for c in parsed_calls]
             _apply_turn_budget_to_messages(
-                llm_messages, _batch_ids, _batch_names, conversation_id
+                llm_messages, _batch_ids, _batch_names, conversation_id,
+                context_window_tokens=(
+                    _resume_eff_llm.endpoint.context_window
+                    if _resume_eff_llm.endpoint else None
+                ),
             )
 
         # P0: if guardrail controller tripped a halt, inject nudge and break
@@ -8021,6 +8639,7 @@ async def resume_conversation(
     if agent_app_id and len(messages) >= 4:
         asyncio.create_task(_bg_extract_memories(
             agent_app_id, list(messages), user.id if user else None,
+            project_id=getattr(conv, "project_id", None),
         ))
 
     # P2.3: Background self-improvement review
@@ -8233,12 +8852,17 @@ async def _bg_extract_memories(
     agent_app_id: str,
     messages: list[dict],
     user_id: str | None,
+    project_id: str | None = None,
 ) -> None:
     """Fire-and-forget background task to extract memories after a conversation.
 
     Uses an independent DB session so it doesn't interfere with the
     request-level session that has already closed. Failures are logged
     as warnings and silently swallowed — this must never break the chat.
+
+    ``project_id`` (2026-08-27): forwarded from the conversation so
+    extracted memories land in the project-scoped bucket and appear in
+    that project's Shared Memory panel.
     """
     try:
         from app.database import SessionLocal
@@ -8257,6 +8881,7 @@ async def _bg_extract_memories(
                     saved = loop.run_until_complete(
                         auto_extract_memories(
                             db, agent_app_id, messages, user_id,
+                            project_id=project_id,
                         )
                     )
                     if saved:
@@ -8291,6 +8916,13 @@ async def _call_synthesis_llm(
     provider (get_model / llm_url / llm_headers).
     """
     full_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    def _clamp_synth_max(
+        _max_tokens: int, _ep: "LLMEndpoint | None", _msgs: list[dict]
+    ) -> int:
+        _clamped = _clamp_max_tokens_for_context(_max_tokens, _ep, messages=_msgs)
+        return _clamped if _clamped is not None else _max_tokens
+
     if endpoint is not None:
         _model = endpoint.model_id
         _url = endpoint.base_url.rstrip("/") + "/chat/completions"
@@ -8302,7 +8934,18 @@ async def _call_synthesis_llm(
     payload = {
         "model": _model,
         "messages": full_messages,
-        "max_tokens": getattr(settings, "LLM_SYNTH_MAX_TOKENS", 6144),
+        # Context-aware clamp (2026-08-26): this path previously requested a
+        # FIXED 6144 output tokens regardless of input size. On a grown
+        # conversation (e.g. 61k input vs qwen3.6-27b's 65,536 window) that
+        # guaranteed a 400 context_overflow on EVERY synthesis call — which
+        # is exactly why the empty-bubble guarantee kept falling through to
+        # the deterministic "Data Report" template. Same clamp as the
+        # stream/tool paths: input + output <= context_window - 512 buffer.
+        "max_tokens": _clamp_synth_max(
+            getattr(settings, "LLM_SYNTH_MAX_TOKENS", 6144),
+            endpoint,
+            full_messages,
+        ),
     }
     if not model_has_fixed_temperature(_model):
         payload["temperature"] = 0.7
@@ -8311,12 +8954,19 @@ async def _call_synthesis_llm(
         _payload = dict(payload)
         if trim_rows:
             # Trim visible rows in user messages to first 30 to reduce context
-            _payload["messages"] = [
+            _trimmed = [
                 {**m, "content": m["content"][:8000]}
                 if m.get("role") == "user" and isinstance(m.get("content"), str)
                 else m
                 for m in _payload["messages"]
             ]
+            _payload["messages"] = _trimmed
+            # Re-clamp after trimming: smaller input frees output headroom.
+            _payload["max_tokens"] = _clamp_synth_max(
+                getattr(settings, "LLM_SYNTH_MAX_TOKENS", 6144),
+                endpoint,
+                _trimmed,
+            )
         async with httpx.AsyncClient(timeout=120.0) as client:
             resp = await client.post(_url, headers=_headers, json=_payload)
             _sc = getattr(resp, "status_code", 0)
@@ -8344,6 +8994,50 @@ async def _call_synthesis_llm(
             )
         except httpx.RequestError as e2:
             raise HTTPException(status_code=502, detail=f"LLM request failed: {str(e2)}")
+
+
+async def _generate_dynamic_turn_plan(
+    user_content: str,
+    kind: str,
+    tool_names: list[str],
+    endpoint: "LLMEndpoint | None" = None,
+) -> "TurnPlan | None":
+    """One cheap LLM planning call → a plan tailored to THIS request.
+
+    The user asked for plans that follow their actual input ("revenue +
+    inventory dashboard" should plan steps that name revenue and inventory).
+    This runs a single no-tool LLM call with a tiny prompt, parses the JSON
+    response into a TurnPlan, and returns None on ANY failure (timeout,
+    invalid JSON, too few/many steps, network) so the caller falls back to
+    the fixed intent template. Never raises; never breaks the turn.
+    """
+    try:
+        from app.services.turn_planner import dynamic_plan_prompt, parse_dynamic_plan
+
+        _sys, _msgs = dynamic_plan_prompt(user_content, kind, tool_names)
+        _resp = await asyncio.wait_for(
+            _call_synthesis_llm(_sys, _msgs, endpoint=endpoint),
+            timeout=getattr(settings, "TURN_PLAN_DYNAMIC_TIMEOUT_S", 20.0),
+        )
+        _raw = (_resp or {}).get("content") or ""
+        _plan = parse_dynamic_plan(_raw, kind)
+        if _plan is not None and _plan.steps:
+            logger.info(
+                "dynamic turn plan (%s): %d steps for '%s…'",
+                kind, len(_plan.steps), user_content[:40],
+            )
+        else:
+            logger.info(
+                "dynamic turn plan unparsable (%s) for '%s…' — fixed template used",
+                kind, user_content[:40],
+            )
+        return _plan
+    except Exception as _dyn_err:  # noqa: BLE001 — planning must never break the turn
+        logger.warning(
+            "dynamic turn plan failed (%s) — fixed template used: %s",
+            kind, _dyn_err,
+        )
+        return None
 
 
 async def _call_llm_with_tools(
@@ -8529,7 +9223,18 @@ def _rebuild_v3_history_messages(
                 tc for tc in saved_tcs
                 if tc.get("id") not in seen_tool_ids
             ]
-            openai_tcs = _to_openai_tool_calls(fresh_tcs) if fresh_tcs else None
+            # Only calls WITH embedded results can be re-emitted as
+            # assistant(tool_calls) → tool. A persisted call without
+            # results (the error path saves the frontend display shape;
+            # an interrupted turn can also leave one) would otherwise
+            # produce a DANGLING assistant tool_call with no following
+            # tool response — DeepSeek/OpenAI reject that with 400
+            # ("insufficient tool messages following tool_calls").
+            complete_tcs = [
+                tc for tc in fresh_tcs
+                if tc.get("results") is not None
+            ]
+            openai_tcs = _to_openai_tool_calls(complete_tcs) if complete_tcs else None
             if openai_tcs:
                 llm_messages.append({
                     "role": "assistant",
@@ -8538,19 +9243,19 @@ def _rebuild_v3_history_messages(
                 })
             elif content:
                 # Stale duplicate assistant message (same tool calls re-saved
-                # by the error path): keep any visible text, drop the calls.
+                # by the error path) or result-less calls: keep any visible
+                # text, drop the calls.
                 llm_messages.append({"role": "assistant", "content": content})
-            for tc in fresh_tcs:
+            for tc in complete_tcs:
                 tc_id = tc.get("id")
                 tc_results = tc.get("results")
-                if tc_id and tc_results is not None:
-                    seen_tool_ids.add(tc_id)
-                    _content = tc_results if isinstance(tc_results, str) else json.dumps(tc_results)
-                    llm_messages.append({
-                        "role": "tool",
-                        "tool_call_id": tc_id,
-                        "content": _content,
-                    })
+                seen_tool_ids.add(tc_id)
+                _content = tc_results if isinstance(tc_results, str) else json.dumps(tc_results)
+                llm_messages.append({
+                    "role": "tool",
+                    "tool_call_id": tc_id,
+                    "content": _content,
+                })
         elif role == "tool":
             _tid = msg.get("tool_call_id", "")
             if _tid and _tid in seen_tool_ids:
@@ -9082,6 +9787,12 @@ async def _stream_llm_with_tools(
         "messages": messages,
         "stream": True,
     }
+    # Live reasoning stream (2026-08-27): when the operator enables
+    # LLM_ENABLE_THINKING, ask the provider for its chain-of-thought.
+    # vLLM's qwen3 chat template only emits `reasoning` deltas when
+    # enable_thinking is explicitly requested.
+    if getattr(settings, "LLM_ENABLE_THINKING", False):
+        base_payload["chat_template_kwargs"] = {"enable_thinking": True}
     # P1-5: apply per-model tool-output cap to the messages being sent
     # in the streaming path.  Without this, the v3 FSM (which streams
     # multiple LLM calls per turn) can carry forward 50k+ tokens of
@@ -9216,7 +9927,7 @@ async def _stream_llm_with_tools(
                     if token:
                         full_content += token
                         yield ("delta", token)
-                    reasoning = delta.get("reasoning_content", "")
+                    reasoning = delta.get("reasoning_content") or delta.get("thinking") or delta.get("reasoning") or ""
                     if reasoning:
                         reasoning_acc += reasoning
                         yield ("reasoning", reasoning)
@@ -9416,7 +10127,7 @@ def _chunk_stream_text(text: str, size: int = 180) -> list:
 # Experience layer (Phase A): turn-end recipe learning + user profile updates.
 # Best-effort: any failure is logged (never user content or embeddings) and
 # skipped, so the chat loop is never affected. Gated by
-# ECISCO_BI_RECIPE_LEARNING_ENABLED / ECISCO_BI_USER_PROFILE_ENABLED.
+# RECIPE_LEARNING_ENABLED / USER_PROFILE_ENABLED.
 # --------------------------------------------------------------------------- #
 def _record_turn_experience(
     *,
@@ -9436,7 +10147,7 @@ def _record_turn_experience(
     """
     success = bool(assistant_content and assistant_content.strip())
 
-    if getattr(settings, "ECISCO_BI_RECIPE_LEARNING_ENABLED", False):
+    if getattr(settings, "RECIPE_LEARNING_ENABLED", False):
         try:
             from app.services.experience_intent import classify_question, INTENT_CONVERSATIONAL
             from app.services.learning_graph import record_recipe
@@ -9452,7 +10163,7 @@ def _record_turn_experience(
         except Exception as _rec_err:  # noqa: BLE001 — best-effort
             logger.warning("experience: recipe recording failed (non-fatal): %s", _rec_err)
 
-    if getattr(settings, "ECISCO_BI_USER_PROFILE_ENABLED", False) and user_id:
+    if getattr(settings, "USER_PROFILE_ENABLED", False) and user_id:
         try:
             from app.services.user_profile import update_user_profile
 
@@ -9476,12 +10187,12 @@ def _store_turn_cache(
 ) -> None:
     """Turn-end hook: persist a successful answer into the semantic cache.
 
-    Gated by ECISCO_BI_RESPONSE_CACHE_ENABLED. Only substantive answers
+    Gated by RESPONSE_CACHE_ENABLED. Only substantive answers
     are stored; the cache service itself enforces scope (shared for
     data-driven intents, per-user for conversational) and freshness
     guards. Best-effort: any failure is logged and skipped.
     """
-    if not getattr(settings, "ECISCO_BI_RESPONSE_CACHE_ENABLED", False):
+    if not getattr(settings, "RESPONSE_CACHE_ENABLED", False):
         return
     if not assistant_content or not assistant_content.strip():
         return
@@ -9546,7 +10257,7 @@ def add_message_feedback(
       - reinforces or evicts the matching semantic cache entry (Layer 2)
       - updates the user's explicit profile preferences (Layer 3)
 
-    All adjustments are best-effort and flag-gated (ECISCO_BI_*_ENABLED).
+    All adjustments are best-effort and flag-gated (feature flags).
     """
     try:
         rating = int(body.get("rating", 0))
@@ -9636,7 +10347,7 @@ def add_message_feedback(
             pass
 
     # 2) Recipe adjustment (Layer 1).
-    if getattr(settings, "ECISCO_BI_RECIPE_LEARNING_ENABLED", False):
+    if getattr(settings, "RECIPE_LEARNING_ENABLED", False):
         try:
             from app.services.learning_graph import adjust_recipe_feedback
 
@@ -9645,7 +10356,7 @@ def add_message_feedback(
             logger.warning("feedback: recipe adjust failed (non-fatal): %s", _recipe_fb_err)
 
     # 3) Cache entry adjustment (Layer 2) — thumbs down evicts it.
-    if getattr(settings, "ECISCO_BI_RESPONSE_CACHE_ENABLED", False):
+    if getattr(settings, "RESPONSE_CACHE_ENABLED", False):
         try:
             from app.models.response_cache_entry import ResponseCacheEntry
             from app.services.response_cache import apply_feedback_score, evict_cache_entry
@@ -9669,7 +10380,7 @@ def add_message_feedback(
             logger.warning("feedback: cache adjust failed (non-fatal): %s", _cache_fb_err)
 
     # 4) User profile explicit preferences (Layer 3).
-    if getattr(settings, "ECISCO_BI_USER_PROFILE_ENABLED", False):
+    if getattr(settings, "USER_PROFILE_ENABLED", False):
         try:
             from app.services.user_profile import add_feedback
 
@@ -9820,6 +10531,23 @@ async def add_message_stream(
         role=user.role,
     )
 
+    # Resolve the owning ChatSession so the FSM route can persist the
+    # assistant Message with the right session_id (parity with the v2
+    # blocking route ~line 5536). Without this, chat_session_id is a
+    # free variable that is never bound in this scope and the assistant
+    # message silently fails to persist.
+    chat_session_id: str | None = None
+    try:
+        from app.models.chat_session import ChatSession as _ChatSession
+        _sess_row = db.query(_ChatSession).filter(
+            _ChatSession.conversation_id == conv.id,
+            _ChatSession.is_deleted == False,  # noqa: E712
+        ).order_by(_ChatSession.created_date.desc()).first()
+        if _sess_row:
+            chat_session_id = _sess_row.id
+    except Exception as _cs_err:
+        logger.debug("add_message_stream: chat_session lookup skipped: %s", _cs_err)
+
     messages = conv.messages or []
     user_content = body.get("content", "")
     user_role = body.get("role", "user")
@@ -9906,7 +10634,27 @@ async def add_message_stream(
         user_msg["selected_skill"] = selected_skill
     elif selected_skill_id:
         user_msg["selected_skill_id"] = selected_skill_id
-    messages.append(user_msg)
+
+    # ── Regenerate flag (2026-08-31) ──────────────────────────────────
+    # When the user clicks "Regenerate" on the last assistant message, the
+    # frontend re-sends the SAME user content with ``regenerate: true``.
+    # We must NOT append a duplicate user bubble to conv.messages — the
+    # original user message from the turn being regenerated is already in
+    # the list. Instead we reuse it (and its file_urls / skill) so the
+    # LLM context and the conversation history stay clean, and the new
+    # assistant reply REPLACES the previous one (handled at persist time
+    # via ``_replace_last_assistant``).
+    _regenerate = bool(body.get("regenerate"))
+    if _regenerate:
+        user_content, file_urls, selected_skill, selected_skill_id = _resolve_regenerate_turn(
+            messages, user_role, user_content, file_urls, selected_skill, selected_skill_id
+        )
+        logger.info(
+            "v3 add_message_stream: regenerate requested (conv=%s) — reusing last user turn",
+            conversation_id,
+        )
+    else:
+        messages.append(user_msg)
 
     # --- Persist the user message immediately ---
     # CRITICAL: commit the user message to the DB BEFORE the tool-calling
@@ -9930,7 +10678,7 @@ async def add_message_stream(
         # still attempt a persist. But log loudly so we notice.
 
     # ── Experience layer (Phase B): semantic response cache ──────────────
-    # When ECISCO_BI_RESPONSE_CACHE_ENABLED is on, attempt an early cache
+    # When RESPONSE_CACHE_ENABLED is on, attempt an early cache
     # lookup BEFORE the FSM/tool loop runs. On hit, stream the cached
     # answer through the same SSE delta/done format and skip the LLM run
     # entirely — the "faster on repeat questions" payoff. Strict freshness
@@ -9940,7 +10688,7 @@ async def add_message_stream(
     # would depend on the file contents).
     _cache_hit_entry = None
     if (
-        getattr(settings, "ECISCO_BI_RESPONSE_CACHE_ENABLED", False)
+        getattr(settings, "RESPONSE_CACHE_ENABLED", False)
         and user_content
         and not file_urls
     ):
@@ -10157,6 +10905,7 @@ async def add_message_stream(
                         selected_project_name=_v3_effective_pname,
                         pinned_data_source_id=_v3_pinned_dsr_id,
                         user_id=user.id if user else None,
+                        user_message=user_content,
                         # P1-5: this is a pre-flight data-ctx bound-KB
                         # check (bound_ids only), so compact mode does
                         # not affect the answer.  Pass None to keep
@@ -10190,6 +10939,13 @@ async def add_message_stream(
             _v3_dsr_err,
         )
         _v3_data_ctx_extras = {}
+        # 2026-08-31: the preflight above assigns `_v3_bound` only inside
+        # its try; when prepare_data_source_runtime raises, the except set
+        # extras={} but left `_v3_bound` undefined → the very next
+        # `bool(_v3_bound)` check below raised UnboundLocalError and the
+        # whole planning-trigger block was skipped (non-fatal, but bound-
+        # data chats silently lost the FSM/data-bound routing decision).
+        _v3_bound = []
 
     try:
         _v3_plan_trigger = should_trigger_planning(user_content)
@@ -10307,11 +11063,23 @@ async def add_message_stream(
                     collected.append(_emit_phase(state))
                     # Live feed: typed phase_enter for every FSM transition.
                     _push_live("phase_enter", f"phase_enter.{state}")
-                    # FINALIZE is only entered after VERIFY succeeds — surface
-                    # the pass + the finalize start as typed feed events.
+                    # FINALIZE is only entered after VERIFY runs — the honest
+                    # pass/fail verdict is emitted by ``_on_verify`` during the
+                    # VERIFY state (verify_passed only when the checks really
+                    # passed), then finalize_started marks the synthesis stage.
                     if state == "finalize":
-                        _push_live("verify_passed", "verify_passed")
                         _push_live("finalize_started", "finalize_started")
+
+                def _on_verify(passed: bool, _result=None) -> None:
+                    # Honest verdict: never claim "Verification passed" when
+                    # checks failed (e.g. a sandbox/artifact node failed).
+                    try:
+                        _push_live(
+                            "verify_passed" if passed else "verify_failed",
+                            "verify_passed" if passed else "verify_failed",
+                        )
+                    except Exception as _v_err:
+                        logger.debug("on_verify SSE emit failed (non-fatal): %s", _v_err)
 
                 _v3_agent_name = conv.agent_name or "general_assistant"
                 _v3_org_id = getattr(conv, "org_id", None) or "default-org"
@@ -10340,6 +11108,12 @@ async def add_message_stream(
                     # the automation executor) so the quality gate uses the
                     # stricter unattended threshold (0.6 vs 0.4).
                     is_automation=bool(body.get("force_planning")),
+                    # Hierarchical LLM pin (project/agent → llm_models):
+                    # every LLM call inside the FSM now uses the resolved
+                    # endpoint instead of the legacy .env defaults — so the
+                    # badge model and the runtime model finally match on
+                    # FSM-routed turns.
+                    endpoint=effective_llm.endpoint,
                 )
                 _fsm = SynexiaFSM(db)
 
@@ -10408,6 +11182,9 @@ async def add_message_stream(
                     fsm_result = await asyncio.to_thread(
                         _fsm.run, _fsm_req, _on_state, False, _on_plan_node,
                         # generate_response=False, on_plan_node=_on_plan_node
+                        # on_verify=_on_verify — honest verify_passed/failed
+                        # verdicts for the live feed (keyword for clarity).
+                        on_verify=_on_verify,
                     )
                 except Exception as _fsm_err:
                     logger.error(
@@ -10467,12 +11244,25 @@ async def add_message_stream(
                 except Exception as _qe_err:  # noqa: BLE001 — observability only
                     logger.warning("QUALITY_EVAL streaming hook failed (non-fatal): %s", _qe_err)
 
+                # Kimi/GPT-style citations: collect the data sources the
+                # FSM actually queried this turn (source_id/source_name
+                # from tool result_data). Attached to the persisted
+                # assistant message + the done payload so the frontend
+                # can render source chips under the bubble.
+                _fsm_citations = _extract_citations_from_tool_calls(
+                    fsm_result.tool_calls or []
+                )
+
                 # Persist the assistant message and emit done.
                 try:
                     from app.models.chat_message import ChatMessage as Message
-                    if chat_session_id:
+                    # On regenerate, the frontend REUSES the existing
+                    # assistant ChatMessage row (same id, content updated
+                    # in place via ChatMessage.update), so creating a
+                    # fresh row here would leave a stale duplicate. Skip.
+                    if chat_session_id and not _regenerate:
                         msg = Message(
-                            id=str(uuid4()),
+                            id=str(uuid.uuid4()),
                             conversation_id=conversation_id,
                             session_id=chat_session_id,
                             role="assistant",
@@ -10481,6 +11271,7 @@ async def add_message_stream(
                             trace=fsm_result.plan_summary or {},
                             reasoning=None,
                             live_events=live_events or None,
+                            sources=_fsm_citations or None,
                         )
                         db.add(msg)
                         db.commit()
@@ -10502,7 +11293,7 @@ async def add_message_stream(
                             "artifact_ids": _tc.get("artifact_ids", []),
                         })
                     _assistant_msg = {
-                        "id": str(uuid4()),
+                        "id": str(uuid.uuid4()),
                         "role": "assistant",
                         "content": (assistant_content or "")[:4000],
                         "created_date": datetime.now(timezone.utc).isoformat(),
@@ -10514,7 +11305,11 @@ async def add_message_stream(
                         "quality_eval": (
                             fsm_result.quality_eval if hasattr(fsm_result, "quality_eval") else None
                         ),
+                        "sources": _fsm_citations,
                     }
+                    # On regenerate the old assistant reply was popped at
+                    # the top of the handler, so appending yields exactly
+                    # one assistant message per user turn (Kimi/GPT parity).
                     messages.append(_assistant_msg)
                     conv.messages = list(messages)
                     conv.updated_date = datetime.now(timezone.utc)
@@ -10549,7 +11344,7 @@ async def add_message_stream(
                         iterations=len(_fsm_tool_seq),
                     )
                     _store_turn_cache(
-                        db,
+                        db=db,
                         agent_app_id=_fsm_agent_app_id,
                         user_id=getattr(user, "id", None),
                         user_content=user_content,
@@ -10575,12 +11370,13 @@ async def add_message_stream(
                     # the FSM produced no artifacts / no plan.
                     "fsm_quality_gate": fsm_result.quality_gate,
                     "fsm_plan_summary": fsm_result.plan_summary,
+                    "sources": _fsm_citations,
                 }
                 _push_live("finalize_done", "finalize_done")
                 yield f'data: {json.dumps(done_payload)}\n\n'
 
             return StreamingResponse(
-                _sse_with_heartbeat(_fsm_event_stream()),
+                _sse_with_heartbeat(_disconnect_safe_stream(_fsm_event_stream)),
                 media_type="text/event-stream",
                 headers={
                     "Cache-Control": "no-cache",
@@ -10639,8 +11435,8 @@ async def add_message_stream(
         )
         if (
             _project_id_for_cache
-            and _settings.ECISCO_BI_KG_QWEN_FAST_PATH
-            and _settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED
+            and _settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH
+            and _settings.PROJECT_KNOWLEDGE_CACHE_ENABLED
         ):
             _cached = try_fast_path(
                 db,
@@ -10719,39 +11515,61 @@ async def add_message_stream(
     # Image files with no OCR text are noted as "[image attached — use the
     # multimodal content block]" — the actual image bytes are forwarded as
     # a multimodal content block in the user message below.
-    if file_urls:
+    #
+    # Phase 1b (2026-08-31): also re-inject files uploaded in EARLIER
+    # turns. The frontend only sends file_urls for the CURRENT turn, so a
+    # follow-up ("tell me more about that file") would otherwise lose the
+    # file content — the agent would claim it "can't re-read" the upload.
+    # file_urls are persisted on each user message; re-scan conv.messages
+    # (deduped against the current turn) so uploads stay readable for the
+    # whole conversation, matching Kimi/GPT.
+    try:
+        from app.services.synexia.context_assembler import collect_historical_file_urls
+        _historical_urls = collect_historical_file_urls(
+            getattr(conv, "messages", None) or [],
+            exclude=file_urls,
+        )
+    except Exception as _hist_err:
+        logger.debug("v3 stream: historical file_urls scan failed (non-fatal): %s", _hist_err)
+        _historical_urls = []
+    _all_attachment_urls = list(dict.fromkeys([*file_urls, *_historical_urls]))
+
+    if _all_attachment_urls:
         try:
             from app.services.document_ingestion.service import prepare_for_context
             _attach_parts: list[str] = []
             _image_urls: list[str] = []
-            for _furl in file_urls:
+            for _furl in _all_attachment_urls:
+                _is_historical = _furl not in file_urls
                 _prep = prepare_for_context(_furl)
                 _fname = _prep.get("file_name") or _furl
+                _origin = " (uploaded earlier)" if _is_historical else ""
                 if _prep.get("is_image"):
                     _image_urls.append(_furl)
                     if _prep.get("text"):
                         _attach_parts.append(
-                            f"--- {_fname} (image, OCR) ---\n{_prep['text']}"
+                            f"--- {_fname}{_origin} (image, OCR) ---\n{_prep['text']}"
                         )
                     else:
                         _attach_parts.append(
-                            f"--- {_fname} (image, no OCR text — see multimodal block) ---"
+                            f"--- {_fname}{_origin} (image, no OCR text — see multimodal block) ---"
                         )
                 elif _prep.get("text"):
                     _attach_parts.append(
-                        f"--- {_fname} ---\n{_prep['text']}"
+                        f"--- {_fname}{_origin} ---\n{_prep['text']}"
                     )
                 elif _prep.get("error"):
                     _attach_parts.append(
-                        f"--- {_fname} [could not read: {_prep['error']}] ---"
+                        f"--- {_fname}{_origin} [could not read: {_prep['error']}] ---"
                     )
             if _attach_parts:
                 system_prompt += (
                     "\n\n=== User attachments ===\n"
                     + "\n\n".join(_attach_parts)
-                    + "\n\nThe user uploaded the file(s) above. Answer the "
-                    "user's question using their content. Quote the file "
-                    "name when citing a passage.\n"
+                    + "\n\nSome of the file(s) above were uploaded in earlier "
+                    "messages of this conversation and remain available for "
+                    "follow-up questions. Answer the user's question using "
+                    "their content. Quote the file name when citing a passage.\n"
                 )
         except Exception as _attach_err:
             logger.warning(
@@ -10769,58 +11587,30 @@ async def add_message_stream(
         except Exception:
             pass
 
-    # Full skill catalog injection (dynamic discovery) — see the main
-    # chat path above for the full rationale.  Best-effort, token-budgeted.
+    # Full skill catalog context injection (dynamic discovery + routed
+    # skill) — same composition as the main chat path above. Best-effort.
     if agent_app:
         try:
-            from app.services.skills_loader import list_skills as loader_list_skills
-            from app.services.skills_loader import unified_search
-            from app.services.skill_routing.catalog import build_catalog
-            from app.services.skill_routing.post_router_hook import (
-                build_agent_forced_skill_directive,
-                post_router_pick,
+            from app.services.skill_routing.runtime_catalog import (
+                build_skill_catalog_context,
             )
-
-            all_skills = [s.to_dict() for s in loader_list_skills()]
-            catalog_block = build_catalog(all_skills)
-            if catalog_block:
-                # Post-router hook: when a strong skill match fires, append a
-                # HARD directive to the system prompt telling the LLM to
-                # invoke the matched skill as its first action via the Skill
-                # meta-tool.  Reuses unified_search results when available.
-                forced_skill_directive = ""
-                if user_content:
-                    try:
-                        results = unified_search(
-                            user_content, limit=5, db=db,
-                        )
-                        forced = post_router_pick(
-                            user_content,
-                            db=db,
-                            candidates=results,
-                        )
-                        if forced:
-                            forced_skill_directive = (
-                                build_agent_forced_skill_directive(
-                                    forced["skill_name"],
-                                    score=forced.get("score"),
-                                )
-                            )
-                    except Exception:
-                        pass  # Forced-skill directive is best-effort
-                system_prompt += forced_skill_directive
-                system_prompt += (
-                    "\n\n## Skill Catalog (dynamic discovery)\n"
-                    "You have access to ALL skills below — not just the "
-                    "ones bound to you. Use the `Skill` tool to load or "
-                    "execute any skill by name (e.g. "
-                    '`Skill {command: "execute weekly-report-generation"}`). '
-                    "`load_skill_body` is a SEPARATE tool from the `Skill` "
-                    "dispatcher — call it directly with {name: '<skill-name>'} "
-                    "to read a skill's full methodology. NEVER pass a tool "
-                    "name (like 'load_skill_body') as a Skill command.\n\n"
-                    f"<available_skills>\n{catalog_block}\n</available_skills>"
-                )
+            _explicit_skill_name_v3 = None
+            if isinstance(selected_skill, dict):
+                _explicit_skill_name_v3 = selected_skill.get("name")
+            elif isinstance(selected_skill, str):
+                _explicit_skill_name_v3 = selected_skill
+            _skill_ctx_block_v3 = build_skill_catalog_context(
+                user_content,
+                db,
+                bound_skills=set(agent_app.skills or []),
+                context_window_tokens=(
+                    effective_llm.endpoint.context_window
+                    if effective_llm.endpoint else None
+                ),
+                explicit_skill_name=_explicit_skill_name_v3,
+            )
+            if _skill_ctx_block_v3:
+                system_prompt += _skill_ctx_block_v3
         except Exception:
             pass
 
@@ -10855,10 +11645,17 @@ async def add_message_stream(
             selected_project_id=_v3_effective_pid,
             selected_project_name=_v3_effective_pname,
             user_id=user.id if user else None,
+            user_message=user_content,
             # P1-5: pass the user-selected model's context window so the
             # Bound Data Sources block auto-compresses for small models.
+            # Uses the REAL resolved window (admin-set or auto-probed) so
+            # ANY model gets the right budget, not just heuristic names.
             target_context_window=get_context_window(
-                user_model or get_model()
+                user_model or get_model(),
+                context_window_tokens=(
+                    effective_llm.endpoint.context_window
+                    if effective_llm.endpoint else None
+                ),
             ),
         )
     except Exception as e:
@@ -10942,24 +11739,6 @@ async def add_message_stream(
         except Exception:
             pass
 
-    # ── T15: weak re-export intent → nudge the system prompt (flag-gated) ──
-    # Append before llm_messages is built so the directive reaches the loop.
-    if settings.INTENT_ROUTER_ENABLED:
-        _intent = detect_export_intent(user_content)
-        if _intent and _intent.confidence == "weak":
-            _directive = (
-                "\n\nUSER INTENT DETECTED: re-export. Prefer "
-                "create_artifact(source_execution_id=...) with the session's "
-                "last execution_id instead of re-running data tools."
-            )
-            try:
-                _state = SessionStateService.get_last(db, session_id=conversation_id)
-                if isinstance(_state, SessionState) and getattr(_state, "last_execution_id", None):
-                    _directive += f" Last: {_state.last_execution_id}\n"
-            except Exception as _exc:
-                logger.debug("[intent-router] weak state lookup failed: %s", _exc)
-            system_prompt += _directive
-
     # ── T17: SESSION STATE block (fail-open, best-effort) ──────────────
     # Append cached last-data-execution metadata before llm_messages freeze
     # so re-export/re-format requests can reuse the execution_id instead of
@@ -10971,6 +11750,20 @@ async def add_message_stream(
             system_prompt = system_prompt + state_block
     except Exception as _exc:
         logger.debug("[session-state] injection failed: %s", _exc)
+
+    # ── P1-4: delegation nudge (2026-08-29) ─────────────────────────────
+    # Parallelizable asks (>=2 top-N/list/comparison clauses) get a one-shot
+    # directive to fan out via delegate_task instead of answering linearly.
+    # Mirrors the T15 directive pattern above. Dashboard turns excluded
+    # (they have their own build-tool forcing).
+    try:
+        from app.services.delegation_nudge import delegation_nudge_directive
+
+        _del_directive = delegation_nudge_directive(user_content)
+        if _del_directive:
+            system_prompt += _del_directive
+    except Exception as _del_err:  # noqa: BLE001 — non-fatal
+        logger.debug("delegation nudge injection failed (non-fatal): %s", _del_err)
 
     llm_messages = _rebuild_v3_history_messages(system_prompt, messages)
 
@@ -11058,54 +11851,21 @@ async def add_message_stream(
         # the empty-rows path) as well as after it (orchestrator fallback),
         # so compute it once up front.
         _orch_doc_format = detect_file_intent(user_content)
-
-        # ── T15: strong re-export intent → hard bypass (flag-gated) ─────────
-        # If the user asks to re-export/re-format a previous analysis AND a
-        # cached session execution exists, build the artifact directly from the
-        # cached structured data (source_execution_id) and end the stream
-        # WITHOUT running the LLM loop. Any failure falls through to the normal
-        # loop below (never 500s the stream).
-        if settings.INTENT_ROUTER_ENABLED:
-            _intent = detect_export_intent(user_content)
-            if _intent and _intent.confidence == "strong":
-                try:
-                    _state = None
-                    try:
-                        _state = SessionStateService.get_last(db, session_id=conversation_id)
-                    except Exception as _exc:
-                        logger.debug("[intent-router] strong state lookup failed: %s", _exc)
-                    if isinstance(_state, SessionState) and getattr(_state, "last_execution_id", None):
-                        _intent.source_execution_id = _state.last_execution_id
-                    if _intent.source_execution_id:
-                        _result = await _create_artifact_tool(
-                            args={
-                                "type": _intent.format,
-                                "title": (getattr(_state, "last_tool_name", None) or "Report"),
-                                "source_execution_id": _intent.source_execution_id,
-                            },
-                            db=db,
-                            user_id=str(user.id),
-                            context={
-                                "conversation_id": conversation_id,
-                                "agent_app_id": agent_app_id,
-                                "agent_name": agent_name,
-                            },
-                        )
-                        _done_content = "Document ready."
-                        if isinstance(_result, dict):
-                            _done_content = (
-                                _result.get("artifact_url")
-                                or _result.get("message")
-                                or _result.get("title")
-                                or "Document ready."
-                            )
-                        yield f'data: {json.dumps({"type": "done", "content": _done_content, "conversation": conv.to_dict()})}\n\n'
-                        return
-                except Exception as exc:
-                    logger.warning("[intent-router] strong-intent bypass failed, falling through: %s", exc)
+        # Dashboard builds (2026-08-27): a full-stack dashboard turn is a LONG
+        # multi-phase pipeline (design system → schema → data collection →
+        # build → verify). It gets its own budget below — the fast-mode caps
+        # (10 iterations / 180s wall clock) fired mid-pipeline and the user
+        # got the "turn ended" note instead of the live app.
+        _is_dashboard_build = bool(_orch_doc_format == "dashboard")
 
         # ── Activity steps tracking (Claude-style inline numbered steps) ──
         _step_counter = [0]  # mutable counter (list for nonlocal access)
+        # Turn-start timestamp for the agent_invocations recorder (P1, 2026-08-29).
+        from datetime import datetime as _dt, timezone as _tz
+
+        _turn_started = _dt.now(_tz.utc)
+        # 2026-08-27: sink for opt-in ask_data_agent sub-step SSE frames.
+        _tool_progress: list[str] = []
         _activity_steps: list[dict] = []  # accumulate for final persistence
         _emitted_phases: set[str] = {"goal"}  # phase headlines already sent this turn
         reasoning_acc: list[str] = []  # P0: accumulate reasoning across iterations for final assistant_msg
@@ -11159,6 +11919,23 @@ async def add_message_stream(
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
         _gate_attempts = 0  # universal self-eval re-plan nudges this turn
+        _cad_verify_nudges = 0  # CAD verify-on-stop nudges this turn (cap 1)
+        _fusion_clear_count = 0  # fusion360_clear calls this turn (cap 1 — see _invoke_v3)
+        _fusion_readonly_streak = 0  # consecutive read-only fusion calls (info/ping) — spin guard
+        # Clarify handoff (2026-08-28): when the model issues a clarify
+        # question, the turn must END — the user's next message is the
+        # answer (CLARIFY_SUSPENDS_TURN_ENABLED). Without this, the loop
+        # kept iterating after clarify and burned the remaining budget on
+        # guard blocks / failing tools, ending in a confusing
+        # "phase_enter.act failed" + verify_failed instead of a clean pause
+        # (Sales Performance Dashboard turn, conv f62e4c2b).
+        _clarify_issued = False
+        _clarify_question_text = ""
+        # Batch-replay guard state: fingerprint (sorted tool name+args JSON) →
+        # count within THIS turn. A large identical batch re-emitted N times
+        # escapes the per-tool loop guard (each tool appears once per batch),
+        # so we fingerprint whole batches and break at >= 3 repeats.
+        _batch_fp_counts: dict[str, int] = {}
         _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
         # Fix 1b: one-shot "force create_artifact next iteration" signal set
         # by the LAST allowed pptx nudge (pptx_turn_guard.force_next). Read at
@@ -11199,6 +11976,32 @@ async def add_message_stream(
             _fetch_cap = max(2, _data_cap // 2)
             if _fetch_cap > TOOL_CALL_CAPS.get("fetch_data_batch", 3):
                 _dynamic_tool_caps["fetch_data_batch"] = _fetch_cap
+            # Dashboard builds (2026-08-27): schema exploration alone is
+            # several fetch_data_batch calls (SHOW TABLES, DESCRIBE per
+            # table, SHOW COLUMNS) BEFORE any data pull. The generic cap
+            # (3 calls, name-only keyed) tripped the tool-call loop guard
+            # mid-exploration on conv 3e7fa92b — the loop broke before
+            # create_fullstack_dashboard could ever be called, and the
+            # user got a "readiness assessment" report instead of the app.
+            # On dashboard turns, give data tools the dashboard exploration
+            # budget (the exploration cap itself stays authoritative for
+            # steering the model to build).
+            if _is_dashboard_build:
+                _dash_data_cap = max(
+                    getattr(settings, "MAX_DASHBOARD_EXPLORATION_PER_TURN", 8),
+                    _dynamic_tool_caps.get("fetch_data_batch", 0),
+                    _dynamic_tool_caps.get("ask_data_agent", 0),
+                )
+                _dynamic_tool_caps["fetch_data_batch"] = max(
+                    _dynamic_tool_caps.get("fetch_data_batch", 0), _dash_data_cap,
+                )
+                _dynamic_tool_caps["ask_data_agent"] = max(
+                    _dynamic_tool_caps.get("ask_data_agent", 0), _dash_data_cap,
+                )
+                logger.info(
+                    "Dashboard turn: data-tool caps raised to %d (fetch_data_batch/ask_data_agent)",
+                    _dash_data_cap,
+                )
         # Finish-line state (UnboundLocalError discipline: initialized BEFORE
         # the loop). ``dashboard_forced`` tracks whether the dashboard guard
         # forced ``create_dashboard`` this turn; ``_wrapup_nudged`` ensures
@@ -11220,6 +12023,11 @@ async def add_message_stream(
         _effective_budget = calculate_agent_budget(
             None, user_content or "", is_automation=_auto_flag,
         )
+        if _is_dashboard_build:
+            # Dashboard builds are 15-30+ tool calls; the dynamic soft cap
+            # (max 10) would break the loop before the build step. Use the
+            # dashboard budget (40) so the pipeline runs to completion.
+            _effective_budget = max(_effective_budget, settings.DASHBOARD_BUILD_MAX_TOOL_ITERATIONS)
         _schema_edges_seen = False
         # T12: per-turn describe_schema cap (dashboard turns). The agent can
         # burn its whole tool-loop budget re-inspecting the schema instead of
@@ -11229,6 +12037,16 @@ async def add_message_stream(
         _describe_schema_count = 0
         _schema_budget_frozen = False
         _v3_executed_tool_names: list[str] = []
+        # Tier 1 auto-refine tracking (2026-08-28): remember the dashboard
+        # build's quality grade + gaps and whether an update followed, so the
+        # done frame can warn when a B/C board was shipped without refinement.
+        _dash_quality_worst: str | None = None
+        _dash_quality_gaps: list[str] = []
+        _dash_refined: bool = False
+        # P1-4b: hard delegation nudge — injected ONCE per turn when the user
+        # asked for parallel work but the model keeps answering linearly.
+        _delegation_nudged: bool = False
+        _delegation_enforced: bool = False
         # T19: tools that were CALLED this turn but FAILED (returned
         # {"success": False} or threw). Lets the dashboard-orchestrator guard
         # distinguish "build tool ran OK" from "build tool crashed" — a failed
@@ -11272,6 +12090,63 @@ async def add_message_stream(
             except Exception as _gc_err:  # noqa: BLE001 — contract must never break the loop
                 logger.warning("goal-contract build failed (fallback to legacy): %s", _gc_err)
                 _contract = None
+        # ── Turn plan (2026-08-27): deterministic plan-first ──────────
+        # The agent MUST make a plan (todo list) from the user's input BEFORE
+        # acting, then follow it. Previously planning was optional model prose
+        # that the local LLM rarely produced — the loop freewheeled into
+        # repeated ask_data_agent calls and shipped no deliverable. The plan
+        # is derived deterministically from intent, emitted as plan_step_added
+        # events (live checklist in the UI), and injected into the model
+        # context so the loop follows it. Flag-gated: TURN_PLAN_ENABLED.
+        _turn_plan = None
+        _turn_plan_completed: set[int] = set()
+        if settings.TURN_PLAN_ENABLED:
+            try:
+                _turn_plan = build_turn_plan(
+                    user_content or "",
+                    is_dashboard_build=_is_dashboard_build,
+                    is_report_request=bool(_orch_doc_format),
+                    tool_names=_tool_names_from_schemas(tools),
+                )
+                # Dynamic per-request plan (2026-08-27): one cheap LLM
+                # planning call tailors the steps to THIS request (the exact
+                # metrics / regions / tools the user named), not a generic
+                # template. Only for deliverable/data kinds — generic turns
+                # keep the fixed template with zero added latency. Falls back
+                # to the fixed plan on any failure (timeout, invalid JSON,
+                # too few/many steps) — the deterministic backbone always
+                # stands.
+                if (
+                    _turn_plan is not None
+                    and _turn_plan.kind in ("dashboard", "report", "data")
+                    and settings.TURN_PLAN_DYNAMIC_ENABLED
+                ):
+                    _dyn_plan = await _generate_dynamic_turn_plan(
+                        user_content or "",
+                        _turn_plan.kind,
+                        _tool_names_from_schemas(tools),
+                        endpoint=effective_llm.endpoint,
+                    )
+                    if _dyn_plan is not None:
+                        _turn_plan = _dyn_plan
+                if _turn_plan and _turn_plan.steps:
+                    # Step 1 (analyze/understand) is complete by definition:
+                    # the request was read to build the plan.
+                    _turn_plan_completed = {
+                        s.step_index for s in _turn_plan.steps if s.key == "analyze"
+                    }
+                    if "plan" not in _emitted_phases:
+                        _emitted_phases.add("plan")
+                        yield _emit_phase("plan")
+                    for _st in _turn_plan.steps:
+                        yield plan_step_added_frame(_st)
+                    llm_messages.append({
+                        "role": "user",
+                        "content": plan_to_system_block(_turn_plan),
+                    })
+            except Exception as _plan_err:  # noqa: BLE001 — planning must never break the loop
+                logger.warning("turn-plan build failed (planless loop): %s", _plan_err)
+                _turn_plan = None
         # ── Query-purpose resolver (flag-gated, Bug 2 fix) ─────────────
         # Resolves catalog table roles ONCE per turn (memoized) so every
         # ask_data_agent result can be tagged probe/auxiliary/answer before
@@ -11323,9 +12198,21 @@ async def add_message_stream(
         # the final synthesis — jarring "make-then-collapse" UX. We only
         # show the FINAL accumulated_content in the very last SSE event.
         _suppress_chat_deltas = bool(_orch_doc_format)
-        # 2026-08-25: per-model override — qwen3.6-27b uses 10 iterations (not 40)
-        # to keep turn time under 60s. DeepSeek-chat path unchanged.
+        # 2026-08-27: agent fast mode — 10 iterations (not 40) keeps turn
+        # time under 60s for ALL models (deepseek, qwen, etc.)
         _v3_max_iterations = _effective_max_tool_iterations(effective_llm)
+        if _is_dashboard_build:
+            # Dashboard builds are 15-30+ tool calls (design → schema → data
+            # → build → verify). Lift the fast-mode 10-iteration cap to the
+            # dashboard budget (40). An explicit agent_app.max_iterations
+            # below still wins — the user's per-agent choice is respected.
+            _v3_max_iterations = max(_v3_max_iterations, settings.DASHBOARD_BUILD_MAX_TOOL_ITERATIONS)
+        # Per-agent override (2026-08-27): AgentApp.max_iterations beats the
+        # fast-mode default. The CAD Agent seeds 30 because a Fusion build is
+        # a 9-15+ step sequential tool loop (sketch→extrude→fillet→verify),
+        # which would otherwise be cut off at 10 iterations.
+        if agent_app and isinstance(getattr(agent_app, "max_iterations", None), int) and agent_app.max_iterations > 0:
+            _v3_max_iterations = agent_app.max_iterations
         # 2026-08-25: hard wall-clock cap on the orchestrator loop.
         # 60s keeps the user's HTTP connection alive (typical proxy/browser
         # idle cap is 240s, but observed 228s "connection interrupted"
@@ -11334,7 +12221,53 @@ async def add_message_stream(
         # rows were collected so far.
         import time as _time_outer
         _loop_t0 = _time_outer.monotonic()
-        _LOOP_WALL_CLOCK_CAP_S = 60.0
+        # 2026-08-25: hard wall-clock cap on the orchestrator loop.
+        # 60s keeps the user's HTTP connection alive (typical proxy/browser
+        # idle cap is 240s, but observed 228s "connection interrupted"
+        # before any message was saved).
+        # 2026-08-26: deliverable/report requests (docx/pptx/pdf/xlsx) get
+        # a LARGER budget (180s) — the ask_data_agent sub-loop alone takes
+        # 20-40s on qwen3.6-27b, so a 60s cap fired BEFORE post-loop
+        # synthesis could run, and the user got the generic fallback
+        # instead of the real report. 180s stays under the 240s proxy
+        # ceiling while giving the loop room to collect data AND let
+        # synthesis run. Chat-only requests keep the snappy 60s cap.
+        # 2026-08-27: CAD/Fusion agents need the same larger budget as report
+        # requests — a build is a multi-step tool loop (ping→sketch→extrude→
+        # verify, 4-12+ iterations) and on a local LLM at ~20s/iteration the
+        # 60s cap fired BEFORE post-loop synthesis, so the user got the
+        # generic "trouble putting it all together" fallback instead of the
+        # model result. Detect via enabled fusion360_* tools (per-agent).
+        _is_fusion_agent = bool(
+            tool_config
+            and isinstance(tool_config.get("enabled_tools"), list)
+            and any(
+                isinstance(t, str) and t.startswith("fusion360")
+                for t in tool_config.get("enabled_tools")
+            )
+        )
+        # 2026-08-28: CAD/Fusion soft-budget lift. The dynamic soft cap
+        # (calculate_agent_budget returns a small base budget like 4 for
+        # non-DB messages) breaks the loop at iteration 4 — mid-build — so a
+        # Fusion build never finishes (observed: clear→sketch→polygon→extrude
+        # then a forced wrap-up, no verify_build). Dashboard builds already get
+        # a lift (above); CAD builds get the same treatment: the soft cap is
+        # raised to the per-agent hard cap so the build runs until the model
+        # calls fusion360_verify_build and produces its final answer. The
+        # wall-clock cap (180s for fusion agents) still bounds runaway turns.
+        if _is_fusion_agent:
+            _effective_budget = max(_effective_budget, _v3_max_iterations)
+        _LOOP_WALL_CLOCK_CAP_S = (
+            # Dashboard builds (2026-08-27): 30-minute wall clock — effectively
+            # no cap. The pipeline is multi-phase and the local LLM takes ~20s
+            # per call; the old 180s cap fired mid-data-gathering and the user
+            # got the canned "turn ended" note instead of the live app.
+            # Long-running build tools emit progress frames, so the SSE
+            # connection stays alive for the full build.
+            settings.DASHBOARD_BUILD_WALL_CLOCK_CAP_S
+            if _is_dashboard_build
+            else (180.0 if (_orch_doc_format or _is_fusion_agent) else 60.0)
+        )
         for iteration in range(_v3_max_iterations):
             # 2026-08-25: wall-clock cap. If we've been looping >60s, break
             # and let the post-loop synthesizer produce a final answer from
@@ -11497,7 +12430,9 @@ async def add_message_stream(
                 logger.warning(
                     "Tool-call loop guard tripped in conversation %s: "
                     "tool=%r count=%d (cap=%d). Breaking loop.",
-                    conversation_id, looped_tool, looped_n, TOOL_CALL_HARD_CAP,
+                    conversation_id, looped_tool, looped_n,
+                    _dynamic_tool_caps.get(looped_tool)
+                    or TOOL_CALL_CAPS.get(looped_tool, TOOL_CALL_HARD_CAP),
                 )
                 # Bug 2 fix: do NOT stream the reflexion text as the user's
                 # response. The previous code set assistant_content =
@@ -11537,12 +12472,11 @@ async def add_message_stream(
             # in the chat. Without this, the agent often keeps running
             # `execute_query` and dumps markdown tables instead of producing
             # an interactive dashboard artifact.
-            # Also fires in dashboard-capable projects (Ecisco BI) when the
+            # Also fires in dashboard-capable projects when the
             # agent speculatively loads dashboard skills before being asked.
             _tool_names = _tool_names_from_schemas(tools)
             _is_dash_project = bool(conv.agent_name and (
-                "ecisco_bi" in conv.agent_name.lower()
-                or "bi_assistant" in conv.agent_name.lower()
+                "bi_assistant" in conv.agent_name.lower()
             ))
             _dash_build_tool = dashboard_build_tool()
             if (
@@ -11746,20 +12680,41 @@ async def add_message_stream(
                                     # 2026-08-25: live-streaming spec — parse the
                                     # streaming text for plan-step markers and emit
                                     # `plan_step_added` for each newly-detected step.
-                                    try:
-                                        from app.services.agent_loop.streaming_helpers import parse_plan_steps_from_text
-                                        for _step in parse_plan_steps_from_text(assistant_content):
-                                            if _step["step_index"] not in _plan_step_seen:
-                                                _plan_step_seen.add(_step["step_index"])
-                                                yield f'data: {json.dumps({"type": "plan_step_added", "step_index": _step["step_index"], "title": _step["title"]})}\n\n'
-                                    except Exception as _plan_err:
-                                        logger.debug("plan step parse failed (non-fatal): %s", _plan_err)
+                                    # 2026-08-27: the deterministic turn plan
+                                    # (TURN_PLAN_ENABLED) is now the ONLY source of
+                                    # plan_step_added — it is emitted BEFORE the loop
+                                    # with clean titles and ticked off by tool
+                                    # evidence. This legacy streaming parser collided
+                                    # with it: it re-parsed the streamed markdown on
+                                    # every delta, captured mid-stream partial lines
+                                    # ("- **") as step titles, and its step_indexes
+                                    # overwrote the turn plan's titles in the UI
+                                    # checklist. Kept only for TURN_PLAN_ENABLED=False
+                                    # (legacy) mode.
+                                    if not settings.TURN_PLAN_ENABLED:
+                                        try:
+                                            from app.services.agent_loop.streaming_helpers import parse_plan_steps_from_text
+                                            for _step in parse_plan_steps_from_text(assistant_content):
+                                                if _step["step_index"] not in _plan_step_seen:
+                                                    _plan_step_seen.add(_step["step_index"])
+                                                    yield f'data: {json.dumps({"type": "plan_step_added", "step_index": _step["step_index"], "title": _step["title"]})}\n\n'
+                                        except Exception as _plan_err:
+                                            logger.debug("plan step parse failed (non-fatal): %s", _plan_err)
                                     if _nudge_replacement_pending:
                                         # D1/D2: post-nudge re-synthesis replaces
                                         # the whole bubble instead of appending, so
                                         # leaked nudge-reply prose never shows.
+                                        # 2026-08-28: one-shot latch — emit the
+                                        # replacement ONCE (full accumulated text),
+                                        # then clear the flag so the rest of the
+                                        # stream appends as normal deltas. Previously
+                                        # the flag was never reset, so EVERY token
+                                        # became a full-bubble content_replace (629
+                                        # in one CAD turn = the visible
+                                        # buffering/collapse loop).
                                         if not _suppress_chat_deltas:
                                             yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                        _nudge_replacement_pending = False
                                     else:
                                         if not _suppress_chat_deltas:
                                             yield f'data: {json.dumps({"type": "delta", "content": ev_data})}\n\n'
@@ -11870,8 +12825,10 @@ async def add_message_stream(
                             if _nudge_replacement_pending:
                                 # D1/D2: full-content emit must replace the
                                 # bubble when a re-synthesis is in flight.
+                                # 2026-08-28: one-shot (see delta branch).
                                 if not _suppress_chat_deltas:
                                     yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                _nudge_replacement_pending = False
                             else:
                                 if not _suppress_chat_deltas:
                                     yield f'data: {json.dumps({"type": "delta", "content": assistant_content})}\n\n'
@@ -11957,6 +12914,22 @@ async def add_message_stream(
                 reasoning_acc.append(final_reasoning)
                 yield f'data: {json.dumps({"type": "reasoning_done", "reasoning": final_reasoning, "step_count": len(tool_calls_for_frontend)})}\n\n'
 
+            # ── Clarification hard-stop (:::options) — same as the
+            # add_message / resume loops: a message with an options block
+            # asks the user a question → turn done, no tools, no
+            # goal-contract / verification gates (they would misread the
+            # question as an unmet deliverable and force a retry loop).
+            _opt_names = [tc.get("function", {}).get("name", "") for tc in raw_tool_calls]
+            if _options_clarification(assistant_content, _opt_names):
+                if raw_tool_calls:
+                    logger.info(
+                        "Suppressing %d tool call(s) after :::options clarification "
+                        "block (stream, conv=%s, iter=%d): %s",
+                        len(raw_tool_calls), conversation_id, iteration, _opt_names,
+                    )
+                    raw_tool_calls = []
+                break
+
             if not raw_tool_calls:
                 # ── Goal-Contract exit checker (flag-gated) ──────────
                 # FIRST in the exit branch: if the turn contract has unmet
@@ -12030,8 +13003,15 @@ async def add_message_stream(
                         # D1/D2: nudge-reply prose must never be visible. Clear
                         # it (the top-of-loop append skips it) and mark the
                         # next iteration's stream as a bubble replacement.
+                        # 2026-08-31: emit content_preserve (NOT a bare
+                        # content_replace) so the frontend keeps the old text
+                        # visible with a "Refining answer…" indicator while the
+                        # re-synthesis runs — the bare replace was the visible
+                        # collapse-then-regenerate UX. The next iteration's
+                        # first delta (via _nudge_replacement_pending) swaps in
+                        # the real replacement text.
                         if content_streamed and assistant_content and not _suppress_chat_deltas:
-                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                            yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "goal_contract"})}\n\n'
                         assistant_content = ""
                         _nudge_replacement_pending = True
                         continue
@@ -12082,8 +13062,12 @@ async def add_message_stream(
                     # 2026-08-25: emit content_preserve first so the
                     # frontend can keep old text visible during the swap,
                     # avoiding the "collapse" UX.
+                    # 2026-08-28: do NOT also emit content_replace "" here —
+                    # that wiped the bubble to empty (visible collapse) before
+                    # the re-synthesis streamed. content_preserve keeps the old
+                    # text visible; the re-synthesis's first delta arrives as a
+                    # content_replace (flag set below) with the REAL text.
                     yield f'data: {json.dumps({"type": "content_preserve", "content": "", "reason": "promise_strip"})}\n\n'
-                    yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.info(
@@ -12118,7 +13102,8 @@ async def add_message_stream(
                         ),
                     })
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        # 2026-08-31: content_preserve (see guardrail site).
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "apology_force"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.warning(
@@ -12151,7 +13136,8 @@ async def add_message_stream(
                         ),
                     })
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        # 2026-08-31: content_preserve (see guardrail site).
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "bounce_back_force"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.warning(
@@ -12193,8 +13179,11 @@ async def add_message_stream(
                     })
                     # Replace any previously streamed text (promise narration
                     # from earlier iterations) with the upcoming synthesis.
+                    # 2026-08-31: content_preserve instead of a bare
+                    # content_replace — keep old text + "Refining answer…"
+                    # indicator visible during the forced retry.
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "empty_answer_force"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     logger.warning(
@@ -12212,9 +13201,17 @@ async def add_message_stream(
                     llm_messages.append({"role": "user", "content": guardrail_result.message})
                     guardrail_retries += 1
                     # D1/D2: guardrail nudge-reply must not leak into the
-                    # final answer (same clear + content_replace pattern).
+                    # final answer (same clear + preserve pattern).
+                    # 2026-08-31: content_preserve — the hallucination guardrail
+                    # fires when the LLM answered a data question WITHOUT
+                    # calling a tool; the streamed answer was fabricated, so the
+                    # next retry replaces it. Emitting a bare content_replace
+                    # here made the bubble visibly collapse-then-regenerate
+                    # (the exact UX reported). preserve keeps the old text +
+                    # "Refining answer…" indicator during the retry; the next
+                    # iteration's first delta swaps in the real answer.
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "hallucination_guardrail"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     continue
@@ -12229,6 +13226,46 @@ async def add_message_stream(
                 # issuing one records a force so a nudge can never extend the
                 # turn beyond the global force budget. Contract inactive (flag
                 # off) → standalone cap via settings.VERIFY_NUDGE_MAX.
+                # ── CAD verify-on-stop (2026-08-27) ────────────────────────
+                # A Fusion build turn MUST end with fusion360_verify_build before
+                # claiming success. The CAD prompt mandates it but qwen3.6-27b
+                # frequently skips it and declares "build finished" after a
+                # partial build (observed: M5 bolt+nut left only a hex head on
+                # canvas). If modeling tools ran this turn and verify_build was
+                # never called, nudge the model to call it now (cap 1/turn —
+                # the nudge forces a tool-call next iteration, and the result
+                # feeds _cad_build_fallback deterministically).
+                if (
+                    _is_fusion_agent
+                    and _fusion_build_progress_this_turn(tool_calls_for_frontend)
+                    and not _tool_was_called(tool_calls_for_frontend, "fusion360_verify_build")
+                    and _cad_verify_nudges < 1
+                ):
+                    _cad_verify_nudges += 1
+                    llm_messages.append({"role": "assistant", "content": assistant_content})
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "You ran Fusion 360 modeling tools this turn but never "
+                            "called fusion360_verify_build. Call it NOW with "
+                            "expected_body_count=<the number of parts in your plan> "
+                            "(and expected_params if you created parameters). Read the "
+                            "PASS/FAIL result — if it FAILs, fix the discrepancy before "
+                            "finishing. Do not claim the build is complete until "
+                            "verify_build returns ok=true."
+                        ),
+                    })
+                    # D1/D2: nudge reply must not leak into the final answer.
+                    # 2026-08-31: content_preserve (see guardrail site).
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "cad_verify"})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.info(
+                        "v3 stream: CAD verify-on-stop nudge injected (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                    continue
                 _verify_nudge = build_verify_on_stop_nudge(llm_messages, attempts=_verify_attempts)
                 if _verify_nudge and _contract is not None and _contract.forces_used >= min(
                     _effective_verify_nudge_max(effective_llm), settings.GOAL_CONTRACT_MAX_FORCES,
@@ -12241,9 +13278,10 @@ async def add_message_stream(
                     if _contract is not None:
                         _contract.record_force()
                     # D1/D2: verify nudge-reply must not leak into the final
-                    # answer (same clear + content_replace pattern).
+                    # answer (same clear + preserve pattern).
+                    # 2026-08-31: content_preserve (see guardrail site).
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "verify_nudge"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     continue
@@ -12280,9 +13318,10 @@ async def add_message_stream(
                         if len(_popped or "") > len(_v3_recovered_best[0] or ""):
                             _v3_recovered_best[0] = _popped
                     # D1/D2: pptx nudge-reply must not leak into the final
-                    # answer (same clear + content_replace pattern).
+                    # answer (same clear + preserve pattern).
+                    # 2026-08-31: content_preserve (see guardrail site).
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "pptx_guard"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     continue
@@ -12327,8 +13366,10 @@ async def add_message_stream(
                                                 _v3_recovered_best[0] = _popped
                                         # D1/D2: file-guard nudge-reply must not
                                         # leak into the final answer.
+                                        # 2026-08-31: content_preserve (see
+                                        # guardrail site).
                                         if content_streamed and assistant_content and not _suppress_chat_deltas:
-                                            yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                                            yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "file_guard"})}\n\n'
                                         assistant_content = ""
                                         _nudge_replacement_pending = True
                                         continue
@@ -12421,9 +13462,13 @@ async def add_message_stream(
                     # disappears and reappears. The content_replace
                     # immediately follows to swap the persisted message
                     # content; the frontend preserves the visual bubble.
+                    # 2026-08-31: DROP the immediate content_replace — it
+                    # cleared the refining flag instantly (the indicator
+                    # never showed). preserve-only matches promise_strip:
+                    # the next iteration's first delta (via
+                    # _nudge_replacement_pending) performs the actual swap.
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
                         yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "self_eval_nudge"})}\n\n'
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
                     continue
@@ -12471,12 +13516,54 @@ async def add_message_stream(
                         if len(_popped or "") > len(_v3_recovered_best[0] or ""):
                             _v3_recovered_best[0] = _popped
                     # D1/D2: the nudge reply must never leak into the final
-                    # answer (same content_replace SSE pattern as the other
-                    # nudge sites).
+                    # answer (same preserve SSE pattern as the other nudge
+                    # sites). 2026-08-31: content_preserve (see guardrail site).
                     if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_replace", "content": assistant_content})}\n\n'
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "dashboard_narration"})}\n\n'
                     assistant_content = ""
                     _nudge_replacement_pending = True
+                    continue
+                # ── P1-4c: hard delegation enforcement (2026-08-29) ──────
+                # The model answered a parallelizable ask with a weak final
+                # answer and never called delegate_task. Mirror the narration
+                # nudge: inject the hard instruction, drop the weak narration,
+                # and continue the loop (capped once per turn).
+                if (
+                    _delegation_nudged
+                    and not _delegation_enforced
+                    and "delegate_task" not in _v3_executed_tool_names
+                ):
+                    _delegation_enforced = True
+                    _enforce_msg = (
+                        "SYSTEM GUARDRAIL: your answer did not cover all the "
+                        "requested items and you did not call delegate_task. "
+                        "The user's ask has INDEPENDENT parts (top-N lists / "
+                        "comparisons). Call `delegate_task(tasks=[...])` NOW — "
+                        "ONE task string per item — then synthesize their "
+                        "results. Do not reply with prose until you have made "
+                        "that call."
+                    )
+                    llm_messages.append({"role": "assistant", "content": assistant_content or ""})
+                    llm_messages.append({"role": "user", "content": _enforce_msg})
+                    if _v3_iter_contents:
+                        _popped = _v3_iter_contents.pop()
+                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _popped
+                    if content_streamed and assistant_content and not _suppress_chat_deltas:
+                        # 2026-08-31: content_preserve (NOT the old
+                        # content_replace with "") — the empty replace WIPED
+                        # the visible bubble (a literal collapse); preserve
+                        # keeps the weak narration visible + "Refining
+                        # answer…" while the delegation-enforced next
+                        # iteration streams.
+                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "delegation_enforce"})}\n\n'
+                    assistant_content = ""
+                    _nudge_replacement_pending = True
+                    logger.warning(
+                        "v3 stream: hard delegation enforcement injected "
+                        "(conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
                     continue
                 break
 
@@ -12495,6 +13582,44 @@ async def add_message_stream(
                     "tool_name": tool_name, "args": args,
                     "args_str": args_str, "tool_call_id": tool_call_id,
                 })
+
+            # ── Batch-replay guard (2026-08-27) ─────────────────────────
+            # The single-tool loop guard keys on (tool_name, args) per call,
+            # so a large parallel batch re-emitted verbatim N times (each tool
+            # called once per batch) never accumulates a per-tool count — the
+            # classic "identical 25-tool batch replayed 24×" runaway. Fingerprint
+            # the WHOLE batch (sorted name+args) and break when the same batch
+            # repeats >= 3×, nudging the model to stop.
+            # 2026-08-28: only guard batches with >= 2 calls. A legit CAD
+            # re-sync can call fusion360_info (single call, identical args)
+            # 3+ times in a row — tripping on single-call batches killed the
+            # turn mid-re-sync. Single-tool repetition is already capped by
+            # the per-tool loop guard, so this guard is only needed for
+            # multi-call batch replay.
+            if parsed_calls and len(parsed_calls) >= 2:
+                _batch_fp = json.dumps(
+                    sorted(
+                        (c["tool_name"], json.dumps(c.get("args") or {}, sort_keys=True))
+                        for c in parsed_calls
+                    ),
+                    sort_keys=True,
+                )
+                _batch_fp_counts[_batch_fp] = _batch_fp_counts.get(_batch_fp, 0) + 1
+                if _batch_fp_counts[_batch_fp] >= 3:
+                    logger.warning(
+                        "v3 stream: batch-replay guard tripped (conv=%s, iter=%d, "
+                        "batch=%d calls, fp=%.120s) — breaking loop",
+                        conversation_id, iteration, len(parsed_calls), _batch_fp,
+                    )
+                    llm_messages.append({
+                        "role": "user",
+                        "content": (
+                            "You have re-emitted the exact same tool-call batch "
+                            "multiple times. Stop repeating it. Use the results "
+                            "you already have and produce your final answer now."
+                        ),
+                    })
+                    break
 
             # ── Dashboard guard interception ──────────────────────────
             # The guard above set tool_choice to force create_dashboard, but
@@ -12575,7 +13700,7 @@ async def add_message_stream(
             ):
                 _phase_locked_calls = [
                     p for p in parsed_calls
-                    if p["tool_name"] in ("create_artifact", "run_sandbox_skill")
+                    if _phase_lock_should_block(p)
                 ]
                 if _phase_locked_calls:
                     _phase_blocked_ids = {
@@ -12799,6 +13924,40 @@ async def add_message_stream(
                         yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_antitool", "args": {"blocked": "anti_tools"}})}\n\n')
                         continue
 
+            # ── P1-4b: hard delegation nudge (2026-08-29) ────────────────
+            # The system-prompt directive is soft — weak models ignore it and
+            # answer "top 5 customers, top 5 products, top 3 regions"
+            # linearly (observed: 12 tool calls → "trouble putting it all
+            # together"). After one iteration of linear exploration, inject a
+            # hard user-role instruction ONCE (capped) steering to
+            # delegate_task. Mirrors the dashboard narration-nudge pattern.
+            if not _delegation_nudged and iteration >= 0:
+                try:
+                    from app.services.delegation_nudge import delegation_nudge_directive
+
+                    _del_hard = delegation_nudge_directive(user_content)
+                except Exception:  # noqa: BLE001
+                    _del_hard = None
+                if (
+                    _del_hard
+                    and _dash_build_tool not in _v3_executed_tool_names
+                    and "delegate_task" not in _v3_executed_tool_names
+                ):
+                    _delegation_nudged = True
+                    _del_msg = (
+                        "SYSTEM GUARDRAIL: the user asked for multiple "
+                        "INDEPENDENT items (top-N lists / comparisons). "
+                        "Stop answering them one-by-one. Call "
+                        "`delegate_task(tasks=[...])` NOW with ONE task string "
+                        "per item so they run as parallel sub-agents, then "
+                        "synthesize their results. Every item must be answered."
+                    )
+                    llm_messages.append({"role": "user", "content": _del_msg})
+                    logger.info(
+                        "v3 stream: hard delegation nudge injected (conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+
             # ── Fix 3: total-exploration cap (dashboard turns) ────────────
             # describe_schema + execute_query + execute_sql + sql_query
             # combined. Fires independently of the T12 describe_schema cap:
@@ -12958,12 +14117,8 @@ async def add_message_stream(
 
             if parsed_calls:
                 _dash_guard_names = {p["tool_name"] for p in parsed_calls}
-                if (
-                    _dash_build_tool in _dash_guard_names
-                    or _dash_build_tool in _tool_names
-                ) and any(
-                    n in dashboard_guard_blocked_tools()
-                    for n in _dash_guard_names
+                if dashboard_guard_should_block_queries(
+                    _dash_guard_names, _dash_build_tool, dashboard_forced,
                 ):
                     # Strip the blocked tool calls; keep only create_dashboard
                     # and harmless tools.
@@ -13291,6 +14446,12 @@ async def add_message_stream(
                 # the data agent can skip its narrate LLM call (saves ~1 call
                 # per ask_data_agent). Simple Q&A turns keep narrate.
                 "main_agent_will_synthesize": bool(_orch_doc_format),
+                # 2026-08-27: opt-in progress sub-steps for ask_data_agent.
+                # The handler appends SSE activity_step strings into this list;
+                # we drain+yield it right after the tool batch finishes so the
+                # UI can show "Resolving schema → Generating SQL → Executing".
+                "progress_emitter": _tool_progress,
+                "step_counter": _step_counter,
             }
 
             # ── Tool execution ──────────────────────────────────────────────
@@ -13303,6 +14464,124 @@ async def add_message_stream(
             async def _run_tool_batch():
                 # P2-12: shared core in app.services.agent_loop.tool_executor.
                 async def _invoke_v3(tool_name, args):
+                    nonlocal _fusion_clear_count  # loop-scope counter; += below would otherwise shadow it locally
+                    nonlocal _fusion_readonly_streak
+                    if _is_dashboard_build and tool_name == "ask_data_agent":
+                        # Dashboard builds collect metrics across many tables;
+                        # give the data-agent delegate the dashboard budget
+                        # (10 min) instead of the default 60s truncation so
+                        # every metric is gathered before the build starts.
+                        args = {**(args or {}), "budget_seconds": settings.DASHBOARD_DELEGATE_BUDGET_SECONDS}
+                    # CAD destructive-reclear guard (2026-08-27, hardened
+                    # 2026-08-28): a modeling tool already succeeded THIS turn,
+                    # so `fusion360_clear` would wipe the model mid-build (the
+                    # classic build-head → re-clear → rebuild → fail pattern),
+                    # and a SECOND clear in one turn always means the model is
+                    # re-planning from scratch instead of continuing (observed
+                    # 2026-08-28: clear re-emitted at the head of every batch,
+                    # 4× in one turn, wiping sketches it had just created).
+                    # Block the clear with an actionable synthetic result.
+                    if (
+                        _is_fusion_agent
+                        and tool_name == "fusion360_clear"
+                        and (
+                            _fusion_clear_count >= 1
+                            or _fusion_build_progress_this_turn(tool_calls_for_frontend)
+                        )
+                    ):
+                        logger.warning(
+                            "v3 stream: blocked destructive fusion360_clear mid-build "
+                            "(conv=%s, iter=%d, clear_count=%d)",
+                            conversation_id, iteration, _fusion_clear_count,
+                        )
+                        return {
+                            "success": False,
+                            "error": (
+                                "BLOCKED: the Fusion scene was already cleared this "
+                                "turn — do NOT clear again, it would wipe work in "
+                                "progress and restart from zero. Continue from the "
+                                "current scene: call fusion360_info to re-sync the "
+                                "live sketch/body indices, then keep building. Only "
+                                "an explicit user request for a brand-new model "
+                                "justifies a clear, and then only once per turn."
+                            ),
+                            "guardrail": {"code": "fusion_destructive_reclear_block"},
+                        }
+                    # ── Read-only spin guard (2026-08-28) ──────────────
+                    # Local models occasionally loop on re-sync: "I'll re-read
+                    # the live scene" → fusion360_info, forever (observed 10×
+                    # in one turn). Count CONSECUTIVE read-only calls (any
+                    # modeling tool resets the streak) and hard-block after 5
+                    # so the model is forced to either modify geometry or
+                    # answer. Legit info-after-modify is unaffected.
+                    _FUSION_READONLY = {"fusion360_info", "fusion360_ping",
+                                        "fusion360_project", "fusion360_lookup_api"}
+                    if _is_fusion_agent and tool_name in _FUSION_READONLY:
+                        _fusion_readonly_streak += 1
+                    elif (
+                        _is_fusion_agent
+                        and tool_name.startswith("fusion360_")
+                        and tool_name not in _FUSION_READONLY
+                    ):
+                        # A real modeling tool changes geometry — the streak
+                        # resets so info-after-modify stays legal. todo/plan
+                        # calls do NOT reset it (they don't touch geometry).
+                        _fusion_readonly_streak = 0
+                    if (
+                        _is_fusion_agent
+                        and tool_name in _FUSION_READONLY
+                        # 2026-08-28: 5 → 3. deepseek re-reads info 3-5x at
+                        # turn start before acting; each wasted re-read costs a
+                        # full LLM round trip (~5-15s on api.deepseek.com).
+                        # Blocking at 3 saves ~2 calls per turn while still
+                        # allowing one legit re-sync after a modeling change.
+                        and _fusion_readonly_streak >= 3
+                    ):
+                        logger.warning(
+                            "v3 stream: blocked read-only spin (conv=%s, iter=%d, "
+                            "tool=%s, streak=%d)",
+                            conversation_id, iteration, tool_name,
+                            _fusion_readonly_streak,
+                        )
+                        return {
+                            "success": False,
+                            "error": (
+                                "BLOCKED: you have re-read the Fusion scene %d "
+                                "times in a row WITHOUT changing any geometry. "
+                                "The scene has NOT changed. Use the "
+                                "fusion360_info result you already have and call "
+                                "a MODELING tool now (fusion360_sketch_create / "
+                                "fusion360_extrude / fusion360_fillet / "
+                                "fusion360_thread ...), or give your final "
+                                "answer. Do NOT call fusion360_info again."
+                            ) % _fusion_readonly_streak,
+                            "guardrail": {"code": "fusion_readonly_spin_block"},
+                        }
+                    if tool_name == "fusion360_clear":
+                        _fusion_clear_count += 1
+                    # Clarify handoff (2026-08-28): the model must not ask a
+                    # SECOND question in one turn. The first clarify already
+                    # suspends the turn (see the post-batch break above), so
+                    # this only fires for same-batch duplicates or when the
+                    # suspend flag is off — defense in depth.
+                    if (
+                        tool_name == "clarify"
+                        and _clarify_issued
+                        and settings.CLARIFY_SUSPENDS_TURN_ENABLED
+                    ):
+                        logger.warning(
+                            "v3 stream: blocked duplicate clarify (conv=%s, iter=%d)",
+                            conversation_id, iteration,
+                        )
+                        return {
+                            "success": False,
+                            "error": (
+                                "You already asked the user a question this turn — "
+                                "STOP and wait for the answer in the next message. "
+                                "Do NOT call clarify again."
+                            ),
+                            "guardrail": {"code": "clarify_duplicate_block"},
+                        }
                     return await execute_tool(
                         tool_name, args, db,
                         user.id if user else None, context=ctx,
@@ -13327,6 +14606,14 @@ async def add_message_stream(
             else:
                 results = await _run_tool_batch()
 
+            # 2026-08-27: drain any opt-in sub-step progress frames the
+            # ask_data_agent handler appended (Resolving schema → Generating
+            # SQL → Executing). They are yielded here, after the tool batch
+            # returns, so the UI gets granular feedback for slow DB queries.
+            for _tp_frame in _tool_progress:
+                yield _tp_frame
+            _tool_progress.clear()
+
             # Process results — check for approval pause
             paused_for_approval = False
             pending_tool = None
@@ -13335,10 +14622,58 @@ async def add_message_stream(
                 args_str = call["args_str"]
                 tool_call_id = call["tool_call_id"]
                 display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
+                # Clarify handoff (2026-08-28): a successful clarify means the
+                # user's next message IS the answer — the turn must suspend.
+                # Capture the question so the final bubble shows it instead of
+                # the empty "I gathered some information" fallback.
+                if (
+                    tool_name == "clarify"
+                    and isinstance(result, dict)
+                    and result.get("success")
+                    and settings.CLARIFY_SUSPENDS_TURN_ENABLED
+                ):
+                    _clarify_issued = True
+                    _clarify_question_text = (
+                        result.get("question") or _clarify_question_text
+                    )
                 # T12: count describe_schema executions + record executed tool
                 # names (canonical) so the pre-execution interception zone can
                 # enforce the per-turn cap on the NEXT iteration.
                 _v3_executed_tool_names.append(tool_name)
+                # Tier 1 auto-refine tracking (2026-08-28): the build tool's
+                # result carries a deterministic `quality` verdict. Capture the
+                # worst grade + hard gaps; an update afterwards marks refined.
+                if tool_name == _dash_build_tool and isinstance(result, dict) and result.get("success"):
+                    _q_res = result.get("quality")
+                    if isinstance(_q_res, dict):
+                        _q_grade = _q_res.get("grade")
+                        if _q_grade in ("B", "C"):
+                            _dash_quality_worst = _q_grade
+                            _dash_quality_gaps = list(_q_res.get("hard_gaps") or [])
+                        elif _q_grade == "A":
+                            _dash_quality_worst = "A"
+                if tool_name == "update_fullstack_dashboard" and isinstance(result, dict) and result.get("success"):
+                    _dash_refined = True
+                # Turn-plan evidence (2026-08-27): mark plan steps complete
+                # when a tool that evidences them SUCCEEDS, and emit
+                # plan_step_completed so the UI checklist ticks off as the
+                # agent executes its plan. Deterministic — never trusts model
+                # prose. Failed tools do NOT advance the plan.
+                if (
+                    _turn_plan is not None
+                    and _turn_plan.steps
+                    and isinstance(result, dict)
+                    and result.get("success")
+                ):
+                    _plan_new_done = plan_completed_steps(
+                        _turn_plan, _v3_executed_tool_names,
+                    ) - _turn_plan_completed
+                    if _plan_new_done:
+                        _turn_plan_completed |= _plan_new_done
+                        for _plan_idx in sorted(_plan_new_done):
+                            _plan_st = _turn_plan.step_by_index(_plan_idx)
+                            if _plan_st is not None:
+                                yield plan_step_completed_frame(_plan_st)
                 # T19: record FAILED tool executions. `result` is already
                 # normalized here — exceptions were converted to
                 # {"success": False, "error": ...} by _run_tool_batch, and
@@ -13524,7 +14859,7 @@ async def add_message_stream(
                 # Any data-producing tool feeds the deferred pipeline:
                 # ask_data_agent (delegated), execute_query / execute_sql /
                 # sql_query (direct SQL), forecast_brief (market reads).
-                # Production bug (2026-08-21): the Ecisco BI agent collected
+                # Production bug (2026-08-21): the BI agent collected
                 # 41 rows via execute_query, but record_dataset only fired
                 # for ask_data_agent → answer_datasets() stayed empty → the
                 # post-loop card never built → raw table + no deliverable.
@@ -13849,6 +15184,22 @@ async def add_message_stream(
                             conversation_id, exc,
                         )
 
+                # 2026-08-28: never persist a guardrail-BLOCKED fusion360_clear
+                # into the tool history. The model would read its synthetic
+                # result ("CLEARED bodies: 0") as proof the scene is empty,
+                # and a follow-up "update the model" turn then re-syncs in
+                # circles instead of modifying the existing bodies.
+                if (
+                    isinstance(result, dict)
+                    and isinstance(result.get("guardrail"), dict)
+                    and result["guardrail"].get("code")
+                    == "fusion_destructive_reclear_block"
+                ):
+                    logger.info(
+                        "v3 stream: blocked clear omitted from tool history "
+                        "(conv=%s, iter=%d)", conversation_id, iteration,
+                    )
+                    continue
                 tool_call_record = {
                     "id": tool_call_id, "name": display_name,
                     "arguments_string": args_str, "results": result,
@@ -14102,7 +15453,13 @@ async def add_message_stream(
                                     "function": {"name": tool_name, "arguments": args_str}}],
                 })
                 # P0: apply Layer 2 (per-result) persistence + guardrail after_call
-                _result_str = _persisted_result_str(tool_name, result, conversation_id)
+                _result_str = _persisted_result_str(
+                    tool_name, result, conversation_id,
+                    context_window_tokens=(
+                        effective_llm.endpoint.context_window
+                        if effective_llm.endpoint else None
+                    ),
+                )
                 # P1-5 Hermes-style hard cap: cap the individual tool result
                 # to FSM_PRUNE_MIN_RESULT_CHARS (50k chars ≈ 12-15k tokens)
                 # BEFORE appending to llm_messages.  This is Hermes Step 1
@@ -14141,12 +15498,39 @@ async def add_message_stream(
                 except Exception:
                     pass
 
+            # ── Clarify handoff: suspend the turn (2026-08-28) ─────────
+            # A successful clarify means the user's next message IS the
+            # answer. End the loop NOW — before the model can burn the
+            # remaining budget on guard blocks or failing tools (the tool
+            # budget cap of 3 and the "do NOT call this again" instruction
+            # were insufficient: deepseek re-issued clarify 2x then tried
+            # blocked tools until the iteration budget died with a confusing
+            # verify_failed on the Sales Performance Dashboard turn).
+            if _clarify_issued:
+                if not assistant_content and _clarify_question_text:
+                    assistant_content = _clarify_question_text
+                    logger.info(
+                        "v3 stream: clarify question used as final content "
+                        "(conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                logger.info(
+                    "v3 stream: clarify issued (conv=%s, iter=%d); "
+                    "suspending turn awaiting user answer",
+                    conversation_id, iteration,
+                )
+                break
+
             # P0: Layer 3 — apply per-turn aggregate budget to this batch's results
             if not paused_for_approval:
                 _batch_ids = [c["tool_call_id"] for c in parsed_calls]
                 _batch_names = [c["tool_name"] for c in parsed_calls]
                 _apply_turn_budget_to_messages(
-                    llm_messages, _batch_ids, _batch_names, conversation_id
+                    llm_messages, _batch_ids, _batch_names, conversation_id,
+                    context_window_tokens=(
+                        effective_llm.endpoint.context_window
+                        if effective_llm.endpoint else None
+                    ),
                 )
 
             # P0: if guardrail controller tripped a halt, inject nudge and break
@@ -14333,6 +15717,22 @@ async def add_message_stream(
 
         # --- Stream the final response ---
         _loop_exit_monotonic = time.monotonic()
+        # Turn-plan final step (2026-08-27): when the loop produced content,
+        # the answer/respond step is complete — deterministic, model-free.
+        if (
+            _turn_plan is not None
+            and _turn_plan.steps
+            and assistant_content.strip()
+        ):
+            _plan_final_done = mark_final_step_completed(
+                _turn_plan, _turn_plan_completed, bool(assistant_content.strip()),
+            )
+            if _plan_final_done:
+                _turn_plan_completed |= _plan_final_done
+                for _plan_idx in sorted(_plan_final_done):
+                    _plan_st = _turn_plan.step_by_index(_plan_idx)
+                    if _plan_st is not None:
+                        yield plan_step_completed_frame(_plan_st)
         # Use the ``assistant_content`` already captured by the main loop's
         # last non-streaming ``_call_llm_with_tools`` call. DO NOT re-call
         # the LLM here: when the message history still contains assistant
@@ -14375,6 +15775,7 @@ async def add_message_stream(
                         tool_calls_for_frontend=tool_calls_for_frontend,
                         agent_name=agent_name,
                         agent_app=agent_app,
+                        endpoint=effective_llm.endpoint,
                     )
                 except Exception as _ra_exc:  # noqa: BLE001
                     logger.warning("_research_analyst_fallback raised: %s", _ra_exc)
@@ -14420,9 +15821,18 @@ async def add_message_stream(
         if "finalize" not in _emitted_phases:
             _emitted_phases.add("finalize")
             yield _emit_phase("finalize")
-            # Live feed: the tool loop finished cleanly → verify_passed,
-            # then finalize_started marks the synthesis stage.
-            _le_vp = _push_live_event("verify_passed", "verify_passed")
+            # Live feed: honest verdict — verify_passed only when no tool
+            # call failed; otherwise verify_failed (never claim success
+            # after a step like a sandbox/artifact build actually failed).
+            _any_failed_tool = any(
+                str(tc.get("status") or "").lower()
+                in ("failed", "error", "denied")
+                for tc in (locals().get("tool_calls_for_frontend") or [])
+            ) and not _clarify_issued
+            _le_vp = _push_live_event(
+                "verify_failed" if _any_failed_tool else "verify_passed",
+                "verify_failed" if _any_failed_tool else "verify_passed",
+            )
             if _le_vp:
                 yield _le_vp
             _le_fs = _push_live_event("finalize_started", "finalize_started")
@@ -14775,10 +16185,60 @@ async def add_message_stream(
                             # Context-aware fallback: choose the best message
                             # based on what was produced this turn (report cards,
                             # artifacts, dashboard requests, or generic).
-                            assistant_content = _choose_fallback(
-                                tool_calls_for_frontend, _orch_created,
-                                user_content=user_content,
-                            )
+                            #
+                            # 2026-08-26: LLM-FIRST fallback. The loop reached
+                            # this point with empty assistant_content (tool-only
+                            # turn, or streamed narration stripped by hygiene
+                            # rules) — but the collected rows ARE the answer.
+                            # Before falling to the deterministic
+                            # `_choose_fallback` template (the rigid
+                            # "Scope / Executive Summary / Top Performers"
+                            # builder), make ONE focused LLM synthesis call so
+                            # the user gets a professional, narrative answer
+                            # (Kimi/Claude-style) written from the actual data.
+                            # The template remains only as the absolute last
+                            # resort when the LLM cannot write prose.
+                            _fb_rows: list[dict] = []
+                            for _tc in (tool_calls_for_frontend or []):
+                                try:
+                                    _fb_ex = _extract_data_rows_from_tool_call(_tc)
+                                except Exception:
+                                    _fb_ex = None
+                                if _fb_ex:
+                                    _fb_rows.extend(_fb_ex[0])
+
+                            async def _fb_synth_call(system_prompt, msgs, _ep=effective_llm.endpoint):
+                                return await _call_synthesis_llm(system_prompt, msgs, endpoint=_ep)
+
+                            _fb_text = ""
+                            if _fb_rows:
+                                try:
+                                    _fb_text = await _force_llm_synthesis(
+                                        user_content,
+                                        _fb_rows,
+                                        synth_call_fn=_fb_synth_call,
+                                        conversation_history=llm_messages,
+                                        max_retries=1,
+                                        endpoint=effective_llm.endpoint,
+                                    )
+                                except Exception as _fb_synth_err:
+                                    logger.warning(
+                                        "Post-loop LLM-first synthesis failed (conv=%s): %s",
+                                        conversation_id, _fb_synth_err,
+                                    )
+                                    _fb_text = ""
+                            if _fb_text and len(_fb_text.strip()) > 50:
+                                assistant_content = _fb_text
+                                logger.info(
+                                    "Post-loop: LLM-first synthesis produced %d chars "
+                                    "(rows=%d, conv=%s)",
+                                    len(_fb_text), len(_fb_rows), conversation_id,
+                                )
+                            else:
+                                assistant_content = _choose_fallback(
+                                    tool_calls_for_frontend, _orch_created,
+                                    user_content=user_content,
+                                )
                 logger.info(
                     "Post-loop fallback: empty assistant_content, using fallback message "
                     "(conv=%s, len=%d)",
@@ -15012,6 +16472,12 @@ async def add_message_stream(
                         or _acc_text.startswith("I've completed your request")
                         or _acc_text.startswith("Your deliverable")
                         or _acc_text.startswith("Here is the artifact")
+                        # 2026-08-26: same strip-residue rule — a mangled
+                        # fragment must not block the honest no-data message.
+                        or (
+                            0 < len(_acc_text) < _WEAK_CONTENT_MAX_CHARS
+                            and len(_no_data_msg) > len(_acc_text) * 2
+                        )
                     )
                     if _is_placeholder_now:
                         accumulated_content = _no_data_msg
@@ -15312,8 +16778,23 @@ async def add_message_stream(
                                     or _acc_text.startswith("I've completed your request")
                                     or _acc_text.startswith("Your deliverable")
                                     or _acc_text.startswith("Here is the artifact")
+                                    # 2026-08-26: the post-loop strips can
+                                    # leave a SHORT residue that is neither
+                                    # empty nor a recognized prefix. It must
+                                    # not block the rich synthesis prose.
+                                    or _is_weak_strip_residue(_acc_text, _synth_text)
                                 )
-                                if _synth_text and _is_fallback_placeholder:
+                                # Mirror the empty-bubble guard: never clobber
+                                # good prose with artifact boilerplate.
+                                if (
+                                    _synth_text
+                                    and _is_fallback_placeholder
+                                    and not _synth_text.startswith(
+                                        ("I've completed your request",
+                                         "Your deliverable",
+                                         "Here is the artifact")
+                                    )
+                                ):
                                     accumulated_content = _deferred_synth.assistant_content
                                     try:
                                         yield (
@@ -15637,8 +17118,22 @@ async def add_message_stream(
             "content": accumulated_content,
             "created_date": datetime.now(timezone.utc).isoformat(),
         }
+        # Kimi/GPT-style citations: collect the data sources the tool loop
+        # actually queried this turn (source_id/source_name from tool
+        # results). Attached so the frontend can render source chips.
+        try:
+            _legacy_sources = _extract_citations_from_tool_calls(tool_calls_for_frontend)
+            if _legacy_sources:
+                assistant_msg["sources"] = _legacy_sources
+        except Exception:  # noqa: BLE001 — citations must never break the stream
+            pass
         if tool_calls_for_frontend:
-            assistant_msg["tool_calls"] = tool_calls_for_frontend
+            # 2026-08-28: cap the PERSISTED tool history so a long CAD/data
+            # turn (local models re-emit whole build batches — a bolt+nut
+            # can produce 150+ entries) doesn't flood the NEXT turn's LLM
+            # context and confuse the model about the live scene state.
+            # The live SSE stream still shows the full list during the turn.
+            assistant_msg["tool_calls"] = tool_calls_for_frontend[-50:]
         # Attach artifact_ids so the frontend can render ArtifactPreviewCard
         if artifact_ids:
             assistant_msg["artifact_ids"] = artifact_ids
@@ -15728,6 +17223,7 @@ async def add_message_stream(
         if agent_app_id and len(messages) >= 4:
             asyncio.create_task(_bg_extract_memories(
                 agent_app_id, list(messages), user.id if user else None,
+                project_id=getattr(conv, "project_id", None),
             ))
 
         # P3 post-turn memory consolidation — extract durable user facts via
@@ -15832,7 +17328,7 @@ async def add_message_stream(
                 cache_db = SessionLocal()
                 try:
                     _store_turn_cache(
-                        cache_db,
+                        db=cache_db,
                         agent_app_id=agent_app_id,
                         user_id=getattr(user, "id", None),
                         user_content=user_content,
@@ -15889,7 +17385,98 @@ async def add_message_stream(
                     yield (
                         f'data: {json.dumps({"type": "content_replace", "content": _final_bubble_text})}\n\n'
                     )
-            yield f'data: {json.dumps({"type": "done", "content": accumulated_content or assistant_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
+            # ── Post-build dashboard verification gate ─────────────
+            # Deterministic check AFTER a dashboard turn: if the build tool
+            # ran this turn but NO dashboard_apps row exists for this
+            # conversation, append a visible failure to the final content
+            # instead of letting a confident-but-fake success story land.
+            # (The "text report instead of dashboard" failure mode.)
+            _dash_verify_msg = None
+            try:
+                _dash_verify_msg = verify_dashboard_build_produced_app(
+                    db,
+                    conversation_id,
+                    _v3_executed_tool_names,
+                    _dash_build_tool,
+                )
+            except Exception:  # noqa: BLE001 — gate must never break the stream
+                _dash_verify_msg = None
+            if _dash_verify_msg:
+                _done_content = (
+                    (accumulated_content or assistant_content or "")
+                    + "\n\n"
+                    + _dash_verify_msg
+                )
+                logger.warning(
+                    "v3 stream: dashboard build verification FAILED "
+                    "(conv=%s, tool=%s)",
+                    conversation_id, _dash_build_tool,
+                )
+            else:
+                _done_content = accumulated_content or assistant_content
+            # ── Tier 1 auto-refine gate (2026-08-28) ──────────────────
+            # If the build's own quality report was B/C and NO
+            # update_fullstack_dashboard followed in the same turn, the agent
+            # shipped a thin board on purpose — surface that to the user.
+            _dash_q_msg = None
+            try:
+                from app.services.dashboard_turn_guard import (
+                    verify_dashboard_quality_refined,
+                )
+                _dash_q_msg = verify_dashboard_quality_refined(
+                    _dash_quality_worst, _dash_refined, _dash_quality_gaps,
+                )
+            except Exception:  # noqa: BLE001 — gate must never break the stream
+                _dash_q_msg = None
+            if _dash_q_msg:
+                _done_content = (_done_content + "\n\n" + _dash_q_msg).strip()
+                logger.warning(
+                    "v3 stream: dashboard quality B/C shipped unrefined "
+                    "(conv=%s, grade=%s, gaps=%s)",
+                    conversation_id, _dash_quality_worst, _dash_quality_gaps,
+                )
+            # ── Per-turn invocation record (P1, 2026-08-29) ─────────────
+            # One agent_invocations row per conversation turn: duration,
+            # token usage, cost, trace id. Best-effort — never breaks the
+            # done frame.
+            try:
+                from datetime import datetime as _dt2, timezone as _tz2
+                from app.services.agent_invocations import record_invocation
+
+                # Observability enrichment: which model served the turn and
+                # how many tool calls it made (derived from the emitted
+                # reasoning trace, where each tool_call step is one call).
+                _inv_model = None
+                try:
+                    _inv_model = effective_llm.endpoint.model_id if effective_llm.endpoint else None
+                except Exception:  # noqa: BLE001 — non-fatal
+                    _inv_model = None
+                _inv_trace = assistant_msg.get("trace", []) if isinstance(assistant_msg, dict) else []
+                _tool_count = sum(
+                    1 for _t in _inv_trace
+                    if isinstance(_t, dict) and _t.get("type") == "tool_call"
+                ) or None
+
+                record_invocation(
+                    db,
+                    agent_app_id=agent_app_id,
+                    conversation_id=conversation_id,
+                    user_id=getattr(user, "id", None),
+                    invocation_type="conversation",
+                    trigger="user",
+                    input_message=user_content,
+                    status="completed",
+                    assistant_content=_done_content,
+                    started_at=_turn_started,
+                    completed_at=_dt2.now(_tz2.utc),
+                    duration_ms=max(0, int((_dt2.now(_tz2.utc) - _turn_started).total_seconds() * 1000)),
+                    trace_id=getattr(_qe_result, "trace_id", None) if "_qe_result" in locals() else None,
+                    model_name=_inv_model,
+                    tool_call_count=_tool_count,
+                )
+            except Exception as _inv_err:  # noqa: BLE001 — non-fatal
+                logger.warning("v3 stream: invocation record failed (non-fatal): %s", _inv_err)
+            yield f'data: {json.dumps({"type": "done", "content": _done_content, "trace": assistant_msg.get("trace", []), "conversation": conv.to_dict()})}\n\n'
         except (GeneratorExit, StopIteration):
             raise
         except Exception as _done_err:
@@ -15915,7 +17502,7 @@ async def add_message_stream(
                 logger.warning("v3 stream: reset dashboard intent failed (non-fatal): %s", _reset_err)
 
     return StreamingResponse(
-        _sse_with_heartbeat(_guarantee_done(event_stream())),
+        _sse_with_heartbeat(_guarantee_done(_disconnect_safe_stream(event_stream))),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

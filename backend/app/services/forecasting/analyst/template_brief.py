@@ -249,9 +249,10 @@ def _macro_supply_demand(p: dict) -> str:
 
 
 def _upstream_macro_context(p: dict) -> str:
-    """上游传导(原油) — when there is no usable upstream parent (crude_oil at the
-    top of the chain, or upstream data missing), render a global macro context
-    narrative instead of a causal elasticity chain that would otherwise be empty."""
+    """上游传导 — when there is no usable upstream parent (the product sits at
+    the top of the chain, or upstream data missing), render a global macro
+    context narrative instead of a causal elasticity chain that would otherwise
+    be empty."""
     intel = p.get("intelligence") or {}
     bias = intel.get("bias", "neutral")
     bias_zh = _INTEL_BIAS_ZH.get(bias, "中性")
@@ -381,9 +382,9 @@ SECTION_TITLES = [
 
 def render_template_brief(pack: dict) -> dict:
     is_up = _is_upstream(pack)
-    # crude_oil (top of chain) has an empty upstream list, so `_upstream_logic`
-    # would return "" — render macro context instead. Naphtha/cracked_c5/cracked_c9
-    # have upstream parents but no ERP demand volume, so swap supply/demand.
+    # A top-of-chain product has an empty upstream list, so `_upstream_logic`
+    # would return "" — render macro context instead. Products with upstream
+    # parents but no ERP demand volume swap supply/demand.
     upstream_has_parent = bool((pack.get("upstream") or [{}])[0].get("chg_30d_pct") is not None)
     return {
         "market_update_zh": _market_update(pack),

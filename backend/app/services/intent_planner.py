@@ -1,6 +1,6 @@
-"""EDIA 6-stage intent pipeline — ported from EDIA_5.1.2.
+"""Intent pipeline — ported from the legacy reference implementation.
 
-Maps user queries to the classic EDIA decision pipeline stages:
+Maps user queries to the classic decision pipeline stages:
     1. perception — observe market/entity state
     2. resolve_product — disambiguate product/entity identity
     3. diagnosis — root-cause / what's happening
@@ -14,11 +14,11 @@ existing DAG planner (``capability_router.py``) to determine which
 agent tools to dispatch.
 
 Configuration:
-- ``EDIA_INTENT_PLANNER_ENABLED`` (default False) — master toggle
+- ``INTENT_PLANNER_ENABLED`` (default False) — master toggle
 - When disabled, falls back to existing ``should_trigger_planning()``.
 
 Reference:
-- ``EDIA_5.1.2/EDIA Intent-Driven Query Planner.md``
+- ``Intent-Driven Query Planner.md``
 - ``EDIA_5.1.2/backend/src/engine/decision_graph.py``
 """
 
@@ -65,7 +65,7 @@ STAGES: dict[str, dict] = {
     "what_if": {
         "order": 5,
         "name": "What-If",
-        "description": "Scenario simulation — hypothetical changes to upstream prices (Brent/Naphtha)",
+        "description": "Scenario simulation — hypothetical changes to upstream prices (market index / root feedstock)",
         "prompt_hint": "The user wants to simulate a hypothetical scenario or upstream price shock.",
         "matching_keywords": ["what if", "scenario", "simulate", "simulation", "shock", "hypothetical", "假设", "情景", "模拟", "如果"],
     },
@@ -109,7 +109,7 @@ class IntentResult:
 
 def is_enabled() -> bool:
     from app.config import settings
-    return getattr(settings, "EDIA_INTENT_PLANNER_ENABLED", False)
+    return getattr(settings, "INTENT_PLANNER_ENABLED", False)
 
 
 # ── Fast heuristic classifier (no LLM call) ───────────────────────────
@@ -138,7 +138,7 @@ def _keyword_classify(user_message: str) -> Optional[list[str]]:
 
 
 def _llm_classify(user_message: str, conversation_context: str = "") -> IntentResult:
-    """Use LLM to classify user intent into EDIA stages.
+    """Use LLM to classify user intent into pipeline stages.
 
     Returns an IntentResult with categorized stages and disambiguation info.
     """
@@ -189,7 +189,7 @@ Output only the JSON object, no markdown."""
             disambiguation_question=data.get("disambiguation_question", ""),
         )
     except Exception as e:
-        logger.warning("EDIA intent LLM classification failed: %s — using heuristics", e)
+        logger.warning("Intent LLM classification failed: %s — using heuristics", e)
         # Fall back to keyword-based
         stages = _keyword_classify(user_message) or ["perception"]
         return IntentResult(
@@ -204,7 +204,7 @@ def classify_intent(
     conversation_context: str = "",
     use_llm: bool = False,
 ) -> IntentResult:
-    """Classify user intent into EDIA stages.
+    """Classify user intent into pipeline stages.
 
     Args:
         user_message: The user's query text.
@@ -233,7 +233,7 @@ def classify_intent(
 
 
 def stage_to_tools(stage: str) -> list[str]:
-    """Map an EDIA stage to recommended agent tools.
+    """Map a pipeline stage to recommended agent tools.
 
     Returns a list of tool names the DAG planner should include for this stage.
     """
@@ -250,7 +250,7 @@ def stage_to_tools(stage: str) -> list[str]:
 
 
 def integrate_with_planning_trigger(user_message: str) -> dict:
-    """Bridge function: runs EDIA intent classification and merges with
+    """Bridge function: runs intent classification and merges with
     the existing planning trigger (should_trigger_planning).
 
     Returns a dict with:

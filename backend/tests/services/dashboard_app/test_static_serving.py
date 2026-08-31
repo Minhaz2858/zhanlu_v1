@@ -55,34 +55,54 @@ def test_template_dist_exists_and_is_built() -> None:
     assert './assets/' in html or '"./assets/' in html
 
 
-def test_generated_app_serves_index_and_assets() -> None:
+def test_generated_app_serves_index_and_assets(monkeypatch) -> None:
     _cleanup()
-    manager = DashboardAppManager()
+    # T17: apps are served by the GLOBAL catch-all routes in routers/dashboards.py
+    # (per-app mounts were removed). Include that router and point its module-level
+    # manager at a lightweight fake (get_app/resolve_app_dir) so the test never
+    # touches the real Postgres registry.
+    from app.routers import dashboards as dash_router
+
+    class _FakeManager:
+        def get_app(self, slug):  # noqa: ARG002
+            return {"slug": slug}  # truthy → app record exists
+
+        def resolve_app_dir(self, slug):
+            return get_generator().app_dir(slug)
+
     app = FastAPI()
-    manager.init_app(app)
+    app.include_router(dash_router.router, prefix="/api")
+    monkeypatch.setattr(dash_router, "dashboard_app_manager", _FakeManager())
     try:
         get_generator().generate(SAMPLE_SPEC)
-        manager.mount(SLUG)
         client = TestClient(app)
 
         # SPA entry
         r = client.get(f"/api/dashboards/apps/{SLUG}/")
         assert r.status_code == 200
         assert '<div id="root">' in r.text or "root" in r.text
+        # Cache policy: index.html must revalidate so redeploys reach the
+        # browser (new hashed bundle reference); never heuristically cached.
+        assert r.headers.get("cache-control", "").startswith("no-cache")
 
         # JS bundle asset
         assets = list((get_generator().app_dir(SLUG) / "dist" / "assets").glob("index-*.js"))
         assert assets
         r2 = client.get(f"/api/dashboards/apps/{SLUG}/assets/{assets[0].name}")
         assert r2.status_code == 200
-        assert r2.headers.get("content-type", "").startswith("text/javascript")
+        assert r2.headers.get("content-type", "").split(";")[0] in (
+            "application/javascript", "text/javascript",
+        )
+        # Hashed assets are content-addressed → safe to cache long-term.
+        assert "immutable" in r2.headers.get("cache-control", "")
 
-        # app config endpoint from the generated api.py router
-        r3 = client.get(f"/api/dashboards/apps/{SLUG}/config")
+        # app config: T17 serves the generated config.json from the app root
+        # (the generated api.py router is no longer mounted, so /config.json is
+        # the canonical endpoint — the frontend fetches it at startup).
+        r3 = client.get(f"/api/dashboards/apps/{SLUG}/config.json")
         assert r3.status_code == 200
         assert r3.json()["slug"] == SLUG
+        # config.json is regenerated on rebuild → must revalidate too.
+        assert r3.headers.get("cache-control", "").startswith("no-cache")
     finally:
-        try:
-            manager.unmount(SLUG)
-        finally:
-            _cleanup()
+        _cleanup()

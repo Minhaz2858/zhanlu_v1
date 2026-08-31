@@ -101,3 +101,38 @@ def test_cap_composes_with_guard_blocked_tools(fullstack_on):
     executed = ["describe_schema", "describe_schema", "execute_query"]
     assert "execute_query" in dashboard_guard_blocked_tools()
     assert describe_schema_cap_reached("build me a dashboard", executed, 2) is True
+
+
+# ── Fix 3b: fetch_data_batch counts toward the EXPLORATION cap ──────────────
+# 2026-08-27 regression (conv 3e7fa92b, C5_C9): the local model explores the
+# schema via fetch_data_batch (SHOW TABLES / DESCRIBE / SHOW COLUMNS batched
+# per call) instead of describe_schema. That tool was NOT in
+# DASHBOARD_EXPLORATION_TOOLS, so the total-exploration cap never fired and
+# the only bound on exploration was the generic tool-call loop guard
+# (fetch_data_batch cap=3, name-only keyed) which broke the loop
+# mid-exploration — before create_fullstack_dashboard could be called.
+
+
+def test_exploration_cap_counts_fetch_data_batch(fullstack_on):
+    from app.services.dashboard_turn_guard import (
+        DASHBOARD_EXPLORATION_TOOLS,
+        dashboard_exploration_cap_reached,
+    )
+
+    assert "fetch_data_batch" in DASHBOARD_EXPLORATION_TOOLS
+
+    # 3 batched fetch calls (SHOW TABLES, DESCRIBE x6, SHOW COLUMNS x7) are
+    # below a cap of 8 → exploration may continue.
+    executed = ["fetch_data_batch", "fetch_data_batch", "fetch_data_batch"]
+    assert dashboard_exploration_cap_reached("build me a dashboard", executed, 8) is False
+
+    # 8+ total exploration calls (fetch + describe + query) → cap fires.
+    executed = ["fetch_data_batch"] * 5 + ["describe_schema", "execute_query", "execute_query"]
+    assert dashboard_exploration_cap_reached("build me a dashboard", executed, 8) is True
+
+
+def test_exploration_cap_inert_after_build_with_fetch(fullstack_on):
+    from app.services.dashboard_turn_guard import dashboard_exploration_cap_reached
+
+    executed = ["fetch_data_batch"] * 5 + ["create_fullstack_dashboard"]
+    assert dashboard_exploration_cap_reached("build me a dashboard", executed, 8) is False

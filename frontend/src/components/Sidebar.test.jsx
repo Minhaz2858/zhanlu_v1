@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import React from 'react';
 
-const { mockList, mockAuth, mockProjectList, mockAutomationList, mockDashboardEnabled } = vi.hoisted(() => ({
+const { mockList, mockAuth, mockProjectList, mockAutomationList, mockAgentConversationList } = vi.hoisted(() => ({
   mockList: vi.fn().mockResolvedValue([]),
   mockProjectList: vi.fn().mockResolvedValue([]),
   // Sidebar/SessionList fetches the full AutomationTask list once on
@@ -14,13 +14,11 @@ const { mockList, mockAuth, mockProjectList, mockAutomationList, mockDashboardEn
   // clock icon — and so we don't have to backfill mocks across the
   // whole suite just to keep it green.
   mockAutomationList: vi.fn().mockResolvedValue([]),
+  // SessionList also loads AgentConversation ids on mount (conv rows
+  // that own this chat); without the entity the effect throws before
+  // the first assertion.
+  mockAgentConversationList: vi.fn().mockResolvedValue([]),
   mockAuth: { me: vi.fn().mockResolvedValue({ name: 'Tester', email: 't@x.com' }) },
-  // Sidebar uses useQuery to check whether EDIA is enabled so it can
-  // (in older versions) gate the dashboard accordion. The test only
-  // cares about the rest of the sidebar's behavior, so default to a
-  // disabled-EDIA response — keeps the test focused and avoids a
-  // real network call to /api/market-dashboard/enabled.
-  mockDashboardEnabled: vi.fn().mockResolvedValue({ enabled: false, reachable: false, reason: 'unconfigured' }),
 }));
 
 vi.mock('@/api/base44Client', () => ({
@@ -29,6 +27,7 @@ vi.mock('@/api/base44Client', () => ({
       ChatSession: { list: mockList },
       Project: { list: mockProjectList },
       AutomationTask: { list: mockAutomationList },
+      AgentConversation: { list: mockAgentConversationList },
     },
     auth: mockAuth,
   },
@@ -39,12 +38,6 @@ vi.mock('@/api/base44Client', () => ({
 // matches the base44 mock style above.
 vi.mock('@/lib/AuthContext', () => ({
   useAuth: () => ({ logout: vi.fn() }),
-}));
-
-vi.mock('@/api/marketDashboard', () => ({
-  marketDashboardApi: {
-    enabled: mockDashboardEnabled,
-  },
 }));
 
 // The screen-adaptation work moved the sidebar width from a
@@ -61,10 +54,7 @@ const { default: Sidebar } = await import('@/components/Sidebar');
 const { ChatSessionProvider, useChatSession } = await import('@/lib/ChatSessionContext');
 
 function renderAtRoute(initialEntries) {
-  // Wrap in QueryClientProvider — Sidebar now uses useQuery for the
-  // market-dashboard enabled probe (it always shows the dashboard
-  // accordion, but it still queries /enabled to keep the cache warm
-  // for when the user navigates to /market-dashboard/*).
+  // Wrap in QueryClientProvider — Sidebar may use useQuery hooks.
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     React.createElement(
@@ -95,7 +85,7 @@ function InjectActiveId() {
 // The app's default language is Chinese. These constants match the
 // nav labels in `translations.js` for `lang=zh`.
 const LABELS = {
-  brand: '伊斯科AI',
+  brand: 'Zhanlu',
   nav_automation: '自动化任务',
   nav_mySpace: '我的空间',
   newTask: '新建任务',
@@ -112,7 +102,7 @@ describe('Sidebar (unified)', () => {
   it('renders brand + new-task CTA + nav on the chat route (/)', async () => {
     renderAtRoute(['/']);
     expect(screen.getByText(LABELS.brand)).toBeInTheDocument();
-    expect(screen.getByAltText('Ecisco AI logo')).toBeInTheDocument();
+    // Brand logo image was removed — sidebar now shows text-only brand.
     // "Cognitive Hub" was removed — the primary CTA at the top is
     // now "+ New Task", and the other nav items follow.
     expect(screen.getByText(LABELS.newTask)).toBeInTheDocument();
@@ -313,7 +303,7 @@ describe('Sidebar (unified)', () => {
     function SetProject() {
       const { setPendingProject } = useChatSession();
       React.useEffect(() => {
-        setPendingProject('ECISCO', 'ecisco-id');
+        setPendingProject('ACME', 'acme-id');
       }, []);
       return null;
     }
@@ -344,10 +334,10 @@ describe('Sidebar (unified)', () => {
       ),
     );
 
-    // Before click: pendingProject should be 'ECISCO' (set by
+    // Before click: pendingProject should be 'ACME' (set by
     // SetProject's useEffect).
     await waitFor(() =>
-      expect(screen.getByTestId('project-display').textContent).toBe('ECISCO'),
+      expect(screen.getByTestId('project-display').textContent).toBe('ACME'),
     );
 
     const newTaskBtn = screen.getByText(LABELS.newTask).closest('button');

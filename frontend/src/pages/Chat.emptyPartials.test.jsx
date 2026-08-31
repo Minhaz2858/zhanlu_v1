@@ -34,13 +34,15 @@ describe('Chat.jsx renderer filters empty assistant partials', () => {
     // The predicate should look like:
     //   !m.hidden && !(m.role === 'assistant' && !m.content)
     // or an equivalent helper.
-    // Find the ``messages.filter(...)`` call. The existing predicate
-    // is ``(m) => !m.hidden`` on a single line; the new predicate
-    // adds the empty-content assistant check.
+    // Find the ``messages.filter(...)`` call (the visible-list build).
+    // The predicate is ``(m) => !m.hidden && (m.id === streamingId ||
+    // !(m.role === 'assistant' && !m.content))`` — since 2026-08-31 it
+    // feeds a hoisted ``visible`` array (IIFE render block) instead of
+    // an inline ``.map``, but the predicate contract is identical.
     const filterCall = SOURCE.match(
-      /messages\.filter\(\(m\)\s*=>\s*([\s\S]{0,400}?)\)\.map/,
+      /messages\.filter\(\(m\)\s*=>\s*([\s\S]{0,400}?)\)\s*;/,
     );
-    expect(filterCall, 'messages.filter((m) => ...).map pattern not found').not.toBeNull();
+    expect(filterCall, 'messages.filter((m) => ...) pattern not found').not.toBeNull();
     const predicate = filterCall[1];
     // Must reference hidden, role=assistant, AND content emptiness
     expect(predicate).toMatch(/hidden/);
@@ -60,9 +62,9 @@ describe('Chat.jsx renderer filters empty assistant partials', () => {
     // the message whose id === streamingId so the live bubble stays
     // visible while historical empty partials stay hidden.
     const filterCall = SOURCE.match(
-      /messages\.filter\(\(m\)\s*=>\s*([\s\S]{0,400}?)\)\.map/,
+      /messages\.filter\(\(m\)\s*=>\s*([\s\S]{0,400}?)\)\s*;/,
     );
-    expect(filterCall, 'messages.filter((m) => ...).map pattern not found').not.toBeNull();
+    expect(filterCall, 'messages.filter((m) => ...) pattern not found').not.toBeNull();
     const predicate = filterCall[1];
     // Must short-circuit on the streaming id BEFORE the empty-content
     // check, so the live placeholder is always rendered.

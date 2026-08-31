@@ -32,6 +32,10 @@ from sqlalchemy.orm import Session
 
 from app.services.tool_registry import registry
 
+# Import is deferred to first use to avoid circular imports during app boot.
+# The auto-analysis module is pure-Python / pandas-only — safe to import
+# from a tool handler running in the API process.
+
 logger = logging.getLogger(__name__)
 
 # Proactive post-generation edit suggestion.  Appended to the success message
@@ -290,6 +294,291 @@ _MAX_POLL_SECONDS = 120
 _POLL_INTERVAL_SECONDS = 1.0
 
 
+# ---------------------------------------------------------------------------
+# Metric/value row enrichment
+# ---------------------------------------------------------------------------
+# When the agent hands us a flat list of ``{metric: <name>, value: <text>}``
+# rows (or similar 2-column "label: value" rows) rather than a tabular row
+# set, auto_analyze() cannot derive narrative findings/recommendations/
+# sections because there are no dimensions to slice across.  These helpers
+# detect that shape and build the rich payload directly: each metric
+# becomes a KPI, and rows sharing a common prefix (``Customer N``,
+# ``Product N``, etc.) become a section.
+
+import re as _re_meta
+import sys as _sys_meta
+
+
+_META_PREFIX_RE = _re_meta.compile(
+    r"^(customer|product|top\s+(?:customer|product|region|supplier))\b.*",
+    _re_meta.IGNORECASE,
+)
+
+
+def _is_meta_style_rows(data) -> bool:
+    """Return True when ``data`` is a flat list of single-metric/value
+    rows rather than a tabular row set with multiple numeric dimensions.
+
+    A "meta-style" row looks like
+    ``{report_level: 'TOTAL', metric: 'Revenue', value: '¥55M', detail: '...'}``
+    where each row represents ONE named indicator.  The key heuristic:
+    the row has a string-typed "label" column (``metric``/``name``/``key``)
+    AND a single ``value``-ish column, AND most ``value`` cells are
+    strings (currency, percent, dates, IDs — not raw numbers in
+    multiple dimensions).
+
+    A "tabular" row has multiple numeric dimensions per row (e.g.
+    ``{month: '2026-07', revenue: 348M, volume: 50k, orders: 196}``)
+    where auto_analyze can derive slices.  In that shape we leave it
+    alone.
+    """
+    if not isinstance(data, list) or not data or not isinstance(data[0], dict):
+        return False
+    first = data[0]
+    if not isinstance(first, dict) or len(first) < 2 or len(first) > 4:
+        return False
+
+    # Find a label-like key (str) and value-like key (str or scalar).
+    label_keys = ["metric", "name", "key", "indicator", "label", "title"]
+    value_keys = ["value", "v", "val", "amount", "metric_value"]
+    label_key = next((k for k in label_keys if k in first), None)
+    value_key = next((k for k in value_keys if k in first and k != label_key), None)
+    if not label_key:
+        # Fallback: pick first string-valued key as label
+        for k in first:
+            if isinstance(k, str) and isinstance(first.get(k), str):
+                label_key = k
+                break
+    if not value_key:
+        # Fallback: pick first non-label key as value
+        for k in first:
+            if k != label_key:
+                value_key = k
+                break
+    if not (label_key and value_key):
+        return False
+
+    # Now verify the values look "metric-y" (mostly strings, not all numeric
+    # columns side-by-side).  We accept up to 4 cols and the rest are
+    # treated as level/detail (kept as plain text alongside the value).
+    metaish = 0
+    for r in data[:10]:
+        if not isinstance(r, dict):
+            return False
+        if label_key not in r or value_key not in r:
+            return False
+        v = r.get(value_key)
+        if isinstance(v, str):
+            metaish += 1  # value as string (currency/%/date) -> meta
+    return metaish >= max(3, len(data[:10]) * 0.5)
+
+
+def _metric_key_value(rows) -> tuple[str | None, str | None]:
+    """Return (metric_key, value_key) for the first row, with priority
+    for the conventional names (``metric``/``name``/``key`` and
+    ``value``/``amount``)."""
+    if not rows or not isinstance(rows[0], dict):
+        return None, None
+    first = rows[0]
+    label_keys = ["metric", "name", "key", "indicator", "label", "title"]
+    value_keys = ["value", "v", "val", "amount", "metric_value"]
+    metric_key = next((k for k in label_keys if k in first), None)
+    value_key = next((k for k in value_keys if k in first and k != metric_key), None)
+    if not metric_key:
+        # Fallback: first str-valued key
+        for k in first:
+            if isinstance(k, str) and isinstance(first.get(k), str):
+                metric_key = k
+                break
+    if not value_key:
+        # Fallback: first non-label key
+        for k in first:
+            if k != metric_key:
+                value_key = k
+                break
+    return metric_key, value_key
+
+
+def _kpis_from_metric_value_rows(rows) -> list[dict]:
+    """Convert each meta-row into a KPI dict, capped to 8.  Skips
+    rows where the metric is a sub-row label (``Customer 1``,
+    ``Product 2``) — those belong in sections, not the KPI bar."""
+    metric_key, value_key = _metric_key_value(rows)
+    if not metric_key or not value_key:
+        return []
+    out: list[dict] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        m = str(r.get(metric_key, "")).strip()
+        v = r.get(value_key, "")
+        if not m or v in (None, "", []):
+            continue
+        # Skip enumerations (Customer N / Product N) — they're
+        # top-N rows, not KPIs.
+        if _re_meta.match(r"^(customer|product|region|supplier|item)\s+\d+\b", m, _re_meta.IGNORECASE):
+            continue
+        if len(out) >= 8:
+            break
+        if isinstance(v, (int, float)):
+            disp = f"{v:,.2f}" if isinstance(v, float) else f"{v:,}"
+        else:
+            disp = str(v)
+        out.append({"label": m[:60], "value": disp})
+    return out
+
+
+def _normalize_metric_for_group(metric: str) -> tuple[str, str]:
+    """(group, title) — 'Customer 1', 'Customer 2' -> ('customer', 'Customer 1')
+    'Top Customer' -> ('customer', 'Top Customer').
+    Unknown -> ('', metric).
+    """
+    if not metric:
+        return "", metric or ""
+    m = str(metric).strip()
+    low = m.lower()
+    if low.startswith("customer"):
+        return "customer", m
+    if low.startswith("product"):
+        return "product", m
+    if low.startswith("top customer"):
+        return "customer", m
+    if low.startswith("top product"):
+        return "product", m
+    if low.startswith("region") or low.startswith("top region"):
+        return "region", m
+    return "", m
+
+
+def _sections_from_metric_value_rows(rows) -> list[dict] | None:
+    """Group metric/value rows into sections, by either the dedicated
+    ``report_level`` column or by the metric-name prefix.
+
+    Returns a list of section dicts ready for ``SectionSpec``:
+
+    .. code-block:: python
+
+        {"title": "Total Performance", "bullets": [...], "type": "bullets"}
+
+    or ``None`` when the rows are not in meta-style.
+    """
+    if not _is_meta_style_rows(rows):
+        return None
+    label_key, value_key = _metric_key_value(rows)
+    if not label_key or not value_key:
+        return None
+
+    # An optional "level" key — group rows by its value (e.g.
+    # report_level / category / section).  When present, this is the
+    # primary grouping.
+    level_key = None
+    if rows and isinstance(rows[0], dict):
+        for k in ("report_level", "category", "section", "group"):
+            if k in rows[0] and k != label_key and k != value_key:
+                level_key = k
+                break
+
+    level_groups: dict[str, list[tuple[str, str]]] = {}
+    prefix_groups: dict[str, list[tuple[str, str]]] = {}
+    standalone: list[tuple[str, str]] = []
+    for r in rows:
+        if not isinstance(r, dict):
+            continue
+        m = str(r.get(label_key, "")).strip()
+        v = r.get(value_key, "")
+        v_str = str(v).strip() if v not in (None, "") else ""
+
+        if level_key:
+            lvl = str(r.get(level_key, "")).strip() or "Summary"
+            level_groups.setdefault(lvl, []).append((m, v_str))
+            continue
+
+        group, _title = _normalize_metric_for_group(m)
+        if group:
+            prefix_groups.setdefault(group, []).append((m, v_str))
+        else:
+            standalone.append((m, v_str))
+
+    sections: list[dict] = []
+
+    if level_groups:
+        # Title mapping for known level keys
+        title_map = {
+            "TOTAL": "Overall Performance",
+            "COMPARISON": "Month-over-Month Comparison",
+            "CUSTOMER": "Customer Analysis",
+            "CUSTOMERS": "Customer Analysis",
+            "PRODUCT": "Product Analysis",
+            "PRODUCTS": "Product Analysis",
+            "REGION": "Regional Analysis",
+            "REGIONS": "Regional Analysis",
+        }
+        # Order: priority groups first
+        order = ["TOTAL", "COMPARISON", "CUSTOMER", "PRODUCT", "REGION"]
+        level_keys_sorted = sorted(
+            level_groups.keys(),
+            key=lambda k: (order.index(k.upper()) if k.upper() in order else 99, k),
+        )
+        for lvl in level_keys_sorted:
+            items = level_groups[lvl]
+            sec_title = title_map.get(lvl.upper(), lvl.title() + " Breakdown")
+            bullets = []
+            for m, v in items[:20]:
+                bullets.append(f"{m}: {v}" if v else m)
+            if bullets:
+                sections.append({
+                    "title": sec_title,
+                    "bullets": bullets,
+                    "type": "bullets",
+                })
+    else:
+        # Fall back to prefix-based grouping (Customer N, Product N)
+        ordered_groups = sorted(prefix_groups.items(), key=lambda kv: (
+            {"customer": 0, "product": 1, "region": 2}.get(kv[0], 9), kv[0]
+        ))
+        for group_name, items in ordered_groups:
+            title_map = {
+                "customer": "Customer Analysis",
+                "product": "Product Analysis",
+                "region": "Regional Analysis",
+            }
+            sec_title = title_map.get(group_name, group_name.title() + " Breakdown")
+            bullets = []
+            for m, v in items[:20]:
+                bullets.append(f"{m}: {v}" if v else m)
+            if bullets:
+                sections.append({
+                    "title": sec_title,
+                    "bullets": bullets,
+                    "type": "bullets",
+                })
+
+        # If still no section, build from standalone
+        if not sections and standalone:
+            bullets = [f"{m}: {v}" if v else m for m, v in standalone[:12]]
+            sections.append({
+                "title": "Highlights",
+                "bullets": bullets,
+                "type": "bullets",
+            })
+
+    return sections or None
+
+
+def _summary_from_metric_value_rows(rows, *, title_hint: str = "") -> str:
+    """Build a short summary that names the dataset + the title."""
+    metric_key, _value_key = _metric_key_value(rows)
+    n = len(rows)
+    prefix = f"{title_hint}: " if title_hint else "This report covers "
+    tail = (
+        f"the top {min(n, 10)} key indicators below, "
+        f"followed by {len(rows)} supporting metric{'s' if len(rows) != 1 else ''} "
+        f"covering customer, product, and overall performance."
+    )
+    return f"{prefix}{tail}"
+
+
+
 def _enrich_args_from_sibling_html_report(
     *,
     args: dict,
@@ -442,6 +731,132 @@ def _enrich_args_from_sibling_html_report(
         return args
 
 
+def _enrich_args_from_data_auto_analysis(args: dict, *, fmt: str) -> dict:
+    """Fill blank rich fields (summary/kpis/findings/etc.) from raw rows.
+
+    The sibling-HTML-report enrichment only fires when an earlier
+    ``finalize_into_artifact`` already produced a rich ``html_report``
+    in the same conversation.  When the agent goes straight from
+    ``ask_data_agent`` to ``run_sandbox_skill(format="docx")`` — the
+    common pattern after a small data lookup — there is no sibling, and
+    the deterministic ``generate_docx`` renderer emits a bare cover +
+    "Instructions" heading + raw data table.  That is the exact
+    complaint this function exists to fix.
+
+    We delegate to the backend's ``_report_auto_analysis.auto_analyze``
+    (the same safety net used by the in-process ``create_artifact`` /
+    ``_payload_from_execution`` path) which deterministically derives a
+    full ReportCard-shaped payload — Executive Summary, KPI grid, Key
+    Findings, Recommendations, top-N breakdown sections, an aggregated
+    chart, and methodology — from the rows + columns the agent passed.
+
+    Only blank fields are filled.  LLM / orchestrator values still win.
+    Returns the (possibly mutated) ``args`` dict.
+    """
+    # Only do work when the agent actually handed us rows.
+    data = args.get("data")
+    if not isinstance(data, list) or not data:
+        return args
+
+    # Skip when the config already carries rich content — don't override
+    # the LLM / orchestrator's authoring.  We only fire when ALL of the
+    # primary rich fields are blank.
+    rich_keys = ("summary", "kpis", "key_findings", "recommendations", "sections")
+    has_any = any(args.get(k) for k in rich_keys)
+    if has_any:
+        return args
+
+    # Derive columns from the first row when the agent didn't pass an
+    # explicit column list.  ``auto_analyze`` accepts either, but a flat
+    # list of dicts is the most common shape from ``ask_data_agent``.
+    columns = args.get("columns")
+    if not columns and isinstance(data[0], dict):
+        # Union of keys preserves order of first-seen — keeps time/date
+        # columns ahead of derived numeric columns, which reads better in
+        # the auto-generated KPI grid.
+        seen: list[str] = []
+        for row in data[:50]:
+            if not isinstance(row, dict):
+                continue
+            for k in row.keys():
+                if k not in seen:
+                    seen.append(str(k))
+        columns = seen
+    if not columns:
+        return args
+
+    # Special case: the data is a flat list of metric/value pairs
+    # ("label" → single value) rather than a tabular row set.  In this
+    # shape auto_analyze() cannot derive narrative findings/recommendations
+    # because there are no dimensions to slice across.  Build them
+    # directly: each metric becomes a KPI, rows sharing a prefix
+    # ("Customer N", "Product N") become a section.
+    metric_sections = _sections_from_metric_value_rows(data)
+    if metric_sections is not None:
+        # Only fill in when the meta-style path produced sections AND
+        # the agent didn't already provide them (we already returned if
+        # any rich key was set, above).
+        args["sections"] = metric_sections
+        # meta-style data also benefits from KPI rows as kpis (when
+        # the values look like clean numbers / currency).
+        kpis = _kpis_from_metric_value_rows(data)
+        if kpis:
+            args["kpis"] = kpis
+        # Synthesize a summary that names the dataset + a few highlights.
+        args["summary"] = _summary_from_metric_value_rows(
+            data,
+            title_hint=(args.get("title") or "").strip(),
+        )
+        print(
+            f"[SBX META] built {len(metric_sections)} sections, "
+            f"{len(kpis)} kpis from {len(data)} metric/value rows",
+            file=sys.stderr, flush=True,
+        )
+        filled.append("sections")
+        filled.append("kpis")
+        filled.append("summary")
+        return args
+
+    try:
+        # Lazy import — keeps app startup fast and avoids pulling pandas
+        # at import time.
+        from app.services.tool_handlers._report_auto_analysis import auto_analyze
+
+        title_hint = (args.get("title") or "").strip() or None
+        enriched = auto_analyze(
+            rows=data,
+            columns=columns,
+            tool_name=f"run_sandbox_skill/{fmt}",
+            title_hint=title_hint,
+        )
+    except Exception as exc:
+        logger.warning(
+            "auto_analyze enrichment in run_sandbox_skill failed: %s; "
+            "falling back to raw data.",
+            exc,
+        )
+        return args
+
+    if not enriched:
+        return args
+
+    # Merge — ``auto_analyze`` only returns the fields it derived, so
+    # existing keys in ``args`` (instructions, data, title, user_message,
+    # source, etc.) are preserved verbatim.
+    filled = []
+    for key, value in enriched.items():
+        if not args.get(key) and value not in (None, "", [], {}):
+            args[key] = value
+            filled.append(key)
+
+    if filled:
+        logger.info(
+            "run_sandbox_skill(%s) auto-analyzed %d rows → filled %s",
+            fmt, len(data), filled,
+        )
+    return args
+
+
 def run_sandbox_skill_sync(
     args: dict,
     db: Session,
@@ -540,6 +955,31 @@ async def _run_sandbox_skill(
             conversation_id=conversation_id,
             title=title,
         )
+
+    # --- 0b. Enrich sparse args from the raw DATA itself ---
+    # When the agent passes only ``{data, title, instructions}`` and no
+    # sibling HTML report exists (e.g. direct ``run_sandbox_skill`` call
+    # after ``ask_data_agent``), the deterministic ``generate_docx``
+    # renderer still produces a bare "Instructions + data table" because
+    # none of the rich fields (summary / kpis / key_findings /
+    # recommendations / sections) are populated.
+    #
+    # The backend's ``_report_auto_analysis.auto_analyze`` derives all
+    # of those fields deterministically from the rows + columns — it is
+    # the same safety-net that the in-process ``create_artifact`` path
+    # uses.  We invoke it here so docx (and pptx/xlsx) produced via the
+    # sandbox also get a proper Executive Summary, KPI grid, Key
+    # Findings and Recommendations instead of the empty cover page.
+    #
+    # Only fires when the config is genuinely sparse — if the LLM /
+    # orchestrator already supplied rich fields, we keep them.  This
+    # matches the "LLM values win, auto-fill fills blanks" contract
+    # used by ``_payload_from_execution``.
+    if fmt in ("docx", "pptx", "xlsx") and isinstance(args.get("data"), list):
+        import sys
+        print(f"[DEBUG sandbox_tool] enriching fmt={fmt} data_len={len(args.get('data',[]))} rich_present={any(args.get(k) for k in ('summary','kpis','key_findings','recommendations','sections'))}", file=sys.stderr, flush=True)
+        args = _enrich_args_from_data_auto_analysis(args=args, fmt=fmt)
+        print(f"[DEBUG sandbox_tool] AFTER enrich: has_summary={bool(args.get('summary'))} has_kpis={bool(args.get('kpis'))} has_findings={bool(args.get('key_findings'))}", file=sys.stderr, flush=True)
 
     # --- 1. Create Artifact + Version ---
     from app.services.artifacts.artifact_service import ArtifactService

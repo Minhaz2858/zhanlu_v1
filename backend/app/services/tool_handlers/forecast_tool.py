@@ -54,19 +54,12 @@ def _resolve_org_context(context: dict | None) -> tuple[str, str]:
 
 
 def _forecast_engine(db: Session):
-    """Return ``ForecastingAgentService`` (flag on) or ``ForecastEngine`` (legacy).
+    """Return a ``ForecastEngine`` for the current session.
 
-    The facade exposes engine-compatible methods (``discover_and_register``,
-    ``compute_target_anchored``, ``compute_all``, ``get_latest_run``,
-    ``get_accuracy``) so it is a drop-in for ``ForecastEngine`` at these
-    call-sites.
+    The legacy engine is the sole forecasting backend (the unified
+    ``ForecastingAgentService`` facade was removed with the market
+    dashboard feature).
     """
-    from app.config import settings
-
-    if settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
-        from app.services.forecasting.unified_service import ForecastingAgentService
-
-        return ForecastingAgentService(db)
     return ForecastEngine(db)
 
 
@@ -74,11 +67,11 @@ def _serialize_target(t: ForecastTarget) -> dict:
     """Convert a ForecastTarget row to a safe dict for tool responses."""
     ds = t.datasource or {}
     # Extract material_code from product_key for SKU targets
-    # (e.g. "ecisco.c5_resin.201000018" → "201000018")
+    # (e.g. "<product>.<code>" → "<code>")
     material_code = None
     parts = t.product_key.split(".")
-    if len(parts) >= 3 and parts[0] == "ecisco":
-        material_code = parts[2]
+    if len(parts) >= 2:
+        material_code = parts[-1]
 
     return {
         "id": t.id,
@@ -265,7 +258,7 @@ async def _forecast_run(
 
         if product_id:
             # Run all SKU targets for an ERP product family
-            prefix = f"ecisco.{product_id}."
+            prefix = f"{product_id}."
             sku_targets = db.query(ForecastTarget).filter(
                 ForecastTarget.product_key.like(f"{prefix}%"),
                 ForecastTarget.org_id == org_id,
@@ -347,7 +340,7 @@ FORECAST_RUN_SCHEMA = {
                     "type": "string",
                     "description": (
                         "ERP product family to run all SKU targets for "
-                        "(e.g. 'c5_resin', 'raffinate_c5'). "
+                        "(e.g. 'product_a', 'product_b'). "
                         "Alternative to target_id for batch SKU runs."
                     ),
                 },
@@ -382,15 +375,15 @@ async def _forecast_list_skus(
     """List all SKU-level forecast targets for an ERP product family.
 
     Required args:
-        product_id  (str): The dashboard product_id (e.g. 'c5_resin',
-                           'raffinate_c5').
+        product_id  (str): The dashboard product_id (e.g. 'product_a',
+                           'product_b').
     """
     product_id = (args.get("product_id") or "").strip().lower()
     if not product_id:
         return {"success": False, "error": "product_id is required."}
 
     org_id, _app_id = _resolve_org_context(context)
-    prefix = f"ecisco.{product_id}."
+    prefix = f"{product_id}."
 
     targets = db.query(ForecastTarget).filter(
         ForecastTarget.product_key.like(f"{prefix}%"),
@@ -419,7 +412,7 @@ FORECAST_LIST_SKUS_SCHEMA = {
         "name": "forecast_list_skus",
         "description": (
             "List all SKU-level forecast targets for an ERP product family "
-            "(c5_resin or raffinate_c5). Returns material_code, target_id, "
+            "(product_a or product_b). Returns material_code, target_id, "
             "report_order, and whether each SKU is the primary (highest volume) "
             "for its family. Safe for the user-facing agent."
         ),
@@ -430,7 +423,7 @@ FORECAST_LIST_SKUS_SCHEMA = {
                     "type": "string",
                     "description": (
                         "The dashboard product_id to list SKUs for. "
-                        "Must be an ERP product: 'c5_resin' or 'raffinate_c5'."
+                        "Must be an ERP product: 'product_a' or 'product_b'."
                     ),
                 },
             },
@@ -975,7 +968,7 @@ async def _forecast_brief(
     """Return the cached evidence-grounded analyst brief for a product.
 
     Required args:
-        product_id  (str): Dashboard product_id (e.g. 'dcpd', 'isoprene').
+        product_id  (str): Dashboard product_id (e.g. 'product_a', 'product_b').
     Optional args:
         day         (int): Forecast horizon in days (default 7).
     """
@@ -985,12 +978,6 @@ async def _forecast_brief(
     day = int(args.get("day", 7))
 
     def _do_work():
-        from app.config import settings
-
-        if settings.UNIFIED_FORECASTING_SERVICE_ENABLED:
-            from app.services.forecasting.unified_service import ForecastingAgentService
-
-            return ForecastingAgentService(db).get_forecast_brief(product_id, day=day)
         from app.services.forecasting.analyst import service as analyst_service
 
         return analyst_service.get_analyst_brief(product_id, day=day, db=db)
@@ -1012,7 +999,7 @@ FORECAST_BRIEF_SCHEMA = {
         "name": "forecast_brief",
         "description": (
             "Get the evidence-grounded AI analyst brief for a dashboard product "
-            "(dcpd, isoprene, piperylene, c5_resin, etc.): why the price is "
+            "(e.g. 'product_a', 'product_b'): why the price is "
             "forecast to move (upstream transmission, trend, seasonality, model "
             "drivers), why the current buy/hold/sell/watch recommendation, and "
             "what triggers would change it. Use this to answer 'why' questions "
@@ -1022,7 +1009,7 @@ FORECAST_BRIEF_SCHEMA = {
             "type": "object",
             "properties": {
                 "product_id": {"type": "string",
-                               "description": "Dashboard product_id, e.g. 'dcpd'."},
+                               "description": "Dashboard product_id, e.g. 'product_a'."},
                 "day": {"type": "integer", "default": 7,
                         "description": "Forecast horizon in days (default 7)."},
             },
@@ -1033,7 +1020,7 @@ FORECAST_BRIEF_SCHEMA = {
 
 
 async def _forecast_what_if(args, db, user_id, context=None):
-    """Simulate a forecast under upstream price shocks (Brent/Naphtha).
+    """Simulate a forecast under upstream price shocks (market index / root feedstock).
 
     Mirrors ``app.routers.forecast_ops.get_what_if_simulation`` using the
     shared causal-chain elasticity math (``what_if.compute_what_if``) — no
@@ -1043,27 +1030,27 @@ async def _forecast_what_if(args, db, user_id, context=None):
     if not product_id:
         return {"success": False, "error": "no forecast target for ''"}
 
-    brent_arg = args.get("brent_delta_pct")
-    naphtha_arg = args.get("naphtha_delta_pct")
+    market_arg = args.get("market_delta_pct")
+    feedstock_arg = args.get("feedstock_delta_pct")
     try:
-        brent_delta_pct = float(brent_arg) if brent_arg is not None else 0.0
-        naphtha_delta_pct = float(naphtha_arg) if naphtha_arg is not None else 0.0
+        market_delta_pct = float(market_arg) if market_arg is not None else 0.0
+        feedstock_delta_pct = float(feedstock_arg) if feedstock_arg is not None else 0.0
     except (TypeError, ValueError) as exc:
         return {"success": False, "error": f"simulation failed: {exc}"}
 
     # Only reject when the caller explicitly passed zero shocks; a bare
     # product_id lookup (no delta keys) still resolves the target first.
-    if brent_delta_pct == 0 and naphtha_delta_pct == 0 and (
-        brent_arg is not None or naphtha_arg is not None
+    if market_delta_pct == 0 and feedstock_delta_pct == 0 and (
+        market_arg is not None or feedstock_arg is not None
     ):
         return {"success": False,
-                "error": "specify at least one price shock (brent_delta_pct or naphtha_delta_pct)"}
+                "error": "specify at least one price shock (market_delta_pct or feedstock_delta_pct)"}
 
     org_id, _app_id = _resolve_org_context(context)
 
     def _do_sim() -> dict:
         target = db.query(ForecastTarget).filter(
-            ForecastTarget.product_key.like(f"ecisco.{product_id}.%"),
+            ForecastTarget.product_key.like(f"{product_id}.%"),
             ForecastTarget.org_id == org_id,
             ForecastTarget.is_deleted == False,  # noqa: E712
         ).order_by(ForecastTarget.report_order.asc()).first()
@@ -1071,8 +1058,8 @@ async def _forecast_what_if(args, db, user_id, context=None):
             return {"success": False, "error": f"no forecast target for '{product_id}'"}
 
         try:
-            result = compute_what_if(target.product_key, brent_delta_pct,
-                                     naphtha_delta_pct, db)
+            result = compute_what_if(target.product_key, market_delta_pct,
+                                     feedstock_delta_pct, db)
         except LookupError as exc:
             return {"success": False, "error": str(exc)}
         except Exception as exc:
@@ -1087,11 +1074,11 @@ async def _forecast_what_if(args, db, user_id, context=None):
         base = result.get("base_forecast") or []
         adjustments = result.get("adjustments") or []
 
-        # Drivers — always surface both brent + naphtha rows (zero → "no shock")
+        # Drivers — always surface both market + feedstock rows (zero → "no shock")
         by_driver = {a.get("driver"): a for a in adjustments if a.get("driver")}
         drivers = []
-        for driver, delta in (("brent", brent_delta_pct),
-                              ("naphtha", naphtha_delta_pct)):
+        for driver, delta in (("market_index", market_delta_pct),
+                              ("feedstock", feedstock_delta_pct)):
             entry = by_driver.get(driver)
             if entry is None:
                 drivers.append({
@@ -1154,10 +1141,10 @@ FORECAST_WHAT_IF_SCHEMA = {
     "function": {
         "name": "forecast_what_if",
         "description": (
-            "Simulate how a dashboard product's (dcpd, isoprene, piperylene, "
-            "c5_resin, etc.) forecast changes under upstream price shocks. "
-            "Provide percentage changes for Brent (brent_delta_pct) and/or "
-            "naphtha (naphtha_delta_pct); at least one must be non-zero. "
+            "Simulate how a dashboard product's (e.g. 'product_a', 'product_b') "
+            "forecast changes under upstream price shocks. "
+            "Provide percentage changes for the market index (market_delta_pct) and/or "
+            "root feedstock (feedstock_delta_pct); at least one must be non-zero. "
             "Use this for 'what if' / scenario questions about the forecast. "
             "Safe read-only tool."
         ),
@@ -1165,11 +1152,11 @@ FORECAST_WHAT_IF_SCHEMA = {
             "type": "object",
             "properties": {
                 "product_id": {"type": "string",
-                               "description": "Dashboard product_id, e.g. 'dcpd'."},
-                "brent_delta_pct": {"type": "number", "default": 0,
-                                    "description": "Percentage change in Brent price (e.g. 5.0 = +5%)."},
-                "naphtha_delta_pct": {"type": "number", "default": 0,
-                                      "description": "Percentage change in naphtha price (e.g. -3.0 = -3%)."},
+                               "description": "Dashboard product_id, e.g. 'product_a'."},
+                "market_delta_pct": {"type": "number", "default": 0,
+                                   "description": "Percentage change in the market index (e.g. 5.0 = +5%)."},
+                "feedstock_delta_pct": {"type": "number", "default": 0,
+                                      "description": "Percentage change in the root feedstock price (e.g. -3.0 = -3%)."},
             },
             "required": ["product_id"],
         },
@@ -1250,7 +1237,7 @@ for _name, _schema, _handler, _enabled, _desc in (
         FORECAST_WHAT_IF_SCHEMA,
         _forecast_what_if,
         True,
-        "Simulate a forecast under upstream price shocks (Brent/Naphtha) for scenario analysis",
+        "Simulate a forecast under upstream price shocks (market index / root feedstock) for scenario analysis",
     ),
 ):
     registry.register(

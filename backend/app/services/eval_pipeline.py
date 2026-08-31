@@ -75,19 +75,26 @@ def _sample_conversations(
     """Sample conversations from the database.
 
     Returns a list of dicts with conversation_id, user_message, assistant_text.
+
+    NOTE (2026-08-29, Phase 0 build): the original code imported a
+    ``Conversation`` model from ``app.models.chat`` that does not exist in
+    this checkout — a dormant bug (the pipeline was flag-gated so the import
+    was never exercised). The real model is ``AgentConversation``
+    (``app.models.agent_conversation``) whose ``messages`` JSON column holds
+    ``[{role, content}, ...]``.
     """
-    from app.models.chat import Conversation, Message
+    from app.models.agent_conversation import AgentConversation
 
     cutoff = since or (datetime.now(timezone.utc) - timedelta(hours=24))
 
     try:
         conversations = (
-            db.query(Conversation)
+            db.query(AgentConversation)
             .filter(
-                Conversation.updated_date >= cutoff,
-                Conversation.is_deleted == False,
+                AgentConversation.updated_date >= cutoff,
+                AgentConversation.is_deleted == False,  # noqa: E712
             )
-            .order_by(Conversation.updated_date.desc())
+            .order_by(AgentConversation.updated_date.desc())
             .limit(max_samples() * 3)  # oversample for filtering
             .all()
         )
@@ -170,14 +177,20 @@ def _evaluate_one(conv: dict) -> Optional[EvalRecord]:
         task_spec={"source": "eval_pipeline"},
     )
 
+    # QualityEvalResult exposes completeness_score + confidence (no `scores`
+    # dict / `model` — the original mapping was written against a different
+    # API and crashed as soon as the flag was enabled; fixed 2026-08-29).
     return EvalRecord(
         conversation_id=conv["conversation_id"],
         user_message=conv["user_message"],
         assistant_text=conv["assistant_text"],
-        scores=result.scores or {},
-        verdict=result.verdict,
+        scores={
+            "completeness": getattr(result, "completeness_score", 0.0) or 0.0,
+            "confidence": getattr(result, "confidence", 0.0) or 0.0,
+        },
+        verdict=result.verdict or "accept",
         evaluated_at=datetime.now(timezone.utc).isoformat(),
-        model=result.model or "",
+        model="",
     )
 
 

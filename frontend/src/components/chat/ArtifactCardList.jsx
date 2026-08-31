@@ -1,5 +1,5 @@
 import {
-  FileText, Presentation, Code, Eye, Download, FileType, AlertCircle,
+  FileText, Presentation, Code, Eye, Download, FileType, AlertCircle, Pencil,
 } from 'lucide-react';
 
 const TYPE_ICON = {
@@ -45,7 +45,7 @@ function getArtifactId(a) {
  * Preview button remains available, but the warning makes the mismatch
  * explicit instead of silently rendering the wrong format.
  */
-export default function ArtifactCardList({ artifacts, onPreview, userRequestedFormat }) {
+export default function ArtifactCardList({ artifacts, onPreview, onEdit, userRequestedFormat }) {
   if (!artifacts || artifacts.length === 0) return null;
 
   return (
@@ -108,6 +108,16 @@ export default function ArtifactCardList({ artifacts, onPreview, userRequestedFo
                   <Eye className="h-3.5 w-3.5" />
                   Preview
                 </button>
+                {onEdit && (artifact.type === 'html' || artifact.type === 'html_report' || artifact.artifact_type === 'html') && (
+                  <button
+                    onClick={() => onEdit?.(artifact)}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-background px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-secondary"
+                    title="Edit in interactive canvas"
+                  >
+                    <Pencil className="h-3.5 w-3.5" />
+                    Edit
+                  </button>
+                )}
                 {artifact.file_url && (
                   <a
                     href={artifact.file_url}

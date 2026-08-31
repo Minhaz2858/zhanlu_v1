@@ -109,20 +109,71 @@ def prune_between_fsm_states(
         f"Latest result preserved for analysis."
     )
 
+    # Collect tool_call_ids that would be orphaned by dropping these tool
+    # messages. DeepSeek/OpenAI reject an assistant message whose
+    # tool_calls have no following tool response:
+    #   "An assistant message with 'tool_calls' must be followed by tool
+    #    messages responding to each 'tool_call_id' (insufficient tool
+    #    messages following tool_calls message)"
+    # The prior assistant messages REMAIN in the list, so we must strip
+    # the orphaned calls from them (same pattern as
+    # pre_api_prune.escalate()'s drop_old_tool_messages, 2026-08-25).
+    orphaned_call_ids: set[str] = set()
+    for i in indices_to_replace:
+        tid = messages[i].get("tool_call_id")
+        if tid:
+            orphaned_call_ids.add(tid)
+
+    # 2026-08-29 BUGFIX: the checkpoint message must be inserted AFTER the
+    # contiguous run of tool messages that starts at the first replaced
+    # index — NOT at the first replaced index itself. The kept (most
+    # recent) tool responses live at the END of that run, and their
+    # assistant(tool_calls) message must be IMMEDIATELY followed by them.
+    # Inserting the checkpoint between the assistant and its tool
+    # responses produced exactly the 400 this pruner exists to prevent:
+    #   "An assistant message with 'tool_calls' must be followed by tool
+    #    messages responding to each 'tool_call_id'"
+    # (reproduced live: conversation 8e749a1e, "sales sanpshoot" follow-up).
+    first_replaced = indices_to_replace[0]
+    insert_at = first_replaced
+    while insert_at < len(messages) and messages[insert_at].get("role") == "tool":
+        insert_at += 1
+
     # Build new message list
     out: list[dict] = []
     checkpoint_inserted = False
 
     for i, msg in enumerate(messages):
         if i in indices_to_replace:
-            # Replace first old tool result with checkpoint, skip others
-            if not checkpoint_inserted:
-                out.append({
-                    "role": "assistant",
-                    "content": checkpoint_content,
-                })
-                checkpoint_inserted = True
             continue
+        if not checkpoint_inserted and i == insert_at:
+            out.append({
+                "role": "assistant",
+                "content": checkpoint_content,
+            })
+            checkpoint_inserted = True
+        if (
+            msg.get("role") == "assistant"
+            and msg.get("tool_calls")
+            and orphaned_call_ids
+        ):
+            kept_tcs = [
+                tc for tc in msg["tool_calls"]
+                if not (isinstance(tc, dict) and tc.get("id") in orphaned_call_ids)
+            ]
+            if len(kept_tcs) != len(msg["tool_calls"]):
+                # Shallow copy with the orphaned calls removed; keep any
+                # visible text. A fully-orphaned assistant message with no
+                # text is dropped. When all calls are stripped, the
+                # tool_calls KEY must go too — DeepSeek rejects
+                # `tool_calls: []` with "Invalid 'messages[2].tool_calls':
+                # empty array" (400).
+                if not kept_tcs:
+                    if not msg.get("content"):
+                        continue
+                    msg = {k: v for k, v in msg.items() if k != "tool_calls"}
+                else:
+                    msg = {**msg, "tool_calls": kept_tcs}
         out.append(msg)
 
     kept_chars = sum(

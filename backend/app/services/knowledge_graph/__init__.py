@@ -1,18 +1,19 @@
-"""Ecisco BI Knowledge Graph — C5/C9 product value-chain graph and product resolver.
+"""Enterprise Knowledge Graph — product value-chain graph and product resolver.
 
-Port of EDIA 5.1.2 backend/src/domain/ (knowledge_graph.py, product_resolver.py,
-edia_ontology.py).  Adapted from EDIA module-level singletons and SQLite to
+Ported from a reference implementation (knowledge_graph.py, product_resolver.py,
+edia_ontology.py).  Adapted from module-level singletons and SQLite to
 class-based / function-based patterns with no external DB dependency.
 
 Provides:
-- build_c5_c9_graph()    — static C5/C9 product graph (nodes + edges)
+- build_c5_c9_graph()    — product graph (nodes + edges) from domain config
 - resolve_product_id()   — map user language to canonical product_id
 - extract_product_ids_in_text() — NLU multi-product extraction
 - query_upstream()       — find upstream products of a given product
 - query_downstream()     — find downstream products of a given product
 - list_supported_product_ids()  — all known product IDs
 
-All 12 C5/C9 products are supported by default (no per-user scoping).
+The product catalog is defined by the app's domain configuration; with no
+config the graph and resolver behave generically (empty catalog).
 """
 
 from __future__ import annotations

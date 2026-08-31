@@ -2,7 +2,7 @@
 
 Trains a small set of learnable prompt tokens prepended to the input
 series, while freezing the Chronos-Bolt backbone. This adapts the model
-to petrochem price dynamics without full fine-tuning.
+to price dynamics without full fine-tuning.
 
 Phase B, CPU-feasible step. LoRA / full fine-tuning deferred to GPU.
 
@@ -82,7 +82,7 @@ def train_soft_prompts(
     config: PromptTuningConfig,
     model_name: str = "amazon/chronos-bolt-mini",
 ) -> dict[str, Any]:
-    """Train soft-prompt tokens on pooled petrochem data.
+    """Train soft-prompt tokens on pooled data.
 
     Parameters
     ----------

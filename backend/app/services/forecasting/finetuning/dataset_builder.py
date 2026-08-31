@@ -1,4 +1,4 @@
-"""Pooled petrochem dataset builder for cross-product fine-tuning.
+"""Pooled dataset builder for cross-product fine-tuning.
 
 Collects all available price series (lz_v_* views + ERP tables), applies
 sliding-window context/target extraction, and produces PooledSample objects

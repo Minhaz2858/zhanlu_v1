@@ -304,11 +304,11 @@ def test_decision_scoring_step_in_nightly_sync(db, monkeypatch):
         })(),
     )
     monkeypatch.setattr(
-        "app.services.forecasting.seed_ecisco_targets.seed_ecisco_forecast_targets",
+        "app.services.forecasting.seed_targets.seed_forecast_targets",
         lambda db: 0,
     )
     monkeypatch.setattr(
-        "app.services.forecasting.seed_ecisco_targets.discover_and_seed_sku_targets",
+        "app.services.forecasting.seed_targets.discover_and_seed_sku_targets",
         lambda db: 0,
     )
     # Avoid colliding with real cron env — patch steps inside scheduled_tasks
@@ -354,11 +354,11 @@ def test_decision_scoring_step_skipped_in_nightly_when_disabled(db, monkeypatch)
         })(),
     )
     monkeypatch.setattr(
-        "app.services.forecasting.seed_ecisco_targets.seed_ecisco_forecast_targets",
+        "app.services.forecasting.seed_targets.seed_forecast_targets",
         lambda db: 0,
     )
     monkeypatch.setattr(
-        "app.services.forecasting.seed_ecisco_targets.discover_and_seed_sku_targets",
+        "app.services.forecasting.seed_targets.discover_and_seed_sku_targets",
         lambda db: 0,
     )
     monkeypatch.setattr(

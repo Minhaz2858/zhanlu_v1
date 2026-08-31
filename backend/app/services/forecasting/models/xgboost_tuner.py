@@ -77,7 +77,7 @@ def tune_xgboost_params(
     y : pd.Series
         Target time series (will be cleaned internally).
     product_key : str
-        Used as cache key (e.g. ``c5.isoprene``).
+        Used as cache key (e.g. ``<tenant>.<product>``).
     seasonal_period : int
         Seasonality horizon for purged-CV fold construction.
     exog : pd.DataFrame or None

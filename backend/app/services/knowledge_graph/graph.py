@@ -1,11 +1,18 @@
-"""Static C5/C9 petrochemical value-chain knowledge graph.
+"""Value-chain knowledge graph (data loaded from domain config).
 
-Port of EDIA 5.1.2 backend/src/domain/knowledge_graph.py.
-Builds the 12-product graph with PRODUCES/CONSUMES/SUBSTITUTE edges.
-All 12 products are included by default (no per-user scoping).
+Knowledge-graph construction and traversal.
+Builds the product graph with PRODUCES/CONSUMES/SUBSTITUTE edges.
+Products and relationships are loaded from the per-app domain config's
+"knowledge_graph" block ({"products": [...], "relationships": [...]}); when
+the config carries no such block the graph is empty (no products, no
+relationships) — the platform stays fully generic and never crashes.
 """
 
 from __future__ import annotations
+
+from typing import Any
+
+from app.services.domain_config import get_domain_config
 
 from .models import (
     ProductNode,
@@ -15,171 +22,85 @@ from .models import (
     KnowledgeGraph,
 )
 
-# ── C5/C9 Graph Definition ────────────────────────────────────────────────
+# ── Graph Data Source ─────────────────────────────────────────────────────
+# All industry-specific product/relationship data lives in the per-app domain
+# config (domain_configs/<agent>.json -> "knowledge_graph" block), never in
+# platform code. No config → empty graph (fully generic platform).
 
-_C5_C9_NODES: list[ProductNode] = [
-    # Raw materials
-    ProductNode(
-        id="crude_oil", name_en="Crude Oil", name_cn="原油",
-        type=ProductType.CRUDE,
-        description="Global crude oil (Brent/Dubai) — feedstock for naphtha cracking.",
-        typical_price_range="70-120 USD/bbl", unit="barrel",
-    ),
-    ProductNode(
-        id="naphtha", name_en="Naphtha", name_cn="石脑油",
-        type=ProductType.FEEDSTOCK,
-        description="Light naphtha from crude distillation — cracker feedstock.",
-        typical_price_range="600-1200 USD/ton", unit="ton",
-    ),
+_DOMAIN_CONFIG_NAME = ""
 
-    # C5 chain ─────────────────────────────────────────────
-    ProductNode(
-        id="cracked_c5", name_en="Cracked C5", name_cn="裂解C5",
-        type=ProductType.C5_MIX,
-        description="C5 fraction from steam cracking — separation into isoprene/piperylene/DCPD.",
-        typical_price_range="700-1500 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="mixed_c5", name_en="Mixed C5", name_cn="混合碳五",
-        type=ProductType.C5_MIX,
-        description="Blended C5 stream including C5 raffinate.",
-        typical_price_range="500-1000 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="isoprene", name_en="Isoprene", name_cn="异戊二烯",
-        type=ProductType.C5_DERIVATIVE,
-        description="Isoprene — monomer for polyisoprene rubber (IR) and SIS.",
-        typical_price_range="1500-3000 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="piperylene", name_en="Piperylene", name_cn="间戊二烯",
-        type=ProductType.C5_DERIVATIVE,
-        description="Piperylene — co-monomer for C5 petroleum resin.",
-        typical_price_range="800-1800 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="dcpd", name_en="DCPD", name_cn="双环戊二烯",
-        type=ProductType.C5_DERIVATIVE,
-        description="DCPD — monomer for high-grade hydrocarbon resin and ENB.",
-        typical_price_range="1000-2500 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="sis", name_en="SIS", name_cn="苯乙烯-异戊二烯-苯乙烯",
-        type=ProductType.C5_DERIVATIVE,
-        description="Styrene-Isoprene-Styrene block copolymer — thermoplastic elastomer.",
-        typical_price_range="2000-4000 USD/ton", unit="ton",
-    ),
 
-    # C9 chain ─────────────────────────────────────────────
-    ProductNode(
-        id="cracked_c9", name_en="Cracked C9", name_cn="裂解C9",
-        type=ProductType.C9_DERIVATIVE,
-        description="C9 fraction from steam cracking — resin feedstock.",
-        typical_price_range="500-1200 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="styrene", name_en="Styrene", name_cn="苯乙烯",
-        type=ProductType.DOWNSTREAM,
-        description="Styrene monomer — for C5/C9 resin and downstream SIS.",
-        typical_price_range="800-1500 USD/ton", unit="ton",
-    ),
+def _load_products(raw: Any) -> list[ProductNode]:
+    """Build ProductNode instances from a config product list (fail-soft)."""
+    nodes: list[ProductNode] = []
+    for item in raw or []:
+        if not isinstance(item, dict) or not item.get("id"):
+            continue
+        try:
+            ptype = ProductType(str(item.get("type") or ""))
+        except ValueError:
+            ptype = ProductType.DOWNSTREAM
+        nodes.append(
+            ProductNode(
+                id=str(item["id"]),
+                name_en=str(item.get("name_en") or item["id"]),
+                name_cn=str(item.get("name_cn") or ""),
+                type=ptype,
+                description=item.get("description"),
+                typical_price_range=item.get("typical_price_range"),
+                unit=str(item.get("unit") or "ton"),
+            )
+        )
+    return nodes
 
-    # Downstream / other ───────────────────────────────────
-    ProductNode(
-        id="c5_resin", name_en="C5 Petroleum Resin", name_cn="碳五石油树脂",
-        type=ProductType.DOWNSTREAM,
-        description="C5 petroleum resin — tackifier for adhesives, rubber, paint.",
-        typical_price_range="800-2000 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="raffinate_c5", name_en="Raffinate C5", name_cn="抽余碳五",
-        type=ProductType.C5_DERIVATIVE,
-        description="C5 raffinate after extraction — remaining C5 stream.",
-        typical_price_range="400-800 USD/ton", unit="ton",
-    ),
-    ProductNode(
-        id="blowing_agent", name_en="Pentane Blowing Agent", name_cn="戊烷发泡剂",
-        type=ProductType.DOWNSTREAM,
-        description="Pentane-based blowing agent for foam products.",
-        typical_price_range="500-1000 USD/ton", unit="ton",
-    ),
-]
 
-_C5_C9_EDGES: list[Relationship] = [
-    # Crude → Naphtha
-    Relationship("crude_oil", "naphtha", RelationshipType.PRODUCES,
-                 yield_rate=0.15,
-                 description="Crude distillation → light naphtha fraction"),
+def _load_relationships(raw: Any) -> list[Relationship]:
+    """Build Relationship instances from a config relationship list (fail-soft)."""
+    edges: list[Relationship] = []
+    for item in raw or []:
+        if not isinstance(item, dict):
+            continue
+        source_id = item.get("source_id")
+        target_id = item.get("target_id")
+        if not source_id or not target_id:
+            continue
+        try:
+            rtype = RelationshipType(str(item.get("relation") or ""))
+        except ValueError:
+            rtype = RelationshipType.PRODUCES
+        yield_rate = item.get("yield_rate")
+        edges.append(
+            Relationship(
+                source_id=str(source_id),
+                target_id=str(target_id),
+                relation=rtype,
+                yield_rate=float(yield_rate) if yield_rate is not None else None,
+                description=item.get("description"),
+            )
+        )
+    return edges
 
-    # Naphtha → Cracked C5 / Cracked C9
-    Relationship("naphtha", "cracked_c5", RelationshipType.PRODUCES,
-                 yield_rate=0.12,
-                 description="Naphtha steam cracking → C5 fraction"),
-    Relationship("naphtha", "cracked_c9", RelationshipType.PRODUCES,
-                 yield_rate=0.08,
-                 description="Naphtha steam cracking → C9 fraction"),
 
-    # Cracked C5 → derivatives
-    Relationship("cracked_c5", "isoprene", RelationshipType.PRODUCES,
-                 yield_rate=0.20,
-                 description="C5 separation → isoprene"),
-    Relationship("cracked_c5", "piperylene", RelationshipType.PRODUCES,
-                 yield_rate=0.18,
-                 description="C5 separation → piperylene"),
-    Relationship("cracked_c5", "dcpd", RelationshipType.PRODUCES,
-                 yield_rate=0.22,
-                 description="C5 separation → DCPD"),
-    Relationship("cracked_c5", "mixed_c5", RelationshipType.PRODUCES,
-                 yield_rate=None,
-                 description="C5 blending → mixed C5"),
-    Relationship("cracked_c5", "raffinate_c5", RelationshipType.PRODUCES,
-                 yield_rate=0.25,
-                 description="Post-extraction C5 raffinate"),
+def _load_graph_data() -> tuple[list[ProductNode], list[Relationship]]:
+    """Load products + relationships from the domain config (never raises)."""
+    try:
+        kg = (get_domain_config(_DOMAIN_CONFIG_NAME) or {}).get("knowledge_graph") or {}
+    except Exception:  # noqa: BLE001 — fail-soft: empty graph on any config issue
+        kg = {}
+    return _load_products(kg.get("products")), _load_relationships(kg.get("relationships"))
 
-    # Cracked C9 → downstream
-    Relationship("cracked_c9", "c5_resin", RelationshipType.CONSUMES,
-                 yield_rate=None,
-                 description="C9 feeds into C5 resin as co-monomer"),
 
-    # Mixed C5 → downstream
-    Relationship("mixed_c5", "c5_resin", RelationshipType.CONSUMES,
-                 yield_rate=None,
-                 description="Mixed C5 → C5 petroleum resin"),
-    Relationship("mixed_c5", "blowing_agent", RelationshipType.CONSUMES,
-                 yield_rate=None,
-                 description="Mixed C5 → pentane blowing agent"),
+# ── Graph Definition (loaded from domain config) ─────────────────────────
 
-    # Isoprene → SIS
-    Relationship("isoprene", "sis", RelationshipType.CONSUMES,
-                 yield_rate=0.70,
-                 description="Isoprene + styrene → SIS block copolymer"),
-
-    # Styrene → SIS / C5 Resin
-    Relationship("styrene", "sis", RelationshipType.CONSUMES,
-                 yield_rate=0.30,
-                 description="Styrene co-monomer for SIS"),
-    Relationship("styrene", "c5_resin", RelationshipType.CONSUMES,
-                 yield_rate=None,
-                 description="Styrene co-monomer for C5/C9 resin"),
-
-    # Substitution edges
-    Relationship("piperylene", "dcpd", RelationshipType.SUBSTITUTE,
-                 yield_rate=None,
-                 description="Piperylene and DCPD compete for C5 separation capacity"),
-    Relationship("isoprene", "piperylene", RelationshipType.SUBSTITUTE,
-                 yield_rate=None,
-                 description="Isoprene and piperylene compete for cracker C5 allocation"),
-    Relationship("c5_resin", "sis", RelationshipType.SUBSTITUTE,
-                 yield_rate=None,
-                 description="C5 resin vs SIS — competing downstream applications"),
-    Relationship("naphtha", "crude_oil", RelationshipType.CONSUMES,
-                 yield_rate=None,
-                 description="Naphtha is refined from crude oil"),
-]
+_C5_C9_NODES, _C5_C9_EDGES = _load_graph_data()
 
 
 def build_c5_c9_graph() -> KnowledgeGraph:
-    """Return a fresh instance of the static C5/C9 product graph."""
+    """Return a fresh instance of the product value-chain graph.
+
+    Data comes from the domain config's "knowledge_graph" block; with no
+    block present the returned graph is empty (fully generic behavior).
+    """
     return KnowledgeGraph(
         nodes=list(_C5_C9_NODES),
         edges=list(_C5_C9_EDGES),
@@ -191,7 +112,7 @@ _domain_graph: KnowledgeGraph | None = None
 
 
 def get_domain_graph() -> KnowledgeGraph:
-    """Return the shared (lazy-singleton) C5/C9 domain graph."""
+    """Return the shared (lazy-singleton) domain graph."""
     global _domain_graph
     if _domain_graph is None:
         _domain_graph = build_c5_c9_graph()
@@ -334,9 +255,9 @@ def query_chain(product_id: str, direction: str = "downstream") -> dict:
 
 
 def format_graph_summary() -> str:
-    """Return a human-readable summary of the entire C5/C9 graph."""
+    """Return a human-readable summary of the entire product graph."""
     g = get_domain_graph()
-    lines = [f"C5/C9 Knowledge Graph — {len(g.nodes)} products, {len(g.edges)} edges\n"]
+    lines = [f"Knowledge Graph — {len(g.nodes)} products, {len(g.edges)} edges\n"]
     lines.append("=" * 60)
 
     for node in g.nodes:

@@ -7,6 +7,7 @@ fallback providers are tried automatically.
 """
 
 import logging
+import re
 from abc import ABC, abstractmethod
 
 import httpx
@@ -143,10 +144,14 @@ class BingProvider(SearchProvider):
         from urllib.parse import quote_plus
 
         url = f"https://www.bing.com/search?q={quote_plus(query)}"
-        # For ASCII (English) queries, hint the English market so results
-        # match the query language instead of the server IP's geolocation.
+        # Market/language hint so results match the query language instead of
+        # the server IP's geolocation. ASCII queries → English market; CJK
+        # queries → zh-CN (without this, a Chinese petrochemical query on a
+        # datacenter IP gets US-market mixed-language junk).
         if query.isascii():
             url += "&setlang=en&mkt=en-US"
+        else:
+            url += "&setlang=zh-hans&mkt=zh-CN"
 
         async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
             resp = await client.get(
@@ -242,6 +247,75 @@ def _provider_for(name: str) -> SearchProvider:
     return DuckDuckGoProvider()
 
 
+# ---------------------------------------------------------------------------
+# Relevance filter (2026-08-31)
+# ---------------------------------------------------------------------------
+# Poisoned-SERP failure mode: keyless HTML-scraped engines (Bing from a
+# datacenter IP) return 200 OK with plausible-looking but IRRELEVANT rows —
+# the C5/C9 petrochemical query got "C5驾驶证" (driver's license), CSGO item
+# markets, and a military transport plane. The agent trusted them, spent a
+# turn extracting the wrong pages, and fell back to internal data — the
+# "not informative vs Kimi/Claude" gap. A result must share enough
+# significant query tokens to survive; when nothing survives, the provider
+# is treated as "no relevant results" (honest) instead of poisoning the
+# agent's context.
+
+# EN stopwords / generic market-report noise ignored when building tokens.
+_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "with",
+    "about", "market", "markets", "price", "prices", "trend", "trends",
+    "report", "reports", "data", "china", "chinese", "current", "overview",
+    "analysis", "make", "me", "please", "hello", "hi", "can", "you", "your",
+    "this", "that", "from", "what", "how", "why", "new", "latest", "update",
+    "info", "information", "2026", "2025", "2024", "the", "is", "are", "was",
+})
+
+def _significant_tokens(query: str) -> list[str]:
+    """Meaningful tokens of a query for relevance matching.
+
+    ASCII: words >= 3 letters plus short alphanumerics with a digit
+    ("c5", "c9", "5g").  CJK: every 2-char bigram of each Chinese run
+    ("裂解碳五" -> 裂解/解碳/碳五) — the standard Chinese relevance unit.
+    """
+    tokens: list[str] = []
+    for m in re.finditer(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", query.lower()):
+        tok = m.group(0)
+        if tok in _STOPWORDS:
+            continue
+        if tok.isascii():
+            if len(tok) >= 3 or any(ch.isdigit() for ch in tok):
+                tokens.append(tok)
+        else:
+            tokens.append(tok)
+    for m in re.finditer(r"[\u4e00-\u9fff]{2,}", query.lower()):
+        run = m.group(0)
+        tokens.extend(run[i:i + 2] for i in range(len(run) - 1))
+    return tokens
+
+
+def _filter_relevant(results: list[dict], query: str) -> list[dict]:
+    """Drop results sharing too few significant tokens with ``query``.
+
+    ``required_overlap`` is 2 for queries with >= 4 significant tokens,
+    1 otherwise (so a short query like "weather today" still works).
+    Returns ``[]`` when every row is junk — the caller treats that as
+    "provider returned no relevant results" and moves on.
+    """
+    if not results or not query:
+        return results
+    tokens = _significant_tokens(query)
+    if not tokens:
+        return results
+    required = 2 if len(tokens) >= 4 else 1
+    kept = []
+    for r in results:
+        hay = f"{r.get('title', '')} {r.get('description', '')}".lower()
+        overlap = sum(1 for t in tokens if t in hay)
+        if overlap >= required:
+            kept.append(r)
+    return kept
+
+
 def get_search_provider() -> SearchProvider:
     """Factory: returns provider based on settings.SEARCH_PROVIDER."""
     return _provider_for(settings.SEARCH_PROVIDER)
@@ -283,31 +357,51 @@ async def _web_search(
     if not query:
         return {"success": False, "error": "query is required"}
 
-    if not settings.search_config_ok():
+    # Usable provider chain: the configured provider first, then keyless
+    # fallbacks (keyed providers are skipped when no SEARCH_API_KEY is set).
+    # Hard-fail only when NO provider is usable at all (e.g. configured =
+    # bocha/tavily/serper with no key AND no keyless fallback reachable) —
+    # previously a keyed-but-unkeyed configured provider aborted the whole
+    # tool even though bing/duckduckgo fallbacks existed.
+    providers = _providers_to_try()
+    if not providers:
         return {
             "success": False,
             "error": f"Search provider '{settings.SEARCH_PROVIDER}' is not configured. "
-                     f"Set SEARCH_API_KEY in .env or use SEARCH_PROVIDER=duckduckgo.",
+                     f"Set SEARCH_API_KEY in .env or use SEARCH_PROVIDER=duckduckgo/bing.",
         }
 
     results: list[dict] = []
     last_error: str | None = None
     used_fallback = False
+    relevance_filtered = False
     configured_name = type(get_search_provider()).__name__
-    for provider in _providers_to_try():
+    for provider in providers:
         name = type(provider).__name__
         try:
-            results = await provider.search(query, limit)
+            raw_results = await provider.search(query, limit)
         except httpx.HTTPStatusError as e:
             logger.warning("web_search %s HTTP error: %s", name, e)
             last_error = f"Search API error: {e.response.status_code}"
-            results = []
+            raw_results = []
             continue
         except httpx.RequestError as e:
             logger.warning("web_search %s request error: %s", name, e)
             last_error = f"Search request failed: {e}"
-            results = []
+            raw_results = []
             continue
+        # Relevance filter: keyless scraped engines can return 200 OK with
+        # plausible-looking but irrelevant rows (C5驾驶证 for a C5/C9 resin
+        # query). Drop junk before trusting the provider; when everything is
+        # junk, treat the provider as empty so the chain moves on (or the
+        # turn fails honestly instead of extracting the wrong pages).
+        results = _filter_relevant(raw_results, query)
+        if name == configured_name and raw_results and not results:
+            relevance_filtered = True
+            logger.info(
+                "web_search %s returned %d rows but none relevant to query — filtered",
+                name, len(raw_results),
+            )
         if results:
             if name != configured_name:
                 logger.info("web_search succeeded via fallback provider %s", name)
@@ -350,6 +444,13 @@ async def _web_search(
     }
     if used_fallback:
         resp["used_fallback_provider"] = True
+    if relevance_filtered:
+        resp["relevance_filtered"] = True
+        resp["relevance_note"] = (
+            "The configured provider returned rows but none shared significant "
+            "query tokens — they were dropped. For higher-quality results set "
+            "SEARCH_PROVIDER=tavily/serper/bocha with a SEARCH_API_KEY in .env."
+        )
     if degraded:
         resp["degraded"] = True
         resp["degraded_reason"] = degraded_reason

@@ -40,7 +40,7 @@ def upgrade() -> None:
         )
         batch_op.create_index(
             "ix_projects_resource_type",
-            "resource_type",
+            ["resource_type"],
         )
 
     # Backfill projects: is_system=true OR created_by_id IS NULL → 'company'
@@ -65,7 +65,7 @@ def upgrade() -> None:
         )
         batch_op.create_index(
             "ix_agent_apps_resource_type",
-            "resource_type",
+            ["resource_type"],
         )
 
     # Backfill agent_apps: is_system=true OR created_by_id IS NULL → 'company'
@@ -103,15 +103,15 @@ def upgrade() -> None:
     with op.batch_alter_table("resource_shares") as batch_op:
         batch_op.create_index(
             "ix_resource_shares_target",
-            "resource_type", "resource_id",
+            ["resource_type", "resource_id"],
         )
         batch_op.create_index(
             "ix_resource_shares_shared_with",
-            "shared_with_user_id",
+            ["shared_with_user_id"],
         )
         batch_op.create_index(
             "ix_resource_shares_org_app",
-            "org_id", "app_id",
+            ["org_id", "app_id"],
         )
 
 

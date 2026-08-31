@@ -25,13 +25,6 @@ const __dirname = dirname(__filename);
 const SOURCE = readFileSync(resolve(__dirname, './ProjectDetail.jsx'), 'utf8');
 
 describe('ProjectDetail.jsx Recent Chats list', () => {
-  it('uses the Ecisco logo image in the project title header for Ecisco projects', () => {
-    expect(SOURCE).toMatch(/import\s+brandLogo\s+from\s+['"]\.\.\/\.\.\/logo\/logo\.png['"]/);
-    expect(SOURCE).toMatch(/alt="Ecisco AI logo"/);
-    expect(SOURCE).toMatch(/includes\('ecisco'\)/);
-    expect(SOURCE).toMatch(/includes\('伊斯科'\)/);
-  });
-
   it('renders each conversation as a <button>, not a <div>', () => {
     // Locate the ConversationsSection function and assert the row
     // element is a <button>. Clicking the row should fire

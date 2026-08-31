@@ -237,4 +237,28 @@ describe('Chat — handleUploadFile renders chip even if persistence fails', () 
       expect(screen.queryByTestId('attachment-chip')).not.toBeInTheDocument();
     });
   });
+
+  it('keeps the chip when the upload creates a brand-new session (landing-page flow)', async () => {
+    // Regression (2026-08-31): on the landing page activeId is null, so
+    // ensureSession() creates a NEW session mid-upload. The old
+    // session-change effect unconditionally wiped draft attachments on
+    // activeId change — the chip the user just uploaded vanished a tick
+    // later and the agent never received the file. The effect must skip
+    // the wipe for brand-new sessions (the same gate it already uses
+    // for setActiveAgent).
+    base44.entities.ChatSession.create.mockResolvedValue({ id: 'sess-brand-new', project: 'Default' });
+
+    renderChat();
+
+    await waitFor(() => expect(capturedOnUploadFile).toBeInstanceOf(Function));
+
+    const file = new File(['hello'], 'new-session.txt', { type: 'text/plain' });
+    await capturedOnUploadFile(file);
+
+    // The chip must survive the session creation + activeId change.
+    await waitFor(() => {
+      const chips = screen.getAllByTestId('attachment-chip');
+      expect(chips.some((c) => c.textContent === 'new-session.txt')).toBe(true);
+    });
+  });
 });

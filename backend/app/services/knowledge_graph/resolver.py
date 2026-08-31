@@ -1,86 +1,82 @@
-"""Product name → product_id resolver for the Ecisco BI domain.
-
-Port of EDIA 5.1.2 backend/src/domain/product_resolver.py.
+"""Product name → product_id resolver.
 
 Maps user-language product names (Chinese, English, abbreviations, aliases)
-to canonical `product_id` strings.  Supports all 12 C5/C9 products by default.
-
-Uses a static mapping table with no external DB dependency.
+to canonical `product_id` strings.  The alias table and display labels are
+loaded from the per-app domain configuration (keys ``product_aliases`` /
+``product_labels``); with no config present the resolver behaves generically
+(empty catalog — lookups return None / [] and nothing ever crashes).
 """
 
 from __future__ import annotations
 
 import re
 
-# ── Alias mapping — user language → canonical product_id ──────────────────
+from app.services.domain_config import get_domain_config
 
-_ALIAS_MAP: dict[str, list[str]] = {
-    "crude_oil": ["原油", "brent", "dubai", "crude oil", "crude", "wti"],
-    "naphtha": ["石脑油", "naphtha", "轻石脑油", "重石脑油", "naph", "nap"],
-    "cracked_c5": ["裂解c5", "裂解碳五", "cracked c5", "裂解c5馏分", "c5裂解", "c5馏分", "c5"],
-    "mixed_c5": ["混合碳五", "混合c5", "mixed c5", "混合碳5"],
-    "isoprene": ["异戊二烯", "isoprene", "ip", "iso", "异戊"],
-    "piperylene": ["间戊二烯", "piperylene", "pip", "pipe", "间戊"],
-    "dcpd": ["双环戊二烯", "dcpd", "二聚环戊二烯", "dimer", "dcp"],
-    "sis": ["sis", "苯乙烯异戊二烯苯乙烯", "sis橡胶", "sis弹性体", "苯乙烯-异戊二烯-苯乙烯"],
-    "cracked_c9": ["裂解c9", "裂解碳九", "cracked c9", "c9馏分", "c9"],
-    "styrene": ["苯乙烯", "styrene", "sm", "st"],
-    "c5_resin": ["碳五石油树脂", "c5石油树脂", "c5树脂", "c5 resin", "碳五树脂", "石油树脂"],
-    "raffinate_c5": ["抽余碳五", "抽余c5", "raffinate c5", "raffinate", "抽余油"],
-    "blowing_agent": ["戊烷发泡剂", "发泡剂", "blowing agent", "pentane", "戊烷"],
-}
+# Per-app domain config name. The resolver is app-agnostic; "" resolves to
+# the generic (empty) config unless an app name is configured at startup.
+_DOMAIN_CONFIG_NAME = ""
 
-# ── Product ID → display label ────────────────────────────────────────────
 
-_PRODUCT_LABELS: dict[str, str] = {
-    "crude_oil": "Crude Oil / 原油",
-    "naphtha": "Naphtha / 石脑油",
-    "cracked_c5": "Cracked C5 / 裂解C5",
-    "mixed_c5": "Mixed C5 / 混合碳五",
-    "isoprene": "Isoprene / 异戊二烯",
-    "piperylene": "Piperylene / 间戊二烯",
-    "dcpd": "DCPD / 双环戊二烯",
-    "sis": "SIS / 苯乙烯-异戊二烯-苯乙烯",
-    "cracked_c9": "Cracked C9 / 裂解C9",
-    "styrene": "Styrene / 苯乙烯",
-    "c5_resin": "C5 Petroleum Resin / 碳五石油树脂",
-    "raffinate_c5": "Raffinate C5 / 抽余碳五",
-    "blowing_agent": "Pentane Blowing Agent / 戊烷发泡剂",
-}
+def _load_alias_map() -> dict[str, list[str]]:
+    """Load the product alias table from the app's domain config.
+
+    Key ``product_aliases`` maps product_id → list of user-language aliases.
+    Missing/invalid config → empty mapping (generic, never raises).
+    """
+    cfg = get_domain_config(_DOMAIN_CONFIG_NAME) or {}
+    raw = cfg.get("product_aliases") or {}
+    out: dict[str, list[str]] = {}
+    for pid, aliases in raw.items():
+        if isinstance(aliases, (list, tuple)):
+            cleaned = [str(a) for a in aliases if a is not None and str(a).strip()]
+            if cleaned:
+                out[str(pid)] = cleaned
+    return out
+
+
+def _load_product_labels() -> dict[str, str]:
+    """Load display labels from the app's domain config (key ``product_labels``)."""
+    cfg = get_domain_config(_DOMAIN_CONFIG_NAME) or {}
+    raw = cfg.get("product_labels") or {}
+    return {str(k): str(v) for k, v in raw.items() if v is not None and str(v).strip()}
+
+
+def _alias_map() -> dict[str, list[str]]:
+    """Current alias mapping (re-read per call; config dict is lru-cached)."""
+    return _load_alias_map()
 
 
 def resolve_product_id(user_input: str) -> str | None:
     """Map a user-language product string to a canonical product ID.
 
-    Returns the canonical product_id (e.g. "isoprene") or None if no match.
+    Returns the canonical product_id or None if no match.
     Case-insensitive.  Matches both exact and substring patterns.
 
-    Examples:
-        resolve_product_id("异戊二烯")    → "isoprene"
-        resolve_product_id("isoprene")   → "isoprene"
-        resolve_product_id("IP")         → "isoprene"
-        resolve_product_id("unknown")    → None
+    With no domain config loaded the catalog is empty and every input
+    resolves to None (fully generic behavior).
     """
     normalized = user_input.strip().lower()
     if not normalized:
         return None
 
+    alias_map = _alias_map()
+
     # Exact ID match first
-    if normalized in _ALIAS_MAP:
+    if normalized in alias_map:
         return normalized
 
     # Phase 1: Exact alias match — highest priority
-    for pid, aliases in _ALIAS_MAP.items():
+    for pid, aliases in alias_map.items():
         for alias in aliases:
             if normalized == alias:
                 return pid
 
     # Phase 2: Substring match (user input IS a substring of an alias)
-    # Shortest alias wins to avoid overly greedy matches (e.g. "异戊二烯"
-    # matching "苯乙烯-异戊二烯-苯乙烯" instead of the exact "异戊二烯" alias).
+    # Shortest alias wins to avoid overly greedy matches.
     best_id: str | None = None
     best_len = 999999
-    for pid, aliases in _ALIAS_MAP.items():
+    for pid, aliases in alias_map.items():
         for alias in aliases:
             if normalized in alias and len(alias) < best_len:
                 best_id = pid
@@ -90,7 +86,7 @@ def resolve_product_id(user_input: str) -> str | None:
         return best_id
 
     # Phase 3: Alias IS a substring of user input
-    for pid, aliases in _ALIAS_MAP.items():
+    for pid, aliases in alias_map.items():
         for alias in aliases:
             if alias in normalized:
                 # Prefer longer alias match within the input
@@ -104,14 +100,14 @@ def resolve_product_id(user_input: str) -> str | None:
 def extract_product_ids_in_text(text: str) -> list[str]:
     """Extract all recognized product IDs from free-form text.
 
-    Uses longest-match-first to handle ambiguous cases like "c5" vs "c5_resin".
+    Uses longest-match-first to handle ambiguous aliases.
     """
     found: dict[str, int] = {}  # pid → match length
     normalized = text.lower()
 
     # Sort aliases by length descending — longest match wins
     all_aliases: list[tuple[str, str, int]] = []  # (pid, alias, len)
-    for pid, aliases in _ALIAS_MAP.items():
+    for pid, aliases in _alias_map().items():
         for alias in aliases:
             all_aliases.append((pid, alias, len(alias)))
     all_aliases.sort(key=lambda x: x[2], reverse=True)
@@ -158,37 +154,44 @@ def split_product_tokens(text: str) -> list[str]:
 
 
 def product_id_to_context_label(product_id: str) -> str:
-    """Return display label for a product_id for context injection."""
-    return _PRODUCT_LABELS.get(product_id, product_id)
+    """Return display label for a product_id for context injection.
+
+    Falls back to the product_id itself when no label is configured.
+    """
+    return _load_product_labels().get(product_id, product_id)
 
 
 def list_supported_product_ids() -> list[str]:
-    """Return all 12 canonical product IDs."""
-    return sorted(_ALIAS_MAP.keys())
+    """Return all canonical product IDs from the configured catalog."""
+    return sorted(_alias_map().keys())
 
 
 def get_alias_mapping() -> dict[str, list[str]]:
     """Return the full alias mapping dict (read-only)."""
-    return dict(_ALIAS_MAP)
+    return dict(_alias_map())
 
 
-# ── Sinopec listing query helpers ─────────────────────────────────────────
+# ── Listing query helpers ────────────────────────────────────────────────
 
 
 def looks_like_sinopec_listing_query(text: str) -> bool:
-    """Detect if the user query looks like a Sinopec listing request.
+    """Detect if the user query looks like a listing/auction-price request.
 
-    Examples: "挂拍价", "牌价", "listing price", "挂牌"
+    Signal terms come from the app's domain config (key
+    ``listing_query_signals``); defaults to generic listing/auction terms.
+    Legacy name kept for compatibility.
     """
-    signals = ["挂拍", "牌价", "挂牌", "listing", "list price", "sinopec", "中石化"]
+    cfg = get_domain_config(_DOMAIN_CONFIG_NAME) or {}
+    signals = cfg.get("listing_query_signals") or ["挂拍", "牌价", "挂牌", "listing", "list price"]
     lower = text.lower()
-    return any(s in lower for s in signals)
+    return any(str(s).lower() in lower for s in signals if s)
 
 
 def default_sinopec_listing_product_ids() -> list[str]:
-    """Return product IDs typically looked up for Sinopec listing."""
-    return [
-        "isoprene", "piperylene", "dcpd", "cracked_c5",
-        "cracked_c9", "c5_resin", "sis", "styrene",
-        "naphtha", "blowing_agent",
-    ]
+    """Return product IDs typically looked up for listing prices.
+
+    Loaded from the app's domain config (key ``listing_product_ids``);
+    empty config → empty list (generic).
+    """
+    cfg = get_domain_config(_DOMAIN_CONFIG_NAME) or {}
+    return [str(p) for p in (cfg.get("listing_product_ids") or []) if p]

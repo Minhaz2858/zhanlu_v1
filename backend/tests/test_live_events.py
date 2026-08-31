@@ -117,7 +117,8 @@ class TestTemplateCoverage:
                 if not placeholders:
                     # Static label — allowed only for these label keys.
                     assert label_key.startswith("phase_enter.") or label_key in {
-                        "verify_passed", "finalize_started",
+                        "verify_passed", "verify_failed", "finalize_started",
+                        "finalize_done",
                     }, (
                         f"{label_key}/{lang} is a dynamic label but has no "
                         "structured placeholders — labels must come from the "

@@ -144,6 +144,7 @@ def parse_task_spec(
     active_skill: Optional[dict] = None,
     conversation_context: Optional[dict] = None,
     db=None,
+    endpoint=None,
 ) -> dict:
     """Parse a user message into a TaskSpec using the LLM.
 
@@ -240,22 +241,72 @@ Classify the task:
 {followup_hint}{context_block}
 Respond with ONLY a JSON object, no explanation."""
 
+    # ── TaskSpec JSON schema ─────────────────────────────────────────
+    # DeepSeek (the default routing model for background FSM calls)
+    # ignores prose "respond with ONLY JSON" instructions and role-plays
+    # a refusal instead — which silently breaks TaskSpec parsing and
+    # degrades every request to the generic default plan (the agent then
+    # reports "tool Process request is not available" and claims it has
+    # no database access).  Passing a real JSON schema makes the
+    # provider enforce json_object output (build_llm_payload sets
+    # response_format={"type":"json_object"} and injects the schema
+    # hint), so the parse always succeeds regardless of which model the
+    # router picked.
+    _task_spec_schema = {
+        "type": "object",
+        "properties": {
+            "task_kind": {
+                "type": "string",
+                "enum": ["create_artifact", "answer_question", "analyze_data", "configure_system", "general"],
+            },
+            "artifact_intents": {"type": "array", "items": {"type": "string"}},
+            "entities": {"type": "object"},
+            "kpis": {"type": "array", "items": {"type": "string"}},
+            "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+            "complexity": {"type": "string", "enum": ["simple", "moderate", "complex"]},
+            "requires_data": {"type": "boolean"},
+            "user_signal": {"type": "string"},
+            "is_followup": {"type": "boolean"},
+            "refines_artifact_id": {"type": ["string", "null"]},
+        },
+        "required": ["task_kind", "artifact_intents", "entities", "requires_data", "is_followup"],
+    }
+
     try:
-        result = call_llm(
+        # call_llm is async; this parser runs in a sync context (FSM GOAL
+        # state).  Bare-calling it returns a coroutine and `.get()` blows
+        # up with "coroutine object has no attribute 'get'", silently
+        # falling back to the generic default TaskSpec (which then plans
+        # a useless "Process request" tool step and the agent claims it
+        # has no data access).  Reuse plan_dag's sync runner so the LLM
+        # parse actually happens.
+        from app.services.synexia.plan_dag import _run_llm_sync
+
+        result = _run_llm_sync(call_llm(
             prompt=system_prompt,
             messages=[{"role": "user", "content": user_message}],
             temperature=0,
-        )
+            response_json_schema=_task_spec_schema,
+            endpoint=endpoint,
+        ))
 
-        response_text = result.get("response", "{}").strip()
+        # When response_json_schema is used, call_llm parses the JSON and
+        # returns it under ``data`` (plus top-level key merge) — NOT under
+        # ``response`` (that stays None).  Fall back gracefully so the
+        # schema path and the plain-text path both work.
+        _parsed = result.get("data")
+        if isinstance(_parsed, dict):
+            task_spec = _parsed
+        else:
+            response_text = (result.get("response") or "{}").strip()
 
-        # Extract JSON from response
-        if "```json" in response_text:
-            response_text = response_text.split("```json")[1].split("```")[0]
-        elif "```" in response_text:
-            response_text = response_text.split("```")[1].split("```")[0]
+            # Extract JSON from response
+            if "```json" in response_text:
+                response_text = response_text.split("```json")[1].split("```")[0]
+            elif "```" in response_text:
+                response_text = response_text.split("```")[1].split("```")[0]
 
-        task_spec = json.loads(response_text)
+            task_spec = json.loads(response_text)
 
         # Ensure required fields
         task_spec.setdefault("task_kind", "general")

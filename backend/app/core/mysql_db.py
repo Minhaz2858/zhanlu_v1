@@ -1,10 +1,10 @@
-"""Lazy SQLAlchemy engine for EDIA's MySQL warehouse (read-only mirror).
+"""Lazy SQLAlchemy engine for the external MySQL warehouse (read-only mirror).
 
-Mirrors EDIA's backend/src/db/engine_factory.py pattern: pool_pre_ping + small
-pool + short connect_timeout so an unreachable host fails in ~3s, not 30s.
+Uses a standard engine_factory pattern: pool_pre_ping + small pool + short
+connect_timeout so an unreachable host fails in ~3s, not 30s.
 
-Empty EDIA_MYSQL_URL = feature off. The engine is created lazily on first
-use so the rest of zhanlu is unaffected when EDIA is not configured.
+Empty MYSQL_URL = feature off. The engine is created lazily on first
+use so the rest of zhanlu is unaffected when no external MySQL is configured.
 """
 import logging
 import time
@@ -25,13 +25,13 @@ _REACHABILITY_TTL = 30.0  # seconds
 
 
 def get_mysql_engine() -> Optional[Engine]:
-    """Return the cached EDIA MySQL engine, or None when unconfigured."""
+    """Return the cached external MySQL engine, or None when unconfigured."""
     global _engine
-    if not settings.EDIA_MYSQL_URL:
+    if not settings.MYSQL_URL:
         return None
     if _engine is None:
         _engine = create_engine(
-            settings.EDIA_MYSQL_URL,
+            settings.MYSQL_URL,
             pool_pre_ping=True,
             pool_size=5,
             max_overflow=2,
@@ -42,14 +42,14 @@ def get_mysql_engine() -> Optional[Engine]:
 
 
 def get_mysql_db():
-    """FastAPI dependency: yield a Session against EDIA's MySQL.
+    """FastAPI dependency: yield a Session against the external MySQL warehouse.
 
-    Raises HTTPException(503, "edia_unavailable") when EDIA_MYSQL_URL is empty.
-    Callers wrap query errors as HTTPException(503, "edia_unreachable").
+    Raises HTTPException(503, "mysql_unavailable") when MYSQL_URL is empty.
+    Callers wrap query errors as HTTPException(503, "mysql_unreachable").
     """
     eng = get_mysql_engine()
     if eng is None:
-        raise HTTPException(status_code=503, detail="edia_unavailable")
+        raise HTTPException(status_code=503, detail="mysql_unavailable")
     SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=eng)
     db = SessionLocal()
     try:
@@ -58,8 +58,8 @@ def get_mysql_db():
         db.close()
 
 
-def is_edia_reachable() -> bool:
-    """Return True if `SELECT 1` succeeds against EDIA's MySQL.
+def is_mysql_reachable() -> bool:
+    """Return True if `SELECT 1` succeeds against the external MySQL warehouse.
 
     Cached for _REACHABILITY_TTL seconds to bound probe cost.
     Returns False when unconfigured OR when the probe raises.
@@ -77,7 +77,7 @@ def is_edia_reachable() -> bool:
             conn.execute(text("SELECT 1"))
         _reachability_cache["value"] = True
     except Exception as exc:
-        logger.warning("EDIA MySQL unreachable: %s", exc)
+        logger.warning("External MySQL unreachable: %s", exc)
         _reachability_cache["value"] = False
     _reachability_cache["ts"] = now
     return bool(_reachability_cache.get("value"))

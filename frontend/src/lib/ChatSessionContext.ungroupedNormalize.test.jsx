@@ -171,8 +171,8 @@ describe('ChatSessionContext.jsx read-back normalization', () => {
     // the project name + created_by_id matches an existing
     // Project row. Sessions created before the migration (or
     // whose project was created by a different user) keep
-    // ``project = "ECISCO"`` but have ``project_id = null``.
-    // The sidebar groups these sessions under "ECISCO" by
+    // ``project = "ACME"`` but have ``project_id = null``.
+    // The sidebar groups these sessions under "ACME" by
     // reading ``s.project``, so the chat input must do the
     // same — otherwise the project chip disappears on reopen
     // even though the session is correctly grouped.

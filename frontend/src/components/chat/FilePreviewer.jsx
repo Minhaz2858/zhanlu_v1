@@ -200,6 +200,16 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
   if (isAutomation) {
     if (tokenFailed) return <PreviewFailed />;
     if (!tokenUrl) return <PreviewLoading />;
+    // Office / Markdown automation files: render the tokenized URL directly.
+    // 2026-08-31 (bug): the previous code fell through to the MS Office
+    // Online viewer (view.officeapps.live.com) with the RAW download URL —
+    // the token was minted but ignored, so the preview was broken (MS
+    // servers can't authenticate) AND the unauthenticated file URL leaked
+    // to a third-party service. The viewer cannot reach the tokenized local
+    // URL, so it stays out of the automation path entirely.
+    if (OFFICE.includes(ext) || ['md', 'markdown'].includes(ext)) {
+      return <iframe src={tokenUrl} title={name || 'preview'} className={iframeCls} />;
+    }
   }
 
   if (IMG.includes(ext)) {
@@ -211,7 +221,7 @@ export default function FilePreviewer({ url, name, kind, fileType, className }) 
   }
 
   // HTML, dashboards, web apps → render in sandboxed iframe
-  if (['html', 'htm'].includes(ext) || ['dashboard', 'html_file', 'webapp'].includes(kind)) {
+  if (['html', 'htm'].includes(ext) || ['dashboard', 'html_file'].includes(kind)) {
     return <iframe src={effectiveUrl} title={name || 'preview'} className={iframeCls} sandbox="allow-same-origin allow-scripts allow-popups allow-forms" />;
   }
 

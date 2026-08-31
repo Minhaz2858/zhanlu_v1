@@ -1,4 +1,4 @@
-"""Forecasting domain models — 5 tables for the Ecisco BI Agent forecasting engine.
+"""Forecasting domain models — 5 tables for the enterprise BI forecasting engine.
 
 Tables:
     forecast_targets          — registry of forecastable series (any product/schema)
@@ -11,7 +11,7 @@ All tables inherit ``TimestampedBase`` (UUID PK, org_id/app_id tenant wall,
 soft-delete, timestamps).  The ``below_naive_baseline`` boolean on
 ``forecast_runs`` and ``forecast_accuracy_log`` is the schema-level honesty
 gate — it prevents silently shipping forecasts that fail to outperform a
-naive seasonal baseline (EDIA's hard-won lesson).
+naive seasonal baseline (a hard-won lesson from the reference deployment).
 """
 
 from datetime import datetime
@@ -120,7 +120,7 @@ class ForecastAccuracyLog(TimestampedBase):
 
     Written by the backtest job (Section 2.5) after each compute cycle.
     ``per_model`` JSON captures every model's MAPE for audit + re-tuning,
-    fixing EDIA's gap of logging only aggregate MAPE.
+    fixing the gap of logging only aggregate MAPE.
     """
 
     __tablename__ = "forecast_accuracy_log"
@@ -182,7 +182,7 @@ class ForecastBusinessRule(TimestampedBase):
 
     # JSON params are rule-type specific:
     #   seasonal:        {month: 11, adjustment_pct: -2.5}
-    #   causal_driver:   {driver: "naphtha", elasticity: 0.82}
+    #   causal_driver:   {driver: "feedstock", elasticity: 0.82}
     #   event_override:  {event: "post_holiday_lull", month: 2, adjustment_pct: 0.8}
     #   guardrail:       {min_history: 14, max_mape: 0.3}
     params: Mapped[dict] = mapped_column(JSON, nullable=False)

@@ -41,6 +41,27 @@ import { pickEvents } from './LiveActivityStream.legacyAdapter';
 
 // ── Helpers ────────────────────────────────────────────────────────────
 
+/** Tool name → short action label for the live one-liner (hybrid mode). */
+const TOOL_ACTION_LABELS = {
+  execute_query: 'Running query…',
+  execute_sql: 'Running query…',
+  run_sql: 'Running query…',
+  query_database: 'Running query…',
+  create_artifact: 'Building artifact…',
+  create_report: 'Building report…',
+  generate_report: 'Building report…',
+  create_dashboard: 'Building dashboard…',
+  create_automation: 'Creating automation…',
+  execute_code: 'Running code…',
+  web_search: 'Searching…',
+  _web_search: 'Searching…',
+  tavily_search: 'Searching…',
+  ask_rag_research: 'Researching…',
+  rag_research: 'Researching…',
+  create_cad: 'Building CAD model…',
+  delegate_task: 'Delegating to sub-agent…',
+};
+
 /** Substitute {placeholders} from structured params into a template string. */
 function formatTemplate(template, params = {}) {
   return String(template || '').replace(/\{(\w+)\}/g, (_, key) =>
@@ -628,6 +649,12 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedP
     !((ev.type === 'finalize_started' || ev.type === 'artifact_progress') && !isLive);
   // 2026-08-25: when collapsed, render a compact chip instead of the full
   // row. Activity-feed modernization task 9.
+  // 2026-08-31 (bug): the chip rendered ``collapsedChipSummary`` which built
+  // the label from raw params/type — phase_enter/plan_preview/verify_passed/
+  // retry rows leaked raw event keys ("phase_enter", "verify_passed") into
+  // the feed while the stream was live. Route through the same localized
+  // ``resolveLabel`` the expanded row uses so collapsed chips never show raw
+  // keys (parity with Kimi/Claude/MiniMax activity feeds).
   const collapsed = !!collapsedProp && (status === 'done' || status === 'failed');
   if (collapsed) {
     return (
@@ -639,7 +666,7 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedP
         <span className={status === 'failed' ? 'text-red-500' : 'text-emerald-600'}>
           {status === 'failed' ? '✗' : '✓'}
         </span>
-        <span className="flex-1 truncate font-mono">{collapsedChipSummary(ev)}</span>
+        <span className="flex-1 truncate">{resolveLabel(ev, le)}</span>
       </div>
     );
   }
@@ -723,7 +750,96 @@ function TypedRow({ ev, le, isLive, isEn, isStickyRunning, collapsed: collapsedP
 
 // ── Main component ─────────────────────────────────────────────────────
 
-export default function LiveActivityStream({ events, legacySteps, phase, reasoning, isStreaming, streamingSearchQueries, streamingPlanSteps, streamingDataPreviews }) {
+/**
+ * LiveStatusLine — P0-3 one-line live streaming status (hybrid mode).
+ *
+ * Renders a single compact line: pulsing dot + "Live" label + truncated
+ * status text. While the model is reasoning it shows the raw
+ * chain-of-thought (reasoning_delta tokens); when a tool fires it
+ * switches to a short action label ("Running query…"). Only visible
+ * while the turn is streaming — disappears on completion.
+ */
+function LiveStatusLine({ reasoning, action, isLive }) {
+  if (!isLive) return null;
+  let text = '';
+  if (typeof reasoning === 'string' && reasoning.trim()) {
+    text = reasoning.trim();
+  } else if (typeof action === 'string' && action.trim()) {
+    text = TOOL_ACTION_LABELS[action] || `Running ${action}…`;
+  }
+  if (!text) return null;
+  return (
+    <div
+      data-testid="live-status-line"
+      className="flex items-center gap-2 border-b border-border/60 px-3 py-1.5"
+    >
+      <span className="relative flex h-2 w-2 shrink-0">
+        <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-60" />
+        <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-500" />
+      </span>
+      <span className="shrink-0 text-[10px] font-semibold uppercase tracking-wider text-emerald-600 dark:text-emerald-400">
+        Live
+      </span>
+      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground" dir="auto">
+        {text}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * PlanChecklist — 2026-08-27: the agent's live todo list.
+ *
+ * The backend derives a deterministic plan from the user's input BEFORE the
+ * loop runs (plan_step_added events) and ticks steps off as tool evidence
+ * completes them (plan_step_completed events). This compact checklist makes
+ * the "understand → plan → follow plan → respond" contract visible: the user
+ * sees the todo list appear, then watches each step check off as the agent
+ * executes it. Deliberately NOT the old 4-section panel — one slim row list
+ * inside the existing activity box.
+ */
+function PlanChecklist({ steps, isEn }) {
+  if (!Array.isArray(steps) || steps.length === 0) return null;
+  const sorted = [...steps].sort((a, b) => a.step_index - b.step_index);
+  const done = sorted.filter((s) => s.status === 'done').length;
+  return (
+    <div data-testid="plan-checklist" className="border-b border-border/60 px-3 py-2">
+      <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+        <ListChecks className="h-3 w-3" />
+        <span>{isEn ? 'Plan' : '计划'}</span>
+        <span className="ml-auto tabular-nums text-muted-foreground/70">
+          {done}/{sorted.length}
+        </span>
+      </div>
+      <ol className="space-y-1">
+        {sorted.map((s) => {
+          const isDone = s.status === 'done';
+          return (
+            <li
+              key={s.step_index}
+              data-testid={`plan-step-${s.step_index}`}
+              className={`flex items-center gap-1.5 text-xs ${isDone ? 'text-muted-foreground' : 'text-foreground'}`}
+            >
+              {isDone ? (
+                <Check className="h-3 w-3 shrink-0 text-emerald-500" />
+              ) : (
+                <span
+                  className="h-3 w-3 shrink-0 rounded-full border border-muted-foreground/40"
+                  aria-hidden="true"
+                />
+              )}
+              <span className={`min-w-0 truncate ${isDone ? 'line-through opacity-70' : ''}`}>
+                {s.title}
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </div>
+  );
+}
+
+export default function LiveActivityStream({ events, legacySteps, phase, reasoning, isStreaming, streamingSearchQueries, streamingPlanSteps, streamingDataPreviews, streamingReasoning, streamingAction }) {
   const { lang, t } = useLanguage();
   const isEn = lang === 'en';
   const le = t?.chat?.liveEvent || {};
@@ -739,11 +855,13 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   // 1. attachSubagentParent: pair tool rows with their parent subagent
   // 2. nestRows: set indent=1 for child rows under a subagent
   // 3. computeCollapseStates: auto-collapse done rows when newer events are running
+  // 4. applyRetryIndent: visual indent for retry lineage (was dead code
+  //    until 2026-08-31 — retry rows never carried the ml-4/ml-8 indent).
   const mergedIndented = useMemo(() => {
     if (!hasEvents) return [];
     const withParents = attachSubagentParent(merged);
     const nested = nestRows(withParents);
-    return computeCollapseStates(nested);
+    return applyRetryIndent(computeCollapseStates(nested));
   }, [merged, hasEvents]);
 
   // Headline derivation: latest `phase_enter.*` event wins; fall back to the
@@ -756,8 +874,12 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     if (last) return String(last.label_key || '').replace('phase_enter.', '');
     return phase?.state || null;
   }, [effectiveEvents, phase]);
-  const headlineVerb = t.chat.phase[headlineState]?.verb || phase?.verb || headlineState || '';
-  const headlineTitle = t.chat.phase[headlineState]?.title || phase?.title || '';
+  // Defensive optional-chaining on t.chat.phase: some translation
+  // variants / test mocks may not define the phase map, and a missing
+  // key must never crash the activity stream (it degrades to the raw
+  // headline state instead of throwing).
+  const headlineVerb = t.chat.phase?.[headlineState]?.verb || phase?.verb || headlineState || '';
+  const headlineTitle = t.chat.phase?.[headlineState]?.title || phase?.title || '';
 
   // Sticky running row: the most-recent running row gets the left-border
   // accent + pulsing background, so the user sees what's happening RIGHT NOW.
@@ -844,6 +966,12 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     >
       {expanded ? (
         <>
+          {/* P0-3 one-line live streaming status (hybrid reasoning/action). */}
+          <LiveStatusLine
+            reasoning={streamingReasoning}
+            action={streamingAction}
+            isLive={isLive}
+          />
           {/* Phase headline bar — pulses amber while the turn is live. */}
           {headlineState && (
             <div
@@ -861,6 +989,11 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
               )}
             </div>
           )}
+
+          {/* Plan checklist — 2026-08-27: the agent's live todo list
+              (deterministic plan derived from the user's input, ticked off
+              by tool evidence as the loop executes it). */}
+          <PlanChecklist steps={streamingPlanSteps} isEn={isEn} />
 
           {/* Progress bar — 2026-08-25 activity-feed modernization. */}
           <ProgressBar

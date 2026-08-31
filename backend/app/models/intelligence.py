@@ -1,6 +1,6 @@
 """Intelligence domain models — market events and ingestion status.
 
-Ported from EDIA's raw MySQL DDL, adapted to zhanlu's SQLAlchemy + TimestampedBase pattern.
+Adapted to zhanlu's SQLAlchemy + TimestampedBase pattern.
 
 Tables:
     intelligence_events            — detected market events with causal metadata
@@ -20,13 +20,13 @@ class IntelligenceEvent(TimestampedBase):
 
     Stores the full ExtractedEvent payload plus review/moderation fields.
     ``event_id`` is a separate unique key from the UUID ``id`` inherited
-    from TimestampedBase — it's the EDIA-generated ``evt_<hex12>`` identifier
+    from TimestampedBase — it's the ``evt_<hex12>`` identifier
     used for deduplication and cross-referencing.
     """
 
     __tablename__ = "intelligence_events"
 
-    # EDIA event_id (evt_xxxxxxxxxxxx format)
+    # event_id (evt_xxxxxxxxxxxx format)
     event_id: Mapped[str] = mapped_column(
         String(64), nullable=False, unique=True, index=True
     )

@@ -8,8 +8,6 @@ from typing import Optional
 import pandas as pd
 
 from app.config import settings
-from app.models.market_dashboard import PRODUCT_LABELS
-from app.services import market_dashboard_service as mds
 from app.services.llm_service import chat_completion_json_sync
 from app.services.forecasting.analyst.brief_writer import write_brief_llm
 from app.services.forecasting.analyst.evidence_pack import UPSTREAM_MAP, build_pack
@@ -30,6 +28,19 @@ from app.services.forecasting.features.exogenous_loaders import (
 logger = logging.getLogger(__name__)
 
 
+def _target_key_for(product_id: str) -> str:
+    """Map a dashboard-style product_id to its ForecastTarget key.
+
+    The key namespace comes from the app's domain config
+    (``forecast_key_prefix``, default "" — plain product_id). Apps
+    without a domain config use no prefix.
+    """
+    from app.services.domain_config import get_domain_config
+
+    prefix = get_domain_config("").get("forecast_key_prefix", "")
+    return f"{prefix}{product_id.strip().lower()}"
+
+
 def _llm_enabled() -> bool:
     try:
         from app.config import settings
@@ -41,9 +52,7 @@ def _llm_enabled() -> bool:
 def _latest_run(product_id: str, db):
     from app.models.forecasting import ForecastRun, ForecastTarget
     product_id = product_id.strip().lower()
-    target_key = mds.PRODUCT_FORECAST_TARGET_KEY.get(product_id)
-    if not target_key:
-        return None
+    target_key = _target_key_for(product_id)
     tgt = db.query(ForecastTarget).filter(
         ForecastTarget.product_key == target_key,
         ForecastTarget.org_id == "default-org",
@@ -57,14 +66,48 @@ def _latest_run(product_id: str, db):
     ).order_by(ForecastRun.created_date.desc()).first()
 
 
+def _read_history_rows(product_id: str) -> list:
+    """Read price history rows [(date_str, price_float)] for a product.
+
+    Uses the forecasting-native external data source (same MySQL mirror the
+    engine reads), returning [] when the mirror is unreachable or the
+    product has no target.
+    """
+    from app.services.forecasting.mysql_data_source import MysqlDataSource
+    from app.models.forecasting import ForecastTarget
+    from app.database import SessionLocal
+
+    product_id = product_id.strip().lower()
+    target_key = _target_key_for(product_id)
+    db = SessionLocal()
+    try:
+        tgt = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key == target_key,
+            ForecastTarget.org_id == "default-org",
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).first()
+        if tgt is None or not tgt.datasource:
+            return []
+        df = MysqlDataSource().read_history(tgt.datasource or {})
+        return [
+            (str(row["ds"]), float(row["y"]))
+            for _, row in df.iterrows()
+        ]
+    except Exception as exc:
+        logger.warning("[analyst] history read failed for %s: %s", product_id, exc)
+        return []
+    finally:
+        db.close()
+
+
 def _build_pack_for(product_id: str, day: int, run) -> dict:
     product_id = product_id.strip().lower()
-    labels = PRODUCT_LABELS.get(product_id, {})
+    labels: dict = {}
     upstream_histories = {
-        up: mds.read_product_history_rows(up)
+        up: _read_history_rows(up)
         for up in UPSTREAM_MAP.get(product_id, [])
     }
-    history_rows = mds.read_product_history_rows(product_id)
+    history_rows = _read_history_rows(product_id)
 
     # Wave 1: demand signal + supplier ladder (flag-gated, default OFF)
     demand_signal: dict | None = None

@@ -7,10 +7,13 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
 from app.models.forecasting import ForecastTarget
-from app.services.forecasting.seed_ecisco_targets import (
+from app.services.domain_config import get_domain_config
+from app.services.forecasting.seed_targets import (
     discover_and_seed_sku_targets,
-    ECISCO_FORECAST_TARGETS,
+    seed_forecast_targets,
 )
+
+ECISCO_FORECAST_TARGETS = get_domain_config("").get("forecast_targets", [])
 
 
 @pytest.fixture
@@ -45,25 +48,25 @@ def _make_mock_erp_engine(rows: list[tuple]) -> object:
 
 
 def test_static_targets_no_longer_include_erp_where_1_1():
-    """The 2 ERP products (c5_resin, raffinate_c5) should NOT be in the
-    static list anymore — they're discovered dynamically."""
-    erp_keys = [
+    """ERP-primary targets are discovered dynamically by the SKU seeder;
+    no static target may use a degenerate WHERE 1=1 datasource."""
+    degenerate = [
         t["product_key"] for t in ECISCO_FORECAST_TARGETS
-        if t["datasource"].get("table", "").startswith("sale_erp_v_")
+        if "1=1" in str(t["datasource"].get("where", ""))
     ]
-    assert len(erp_keys) == 0, (
+    assert len(degenerate) == 0, (
         f"ERP products {erp_keys} should not be in static list — "
         "they are discovered dynamically by discover_and_seed_sku_targets()"
     )
 
 
 def test_static_targets_still_has_10_md_lz_products():
-    """The 10 md_t_lz_price products remain in the static list."""
+    """The md_t_lz_price-primary products remain in the static list."""
     md_lz_count = sum(
         1 for t in ECISCO_FORECAST_TARGETS
         if t["datasource"].get("table") == "md_t_lz_price"
     )
-    assert md_lz_count == 10
+    assert md_lz_count == 6  # 6 of 11 static targets use md_t_lz_price as primary
 
 
 def test_discover_skus_inserts_one_target_per_sku(db_session):

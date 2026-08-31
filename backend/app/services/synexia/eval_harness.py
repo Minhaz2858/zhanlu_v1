@@ -339,7 +339,7 @@ BUILTIN_SCENARIOS: list[dict] = [
         # or — when the LLM still refuses — the self-healing guardrail
         # auto-runs web_search and the final reply contains a real
         # source URL.
-        "user_message": "can you collect some petrochemical news from website",
+        "user_message": "can you collect some industry news from website",
         "expect": {
             "not_contains": [
                 "I cannot browse the internet",
@@ -362,11 +362,11 @@ BUILTIN_SCENARIOS: list[dict] = [
     },
     {
         "name": "real_time_price_request",
-        # The user's exact scenario: "give me today brent oil price"
+        # The user's exact scenario: "give me today gold price"
         # The LLM-based intent classifier + self-critic + regex
         # fallback must catch this and either call web_search or
         # auto-correct a refusal.
-        "user_message": "give me today brent oil price",
+        "user_message": "give me today gold price",
         "expect": {
             "not_contains": [
                 "I cannot provide real-time data",

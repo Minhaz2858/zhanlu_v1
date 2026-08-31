@@ -160,11 +160,11 @@ class TestIsEnabled:
     """Tests for is_enabled."""
 
     def test_default_false(self):
-        mock_settings = type("S", (), {"EDIA_INTENT_PLANNER_ENABLED": False})()
+        mock_settings = type("S", (), {"INTENT_PLANNER_ENABLED": False})()
         with patch("app.config.settings", mock_settings):
             assert is_enabled() is False
 
     def test_true_when_enabled(self):
-        mock_settings = type("S", (), {"EDIA_INTENT_PLANNER_ENABLED": True})()
+        mock_settings = type("S", (), {"INTENT_PLANNER_ENABLED": True})()
         with patch("app.config.settings", mock_settings):
             assert is_enabled() is True

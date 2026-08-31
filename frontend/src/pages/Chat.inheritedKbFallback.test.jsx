@@ -7,7 +7,7 @@
  * sometimes hidden — depending on which entry flow set the
  * pendingProject state:
  *
- *   - ``?projectName=Ecisco+BI`` URL (no ``?project=ID``) → name set, id null
+ *   - ``?projectName=ACME`` URL (no ``?project=ID``) → name set, id null
  *   - Sidebar "+ New Chat" → name set, id unchanged (often null)
  *   - ``selectSession`` of a legacy row (no ``project_id`` column populated)
  *

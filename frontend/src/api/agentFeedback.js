@@ -1,5 +1,5 @@
 /**
- * Feedback API client for the Ecisco BI experience layer (Phase C).
+ * Feedback API client for the BI experience layer (Phase C).
  *
  * POSTs an explicit thumbs up/down rating for an assistant message to
  * `/api/apps/{appId}/agents/conversations/{convId}/messages/{messageId}/feedback`.

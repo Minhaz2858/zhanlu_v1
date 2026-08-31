@@ -11,7 +11,10 @@ import { describe, it, expect } from 'vitest';
 import fs from 'fs';
 import path from 'path';
 
-const REPO = '/root/zhanlu';
+// Resolve the repo root from this file's own location (the old
+// hardcoded '/root/zhanlu' broke when the repo moved to macOS).
+// This file lives at <repo>/frontend/tests/, so the root is two levels up.
+const REPO = path.resolve(__dirname, '..', '..');
 const API_HELPERS = fs.readFileSync(path.join(REPO, 'frontend/src/api/agentEnhanced.js'), 'utf8');
 const CHAT = fs.readFileSync(path.join(REPO, 'frontend/src/pages/Chat.jsx'), 'utf8');
 const CHAT_INPUT = fs.readFileSync(path.join(REPO, 'frontend/src/components/chat/ChatInput.jsx'), 'utf8');
@@ -49,12 +52,13 @@ describe('Chat.jsx steer integration', () => {
   });
 
   it('routes handleSend to handleSteer when streaming is active', () => {
-    // The effectiveAgent (or activeAgent) branch must short-circuit to
-    // handleSteer when both streamState.isActive AND streamingConvId
-    // are set. We allow either name because the variable was renamed
-    // from activeAgent -> effectiveAgent in a prior refactor; the test
-    // is checking the wiring, not the specific identifier.
-    expect(CHAT).toMatch(/(?:activeAgent|effectiveAgent)\s*&&\s*streamState\.isActive\s*&&\s*streamingConvId/);
+    // The effectiveAgent branch must short-circuit to handleSteer when
+    // BOTH the persistent-stream is active for this session AND
+    // streamingConvId is set. The stream-state API evolved from
+    // `streamState.isActive` to `stream.isActiveForSession(activeId)`
+    // when streaming moved into PersistentStreamContext (survives page
+    // navigation); the wiring contract is unchanged.
+    expect(CHAT).toMatch(/effectiveAgent && stream\.isActiveForSession\(activeId\) && streamingConvId/);
     expect(CHAT).toMatch(/return handleSteer\(fullText\)/);
   });
 
@@ -86,22 +90,29 @@ describe('Chat.jsx steer integration', () => {
   });
 });
 
-describe('ChatInput.jsx steer button', () => {
-  it('renders BOTH Stop and a Steer button while streaming', () => {
-    // The isStreaming branch must now contain two buttons, not one.
+describe('ChatInput.jsx streaming button contract', () => {
+  it('renders ONLY the Stop button while streaming (no Steer, no mic)', () => {
+    // Design change (2026-08-xx): the mid-turn Steer button and the
+    // VoiceInput mic are deliberately HIDDEN while the agent responds —
+    // "three icons in the corner was visually loud and the user asked
+    // for just Stop during the response" (ChatInput.jsx comment). The
+    // isStreaming branch must therefore contain exactly ONE button.
     const branch = CHAT_INPUT.match(/isStreaming \?\s*\(([\s\S]*?)\)\s*:\s*\(/);
     expect(branch).not.toBeNull();
     const branchBody = branch[1];
-    // Count <button tags in the branch.
     const buttonOpens = (branchBody.match(/<button\b/g) || []).length;
-    expect(buttonOpens).toBe(2);
+    expect(buttonOpens).toBe(1);
+    // The single streaming button is the Stop control (routes through
+    // onStopAutomation when present for cooperative automation cancel).
+    expect(branchBody).toMatch(/onStopAutomation/);
+    expect(branchBody).toMatch(/onStop\b/);
   });
 
-  it('Steer button label is language-aware', () => {
-    expect(CHAT_INPUT).toMatch(/lang === 'en' \? 'Steer' : '引导'/);
-  });
-
-  it('Steer button is disabled when input is empty', () => {
-    expect(CHAT_INPUT).toMatch(/disabled=\{!value\.trim\(\)\}/);
+  it('mid-turn steering still exists via Chat.jsx handleSend routing', () => {
+    // The steer affordance moved out of the streaming toolbar into the
+    // main send path: while a stream is active, sending text routes to
+    // handleSteer (asserted in the Chat.jsx describe above). ChatInput
+    // itself must NOT render a second streaming button.
+    expect(CHAT_INPUT).not.toMatch(/lang === 'en' \? 'Steer' : '引导'/);
   });
 });

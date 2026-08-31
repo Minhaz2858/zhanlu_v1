@@ -1,78 +1,208 @@
-"""One-time seed for ForecastTarget rows in zhanlu's Postgres.
+"""Idempotent seeder for forecast targets — reads definitions from per-app domain config.
 
-Registers 9 products that have data in the MySQL warehouse's LZ views.
-The 7 remaining pack products (naphtha, raffinate_c5, c5_resin, hydrogenated_c9,
-crude_oil, butadiene, sbs) have no warehouse data and intentionally get no
-ForecastTarget row — forecast_run will return "not found" and the truth_gate
-(Task 5) will surface that honestly.
+For apps WITH a domain config carrying ``forecast_targets`` (a list of
+{product_key, name, datasource, include_in_weekly_report, report_order}),
+seeds one ForecastTarget row per definition (matched by product_key + org_id).
+Apps WITHOUT a config get NOTHING seeded — fully generic: targets are created
+by the user or by their own integration.
+
+Optional SKU discovery: when the config carries ``erp_sku_targets``
+({family: table_name}), discovers ``material_code`` values per table and seeds
+one target per SKU with enough history (``forecast_min_sku_rows``, default 50).
+``forecast_key_prefix`` (default "") namespaces product keys when the app's
+data model needs it.
+
+Run on boot via seed.py, or manually via the /bootstrap-nightly-forecast
+endpoint. Safe to re-run — skips targets that already exist.
 """
-
 from __future__ import annotations
 
-import os
+import logging
 
 from sqlalchemy.orm import Session
 
 from app.models.forecasting import ForecastTarget
+from app.services.domain_config import get_domain_config
 
-# KB id for the MySQL warehouse. Override via env var to seed against a
-# different KB (e.g. for testing).
-DEFAULT_WAREHOUSE_KB_ID = "650a2505-3012-4968-87bf-80d79ac27da8"
+logger = logging.getLogger(__name__)
 
-# product_key → (lz_view_table, material_name, time_column, measure)
-SEED_PRODUCTS = [
-    ("cracked_c5",       "lz_v_裂解c5_data",      "裂解C5",   "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("cracked_c9",       "lz_v_裂解c9_data",      "裂解C9",   "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("isoprene",         "lz_v_异戊二烯_data",    "异戊二烯", "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("piperylene",       "lz_v_间戊二烯_data",    "间戊二烯", "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("dcpd",             "lz_v_双环戊二烯_data",  "双环戊二烯", "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("sis",              "lz_v_sis_data",         "SIS",      "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("blowing_agent",    "lz_v_戊烷泡发剂_data",  "戊烷泡发剂", "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("trimethylbenzene", "lz_v_混三甲苯_data",    "混三甲苯", "biz_date(业务日期)", "tax_price(含税单价)"),
-    ("styrene",          "lz_v_苯乙烯_data",      "苯乙烯",   "biz_date(业务日期)", "tax_price(含税单价)"),
-]
+DEFAULT_AGENT_NAME = ""
 
 
 def seed_forecast_targets(
     db: Session,
     org_id: str = "default-org",
     app_id: str = "default-app",
-    kb_id: str | None = None,
+    agent_name: str | None = None,
 ) -> int:
-    """Idempotently create ForecastTarget rows for the 9 products with data.
+    """Insert any missing forecast targets from the app's domain config.
 
-    Returns the number of rows created (excluding pre-existing).
+    Returns the count of new rows. Idempotent: skips targets that already
+    exist (matched by product_key + org_id). Apps without config seed 0.
     """
-    if kb_id is None:
-        kb_id = os.environ.get("WAREHOUSE_KB_ID", DEFAULT_WAREHOUSE_KB_ID)
+    agent_name = agent_name or DEFAULT_AGENT_NAME
+    specs = get_domain_config(agent_name).get("forecast_targets", [])
+    if not specs:
+        logger.debug("seed_forecast_targets: no forecast_targets in config for %s", agent_name)
+        return 0
 
-    created = 0
-    for product_key, table, material, time_col, measure in SEED_PRODUCTS:
-        existing = (
-            db.query(ForecastTarget)
-            .filter(
-                ForecastTarget.product_key == product_key,
-                ForecastTarget.org_id == org_id,
-            )
-            .first()
-        )
+    inserted = 0
+    for spec in specs:
+        existing = db.query(ForecastTarget).filter(
+            ForecastTarget.product_key == spec["product_key"],
+            ForecastTarget.org_id == org_id,
+            ForecastTarget.is_deleted == False,  # noqa: E712
+        ).first()
         if existing is not None:
             continue
+
         target = ForecastTarget(
             org_id=org_id,
             app_id=app_id,
-            product_key=product_key,
-            name=product_key.replace("_", " ").title(),
-            datasource={
-                "kb_id": kb_id,
-                "table": table,
-                "time_column": time_col,
-                "measure": measure,
-                "dimensions": ["material_name(产品名称)"],
-                "material_filter": material,
-            },
+            product_key=spec["product_key"],
+            name=spec["name"],
+            datasource=spec["datasource"],
+            level=2,  # pack-grade
+            quality_grade="B",  # default; re-scored on first compute_target
+            status="active",
+            source="seed",
+            include_in_weekly_report=spec.get("include_in_weekly_report", True),
+            report_order=spec.get("report_order", 0),
         )
         db.add(target)
-        created += 1
-    db.commit()
-    return created
+        inserted += 1
+
+    if inserted:
+        db.commit()
+        logger.info(
+            "seed_forecast_targets: inserted %d new targets for org=%s (agent=%s)",
+            inserted, org_id, agent_name,
+        )
+    return inserted
+
+
+def discover_and_seed_sku_targets(
+    db: Session,
+    org_id: str = "default-org",
+    app_id: str = "default-app",
+    engine=None,
+    agent_name: str | None = None,
+) -> int:
+    """Discover SKUs (material_code values) in ERP tables and seed one
+    ForecastTarget per SKU.
+
+    The family → table map comes from the app's domain config
+    (``erp_sku_targets``); absent → no SKU discovery (generic apps).
+
+    1. Query SELECT DISTINCT material_code, COUNT(*) FROM <table>
+       WHERE FTAXPRICE > 0 GROUP BY material_code
+    2. Filter to SKUs with >= min rows (``forecast_min_sku_rows``, default 50)
+    3. Sort by row count descending — primary SKU gets report_order=12,
+       secondary SKUs get 13, 14, ...
+    4. Insert ForecastTarget rows with product_key="<prefix><family>.<code>"
+
+    Idempotent: skips targets that already exist (matched by product_key
+    + org_id). Safe to call on every boot.
+    """
+    from sqlalchemy import text as sa_text
+
+    agent_name = agent_name or DEFAULT_AGENT_NAME
+    cfg = get_domain_config(agent_name)
+    erp_tables: dict[str, str] = cfg.get("erp_sku_targets", {})
+    if not erp_tables:
+        logger.debug("discover_and_seed_sku_targets: no erp_sku_targets in config for %s", agent_name)
+        return 0
+
+    prefix: str = cfg.get("forecast_key_prefix", "")
+    min_rows: int = int(cfg.get("forecast_min_sku_rows", 50))
+
+    if engine is None:
+        from app.core.mysql_db import get_mysql_engine
+        engine = get_mysql_engine()
+    if engine is None:
+        logger.warning(
+            "discover_and_seed_sku_targets: MySQL mirror unreachable, "
+            "skipping SKU discovery."
+        )
+        return 0
+
+    inserted = 0
+    for family, table_name in erp_tables.items():
+        try:
+            with engine.connect() as conn:
+                stmt = sa_text(
+                    f"SELECT material_code, COUNT(*) AS cnt "
+                    f"FROM `{table_name}` "
+                    f"WHERE FTAXPRICE > 0 "
+                    f"AND material_code IS NOT NULL "
+                    f"AND material_code != '' "
+                    f"GROUP BY material_code "
+                    f"ORDER BY cnt DESC"
+                )
+                rows = conn.execute(stmt).fetchall()
+        except Exception as exc:
+            logger.warning(
+                "discover_and_seed_sku_targets: query failed for %s: %s",
+                table_name, exc,
+            )
+            continue
+
+        qualified = [
+            (code, cnt) for code, cnt in rows
+            if cnt >= min_rows
+        ]
+        if not qualified:
+            logger.info(
+                "discover_and_seed_sku_targets: no SKUs with >= %d rows in %s",
+                min_rows, table_name,
+            )
+            continue
+
+        logger.info(
+            "discover_and_seed_sku_targets: %s — %d SKUs qualified (of %d total)",
+            family, len(qualified), len(rows),
+        )
+
+        for idx, (code, cnt) in enumerate(qualified):
+            product_key = f"{prefix}{family}.{code}"
+            # Primary SKU (idx=0) gets report_order=12 (family's original).
+            # Secondary SKUs get 13, 14, 15, ...
+            report_order = 12 + idx
+
+            existing = db.query(ForecastTarget).filter(
+                ForecastTarget.product_key == product_key,
+                ForecastTarget.org_id == org_id,
+                ForecastTarget.is_deleted == False,  # noqa: E712
+            ).first()
+            if existing is not None:
+                continue
+
+            db.add(ForecastTarget(
+                org_id=org_id,
+                app_id=app_id,
+                product_key=product_key,
+                name=f"{family} SKU {code}",
+                datasource={
+                    "source": "edia_mysql",
+                    "table": table_name,
+                    "time_col": "PLANDATE",
+                    "measure": "FTAXPRICE",
+                    "where": f"material_code = '{code}' AND FTAXPRICE > 0",
+                    "granularity": "day",
+                },
+                level=3,  # SKU-grade
+                quality_grade="B",
+                status="active",
+                source="seed_sku",
+                include_in_weekly_report=True,
+                report_order=report_order,
+            ))
+            inserted += 1
+
+    if inserted:
+        db.commit()
+        logger.info(
+            "discover_and_seed_sku_targets: inserted %d new SKU targets for org=%s (agent=%s)",
+            inserted, org_id, agent_name,
+        )
+    return inserted

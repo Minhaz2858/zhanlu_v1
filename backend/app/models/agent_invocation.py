@@ -49,6 +49,10 @@ class AgentInvocation(TimestampedBase):
     token_usage: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     cost_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
+    # Model + workload (observability)
+    model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
+    tool_call_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Tracing
     trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     span_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

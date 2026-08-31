@@ -20,6 +20,72 @@ logger = logging.getLogger(__name__)
 # Token budget for context (conservative default)
 MAX_CONTEXT_TOKENS = 50000
 
+# Cumulative budget for re-injecting files uploaded in EARLIER turns
+# (see collect_historical_file_urls). Files stay readable for the whole
+# conversation (Kimi/GPT parity), but a long file-heavy conversation
+# must not blow the context window — once this budget is exhausted the
+# remaining historical files are noted by name only.
+MAX_HISTORICAL_EXTRACT_CHARS = 60000
+
+# Scan bounds for historical file re-injection: only look back this many
+# user messages, and cap the number of distinct file urls re-read.
+_HISTORICAL_MAX_USER_MESSAGES = 8
+_HISTORICAL_MAX_URLS = 12
+
+
+def collect_historical_file_urls(
+    conv_messages: Optional[list],
+    exclude: Optional[list] = None,
+) -> list[str]:
+    """Collect ``file_urls`` from PAST user messages in a conversation.
+
+    The chat frontend only sends ``file_urls`` for the CURRENT turn, so a
+    follow-up request ("tell me more about that file") would otherwise
+    lose access to files uploaded earlier. Those urls are persisted on the
+    user message by the stream router — this helper walks ``conv.messages``
+    newest-first and gathers them for re-injection.
+
+    Rules (mirror the stream router's anti-path-traversal wall):
+    - Only ``role == 'user'`` messages are scanned.
+    - Only urls starting with ``/api/uploads/`` are accepted (arbitrary
+      absolute paths are dropped).
+    - The current turn's urls (``exclude``) are skipped.
+    - Order preserved, duplicates removed, scan bounded by
+      ``_HISTORICAL_MAX_USER_MESSAGES`` / ``_HISTORICAL_MAX_URLS``.
+
+    Non-fatal: any malformed message is skipped. Returns ``[]`` when
+    there is nothing to re-read.
+    """
+    if not conv_messages:
+        return []
+    exclude_set = {u for u in (exclude or []) if isinstance(u, str)}
+    seen: set[str] = set(exclude_set)
+    out: list[str] = []
+    user_seen = 0
+    for m in reversed(conv_messages):
+        if not isinstance(m, dict):
+            continue
+        if (m.get("role") or "").lower() != "user":
+            continue
+        user_seen += 1
+        if user_seen > _HISTORICAL_MAX_USER_MESSAGES:
+            break
+        urls = m.get("file_urls") or []
+        if isinstance(urls, str):
+            urls = [urls]
+        if not isinstance(urls, list):
+            continue
+        for u in urls:
+            if not isinstance(u, str) or not u.startswith("/api/uploads/"):
+                continue
+            if u in seen:
+                continue
+            seen.add(u)
+            out.append(u)
+            if len(out) >= _HISTORICAL_MAX_URLS:
+                return out
+    return out
+
 
 def assemble_context(
     db: Session,
@@ -113,6 +179,73 @@ def assemble_context(
                 "priority": "high",
             })
             token_estimate += _estimate_tokens(attach_block)
+
+    # 1c. Historical attachments — files the user uploaded in EARLIER
+    # turns of this conversation. The frontend only sends file_urls for
+    # the CURRENT turn, so a follow-up request ("tell me more about that
+    # file") would otherwise find the file gone and the agent would
+    # apologise it "can't re-read" the upload — the Kimi/GPT parity gap.
+    # The stream router persists file_urls on each user message; re-scan
+    # conv.messages and re-extract the text so uploads stay readable for
+    # the whole conversation. Deduplicated against this turn's
+    # attachments. Bounded by MAX_HISTORICAL_EXTRACT_CHARS so a long
+    # file-heavy conversation can't blow the context window.
+    historical_urls = collect_historical_file_urls(
+        _get_all_messages(db, conversation_id),
+        exclude=attachments,
+    )
+    if historical_urls:
+        hist_parts: list[str] = []
+        _hist_budget = MAX_HISTORICAL_EXTRACT_CHARS
+        for furl in historical_urls:
+            try:
+                from app.services.document_ingestion.service import prepare_for_context
+                prep = prepare_for_context(furl)
+                prepared_attachments.append(prep)
+                fname = prep.get("file_name") or furl
+                if prep.get("is_image"):
+                    if prep.get("text"):
+                        hist_parts.append(
+                            f"--- {fname} (image, OCR, uploaded earlier) ---\n{prep['text']}"
+                        )
+                    else:
+                        hist_parts.append(
+                            f"--- {fname} (image uploaded earlier; no OCR text) ---"
+                        )
+                elif prep.get("text"):
+                    hist_parts.append(f"--- {fname} (uploaded earlier) ---\n{prep['text']}")
+                elif prep.get("error"):
+                    hist_parts.append(
+                        f"--- {fname} [could not read: {prep['error']}] ---"
+                    )
+                _hist_budget -= len(prep.get("text") or "")
+                if _hist_budget <= 0:
+                    hist_parts.append(
+                        "(further earlier files omitted — the conversation "
+                        "already has a lot of file content; ask to focus on "
+                        "a specific file if needed)"
+                    )
+                    break
+            except Exception as e:
+                logger.warning(
+                    "assemble_context: historical attachment prep failed for %s: %s",
+                    furl, e,
+                )
+                hist_parts.append(f"--- {furl} [extraction failed] ---")
+        if hist_parts:
+            hist_block = (
+                "The user uploaded the file(s) below in EARLIER messages of this "
+                "conversation. They remain available for follow-up questions. "
+                "Quote the file name when citing a passage.\n\n"
+                + "\n\n".join(hist_parts)
+            )
+            items.append({
+                "type": "user_attachments",
+                "content": hist_block,
+                "source": "user_upload",
+                "priority": "high",
+            })
+            token_estimate += _estimate_tokens(hist_block)
 
     # 2. Conversation history
     history = _get_conversation_history(db, conversation_id)
@@ -219,6 +352,26 @@ def _get_conversation_history(db: Session, conversation_id: Optional[str]) -> li
             return conv.messages[-10:]
     except Exception as e:
         logger.debug("Failed to get conversation history: %s", e)
+    return []
+
+
+def _get_all_messages(db: Session, conversation_id: Optional[str]) -> list:
+    """Get the FULL conversation message list (for historical re-reads).
+
+    Unlike ``_get_conversation_history`` (last 10 only), this returns every
+    message so ``collect_historical_file_urls`` can find files uploaded
+    many turns back. The collector bounds the scan, so the full list is
+    cheap to load. Non-fatal: returns ``[]`` on any error.
+    """
+    if not conversation_id:
+        return []
+    try:
+        from app.models.agent_conversation import AgentConversation
+        conv = db.query(AgentConversation).filter(AgentConversation.id == conversation_id).first()
+        if conv and conv.messages:
+            return list(conv.messages)
+    except Exception as e:
+        logger.debug("Failed to get full conversation messages: %s", e)
     return []
 
 

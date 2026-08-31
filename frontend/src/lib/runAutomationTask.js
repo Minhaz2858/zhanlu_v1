@@ -133,5 +133,17 @@ export async function runAutomationTask(task, { navigate, toast, lang = 'en' }) 
   } catch {
     // SSR or window-less env — no-op, navigation below is the fallback.
   }
-  navigate(`/chat?session=${encodeURIComponent(sessionId)}`);
+  // (2026-08-31) Carry the automation context in the navigation URL —
+  // the user wants automation sessions to read
+  // ``?automationId=<id>&agentName=automation_agent&projectName=<p>&session=<sid>``
+  // so a refresh keeps the automation identity visible and re-binds the
+  // same automation_agent. The /chat ?session= handler rewrites
+  // ``session`` → ``conv`` and preserves the other params.
+  const navParams = new URLSearchParams({ session: sessionId });
+  if (taskId) navParams.set('automationId', taskId);
+  navParams.set('agentName', 'automation_agent');
+  if (task?.project && task.project !== 'global') {
+    navParams.set('projectName', task.project);
+  }
+  navigate(`/chat?${navParams.toString()}`);
 }

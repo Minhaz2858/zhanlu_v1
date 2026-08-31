@@ -575,23 +575,6 @@ class ForecastEngine:
                         )
                         import_price_df = None
 
-                # Wave 5: Oilchem exogenous features (Brent/naphtha/C5/C9 from 隆众资讯)
-                oilchem_df = None
-                _oilchem_enabled = settings.FORECAST_OILCHEM_EXOG_ENABLED
-                if _oilchem_enabled:
-                    try:
-                        from app.services.forecasting.features.oilchem_loader import get_oilchem_loader
-                        oc_loader = get_oilchem_loader()
-                        oc_df = oc_loader.get_dataframe()
-                        if not oc_df.empty:
-                            oilchem_df = oc_df
-                            logger.info(
-                                "Oilchem loaded: %d rows, %d cols",
-                                len(oilchem_df), len(oilchem_df.columns),
-                            )
-                    except Exception as exc:
-                        logger.warning("Oilchem load failed: %s", exc)
-
                 # Wave 5: Feature engineering flags
                 _tech_ind_enabled = settings.FORECAST_TECHNICAL_INDICATORS_ENABLED
                 _fourier_enabled = settings.FORECAST_FOURIER_FEATURES_ENABLED
@@ -610,10 +593,8 @@ class ForecastEngine:
                     demand_signal=demand_signal_obj,
                     supplier_dispersion_df=supplier_disp_df,
                     # Wave 5: new feature engineering
-                    oilchem_df=oilchem_df,
                     tech_indicators_enabled=_tech_ind_enabled,
                     fourier_enabled=_fourier_enabled,
-                    oilchem_exog_enabled=_oilchem_enabled,
                 )
 
                 # Fit exog-aware models if feature matrix is available
@@ -843,49 +824,6 @@ class ForecastEngine:
                         )
                     break   # check first feedstock only
 
-        # --- Step 8.5: Intelligence overlay (Phase 3) ---
-        intelligence_overlay_enabled = _get_config_bool(
-            "FORECAST_INTELLIGENCE_OVERLAY_ENABLED", True
-        )
-        intelligence_report: dict | None = None
-        if intelligence_overlay_enabled:
-            try:
-                from app.services.forecasting.intelligence_overlay import (
-                    fetch_product_intelligence_sync,
-                )
-                intel = fetch_product_intelligence_sync(
-                    self._db, target.product_key, target.org_id or "default-org"
-                )
-                intelligence_report = {
-                    "net_price_pct": intel["net_price_pct"],
-                    "confidence": intel["confidence"],
-                    "event_count": intel["event_count"],
-                    "bias": intel["bias"],
-                    "horizon_adjustments": intel["horizon_adjustments"],
-                }
-                # Apply adjustment to the published forecast (7d = full reflection)
-                if intel.get("active") and abs(intel["net_price_pct"]) > 0.01:
-                    adj_pct = intel["horizon_adjustments"].get(7, 0.0)
-                    factor = 1.0 + adj_pct / 100.0
-                    gc = guard_result
-                    gc.published_forecast = gc.published_forecast * factor
-                    # Log top event
-                    top = intel["detail"][0] if intel["detail"] else None
-                    logger.info(
-                        "[intel-overlay] %s: %.2f%% (×%.4f, %d events, bias=%s)%s",
-                        target.product_key,
-                        adj_pct,
-                        factor,
-                        intel["event_count"],
-                        intel["bias"],
-                        f" — {top['headline'][:80]}" if top else "",
-                    )
-            except Exception as exc:
-                logger.warning(
-                    "[intel-overlay] failed for %s: %s", target.product_key, exc
-                )
-                intelligence_report = None
-
         # --- Step 8.55: Domain signals overlay (Phase B) ---
         domain_signals_enabled = _get_config_bool(
             "FORECAST_DOMAIN_SIGNALS_ENABLED", False
@@ -895,22 +833,22 @@ class ForecastEngine:
             try:
                 from app.services.forecasting.domain_signals import (
                     compute_domain_signal_adjustment,
-                    fetch_naphtha_recent_pct_change,
+                    fetch_root_feedstock_pct_change,
                 )
                 # Extract product_id from target.product_key.
-                # For family targets: "ecisco.c5_resin" → "c5_resin"
-                # For SKU targets:   "ecisco.c5_resin.201000018" → "c5_resin"
+                # For family targets: "<tenant>.<product>" → "<product>"
+                # For SKU targets:   "<tenant>.<product>.<sku>" → "<product>"
                 parts = (target.product_key or "").split(".")
                 product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
 
-                naphtha_pct = fetch_naphtha_recent_pct_change(
+                feedstock_pct = fetch_root_feedstock_pct_change(
                     self._db, org_id=target.org_id or "default-org"
                 )
 
                 domain_signals_report = compute_domain_signal_adjustment(
                     product_id=product_id,
                     as_of_date=datetime.now(),
-                    naphtha_pct_change=naphtha_pct,
+                    naphtha_pct_change=feedstock_pct,
                 )
 
                 # Apply the combined % adjustment to the published forecast
@@ -1262,7 +1200,6 @@ class ForecastEngine:
                 "drivers": [{"feature": d.feature, "weight": d.weight} for d in explanation.drivers],
                 "coherence_flags": explanation.coherence_flags,
                 "drift_warning": explanation.drift_warning,
-                "intelligence": intelligence_report,
                 "policy": policy_report,
                 "domain_signals": domain_signals_report,
                 "trust_tier": trust_tier_report,
@@ -1701,11 +1638,17 @@ def _prewarm_analyst_brief(db, product_key) -> None:
     try:
         if not _get_config_bool("FORECAST_ANALYST_LLM_ENABLED", False):
             return
-        parts = (product_key or "").split(".")
-        if len(parts) != 2 or parts[0] != "ecisco":
+        # Generic key parsing: strip the app's configured key prefix
+        # (if any) to recover the dashboard product_id; no prefix → the
+        # whole key is the product_id.
+        from app.services.domain_config import get_domain_config
+        prefix = get_domain_config("").get("forecast_key_prefix", "")
+        product_key = product_key or ""
+        product_id = product_key[len(prefix):] if prefix and product_key.startswith(prefix) else product_key
+        if not product_id:
             return
         from app.services.forecasting.analyst import service as analyst_service
-        analyst_service.prewarm_brief(parts[1], day=7, db=db)
+        analyst_service.prewarm_brief(product_id, day=7, db=db)
     except Exception as exc:
         logger.warning("[analyst] prewarm failed for %s: %s", product_key, exc)
 

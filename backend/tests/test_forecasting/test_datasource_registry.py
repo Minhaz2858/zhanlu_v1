@@ -64,15 +64,15 @@ class TestQuoteIdentifier:
 # ── EdiaMysqlStrategy tests ─────────────────────────────────────────
 
 class TestEdiaMysqlStrategy:
-    @patch("app.services.forecasting.edia_source.EdiaMysqlDataSource")
-    def test_fetch_delegates_to_edia_source(self, mock_edia_cls):
+    @patch("app.services.forecasting.mysql_data_source.MysqlDataSource")
+    def test_fetch_delegates_to_mysql_data_source(self, mock_mysql_cls):
         # Arrange
         mock_src = MagicMock()
         mock_src.read_history.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=5),
             "y": [10.0, 20.0, 30.0, 40.0, 50.0],
         })
-        mock_edia_cls.return_value = mock_src
+        mock_mysql_cls.return_value = mock_src
 
         target = _make_target({"source": "edia_mysql", "table": "md_t_lz_price"})
         strategy = EdiaMysqlStrategy()
@@ -88,9 +88,9 @@ class TestEdiaMysqlStrategy:
         assert result.iloc[-1] == 50.0
         mock_src.read_history.assert_called_once_with(target.datasource)
 
-    @patch("app.services.forecasting.edia_source.EdiaMysqlDataSource")
-    def test_fetch_returns_none_on_error(self, mock_edia_cls):
-        mock_edia_cls.side_effect = RuntimeError("connection failed")
+    @patch("app.services.forecasting.mysql_data_source.MysqlDataSource")
+    def test_fetch_returns_none_on_error(self, mock_mysql_cls):
+        mock_mysql_cls.side_effect = RuntimeError("connection failed")
         target = _make_target({"source": "edia_mysql"})
         strategy = EdiaMysqlStrategy()
 

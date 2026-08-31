@@ -85,7 +85,6 @@ from app.models.eval_result import EvalResult
 from app.models.prompt_ab_test import PromptABTest
 from app.models.agent_run import AgentRun
 from app.models.agent_run_step import AgentRunStep
-from app.models.alert import AlertLog
 from app.models.llm_model import LlmModel
 from app.models.knowledge_catalog import (
     KBTableMeta, KBColumnMeta, KBTableRelation,
@@ -93,8 +92,6 @@ from app.models.knowledge_catalog import (
 )
 from app.models.resource_registry import ResourceRegistry
 from app.models.report_recipe import ReportRecipe
-from app.models.weekly_digest import WeeklyReportCard, WeeklyReportProduct
-from app.models.alert_baseline import AlertProductBaseline
 from app.models.dashboard_app import DashboardApp
 from app.models.data_execution import DataExecution
 from app.models.session_state import SessionState
@@ -192,9 +189,6 @@ __all__ = [
     "AgentRunStep",
     "LlmModel",
     "ResponseCacheEntry",
-    "WeeklyReportCard",
-    "WeeklyReportProduct",
-    "AlertProductBaseline",
     "DataExecution",
     "SessionState",
 ]

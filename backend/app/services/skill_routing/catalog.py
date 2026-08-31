@@ -24,6 +24,7 @@ DEFAULT_BUDGET_CHARS = 15_000
 def build_catalog(
     skills: list[dict],
     budget_chars: int = DEFAULT_BUDGET_CHARS,
+    always_include: Optional[list[str]] = None,
 ) -> str:
     """Build a progressive-disclosure catalog block (Layer A metadata only).
 
@@ -31,9 +32,13 @@ def build_catalog(
     Entries are ordered by ``priority`` descending, then by source-tier
     preference (user > marketplace > generated > builtin > bundled).
 
-    The block is truncated to fit within *budget_chars* (character
-    count, not token count, for simplicity).  When truncation is needed
-    the least-relevant entries are dropped and a warning is logged.
+    ``always_include`` names are force-included FIRST (in the given order),
+    regardless of priority/tier — used to guarantee that turn-relevant
+    skills (unified_search hits, the resolver's routed skill) survive
+    budget truncation. The block is otherwise truncated to fit within
+    *budget_chars* (character count, not token count, for simplicity).
+    When truncation is needed the least-relevant entries are dropped and
+    a warning is logged.
 
     Parameters
     ----------
@@ -43,6 +48,10 @@ def build_catalog(
         Optional keys: ``summary``, ``priority``, ``tags``.
     budget_chars:
         Maximum total character length of the returned block.
+    always_include:
+        Optional list of skill names that must appear in the catalog.
+        Unknown names are ignored. Order is preserved; any names not in
+        ``skills`` are skipped.
 
     Returns
     -------
@@ -53,16 +62,33 @@ def build_catalog(
     if not skills:
         return ""
 
-    # ── Sort: higher priority first, then preferred source tier ────────
-    sorted_skills = sorted(skills, key=_sort_key)
+    # ── Resolve force-include names first (turn-relevant skills) ────────
+    forced: list[dict] = []
+    remaining: list[dict] = []
+    seen: set[str] = set()
+    if always_include:
+        wanted = [n for n in always_include if n]
+        by_name = {sk.get("name"): sk for sk in skills}
+        for name in wanted:
+            sk = by_name.get(name)
+            if sk is not None and name not in seen:
+                forced.append(sk)
+                seen.add(name)
+    for sk in skills:
+        if sk.get("name") not in seen:
+            remaining.append(sk)
 
-    # ── Build entries ─────────────────────────────────────────────────
+    # ── Sort the remainder: higher priority first, then preferred tier ──
+    remaining.sort(key=_sort_key)
+
+    # ── Build entries: forced first, then fill with sorted remainder ────
     lines: list[str] = []
     total_chars = 0
     included = 0
     dropped = 0
 
-    for sk in sorted_skills:
+    ordered = forced + remaining
+    for sk in ordered:
         entry = _format_entry(sk)
         if total_chars + len(entry) > budget_chars:
             dropped += 1
@@ -73,10 +99,11 @@ def build_catalog(
 
     if dropped:
         logger.info(
-            "Skill catalog budget exhausted: %d included, %d dropped (budget=%d chars)",
+            "Skill catalog budget exhausted: %d included, %d dropped (budget=%d chars, %d forced)",
             included,
             dropped,
             budget_chars,
+            len(forced),
         )
 
     return "\n".join(lines)

@@ -77,25 +77,3 @@ class UserSetting(TimestampedBase):
     auto_scaling: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
     maintenance_window: Mapped[str | None] = mapped_column(String(255), nullable=True)
     backup_schedule: Mapped[str | None] = mapped_column(String(255), nullable=True)
-
-    # --- Smart Alerts (adaptive thresholds + notification preferences) ---
-    # v1 user-facing knobs. All default to the quietest/safest behavior so
-    # the master SMART_ALERTS_ENABLED flag alone decides whether the feature
-    # is active; individual knobs tune the noise floor per user.
-    alert_min_severity: Mapped[str | None] = mapped_column(
-        String(10), nullable=True, default="low"
-    )
-    alert_muted_products: Mapped[list | None] = mapped_column(
-        JSON, nullable=True, default=list
-    )
-    alert_channels: Mapped[list | None] = mapped_column(
-        JSON, nullable=True, default=lambda: ["in_app"]
-    )
-    alert_threshold_multiplier: Mapped[float | None] = mapped_column(
-        Float, nullable=True, default=1.0
-    )
-    alert_quiet_hours: Mapped[dict | None] = mapped_column(JSON, nullable=True)
-    alert_recommendations_enabled: Mapped[bool | None] = mapped_column(
-        Boolean, nullable=True, default=True
-    )
-    alert_webhook_secret: Mapped[str | None] = mapped_column(String(64), nullable=True)

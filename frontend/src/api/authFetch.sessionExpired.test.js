@@ -112,7 +112,7 @@ describe('authFetch session-expired surfacing', () => {
   });
 
   it('authFetch (legacy) still returns the response so non-throwing callers keep working', async () => {
-    // Existing call sites (e.g. useEciscoBiChat polling) call `authFetch`
+    // Existing call sites (e.g. polling loops) call `authFetch`
     // directly. They expect a Response, not a throw. Confirm the legacy
     // helper hasn't been broken.
     global.fetch = vi.fn(async (_url, _opts) => ({

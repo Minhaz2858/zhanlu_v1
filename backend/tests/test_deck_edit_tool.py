@@ -265,13 +265,13 @@ async def test_restyle_deck_success(mock_service, mock_render, mock_thumbnails):
     with patch("app.services.tool_handlers.deck_edit_tool.ArtifactService", return_value=mock_service):
         result = await _call(
             "restyle_deck",
-            {"artifact_id": 1, "theme": "sunset", "headline_style": "assertion"},
+            {"artifact_id": 1, "theme": "neon_cyber", "headline_style": "assertion"},
             db,
             _ctx(),
         )
     assert result["success"] is True
     _plan = mock_render.call_args[0][0]
-    assert _plan.theme_recommendation == "sunset"
+    assert _plan.theme_recommendation == "neon_cyber"
     assert _plan.headline_style == "assertion"
 
 

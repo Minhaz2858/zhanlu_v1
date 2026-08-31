@@ -46,3 +46,37 @@ def test_truncates_very_long_titles():
     steps = parse_plan_steps_from_text(text)
     assert len(steps) == 1
     assert len(steps[0]["title"]) <= 210  # 200 chars + ellipsis
+
+
+# ── 2026-08-27: markdown-artifact guard ─────────────────────────────────────
+# The local LLM streams markdown plans with bold wrappers. Mid-stream partial
+# lines ("- **") used to be captured as step titles of exactly "**", which then
+# overwrote the deterministic turn-plan titles in the UI checklist (the "Plan
+# 0/10 ** ** ** Revenue **" bug). These tests pin the cleanup.
+
+def test_strips_markdown_bold_wrappers():
+    text = "- **Query the data source**\n- **Build the dashboard**"
+    steps = parse_plan_steps_from_text(text)
+    assert len(steps) == 2
+    assert steps[0]["title"] == "Query the data source"
+    assert steps[1]["title"] == "Build the dashboard"
+
+
+def test_numbered_bold_lines_clean():
+    text = "1. **Analyze the request**\n2. **Inspect schema**"
+    steps = parse_plan_steps_from_text(text)
+    assert [s["title"] for s in steps] == ["Analyze the request", "Inspect schema"]
+
+
+def test_bold_artifact_lines_are_skipped():
+    # Mid-stream partial lines and pure bold markers must NOT become steps.
+    text = "- **\n- **\n- Revenue\n- **"
+    steps = parse_plan_steps_from_text(text)
+    assert len(steps) == 1
+    assert steps[0]["title"] == "Revenue"
+
+
+def test_underscore_wrappers_stripped():
+    text = "- __Gather revenue__\n- _orders_"
+    steps = parse_plan_steps_from_text(text)
+    assert [s["title"] for s in steps] == ["Gather revenue", "orders"]

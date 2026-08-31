@@ -213,3 +213,34 @@ def test_build_stage_injects_source_footer():
     )
     assert html.count("Source: Market Research Data") == 2
     assert "source-footer" in html
+
+
+def test_theme_css_emits_hyphen_aliases():
+    """Theme tokens must be addressable by BOTH underscore and hyphen CSS
+    names — layout CSS uses var(--bg-primary) while the token dict uses
+    bg_primary. Without the alias the slide background is transparent/black."""
+    from app.services.synexia.contracts import DeckPlan
+    from app.services.artifacts.themes import select_theme
+    from app.services.artifacts.html_slide_generator import _theme_css
+
+    plan = DeckPlan(title="t", slides=[])
+    theme = select_theme(plan, "market data")
+    css = _theme_css(theme)
+    assert "--bg_primary: #ffffff" in css or "--bg_primary:" in css
+    assert "--bg-primary: " in css  # hyphen alias emitted
+
+
+def test_split_stage_keeps_trailing_chart_script():
+    """A chart_full slide's <script> (after </section>) must survive the
+    stage split, or the canvas renders blank."""
+    from app.services.artifacts.html_to_pptx import _split_stage_into_slides
+
+    stage = (
+        "<style>:root{--bg-primary:#fff}</style>"
+        "<section class=\"slide slide--chart-full\"><canvas id=\"c\"></canvas></section>"
+        "<script>new Chart(document.getElementById('c'))</script>"
+    )
+    chunks = _split_stage_into_slides(stage)
+    assert len(chunks) == 1
+    assert "new Chart" in chunks[0]
+    assert "</section>" in chunks[0]

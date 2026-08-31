@@ -59,6 +59,7 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(\{[\s\S]*?\})\s*```", re.IGNORECASE)
 # drives which KPI suggestions and column-name patterns the LLM (and
 # the fallback) should prefer.
 _TASK_KEYWORDS: list[tuple[str, str]] = [
+    ("contract|履约|合同|fulfil|execution.rate", "contract"),
     ("sales|revenue|revenu|revenue|turnover|pipeline|deal|opportunity|crm", "sales"),
     ("inventory|stock|instock|warehouse|sku|supply|on.hand", "inventory"),
     ("customer|client|account|lead|prospect|contact|segment|retention|churn", "customer"),
@@ -167,7 +168,7 @@ OUTPUT FORMAT (strict — the frontend parses this):
     "kpis": [
       {"label": "Total revenue", "value": "189.3M CNY", "caption": "Top 7 materials · Jun–Jul 2026"},
       {"label": "Total quantity", "value": "11,210 tons", "caption": "Jun–Jul 2026"},
-      {"label": "Top material share", "value": "35%", "caption": "碳五石油树脂 · 66.2M CNY"},
+      {"label": "Top material share", "value": "35%", "caption": "Top material · 66.2M CNY"},
       {"label": "MoM change", "value": "+8.2%", "caption": "Jul vs Jun 2026"},
       {"label": "Concentration (HHI)", "value": "2,140", "caption": "Moderately concentrated"}
     ],
@@ -180,20 +181,20 @@ OUTPUT FORMAT (strict — the frontend parses this):
       "unit": "CNY"
     },
     "insights": [
-      {"icon": "trending-up",   "text": "Top 3 materials account for 76% of revenue — moderate concentration risk; single-source dependency on carbon five resin warrants diversification review."},
-      {"icon": "bar-chart-3",   "text": "碳五石油树脂 (66.2M) is 3.1x the runner-up solvent oil (21.4M) — a classic Pareto distribution suggesting category leader economics."},
-      {"icon": "zap",           "text": "Solvent oil grew 28% MoM (Jul vs Jun), the fastest-growing material in the top 7 — potential shift in downstream demand mix."},
-      {"icon": "trending-down", "text": "Carbon five resin declined 12% MoM despite holding #1 rank — monitor for sustained erosion or seasonal dip."},
+      {"icon": "trending-up",   "text": "Top 3 materials account for 76% of revenue — moderate concentration risk; single-source dependency on the top material warrants diversification review."},
+      {"icon": "bar-chart-3",   "text": "The top material (66.2M) is 3.1x the runner-up (21.4M) — a classic Pareto distribution suggesting category leader economics."},
+      {"icon": "zap",           "text": "The second-ranked material grew 28% MoM (Jul vs Jun), the fastest-growing material in the top 7 — potential shift in downstream demand mix."},
+      {"icon": "trending-down", "text": "The top material declined 12% MoM despite holding #1 rank — monitor for sustained erosion or seasonal dip."},
       {"icon": "target",        "text": "The bottom 4 materials combined account for only 24% of revenue — evaluate SKU rationalization or bundling opportunities."}
     ],
     "key_findings": [
-      {"icon": "shield-check",  "text": "Revenue is highly concentrated: carbon five petroleum resin alone represents 35% of the top-7 total (66.2M of 189.3M CNY). Any supply disruption or price correction in this single SKU would materially impact the P&L."},
-      {"icon": "shield-check",  "text": "Month-over-month trajectory is positive overall (+8.2% Jul vs Jun), but the composition is shifting — traditional leader carbon five is declining while solvent oil and modified resin are accelerating."},
+      {"icon": "shield-check",  "text": "Revenue is highly concentrated: the top material alone represents 35% of the top-7 total (66.2M of 189.3M CNY). Any supply disruption or price correction in this single SKU would materially impact the P&L."},
+      {"icon": "shield-check",  "text": "Month-over-month trajectory is positive overall (+8.2% Jul vs Jun), but the composition is shifting — the traditional leader is declining while challengers are accelerating."},
       {"icon": "shield-check",  "text": "The Herfindahl-Hirschman Index (HHI) of 2,140 indicates a moderately concentrated portfolio. This is below the 2,500 antitrust threshold but above the 1,500 level where diversification benefits typically emerge."}
     ],
     "recommendations": [
-      {"icon": "arrow-right",   "text": "Initiate dual-sourcing qualification for carbon five petroleum resin to mitigate single-supplier concentration risk — target Q4 2026."},
-      {"icon": "arrow-right",   "text": "Accelerate solvent oil capacity planning given 28% MoM growth trajectory; if sustained, current allocation will constrain supply by Q1 2027."},
+      {"icon": "arrow-right",   "text": "Initiate dual-sourcing qualification for the top material to mitigate single-supplier concentration risk — target Q4 2026."},
+      {"icon": "arrow-right",   "text": "Accelerate capacity planning for the fastest-growing material given its 28% MoM growth trajectory; if sustained, current allocation will constrain supply by Q1 2027."},
       {"icon": "arrow-right",   "text": "Run a 12-month trend analysis (Jul 2025–Jul 2026) to distinguish seasonal patterns from structural shifts — current 2-month window may over-fit transient signals."}
     ],
     "next_step": "Want to break this down by region, or extend the analysis to a 12-month window?",
@@ -242,6 +243,19 @@ NARRATIVE part, not the chart part):
 7. When a date/timestamp column is present, always compute and mention
    a comparison (MoM, YoY, period-over-period change) in both summary
    and at least one insight.
+
+CONTRACT-PERFORMANCE GUIDANCE (when the user asks about contracts /
+履约 / 合同 / contract performance):
+- Use the contract vocabulary: contracted quantity, delivered (shipped)
+  quantity, outstanding/remaining quantity, execution (fulfillment)
+  rate = delivered ÷ contracted × 100, contracted value, delivered value.
+- The headline KPI is the EXECUTION RATE and the OUTSTANDING volume —
+  not just revenue. Flag contracts below 80% execution as risk items.
+- Rank customers/materials by contracted value or contracted quantity.
+- Mention MoM change in contracted/delivered volume when the data spans
+  two months (prior-month vs current-month columns).
+- NEVER describe contract rows as "sales orders" and never rename
+  delivered qty to "revenue" — keep the contract semantics.
 
 CHART RULES (these prevent the "all bars = 1" degenerate chart):
 8. The chart's `data` array MUST use the EXACT column names present in
@@ -394,6 +408,10 @@ def _fallback_payload(
     # Priority column-name patterns per task type.
     # Each entry: (task_type → (label_patterns, value_patterns))
     _TASK_COLUMN_PATTERNS: dict[str, tuple[list[str], list[str]]] = {
+        "contract": (
+            ["name", "customer", "material", "product", "partner"],
+            ["quantity", "qty", "amount", "value", "rate", "execution", "price", "revenue", "out"],
+        ),
         "sales": (
             ["name", "material", "product", "customer", "region"],
             ["revenue", "amount", "total", "sales", "quantity", "value", "price"],
@@ -587,6 +605,7 @@ def _fallback_payload(
 
     # ── Title and summary ──
     task_titles = {
+        "contract": "Contract performance report",
         "sales": "Sales report",
         "inventory": "Inventory report",
         "customer": "Customer report",
@@ -605,6 +624,10 @@ def _fallback_payload(
         summary = "No data returned for this query."
 
     task_actions = {
+        "contract": [
+            ActionSpec(label="Top customers", prompt="Show me the top customers by contract value."),
+            ActionSpec(label="Execution risk", prompt="Which contracts are executing below 80%?"),
+        ],
         "sales": [
             ActionSpec(label="Break down by region", prompt="Break this down by region."),
             ActionSpec(label="Save as weekly", prompt="Save this as a recurring weekly report."),

@@ -1,7 +1,7 @@
 """Value-chain coherence: spread guardrails + directional consistency + hierarchical reconciliation.
 
-Not literal HTS reconciliation — our crude→naphtha→C5 chain is a production
-chain with yield rates, not an additive disaggregation. Instead, we support:
+Not literal HTS reconciliation — the app's configured value chain is a
+production chain with yield rates, not an additive disaggregation. Instead, we support:
   1. Spread guardrails — child forecast should not invert vs feedstock cost
   2. Directional consistency — flag if feedstock moved >X% but child didn't
   3. Top-down allocation — parent forecast → child share by yield ratio
@@ -15,29 +15,28 @@ from typing import Any
 
 import numpy as np
 
+from app.services.domain_config import get_domain_config
+
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Default cracking yield ratios (naphtha → child products)
-# These can be overridden via target.model_config["hierarchy"]["yield_ratios"]
+# Hierarchy defaults — loaded from the app's domain config ("hierarchy"
+# block: "yield_ratios" + "margin_premiums"). Empty config = no defaults
+# (top-down allocation is skipped gracefully). Per-target overrides can
+# still be supplied via target.model_config["hierarchy"]["yield_ratios"].
 # ---------------------------------------------------------------------------
-_DEFAULT_YIELD_RATIOS: dict[str, dict[str, float]] = {
-    "naphtha": {
-        "c5_cracked": 0.15,
-        "c9_cracked": 0.12,
-        "isoprene": 0.05,
-        "dicyclopentadiene": 0.03,
-    },
-}
+_DOMAIN_CFG: dict[str, Any] = get_domain_config("")
+
+# Default cracking yield ratios (feedstock → child products)
+_DEFAULT_YIELD_RATIOS: dict[str, dict[str, float]] = dict(
+    (_DOMAIN_CFG.get("hierarchy") or {}).get("yield_ratios") or {}
+)
 
 # Default premium over feedstock cost per product (fraction)
-_DEFAULT_MARGIN_PREMIUMS: dict[str, float] = {
-    "c5_cracked": 0.20,
-    "c9_cracked": 0.18,
-    "isoprene": 0.35,
-    "dicyclopentadiene": 0.40,
-}
+_DEFAULT_MARGIN_PREMIUMS: dict[str, float] = dict(
+    (_DOMAIN_CFG.get("hierarchy") or {}).get("margin_premiums") or {}
+)
 
 
 @dataclass
@@ -187,7 +186,7 @@ def allocate_top_down(
     Parameters
     ----------
     parent_key : str
-        Parent product key (e.g. "naphtha").
+        Parent product key (e.g. "<product>").
     parent_forecast : list[float]
         Parent forecast values.
     child_forecasts : dict[str, list[float]] | None
@@ -295,8 +294,8 @@ def constrain_middle_out(
     price without margin is a structural violation.
 
     Also checks that siblings of the same tier don't invert relative
-    to each other without justification (e.g., C5 cracked should not
-    exceed isoprene price by >50%).
+    to each other without justification (e.g., a downstream product should
+    not exceed a higher-value sibling's price by >50%).
 
     Parameters
     ----------
@@ -341,7 +340,7 @@ def constrain_middle_out(
                         })
 
     # 2. Sibling ordering constraint
-    # (e.g., isoprene > C5 cracked > DCPD typically)
+    # (e.g., higher-value products typically price above lower-value siblings)
     sibling_keys = list(adjusted.keys())
     if len(sibling_keys) >= 2:
         # Check for extreme inversions between any pair

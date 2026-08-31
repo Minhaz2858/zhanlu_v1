@@ -13,6 +13,7 @@ bcrypt==4.2.1
 httpx==0.28.1
 python-docx>=1.1.0
 python-pptx>=0.6.23
+matplotlib>=3.8,<3.11
 # Redis client (sandbox queue + prestart health check)
 redis==5.2.0
 # MinIO client (optional — artifact blob storage)
@@ -65,3 +66,8 @@ numpy>=1.26,<3.0
 statsmodels>=0.14,<1.0
 scikit-learn>=1.4,<2.0
 xgboost>=2.0,<3.0
+# ── CAD Agent (Fusion 360) ──────────────────────────────────────────
+# Engineering-drawing DXF generation (fusion360_make_drawing). Lazily
+# imported with a graceful error if missing, but install it for the
+# drawing tool to work.
+ezdxf>=1.4

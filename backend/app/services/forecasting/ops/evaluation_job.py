@@ -24,9 +24,9 @@ DEFAULT_HORIZONS = [3, 7, 30]
 
 
 def _default_actuals_loader():
-    """Build the default loader that reads EDIA MySQL actuals."""
-    from app.services.forecasting.edia_source import EdiaMysqlDataSource
-    src = EdiaMysqlDataSource()
+    """Build the default loader that reads external MySQL actuals."""
+    from app.services.forecasting.mysql_data_source import MysqlDataSource
+    src = MysqlDataSource()
     return lambda datasource: src.read_history(datasource)
 
 
@@ -56,7 +56,7 @@ def _actuals_series(actuals_loader, datasource) -> Optional[pd.Series]:
         return None
     if df is None:
         return None
-    # Loader may return a ready Series (tests) or an EDIA DataFrame (prod).
+    # Loader may return a ready Series (tests) or a raw DataFrame (prod).
     if isinstance(df, pd.Series):
         s = df.astype(float).copy()
         s.index = pd.to_datetime(s.index)

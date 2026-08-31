@@ -128,6 +128,7 @@ LIVE_EVENT_TEMPLATES: dict[str, dict[str, str]] = {
     "tool_call_failed":     {"en": "{tool_label} failed", "zh": "{tool_label}执行失败"},
     "artifact_progress":    {"en": "Building {artifact_type} · {current} of {total}", "zh": "正在构建{artifact_type} · {current}/{total}"},
     "verify_passed":        {"en": "Verification passed", "zh": "校验通过"},
+    "verify_failed":        {"en": "Verification failed — some steps did not complete", "zh": "校验未通过 — 部分步骤未完成"},
     "retry":                {"en": "Correcting {target}", "zh": "正在修正{target}"},
     "finalize_started":     {"en": "Finalizing your answer", "zh": "正在生成最终答复"},
     "finalize_done":        {"en": "Final answer ready", "zh": "最终答复已生成"},
@@ -142,12 +143,17 @@ LIVE_EVENT_TEMPLATES: dict[str, dict[str, str]] = {
 
 # Content-invariant denylist: SQL keywords, ERP table/column patterns and
 # row-data markers must never appear inside the persisted live stream.
+# The ERP column-ID branch (\bF[A-Z][A-Z0-9_]{1,15}\b) is deliberately
+# CASE-SENSITIVE (the (?i:...) scoping applies ONLY to the SQL/erp_ branches).
+# A blanket IGNORECASE made ANY word starting with 'f' — "fusion360_extrude",
+# "Fabricating", "Friday" — match the ERP pattern, so every CAD tool label in
+# the live feed was replaced with the "[data]" placeholder. Tool labels are
+# server-generated metadata (never raw model text) and must survive.
 _LIVE_EVENT_FORBIDDEN_RE = re.compile(
-    r"\b(?:select|insert|update|delete|from|where|join|group\s+by|order\s+by|"
+    r"(?i:\b(?:select|insert|update|delete|from|where|join|group\s+by|order\s+by|"
     r"limit|inner\s+join|left\s+join|create\s+table|alter\s+table|drop\s+table)\b"
-    r"|\berp_[tv]_[a-z0-9_]+\b"
-    r"|\bF[A-Z][A-Z0-9_]+\b",
-    re.IGNORECASE,
+    r"|\berp_[tv]_[a-z0-9_]+\b)"
+    r"|\bF[A-Z][A-Z0-9_]{1,15}\b|\bF\d{2,8}\b",
 )
 _LIVE_EVENT_SAFE_FALLBACK = "[data]"
 

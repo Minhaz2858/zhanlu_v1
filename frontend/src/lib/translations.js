@@ -16,6 +16,8 @@ export const translations = {
       noAccount: '还没有账户？', createOne: '创建账户',
       // Register
       createAccount: '创建账户', signUpToStart: '注册并开始使用',
+      registrationDisabled: '注册已关闭', registrationDisabledSubtitle: '请联系管理员为你创建账户',
+      registrationDisabledNote: '本工作区已关闭自助注册，账户由管理员统一创建。',
       passwordRules: { minLen: '至少 10 个字符', hasLetter: '包含字母', hasDigit: '包含数字' },
       pwMinLen: '至少 10 个字符', pwHasLetter: '包含一个字母', pwHasDigit: '包含一个数字',
       passwordMust: '密码必须包含：', pwNoMatch: '两次输入的密码不一致',
@@ -31,6 +33,12 @@ export const translations = {
       codeSentDesc: '请查收邮箱中的新验证码。',
       failedToSendCode: '验证码发送失败',
       failedToResendCode: '重新发送验证码失败',
+      // Login with email code (passwordless SaaS)
+      emailCodeTab: '邮箱验证码', passwordTab: '密码',
+      sendCode: '发送验证码', sendingCode: '发送中…',
+      usePassword: '使用密码登录', useEmailCode: '使用邮箱验证码',
+      enterCodeDesc: '我们已向 {email} 发送了登录验证码',
+      invalidLoginCode: '验证码无效或已过期',
       // Forgot password
       resetPassword: '重置密码', resetSubtitle: '我们会向你的邮箱发送重置链接',
       emailAddress: '邮箱地址', sending: '发送中…', sendResetLink: '发送重置链接',
@@ -46,17 +54,16 @@ export const translations = {
       failedToReset: '重置密码失败',
     },
     sidebar: {
-      brand: '伊斯科AI', cognitiveHub: '认知中枢', automation: '自动化任务', automationAgent: '自动化助手',
+      brand: 'Zhanlu', cognitiveHub: '认知中枢', automation: '自动化任务', automationAgent: '自动化助手',
       mySpace: '我的空间', myFiles: '我的文件', fromPersonal: '来自个人', fromCompany: '来自公司', market: '市场', toolkit: '工具包',
       admin: '管理', adminZh: '管理',
-      dashboard: '行情看板', dashboardOverview: '总览', dashboardUpstream: '上游', dashboardMidstream: '中游', dashboardDownstream: '下游', dashboardReport: '报表', dashboardWeeklySummary: '周度总结与预测',
       collapse: '收起侧栏', expand: '展开侧栏',
     },
     chat: {
-      coreTitle: '伊斯科AI认知核心',
+      coreTitle: 'Zhanlu认知核心',
       subtitle: '通过自然语言创建与配置 Agent、自动化任务、知识库、工具、报表与决策流程。全部资源创建、配置与部署的唯一入口。',
-      placeholder: '向伊斯科AI描述你想创建或执行的任务…',
-      thinking: '伊斯科AI正在思考…',
+      placeholder: '向Zhanlu描述你想创建或执行的任务…',
+      thinking: 'Zhanlu正在思考…',
       clarify: { tag: '配置需求', other: '其他', otherDesc: '自行输入需求', step: '步骤' },
       clarifyBatch: { tag: '批量配置', questions: '个问题', confirm: '确认并创建', customPh: '输入你的需求…', backToOptions: '返回选项' },
       created: '资源已创建',
@@ -194,6 +201,9 @@ export const translations = {
       // automation — keeps the clock icon in the sidebar
       // accessible (hover tooltip + screen-reader label).
       automationBadge: '已创建自动化任务',
+      // Shown on chat sessions dedicated to building/editing a
+      // dashboard (conversation metadata.mode === 'dashboard').
+      dashboardBadge: '仪表盘会话',
     },
     userMenu: {
       language: '语言', zh: '中文', en: 'English',
@@ -214,11 +224,12 @@ export const translations = {
       project: '所属项目', projectPh: '选择项目或未分组', globalProject: '未分组',
       description: '描述', descPh: '用自然语言描述要做什么，Agent 会在对话中补充细节',
       cancel: '取消', submit: '保存并继续对话',
-      resourceLabels: { automation: '自动化任务', agent: 'Agent 应用', kb: '知识库', flow: '决策流程', report: '报表', file: '文件' },
+      resourceLabels: { automation: '自动化任务', agent: 'Agent 应用', kb: '知识库', flow: '决策流程', report: '报表', file: '文件', dashboard: '仪表盘' },
       // New keys for the redesigned dialog
       projectBadge: '项目', projectInherited: '自动继承自当前项目',
       dataSourcesLabel: '可用数据源', dataSourcesEmpty: '该项目暂未配置数据源，Agent 将在对话中询问',
       dataSourcesMore: '等', noProjectSelected: '请先在项目页面中打开此对话框',
+      refreshCadence: '刷新间隔', dashboardHint: 'Agent 会先与你确认数据源与核心指标，再基于设计系统构建全栈实时应用（WebSocket 实时刷新），你可以在对话中持续调整。',
       pickProjectFirst: '请先进入具体项目页面以创建自动化任务',
       schedulePicker: {
         frequency: '频率', time: '时间', dayOfWeek: '星期', dayOfMonth: '日期', cron: 'Cron 表达式',
@@ -291,7 +302,7 @@ export const translations = {
       title: '自动化任务', subtitle: '查看与管理在对话中创建的全部自动执行流程。启停、查看日志与运行状态。',
       hint: '新建或修改自动化任务，请在 Chat 对话框中完成。',
       cardView: '卡片视图', tableView: '表格视图', monthView: '月历视图', timelineView: '时间轴',
-      newTask: '新建自动化任务', today: '今天', calendarDesc: '伊斯科AI工业智能中枢自动化执行中的数据抓取、报表生成及环境监测任务。一切尽在掌控中。',
+      newTask: '新建自动化任务', today: '今天', calendarDesc: 'Zhanlu工业智能中枢自动化执行中的数据抓取、报表生成及环境监测任务。一切尽在掌控中。',
       moreTasks: '...还有 {n} 个任务', weekDays: { sun: '周日', mon: '周一', tue: '周二', wed: '周三', thu: '周四', fri: '周五', sat: '周六' },
       types: { data_sync: '数据同步', report_generation: '报表生成', approval_flow: '流程审批', agent_inspection: 'Agent巡检', data_cleaning: '数据清洗' },
       statuses: { running: '运行中', paused: '已暂停', completed: '已完成', failed: '失败' },
@@ -755,23 +766,8 @@ export const translations = {
       moreTitle: '更多功能',
       noSessions: '暂无历史记录',
       emptyChat: '开始新的对话',
-      emptyChatHint: '向伊斯科AI描述你想创建或执行的任务…',
+      emptyChatHint: '向Zhanlu描述你想创建或执行的任务…',
       others: '其它页面',
-    },
-    marketDashboardChat: {
-      title: 'Ecisco BI 助手',
-      placeholder: '随时问我市场行情、定价或报告…',
-      newChat: '新对话',
-      close: '关闭',
-      stop: '停止',
-      thinking: '思考中…',
-      emptyGreeting: '你好！我是 Ecisco BI 助手。你可以问我市场趋势、定价、预测或周报相关问题。',
-      errorRetry: '生成回复时出错，请重试。',
-      suggestions: [
-        '给我本周的市场总结',
-        '原油价格趋势如何？',
-        '显示最新的情报事件',
-      ],
     },
     accessPolicy: {
       title: '管理访问权限',
@@ -821,6 +817,8 @@ export const translations = {
       noAccount: "Don't have an account?", createOne: 'Create one',
       // Register
       createAccount: 'Create your account', signUpToStart: 'Sign up to get started',
+      registrationDisabled: 'Registration disabled', registrationDisabledSubtitle: 'Contact an administrator to request an account',
+      registrationDisabledNote: 'Self-registration is turned off for this workspace. Accounts are created by an administrator.',
       passwordRules: { minLen: 'At least 10 characters', hasLetter: 'Contains a letter', hasDigit: 'Contains a digit' },
       pwMinLen: 'At least 10 characters', pwHasLetter: 'Contains a letter', pwHasDigit: 'Contains a digit',
       passwordMust: 'Password must include: ', pwNoMatch: 'Passwords do not match',
@@ -836,6 +834,12 @@ export const translations = {
       codeSentDesc: 'Check your email for the new code.',
       failedToSendCode: 'Failed to send verification code',
       failedToResendCode: 'Failed to resend code',
+      // Login with email code (passwordless SaaS)
+      emailCodeTab: 'Email code', passwordTab: 'Password',
+      sendCode: 'Send code', sendingCode: 'Sending…',
+      usePassword: 'Use password instead', useEmailCode: 'Email me a code',
+      enterCodeDesc: 'We sent a login code to {email}',
+      invalidLoginCode: 'Invalid or expired login code',
       // Forgot password
       resetPassword: 'Reset password', resetSubtitle: "We'll send you a link to reset it",
       emailAddress: 'Email address', sending: 'Sending…', sendResetLink: 'Send reset link',
@@ -851,17 +855,16 @@ export const translations = {
       failedToReset: 'Failed to reset password',
     },
     sidebar: {
-      brand: 'Ecisco AI', cognitiveHub: 'Cognitive Hub', automation: 'Automation', automationAgent: 'Automation Agent',
+      brand: 'Zhanlu', cognitiveHub: 'Cognitive Hub', automation: 'Automation', automationAgent: 'Automation Agent',
       mySpace: 'My Space', myFiles: 'My Files', fromPersonal: 'From Personal', fromCompany: 'From Company', market: 'Market', toolkit: 'Toolkit',
       admin: 'Admin', adminZh: 'Admin',
-      dashboard: 'Dashboard', dashboardOverview: 'Overview', dashboardUpstream: 'Upstream', dashboardMidstream: 'Midstream', dashboardDownstream: 'Downstream', dashboardReport: 'Report', dashboardWeeklySummary: 'Weekly Summary and Forecast',
       collapse: 'Collapse sidebar', expand: 'Expand sidebar',
     },
     chat: {
-      coreTitle: 'Ecisco AI Cognitive Core',
+      coreTitle: 'Zhanlu Cognitive Core',
       subtitle: 'Create and configure Agents, automation tasks, knowledge bases, tools, reports and decision flows via natural language. The single entry for all resource creation, configuration and deployment.',
-      placeholder: 'Describe what you want to create or run for Ecisco AI…',
-      thinking: 'Ecisco AI is thinking…',
+      placeholder: 'Describe what you want to create or run for Zhanlu…',
+      thinking: 'Zhanlu is thinking…',
       clarify: { tag: 'Config', other: 'Other', otherDesc: 'Type your own', step: 'Step' },
       clarifyBatch: { tag: 'Batch Config', questions: 'questions', confirm: 'Confirm & Create', customPh: 'Type your answer…', backToOptions: 'Back to options' },
       created: 'Resource created',
@@ -918,6 +921,7 @@ export const translations = {
         tool_call_failed: '{tool_label} failed',
         artifact_progress: 'Building {artifact_type} · {current} of {total}',
         verify_passed: 'Verification passed',
+        verify_failed: 'Verification failed — some steps did not complete',
         retry: 'Correcting {target}',
         finalize_started: 'Finalizing your answer',
         subagent_invoked: 'Delegating to {agent_label}',
@@ -1000,6 +1004,9 @@ export const translations = {
       // automation — keeps the clock icon in the sidebar
       // accessible (hover tooltip + screen-reader label).
       automationBadge: 'Created a scheduled automation',
+      // Shown on chat sessions dedicated to building/editing a
+      // dashboard (conversation metadata.mode === 'dashboard').
+      dashboardBadge: 'Dashboard session',
     },
     userMenu: {
       language: 'Language', zh: '中文', en: 'English',
@@ -1020,11 +1027,12 @@ export const translations = {
       project: 'Project', projectPh: 'Select project or ungrouped', globalProject: 'Ungrouped',
       description: 'Description', descPh: 'Describe what to do in natural language — the Agent will fill in the details in chat',
       cancel: 'Cancel', submit: 'Save & Continue in Chat',
-      resourceLabels: { automation: 'Automation Task', agent: 'Agent App', kb: 'Knowledge Base', flow: 'Decision Flow', report: 'Report', file: 'File' },
+      resourceLabels: { automation: 'Automation Task', agent: 'Agent App', kb: 'Knowledge Base', flow: 'Decision Flow', report: 'Report', file: 'File', dashboard: 'Dashboard' },
       // New keys for the redesigned dialog
       projectBadge: 'Project', projectInherited: 'Auto-inherited from current project',
       dataSourcesLabel: 'Available data sources', dataSourcesEmpty: 'No data sources configured for this project — the Agent will ask in chat',
-      dataSourcesMore: 'and more', noProjectSelected: 'Open this dialog from a project page to inherit its data sources',
+      dataSourcesMore: 'more', noProjectSelected: 'Open this dialog from a project page first',
+      refreshCadence: 'Refresh interval', dashboardHint: 'The Agent first confirms the datasource and KPIs with you, then builds a full-stack live app with the design system (WebSocket realtime) — keep iterating in chat.',
       pickProjectFirst: 'Open a project page first to create an automation task',
       schedulePicker: {
         frequency: 'Frequency', time: 'Time', dayOfWeek: 'On days', dayOfMonth: 'Day of month', cron: 'Cron expression',
@@ -1096,7 +1104,7 @@ export const translations = {
       title: 'Automation Tasks', subtitle: 'View and manage all automated flows created via chat. Start, stop, view logs and status.',
       hint: 'To create or edit automation tasks, use the Chat box.',
       cardView: 'Card View', tableView: 'Table View', monthView: 'Month View', timelineView: 'Timeline',
-      newTask: 'New Automation Task', today: 'Today', calendarDesc: 'Ecisco AI industrial intelligence hub automated data fetching, report generation and environment monitoring tasks. All under control.',
+      newTask: 'New Automation Task', today: 'Today', calendarDesc: 'Zhanlu industrial intelligence hub automated data fetching, report generation and environment monitoring tasks. All under control.',
       moreTasks: '...{n} more tasks', weekDays: { sun: 'Sun', mon: 'Mon', tue: 'Tue', wed: 'Wed', thu: 'Thu', fri: 'Fri', sat: 'Sat' },
       types: { data_sync: 'Data Sync', report_generation: 'Report Gen', approval_flow: 'Approval Flow', agent_inspection: 'Agent Inspection', data_cleaning: 'Data Cleaning' },
       statuses: { running: 'Running', paused: 'Paused', completed: 'Completed', failed: 'Failed' },
@@ -1560,23 +1568,8 @@ export const translations = {
       moreTitle: 'More',
       noSessions: 'No history yet',
       emptyChat: 'Start a new conversation',
-      emptyChatHint: 'Describe what you want to create or run for Ecisco AI…',
+      emptyChatHint: 'Describe what you want to create or run for Zhanlu…',
       others: 'Other Pages',
-    },
-    marketDashboardChat: {
-      title: 'Ecisco BI Assistant',
-      placeholder: 'Ask me anything about markets, pricing, or reports…',
-      newChat: 'New chat',
-      close: 'Close',
-      stop: 'Stop',
-      thinking: 'Thinking…',
-      emptyGreeting: 'Hi! I\'m the Ecisco BI Assistant. Ask me about market trends, pricing, forecasts, or weekly reports.',
-      errorRetry: 'Error generating response. Please try again.',
-      suggestions: [
-        'Give me this week\'s market summary',
-        'What\'s the price trend for crude oil?',
-        'Show me the latest intelligence events',
-      ],
     },
     accessPolicy: {
       title: 'Manage Access',

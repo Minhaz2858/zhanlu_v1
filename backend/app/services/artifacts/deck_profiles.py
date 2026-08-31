@@ -56,6 +56,7 @@ DATA_REPORT = DeckProfile(
         "cover", "kpi_grid", "chart_full", "chart_with_bullets",
         "data_table", "findings_cards", "insights_bullets", "section_divider",
         "recommendations", "closing",
+        "timeline", "roadmap", "comparison", "swot", "process_flow",
     ),
     density_budget=40,
     headline_style="assertion",
@@ -70,6 +71,7 @@ EXECUTIVE_BRIEF = DeckProfile(
     allowed_layouts=(
         "cover", "kpi_grid", "chart_with_bullets", "findings_cards",
         "recommendations", "closing",
+        "timeline", "comparison", "swot", "quote",
     ),
     density_budget=14,
     headline_style="assertion",
@@ -85,6 +87,7 @@ PITCH_NARRATIVE = DeckProfile(
     allowed_layouts=(
         "cover", "section_divider", "findings_cards", "chart_with_bullets",
         "recommendations", "closing",
+        "timeline", "roadmap", "comparison", "quote", "process_flow",
     ),
     density_budget=22,
     headline_style="question",
@@ -99,6 +102,7 @@ PERIODIC_REVIEW = DeckProfile(
     allowed_layouts=(
         "cover", "kpi_grid", "chart_full", "insights_bullets",
         "recommendations", "closing",
+        "timeline", "comparison",
     ),
     density_budget=24,
     headline_style="assertion",

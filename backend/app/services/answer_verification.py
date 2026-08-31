@@ -167,7 +167,7 @@ _AUTOMATION_STOPWORDS = frozenset({
     # these wrapper words describe the task envelope, not data dimensions.
     "data_sync", "type", "name", "description", "project",
     "business", "appropriate", "track", "watch", "use",
-    "ecisco", "erp",
+    "erp",
 })
 
 # Rebuttal detection (Fix 1c). When the assistant explicitly rebuts a

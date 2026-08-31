@@ -5,7 +5,7 @@ Extended with SHA-256 content hashing for dedup, TTL expiration,
 importance scoring, and usage tracking.
 """
 
-from sqlalchemy import String, Text, Integer, DateTime, JSON
+from sqlalchemy import String, Text, Integer, DateTime, JSON, Boolean
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import TimestampedBase
@@ -38,6 +38,9 @@ class AgentMemory(TimestampedBase):
     importance: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     ttl_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
     usage_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Pinned memory (2026-08-27): pinned entries are always injected first
+    # and survive compaction/eviction — the "always-in-context" layer.
+    pinned: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
 
     # Semantic recall (P0 — agent-improvement roadmap). Stores the content's
     # embedding vector as a JSON float list so it works on both SQLite and

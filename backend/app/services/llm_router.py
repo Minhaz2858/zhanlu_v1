@@ -142,6 +142,29 @@ def resolve_message_project_id(
     return conv_project_id
 
 
+def _apply_context_window_probe(endpoint: "LLMEndpoint") -> "LLMEndpoint":
+    """Best-effort: fill ``endpoint.context_window`` when the admin did not set it.
+
+    Probes the endpoint's real window (vLLM ``max_model_len``, Ollama
+    ``context_length``) so ANY model — no matter how new/obscure — gets
+    its TRUE compaction budget instead of the 128k heuristic default.
+    Admin-configured values always win; probe failures are non-fatal.
+    """
+    if endpoint.context_window and endpoint.context_window > 0:
+        return endpoint
+    try:
+        from app.services.context_probe import probe_context_window
+
+        probed = probe_context_window(
+            endpoint.base_url, endpoint.api_key, endpoint.model_id,
+        )
+        if probed and probed > 0:
+            endpoint.context_window = probed
+    except Exception as exc:  # noqa: BLE001 — never break resolution on probe
+        logger.debug("context-window probe skipped: %s", exc)
+    return endpoint
+
+
 def resolve_effective_llm(
     db: Session,
     *,
@@ -194,6 +217,7 @@ def resolve_effective_llm(
                 "System-agent short-circuit: agent=%s → default model=%s",
                 agent_name, default.name,
             )
+            endpoint = _apply_context_window_probe(endpoint)
             return EffectiveLLM(
                 endpoint=endpoint,
                 model_name=default.name,
@@ -305,6 +329,7 @@ def resolve_effective_llm(
         "Resolved LLM: model=%s source=%s locked=%s",
         resolved.name, source, locked,
     )
+    endpoint = _apply_context_window_probe(endpoint)
     return EffectiveLLM(
         endpoint=endpoint,
         model_name=resolved.name,

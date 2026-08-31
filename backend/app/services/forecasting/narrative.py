@@ -1,7 +1,7 @@
 """Forecast reasoning narratives — pure builders (no I/O).
 
 Shared by:
-  - market_dashboard_service.get_forecast_chart  (chart-page analysis panel)
+  - forecast chart API (chart-page analysis panel)
   - decision_board_service.build_narrative       (decision-board AI 简评)
 
 Everything here is a pure function of its inputs so it is trivially

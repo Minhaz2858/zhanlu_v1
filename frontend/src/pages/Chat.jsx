@@ -12,10 +12,11 @@ import { postMessageFeedback, postRoleFeedback } from '@/api/agentFeedback';
 import RelatedContent from '@/components/chat/RelatedContent';
 import ArtifactPanel from '@/components/chat/ArtifactPanel';
 import ArtifactPreviewPane from '@/components/chat/ArtifactPreviewPane';
-import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock } from 'lucide-react';
+import { Bot, Factory, Wrench, ShieldCheck, HardHat, Truck, Gauge, FolderOpen, FolderKanban, ArrowLeft, Clock, LayoutDashboard } from 'lucide-react';
 import { PanelGroup, Panel, PanelResizeHandle } from 'react-resizable-panels';
 import ChatFilesModal from '@/components/chat/ChatFilesModal';
 import ScheduledPanel from '@/components/chat/ScheduledPanel';
+import ArtifactCanvasEditor from '@/components/chat/ArtifactCanvasEditor';
 import ChatThinkingIndicator from '@/components/chat/ChatThinkingIndicator';
 import AutomationDraftCard from '@/components/chat/AutomationDraftCard';
 import { buildSkillContext, buildDefaultSkillContext } from '@/lib/skillContext';
@@ -234,6 +235,8 @@ export default function Chat() {
   // Deep-link target: when a "📅 Scheduled update" chat message's "Open run"
   // button is clicked, we open the Scheduled panel and focus this run.
   const [focusExecutionId, setFocusExecutionId] = useState(null);
+  // Interactive artifact canvas (P0-3): user-editable HTML artifacts.
+  const [canvasArtifact, setCanvasArtifact] = useState(null);
   const openRun = (executionId) => {
     setFocusExecutionId(executionId);
     setScheduledOpen(true);
@@ -242,6 +245,13 @@ export default function Chat() {
   // whenever the active session changes so we can decide whether to render
   // the "Scheduled" button in the header.
   const [sessionAutomation, setSessionAutomation] = useState(null);
+  // Dashboard-mode context for the ACTIVE conversation. When the conversation
+  // was stamped metadata.mode === 'dashboard' (a dedicated dashboard-building
+  // session), the header shows a Dashboard badge with the bound app name and
+  // an "Open dashboard" link — so the user always knows this session owns a
+  // dashboard and can jump straight to it. Reopening the session restores
+  // full build/edit context because the messages history is intact.
+  const [dashboardMode, setDashboardMode] = useState(null); // {slug, name}
   // Latest execution of this session's automation task (from the by-session
   // poll). Drives the "agent is working" indicator while a run is in flight.
   const [latestExecution, setLatestExecution] = useState(null);
@@ -383,36 +393,45 @@ export default function Chat() {
     // prefill processing here to avoid double-sending.
     const autorun = params.get('autorun') === '1';
     if (prefill && !autorun) {
+      // `?newTask=1` is set by the structured-creation dialogs (New Task /
+      // Save & Continue in Chat). It means: "open a BRAND-NEW chat session
+      // for this prefill, bound to the selected project" — for EVERY
+      // resource type (automation, dashboard, report, kb, file, …), not just
+      // automation requests. The prefill is always auto-sent into that fresh
+      // session so the user lands in a clean "one task per chat" context
+      // (Manus-style), mirroring the dialog's promise of "continue in chat".
       if (isAutomationRequest(prefill)) {
         // Stash the prefill as a pending draft BEFORE sending so the
         // editable summary card can mount before the agent starts
         // streaming. The card stays visible until the user dismisses
         // it (or the agent confirms the task is created).
         setPendingDraft({ prefill, lang });
+      }
+      if (newTask) {
         // Resolve the new-task options. We prefer the dialog's project
         // (if provided) so the user gets the project they were just in,
         // not whatever project the sidebar happens to have selected.
-        const sessionOpts = newTask
-          ? {
-            newSessionTitle: t.sessionList.newTask,
-            newSessionProject: dialogProjectName,
-            newSessionProjectId: dialogProjectId,
-          }
-          : {};
-        handleSend(prefill, sessionOpts);
+        handleSend(prefill, {
+          newSessionTitle: t.sessionList.newTask,
+          newSessionProject: dialogProjectName,
+          newSessionProjectId: dialogProjectId,
+        });
         // Strip the newTask/project params from the URL so a refresh
         // (or back-button) doesn't re-trigger the same flow.
-        if (newTask) {
-          try {
-            const newParams = new URLSearchParams(window.location.search);
-            newParams.delete('newTask');
-            newParams.delete('projectName');
-            newParams.delete('projectId');
-            const qs = newParams.toString();
-            const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
-            window.history.replaceState({}, '', newUrl);
-          } catch { /* best-effort — the state is already correct */ }
-        }
+        try {
+          const newParams = new URLSearchParams(window.location.search);
+          newParams.delete('newTask');
+          newParams.delete('projectName');
+          newParams.delete('projectId');
+          const qs = newParams.toString();
+          const newUrl = window.location.pathname + (qs ? `?${qs}` : '') + window.location.hash;
+          window.history.replaceState({}, '', newUrl);
+        } catch { /* best-effort — the state is already correct */ }
+      } else if (isAutomationRequest(prefill)) {
+        // Legacy path (no newTask flag): automation prefills auto-send into
+        // the currently-active session; anything else is staged in the input
+        // for the user to review before sending.
+        handleSend(prefill, {});
       } else {
         setInputValue(prefill);
       }
@@ -467,37 +486,6 @@ export default function Chat() {
     //      the conv record's agent_name is then stale, but the
     //      caller can still pass the current name.
     const convId = params.get('conv');
-    // Auto-select ecisco_bi_assistant when entering the Ecisco BI
-    // project WITHOUT an explicit agent param AND for a brand-new
-    // chat (no ?conv=). The ecisco_bi_assistant replaces the legacy
-    // orchestrator_agent and covers the complete EDIA 6-stage
-    // pipeline (perception→diagnosis→forecast→pricing→decision→
-    // weekly report) plus knowledge graph and ERP writeback.
-    //
-    // CRITICAL: the ``!convId`` gate prevents this auto-select from
-    // racing against the conv rehydration block below. For an
-    // existing conv, the stored ``agent_name`` (general_assistant,
-    // ecisco_bi_assistant, or anything else) is the source of truth
-    // — rehydrating it via ``setActiveAgent`` and then having this
-    // IIFE overwrite it to ecisco_bi_assistant was the bug: an
-    // existing general_assistant conv opened in the Ecisco+BI
-    // project context would silently flip agents on render. Only
-    // auto-select for NEW chats where the user hasn't picked an
-    // agent yet.
-    // Users who manually pick a different agent are not overridden
-    // (handlePickAgent runs after mount and setActiveAgent wins).
-    if (!agentId && projectName && !convId) {
-      (async () => {
-        try {
-          const decodedName = decodeURIComponent(projectName);
-          if (decodedName === 'Ecisco BI') {
-            const _agents = await base44.entities.AgentApp.list();
-            const eciscoAgent = _agents.find((a) => a.name === 'ecisco_bi_assistant');
-            if (eciscoAgent) setActiveAgent(eciscoAgent);
-          }
-        } catch { /* silent — project-scoped fallback handled in handleSend */ }
-      })();
-    }
     const convAgentName = params.get('agentName') || null;
     if (convId) {
       // Mark this load so the activeId effect can detect the race.
@@ -563,27 +551,62 @@ export default function Chat() {
         // (the FK) from the conv so the input shows the correct
         // project chip after a hard reload.
         //
-        // Note (2026-08-06): we deliberately do NOT write
-        // ``agentName`` back into the URL here. The agent context
-        // for new messages is bound via ``setActiveAgent`` above
-        // and consumed by handleAgentSend from React state — no
-        // code path reads ``agentName`` from the URL for the v3
-        // stream body. Adding it to the URL on reload changed the
-        // visible URL bar without any functional benefit, so we
-        // keep the URL minimal.
+        // IMPORTANT (2026-08-31): the AgentConversation model has
+        // NO ``project_name`` / ``project`` columns — the name
+        // lives inside ``conv.metadata.project_name`` /
+        // ``conv.metadata.project`` (createAgentConversation in
+        // agentEnhanced.js stores it there).  The old code read
+        // ``conv.project_name || conv.project`` which is ALWAYS
+        // undefined for every conversation, so ``?projectName=``
+        // was never restored on refresh — the URL stayed
+        // ``?conv=...&agentName=...`` and the project context
+        // silently vanished.  Read from metadata instead.
+        //
+        // ALSO (2026-08-31, user-requested): write ``agentName``
+        // back into the URL here.  The old comment below claimed
+        // "no code path reads agentName from the URL" — that's
+        // outdated: the ?conv= deep-link restore above DOES read
+        // ``?agentName=`` as an override (convAgentName), and the
+        // user explicitly wants the URL to carry the full context
+        // (project + agent + conv) so a refresh keeps the LLM
+        // bound to the same agent.  Matching other AI agents'
+        // shareable-conversation URLs (Kimi/Claude/GPT).
         try {
           const url = new URL(window.location.href);
           if (conv.project_id) {
             url.searchParams.set('project', conv.project_id);
-            setPendingProjectId(conv.project_id);
           }
-          if (conv.project_name || conv.project) {
-            const pname = conv.project_name || conv.project;
+          const pname = (conv.metadata && (conv.metadata.project_name || conv.metadata.project))
+            || conv.project_name || conv.project;
+          if (pname) {
             url.searchParams.set('projectName', pname);
-            setPendingProjectState(pname);
+            // Seed the input's project chip + FK together (the only
+            // setter the context exposes — setPendingProject(name, id)).
+            setPendingProject(pname, conv.project_id || null);
+          } else if (conv.project_id) {
+            // No name resolved — still stage the FK so the chip logic
+            // and next-send project scoping work.
+            setPendingProject(null, conv.project_id);
+          }
+          const agentName = wantedName || conv.agent_name;
+          if (agentName) {
+            url.searchParams.set('agentName', agentName);
           }
           window.history.replaceState({}, '', url.toString());
         } catch { /* SSR / non-browser env — best-effort */ }
+        // Dashboard-mode: if this conversation was stamped as a dedicated
+        // dashboard session (metadata.mode === 'dashboard'), surface the
+        // badge in the header with a link to the bound app. The slug/name
+        // were written by create_fullstack_dashboard / update_fullstack_dashboard.
+        const meta = conv.metadata || {};
+        if (meta.mode === 'dashboard' && (meta.dashboard_slug || meta.dashboard_id)) {
+          setDashboardMode({
+            slug: meta.dashboard_slug || meta.dashboard_id,
+            name: meta.dashboard_name || meta.dashboard_slug || meta.dashboard_id,
+          });
+        } else {
+          setDashboardMode(null);
+        }
       }).catch(() => {
         // 404 or network error — leave the chat empty and let
         // the user start a new session.
@@ -624,30 +647,6 @@ export default function Chat() {
       // previous behavior of clearing the URL entirely.
       window.history.replaceState({}, '', '/');
     }
-  }, []);
-  // Alert "Investigate" button: when the user clicks "Investigate" on
-  // a proactive alert in the sidebar, Sidebar.jsx dispatches an
-  // 'alerts:investigate' CustomEvent with the question and project
-  // context.  We create a new chat session (so the alert investigation
-  // gets its own thread) and prefill the input — the user presses
-  // Enter to send when ready.
-  useEffect(() => {
-    const handler = (e) => {
-      const { question, projectId, projectName } = e.detail || {};
-      if (!question) return;
-      // Create a fresh session scoped to the alert's project (Ecisco BI).
-      contextNewChat(projectName || null);
-      // Stage the project context so the chat input renders the chip
-      // and the next send auto-selects ecisco_bi_assistant.
-      if (projectName || projectId) {
-        setPendingProject(projectName || null, projectId || null);
-      }
-      // Prefill the input — do NOT auto-send (screenshot shows the
-      // question in the input box, user decides when to submit).
-      setInputValue(question);
-    };
-    window.addEventListener('alerts:investigate', handler);
-    return () => window.removeEventListener('alerts:investigate', handler);
   }, []);
   // P3-bis: ?autorun=1 deep-link from /automation's "Run Now" button.
   // The button builds a structured "Run Automation Task: ..." prompt
@@ -717,7 +716,15 @@ export default function Chat() {
     setChips([]);
     setActiveSkill(null);
     if (!_isNewSession) setActiveAgent(null);
-    setAttachments([]);
+    // Only wipe draft attachments when switching to an EXISTING session
+    // (one with a conversation_id). A brand-new session can be created
+    // mid-upload by ensureSession() from the landing page (activeId was
+    // null) — wiping here would erase the chip the user just uploaded
+    // and the agent would never receive the file. Attachments for a
+    // genuinely fresh task were already cleared when activeId went to
+    // null (the "+ New Task" transition), so skipping the wipe for new
+    // sessions is a no-op in that flow and only protects the upload case.
+    if (!_isNewSession) setAttachments([]);
     if (activeId) {
       loadSessionRef.current = activeId;
       setMessages([]);
@@ -1304,17 +1311,8 @@ export default function Chat() {
     if (!effectiveAgent) {
       try {
         const _agents = await base44.entities.AgentApp.list();
-        // When inside the Ecisco BI project, auto-select
-        // ecisco_bi_assistant (replaces legacy orchestrator_agent).
-        // Respect the user's manual choice if activeAgent is already set.
-        if (pendingProject === 'Ecisco BI') {
-          const eciscoAgent = _agents.find((a) => a.name === 'ecisco_bi_assistant');
-          if (eciscoAgent) {
-            effectiveAgent = eciscoAgent;
-          }
-        }
-        // Fallback: general_assistant for all other projects or if
-        // ecisco_bi_assistant is not found.
+        // Fallback: general_assistant for all projects or if no agent is
+        // found.
         if (!effectiveAgent) {
           effectiveAgent = _agents.find((a) => a.name === 'general_assistant') || null;
         }
@@ -1345,7 +1343,7 @@ export default function Chat() {
     //      matches ``isCreateAutomationRequest``.
     //   2. Existing automation-bound chats — ``activeAgent`` is already
     //      ``automation_agent`` (set by conv rehydration).
-    // Other chats (general, Ecisco BI, custom agents) keep their
+    // Other chats (general, project-scoped, custom agents) keep their
     // current agent. We do NOT ``setActiveAgent`` here — the binding
     // persists via the conversation's ``agent_name`` field, which the
     // rehydration effect reads on reload.
@@ -1750,7 +1748,7 @@ export default function Chat() {
             // to the legacy `project` string so the executor's
             // `_resolve_task_project` finds the right project (and binds the
             // project's data sources) when the task runs. Without this, data
-            // sources bound to project "Ecisco BI" silently fall back to a
+            // sources bound to the project silently fall back to a
             // different project and the report comes back empty.
             const projectIdFk = pendingProjectId || null;
             const payload = cr.type === 'report'
@@ -2022,7 +2020,7 @@ export default function Chat() {
     };
   }
 
-  async function handleAgentSend(text, { activeAgent, activeSkill, sid, gen, sessionId, aiMsg, fileUrls, lang }) {
+  async function handleAgentSend(text, { activeAgent, activeSkill, sid, gen, sessionId, aiMsg, fileUrls, lang, regenerate = false }) {
     // Lazily create a backend conversation bound to this agent. The
     // v3 endpoint keys off ``conv.agent_name`` and runs the data-source
     // runtime against the matching AgentApp.
@@ -2032,10 +2030,10 @@ export default function Chat() {
       // source of truth for the current navigation). Previously this
       // read ``sessionStorage['zhanlu:lastProjectContext']``, which
       // leaked: a user who had earlier visited
-      // ``/chat?projectName=Ecisco+BI`` would later open a fresh
+      // ``/chat?projectName=<project>`` would later open a fresh
       // ``/chat`` (no project param) and find their new conversation
-      // auto-tagged with the Ecisco+BI project — and consequently
-      // auto-routed to ``ecisco_bi_assistant`` instead of the default
+      // auto-tagged with that project — and consequently
+      // auto-routed to a project-scoped agent instead of the default
       // ``general_assistant``. Using the URL directly ensures the
       // project context matches the current navigation: only chats
       // opened from a project-scoped URL get tagged with that
@@ -2131,6 +2129,12 @@ export default function Chat() {
         // a reload re-hydrates the full context.
         if (projectCtx.projectId) url.searchParams.set('project', projectCtx.projectId);
         if (projectCtx.projectName) url.searchParams.set('projectName', projectCtx.projectName);
+        // (2026-08-31) Always write agentName too — the user's URL
+        // should carry the FULL context (project + agent + conv) so
+        // a refresh re-binds the same agent and the LLM keeps its
+        // identity. The ?conv= rehydration reads ?agentName= as an
+        // override, so this round-trips correctly.
+        if (activeAgent && activeAgent.name) url.searchParams.set('agentName', activeAgent.name);
         window.history.replaceState({}, '', url.toString());
       } catch { /* SSR / test env */ }
     }
@@ -2145,7 +2149,11 @@ export default function Chat() {
     let currentPhase = null;  // latest Claude-style phase headline { state, verb, title }
     let liveTraceSteps = [];  // P0: accumulate trace_step events incrementally
     let reasoningText = '';   // P0: accumulate reasoning from reasoning_done
+    let streamingReasoning = ''; // P0-3: per-token reasoning_delta for the live one-liner
+    let streamingAction = null;  // P0-3: tool-action text for the live one-liner
+    let streamingPlanSteps = []; // 2026-08-27: plan_step_added/completed → live todo checklist
     let finalArtifacts = [];  // artifacts extracted from the done event's conversation
+    let sources = [];         // citations extracted from the done event (Kimi/GPT-style source chips)
     let aborted = false;
     try {
       stream.startSending(sid, gen);
@@ -2162,6 +2170,7 @@ export default function Chat() {
         {
           role: 'user',
           content: text,
+          ...(regenerate ? { regenerate: true } : {}),
           ...(fileUrls && fileUrls.length ? { file_urls: fileUrls } : {}),
           ...(lang ? { lang } : {}),
           ...(selectedSkill ? { selected_skill: selectedSkill, selected_skill_id: selectedSkill.id } : {}),
@@ -2228,9 +2237,52 @@ export default function Chat() {
               m.id === aiMsg.id ? { ...m, plan_summary: evt.plan } : m
             ));
           }
+        } else if (evt.type === 'reasoning_delta' && typeof evt.content === 'string') {
+          // P0-3 live one-liner: per-token reasoning stream (Kimi/Claude-style).
+          // Accumulate raw thinking so the status line shows it char-by-char.
+          streamingReasoning += evt.content;
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, streaming_reasoning: streamingReasoning } : m
+            ));
+          }
+        } else if (evt.type === 'plan_step_added' && typeof evt.step_index === 'number') {
+          // 2026-08-27: deterministic turn plan — the backend emits the todo
+          // list BEFORE the loop starts (plan_step_added) and ticks steps off
+          // as tool evidence completes them (plan_step_completed). Accumulate
+          // into streaming_plan_steps so LiveActivityStream renders the live
+          // checklist ("agent makes a plan, then follows it").
+          const existingIdx = streamingPlanSteps.findIndex((s) => s.step_index === evt.step_index);
+          const step = { step_index: evt.step_index, title: evt.title || '', status: 'pending' };
+          if (existingIdx >= 0) streamingPlanSteps[existingIdx] = { ...streamingPlanSteps[existingIdx], ...step };
+          else streamingPlanSteps.push(step);
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, streaming_plan_steps: [...streamingPlanSteps] } : m
+            ));
+          }
+        } else if (evt.type === 'plan_step_completed' && typeof evt.step_index === 'number') {
+          const existingIdx = streamingPlanSteps.findIndex((s) => s.step_index === evt.step_index);
+          if (existingIdx >= 0) streamingPlanSteps[existingIdx] = { ...streamingPlanSteps[existingIdx], status: 'done' };
+          else streamingPlanSteps.push({ step_index: evt.step_index, title: evt.title || '', status: 'done' });
+          if (gen === genRef.current) {
+            setMessages((prev) => prev.map((m) =>
+              m.id === aiMsg.id ? { ...m, streaming_plan_steps: [...streamingPlanSteps] } : m
+            ));
+          }
         } else if (evt.type === 'tool_progress' && Array.isArray(evt.tool_calls)) {
           toolCalls = evt.tool_calls;
           if (gen === genRef.current) {
+            // Derive a short action label for the live one-liner from the
+            // most recent tool call (e.g. "running query…").
+            const lastCall = evt.tool_calls[evt.tool_calls.length - 1];
+            const toolName = lastCall?.name || lastCall?.function?.name || lastCall?.tool_name || '';
+            if (toolName) {
+              streamingAction = toolName;
+              setMessages((prev) => prev.map((m) =>
+                m.id === aiMsg.id ? { ...m, streaming_action: toolName } : m
+              ));
+            }
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id ? { ...m, tool_calls: toolCalls } : m
             ));
@@ -2402,6 +2454,16 @@ export default function Chat() {
           if (Array.isArray(lastAssistant?.artifacts) && lastAssistant.artifacts.length) {
             finalArtifacts = lastAssistant.artifacts;
           }
+          // Kimi/GPT-style citations: read the sources the backend attached
+          // to the assistant message (FSM path also mirrors them in
+          // evt.sources). Persisted so source chips survive a refresh.
+          // NOTE: assigns to the outer accumulator (hoisted above the
+          // loop) so the final ChatMessage.update below can persist them.
+          if (Array.isArray(lastAssistant?.sources) && lastAssistant.sources.length) {
+            sources = lastAssistant.sources;
+          } else if (Array.isArray(evt.sources) && evt.sources.length) {
+            sources = evt.sources;
+          }
           if (gen === genRef.current) {
             setMessages((prev) => prev.map((m) =>
               m.id === aiMsg.id
@@ -2411,6 +2473,7 @@ export default function Chat() {
                   tool_calls: toolCalls,
                   refining: false,
                   ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
+                  ...(sources.length ? { sources } : {}),
                 }
                 : m
             ));
@@ -2543,6 +2606,7 @@ export default function Chat() {
         ...(liveEvents.length ? { live_events: liveEvents } : {}),
         ...(finalArtifacts.length ? { artifacts: finalArtifacts } : {}),
         ...(currentPhase ? { phase: currentPhase } : {}),
+        ...(sources.length ? { sources } : {}),
       });
       await base44.entities.ChatSession.update(sid, { last_message_at: new Date().toISOString() });
       touchSession(sid);
@@ -2551,6 +2615,77 @@ export default function Chat() {
     // done — the next Send click should start a new stream, not steer.
     setStreamingConvId((cur) => (cur === convId ? null : cur));
     return { convId, fullContent, toolCalls, aborted };
+  }
+
+  // Kimi/GPT-style regenerate: re-run the LAST user turn against the same
+  // conversation. The backend (``regenerate: true``) reuses the existing
+  // user message (no duplicate user bubble), re-runs the agent loop, and
+  // REPLACES the previous assistant message — so the UI simply streams the
+  // new answer into the SAME assistant bubble (same id, no orphan rows).
+  // Only available on the LAST assistant message while idle.
+  async function handleRegenerate(targetMsg) {
+    if (!targetMsg || targetMsg.role !== 'assistant' || streamingId || loading) return;
+    const idx = messages.findIndex((m) => m && m.id === targetMsg.id);
+    if (idx < 0) return;
+    // Locate the user prompt that produced this assistant reply (walk
+    // back past any hidden/system markers to the nearest user message).
+    let userIdx = idx - 1;
+    while (userIdx >= 0 && messages[userIdx]?.role !== 'user') userIdx--;
+    if (userIdx < 0) return;
+    const userMsg = messages[userIdx];
+    if (!userMsg || !userMsg.content) return;
+    const gen = ++genRef.current;
+    const sid = activeId;
+    if (!sid) return;
+    // Reuse the SAME assistant message object (id preserved) so the
+    // stream's done handler merges into the existing bubble and the
+    // final ChatMessage.update rewrites the same row — no duplicates.
+    const aiMsg = { ...targetMsg, content: '', tool_calls: [], artifacts: [], sources: [], refining: true };
+    setMessages((prev) => prev.map((m) => (m && m.id === targetMsg.id ? aiMsg : m)));
+    setStreamingId(aiMsg.id);
+    setLoading(true);
+    let effectiveAgent = activeAgent;
+    if (!effectiveAgent) {
+      try {
+        const _agents = await base44.entities.AgentApp.list();
+        effectiveAgent = _agents.find((a) => a.name === 'general_assistant') || null;
+        if (!effectiveAgent) effectiveAgent = { name: 'general_assistant' };
+      } catch {
+        effectiveAgent = { name: 'general_assistant' };
+      }
+    }
+    try {
+      const effectiveAiLang = aiLang === 'auto' ? (detectLang(userMsg.content) || 'zh') : aiLang;
+      // Resolve the conv id to reuse (same priority as handleSend).
+      let resumeConvId = streamingConvId;
+      if (!resumeConvId && sid) {
+        const sess = getSession ? getSession(sid) : null;
+        resumeConvId = sess?.conversation_id || null;
+      }
+      if (!resumeConvId) {
+        try {
+          const urlConv = new URLSearchParams(window.location.search).get('conv');
+          if (urlConv) resumeConvId = urlConv;
+        } catch { /* SSR / test env */ }
+      }
+      await handleAgentSend(userMsg.content, {
+        activeAgent: effectiveAgent,
+        activeSkill: activeSkill,
+        sid,
+        gen,
+        sessionId: resumeConvId,
+        aiMsg,
+        fileUrls: [],  // backend re-reads the original turn's file_urls from conv.messages
+        lang: effectiveAiLang,
+        regenerate: true,
+      });
+    } finally {
+      if (gen === genRef.current) {
+        setLoading(false);
+        setStreamingId(null);
+        if (stream.isActive) stream.complete();
+      }
+    }
   }
 
   async function handleClear() {
@@ -2828,6 +2963,23 @@ export default function Chat() {
     const kind = ['csv', 'xls', 'xlsx', 'json', 'tsv'].includes(ext) ? 'data_file'
       : ['html', 'htm'].includes(ext) ? 'html_file' : 'document';
 
+    // 0) Ensure a session exists BEFORE the chip renders. Creating a
+    // session calls setActiveId(), and the session-change effect clears
+    // draft attachments (setAttachments([])) — if the chip is rendered
+    // first, the effect wipes it a tick later and the user sees nothing
+    // (the "file uploaded but never shown, agent never gets it" bug on
+    // the landing page, where activeId is null). Running ensureSession
+    // here makes the wipe-effect fire while attachments is still empty;
+    // the chip lands after, with no subsequent activeId change to clear
+    // it. Best-effort: if session creation fails we still upload and
+    // render the chip (persistence just won't have a session link).
+    let sid = null;
+    try {
+      sid = await ensureSession(file.name);
+    } catch (err) {
+      console.error('[upload] ensureSession failed (chip still rendered):', err);
+    }
+
     // 1) Upload the bytes first so the chip can render even if persistence fails.
     try {
       const uploaded = await base44.integrations.Core.UploadFile({ file });
@@ -2844,11 +2996,12 @@ export default function Chat() {
 
     // 3) Best-effort persistence — don't block the chip if this fails.
     try {
-      const sid = await ensureSession(file.name);
-      await base44.entities.UserFile.create({
-        name: file.name, file_type: ext, size: file.size, file_url, source: 'upload',
-        resource_kind: kind, session_id: sid, project: pendingProject || t.sessionList.ungrouped,
-      });
+      if (sid) {
+        await base44.entities.UserFile.create({
+          name: file.name, file_type: ext, size: file.size, file_url, source: 'upload',
+          resource_kind: kind, session_id: sid, project: pendingProject || t.sessionList.ungrouped,
+        });
+      }
     } catch (err) {
       console.error('[upload] persistence failed (chip still rendered):', err);
     }
@@ -2878,6 +3031,18 @@ export default function Chat() {
                       <ArrowLeft className="h-3 w-3 shrink-0" />
                     </button>
                   ) : <span />}
+                  {dashboardMode ? (
+                    <button
+                      type="button"
+                      onClick={() => navigate(`/dashboard/${dashboardMode.slug}`)}
+                      className="inline-flex items-center gap-1.5 rounded-full border border-primary/30 bg-primary/10 px-2.5 py-0.5 text-xs font-medium text-primary transition-colors hover:bg-primary/15"
+                      title={isEn ? 'This session is dedicated to building/editing this dashboard — click to open it' : '此会话专用于构建/编辑该仪表盘 — 点击打开'}
+                    >
+                      <LayoutDashboard className="h-3.5 w-3.5" />
+                      <span className="max-w-[220px] truncate">{dashboardMode.name}</span>
+                      <ArrowLeft className="h-3 w-3 rotate-180" />
+                    </button>
+                  ) : null}
                   <div className="flex items-center gap-1.5">
                     {/* Manus-style Scheduled button — only rendered when the
                     current session is the origin of an automation. */}
@@ -2940,13 +3105,25 @@ export default function Chat() {
                             }}
                           />
                         )}
-                        {messages.filter((m) => !m.hidden && (m.id === streamingId || !(m.role === 'assistant' && !m.content))).map((m) => {
-                          const isStreaming = m.id === streamingId;
-                          const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
-                          return (
-                            <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} />
-                          );
-                        })}
+                        {(() => {
+                          // Visible = non-hidden + (streaming bubble OR any
+                          // assistant message that has content). The
+                          // Regenerate action (Kimi/GPT-style) is offered
+                          // ONLY on the LAST visible assistant message while
+                          // idle — regenerating mid-list would rewrite a
+                          // message whose children (follow-ups) depend on it.
+                          const visible = messages.filter((m) => !m.hidden && (m.id === streamingId || !(m.role === 'assistant' && !m.content)));
+                          const lastId = visible.length ? visible[visible.length - 1].id : null;
+                          const idle = !streamingId && !loading;
+                          return visible.map((m) => {
+                            const isStreaming = m.id === streamingId;
+                            const hasMarkers = (m.content || '').includes('[[CLARIFY]]') || (m.content || '').includes('[[CLARIFY_BATCH]]') || (m.content || '').includes('[[RESULT]]');
+                            const canRegenerate = m.role === 'assistant' && !!m.content && m.id === lastId && idle && !isStreaming;
+                            return (
+                              <MessageBubble key={m.id} message={{ ...m, content: m.content || '' }} isStreaming={isStreaming} onSelectOption={handleSelectOption} onSelectOther={handleSelectOther} onPreview={setPreviewResult} onArtifactPreview={setOpenArtifact} onArtifactEdit={setCanvasArtifact} onBatchClarifySubmit={handleBatchClarifySubmit} onAgentPreview={handleAgentPreview} onAgentRun={handleAgentRun} onOpenRun={isAutomationSession ? undefined : openRun} isAutomationSession={isAutomationSession} userRequestedFormat={userFormatByMessage[m.id] || null} onEditMessage={handleEditMessage} onFeedback={m.role === 'assistant' ? handleMessageFeedback : null} feedbackRating={feedbackByMessage[m.id] || null} showRoleRating={m.role === 'assistant' ? roleRatingMessageIds.has(m.id) : false} onRoleRelevance={m.role === 'assistant' ? handleRoleRelevance : null} roleRelevanceRating={roleRelevanceByMessage[m.id] || null} onRegenerate={canRegenerate ? handleRegenerate : null} />
+                            );
+                          });
+                        })()}
                       </div>
                     )}
                     {loading && <ChatThinkingIndicator />}
@@ -3051,6 +3228,20 @@ export default function Chat() {
             </Panel>
           </>
         )}
+        {canvasArtifact && (
+          <>
+            <PanelResizeHandle className="w-1 shrink-0 cursor-col-resize bg-border transition-colors hover:bg-primary/50 data-[resize-handle-state=drag]:bg-primary" />
+            <Panel id="artifact-canvas-panel" order={5} defaultSize={46} minSize={30} maxSize={75}>
+              <div className="h-full overflow-hidden">
+                <ArtifactCanvasEditor
+                  artifact={canvasArtifact}
+                  onClose={() => setCanvasArtifact(null)}
+                  onSaved={() => { /* preview/download endpoints serve latest version */ }}
+                />
+              </div>
+            </Panel>
+          </>
+        )}
       </PanelGroup>
       <ChatFilesModal sessionId={activeId} open={filesOpen} onOpenChange={setFilesOpen} />
     </div>
@@ -3098,7 +3289,7 @@ You DO have real-time data access through your tools. When the user asks about c
 
 `;
 
-const baseSystemPrompt = `${_dateAnchor}你是伊斯科AI认知核心助手，一个企业级 AI 智能平台的核心中枢。
+const baseSystemPrompt = `${_dateAnchor}你是Zhanlu认知核心助手，一个企业级 AI 智能平台的核心中枢。
 
 你的能力：
 1. 通过对话帮助用户创建、配置和管理：Agent 应用、自动化任务、知识库、工具技能、报表、决策编排流程。

@@ -76,8 +76,47 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # The COPY is here so the image is self-contained if used standalone.
 COPY . .
 
+# ── Theme fonts for deck rendering ──────────────────────────────────
+# The 12 HTML-design ThemePresets declare Google Fonts family names
+# (Archivo Black, Space Grotesk, Manrope, Fraunces, ...) that the base
+# image does NOT ship — without them Chromium/LibreOffice fall back to a
+# generic sans and every deck loses its intended typeface ("looks like a
+# plain template" complaint).  We bundle free Google Fonts (the same set
+# the canvas-design skill ships) + a fontconfig alias table that maps each
+# declared theme font to an installed family, so the image-fill pipeline
+# renders the intended look.  CJK: Noto Sans SC (sans) + Source Han Serif
+# CN (serif) give Chinese decks real glyphs (fonts-noto in Debian does not
+# include CJK — :lang=zh was empty before this step).
+COPY docker/fonts/zhanlu-fonts.conf /etc/fonts/conf.d/99-zhanlu-theme-fonts.conf
+RUN mkdir -p /usr/share/fonts/truetype/zhanlu \
+    && cp skills/canvas-design/canvas-fonts/*.ttf /usr/share/fonts/truetype/zhanlu/ \
+    && cp docker/fonts/NotoSansSC-Regular.ttf /usr/share/fonts/truetype/zhanlu/ \
+    && cp docker/fonts/SourceHanSerif-Regular.ttf /usr/share/fonts/truetype/zhanlu/ \
+    && fc-cache -f >/dev/null 2>&1 \
+    && fc-match "Manrope" | grep -qi "outfit" \
+    && fc-match "Microsoft YaHei" | grep -qiE "noto|arial" \
+    || echo "WARNING: theme font alias verification failed (non-fatal)"
+
+# ── slide-skill: native-editable PPTX tier ──────────────────────────
+# slide-skill (bundled in skills/ppt_skills) is the SVG-first pipeline that
+# produces FULLY-EDITABLE native .pptx (real text frames) — used when the
+# user asks for an editable/tweakable deck (HTML_DESIGN_EDITABLE_ENABLED).
+# The HTML image-fill path bakes PNGs per slide; this tier is the editable
+# alternative.  Also patches its chromium invocations with --no-sandbox so
+# the render-convergence QA gate works for the non-root zhanlu user.
+RUN /usr/local/bin/python -m pip install -e /app/skills/ppt_skills/slide-skill-master --no-cache-dir -q \
+    && grep -q "no-sandbox" /app/skills/ppt_skills/slide-skill-master/tools/slide/src/slide_skill/measurement_contracts.py \
+    || (sed -i 's/"--disable-gpu",$/&\\n                "--no-sandbox",/' /app/skills/ppt_skills/slide-skill-master/tools/slide/src/slide_skill/measurement_contracts.py \
+        && sed -i 's/            "--disable-gpu",$/            &\\n            "--no-sandbox",/' /app/skills/ppt_skills/slide-skill-master/tools/slide/src/slide_skill/measurement_contracts.py)
+
 # ── Permissions ─────────────────────────────────────────────────────
 RUN chown -R zhanlu:zhanlu /app
+# FIX 2026-08-29: pre-create the user-skills dir with the right owner so a
+# FRESH named volume mounted at ~/.zhanlu/skills inherits zhanlu ownership
+# (Docker copies image dir ownership into empty named volumes). Without
+# this, create_skill's write_skill_md hits PermissionError on a fresh
+# volume and the created skill silently stays DB-only/invisible.
+RUN mkdir -p /home/zhanlu/.zhanlu/skills && chown -R zhanlu:zhanlu /home/zhanlu/.zhanlu
 
 USER zhanlu
 

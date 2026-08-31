@@ -43,6 +43,21 @@ _PLAN_STEP_RE = re.compile(
     r')'
 )
 
+# Markdown bold/italic wrappers that must NOT leak into plan-step titles.
+# The local LLM streams "**Revenue**" / "- **" fragments; a title that is only
+# these markers (e.g. "**" from a mid-stream partial line) is junk.
+_MD_WRAP_RE = re.compile(r'^\s*\*{1,3}\s*|\s*\*{1,3}\s*$|^\s*_{1,2}\s*|\s*_{1,2}\s*$')
+_PURE_MD_ARTIFACT_RE = re.compile(r'[*_\-=\s]+')
+
+
+def _clean_stream_title(raw: str) -> str:
+    """Strip markdown bold/italic wrappers and reject pure-artifact titles."""
+    t = _MD_WRAP_RE.sub('', raw or '')
+    t = t.strip()
+    if not t or _PURE_MD_ARTIFACT_RE.fullmatch(t):
+        return ''
+    return t
+
 
 def parse_plan_steps_from_text(text: str) -> list[dict]:
     """Extract plan steps from streaming text. Returns ordered list of {step_index, title}."""
@@ -53,7 +68,9 @@ def parse_plan_steps_from_text(text: str) -> list[dict]:
         title = m.group("title1") or m.group("title2") or m.group("title3")
         num = m.group("num1") or m.group("num2")
         if title:
-            title = title.strip()
+            title = _clean_stream_title(title)
+            if not title:
+                continue  # markdown artifact ("**", "---") — not a real step
             if len(title) > 200:  # truncate very long lines
                 title = title[:200] + "…"
             steps.append({

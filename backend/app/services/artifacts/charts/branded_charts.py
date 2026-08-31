@@ -59,6 +59,14 @@ def style_chart(chart, theme: dict, kind: str = "bar") -> None:
 
     palette = _brand_palette(theme)
     series = list(chart.series)
+
+    # Resolve the typeface.  Charts inherit PowerPoint's default (Calibri)
+    # unless we set it explicitly on every text element.  East-Asian axis
+    # labels need the CJK face or they render in SimSun/DengXian.
+    import re as _re
+    _cjk = _re.compile(r"[\u2e80-\u9fff\u3000-\u303f\uf900-\ufaff\uff00-\uffef]")
+    _body_font = (theme or {}).get("font_body") or "Inter"
+    _cjk_font = (theme or {}).get("font_cjk") or "Microsoft YaHei"
     for i, s in enumerate(series):
         try:
             color_hex = palette[i % len(palette)]
@@ -86,6 +94,7 @@ def style_chart(chart, theme: dict, kind: str = "bar") -> None:
         plot.has_data_labels = True
         dl = plot.data_labels
         dl.font.size = 11
+        dl.font.name = _body_font
         dl.font.color.rgb = RGBColor.from_string(_hex(theme, "text", "#0F172A"))
         if kind == "pie":
             dl.position = XL_LABEL_POSITION.OUTSIDE_END
@@ -103,10 +112,29 @@ def style_chart(chart, theme: dict, kind: str = "bar") -> None:
             chart.has_legend = True
             chart.legend.position = XL_LEGEND_POSITION.BOTTOM
             chart.legend.include_in_layout = False
+            chart.legend.font.size = 11
+            chart.legend.font.name = _body_font
         else:
             chart.has_legend = False
     except Exception:
         logger.debug("style_chart: legend config failed", exc_info=True)
+
+    # Axis tick-label fonts (category axis may carry CJK material names).
+    try:
+        cat_axis = chart.category_axis
+        cat_font = _cjk_font if any(
+            _cjk.search(str(t)) for t in (cat_axis.tick_labels or [])
+        ) else _body_font
+        cat_axis.tick_labels.font.size = 11
+        cat_axis.tick_labels.font.name = cat_font
+    except Exception:
+        logger.debug("style_chart: category axis font failed", exc_info=True)
+    try:
+        val_axis = chart.value_axis
+        val_axis.tick_labels.font.size = 11
+        val_axis.tick_labels.font.name = _body_font
+    except Exception:
+        logger.debug("style_chart: value axis font failed", exc_info=True)
 
 
 def render_chart_image(

@@ -27,11 +27,11 @@ def try_fast_path(
     """Return a CacheQueryResult if fast-path applies, else None.
 
     Fast-path applies when:
-      - ECISCO_BI_KG_QWEN_FAST_PATH is True
+      - PROJECT_KNOWLEDGE_QWEN_FAST_PATH is True
       - model_id matches QWEN_FAST_PATH_MODEL_PREFIXES
       - the cache returns a non-None hit
     """
-    if not getattr(settings, "ECISCO_BI_KG_QWEN_FAST_PATH", False):
+    if not getattr(settings, "PROJECT_KNOWLEDGE_QWEN_FAST_PATH", False):
         return None
     if not is_qwen_model(model_id):
         return None

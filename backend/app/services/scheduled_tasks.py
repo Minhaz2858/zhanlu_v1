@@ -1,14 +1,12 @@
 """Scheduled background tasks — periodic memory + skill consolidation.
 
-Runs memory consolidation, skill curation, nightly forecast, news ingestion,
-and alert checks on a periodic schedule using asyncio background tasks.
+Runs memory consolidation, skill curation, nightly forecast,
+and eval pipelines on a periodic schedule using asyncio background tasks.
 Started at app startup.
 
 Schedule:
 - Memory consolidation: every 30 minutes per agent
 - Skill curation: every 6 hours (global)
-- Alert check: every 5 minutes
-- News ingestion: every 1 hour (intelligence layer)
 - Nightly forecast: daily at 2:00 AM UTC
 
 All tasks are non-fatal — failures are logged but never crash the app.
@@ -27,10 +25,6 @@ logger = logging.getLogger(__name__)
 # Schedule intervals (seconds)
 MEMORY_CONSOLIDATION_INTERVAL = 30 * 60  # 30 minutes
 SKILL_CURATION_INTERVAL = 6 * 60 * 60   # 6 hours
-ALERT_CHECK_INTERVAL = 5 * 60            # 5 minutes
-MARKET_ALERT_SCAN_INTERVAL = 5 * 60      # 5 minutes (Ecisco BI market alert scan)
-PERCEPTION_HEALTH_INTERVAL = 60 * 60      # 1 hour (perception snapshot health canary)
-NEWS_INGESTION_INTERVAL = 60 * 60        # 1 hour (intelligence layer)
 DAILY_EVAL_INTERVAL = 24 * 60 * 60       # 24 hours (LLM quality eval pipeline)
 
 NIGHTLY_HOUR_UTC = 2  # 2:00 AM UTC
@@ -124,76 +118,9 @@ def _skill_curation_sync() -> None:
         _inc_failure("skill_curation")
 
 
-async def _run_alert_check_cycle() -> None:
-    """Run alert threshold checks."""
-    try:
-        from app.services.alerting import check_alerts
-        alerts = check_alerts()
-        for alert in alerts:
-            logger.warning("ALERT: %s", alert)
-    except Exception as e:
-        logger.debug("Alert check failed: %s", e)
-
-
-async def _run_news_ingestion_cycle() -> None:
-    """Run one news ingestion scan cycle for the intelligence layer."""
-    try:
-        from app.database import SessionLocal
-        from app.services.intelligence.news_ingestion_agent import NewsIngestionAgent
-
-        def _run_sync() -> None:
-            with SessionLocal() as db:
-                agent = NewsIngestionAgent(db, org_id="default-org")
-                agent.run_news_cycle(trigger="scheduled")
-                db.commit()
-
-        await asyncio.to_thread(_run_sync)
-    except Exception as e:
-        logger.warning("News ingestion cycle failed: %s", e)
-
-
-# ---- Ecisco BI Market Alert Scan ----------------------------------------
-
-async def _run_market_alert_scan_cycle() -> None:
-    """Run one market alert scan cycle — snapshot → detect → persist."""
-    try:
-        from app.services.perception.worker import run_alert_scan_cycle
-        await run_alert_scan_cycle()
-    except Exception as e:
-        logger.warning("Market alert scan cycle failed: %s", e)
-
-
-# Perceptual health guard — runs hourly so a regression in the price-warehouse
-# bridge (empty snapshot) surfaces in logs instead of silently dropping alerts.
-_PERCEPTION_HEALTH_MIN_PRODUCTS = 3
-
-
-def _perception_health_check() -> None:
-    """Verify the perception snapshot resolves real prices for enough products.
-
-    Logs a WARNING when fewer than ``_PERCEPTION_HEALTH_MIN_PRODUCTS`` products
-    carry a price — the canary that would otherwise let the alert table go empty
-    without any signal.
-    """
-    try:
-        from app.services.perception.service import build_perception_snapshot
-
-        snapshot = build_perception_snapshot(db=None)
-        products = snapshot.get("products", {})
-        priced = [pid for pid, p in products.items() if p.get("latest_price") is not None]
-        if len(priced) < _PERCEPTION_HEALTH_MIN_PRODUCTS:
-            logger.warning(
-                "[perception-health] snapshot returned only %d/%d priced products "
-                "(expected >= %d). Check market_dashboard_service.read_product_history_rows "
-                "and PerceptionService._get_product_price.",
-                len(priced), len(products), _PERCEPTION_HEALTH_MIN_PRODUCTS,
-            )
-        else:
-            logger.info(
-                "[perception-health] OK — %d priced products in snapshot", len(priced)
-            )
-    except Exception as e:
-        logger.warning("[perception-health] check failed: %s", e)
+# ---- Market Alert Scan (removed with the alerts system) ----------------
+# REMOVED with the alerts system (2026-08-27). The market alert scan cycle,
+# perception health canary, and CEO morning digest loop no longer exist.
 
 
 # ---- Daily LLM Quality Eval Pipeline -------------------------------------------
@@ -507,7 +434,7 @@ def _run_decision_scoring_step(db) -> dict:
 
 
 def _run_nightly_forecast_sync() -> dict:
-    """Run the forecast engine for all active Ecisco BI targets (sync).
+    """Run the forecast engine for all active targets (sync).
 
     Returns summary dict: {success, total, failures, elapsed_s}.
     Called via asyncio.to_thread() to avoid blocking the event loop.
@@ -515,15 +442,15 @@ def _run_nightly_forecast_sync() -> dict:
     from app.database import SessionLocal
     from app.models.forecasting import ForecastTarget
     from app.services.forecasting.engine import ForecastEngine
-    from app.services.forecasting.seed_ecisco_targets import (
-        seed_ecisco_forecast_targets,
+    from app.services.forecasting.seed_targets import (
+        seed_forecast_targets,
         discover_and_seed_sku_targets,
     )
 
     db = SessionLocal()
     try:
         # 1. Seed targets (idempotent)
-        seeded = seed_ecisco_forecast_targets(db)
+        seeded = seed_forecast_targets(db)
         # 1b. Discover and seed ERP SKU targets (idempotent)
         sku_seeded = discover_and_seed_sku_targets(db)
         logger.info(
@@ -683,134 +610,9 @@ async def _nightly_forecast_loop() -> None:
         await asyncio.sleep(5)
 
 
-# ---- CEO Morning Digest Loop (daily at ALERT_DIGEST_HOUR_UTC) ---------
-
-def _calculate_seconds_until_digest_hour() -> float:
-    """Return seconds from now until the next ALERT_DIGEST_HOUR_UTC occurrence."""
-    from app.config import settings
-    target_hour = settings.ALERT_DIGEST_HOUR_UTC
-    now = datetime.datetime.now(datetime.timezone.utc)
-    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
-    if now >= target:
-        target += datetime.timedelta(days=1)
-    return (target - now).total_seconds()
-
-
-async def _run_digest_cycle() -> None:
-    """Run one CEO morning digest build cycle."""
-    from app.config import settings
-    if not settings.ALERT_DIGEST_ENABLED:
-        return
-    try:
-        from app.database import SessionLocal
-        from app.services.perception.digest_service import DigestService
-
-        db = SessionLocal()
-        try:
-            org_id = settings.DEFAULT_ORG_ID
-            svc = DigestService(db=db, org_id=org_id)
-            result = await svc.build_and_persist()
-            if result:
-                logger.info("[digest] Morning digest persisted: %s", result.title)
-            else:
-                logger.info("[digest] No digest today (quiet day or already exists)")
-        finally:
-            db.close()
-    except Exception:
-        logger.exception("[digest] Unhandled exception in digest cycle")
-
-
-async def _digest_loop() -> None:
-    """Infinite loop: sleep until next ALERT_DIGEST_HOUR_UTC, run cycle, repeat."""
-    from app.config import settings
-    if not settings.ALERT_DIGEST_ENABLED:
-        logger.info("[digest] ALERT_DIGEST_ENABLED is off — digest loop not started")
-        return
-
-    while True:
-        delay = _calculate_seconds_until_digest_hour()
-        next_run = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-            seconds=delay
-        )
-        logger.info(
-            "[digest] Next run in %.1f hours (%s UTC)",
-            delay / 3600,
-            next_run.isoformat(),
-        )
-        await asyncio.sleep(delay)
-        try:
-            await _run_digest_cycle()
-        except Exception:
-            logger.exception("[digest] Unhandled exception in digest loop")
-        # Brief cooldown to prevent tight retry on persistent errors
-        await asyncio.sleep(5)
-
-
-# ---- Weekly Summary & Forecast Digest Loop (Sunday 00:00 UTC) ----------
-
-def _calculate_seconds_until_weekly_digest_hour() -> float:
-    """Return seconds from now until the next weekly digest generation time.
-
-    Runs on WEEKLY_DIGEST_DAY_UTC (default 0=Monday) at WEEKLY_DIGEST_HOUR_UTC (default 0=midnight).
-    """
-    from app.config import settings
-    target_hour = settings.WEEKLY_DIGEST_HOUR_UTC
-    target_day = settings.WEEKLY_DIGEST_DAY_UTC  # 0=Monday
-    now = datetime.datetime.now(datetime.timezone.utc)
-    # Find the next occurrence of the target day+hour
-    target = now.replace(hour=target_hour, minute=0, second=0, microsecond=0)
-    days_ahead = (target_day - now.weekday()) % 7
-    if days_ahead == 0 and now >= target:
-        days_ahead = 7
-    target += datetime.timedelta(days=days_ahead)
-    return (target - now).total_seconds()
-
-
-async def _run_weekly_digest_cycle() -> None:
-    """Run one weekly digest generation cycle."""
-    from app.config import settings
-    if not settings.WEEKLY_DIGEST_ENABLED:
-        return
-    try:
-        from app.database import SessionLocal
-        from app.services.weekly_digest.generator import generate_weekly_digest_parallel
-
-        db = SessionLocal()
-        try:
-            card = await generate_weekly_digest_parallel(db, org_id="default-org")
-            logger.info(
-                "[weekly-digest] Generation complete: card=%s, status=%s, products=%d",
-                card.id, card.status, card.product_count,
-            )
-        finally:
-            db.close()
-    except Exception:
-        logger.exception("[weekly-digest] Unhandled exception in weekly digest cycle")
-
-
-async def _weekly_digest_loop() -> None:
-    """Infinite loop: sleep until next weekly digest time, run cycle, repeat."""
-    from app.config import settings
-    if not settings.WEEKLY_DIGEST_ENABLED:
-        logger.info("[weekly-digest] WEEKLY_DIGEST_ENABLED is off — digest loop not started")
-        return
-
-    while True:
-        delay = _calculate_seconds_until_weekly_digest_hour()
-        next_run = datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(
-            seconds=delay
-        )
-        logger.info(
-            "[weekly-digest] Next run in %.1f hours (%s UTC)",
-            delay / 3600,
-            next_run.isoformat(),
-        )
-        await asyncio.sleep(delay)
-        try:
-            await _run_weekly_digest_cycle()
-        except Exception:
-            logger.exception("[weekly-digest] Unhandled exception in weekly digest loop")
-        await asyncio.sleep(60)  # Cooldown to prevent tight retry
+# ---- Digest loops ------------------------------------------------------
+# REMOVED with the alerts system (2026-08-27): CEO morning digest and the
+# weekly summary/forecast digest loops no longer exist.
 
 
 async def _periodic_task(
@@ -870,39 +672,12 @@ def start_scheduled_tasks() -> None:
             name="sched-skill-curation",
         ),
         loop.create_task(
-            _periodic_task("alert_check", ALERT_CHECK_INTERVAL, _run_alert_check_cycle),
-            name="sched-alert-check",
-        ),
-        loop.create_task(
-            _periodic_task("news_ingestion", NEWS_INGESTION_INTERVAL, _run_news_ingestion_cycle),
-            name="sched-news-ingestion",
-        ),
-        loop.create_task(
             _nightly_forecast_loop(),
             name="sched-nightly-forecast",
         ),
         loop.create_task(
             _periodic_task("daily_eval", DAILY_EVAL_INTERVAL, _run_daily_eval_cycle),
             name="sched-daily-eval",
-        ),
-        loop.create_task(
-            _periodic_task("market_alert_scan", MARKET_ALERT_SCAN_INTERVAL, _run_market_alert_scan_cycle),
-            name="sched-market-alert-scan",
-        ),
-        loop.create_task(
-            _periodic_task(
-                "perception_health", PERCEPTION_HEALTH_INTERVAL,
-                lambda: asyncio.to_thread(_perception_health_check),
-            ),
-            name="sched-perception-health",
-        ),
-        loop.create_task(
-            _digest_loop(),
-            name="sched-digest",
-        ),
-        loop.create_task(
-            _weekly_digest_loop(),
-            name="sched-weekly-digest",
         ),
     ]
 
@@ -962,8 +737,6 @@ __all__ = [
     "stop_scheduled_tasks",
     "MEMORY_CONSOLIDATION_INTERVAL",
     "SKILL_CURATION_INTERVAL",
-    "ALERT_CHECK_INTERVAL",
-    "NEWS_INGESTION_INTERVAL",
     "DAILY_EVAL_INTERVAL",
     "_calculate_seconds_until_2am",
     "_run_nightly_forecast_cycle",

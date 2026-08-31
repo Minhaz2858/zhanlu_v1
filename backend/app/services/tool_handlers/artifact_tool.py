@@ -39,12 +39,11 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.models.session_state import SessionState
+from app.models.data_execution import DataExecution
 from app.services.artifacts.event_logger import log_deck_event_fire_and_forget
 from app.services.artifacts.exporters import ExportContext
 from app.services.artifacts.exporters._common import chart_rows
 from app.services.data_execution.execution_service import DataExecutionService
-from app.services.data_execution.session_state import SessionStateService
 from app.services.tool_handlers._errors import ToolExecutionError
 from app.services.tool_handlers._payload_from_execution import _payload_from_execution
 from app.services.tool_registry import registry
@@ -95,6 +94,7 @@ _TYPE_MIME = {
     "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     "pdf": "application/pdf",
     "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "html": "text/html",
 }
 
@@ -102,6 +102,7 @@ _TYPE_EXT = {
     "docx": ".docx",
     "pdf": ".pdf",
     "pptx": ".pptx",
+    "xlsx": ".xlsx",
     "html": ".html",
 }
 
@@ -732,6 +733,7 @@ def _build_deck_export_context(
     user_message: str,
     org_id: str,
     app_id: str,
+    skill_name: str = "",
 ) -> tuple[ExportContext, Optional[str]]:
     """Build the deck-pipeline ExportContext + brand fingerprint for the tool.
 
@@ -741,10 +743,13 @@ def _build_deck_export_context(
     then invalidates the stale deck.  ``theme_name`` stays a vendored base name
     because hex tokens don't pass ``validate_theme_name``; the pipeline
     resolves the actual theme via ``ExportService._resolved_theme_name``.
+    ``skill_name`` is the deck skill the agent loaded (create_artifact
+    skill=...) — drives the skill-aware personality layer.
     """
     ctx = ExportContext(
         conversation_id=conversation_id,
         user_message=user_message,
+        skill_name=skill_name or "",
     )
     theme_tokens, brand_fp = exporter._resolve_brand_tokens(
         artifact, org_id=org_id, app_id=app_id
@@ -928,16 +933,15 @@ async def _create_artifact_tool(
                 f"different session."
             )
     else:
-        # Fail-open: session-state lookup is best-effort; any error here
-        # (e.g. a non-ORM db in tests) must not break payload-only flows.
-        # isinstance() also rejects MagicMock-ish "rows" so a fake db can
-        # never fabricate an execution and pollute the payload.
-        try:
-            state = SessionStateService.get_last(db, session_id=conversation_id)
-        except Exception:
-            state = None
-        if isinstance(state, SessionState) and state.last_execution_id:
-            execution = DataExecutionService.get_by_id(db, state.last_execution_id)
+        # No source_execution_id. GUARD 1 guarantees a non-empty payload
+        # reached this point, so execution stays None: a payload-only call
+        # is a NEW analysis and must NEVER be silently merged with the
+        # session's last cached execution (a PREVIOUS topic's data — the
+        # "same file for a new request" bug class, conv 945c7cf2). The
+        # LLM's explicit payload is authoritative. Re-exports must pass
+        # source_execution_id explicitly (the prompt's RE-EXPORT HARD
+        # RULE instructs exactly that).
+        execution = None
 
     # --- Enrich payload from the cached DataExecution ---
     # GUARD 2 resolved ``execution``; map its cached result into the
@@ -981,11 +985,11 @@ async def _create_artifact_tool(
                 "type": "narrative",
             })
 
-    if artifact_type not in ("docx", "pdf", "pptx", "html"):
+    if artifact_type not in ("docx", "pdf", "pptx", "xlsx", "html"):
         return {
             "success": False,
             "error": f"Unsupported artifact type '{artifact_type}'. "
-                     f"Must be one of: docx, pdf, pptx, html.",
+                     f"Must be one of: docx, pdf, pptx, xlsx, html.",
         }
 
     if not title:
@@ -1060,6 +1064,41 @@ async def _create_artifact_tool(
             payload = dict(payload)
             payload["deck_plan"] = deck_plan.model_dump(mode="json")
 
+    # --- GUARD 3: provenance assertion (layer-2 demo-source guard) ---
+    # Backstop for prepare_data_source_runtime: the prompt-level guard removes
+    # demo sources from the LLM's view, but a citation can still leak through
+    # (historical ask_data results, orchestrator fallback without bound_kb_ids,
+    # or the LLM copying a demo source name verbatim). Reject the artifact
+    # before persistence when it cites a demo/test source and a real source
+    # was available. Demo-only workspaces pass (mirrors layer-1 semantics).
+    from app.services.data_source_runtime.data_source_runtime import (
+        assert_artifact_source_provenance,
+    )
+    prov = assert_artifact_source_provenance(
+        db, payload=payload, execution=execution, context=context,
+    )
+    if not prov["ok"]:
+        if prov["mode"] == "reject":
+            raise ToolExecutionError(
+                "create_artifact rejected by provenance guard: the artifact "
+                "cites demo/test data source(s) "
+                f"{[c.get('name') or c.get('id') for c in prov['demo_cited']]} "
+                "while real data sources are bound. Re-run the data fetch "
+                "against the real source and rebuild the artifact citing it."
+            )
+        # warn mode: persist but tag the payload so the source_json carries
+        # the provenance warning alongside the citation.
+        payload = dict(payload or {})
+        payload["_provenance_warning"] = {
+            "reason": prov["reason"],
+            "demo_cited": prov["demo_cited"],
+            "real_present": prov["real_present"],
+        }
+        logger.warning(
+            "create_artifact provenance WARNING (mode=warn): demo citation %s with real sources bound",
+            prov["demo_cited"],
+        )
+
     used_pipeline = False
     try:
         from app.services.artifacts.artifact_service import ArtifactService
@@ -1102,8 +1141,41 @@ async def _create_artifact_tool(
                 if isinstance(html_content, dict):
                     html_content = str(html_content)
                 if not html_content:
-                    return {"success": False, "error": "html_content is required for html type"}
-                data = html_content.encode("utf-8")
+                    # 2026-08-31 (bug): the LLM frequently calls
+                    # create_artifact(type="html") with a report-card payload
+                    # (summary/kpis/key_findings/sections/chart) instead of
+                    # html_content — the prompt previously never documented the
+                    # html payload contract. Hard-failing here made every
+                    # "give me in html file" request die with "html_content is
+                    # required for html type" (the reliability wrapper retried
+                    # the same broken shape twice, then gave up). Degrade
+                    # gracefully: render a professional self-contained HTML
+                    # report from the report-card fields (same renderer the
+                    # inline sidecar preview uses) so the deliverable ships.
+                    rcp = _payload_to_reportcard(payload, title)
+                    if rcp and (
+                        rcp.summary
+                        or rcp.kpis
+                        or rcp.chart
+                        or rcp.key_findings
+                        or rcp.recommendations
+                        or rcp.sections
+                        or rcp.insights
+                        or rcp.sql
+                    ):
+                        data = _render_sidecar_html(rcp)
+                    else:
+                        return {
+                            "success": False,
+                            "error": (
+                                "html_content is required for html type — pass "
+                                "payload={\"html_content\": \"<!doctype html>…\"} "
+                                "or report-card fields (summary/kpis/sections) "
+                                "and the backend will render the HTML for you."
+                            ),
+                        }
+                else:
+                    data = html_content.encode("utf-8")
             elif artifact_type == "pptx":
                 rcp = _payload_to_reportcard(payload, title)
                 if (
@@ -1118,13 +1190,48 @@ async def _create_artifact_tool(
                     from app.services.artifacts.exporters.service import ExportService
 
                     exporter = ExportService(db)
-                    user_message_arg = str(args.get("user_message", ""))
+                    user_message_arg = str(args.get("user_message", "")).strip()
+                    if not user_message_arg:
+                        # The agent's create_artifact call may omit/garble
+                        # user_message (sanitizer can replace args with {}).
+                        # Fall back to the conversation's LAST user message so
+                        # intent-driven features (market-view synthetic deck,
+                        # theme/palette selection, role inference) still work.
+                        try:
+                            from app.models.chat_message import ChatMessage
+                            from app.models.chat_session import ChatSession
+
+                            # Resolve the conversation's session(s), then the
+                            # latest user message across them.
+                            _session_ids = [
+                                r[0] for r in db.query(ChatSession.id)
+                                .filter(ChatSession.conversation_id == conversation_id)
+                                .all()
+                            ]
+                            if _session_ids:
+                                _last_user = (
+                                    db.query(ChatMessage)
+                                    .filter(
+                                        ChatMessage.session_id.in_(_session_ids),
+                                        ChatMessage.role == "user",
+                                    )
+                                    .order_by(ChatMessage.created_date.desc())
+                                    .first()
+                                )
+                                if _last_user and getattr(_last_user, "content", None):
+                                    user_message_arg = str(_last_user.content).strip()
+                        except Exception as _um_err:  # noqa: BLE001 — best-effort
+                            logger.debug(
+                                "create_artifact: last-user-message fallback failed: %s",
+                                _um_err,
+                            )
                     ctx, brand_fp = _build_deck_export_context(
                         exporter, artifact,
                         conversation_id=conversation_id,
                         user_message=user_message_arg,
                         org_id=org_id,
                         app_id=app_id,
+                        skill_name=skill,
                     )
                     rows = _collect_rows_for_tool(
                         db, rcp,
@@ -1190,6 +1297,11 @@ async def _create_artifact_tool(
                 from app.services.artifacts.exporters.pdf_export import render as _render_pdf
                 rcp = _payload_to_reportcard(payload, title)
                 data, mime, ext = await _run_blocking(_render_pdf, rcp)
+                file_name = _safe_filename(title, ext)
+            elif artifact_type == "xlsx":
+                from app.services.artifacts.exporters.xlsx_export import render as _render_xlsx
+                rcp = _payload_to_reportcard(payload, title)
+                data, mime, ext = await _run_blocking(_render_xlsx, rcp)
                 file_name = _safe_filename(title, ext)
             else:
                 return {"success": False, "error": f"Unknown artifact type: {artifact_type}"}
@@ -1504,6 +1616,13 @@ def _payload_to_reportcard(payload: dict, title: str) -> ReportCardPayload:
         # ordered block plan (agent-authored or architect-synthesized) so the
         # docx/pptx renderers produce a tailored, data-driven document.
         blocks=payload.get("blocks") or [],
+        # Agent-authored slide-by-slide deck structure (2026-08-29). Passed
+        # through verbatim so the PPTX pipeline can render EXACTLY these
+        # slides instead of re-planning a generic structure.
+        slides=payload.get("slides") or [],
+        # Agent-authored per-view spreadsheets (2026-08-29). Passed through
+        # verbatim so the XLSX renderer emits EXACTLY these sheets.
+        sheets=payload.get("sheets") or [],
         # Fields not previously propagated — now passed through so
         # payload assemblers (e.g. ForecastPayloadAssembler) can
         # supply their own warnings and actions.

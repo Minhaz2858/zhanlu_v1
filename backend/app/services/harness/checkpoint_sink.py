@@ -74,6 +74,12 @@ class CheckpointSink:
                     self._safe_json(event.get("messages")),
                     self._TRUNCATE_MESSAGES,
                 ),
+                prompt_tokens=event.get("prompt_tokens"),
+                completion_tokens=event.get("completion_tokens"),
+                total_tokens=event.get("total_tokens"),
+                status=event.get("status", "ok"),
+                error=self._truncate(event.get("error"), self._TRUNCATE_PREVIEW),
+                retry_count=event.get("retry_count", 0),
             )
             db.add(step)
             db.commit()

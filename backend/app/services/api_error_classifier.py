@@ -104,8 +104,22 @@ _AUTH_MARKERS = (
     "invalid_api_key", "incorrect api key",
 )
 _BILLING_MARKERS = (
-    "402", "payment required", "billing", "quota", "insufficient",
-    "credit", "plan", "subscription",
+    "402", "payment required", "billing", "quota exceeded",
+    "insufficient balance", "insufficient funds", "insufficient quota",
+    "insufficient credit", "credit limit", "plan limit", "subscription",
+)
+
+# 2026-08-29: "insufficient tool messages following tool_calls" (DeepSeek/
+# OpenAI 400 when a persisted assistant tool_call lost its tool response)
+# was previously swallowed by _BILLING_MARKERS via the generic word
+# "insufficient" — users saw "Billing issue. Check account quota." while
+# the real problem was a corrupted conversation history. Classify it
+# explicitly so the user gets an actionable message instead.
+_DANGLING_TOOL_CALL_MARKERS = (
+    "tool messages following tool_calls",
+    "insufficient tool messages",
+    "must be followed by tool messages",
+    "each 'tool_call_id'",
 )
 _MODEL_NOT_FOUND_MARKERS = (
     "model not found", "does not exist", "404", "not_found",
@@ -235,6 +249,15 @@ def classify_api_error(
                     message="Context overflow (400). Compress and retry.",
                     original=error,
                 )
+            if _match_any(text, _DANGLING_TOOL_CALL_MARKERS):
+                return ClassifiedError(
+                    reason=FailoverReason.format_error, retryable=False,
+                    message=(
+                        "Conversation history is inconsistent (a tool call is "
+                        "missing its result). Please start a new chat."
+                    ),
+                    original=error,
+                )
             if _match_any(text, _CONTENT_POLICY_MARKERS):
                 return ClassifiedError(
                     reason=FailoverReason.content_policy_blocked, retryable=False,
@@ -265,6 +288,15 @@ def classify_api_error(
             reason=FailoverReason.context_overflow, retryable=True,
             should_compress=True, max_retries=1,
             message="Context overflow. Compress and retry.",
+            original=error,
+        )
+    if _match_any(text, _DANGLING_TOOL_CALL_MARKERS):
+        return ClassifiedError(
+            reason=FailoverReason.format_error, retryable=False,
+            message=(
+                "Conversation history is inconsistent (a tool call is "
+                "missing its result). Please start a new chat."
+            ),
             original=error,
         )
     if _match_any(text, _SERVER_ERROR_MARKERS):

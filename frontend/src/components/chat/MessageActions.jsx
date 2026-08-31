@@ -1,6 +1,6 @@
 import { useState, useCallback, useRef } from 'react';
 import {
-  Copy, Check, Share2, ThumbsUp, ThumbsDown,
+  Copy, Check, Share2, ThumbsUp, ThumbsDown, RotateCcw,
   FileText, Image as ImageIcon, X, Star,
 } from 'lucide-react';
 import { toast } from 'sonner';
@@ -23,6 +23,7 @@ export default function MessageActions({
   showRoleRating,
   onRoleRelevance,
   roleRelevanceRating,
+  onRegenerate,
 }) {
   const { lang } = useLanguage();
   const [copied, setCopied] = useState(false);
@@ -117,11 +118,31 @@ export default function MessageActions({
     generateImage: lang === 'en' ? 'Generate Image' : '生成图片',
     generateDoc: lang === 'en' ? 'Generate Document' : '生成文档',
     cancel: lang === 'en' ? 'Cancel' : '取消',
+    regenerate: lang === 'en' ? 'Regenerate' : '重新生成',
   };
 
   return (
     <TooltipProvider delayDuration={300}>
       <div className="mt-2 flex items-center gap-1">
+        {/* Regenerate (assistant messages only — re-run the same user turn) */}
+        {onRegenerate && (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <button
+                type="button"
+                onClick={() => onRegenerate(message)}
+                className="inline-flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
+                aria-label={t.regenerate}
+              >
+                <RotateCcw className="h-3.5 w-3.5" />
+              </button>
+            </TooltipTrigger>
+            <TooltipContent side="bottom">
+              <p>{t.regenerate}</p>
+            </TooltipContent>
+          </Tooltip>
+        )}
+
         {/* Copy */}
         <Tooltip>
           <TooltipTrigger asChild>

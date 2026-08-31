@@ -9,7 +9,7 @@ Public API:
     retrieve_with_context(query, n_results=3, max_chars=1800, collection=...)
         # Returns a formatted multi-line string suitable for LLM prompt injection.
 
-Port of EDIA 5.1.2 ``backend/src/rag/rag_retriever.py``, adapted to zhanlu's
+RAG retriever adapted to zhanlu's
 ``app.services.rag.knowledge_base.create_knowledge_base()`` factory.
 """
 from __future__ import annotations
@@ -33,7 +33,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-#: All 9 EDIA semantic collections the retriever can target.
+#: All semantic collections the retriever can target.
 KNOWN_COLLECTIONS: List[str] = list(ALL_COLLECTION_NAMES)
 
 #: Default collection for retrieval when the caller doesn't specify.

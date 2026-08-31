@@ -7,7 +7,14 @@ causal-chain elasticity math without model re-running.
 from datetime import datetime, timezone
 
 from app.models.forecasting import ForecastRun, ForecastTarget
+from app.services.domain_config import get_domain_config
 from app.services.forecasting.domain_signals import compute_domain_signal_adjustment
+
+# Display label for the root-feedstock shock driver — from the app's domain
+# config ("root_feedstock_label"). Empty config = generic label.
+_ROOT_FEEDSTOCK_LABEL: str = (get_domain_config("") or {}).get(
+    "root_feedstock_label"
+) or "feedstock"
 
 
 def _point_forecast_from_run(run) -> list:
@@ -39,8 +46,8 @@ def _point_forecast_from_run(run) -> list:
 
 def compute_what_if(
     product_key: str,
-    brent_delta_pct: float,
-    naphtha_delta_pct: float,
+    market_delta_pct: float,
+    feedstock_delta_pct: float,
     db,
 ) -> dict:
     """Simulate forecast changes given upstream price shocks.
@@ -52,10 +59,10 @@ def compute_what_if(
     ----------
     product_key : str
         Product to simulate.
-    brent_delta_pct : float
-        Percentage change in Brent price (e.g., 5.0 = +5%).
-    naphtha_delta_pct : float
-        Percentage change in naphtha price (e.g., -3.0 = -3%).
+    market_delta_pct : float
+        Percentage change in the market index (e.g., 5.0 = +5%).
+    feedstock_delta_pct : float
+        Percentage change in the root feedstock price (e.g., -3.0 = -3%).
     db
         SQLAlchemy session.
 
@@ -95,38 +102,44 @@ def compute_what_if(
     adjustments = []
     total_impact = 0.0
 
-    # Naphtha shock propagation
-    if naphtha_delta_pct != 0.0:
-        naphtha_adj = compute_domain_signal_adjustment(
+    # Root-feedstock shock propagation
+    if feedstock_delta_pct != 0.0:
+        feedstock_adj = compute_domain_signal_adjustment(
             product_id=product_key,
             as_of_date=datetime.now(timezone.utc),
-            naphtha_pct_change=naphtha_delta_pct,
+            naphtha_pct_change=feedstock_delta_pct,
         )
-        impact = naphtha_adj.get("causal_pct", 0.0)
+        impact = feedstock_adj.get("causal_pct", 0.0)
         total_impact += impact
         adjustments.append({
-            "driver": "naphtha",
-            "delta_pct": naphtha_delta_pct,
+            "driver": _ROOT_FEEDSTOCK_LABEL,
+            "delta_pct": feedstock_delta_pct,
             "impact_pct": round(impact, 2),
-            "description": f"Naphtha {naphtha_delta_pct:+.1f}% → {impact:+.2f}% impact",
+            "description": (
+                f"{_ROOT_FEEDSTOCK_LABEL.capitalize()} {feedstock_delta_pct:+.1f}% "
+                f"→ {impact:+.2f}% impact"
+            ),
         })
 
-    # Brent shock (simplified: treat as direct naphtha proxy)
-    if brent_delta_pct != 0.0:
-        # Brent typically affects naphtha with ~0.8 elasticity
-        brent_to_naphtha = brent_delta_pct * 0.8
-        brent_adj = compute_domain_signal_adjustment(
+    # External market shock (simplified: treat as direct root-feedstock proxy)
+    if market_delta_pct != 0.0:
+        # The market index typically affects the root feedstock with ~0.8 elasticity
+        market_to_feedstock = market_delta_pct * 0.8
+        market_adj = compute_domain_signal_adjustment(
             product_id=product_key,
             as_of_date=datetime.now(timezone.utc),
-            naphtha_pct_change=brent_to_naphtha,
+            naphtha_pct_change=market_to_feedstock,
         )
-        impact = brent_adj.get("causal_pct", 0.0)
+        impact = market_adj.get("causal_pct", 0.0)
         total_impact += impact
         adjustments.append({
-            "driver": "brent",
-            "delta_pct": brent_delta_pct,
+            "driver": "market_index",
+            "delta_pct": market_delta_pct,
             "impact_pct": round(impact, 2),
-            "description": f"Brent {brent_delta_pct:+.1f}% → naphtha {brent_to_naphtha:+.1f}% → {impact:+.2f}% impact",
+            "description": (
+                f"Market {market_delta_pct:+.1f}% → {_ROOT_FEEDSTOCK_LABEL} "
+                f"{market_to_feedstock:+.1f}% → {impact:+.2f}% impact"
+            ),
         })
 
     # Apply total impact to base forecast

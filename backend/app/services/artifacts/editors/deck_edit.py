@@ -51,6 +51,13 @@ ALLOWED_LAYOUTS: frozenset[str] = frozenset({
     "methodology",
     "section_divider",
     "closing",
+    # New archetypes (2026-08-29) — renderers exist in both HTML + structured
+    "timeline",
+    "roadmap",
+    "comparison",
+    "swot",
+    "quote",
+    "process_flow",
 })
 
 # Whitelist of slide fields edit_slide may patch.

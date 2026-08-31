@@ -70,7 +70,7 @@ def build_fixture_payload():
     """Return a ``ReportCardPayload``-shaped dict."""
     return {
         "title": "Q3 → Q4 Sales Overview: Resin Pricing Drives a 14% Margin Lift",
-        "source": "erp_product_sales_details, 2026-08-15 snapshot",
+        "source": "sales_orders, 2026-08-15 snapshot",
         "generated_at": "2026-08-15T10:00:00Z",
         "summary": (
             "Resin product revenue grew 18% quarter-over-quarter while unit "
@@ -80,7 +80,7 @@ def build_fixture_payload():
             "PVC pricing in the domestic market."
         ),
         "methodology": (
-            "Aggregated from erp_product_sales_details (fact table joined to "
+            "Aggregated from sales_orders (fact table joined to "
             "dim_product). Filters: FY26 Q3+Q4, sales org = Z01, currency = "
             "RMB. Top-8 by shipment_volume; rebalanced for grade-level "
             "margin to surface the resin / PC divergence."
@@ -145,7 +145,7 @@ def build_fixture_payload():
         },
         "sql": (
             "SELECT grade, SUM(revenue_rmb)/1e6 AS revenue\n"
-            "FROM erp_product_sales_details\n"
+            "FROM sales_orders\n"
             "WHERE fyear IN ('2026-Q3','2026-Q4')\n"
             "GROUP BY grade ORDER BY revenue DESC LIMIT 8;"
         ),

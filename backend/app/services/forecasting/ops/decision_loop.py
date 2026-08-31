@@ -2,7 +2,7 @@
 
 Wraps the Wave 0 accuracy_tracker.score_pending_decisions() with idempotency,
 error isolation, and the critical _backfill_actual_price_t() helper that fills
-NULL actual_price_t from EDIA MySQL (so historical logs become scorable).
+NULL actual_price_t from the external MySQL (so historical logs become scorable).
 """
 import logging
 from datetime import date
@@ -14,11 +14,11 @@ logger = logging.getLogger(__name__)
 
 
 def _resolve_mysql_engine() -> object | None:
-    """Resolve a MySQL engine for EDIA ERP data queries.
+    """Resolve a MySQL engine for ERP data queries.
 
     Returns an engine or None.  Tries the exogenous_loaders'
     _resolve_mysql_engine (the canonical implementation), then falls back to
-    importing edia_source (where accuracy_tracker expects it).  If neither
+    importing mysql_data_source (where accuracy_tracker expects it).  If neither
     works, returns None (callers must tolerate missing MySQL).
     """
     try:
@@ -30,7 +30,7 @@ def _resolve_mysql_engine() -> object | None:
         pass
 
     try:
-        from app.services.forecasting.edia_source import _resolve_mysql_engine
+        from app.services.forecasting.mysql_data_source import _resolve_mysql_engine
         return _resolve_mysql_engine()
     except Exception:
         pass
@@ -46,7 +46,7 @@ def _resolve_mysql_engine() -> object | None:
 
 def _backfill_actual_price_t(db: Session) -> int:
     """Find ForecastDecisionLog rows where actual_price_t IS NULL and fill the
-    price from EDIA MySQL's sale_erp_v_{product_id}_data table (as_of_date).
+    price from the external MySQL sale_erp_v_{product_id}_data table (as_of_date).
 
     Returns the number of rows backfilled.  Graceful when MySQL is unavailable.
     """

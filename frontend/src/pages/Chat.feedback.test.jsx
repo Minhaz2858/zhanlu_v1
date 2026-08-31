@@ -17,7 +17,37 @@ import React from 'react';
 // Mocks for heavy MessageBubble children
 // ---------------------------------------------------------------------------
 vi.mock('@/lib/LanguageProvider', () => ({
-  useLanguage: () => ({ lang: 'en', t: (x) => x }),
+  // t must be an OBJECT (t.chat.phase, t.copy, ...), not the i18next-style
+  // function mock `t: (x) => x` — that made t.chat undefined and every
+  // component render crashed on `t.chat.phase` (reading 'phase' of
+  // undefined). Keys mirror the real translations for the components
+  // under test (MessageBubble/MessageActions).
+  useLanguage: () => ({
+    lang: 'en',
+    t: {
+      sessionList: { ungrouped: 'Default', newSession: 'New' },
+      chat: {
+        coreTitle: 'Chat',
+        categories: {
+          production: { label: 'Production' },
+          maintenance: { label: 'Maintenance' },
+          quality: { label: 'Quality' },
+          safety: { label: 'Safety' },
+          supply: { label: 'Supply' },
+          energy: { label: 'Energy' },
+        },
+        chatFiles: { title: 'Files' },
+        related: {},
+        phase: {},
+        uploadFailed: 'Upload failed',
+      },
+      common: { send: 'Send' },
+      copy: 'Copy', share: 'Share', like: 'Like', dislike: 'Dislike',
+      copyText: 'Copy Text', generateImage: 'Generate Image',
+      generateDoc: 'Generate Document', cancel: 'Cancel', regenerate: 'Regenerate',
+      kb: { dbTypes: {} },
+    },
+  }),
 }));
 vi.mock('@/components/chat/ClarifyOptions', () => ({ default: () => null }));
 vi.mock('@/components/chat/ClarifyBatchForm', () => ({ default: () => null }));
@@ -55,7 +85,7 @@ function makeMessage(overrides = {}) {
   return {
     id: 'm-1',
     role: 'assistant',
-    content: '苯乙烯今日价格 9800 元/吨。',
+    content: '今日价格 9800 元/吨。',
     ...overrides,
   };
 }

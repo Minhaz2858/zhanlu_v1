@@ -266,7 +266,7 @@ def build_deck_user_context(
 
     # ── Learned user profile (flag-gated, filesystem-backed) ──
     if owner_user_id and getattr(
-        settings, "ECISCO_BI_USER_PROFILE_ENABLED", False
+        settings, "USER_PROFILE_ENABLED", False
     ):
         def _profile():
             from app.services.user_profile import get_profile_prompt

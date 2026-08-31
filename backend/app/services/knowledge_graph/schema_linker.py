@@ -24,47 +24,62 @@ from app.models.knowledge_catalog import KBTableMeta, KBTableRelation
 logger = logging.getLogger(__name__)
 
 
-# ── Ecisco BI schema-linker allowlist (2026-08-25) ─────────────────
-# When the calling agent is in ECISCO_BI_AGENT_NAMES and
-# ECISCO_BI_SCHEMA_LINKER_ALLOWLIST_ENABLED is True, restrict retrieval
-# to a curated 30+ table list (business views + price views + masters).
-# This avoids wrong-table picks like intelligence_events or decision_log
-# shadowing real sales data, and cuts search time.
+# ── Schema-linker allowlist (2026-08-25) ───────────────────────────
+# When the calling agent's domain config opts in
+# (schema_linker_allowlist_enabled + schema_linker_table_allowlist),
+# restrict retrieval to a curated table list (business views + price
+# views + masters). This avoids wrong-table picks like intelligence_events
+# or decision_log shadowing real sales data, and cuts search time.
 def _resolve_table_allowlist_for_kb(db: Session, kb_ids: list[str]) -> list[str] | None:
-    if not getattr(settings, "ECISCO_BI_SCHEMA_LINKER_ALLOWLIST_ENABLED", False):
-        return None
+    """Return a per-app table allowlist when the calling project binds to an
+    agent that ships a domain config with ``schema_linker_allowlist_enabled``.
+
+    DE-HARDCODED (2026-08-27): the allowlist no longer lives in settings —
+    it is per-app DATA loaded from ``domain_configs/<agent_name>.json``. Any
+    app can opt in with its own table list; apps without a config get no
+    restriction (fully generic schema discovery).
+    """
     if not kb_ids:
         return None
     try:
+        from app.services.domain_config import get_schema_allowlist
         from app.models.agent_app import AgentApp
-        ecisco_names = (
-            getattr(settings, "ECISCO_BI_AGENT_NAMES", ["ecisco_bi_assistant"]) or []
-        )
-        if not ecisco_names:
-            return None
+        from app.models.knowledge_base import KnowledgeBase
         target_kb_ids = {k for k in kb_ids if k}
         if not target_kb_ids:
             return None
         apps = (
             db.query(AgentApp)
             .filter(
-                AgentApp.name.in_(ecisco_names),
                 AgentApp.is_deleted == False,  # noqa: E712
             )
             .all()
         )
         for app in apps:
+            allowlist = get_schema_allowlist(app.name)
+            if not allowlist:
+                continue
+            # Binding is project-scoped: the agent inherits every KB whose
+            # project_id matches the agent's project.  (The AgentApp JSON
+            # `knowledge_bases` column is NOT populated in this deployment;
+            # matching on it alone silently disables the allowlist.)
             bound = set(app.knowledge_bases or [])
-            if bound & target_kb_ids:
-                allowlist = getattr(
-                    settings, "ECISCO_BI_SCHEMA_LINKER_TABLE_ALLOWLIST", None,
-                )
-                if allowlist:
-                    logger.info(
-                        "schema_linker: allowlist ENABLED for project %s (agent=%s, %d tables)",
-                        app.project_id, app.name, len(allowlist),
+            if app.project_id:
+                proj_kbs = (
+                    db.query(KnowledgeBase.id)
+                    .filter(
+                        KnowledgeBase.project_id == app.project_id,
+                        KnowledgeBase.is_deleted == False,  # noqa: E712
                     )
-                    return list(allowlist)
+                    .all()
+                )
+                bound |= {row[0] for row in proj_kbs}
+            if bound & target_kb_ids:
+                logger.info(
+                    "schema_linker: allowlist ENABLED for project %s (agent=%s, %d tables)",
+                    app.project_id, app.name, len(allowlist),
+                )
+                return list(allowlist)
     except Exception as e:
         logger.debug("schema_linker: allowlist resolve failed (non-fatal): %s", e)
     return None
@@ -128,6 +143,21 @@ async def link_schema(
 
     # ── 2. Enrich from DB (descriptions, columns) ──
     enriched = _enrich_tables(db, retrieved, top_k)
+
+    # ── 2b. Data-freshness annotation (generic, live DB) ──
+    # Tables whose newest row stopped arriving long ago are flagged
+    # STALE so the LLM won't pick a dead table for a recent-period
+    # question. Works for any connected database — no hardcoded names.
+    try:
+        from app.services.knowledge_graph.freshness import annotate_tables
+        by_kb: dict[str, list[dict]] = {}
+        for _t in enriched:
+            by_kb.setdefault(_t.get("kb_id") or "", []).append(_t)
+        for _kb_id, _tabs in by_kb.items():
+            if _kb_id:
+                annotate_tables(db, _kb_id, _tabs)
+    except Exception as _fexc:  # noqa: BLE001 — freshness must never break linking
+        logger.debug("schema_linker: freshness annotation skipped: %s", _fexc)
 
     # ── 3. Expand join paths ──
     join_paths = _expand_joins(db, enriched, max_hops=max_hops)
@@ -219,7 +249,7 @@ def _retrieve_from_catalog(
 
     When ``table_allowlist`` is provided, post-filter hits so only docs whose
     ``table_name`` metadata is in the allowlist survive.  This is the
-    Ecisco-BI narrow-search optimization.
+    Enterprise-BI narrow-search optimization.
     """
     from app.services.document_ingestion.store import _get_client
     from app.services.rag.hybrid_retrieval import hybrid_query_collection
@@ -259,7 +289,7 @@ def _retrieve_from_catalog(
         if not mid:
             continue
 
-        # ── Allowlist post-filter (Ecisco BI) ──
+        # ── Allowlist post-filter ──
         # If a table_name is in metadata but NOT in the allowlist, drop
         # the hit.  This prevents AI-domain tables (intelligence_events,
         # decision_log) from shadowing real sales tables.
@@ -341,6 +371,7 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
         cols = cols_by_table.get(mid, [])
         result.append({
             "table_meta_id": mid,
+            "kb_id": meta.kb_id,
             "table_name": meta.table_name,
             "schema_name": meta.schema_name,
             "table_type": meta.table_type,
@@ -450,6 +481,7 @@ def _format_slice(
     tables: list[dict], join_paths: list[dict], token_budget: int
 ) -> str:
     """Format tables + joins into a curated DDL-style text slice."""
+    from app.services.knowledge_graph.freshness import stale_flag
     parts: list[str] = ["-- Semantic catalog: relevant tables for this query\n"]
     used_tokens = _estimate_tokens(parts[0])
     included = 0
@@ -468,6 +500,11 @@ def _format_slice(
             chunk += f"  -- {t['description_zh']}"
         if t.get("row_count"):
             chunk += f"  -- ~{t['row_count']:,} rows"
+        # Data-freshness marker (generic): a STALE table has no recent
+        # rows — the LLM must not use it for recent-period questions.
+        _fresh = stale_flag(t)
+        if _fresh:
+            chunk += f"  --{_fresh}"
         _cov = t.get("coverage_json") or {}
         if _cov.get("max_date"):
             chunk += (
@@ -517,12 +554,17 @@ def _count_catalog_tables(db: Session, kb_ids: list[str]) -> int:
 # ── full table-of-contents (TOC) ───────────────────────────────────────────
 
 def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
-    """Return a lightweight table-of-contents for ALL tables in the catalog.
+    """Return a lightweight table-of-contents for tables in the catalog.
 
     Each entry has: table_name, description (zh/en), row_count,
     coverage (date_column, max_date), table_role.
     This is used by the two-phase NL2SQL flow so the LLM can see
-    ALL available tables before choosing which ones to query.
+    the available tables before choosing which ones to query.
+
+    When the calling agent's domain config opts into a schema-linker
+    allowlist, the TOC is RESTRICTED to the curated allowlist — the LLM never
+    sees stale shadow tables (e.g. erp_paez_t_lz_price with 2025-06 max
+    date) that would otherwise be picked over the real sales views.
     """
     rows = (
         db.query(KBTableMeta)
@@ -530,6 +572,15 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
         .order_by(KBTableMeta.table_name)
         .all()
     )
+    allowlist = _resolve_table_allowlist_for_kb(db, kb_ids)
+    if allowlist:
+        allowed = set(allowlist)
+        before = len(rows)
+        rows = [r for r in rows if r.table_name in allowed]
+        logger.info(
+            "schema_linker: TOC allowlist filtered %d -> %d tables",
+            before, len(rows),
+        )
     result = []
     for r in rows:
         cov = r.coverage_json or {}
@@ -542,7 +593,43 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
             "max_date": cov.get("max_date", ""),
             "min_date": cov.get("min_date", ""),
             "table_role": r.table_role,
+            "columns": [],  # filled below for freshness detection
         })
+
+    # Generic freshness: attach lightweight column metadata (name+type) and
+    # probe MAX(date) concurrently so STALE tables are flagged even when
+    # the catalog's coverage_json is empty. Works for any connected DB.
+    try:
+        from app.models.knowledge_catalog import KBColumnMeta
+        _ids = [r.id for r in rows]
+        if _ids:
+            _cols = (
+                db.query(KBColumnMeta.column_name, KBColumnMeta.data_type, KBColumnMeta.table_meta_id)
+                .filter(KBColumnMeta.table_meta_id.in_(_ids))
+                .all()
+            )
+            _by_tbl: dict[str, list[dict]] = {}
+            for _name, _dtype, _tid in _cols:
+                _by_tbl.setdefault(_tid, []).append({"name": _name, "data_type": _dtype})
+            _tbl_by_id = {r.id: r.table_name for r in rows}
+            for _tid, _c in _by_tbl.items():
+                _t = next((x for x in result if x["table_name"] == _tbl_by_id.get(_tid)), None)
+                if _t is not None:
+                    _t["columns"] = _c
+        from app.services.knowledge_graph.freshness import (
+            annotate_tables_parallel, stale_flag,
+        )
+        for _kb_id in kb_ids:
+            annotate_tables_parallel(db, _kb_id, result)
+        for _t in result:
+            if _t.get("last_data_date"):
+                _t["freshness"] = {
+                    "last_data_date": _t["last_data_date"],
+                    "stale_days": _t.get("stale_days"),
+                    "flag": stale_flag(_t),
+                }
+    except Exception as exc:
+        logger.debug("schema_linker: TOC freshness annotation skipped: %s", exc)
     return result
 
 
@@ -574,6 +661,10 @@ def format_toc_text(toc: list[dict], token_budget: int = 1200) -> str:
             parts.append(f"coverage: {min_d}~{max_d}")
         elif max_d:
             parts.append(f"latest: {max_d}")
+        # Generic freshness flag (live MAX(date) probe, TTL-cached)
+        _fresh = t.get("freshness") or {}
+        if _fresh.get("flag"):
+            parts.append(_fresh["flag"].strip())
 
         line = "  " + ", ".join(parts)
         tok = max(1, len(line) // 2)
@@ -595,6 +686,16 @@ def get_selected_tables_ddl(
 
     This is Phase 2 of the two-phase NL2SQL flow.
     """
+    allowlist = _resolve_table_allowlist_for_kb(db, kb_ids)
+    if allowlist:
+        allowed = set(allowlist)
+        before = len(selected_table_names)
+        selected_table_names = [n for n in selected_table_names if n in allowed]
+        if len(selected_table_names) != before:
+            logger.info(
+                "schema_linker: selected-tables DDL filtered %d -> %d (allowlist)",
+                before, len(selected_table_names),
+            )
     metas = (
         db.query(KBTableMeta)
         .filter(

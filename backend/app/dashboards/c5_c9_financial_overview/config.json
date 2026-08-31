@@ -1,0 +1,126 @@
+{
+  "name": "Financial Overview",
+  "slug": "c5_c9_financial_overview",
+  "description": "Live revenue, expenses, gross margin and cash-flow metrics",
+  "theme": "dark",
+  "style": "standard",
+  "refresh_interval_seconds": 30,
+  "design_system_ref": "design-system/default-org/MASTER.md",
+  "design": {
+    "colors": {
+      "primary": "#0F172A",
+      "on_primary": "#FFFFFF",
+      "secondary": "#1E293B",
+      "accent": "#22C55E",
+      "background": "#020617",
+      "foreground": "#F8FAFC",
+      "muted": "#1A1E2F",
+      "border": "#334155",
+      "destructive": "#EF4444",
+      "ring": "#0F172A",
+      "chart_palette": [
+        "#22C55E",
+        "#EF4444",
+        "#FFFFFF",
+        "#2563eb",
+        "#10b981",
+        "#f59e0b"
+      ],
+      "dark": {
+        "background": "#020617",
+        "foreground": "#F8FAFC",
+        "muted": "#1A1E2F",
+        "border": "#334155"
+      }
+    },
+    "typography": {
+      "heading": "Fira Code",
+      "body": "Fira Sans",
+      "google_fonts_url": "https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap",
+      "css_import": "@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');"
+    },
+    "spacing": {
+      "xs": "2px",
+      "sm": "4px",
+      "md": "8px",
+      "lg": "12px",
+      "xl": "16px",
+      "2xl": "24px",
+      "3xl": "32px"
+    },
+    "style": {
+      "name": "Data-Dense Dashboard",
+      "keywords": "Multiple charts/widgets, data tables, KPI cards, minimal padding, grid layout, space-efficient, maximum data visibility",
+      "card_radius": "8px"
+    }
+  },
+  "metrics": [
+    {
+      "id": "revenue_total",
+      "title": "Total Revenue (Tax-Incl)",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "revenue_30d_trend",
+      "title": "Revenue Trend (30 Days)",
+      "type": "line",
+      "options": {
+        "delta": 8572.57,
+        "deltaLabel": "vs prev. period",
+        "_locked": {
+          "current": 21716800.0,
+          "previous": 250407.824
+        }
+      }
+    },
+    {
+      "id": "revenue_by_product",
+      "title": "Revenue by Product",
+      "type": "bar",
+      "options": {
+        "topItem": {
+          "label": "异戊二烯",
+          "value": 88471606.2878,
+          "share_pct": 21.7
+        }
+      }
+    },
+    {
+      "id": "top_customers",
+      "title": "Top Customers (30D)",
+      "type": "table",
+      "options": {
+        "topItem": {
+          "label": "中海壳牌石油化工有限公司",
+          "value": 8649.0,
+          "share_pct": 25.5
+        }
+      }
+    }
+  ],
+  "filters": [],
+  "insights": [
+    {
+      "title": "Revenue pulse",
+      "body": "Tracks tax-inclusive sales amount from the ERP sales-order view over the trailing 30 days, refreshed every 30s via WebSocket."
+    },
+    {
+      "title": "Product mix",
+      "body": "Top products by revenue are ranked to show which C5/C9 lines drive the top line."
+    },
+    {
+      "title": "📈 Revenue Trend (30 Days)",
+      "body": "Revenue Trend (30 Days) moved 8572.6% up vs the previous period (locked server-side from the live datasource at build time)."
+    },
+    {
+      "title": "🏆 Top: 异戊二烯",
+      "body": "异戊二烯 leads with 88,471,606 (21.7% of the total)."
+    },
+    {
+      "title": "🏆 Top: 中海壳牌石油化工有限公司",
+      "body": "中海壳牌石油化工有限公司 leads with 8,649 (25.5% of the total)."
+    }
+  ],
+  "layout": []
+}

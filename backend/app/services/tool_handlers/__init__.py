@@ -81,6 +81,27 @@ from app.services.tool_handlers import skills_sync_tool  # noqa: F401
 from app.services.tool_handlers import skills_guard_tool  # noqa: F401
 from app.services.tool_handlers import skill_manager_tool  # noqa: F401
 
+# FIX 2026-08-29: load_skill_body was never imported here — the module
+# registers at import time, so the tool silently did NOT exist in the
+# running backend while the system prompt instructed agents to call it
+# ("Unknown tool: load_skill_body" in real chat traces). Importing it
+# registers the tool AND lets system_agents._tools_in_registry keep it
+# in general_assistant's enabled_tools.
+from app.services.tool_handlers import load_skill_body_tool  # noqa: F401
+
+# FIX 2026-08-29: the `Skill` meta-tool was only registered in main.py
+# lifespan — AFTER system_agents built its tool_configs at import time,
+# so `_tools_in_registry` silently dropped it from enabled_tools.
+# Register it here at import time (idempotent: registry.register
+# overwrites the same name). Wrapped in try/except so a circular-import
+# edge cannot break tool registration; lifespan registration remains as
+# a backstop.
+try:
+    from app.services.skill_routing.meta_tool import register_skill_meta_tool
+    register_skill_meta_tool()
+except Exception:  # pragma: no cover - defensive
+    pass
+
 # Phase 4: LLM/auxiliary
 from app.services.tool_handlers import openrouter_client_tool  # noqa: F401
 from app.services.tool_handlers import xai_http_tool  # noqa: F401
@@ -142,6 +163,15 @@ try:
     from app.services import automation_chat_tool  # noqa: F401
 except Exception as _ac_err:  # pragma: no cover - defensive
     logger.warning("automation_chat_tool registration failed (non-fatal): %s", _ac_err)
+
+# P2 (2026-08-29): browser toolset — Playwright-backed web automation
+# (browser_navigate/click/type/snapshot/screenshot) with scheme + domain
+# allowlist guardrails. check_fn gates on playwright availability, so
+# environments without playwright start up cleanly.
+try:
+    from app.services.tool_handlers import browser_tools  # noqa: F401
+except Exception as _bt_err:  # pragma: no cover - defensive
+    logger.warning("browser_tools registration failed (non-fatal): %s", _bt_err)
 
 # Phase 11: live dashboards (create_dashboard tool)
 try:

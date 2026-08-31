@@ -3,14 +3,11 @@ import { NavLink, useLocation, useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useChatSession } from '@/lib/ChatSessionContext';
-import { Plus, Workflow, Store, Wrench, PanelLeftClose, PanelLeftOpen, LayoutDashboard, ChevronDown, ShieldCheck, Folder, LayoutGrid } from 'lucide-react';
+import { Plus, Workflow, Store, Wrench, PanelLeftClose, PanelLeftOpen, ShieldCheck, Folder, LayoutGrid, Activity } from 'lucide-react';
 import UserMenu from '@/components/UserMenu';
 import ThemeToggle from '@/components/ThemeToggle';
-import AlertButton from '@/components/AlertButton';
-import ProactiveAlerts from '@/components/ProactiveAlerts';
 import SessionList from '@/components/chat/SessionList';
 import { useScreenSize } from '@/hooks/useScreenSize';
-import brandLogo from '../../logo/logo.png';
 
 /**
  * Sidebar — the app's single unified sidebar.
@@ -32,67 +29,6 @@ import brandLogo from '../../logo/logo.png';
  *   only (`w-16`, 64px). When collapsed, the chat content is hidden —
  *   the icon-only strip shows brand + nav + UserMenu.
  */
-/**
- * Build an alert-type-aware investigation question for the Ecisco BI
- * assistant.  The question is pre-filled into the chat input (not
- * auto-sent) so the user can review before pressing Enter.
- */
-export function buildInvestigateQuestion(alert) {
-  const product = alert.product_name || alert.product_id || 'this product';
-  const change  = Math.abs(alert.change_7d_pct ?? 0).toFixed(1);
-  const price   = alert.price
-    ? `${Number(alert.price).toLocaleString()} CNY/ton`
-    : 'price TBD';
-  const sign    = (alert.change_7d_pct ?? 0) >= 0 ? '+' : '-';
-
-  // Specific alert types first (they have dedicated templates)
-  // daily_digest
-  if (alert.alert_type === 'daily_digest') {
-    const date = alert.payload?.date || 'today';
-    return `展开 ${date} 晨报详情。分析每个产品的价格变动对利润的影响，并给出具体的采购和库存建议。`;
-  }
-  // price_spike
-  if (alert.alert_type === 'price_spike') {
-    return `${product} 7d increase +${change}% (current ${price}). `
-      + `Have we entered a price increase window, and how should inventory level `
-      + `and shipment pace be coordinated?`;
-  }
-  // price_drop
-  if (alert.alert_type === 'price_drop') {
-    return `${product} 7d drop ${change}% (current ${price}). `
-      + `Is supplier signaling weakness, and what is the right procurement pivot `
-      + `(delay orders / renegotiate / lock contract)?`;
-  }
-  // regional_arbitrage
-  if (alert.alert_type === 'regional_arbitrage') {
-    const src = alert.source || 'source A';
-    const dst = alert.destination || 'source B';
-    return `Regional arbitrage detected — ${product} ${src} vs ${dst} `
-      + `(Δ ${sign}${change}%, current ${price}). `
-      + `Should we redirect shipment to the higher-margin region?`;
-  }
-  // capacity_change
-  if (alert.alert_type === 'capacity_change') {
-    return `Capacity signal — ${product}: ${alert.message || `${sign}${change}% capacity change`}. `
-      + `Forecast supply tightness and recommend inventory + contract actions.`;
-  }
-  // Implicit sign-based fallback (no explicit alert_type)
-  if ((alert.change_7d_pct ?? 0) > 0) {
-    return `${product} 7d increase +${change}% (current ${price}). `
-      + `Have we entered a price increase window, and how should inventory level `
-      + `and shipment pace be coordinated?`;
-  }
-  if ((alert.change_7d_pct ?? 0) < 0) {
-    return `${product} 7d drop ${change}% (current ${price}). `
-      + `Is supplier signaling weakness, and what is the right procurement pivot `
-      + `(delay orders / renegotiate / lock contract)?`;
-  }
-  // Generic fallback
-  return alert.message
-    ? `Investigate this alert — ${alert.message}`
-    : `Analyze ${product} — ${alert.alert_type || 'market signal'} (${sign}${change}% over 7d). Recommend action.`;
-}
-
 export default function Sidebar() {
   const [user, setUser] = useState(null);
   const { t, lang } = useLanguage();
@@ -123,56 +59,19 @@ export default function Sidebar() {
   const [ripples, setRipples] = useState([]);
   const rippleIdRef = useRef(0);
 
-  // ── Alerts panel state ────────────────────────────────────────────
-  const [alertPanelOpen, setAlertPanelOpen] = useState(false);
-
-  const handleOpenAlertPanel = () => setAlertPanelOpen(true);
-  const handleCloseAlertPanel = () => setAlertPanelOpen(false);
-
-  const handleInvestigateAlert = (alert) => {
-    const question = buildInvestigateQuestion(alert);
-    const projectId   = 'e5ac337b-469a-480d-822b-f6a3155e652c';
-    const projectName = 'Ecisco BI';
-
-    setAlertPanelOpen(false);
-
-    const onChat = location.pathname === '/' || location.pathname.startsWith('/chat');
-    if (onChat) {
-      // User is already on the chat page — dispatch an event so the
-      // Chat component can create a new session and prefill the input
-      // (avoids navigate + event double-fire).
-      window.dispatchEvent(new CustomEvent('alerts:investigate', {
-        detail: { question, projectId, projectName },
-      }));
-    } else {
-      // Navigate to chat with URL params. Chat.jsx's prefill effect
-      // reads ?prefill= (not ?prompt=) and sets the input value.
-      navigate(
-        `/chat?project=${projectId}` +
-        `&projectName=${encodeURIComponent(projectName)}` +
-        `&prefill=${encodeURIComponent(question)}`
-      );
-    }
-  };
-
   useEffect(() => { base44.auth.me().then(setUser).catch(() => setUser(null)); }, []);
 
   // Auto-switch the sidebar tab based on the current route so deep links
   // land on the correct tab without manual clicks. The admin scope covers
   // /admin/*, /toolkit AND /market (the market is a platform-config area —
   // browse/subscribe/deploy — so it lives under 配置). Everything else
-  // (including /, /chat, /automation, /my-space, /my-files,
-  // /market-dashboard/*) is the business scope.
+  // (including /, /chat, /automation, /my-space, /my-files) is the
+  // business scope.
   //
-  // Note: ``/market`` and ``/market-dashboard/*`` share a path prefix
-  // (``/market``) but are completely different features — the former is
-  // the platform-config area, the latter is the read-only EDIA mirror
-  // that lives under the Dashboard accordion in the Business tab. A
-  // naive ``path.startsWith('/market')`` check matches BOTH and would
-  // silently flip the sidebar to Admin when the user clicks Dashboard.
-  // The narrower predicate below excludes /market-dashboard by checking
-  // that the path is either the bare ``/market`` or ``/market/<segment>``
-  // (a single ``/`` after ``/market``), not ``/market-dashboard``.
+  // Note: ``/market`` is the platform-config area; the old
+  // ``/market-dashboard/*`` mirror was removed with the market
+  // dashboard feature. The narrower predicate below matches the bare
+  // ``/market`` or ``/market/<segment>`` only.
   useEffect(() => {
     const path = location.pathname;
     const isMarketAdminRoute =
@@ -209,6 +108,7 @@ export default function Sidebar() {
     { to: '/market', label: t.sidebar.market, icon: Store },
     { to: '/toolkit', label: t.sidebar.toolkit, icon: Wrench },
     ...(isAdmin ? [{ to: '/admin/users', label: (lang === 'en' ? t.sidebar.admin : t.sidebar.adminZh), icon: ShieldCheck }] : []),
+    ...(isAdmin ? [{ to: '/admin/observability', label: (lang === 'en' ? 'Agent Observability' : '智能体可观测性'), icon: Activity }] : []),
   ];
 
   function linkClass({ isActive }) {
@@ -235,7 +135,7 @@ export default function Sidebar() {
     //   - Preserving the previous session's project caused a bug
     //     where the global chat box showed a stale project chip
     //     after clicking "+ New Task" from a project-scoped
-    //     session (e.g., ECISCO → chip persisted on `/`).
+    //     session (e.g., ACME → chip persisted on `/`).
     if (event && event.currentTarget) {
       const rect = event.currentTarget.getBoundingClientRect();
       const ripple = {
@@ -264,32 +164,13 @@ export default function Sidebar() {
   const { settings } = useScreenSize();
   const sidebarWidth = collapsed ? 64 : settings.sidebarWidth;
 
-  // ── Dashboard accordion ──────────────────────────────────────────
-  // Read-only mirror of EDIA's MySQL warehouse. Auto-expands on
-  // /market-dashboard/* routes. Always visible so users can discover
-  // the feature even on servers where the data source is not yet
-  // configured — the page itself shows a friendly "data source
-  // offline" banner in that case.
-  const isDashboardRoute = location.pathname.startsWith('/market-dashboard');
-  const [dashboardOpen, setDashboardOpen] = useState(isDashboardRoute);
-  useEffect(() => {
-    if (isDashboardRoute) setDashboardOpen(true);
-  }, [isDashboardRoute]);
-
-  const dashboardItems = [
-    { to: '/market-dashboard/overview', label: t.sidebar.dashboardOverview },
-    { to: '/market-dashboard/upstream', label: t.sidebar.dashboardUpstream },
-    { to: '/market-dashboard/midstream', label: t.sidebar.dashboardMidstream },
-    { to: '/market-dashboard/downstream', label: t.sidebar.dashboardDownstream },
-    { to: '/market-dashboard/report', label: t.sidebar.dashboardReport },
-    { to: '/market-dashboard/weekly-summary', label: t.sidebar.dashboardWeeklySummary },
-  ];
-  // enabledQuery is still fetched so the query is warm when the user
-  // navigates to the dashboard page, but the accordion is no longer
-  // gated on it — see the comment above for rationale.
+  // ── Dashboard accordion (REMOVED 2026-08-27) ─────────────────────
+  // The Market Dashboard section nav (Dashboard/Overview/Upstream/
+  // Midstream/Downstream/Report/Weekly Summary) was removed from the
+  // sidebar, and the /market-dashboard/* routes were removed from the
+  // app with the market dashboard feature.
 
   return (
-    <>
     <aside
       style={{ width: sidebarWidth }}
       className="relative flex h-screen shrink-0 flex-col border-r border-sidebar-border bg-sidebar transition-[width] duration-200"
@@ -310,12 +191,8 @@ export default function Sidebar() {
                 "Cognitive Hub" removed from the nav, the brand is the
                 most visible entry point to the chat page. */}
             <NavLink to="/" end className="flex flex-1 items-center gap-2.5 min-w-0" title={t.sidebar.brand}>
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white">
-                <img src={brandLogo} alt="Ecisco AI logo" className="h-full w-full object-contain p-1" />
-              </div>
               <div className="min-w-0">
-                <div className="font-display text-lg leading-none tracking-tight text-foreground truncate">{t.sidebar.brand}</div>
-                <div className="mt-1 text-[10px] uppercase tracking-[0.15em] text-muted-foreground">Ecisco</div>
+                <div className="font-display text-xl leading-none tracking-tight text-foreground truncate">{t.sidebar.brand}</div>
               </div>
             </NavLink>
             <button
@@ -440,38 +317,6 @@ export default function Sidebar() {
                       </NavLink>
                     ))}
                   </nav>
-                  <div className="mt-1 border-t border-sidebar-border/60 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => setDashboardOpen((v) => !v)}
-                      className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm transition-colors ${
-                        dashboardOpen
-                          ? 'text-foreground font-medium'
-                          : 'text-muted-foreground hover:bg-sidebar-accent/50 hover:text-foreground'
-                      }`}
-                      aria-expanded={dashboardOpen}
-                    >
-                      <LayoutDashboard className="h-4 w-4 shrink-0" />
-                      <span className="min-w-0 flex-1 truncate text-left">{t.sidebar.dashboard}</span>
-                      <ChevronDown
-                        className={`h-3.5 w-3.5 shrink-0 transition-transform ${dashboardOpen ? 'rotate-180' : ''}`}
-                      />
-                    </button>
-                    {dashboardOpen && (
-                      <nav className="mt-1 space-y-0.5">
-                        {dashboardItems.map((item) => (
-                          <NavLink
-                            key={item.to}
-                            to={item.to}
-                            className={linkClass}
-                            style={{ paddingLeft: '2rem' }}
-                          >
-                            <span className="min-w-0 truncate text-xs">{item.label}</span>
-                          </NavLink>
-                        ))}
-                      </nav>
-                    )}
-                  </div>
                 </>
               ) : (
                 <nav className="space-y-0.5">
@@ -515,13 +360,11 @@ export default function Sidebar() {
         {!collapsed && (
           <div className="mb-2 flex items-center gap-1">
             <ThemeToggle collapsed={false} />
-            <AlertButton collapsed={false} onClick={handleOpenAlertPanel} panelOpen={alertPanelOpen} />
           </div>
         )}
         {collapsed && (
           <div className="mb-2 flex flex-col items-center gap-1">
             <ThemeToggle collapsed />
-            <AlertButton collapsed onClick={handleOpenAlertPanel} panelOpen={alertPanelOpen} />
           </div>
         )}
         {/* Admin entry now lives in the configuration card above (see
@@ -530,13 +373,5 @@ export default function Sidebar() {
         <UserMenu user={user} collapsed={collapsed} />
       </div>
     </aside>
-
-    {/* Proactive Alerts slide-out panel */}
-    <ProactiveAlerts
-      open={alertPanelOpen}
-      onClose={handleCloseAlertPanel}
-      onInvestigate={handleInvestigateAlert}
-    />
-    </>
   );
 }

@@ -156,6 +156,7 @@ def test_exploration_cap_empty_executed_list(fullstack_on):
 def test_exploration_tools_constant():
     assert DASHBOARD_EXPLORATION_TOOLS == frozenset({
         "describe_schema", "execute_query", "execute_sql", "sql_query",
+        "fetch_data_batch",
     })
 
 

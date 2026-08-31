@@ -14,7 +14,7 @@ existing raw tool loop runs.  When True, the FSM orchestrates.
 import logging
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Optional
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
@@ -101,6 +101,13 @@ class ExecutionRequest(BaseModel):
     # automation executor sends). Drives the stricter quality-gate
     # threshold for unattended runs (0.6 vs 0.4 for interactive chat).
     is_automation: bool = False
+    # Resolved hierarchical LLM endpoint (project/agent → llm_models pin).
+    # When set, EVERY LLM call inside the FSM (GOAL task-spec parse, PLAN
+    # generation, ACT tool/nl2sql/synthesize nodes, VERIFY rubric,
+    # QUALITY_EVAL, FINALIZE response + streaming) targets this exact
+    # provider+model instead of the legacy .env defaults.  The chat-loop
+    # routers resolve it via ``resolve_effective_llm`` and attach it here.
+    endpoint: Optional[Any] = None
 
 
 class ExecutionResult(BaseModel):
@@ -169,6 +176,7 @@ class SynexiaFSM:
         on_state_change=None,
         generate_response: bool = True,
         on_plan_node=None,
+        on_verify=None,
     ) -> ExecutionResult:
         """Run the full FSM pipeline for a user message.
 
@@ -185,6 +193,11 @@ class SynexiaFSM:
                 watcher sees the plan executing — and self-correcting via the
                 ACT re-plan — step by step (the Manus-style activity feed).
                 Exceptions in the callback are swallowed by the router.
+            on_verify: Optional callback ``(passed: bool, result)`` invoked
+                after VERIFY with the deterministic VerifyResult. Lets the SSE
+                path emit an HONEST verdict — ``verify_passed`` only when the
+                checks really passed, ``verify_failed`` otherwise — instead of
+                unconditionally claiming success whenever FINALIZE is entered.
         """
         # INIT — create execution record
         self.execution = Execution(
@@ -241,7 +254,7 @@ class SynexiaFSM:
 
                 # VERIFY — validate outputs
                 self._transition(FSMState.VERIFY, on_state_change=on_state_change)
-                self._run_verify(request)
+                self._run_verify(request, on_verify=on_verify)
 
                 if attempt < verify_budget and self._should_verify_replan():
                     failure_context = self._build_verify_replan_context()
@@ -319,6 +332,7 @@ class SynexiaFSM:
             active_skill=request.selected_skill,
             conversation_context=conv_ctx or None,
             db=self.db,
+            endpoint=request.endpoint,
         )
 
         # ── Follow-up reuse: if prior turn has answer datasets and the
@@ -378,6 +392,20 @@ class SynexiaFSM:
         """
         from app.services.synexia.plan_dag import generate_plan
 
+        # The TaskSpec parsed by GOAL carries the LLM's classification
+        # (task_kind, entities, …) but NOT the raw user message — the
+        # LLM's JSON schema doesn't echo it back.  The planner needs the
+        # original text to build a usable nl2sql node (inputs.question);
+        # without it the node executes with question="" and fails with
+        # "Question is required", which cascades into a VERIFY failure
+        # and the agent claiming it has no data access.  The execution
+        # row has the message — inject it here for both the default and
+        # LLM planner paths.
+        if self.execution.task_spec:
+            self.execution.task_spec["user_message"] = (
+                self.execution.task_spec.get("user_message") or request.user_message
+            )
+
         self.plan = generate_plan(
             db=self.db,
             execution_id=self.execution.id,
@@ -386,6 +414,7 @@ class SynexiaFSM:
             agent_name=request.agent_name,
             failure_context=failure_context,
             plan_version=plan_version,
+            endpoint=request.endpoint,
         )
         logger.info(
             "Plan generated (v%s%s): %d nodes",
@@ -423,6 +452,7 @@ class SynexiaFSM:
             user_id=request.user_id,
             data_ctx_extras=request.data_ctx_extras,
             on_plan_node=on_plan_node,
+            endpoint=request.endpoint,
         )
         logger.info("Executed %d plan nodes, %d observations", len(self.plan.nodes) if self.plan else 0, len(observations))
 
@@ -464,7 +494,7 @@ class SynexiaFSM:
             )
             return None
 
-    def _run_verify(self, request: ExecutionRequest):
+    def _run_verify(self, request: ExecutionRequest, on_verify=None):
         """VERIFY state — validate outputs (artifacts, data integrity).
 
         Calls the deterministic validator in :mod:`app.services.synexia.verifier`
@@ -479,6 +509,9 @@ class SynexiaFSM:
         VERIFY is intentionally non-fatal: a ``passed=False`` result is
         information, not a gate. Partial results are still useful and the
         confidence score will reflect the issues.
+
+        ``on_verify(passed, result)`` is invoked after the checks run so the
+        SSE path can surface an honest verdict to the user.
         """
         from app.services.synexia.verifier import (
             verify_execution,
@@ -507,7 +540,7 @@ class SynexiaFSM:
                     _grounding_err,
                 )
 
-        llm_checks = verify_with_llm(self.execution, result)
+        llm_checks = verify_with_llm(self.execution, result, endpoint=request.endpoint)
         if llm_checks:
             result.checks.extend(llm_checks)
 
@@ -523,6 +556,13 @@ class SynexiaFSM:
                 self.execution.id,
                 [(c["check"], c["ok"]) for c in result.checks],
             )
+        # Honest verdict for the SSE path: callers may surface
+        # verify_passed / verify_failed to the user. Never raise.
+        if on_verify is not None:
+            try:
+                on_verify(overall_ok, result)
+            except Exception as _verify_cb_err:
+                logger.warning("FSM on_verify callback raised (non-fatal): %s", _verify_cb_err)
         # Don't fail the whole execution — partial results are still useful
         # (preserved historical behavior of the stub).
 
@@ -659,6 +699,7 @@ class SynexiaFSM:
                 prompt=prompt,
                 messages=messages,
                 temperature=kwargs.get("temperature", 0),
+                endpoint=request.endpoint,
             )
             # Production call_llm is async → run it in a fresh loop (we are
             # in a worker thread via asyncio.to_thread).  Tests may inject a
@@ -1071,7 +1112,27 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
                 prompt=system_prompt,
                 messages=[],
                 temperature=0.7,
+                endpoint=request.endpoint,
             )
+            # Production call_llm is ASYNC — calling it without await returns
+            # a coroutine object; ``.get(...)`` on it raises AttributeError and
+            # every blocking FINALIZE silently fell back to the generic
+            # "I've processed your request." (the LLM was NEVER called).
+            # We are in a worker thread (run via asyncio.to_thread), so a
+            # fresh event loop is always safe — same bridge pattern as
+            # run_quality_eval (line ~694). Tests may inject a sync stub
+            # returning a dict → pass it through untouched.
+            import asyncio as _asyncio
+
+            if _asyncio.iscoroutine(result):
+                _loop = _asyncio.new_event_loop()
+                try:
+                    result = _loop.run_until_complete(result)
+                finally:
+                    try:
+                        _loop.close()
+                    except Exception:
+                        pass
             return result.get("response", "I've processed your request.")
         except Exception as e:
             logger.warning("Response generation failed: %s", e)
@@ -1098,7 +1159,9 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
 
         full_text = ""
         try:
-            async for delta in stream_chat_completion(prompt, temperature=0.7):
+            async for delta in stream_chat_completion(
+                prompt, temperature=0.7, endpoint=request.endpoint,
+            ):
                 full_text += delta
                 yield ("delta", delta)
         except Exception as e:
@@ -1108,7 +1171,10 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
             # Streaming yielded nothing or failed — blocking fallback so the
             # user still gets a response.
             try:
-                result = await call_llm(prompt=prompt, messages=[], temperature=0.7)
+                result = await call_llm(
+                    prompt=prompt, messages=[], temperature=0.7,
+                    endpoint=request.endpoint,
+                )
                 full_text = result.get("response", "I've processed your request.")
             except Exception as e:
                 logger.warning("FSM response blocking fallback failed: %s", e)

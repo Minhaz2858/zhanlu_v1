@@ -1,4 +1,4 @@
-"""EDIA-ported forecast trust tiers.
+"""Forecast trust tiers.
 
 Labels each product's forecast with a user-facing trust tier so the dashboard
 doesn't present misleading daily precision for weekly-cadence products or
@@ -19,28 +19,29 @@ import logging
 import math
 from typing import Any, Optional
 
+from app.services.domain_config import get_domain_config
+
 logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Static product classification (ported from EDIA)
+# Config-driven product classification (HOW, not WHAT)
 # ---------------------------------------------------------------------------
 
+# Product classifications come from the app's domain config (keys
+# "high_skill_products" / "weekly_cadence_products" — lists of product ids).
+# Empty config = empty sets = fully generic behavior.
+_DOMAIN_CFG: dict[str, Any] = get_domain_config("")
+
 # Products with documented genuine ARIMA skill (skill_vs_naive < 0 in backtest).
-_HIGH_SKILL_PRODUCTS: frozenset[str] = frozenset({
-    "isoprene",
-    "piperylene",
-    "c5_resin",
-    "dcpd",
-})
+_HIGH_SKILL_PRODUCTS: frozenset[str] = frozenset(
+    str(p) for p in (_DOMAIN_CFG.get("high_skill_products") or [])
+)
 
 # Products that trade weekly or less frequently; daily forecast is misleading.
-_WEEKLY_CADENCE_PRODUCTS: frozenset[str] = frozenset({
-    "cracked_c9",
-    "mixed_c9",
-    "trimethylbenzene",
-    "raffinate_c5",
-})
+_WEEKLY_CADENCE_PRODUCTS: frozenset[str] = frozenset(
+    str(p) for p in (_DOMAIN_CFG.get("weekly_cadence_products") or [])
+)
 
 
 # ---------------------------------------------------------------------------
@@ -57,7 +58,7 @@ def compute_forecast_trust_tier(
     """Compute a user-facing trust tier for a product's forecast.
 
     Args:
-        product_id: The dashboard product_id (e.g. "c5_resin", "cracked_c9").
+        product_id: The dashboard product_id (e.g. "<product>").
         below_naive: Whether the model's MAPE exceeds a naive last-price-hold
             baseline on this run. If None, treated as False.
         cadence_class: One of "daily", "weekly", "sparse", "unknown".
@@ -173,9 +174,9 @@ def classify_cadence(product_id: str, row_count: int | None) -> str:
 
     Returns one of: "weekly", "sparse", "daily".
 
-    Uses the static _WEEKLY_CADENCE_PRODUCTS frozenset for known weekly
-    products, and a row-count threshold for sparse detection. Daily is
-    the default for everything else.
+    Uses the config-driven _WEEKLY_CADENCE_PRODUCTS frozenset for known
+    weekly products, and a row-count threshold for sparse detection. Daily
+    is the default for everything else.
     """
     if row_count is not None and row_count < 50:
         return "sparse"
@@ -204,10 +205,10 @@ def classify_trust(
       - realized_mape >= naive_mape       →  "directional" (no edge)
       - drift_status = "degraded"         →  downgraded one tier
 
-    When realized metrics are not available, falls back to the static
-    product lists (cold-start only).
+    When realized metrics are not available, falls back to the
+    config-driven product lists (cold-start only).
     """
-    # Cold-start fallback: no realized metrics → use static lists
+    # Cold-start fallback: no realized metrics → use config-driven lists
     if realized_mape is None or naive_mape is None or not math.isfinite(realized_mape) or not math.isfinite(naive_mape):
         if product_id in _HIGH_SKILL_PRODUCTS:
             return {"tier": "high", "badge_color": "green", "reason_codes": ["cold_start_static"]}

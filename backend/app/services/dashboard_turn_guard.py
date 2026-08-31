@@ -110,6 +110,17 @@ def fuzzy_dashboard_request(user_content: str | None) -> bool:
     """
     if not user_content:
         return False
+    # The flag is authoritative: when off, this function is byte-identical to
+    # the legacy no-fuzzy behavior even when GOAL_CONTRACT_ENABLED would
+    # otherwise normalize "Dashbord" → dashboard (the goal-contract normalizer
+    # is a SUPERSET of the skeleton match and must not bypass the flag gate).
+    try:
+        from app.config import settings
+
+        if not getattr(settings, "DASHBOARD_FUZZY_MATCH_ENABLED", False):
+            return False
+    except Exception:
+        return False
     # Goal-Contract mode: the typo-tolerant normalizer is the single source
     # of truth — it catches the exact keyword, Dashbord-class typos AND the
     # Chinese variants, so the fuzzy path is a superset of the skeleton match.
@@ -185,9 +196,9 @@ def should_force_create_dashboard(
        ``Skill``).
 
     2. **Speculative (project-context)**: when the agent is in a project that
-       has dashboard semantics (Ecisco BI / ``is_dashboard_project=True``) and
+       has dashboard semantics (``is_dashboard_project=True``) and
        the agent has already done ``describe_schema`` + a design tool, force
-       the call. This catches the "user said hi in an Ecisco BI chat" case
+       the call. This catches the "user said hi in a dashboard project" case
        where the agent speculatively loads dashboard skills and then dumps
        markdown instead of calling the build tool.
     """
@@ -235,6 +246,38 @@ def dashboard_guard_blocked_tools() -> frozenset[str]:
     the agent then dumps as markdown instead of shipping a dashboard.
     """
     return frozenset({"execute_query", "execute_sql", "sql_query"})
+
+
+def dashboard_guard_should_block_queries(
+    parsed_tool_names,
+    build_tool: str | None,
+    dashboard_forced: bool,
+) -> bool:
+    """True when ``execute_query``-style calls in the current tool-call batch
+    must be intercepted and redirected to the build tool.
+
+    Fires ONLY when a dashboard build is genuinely in play:
+
+    - the LLM itself called the build tool (``build_tool``) in this batch, OR
+    - the dashboard guard forced the build tool this turn
+      (``dashboard_forced`` — the user asked for a dashboard and the
+      schema/design pass completed, so further query exploration is waste).
+
+    It does NOT fire merely because the build tool is REGISTERED in the
+    agent's toolset. That registry-presence check (the pre-fix condition
+    ``build_tool in _tool_names``) blocked legitimate ``execute_query`` calls
+    in every non-dashboard conversation whose agent happened to list the
+    build tool in ``enabled_tools`` — e.g. the skill_agent chat, where a
+    plain "weekly sales report" request got "only create_dashboard allowed"
+    and the agent apologized instead of querying (observed 2026-08-29,
+    conv 8ffb436e).
+    """
+    if not parsed_tool_names or not build_tool:
+        return False
+    names = set(parsed_tool_names)
+    if not (build_tool in names or dashboard_forced):
+        return False
+    return bool(names & dashboard_guard_blocked_tools())
 
 
 # ── T12: describe_schema per-turn cap ──────────────────────────────────────
@@ -366,6 +409,12 @@ def dashboard_orchestrator_should_block(
 # agent is forced to build once total exploration hits the threshold.
 DASHBOARD_EXPLORATION_TOOLS = frozenset({
     "describe_schema", "execute_query", "execute_sql", "sql_query",
+    # 2026-08-27: fetch_data_batch is the direct-parallel-SQL fast path the
+    # local model prefers for schema exploration (SHOW TABLES / DESCRIBE /
+    # SHOW COLUMNS batched per call). It MUST count toward the exploration
+    # cap, otherwise a weak model can explore forever via fetch_data_batch
+    # and never reach the build step.
+    "fetch_data_batch",
 })
 
 
@@ -621,3 +670,96 @@ def contract_confirmation_needed(
     if mentions_concrete_entities(user_content):
         return False  # user named real tables/columns — inspect and build
     return True
+
+
+def verify_dashboard_build_produced_app(
+    db,
+    conversation_id: str | None,
+    executed_tool_names: list[str] | None,
+    build_tool: str | None = None,
+) -> str | None:
+    """POST-BUILD verification gate (T-something, Aug 2026).
+
+    Returns a human-readable warning when a dashboard turn CLAIMED it built a
+    dashboard (the build tool was called) but NO ``dashboard_apps`` row exists
+    for this conversation. This is the deterministic guard against the silent
+    "delivered a text report instead of a dashboard" failure: the agent can
+    narrate success without ever persisting the app.
+
+    Returns ``None`` when:
+      - the build tool was never called (nothing to verify — the narration
+        nudge handles that case),
+      - the build tool is not flag-enabled,
+      - a row with ``chat_thread_id == conversation_id`` EXISTS (success).
+
+    The caller appends the returned message to the final stream content so the
+    user sees a clear failure instead of a confident-but-fake success story.
+    """
+    if not conversation_id or not executed_tool_names:
+        return None
+    build_tool = build_tool or dashboard_build_tool()
+    if not build_tool:
+        return None
+    names = set(executed_tool_names or [])
+    if build_tool not in names:
+        return None  # build tool never ran — nothing to verify
+    try:
+        from app.models.dashboard_app import DashboardApp
+        exists = (
+            db.query(DashboardApp.id)
+            .filter(
+                DashboardApp.chat_thread_id == conversation_id,
+                DashboardApp.is_deleted == False,  # noqa: E712
+            )
+            .first()
+        )
+        if exists:
+            return None
+        return (
+            "⚠️ BUILD VERIFICATION FAILED: the agent said it built a "
+            "dashboard but no dashboard app record exists for this "
+            "conversation. The dashboard was NOT actually created. "
+            "Please ask the agent to call the dashboard build tool again "
+            "and confirm the app URL appears."
+        )
+    except Exception as exc:  # noqa: BLE001 — verification must never crash the stream
+        logger.warning("verify_dashboard_build_produced_app failed (non-fatal): %s", exc)
+        return None
+
+
+def verify_dashboard_quality_refined(
+    worst_grade: str | None,
+    refined: bool,
+    hard_gaps: list[str] | None = None,
+) -> str | None:
+    """POST-BUILD quality gate (Aug 2026, Tier 1 auto-refine enforcement).
+
+    The create/update_fullstack_dashboard tools return a deterministic
+    ``quality`` verdict (grade A/B/C + hard_gaps + recommendations). A turn
+    that BUILT a dashboard with grade B/C and then ended WITHOUT calling
+    ``update_fullstack_dashboard`` shipped a thin board on purpose — the
+    agent saw the quality report and ignored it.
+
+    Returns a human-readable warning when:
+      - ``worst_grade`` is B or C (the build tool returned a quality report
+        that was not grade A), AND
+      - ``refined`` is False (no update_fullstack_dashboard followed the
+        build in the same turn).
+
+    Returns ``None`` when the grade is A or unknown, or an update followed.
+    The caller appends the returned message to the final stream content so
+    the user sees why the dashboard is below the professional standard.
+    """
+    if worst_grade not in ("B", "C"):
+        return None
+    if refined:
+        return None
+    gaps = ", ".join(hard_gaps or []) or "widget mix below standard"
+    return (
+        "⚠️ BUILD QUALITY " + worst_grade + ": the dashboard was created but "
+        "the build's own quality report flagged missing requirements "
+        f"({gaps}) and NO refinement update (update_fullstack_dashboard) "
+        "followed. The board is live but below the professional standard — "
+        "ask the agent to call update_fullstack_dashboard to close the gaps "
+        "(filters, sections, KPI row, trend, insight strip) in one pass."
+    )

@@ -64,13 +64,19 @@ def render(payload: ReportCardPayload, ctx: Optional[ExportContext] = None) -> t
     # Replace the default sheet
     wb.remove(wb.active)
 
-    _add_summary_sheet(wb, payload, ctx)
-    if payload.kpis:
-        _add_kpi_sheet(wb, payload)
-    if payload.chart and payload.chart.data:
-        _add_data_sheet(wb, payload)
-    if payload.insights:
-        _add_insights_sheet(wb, payload)
+    if payload.sheets:
+        # Author-mode: emit the LLM's sheets verbatim (one sheet per
+        # logical view). Falls back to the classic layout when the agent
+        # supplied none.
+        _add_authored_sheets(wb, payload, ctx)
+    else:
+        _add_summary_sheet(wb, payload, ctx)
+        if payload.kpis:
+            _add_kpi_sheet(wb, payload)
+        if payload.chart and payload.chart.data:
+            _add_data_sheet(wb, payload)
+        if payload.insights:
+            _add_insights_sheet(wb, payload)
 
     buf = io.BytesIO()
     wb.save(buf)
@@ -79,6 +85,68 @@ def render(payload: ReportCardPayload, ctx: Optional[ExportContext] = None) -> t
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ".xlsx",
     )
+
+
+def _add_authored_sheets(
+    wb: Workbook, payload: ReportCardPayload, ctx: ExportContext
+) -> None:
+    """Render ``payload.sheets`` — the LLM's per-view spreadsheets.
+
+    Each entry: {"title", "columns"?, "rows": [{col: value}], "summary"?}.
+    Column order comes from ``columns`` when given, otherwise from the
+    first row's keys (then union of all rows).
+    """
+    for idx, sheet in enumerate(payload.sheets):
+        if not isinstance(sheet, dict):
+            continue
+        ws = wb.create_sheet(
+            title=str(sheet.get("title") or f"Sheet {idx + 1}")[:31] or f"Sheet {idx + 1}",
+            index=idx,
+        )
+        ws.sheet_view.showGridLines = False
+
+        rows = sheet.get("rows") or []
+        columns = sheet.get("columns")
+        if not columns:
+            cols_seen: list[str] = []
+            for r in rows:
+                if isinstance(r, dict):
+                    for k in r.keys():
+                        if k not in cols_seen:
+                            cols_seen.append(k)
+            columns = cols_seen
+
+        summary = sheet.get("summary")
+        row = 1
+        if summary:
+            c = ws.cell(row=row, column=1, value=str(summary))
+            c.font = Font(name="Calibri", size=11, color=C_TEXT)
+            c.alignment = Alignment(wrap_text=True, vertical="top")
+            ws.merge_cells(start_row=row, start_column=1,
+                           end_row=row, end_column=max(len(columns), 1))
+            ws.row_dimensions[row].height = 30
+            row += 2
+
+        if columns:
+            for col_idx, col in enumerate(columns, start=1):
+                c = ws.cell(row=row, column=col_idx, value=str(col))
+                c.font = Font(name="Calibri", size=11, bold=True, color=C_WHITE)
+                c.fill = PatternFill(fill_type="solid", fgColor=C_HEADER_BG)
+                c.border = _THIN_BORDER
+                c.alignment = Alignment(horizontal="center", vertical="center")
+            row += 1
+            for r in rows:
+                if not isinstance(r, dict):
+                    continue
+                for col_idx, col in enumerate(columns, start=1):
+                    c = ws.cell(row=row, column=col_idx, value=r.get(col))
+                    c.font = Font(name="Calibri", size=11, color=C_TEXT)
+                    c.border = _THIN_BORDER
+                row += 1
+            for col_idx, col in enumerate(columns, start=1):
+                ws.column_dimensions[get_column_letter(col_idx)].width = max(
+                    12, min(48, 4 + 1.1 * len(str(col)))
+                )
 
 
 # --- Sheet builders ----------------------------------------------------------

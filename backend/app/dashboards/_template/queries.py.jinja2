@@ -56,7 +56,18 @@ async def run_metric(db, metric_id: str, filters: dict | None = None) -> dict:
     except ValueError as exc:
         return {"columns": [], "rows": [], "error": str(exc), "truncated": False}
     dims = metric_dimensions(m)
+    # Query-string params arrive FLAT from the router ({product: x, from: y, to: z}).
+    # render_widget_sql expects date-window keys at the TOP level and dims nested
+    # under ``filters`` — lift from/to/date so :from/:to/:date tokens actually render.
+    qp = filters or {}
+    params = {"filters": qp}
+    if qp.get("from"):
+        params["from"] = qp["from"]
+    if qp.get("to"):
+        params["to"] = qp["to"]
+    if qp.get("date"):
+        params["date"] = qp["date"]
     return await _run_single_sql(
-        db, DATASOURCE_KB_ID, m["sql"], {"filters": filters or {}}, dims,
+        db, DATASOURCE_KB_ID, m["sql"], params, dims,
         DEFAULT_MAX_ROWS, DEFAULT_TIMEOUT_S,
     )

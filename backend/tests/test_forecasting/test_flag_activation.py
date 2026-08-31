@@ -99,19 +99,6 @@ def test_domain_signals_importable_and_callable():
     assert "total_pct" in rpt
 
 
-def test_intelligence_overlay_importable():
-    """intelligence_overlay with event calibration flag ON must be importable."""
-    from app.services.forecasting.intelligence_overlay import (
-        fetch_product_intelligence_sync,
-    )
-
-    assert callable(fetch_product_intelligence_sync)
-
-
-# ---------------------------------------------------------------------------
-# 4.  Ops modules — import and callable
-# ---------------------------------------------------------------------------
-
 def test_event_calibration_importable():
     from app.services.forecasting.ops.event_calibration import (
         run_event_calibration,

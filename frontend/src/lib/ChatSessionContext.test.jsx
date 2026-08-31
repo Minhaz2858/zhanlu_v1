@@ -132,12 +132,12 @@ describe('ChatSessionContext', () => {
       await new Promise((r) => setTimeout(r, 10));
     });
 
-    window.history.replaceState({}, '', '/?project=42&projectName=ECISCO');
+    window.history.replaceState({}, '', '/?project=42&projectName=ACME');
 
     act(() => result.current.selectSession('s1'));
     expect(window.location.search).toContain('conv=conv-X');
     expect(window.location.search).toContain('project=42');
-    expect(window.location.search).toContain('projectName=ECISCO');
+    expect(window.location.search).toContain('projectName=ACME');
   });
 
   it('newChat clears activeId and stages the project', () => {
@@ -313,7 +313,7 @@ describe('ChatSessionContext -- chatGeneration (newChat counter)', () => {
   it('newChat(name) also bumps chatGeneration', () => {
     const { result } = renderHook(() => useChatSession(), { wrapper: wrapWithProvider });
     const before = result.current.chatGeneration;
-    act(() => result.current.newChat('ECISCO'));
+    act(() => result.current.newChat('ACME'));
     expect(result.current.chatGeneration).toBe(before + 1);
   });
 

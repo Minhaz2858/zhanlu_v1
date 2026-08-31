@@ -72,7 +72,7 @@ def _split_stage_into_slides(stage_html: str) -> List[str]:
     """
     pattern = re.compile(
         r'(<style>.*?</style>\s*)?<section class="slide[^"]*"[^>]*>.*?</section>'
-        r'(\s*<script>.*?</script>)?',
+        r'((?:\s*<script[^>]*>.*?</script>)*)',
         re.DOTALL,
     )
     matches = []
@@ -154,6 +154,10 @@ def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> 
         "--no-remote",
         f"--user-data-dir={profile}",
         "--window-size=1920,1080",
+        # Let deferred scripts (Chart.js draws, font swaps) finish before
+        # the screenshot fires. Without this, load-listener chart code
+        # runs too late and the canvas captures as blank.
+        "--virtual-time-budget=5000",
         f"--screenshot={png_path}",
         f"file://{html_path}",
     ]
@@ -172,26 +176,41 @@ def _render_slide_to_png(slide_html: str, png_path: Path, profile_dir: Path) -> 
         )
 
 
-def _build_pptx_from_pngs(pngs: List[Path]) -> bytes:
+def _build_pptx_from_pngs(pngs: List[Path], notes: Optional[List[str]] = None) -> bytes:
     pres = Presentation()
     pres.slide_width = Inches(13.333)  # 16:9
     pres.slide_height = Inches(7.5)
     blank_layout = pres.slide_layouts[6]
 
-    for png in pngs:
+    for idx, png in enumerate(pngs):
         slide = pres.slides.add_slide(blank_layout)
         slide.shapes.add_picture(
             str(png), 0, 0,
             width=pres.slide_width, height=pres.slide_height,
         )
+        # Speaker notes (professional decks always carry them). Only when
+        # the caller supplied notes; the notes text frame is never fatal.
+        if notes and idx < len(notes) and notes[idx]:
+            try:
+                ns = slide.notes_slide
+                ns.notes_text_frame.text = notes[idx]
+            except Exception:
+                pass
+
+    # Fade transitions (settings-gated, best-effort XML addition).
+    from app.services.artifacts.pptx_motion import add_fade_transitions
+    add_fade_transitions(pres)
 
     buf = io.BytesIO()
     pres.save(buf)
     return buf.getvalue()
 
 
-def render_image_fill(stage_html: str) -> bytes:
+def render_image_fill(stage_html: str, notes: Optional[List[str]] = None) -> bytes:
     """Convert a stage HTML to PPTX bytes (image-fill pipeline).
+
+    ``notes`` — one speaker-note string per slide (in slide order) — is
+    written into the pptx notes panes when provided.
 
     Raises ``PptxRenderError`` on any failure.
     """
@@ -211,7 +230,7 @@ def render_image_fill(stage_html: str) -> bytes:
                 png_path = workdir / f"slide_{i:03d}.png"
                 _render_slide_to_png(slide_html, png_path, profile_dir)
                 pngs.append(png_path)
-            pptx_bytes = _build_pptx_from_pngs(pngs)
+            pptx_bytes = _build_pptx_from_pngs(pngs, notes=notes)
         except PptxRenderError:
             raise
         except Exception as exc:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 from typing import Any
 
 import httpx
@@ -53,6 +54,27 @@ def _connection_context(schema_svc: SchemaService, kb_id: str) -> str:
     return f"Data source ({', '.join(parts)})."
 
 
+_MULTI_STMT_NL = re.compile(r";\s*(?=(?:SELECT|WITH)\b)", re.IGNORECASE)
+
+
+def _sanitize_llm_sql(sql: str) -> str:
+    """Hygiene pass for LLM-generated SQL before execution (2026-08-28).
+
+    Observed on the Sales Performance Dashboard build (conv 5f2c2c39):
+    deepseek emitted ``DATE_FORMAT(PLANDATE, '%%Y-%%m')`` (Python-style
+    doubled percents) and pasted TWO SELECTs in one response. Both produce
+    MySQL 1064s that kill the whole data step. Single-pass cleanup:
+    - collapse ``%%`` -> ``%`` (safe for DATE_FORMAT / LIKE in LLM SQL),
+    - keep only the FIRST statement (MySQL multi-statements are disabled;
+      the model usually pastes alternates after the primary query).
+    """
+    if not sql:
+        return sql
+    cleaned = sql.replace("%%", "%")
+    cleaned = _MULTI_STMT_NL.split(cleaned, maxsplit=1)[0]
+    return cleaned.strip()
+
+
 class NLAnswerService:
     """Orchestrate text→SQL→execute→narrate for a KnowledgeBase."""
 
@@ -67,6 +89,7 @@ class NLAnswerService:
         project_id: str | None = None,
         endpoint: LLMEndpoint | None = None,
         skip_narrate: bool = False,
+        agent_name: str | None = None,
     ) -> dict:
         """Return a structured + prose answer for a user question.
 
@@ -133,6 +156,25 @@ class NLAnswerService:
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
 
+        # ── C1 (2026-08-26): static intent resolver ──
+        # Known business questions ("top customer for last month", "sales
+        # report", ...) route DIRECTLY to the known-correct table, skipping
+        # the vector schema linker — eliminating the "wrong table → 0 rows"
+        # failure mode at its source. The NL model still writes the SQL; we
+        # only anchor the table. Falls through to normal selection when the
+        # route's table doesn't exist in the KB.
+        _static_route: dict | None = None
+        # NOTE: the setting may be None (unset) — treat None as enabled.
+        if getattr(settings, "STATIC_QUERY_ROUTING_ENABLED", True) is not False:
+            try:
+                from app.services.db.query_router import resolve_static_route
+                _static_route = resolve_static_route(question, agent_name=agent_name)
+            except Exception as e:
+                logger.warning(
+                    "NLAnswer: static route resolver failed (non-fatal): %s", e,
+                )
+                _static_route = None
+
         # 1. Pull schema — TWO-PHASE approach:
         #   Phase A: Show LLM a full table-of-contents (ALL tables) so it can
         #            choose the most relevant ones.  This fixes the #1 cause of
@@ -146,8 +188,65 @@ class NLAnswerService:
         schema_text: str | None = None
         _selected_via_toc = False  # track whether Phase A succeeded
 
+        # ── C1b: static route → pin the table before ANY LLM selection ──
+        # If the intent resolver hit, load DDL for the pinned table directly
+        # (same machinery as TOC Phase B) and skip Phase A + the linker.
+        if (
+            _static_route
+            and settings.SCHEMA_LINKING_ENABLED
+            and settings.SEMANTIC_CATALOG_ENABLED
+        ):
+            try:
+                from app.services.knowledge_graph.schema_linker import (
+                    get_selected_tables_ddl,
+                )
+                _route_table = _static_route["table"]
+                ddl_text = await asyncio.to_thread(
+                    get_selected_tables_ddl,
+                    self._db, [kb_id], [_route_table],
+                )
+                if ddl_text and ddl_text.strip():
+                    schema_info = _schema_info_from_toc_selection(
+                        self._db, kb_id, [_route_table], schema_svc,
+                    )
+                    schema_text = ddl_text
+                    # Column/date hints make the pinned table usable on the
+                    # first attempt (e.g. PLANDATE for date filters) instead
+                    # of the model guessing a wrong date column → 0 rows.
+                    _date_hint = _static_route.get("date_hint")
+                    if _date_hint:
+                        schema_text = ddl_text + "\n-- " + _date_hint + "\n"
+                    _selected_via_toc = True
+                    logger.info(
+                        "NLAnswer: static route pinned table=%s (KB %s)",
+                        _route_table, kb_id,
+                    )
+                else:
+                    # Pinned table missing from KB → fall through to normal
+                    # selection (Phase A / linker).
+                    logger.warning(
+                        "NLAnswer: static route table %s not found in KB %s "
+                        "— falling back to normal selection",
+                        _route_table, kb_id,
+                    )
+                    _static_route = None
+            except Exception as e:
+                logger.warning(
+                    "NLAnswer: static route DDL failed (non-fatal): %s", e,
+                )
+                _static_route = None
+
         # ── Phase A: Full table-of-contents → LLM selects tables ──
-        if settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+        # Skipped when C1b already pinned a static-route table (the pin is the
+        # authoritative selection; re-running Phase A here would let the model
+        # clobber the pinned schema with its own TOC pick — observed: contract
+        # route pinned erp_v_contract_execution but Phase A overwrote it with
+        # erp_t_crm_contract).
+        if (
+            not _selected_via_toc
+            and settings.SCHEMA_LINKING_ENABLED
+            and settings.SEMANTIC_CATALOG_ENABLED
+        ):
             try:
                 from app.services.knowledge_graph.schema_linker import (
                     build_full_toc,
@@ -315,6 +414,12 @@ class NLAnswerService:
             endpoint=endpoint,
         )
 
+        # 2d. LLM-output hygiene: models sometimes emit Python-format
+        # artifacts (%% in DATE_FORMAT) or paste multiple statements — both
+        # produce MySQL 1064s that kill the data step. Deterministic cleanup
+        # BEFORE execution (see _sanitize_llm_sql).
+        sql = _sanitize_llm_sql(sql)
+
         # 3. Execute
         try:
             exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
@@ -332,15 +437,24 @@ class NLAnswerService:
 
         _shadow_validate_and_log(kb_id, question, sql, live_success=True)
 
-        # 3b. Zero-row auto-correction: if the SQL returned 0 rows, try once
-        # more with the full TOC approach (or a re-selection if we already
-        # used TOC).  The most common cause of empty rows is the schema
-        # linker selecting the wrong table; the TOC phase fixes this.
+        # 3b. Zero-row / degenerate auto-correction: if the SQL returned 0
+        # rows (or degenerate data — metadata-only probe rows / all-null
+        # values, C3 2026-08-26), try once more with the full TOC approach
+        # (or a re-selection if we already used TOC). The most common cause
+        # is the schema linker selecting the wrong table; the TOC phase fixes
+        # it. C2 adds a live COUNT(*) probe so the re-selection LLM can avoid
+        # provably-empty tables.
         exec_rows = exec_result.get("rows", [])
-        if not exec_rows and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
+        _degenerate = _is_degenerate_result(exec_rows)
+        if (
+            (not exec_rows or _degenerate)
+            and settings.SCHEMA_LINKING_ENABLED
+            and settings.SEMANTIC_CATALOG_ENABLED
+        ):
+            _why = "0 rows" if not exec_rows else "degenerate data (metadata-only or all-null)"
             logger.info(
-                "NLAnswer: SQL returned 0 rows — attempting zero-row correction "
-                "with full TOC re-selection for KB %s", kb_id,
+                "NLAnswer: SQL returned %s — attempting table re-selection "
+                "with full TOC for KB %s", _why, kb_id,
             )
             try:
                 from app.services.knowledge_graph.schema_linker import (
@@ -348,12 +462,36 @@ class NLAnswerService:
                     format_toc_text,
                     get_selected_tables_ddl,
                 )
+                # C2 (2026-08-26): probe table coverage so the re-selection
+                # LLM can AVOID provably-empty tables.
+                _probe_names = _extract_table_names(sql)
+                if _static_route:
+                    for _fb in (_static_route.get("fallback_tables") or []):
+                        if _fb not in _probe_names:
+                            _probe_names.append(_fb)
+                _probe_note = ""
+                if _probe_names:
+                    try:
+                        _probe_counts = await _probe_table_counts(
+                            self._db, kb_id, _probe_names[:5],
+                        )
+                        if _probe_counts:
+                            _probe_note = (
+                                " Table coverage probe (live COUNT(*)): "
+                                + ", ".join(
+                                    f"{t}={c}" for t, c in _probe_counts.items()
+                                )
+                                + ". Prefer tables with non-zero counts."
+                            )
+                    except Exception:
+                        _probe_note = ""
                 # Build error context for the re-selection prompt
                 failed_context = (
-                    f"Previous SQL attempt returned 0 rows:\n"
+                    f"Previous SQL attempt returned {_why}:\n"
                     f"```sql\n{sql}\n```\n"
                     f"Please choose DIFFERENT tables that are more likely to "
                     f"contain the data for: {question}"
+                    f"{_probe_note}"
                 )
                 toc = build_full_toc(self._db, [kb_id])
                 if toc:
@@ -433,10 +571,17 @@ class NLAnswerService:
                 # caller still gets a useful string.
                 answer_text = _fallback_narrative(question, exec_result)
 
+        _na_rows = exec_result.get("rows", [])
+        if _na_rows and isinstance(_na_rows[0], dict):
+            _na_cols = list(_na_rows[0].keys())
+        else:
+            _na_cols = []
+
         return {
             "success": True,
             "answer": answer_text,
-            "rows": exec_result.get("rows", []),
+            "rows": _na_rows,
+            "columns": _na_cols,
             "sql": exec_result.get("sql"),
             "source_id": kb_id,
             "source_name": exec_result.get("source", {}).get("name"),
@@ -777,12 +922,82 @@ def _schema_info_from_linker(
     }
 
 
+# ── C2/C3 helpers (2026-08-26): table-coverage probe + degenerate check ──
+_SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _extract_table_names(sql: str) -> list[str]:
+    """Best-effort table names from a SQL string (FROM/JOIN clauses)."""
+    out: list[str] = []
+    if not sql:
+        return out
+    for m in re.finditer(r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_.]*)", sql, re.IGNORECASE):
+        name = m.group(1).split(".")[-1].strip("`\"[]")
+        if _SAFE_IDENT_RE.match(name) and name not in out:
+            out.append(name)
+    return out
+
+
+async def _probe_table_counts(db: Session, kb_id: str, table_names: list[str], timeout_s: int = 3) -> dict:
+    """Run ``SELECT COUNT(*)`` per table (safe identifiers only).
+
+    Returns ``{table: count_str}``; empty dict on any failure. Used by the
+    zero-row / degenerate correction so the re-selection LLM can AVOID
+    tables that are provably empty.
+    """
+    counts: dict[str, str] = {}
+    from app.services.db.query_service import QueryService
+
+    qsvc = QueryService(db)
+    for name in table_names:
+        if not _SAFE_IDENT_RE.match(name):
+            continue
+        try:
+            res = await asyncio.wait_for(
+                asyncio.to_thread(
+                    qsvc.execute, kb_id, f"SELECT COUNT(*) AS cnt FROM `{name}`"
+                ),
+                timeout=timeout_s,
+            )
+            rows = (res or {}).get("rows") or []
+            if rows and isinstance(rows[0], dict):
+                counts[name] = str(rows[0].get("cnt", "?"))
+        except Exception as e:
+            logger.debug("NLAnswer: probe COUNT(%s) failed (non-fatal): %s", name, e)
+    return counts
+
+
+def _is_degenerate_result(rows: list) -> bool:
+    """True when the result is degenerate business data (not a real answer).
+
+    Conservative on purpose: a legit 1-row COUNT(*) summary (e.g. total
+    orders = 11779) is NOT degenerate. Flags:
+      - metadata-only probe rows (MIN_DATE/MAX_DATE/ENTRY_COUNT),
+      - rows where every value is null/empty/zero (all-null measures).
+    """
+    if not isinstance(rows, list) or not rows:
+        return False
+    try:
+        from app.services.goal_contract import is_metadata_only_rows
+        if is_metadata_only_rows(rows):
+            return True
+    except Exception:
+        pass
+    # all-null / all-zero check across every column
+    for row in rows:
+        if not isinstance(row, dict):
+            return False
+        vals = [v for k, v in row.items() if k and v is not None and v != "" and v != 0]
+        if vals:
+            return False
+    return True
+
+
 def _schema_info_from_toc_selection(
     db: Session, kb_id: str, selected_table_names: list[str],
     schema_svc: SchemaService,
 ) -> dict:
     """Build a describe_all-shaped dict from TOC-selected table names.
-
     Similar to _schema_info_from_linker but queries the DB for full
     column metadata for the selected tables only.
     """
@@ -1053,6 +1268,20 @@ def _fallback_narrative(question: str, exec_result: dict) -> str:
     rows = exec_result.get("rows", [])
     if not rows:
         return "The query returned no rows."
+    # 2026-08-26: business-aware deterministic report FIRST — for known
+    # intents (contract performance) build the real business report from
+    # the rows. This text is what the main agent forwards to the docx /
+    # sandbox generator, so the deliverable gets a real report instead of
+    # "Found 307 row(s). First: ...".
+    try:
+        from app.services.db.business_reports import try_build_business_report
+
+        src = exec_result.get("source_name") or "the data source"
+        biz_report = try_build_business_report(question, rows, src)
+        if biz_report:
+            return biz_report
+    except Exception:
+        pass
     cols = list(rows[0].keys())
     head = ", ".join(f"{c}={rows[0][c]!r}" for c in cols[:5])
     more = f" (+{len(rows) - 1} more rows)" if len(rows) > 1 else ""
@@ -1074,7 +1303,11 @@ async def _chat(
     if endpoint is not None:
         _model = endpoint.model_id
         _url = endpoint.base_url.rstrip("/") + "/chat/completions"
-        _headers = {"Authorization": f"Bearer {endpoint.api_key}", "Content-Type": "application/json"}
+        _api_key = endpoint.api_key or ""
+        _headers = {
+            "Authorization": f"Bearer {_api_key}" if _api_key else "",
+            "Content-Type": "application/json",
+        }
     else:
         _model = get_model()
         _url = llm_url()

@@ -381,7 +381,7 @@ def test_entity_master_block_constant_content():
 
 def test_agent_is_db_bound():
     assert _agent_is_db_bound("data_agent", None) is True
-    assert _agent_is_db_bound("ecisco_bi_assistant", None) is True
+    assert _agent_is_db_bound("data_agent", None) is True
     assert _agent_is_db_bound("general_assistant", None) is True
     assert _agent_is_db_bound("custom_agent", _App()) is False
     # User-created agent with a bound knowledge base is db-bound.

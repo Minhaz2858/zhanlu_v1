@@ -92,6 +92,11 @@ class ExportContext:
     #               meaning the report-card renderer path is used unchanged).
     deck_type: str = "data_report"
     deck_plan: Optional[DeckPlan] = None
+    # Deck skill the agent loaded for this artifact (create_artifact
+    # skill=...).  The skill-aware personality layer (skill_deck_profiles)
+    # maps it to theme/palette/deck-type defaults so a different skill
+    # produces a visibly different deck (2026-08-29).
+    skill_name: str = ""
 
 
 # --- Filename / slug helpers -------------------------------------------------

@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
+from app.services.domain_config import get_domain_config
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_STORAGE_DIR = os.path.join(
@@ -31,23 +33,20 @@ _DEFAULT_STORAGE_DIR = os.path.join(
     "user_profiles",
 )
 
-# Known product names (Chinese + English variants) used to match products in
-# user content. Kept in sync with PRODUCT_LABELS in models/market_dashboard.py
-# and the forecasting seed targets.
-KNOWN_PRODUCTS: list[tuple[str, str]] = [
-    ("苯乙烯", "styrene"),
-    ("原油", "crude oil"),
-    ("石脑油", "naphtha"),
-    ("裂解碳五", "cracked c5"),
-    ("裂解碳九", "cracked c9"),
-    ("异戊二烯", "isoprene"),
-    ("间戊二烯", "piperylene"),
-    ("双环戊二烯", "dcpd"),
-    ("SIS", "sis"),
-    ("发泡剂", "blowing agent"),
-    ("抽余C5", "raffinate c5"),
-    ("石油树脂", "c5 resin"),
-]
+# Product aliases come from the app's domain configuration (key
+# ``product_aliases``: product_id -> [user-language aliases]).  With no
+# config present no products are tracked (fully generic behavior).
+def _get_product_aliases() -> dict[str, list[str]]:
+    """Load product aliases from the app's domain config (fail-soft)."""
+    cfg = get_domain_config("") or {}
+    raw = cfg.get("product_aliases") or {}
+    out: dict[str, list[str]] = {}
+    for pid, aliases in raw.items():
+        if isinstance(aliases, (list, tuple)):
+            cleaned = [str(a) for a in aliases if a is not None and str(a).strip()]
+            if cleaned:
+                out[str(pid)] = cleaned
+    return out
 
 # Chinese char range — used for language detection
 _CN_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -167,12 +166,19 @@ def _detect_language(text: str) -> str:
 
 
 def _match_products(text: str) -> list[str]:
-    """Return known product names found in the text (Chinese or English)."""
+    """Return product IDs found in the text (Chinese or English aliases).
+
+    The alias table comes from the app's domain config (``product_aliases``);
+    with no config, no products are matched.
+    """
     lowered = text.lower()
     found: list[str] = []
-    for zh, en in KNOWN_PRODUCTS:
-        if zh in text or (en and en in lowered):
-            found.append(zh)
+    for pid, aliases in _get_product_aliases().items():
+        for alias in aliases:
+            a = alias.lower()
+            if a in lowered or alias in text:
+                found.append(pid)
+                break
     return found
 
 

@@ -52,6 +52,102 @@ def _val(obj, *keys):
     return ""
 
 
+def _looks_like_markdown_report(summary: str) -> bool:
+    """True when the summary is a full deterministic report (markdown with
+    ``## `` headings and ``|`` tables) rather than a plain narrative. The
+    frontend uses the same signal (MessageBubble.jsx suppresses the raw
+    DataTableCard when the message contains "## " headers)."""
+    if not summary:
+        return False
+    return ("## " in summary) and ("|" in summary)
+
+
+def _add_markdown_report(doc, markdown: str) -> None:
+    """Render a deterministic business-report markdown (## headings, pipe
+    tables, **bold**, bullets) as proper Word elements instead of a literal
+    markdown blob. Kept deliberately small — it covers the exact subset
+    emitted by business_reports.py / report builders."""
+    from docx.shared import Pt
+    import re as _re
+
+    lines = (markdown or "").splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i].rstrip()
+        stripped = raw.strip()
+        # Heading 1 (rare — title)
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            doc.add_heading(_re.sub(r"\*\*", "", stripped[2:].strip()), level=1)
+            i += 1
+            continue
+        # Heading 2 (## Section)
+        if stripped.startswith("## "):
+            doc.add_heading(_re.sub(r"\*\*", "", stripped[3:].strip()), level=2)
+            i += 1
+            continue
+        # Pipe table: header row + separator + body rows
+        if stripped.startswith("|") and stripped.endswith("|"):
+            header_cells = [
+                c.strip() for c in stripped.strip("|").split("|")
+            ]
+            # separator row: |---|---| (all dashes)
+            if i + 1 < len(lines) and _re.match(
+                r"^\s*\|[\s:\-|]+\|\s*$", lines[i + 1]
+            ) and all(
+                set(c.strip().replace(":", "").replace("-", "")) == set()
+                for c in lines[i + 1].strip().strip("|").split("|")
+            ):
+                i += 1  # skip separator
+                body = []
+                while i + 1 < len(lines) and lines[i + 1].strip().startswith("|"):
+                    body.append(
+                        [c.strip() for c in lines[i + 1].strip().strip("|").split("|")]
+                    )
+                    i += 1
+                ncols = len(header_cells)
+                t = doc.add_table(rows=1 + len(body), cols=ncols, style="Light Grid Accent 1")
+                for j, hc in enumerate(header_cells):
+                    cell = t.rows[0].cells[j]
+                    cell.text = _re.sub(r"\*\*", "", hc)
+                    _shade_cell(cell, "F1F5F9")
+                    for p in cell.paragraphs:
+                        for r in p.runs:
+                            r.font.size = Pt(9)
+                            r.font.bold = True
+                for ri, brow in enumerate(body, 1):
+                    for j in range(ncols):
+                        val = brow[j] if j < len(brow) else ""
+                        cell = t.rows[ri].cells[j]
+                        cell.text = _re.sub(r"\*\*", "", val)
+                        for p in cell.paragraphs:
+                            for r in p.runs:
+                                r.font.size = Pt(9)
+                doc.add_paragraph()
+                i += 1
+                continue
+            # Not a table (single pipe row) — fall through to paragraph
+        # Bullet
+        if stripped.startswith("- "):
+            p = doc.add_paragraph(style="List Bullet")
+            p.add_run(_re.sub(r"\*\*", "", stripped[2:].strip()))
+            i += 1
+            continue
+        # Numbered
+        if _re.match(r"^\d+\.\s", stripped):
+            p = doc.add_paragraph(style="List Number")
+            p.add_run(_re.sub(r"\*\*", "", stripped.split(". ", 1)[1]))
+            i += 1
+            continue
+        # Plain paragraph (strip leftover markdown emphasis)
+        text = _re.sub(r"\*\*", "", stripped)
+        text = _re.sub(r"`([^`]*)`", r"\1", text)
+        if text:
+            p = doc.add_paragraph(text)
+            for r in p.runs:
+                r.font.size = Pt(10)
+        i += 1
+
+
 def _docx_rgb(theme_color) -> "object":
     """Convert a pptx ``RGBColor`` (from DeckTheme) to a docx ``RGBColor``."""
     from docx.shared import RGBColor
@@ -200,13 +296,27 @@ def _render_via_python_docx(payload: ReportCardPayload, ctx: Optional[ExportCont
 
     # ---- 3. Executive Summary ----
     if payload.summary:
-        h = doc.add_heading("Executive Summary", level=1)
-        para = doc.add_paragraph(payload.summary)
-        # Slight tint via paragraph spacing (full-color callout boxes
-        # in python-docx require cell shading which is fiddly; rely on
-        # Heading 1 styling + paragraph indent for visual separation).
-        para.paragraph_format.left_indent = Cm(0.4)
-        para.paragraph_format.space_after = Pt(12)
+        # When the summary is already a full deterministic business report
+        # (markdown with ## headings — e.g. business_reports.py output), render
+        # it as proper Word headings/tables instead of a literal markdown blob,
+        # and SKIP the generic Key Metrics + raw Data sections below (the report
+        # already contains its own Key Figures / Top Customers / Execution Risk
+        # tables). Mirrors the frontend's suppression of the raw DataTableCard
+        # when the message contains "## " headers.
+        if _looks_like_markdown_report(payload.summary):
+            _add_markdown_report(doc, payload.summary)
+            _summary_is_report = True
+        else:
+            _summary_is_report = False
+            h = doc.add_heading("Executive Summary", level=1)
+            para = doc.add_paragraph(payload.summary)
+            # Slight tint via paragraph spacing (full-color callout boxes
+            # in python-docx require cell shading which is fiddly; rely on
+            # Heading 1 styling + paragraph indent for visual separation).
+            para.paragraph_format.left_indent = Cm(0.4)
+            para.paragraph_format.space_after = Pt(12)
+    else:
+        _summary_is_report = False
 
     # ---- 3. Methodology ----
     if payload.methodology:
@@ -215,7 +325,9 @@ def _render_via_python_docx(payload: ReportCardPayload, ctx: Optional[ExportCont
         m.paragraph_format.left_indent = Cm(0.4)
 
     # ---- 5. Key Metrics (KPI tiles as a 1×N table) ----
-    if payload.kpis:
+    # Skipped when the summary already IS a full report with its own
+    # Key Figures table (generic KPI tiles duplicate it).
+    if payload.kpis and not _summary_is_report:
         doc.add_heading("Key Metrics", level=1)
         num_kpis = len(payload.kpis)
         table = doc.add_table(rows=2, cols=num_kpis, style="Light Grid Accent 1")
@@ -280,9 +392,26 @@ def _render_via_python_docx(payload: ReportCardPayload, ctx: Optional[ExportCont
             doc.add_paragraph(_val(rec, "text") or "", style="List Bullet")
 
     # ---- 9. Custom sections ----
+    # payload.sections may be a list of pydantic ``SectionSpec`` (as produced
+    # by ``_payload_to_reportcard``) OR a list of plain dicts (legacy callers).
+    # BOTH shapes must render — the previous code only handled dicts with a
+    # ``heading``/``content`` key, so pydantic ``SectionSpec`` items (which
+    # carry ``title``/``content``) were silently dropped, collapsing the
+    # document to a cover + bare Executive Summary. Tolerate the common key
+    # aliases the agent/LLM uses:
+    #   {title, content} · {heading, body} · {heading, paragraphs|bullets} · {name, text}
     for sec in payload.sections or []:
-        heading = sec.get("heading") if isinstance(sec, dict) else None
-        content = sec.get("content") if isinstance(sec, dict) else None
+        if isinstance(sec, dict):
+            heading = sec.get("title") or sec.get("heading") or sec.get("name")
+            content = sec.get("content") or sec.get("body") or sec.get("text")
+            bullets = list(sec.get("bullets") or sec.get("paragraphs") or [])
+            stype = sec.get("type", "narrative") or "narrative"
+        else:
+            heading = getattr(sec, "title", None) or getattr(sec, "heading", None)
+            content = getattr(sec, "content", None) or getattr(sec, "body", None)
+            bullets = list(getattr(sec, "bullets", None) or [])
+            stype = getattr(sec, "type", "narrative") or "narrative"
+
         if heading:
             doc.add_heading(str(heading), level=2)
         if content:
@@ -291,9 +420,14 @@ def _render_via_python_docx(payload: ReportCardPayload, ctx: Optional[ExportCont
                     doc.add_paragraph(str(line))
             else:
                 doc.add_paragraph(str(content))
+        for b in bullets:
+            doc.add_paragraph(str(b), style="List Bullet")
 
     # ---- 10. Chart data table ----
-    chart_rows_data = chart_rows(payload)
+    # Skipped when the summary already IS a full report (the report's own
+    # Top Customers / Execution Risk tables carry the data — a raw 188-row
+    # dump is noise, exactly what the frontend suppresses on "## " headers).
+    chart_rows_data = chart_rows(payload) if not _summary_is_report else []
     if chart_rows_data:
         doc.add_heading(payload.chart.title or "Data", level=1)
         keys = list(chart_rows_data[0].keys()) if isinstance(chart_rows_data[0], dict) else []
@@ -649,6 +783,30 @@ def _build_html(payload: ReportCardPayload, ctx: Optional[ExportContext] = None)
     return "\n".join(parts)
 
 
+def _extract_doc_plan(payload):
+    """Return a DocumentPlan to render dynamically, or None for the legacy path."""
+    from app.services.artifacts.document_plan import DocumentPlan
+
+    try:
+        if isinstance(payload, DocumentPlan):
+            return payload
+        if isinstance(payload, dict):
+            if payload.get("blocks"):
+                meta = {k: payload[k] for k in ("title", "subtitle", "theme") if payload.get(k)}
+                return DocumentPlan.from_blocks(payload["blocks"], meta=meta)
+            return None
+        raw = getattr(payload, "blocks", None)
+        if raw:
+            meta = {
+                "title": getattr(payload, "title", ""),
+                "theme": getattr(payload, "theme", ""),
+            }
+            return DocumentPlan.from_blocks(list(raw), meta=meta)
+    except Exception as exc:  # pragma: no cover
+        logger.warning("docx: could not parse dynamic plan: %s", exc)
+    return None
+
+
 def render(
     payload: ReportCardPayload,
     ctx: Optional[ExportContext] = None,
@@ -658,6 +816,12 @@ def render(
     Returns:
         (bytes, mime_type, file_extension)
 
+    Fully-dynamic path: when the payload carries an explicit ``blocks`` list
+    (authored by the agent or produced by the server-side architect), the
+    document is rendered by executing that ordered block plan — there is no
+    fixed template.  Otherwise the legacy fixed layout (and the enterprise
+    pipeline) apply.
+
     Phase 1C: When the payload carries ``enterprise_report_kind ==
     "executive"`` (the marker set by the ``collect_enterprise_data``
     tool), delegate to ``render_enterprise_docx`` to produce the full
@@ -665,6 +829,23 @@ def render(
     anchors, KPI grid, segment breakdown, drivers, risks, actions,
     lineage appendix) instead of the generic ReportCard layout.
     """
+    # --- Fully-dynamic block rendering (Phase: dynamic document generation) ---
+    _plan = _extract_doc_plan(payload)
+    if _plan is not None:
+        try:
+            from app.services.artifacts.exporters.dynamic_docx import render_document_plan
+            # render_document_plan already returns the (bytes, mime, ext)
+            # tuple — do NOT re-wrap it, or the caller gets a nested tuple
+            # whose first element is itself a tuple instead of raw bytes.
+            data, _mime, _ext = render_document_plan(_plan, ctx)
+            logger.info(
+                "DOCX rendered via dynamic plan (%d bytes, %d blocks)",
+                len(data), len(_plan.blocks),
+            )
+            return data, MIME, EXT
+        except Exception as e:
+            logger.warning("dynamic DOCX render failed (%s); falling back", e)
+
     # Phase 1C: Enterprise pipeline short-circuit. Accept both
     # pydantic models and plain dicts (the orchestrator passes a
     # dict from the tool result).

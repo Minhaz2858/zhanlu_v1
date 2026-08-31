@@ -33,7 +33,7 @@ def db():
 
 
 def test_seed_isolates_projects(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
     seed_products_as_entities(db, "p_ecisco")
     seed_products_as_entities(db, "p_other")
     db.commit()
@@ -43,7 +43,7 @@ def test_seed_isolates_projects(db):
 
 
 def test_invalidate_only_target_project(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
     seed_products_as_entities(db, "p_ecisco")
     seed_products_as_entities(db, "p_other")
     db.commit()
@@ -59,7 +59,7 @@ def test_invalidate_only_target_project(db):
 
 
 def test_stats_isolates_projects(db):
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
     seed_products_as_entities(db, "p_ecisco")
     seed_products_as_entities(db, "p_other")
     db.commit()
@@ -74,8 +74,8 @@ def test_stats_isolates_projects(db):
 def test_query_layer2_respects_project_scope(db):
     """When Layer 1 misses, Layer 2 should ONLY return entities from
     the same project_id, never from another project."""
-    settings.ECISCO_BI_KG_PROJECT_CACHE_ENABLED = True
-    settings.ECISCO_BI_KG_LAYER_ENTITIES_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
+    settings.PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED = True
     # seed both projects
     seed_products_as_entities(db, "p_ecisco")
     seed_products_as_entities(db, "p_other")

@@ -274,17 +274,38 @@ class TestRenderDeck:
                 SlidePlan(layout="methodology", title="Method", bullets=["m1"]),
                 SlidePlan(layout="section_divider", title="Section 1"),
                 SlidePlan(layout="closing", title="Thanks"),
+                # New archetypes (2026-08-29)
+                SlidePlan(
+                    layout="timeline", title="Timeline",
+                    bullets=["Q3 | Pilot", "Q4 | Scale"],
+                ),
+                SlidePlan(
+                    layout="roadmap", title="Roadmap",
+                    bullets=["Now|Fix", "Next|Ship", "Later|AI"],
+                ),
+                SlidePlan(
+                    layout="comparison", title="Compare",
+                    subtitle="A", notes="B", bullets=["Fast vs Cheap"],
+                ),
+                SlidePlan(
+                    layout="swot", title="SWOT",
+                    bullets=["S|Brand", "W|Cost", "O|Growth", "T|Risk"],
+                ),
+                SlidePlan(layout="quote", title="The best time was now", subtitle="CEO"),
+                SlidePlan(layout="process_flow", title="Flow", bullets=["Plan", "Build"]),
             ],
         )
         rows = [{"month": "2025-01", "revenue": 100}]
-        data, mime, ext = render_deck(plan, rows=rows)
+        from app.services.artifacts.exporters._common import ExportContext
+        ctx = ExportContext(source="company data", user_message="demo deck")
+        data, mime, ext = render_deck(plan, ctx=ctx, rows=rows)
         assert ext == ".pptx"
         assert mime.startswith("application/vnd.openxmlformats")
 
         from pptx import Presentation
 
         prs = Presentation(io.BytesIO(data))
-        assert len(prs.slides) >= 11
+        assert len(prs.slides) >= 17
 
     def test_render_deck_empty_plan_falls_back(self):
         from app.services.artifacts.exporters.pptx_export import render_deck

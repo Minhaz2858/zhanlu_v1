@@ -19,21 +19,17 @@ export function splitContentIntoChunks(text) {
 }
 
 const MemoizedChunk = memo(
-  ({ text }) => (
-    <ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>
+  ({ text, components: chunkComponents }) => (
+    <ReactMarkdown remarkPlugins={[remarkGfm]} components={chunkComponents || {}}>
       {text}
     </ReactMarkdown>
   ),
-  (prev, next) => prev.text === next.text
+  (prev, next) => prev.text === next.text && prev.components === next.components
 );
 
-const components = {
-  // Default components — can be overridden by parent
-};
-
-export default function StreamingMarkdown({ content, isStreaming }) {
+export default function StreamingMarkdown({ content, isStreaming, components }) {
   if (!isStreaming) {
-    return <MemoizedChunk text={content || ''} />;
+    return <MemoizedChunk text={content || ''} components={components} />;
   }
   const chunks = splitContentIntoChunks(content || '');
   if (chunks.length === 0) {
@@ -42,9 +38,9 @@ export default function StreamingMarkdown({ content, isStreaming }) {
   return (
     <>
       {chunks.slice(0, -1).map((chunk, i) => (
-        <MemoizedChunk key={i} text={chunk} />
+        <MemoizedChunk key={i} text={chunk} components={components} />
       ))}
-      <MemoizedChunk key={chunks.length - 1} text={chunks[chunks.length - 1]} />
+      <MemoizedChunk key={chunks.length - 1} text={chunks[chunks.length - 1]} components={components} />
     </>
   );
 }

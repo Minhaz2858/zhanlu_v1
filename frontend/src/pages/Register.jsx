@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Link } from "react-router-dom";
 import { base44 } from "@/api/base44Client";
 import { useLanguage } from "@/lib/LanguageProvider";
+import { useAuth } from "@/lib/AuthContext";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -12,6 +13,7 @@ import { toast } from "@/components/ui/use-toast";
 
 export default function Register() {
   const { t } = useLanguage();
+  const { allowPublicRegistration } = useAuth();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
@@ -36,6 +38,27 @@ export default function Register() {
     { label: t.auth.pwHasLetter, test: (pw) => /[A-Za-z]/.test(pw) },
     { label: t.auth.pwHasDigit, test: (pw) => /\d/.test(pw) },
   ];
+
+  // When self-registration is disabled (enterprise provisioning), block the
+  // form entirely and explain that an admin must create the account.
+  if (!allowPublicRegistration) {
+    return (
+      <AuthLayout
+        icon={UserPlus}
+        title={t.auth.registrationDisabled}
+        subtitle={t.auth.registrationDisabledSubtitle}
+        footer={
+          <Link to="/login" className="text-primary font-medium hover:underline">
+            {t.auth.logIn}
+          </Link>
+        }
+      >
+        <p className="text-sm text-muted-foreground text-center">
+          {t.auth.registrationDisabledNote}
+        </p>
+      </AuthLayout>
+    );
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault();

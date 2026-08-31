@@ -221,3 +221,122 @@ class TestStructuredLayouts:
         )
         html = render_slide("data_table", plan, THEME_LIGHT)
         assert html.count("<tr>") == 9
+
+
+class TestNewArchetypes:
+    """2026-08-29: timeline / roadmap / comparison / swot / quote / process_flow."""
+
+    def test_timeline_renders_milestones(self):
+        plan = SlidePlan(
+            layout="timeline",
+            title="Rollout Timeline",
+            bullets=["Q3 2026 | Pilot", "Q4 2026 | Scale", "Q1 2027 | Full rollout"],
+        )
+        html = render_slide("timeline", plan, THEME_LIGHT)
+        assert "Q3 2026" in html
+        assert "Pilot" in html
+        assert "slide--timeline" in html
+        assert "tl__row" in html
+
+    def test_timeline_without_pipe_uses_whole_bullet(self):
+        plan = SlidePlan(layout="timeline", title="Timeline", bullets=["One", "Two"])
+        html = render_slide("timeline", plan, THEME_LIGHT)
+        assert "One" in html and "Two" in html
+
+    def test_roadmap_buckets_phases(self):
+        plan = SlidePlan(
+            layout="roadmap",
+            title="Roadmap",
+            bullets=["Now|Fix bugs", "Next|Ship v2", "Later|AI features"],
+        )
+        html = render_slide("roadmap", plan, THEME_LIGHT)
+        assert "Fix bugs" in html
+        assert "Ship v2" in html
+        assert "AI features" in html
+        assert "rm__phase" in html
+
+    def test_comparison_splits_vs_rows(self):
+        plan = SlidePlan(
+            layout="comparison",
+            title="Build vs Buy",
+            subtitle="Build",
+            notes="Buy",
+            bullets=["Speed vs Cost", "Control || Vendor lock-in"],
+        )
+        html = render_slide("comparison", plan, THEME_LIGHT)
+        assert "Speed" in html and "Cost" in html
+        assert "Control" in html and "Vendor lock-in" in html
+
+    def test_swot_buckets_quadrants(self):
+        plan = SlidePlan(
+            layout="swot",
+            title="SWOT",
+            bullets=["S|Strong brand", "W|Thin margins", "O|New market", "T|Regulation"],
+        )
+        html = render_slide("swot", plan, THEME_LIGHT)
+        assert "Strong brand" in html
+        assert "Thin margins" in html
+        assert "New market" in html
+        assert "Regulation" in html
+        assert "swot__grid" in html
+
+    def test_quote_renders_attribution(self):
+        plan = SlidePlan(layout="quote", title="Growth is a choice", subtitle="CEO, Q3")
+        html = render_slide("quote", plan, THEME_LIGHT)
+        assert "Growth is a choice" in html
+        assert "CEO, Q3" in html
+        assert "quote__mark" in html
+
+    def test_process_flow_numbers_steps(self):
+        plan = SlidePlan(layout="process_flow", title="How we ship", bullets=["Plan", "Build", "Launch"])
+        html = render_slide("process_flow", plan, THEME_LIGHT)
+        assert "01" in html and "02" in html and "03" in html
+        assert "slide--process_flow" in html
+
+    def test_hero_image_used_when_set(self):
+        plan = SlidePlan(layout="cover", title="T", hero_image="https://img.example/hero.png")
+        html = render_slide("cover", plan, THEME_LIGHT)
+        assert "hero.png" in html
+
+
+class TestDeckHeroArt:
+    """Deterministic SVG hero art — same seed, same output; no API needed."""
+
+    def test_hero_svg_deterministic(self):
+        from app.services.artifacts.deck_hero import build_hero_svg, hero_svg_data_uri
+        svg1 = build_hero_svg(THEME, "Deck A", "cover")
+        svg2 = build_hero_svg(THEME, "Deck A", "cover")
+        assert svg1 == svg2
+        assert 'width="1920"' in svg1 and 'height="1080"' in svg1
+
+    def test_hero_svg_varies_by_seed(self):
+        from app.services.artifacts.deck_hero import build_hero_svg
+        svg1 = build_hero_svg(THEME, "Deck A", "cover")
+        svg2 = build_hero_svg(THEME, "Deck B", "cover")
+        assert svg1 != svg2
+
+    def test_hero_background_css_has_data_uri(self):
+        from app.services.artifacts.deck_hero import hero_background_css
+        css = hero_background_css(THEME, "Deck A", "cover")
+        assert "background-image: url('data:image/svg+xml;base64," in css
+
+    def test_ai_hero_returns_none_when_disabled(self):
+        from app.services.artifacts.deck_hero import ai_hero_for_deck
+        assert ai_hero_for_deck("Test deck") is None  # disabled by default
+
+
+class TestPptxMotion:
+    def test_fade_transitions_injected(self):
+        from pptx import Presentation
+        from pptx.util import Inches
+        from app.services.artifacts.pptx_motion import add_fade_transitions
+        prs = Presentation()
+        prs.slide_width = Inches(13.333)
+        prs.slide_height = Inches(7.5)
+        blank = prs.slide_layouts[6]
+        for _ in range(3):
+            prs.slides.add_slide(blank)
+        add_fade_transitions(prs)
+        ns = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+        for slide in prs.slides:
+            assert slide._element.find(f"{ns}transition") is not None

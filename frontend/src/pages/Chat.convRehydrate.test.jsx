@@ -47,11 +47,15 @@ describe('Chat.jsx ?conv= rehydration', () => {
   it('hydrates messages from conv.messages', () => {
     // The .then() must call setMessages with conv.messages. This
     // is the only way the chat pane can render the old session.
+    // 2026-08-06: the hydration was hardened with a functional updater
+    // (session guard) + content-fingerprint dedup — conv.messages and
+    // chat_messages are parallel stores with disjoint id spaces, so the
+    // direct set call is wrapped in dedupeMessagesByFingerprint().
     const block = SOURCE.match(
       /AgentConversation\.get\([\s\S]{0,1200}\)\.then\([\s\S]*?\}\)\.catch/,
     );
     expect(block, 'AgentConversation.get().then() block not found').not.toBeNull();
-    expect(block[0]).toMatch(/setMessages\(\s*Array\.isArray\(conv\.messages\)\s*\?\s*conv\.messages\s*:\s*\[\]\s*\)/);
+    expect(block[0]).toMatch(/setMessages\(\(prev\)\s*=>\s*\{[\s\S]*?dedupeMessagesByFingerprint\(\s*Array\.isArray\(conv\.messages\)\s*\?\s*conv\.messages\s*:\s*\[\]\s*,?\s*\)/);
   });
 
   it('resolves the active agent by name from the conv record or ?agentName= param', () => {

@@ -208,6 +208,12 @@ async def _ask_data_agent(
     # short-circuits the data sub-agent so the caller picks the right
     # resource instead of burning 3-5 LLM calls in the loop. Fallback
     # decisions (used_fallback=True) are ignored — behave as today.
+    #
+    # DOCUMENT routes are NOT short-circuited: the data sub-agent ships
+    # document tools (search_documents / answer_from_documents) and its
+    # prompt teaches them, so a question routed to a bound file-KB must
+    # flow through the loop below. Only MEMORY / REPORT (resources the
+    # data agent genuinely cannot serve) short-circuit.
     if getattr(settings, "KG_RESOURCE_ROUTER_ENABLED", False):
         try:
             from app.services.knowledge_graph.resource_router import (
@@ -221,7 +227,11 @@ async def _ask_data_agent(
             if (
                 not _decision.used_fallback
                 and _decision.route
-                not in (ResourceRoute.DATABASE, ResourceRoute.MULTI_RESOURCE)
+                not in (
+                    ResourceRoute.DATABASE,
+                    ResourceRoute.DOCUMENT,
+                    ResourceRoute.MULTI_RESOURCE,
+                )
             ):
                 return {
                     "success": False,
@@ -253,9 +263,51 @@ async def _ask_data_agent(
         fastpath_result = await _try_nl_fastpath(
             question, preferred_kb, bound_kb_ids, db, endpoint=endpoint,
             skip_narrate=bool((context or {}).get("main_agent_will_synthesize")),
+            agent_name=(context or {}).get("agent_name") or (context or {}).get("caller"),
         )
         if fastpath_result is not None:
             return fastpath_result
+
+    # ── Opt-in progress sub-step emitter (wired by the v3 FSM for chat
+    # streaming). When the FSM passes ``context["progress_emitter"]`` (a
+    # mutable list) + ``context["step_counter"]`` (the FSM's ``[int]``
+    # counter), we emit 3 coarse sub-steps so the UI shows what the Data
+    # Agent is doing instead of one long "Querying the bound data source"
+    # block. It is a no-op when the FSM doesn't provide the emitter, so it
+    # is safe for every other caller (tests, batch jobs, other routers).
+    _progress = (context or {}).get("progress_emitter")
+    _progress_step_ctr = (context or {}).get("step_counter")
+    _progress_timings: dict[str, float] = {}
+    _progress_done: set[str] = set()
+
+    def _prog_begin(key: str, label: str) -> None:
+        if _progress is None or _progress_step_ctr is None or key in _progress_done:
+            return
+        _progress_timings[key] = time.monotonic()
+        _progress_step_ctr[0] += 1
+        from app.services.agent_loop.sse_builders import _emit_activity_step
+
+        _progress.append(
+            _emit_activity_step(_progress_step_ctr[0], label, "running", tool_name="ask_data_agent")
+        )
+
+    def _prog_end(key: str, label: str) -> None:
+        if _progress is None or _progress_step_ctr is None or key in _progress_done:
+            return
+        _progress_done.add(key)
+        dur = None
+        if key in _progress_timings:
+            dur = int((time.monotonic() - _progress_timings[key]) * 1000)
+        _progress_step_ctr[0] += 1
+        from app.services.agent_loop.sse_builders import _emit_activity_step
+
+        _progress.append(
+            _emit_activity_step(
+                _progress_step_ctr[0], label, "done", tool_name="ask_data_agent", duration_ms=dur
+            )
+        )
+
+    _prog_begin("schema", "Resolving data source schema")
 
     system_prompt = _build_sub_agent_prompt(
         question,
@@ -304,6 +356,12 @@ async def _ask_data_agent(
     # questions.
     max_iterations = min(args.get("max_iterations", 4), 10)
     final_text = ""
+    # Per-call wall-clock override (2026-08-27): the orchestrator injects
+    # `budget_seconds` for dashboard turns so data collection is NOT
+    # truncated before every metric is gathered (default 60s cut the
+    # delegate mid-collection on a dashboard build). Falls back to the
+    # module constant.
+    _budget_s = float(args.get("budget_seconds") or DATA_AGENT_BUDGET_SECONDS)
     # P0: wall-clock + per-phase timing for the delegation.
     _delegation_start = time.monotonic()
     _llm_total_s = 0.0
@@ -345,11 +403,11 @@ async def _ask_data_agent(
         # sub-model must not hold the user's turn hostage. On truncation we
         # break out and return whatever rows were captured (see the
         # directive fallback below), tagged `truncated: True`.
-        if time.monotonic() - _delegation_start > DATA_AGENT_BUDGET_SECONDS:
+        if time.monotonic() - _delegation_start > _budget_s:
             logger.warning(
                 "ask_data_agent wall-clock budget exceeded (%.1fs > %.1fs), truncating",
                 time.monotonic() - _delegation_start,
-                DATA_AGENT_BUDGET_SECONDS,
+                _budget_s,
             )
             _truncated = True
             break
@@ -371,6 +429,11 @@ async def _ask_data_agent(
             _initial_llm_failure = str(e)
             break
         _llm_total_s += time.monotonic() - _llm_t0
+
+        # First LLM call resolved the schema/plan → hand off to SQL generation.
+        if iteration == 0:
+            _prog_end("schema", "Resolving data source schema")
+            _prog_begin("sql", "Generating SQL query")
 
         content = llm_response.get("content", "") or ""
         raw_tool_calls = llm_response.get("tool_calls", []) or []
@@ -457,6 +520,11 @@ async def _ask_data_agent(
             name in _PARALLEL_SAFE_TOOLS for name, _, _ in _parsed_calls
         ) and len(_parsed_calls) > 1
 
+        # SQL is generated; move the progress sub-step into "executing".
+        if iteration == 0:
+            _prog_end("sql", "Generating SQL query")
+            _prog_begin("exec", "Executing query & fetching rows")
+
         if _all_parallel_safe:
             # Run all tool calls concurrently
             async def _run_one(tn: str, ta: dict, db: Session, uid: str | None, ctx: dict):
@@ -479,7 +547,12 @@ async def _ask_data_agent(
                 if isinstance(result, Exception):
                     result = {"success": False, "error": str(result)}
                 _maybe_capture_execute_result(tn, result, state)
-                _result_str = persist_result_str(tn, result, None)
+                _result_str = persist_result_str(
+                    tn, result, None,
+                    context_window_tokens=(
+                        endpoint.context_window if endpoint else None
+                    ),
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tcid,
@@ -520,7 +593,12 @@ async def _ask_data_agent(
                     _maybe_capture_execute_result(tool_name, result, state)
 
                 # P0: Layer 2 per-result persistence (large results → disk preview)
-                _result_str = persist_result_str(tool_name, result, None)
+                _result_str = persist_result_str(
+                    tool_name, result, None,
+                    context_window_tokens=(
+                        endpoint.context_window if endpoint else None
+                    ),
+                )
                 messages.append({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
@@ -530,7 +608,16 @@ async def _ask_data_agent(
                 guard_ctrl.after_call(tool_name, tool_args, _result_str)
 
         # P0: Layer 3 — apply per-turn aggregate budget to this batch's results
-        apply_turn_budget_to_batch(messages, batch_ids, batch_names, None)
+        apply_turn_budget_to_batch(
+            messages, batch_ids, batch_names, None,
+            context_window_tokens=(
+                endpoint.context_window if endpoint else None
+            ),
+        )
+
+        # First iteration's query has executed — close out the exec sub-step.
+        if iteration == 0:
+            _prog_end("exec", "Executing query & fetching rows")
 
         # P0: if guardrail controller tripped a halt, inject nudge and break
         if guard_ctrl.halt_decision:
@@ -770,6 +857,14 @@ async def _ask_data_agent(
             "business data rows"
         )
 
+    # Cap the rows we hand back to the calling agent. The LLM only needs a
+    # representative sample to synthesize a report; sending the full result
+    # set (which can be 10k+ rows) just bloats the context window and slows
+    # the next LLM turn. The condensed LLM view (~5 rows) is unaffected.
+    ASK_DATA_MAX_RETURN_ROWS = 200
+    if state.get("last_rows") and len(state["last_rows"]) > ASK_DATA_MAX_RETURN_ROWS:
+        state["last_rows"] = state["last_rows"][:ASK_DATA_MAX_RETURN_ROWS]
+
     # Data quality metadata for the calling agent
     _data_quality = {
         "has_business_data": _rows_have_business_data(state.get("last_rows")),
@@ -778,12 +873,21 @@ async def _ask_data_agent(
         "row_count": len(state["last_rows"]) if state.get("last_rows") else 0,
     }
 
+    # Derive column names from row dicts so downstream consumers
+    # (_payload_from_execution, docx/pptx exporters) have schema metadata.
+    _rows = state.get("last_rows")
+    if _rows and isinstance(_rows[0], dict):
+        _derived_columns = list(_rows[0].keys())
+    else:
+        _derived_columns = []
+
     return {
         "success": _initial_llm_failure is None and not _metadata_only,
         "error": (_metadata_err if _metadata_only else _initial_llm_failure),
         "error_kind": "metadata_only" if _metadata_only else None,
         "answer": final_text,
         "rows": state["last_rows"],
+        "columns": _derived_columns,
         "sql": state["last_sql"],
         "source_id": state["source_id"],
         "source_name": state["source_name"],
@@ -804,6 +908,7 @@ async def _try_nl_fastpath(
     db: Session,
     endpoint=None,
     skip_narrate: bool = False,
+    agent_name: str | None = None,
 ) -> dict | None:
     """One-shot NL2SQL fast path for a single bound database source.
 
@@ -829,7 +934,7 @@ async def _try_nl_fastpath(
 
     try:
         from app.services.db import NLAnswerService
-        result = await NLAnswerService(db).answer(kb_id, question, endpoint=endpoint, skip_narrate=skip_narrate)
+        result = await NLAnswerService(db).answer(kb_id, question, endpoint=endpoint, skip_narrate=skip_narrate, agent_name=agent_name)
     except Exception as e:
         logger.warning("ask_data_agent fast path raised (falling back to loop): %s", e)
         return None
@@ -841,10 +946,17 @@ async def _try_nl_fastpath(
         )
         return None
 
+    _fp_rows = result.get("rows")
+    if _fp_rows and isinstance(_fp_rows[0], dict):
+        _fp_cols = list(_fp_rows[0].keys())
+    else:
+        _fp_cols = []
+
     return {
         "success": True,
         "answer": result.get("answer") or "",
-        "rows": result.get("rows"),
+        "rows": _fp_rows,
+        "columns": _fp_cols,
         "sql": result.get("sql"),
         "source_id": result.get("source_id") or kb_id,
         "source_name": result.get("source_name") or kb.name,
@@ -853,12 +965,8 @@ async def _try_nl_fastpath(
     }
 
 
-# Ecisco BI-only hint for the Data Agent sub-loop. Scoped to calls made BY
-# the `ecisco_bi_assistant` main agent. The sub-agent writes the actual SQL,
-# so it MUST know the real column names (`FNAME` holds Chinese product names
-# like 碳五/碳九, codes live in `F_PAEZ_JC`/`FMATERIALID`) — without this it
-# invents columns (e.g. `material_name`) and filters with English literals
-# (`FNAME LIKE '%C5%'`), silently returning zero rows.
+# Generic zero-row recovery / schema-discovery rules for the Data Agent
+# sub-loop. Applies to ALL databases — no app-specific column names here.
 _GENERIC_DATA_AGENT_HINT_BLOCK = """
 
 ZERO-ROW RECOVERY (HARD RULE — applies to ALL databases):
@@ -894,6 +1002,34 @@ ZERO-ROW RECOVERY (HARD RULE — applies to ALL databases):
 - IMPORTANT: When writing SQL, do NOT use reserved words as aliases (e.g.
   `rows`, `year`, `month`, `date`, `group`, `order`). Use safe aliases like
   `row_count`, `yr`, `mo`, `dt` instead. MySQL will reject reserved-word aliases.
+
+ANSWER INTEGRITY (HARD RULE — applies to ALL databases):
+- SCOPE: If the question is company/organization-wide ("top 5 customers",
+  "revenue by region", "company total"), query the fact table/view with the
+  BROADEST coverage. A table or view whose name or description indicates it is
+  scoped to ONE org/region/plant is a SUBSET — never present a subset as the
+  company-wide answer, and never use an org-scoped view to answer a
+  company-wide question.
+- ENTITY FILTER: For any ranking/grouping by an entity name (customer,
+  supplier, product), ALWAYS filter out NULL/empty/placeholder values in the
+  SQL (`WHERE <name_col> IS NOT NULL AND <name_col> != ''`). NEVER present a
+  "(unknown)" / "[Customer name missing]" bucket as a ranked row. If the query
+  result contains such a row, drop it and note the count in your narrative —
+  do not fabricate an entity to fill the gap.
+- METRIC LABELING: Pick ONE amount column for the revenue/value metric and
+  state WHICH column you used (e.g. tax-exclusive vs tax-inclusive) in your
+  narrative. Never silently switch metrics between rows or between the table
+  and your prose. Do not present a tax-inclusive column as plain "revenue"
+  without saying it is tax-inclusive.
+- RECONCILIATION: Before writing any total or share percentage, verify it
+  against the SQL evidence: (1) the sum of the rows you present must equal the
+  total you quote; (2) every share percentage must equal row / total. If they
+  do not reconcile, fix the query or the arithmetic — do not ship an
+  inconsistent table. A stated "top-N total" that differs from the sum of the
+  listed rows is a hard error.
+- NO INVENTED FIGURES: Every number in your answer must trace to the executed
+  query result. Never invent a total, a customer, a volume, or a percentage to
+  make the story cleaner.
 """
 
 
@@ -937,6 +1073,47 @@ def _build_sub_agent_prompt(
     # All callers: append the generic zero-row recovery rules so the
     # sub-agent knows to re-discover schema when queries return empty.
     prompt = prompt + _GENERIC_DATA_AGENT_HINT_BLOCK
+
+    # C1c: static-route pinning for the sub-loop. The one-shot fast path
+    # (NLAnswerService) applies query_router's pinned table + date_hint, but
+    # when the fast path falls through to the iterative sub-agent loop the
+    # route was NEVER injected — observed failure mode: a business term was
+    # routed to a broad line-item table and the report showed meaningless
+    # generic KPIs summed across unrelated rows. Resolve the same static
+    # route here and surface the pinned table + hint so the sub-agent
+    # anchors on the correct table.
+    try:
+        from app.services.db.query_router import resolve_static_route
+        _route = resolve_static_route(question or "", agent_name=caller)
+        if _route:
+            _route_pin = (
+                "\n\nSTATIC ROUTE PIN (authoritative — from the query router):\n"
+                f"Use table `{_route['table']}` for this question. "
+            )
+            _fb = _route.get("fallback_tables") or []
+            if _fb:
+                _route_pin += f"If it lacks the needed columns, fall back to: {', '.join(_fb)}. "
+            _route_pin += (
+                "Do NOT pick a different table by name similarity — the pinned "
+                "table is the known-correct one for this business intent.\n"
+            )
+            _hint = _route.get("date_hint")
+            if _hint:
+                _route_pin += "ROUTE HINT:\n" + _hint + "\n"
+            prompt = prompt + _route_pin
+    except Exception as e:  # noqa: BLE001 — route hint must never break the loop
+        logger.debug("_build_sub_agent_prompt: static route hint skipped (non-fatal): %s", e)
+
+    # Per-app domain hint (de-hardcoded): any app may ship a
+    # domain_configs/<agent_name>.json "data_agent_hint" block. Empty for
+    # apps without config — fully generic behavior.
+    try:
+        from app.services.domain_config import get_data_agent_hint
+        _domain_hint = get_data_agent_hint(caller)
+        if _domain_hint:
+            prompt = prompt + "\n\nDOMAIN HINT (from app config):\n" + _domain_hint + "\n"
+    except Exception as e:  # noqa: BLE001
+        logger.debug("_build_sub_agent_prompt: domain hint skipped (non-fatal): %s", e)
 
     return prompt
 
@@ -1410,7 +1587,43 @@ async def _fetch_data_batch(
             if len(bound_ids) == 1:
                 data_source_id = bound_ids[0]
             else:
-                validated.append({"label": label, "valid": False, "error": "data_source_id required (multiple bound data sources)"})
+                # Enumerate the bound sources so the LLM can pick the right
+                # one instead of guessing (observed: the agent guessed the
+                # demo source and built a deliverable from demo data while
+                # the real ERP was bound).
+                from app.models.knowledge_base import KnowledgeBase
+
+                _src_names: list[str] = []
+                if bound_ids:
+                    try:
+                        _rows = (
+                            db.query(KnowledgeBase)
+                            .filter(
+                                KnowledgeBase.id.in_(bound_ids),
+                                KnowledgeBase.is_deleted == False,  # noqa: E712
+                            )
+                            .all()
+                        )
+                        _by_id = {r.id: r for r in _rows}
+                        for _bid in bound_ids:
+                            _kb = _by_id.get(_bid)
+                            if _kb is not None:
+                                _db = f" ({_kb.database_name})" if _kb.database_name else ""
+                                _src_names.append(f"{_kb.name}{_db} (id={_bid})")
+                            else:
+                                _src_names.append(f"<unknown> (id={_bid})")
+                    except Exception:  # noqa: BLE001 — best-effort naming
+                        _src_names = [f"(id={b})" for b in bound_ids]
+                _src_help = "; ".join(_src_names) if _src_names else ", ".join(bound_ids)
+                validated.append({
+                    "label": label,
+                    "valid": False,
+                    "error": (
+                        "data_source_id required (multiple bound data sources). "
+                        f"Available bound sources: {_src_help}. "
+                        "Pass the matching data_source_id explicitly."
+                    ),
+                })
                 continue
 
         validated.append({

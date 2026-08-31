@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import { Link } from "react-router-dom";
-import { base44 } from "@/api/base44Client";
+import { appParams } from "@/lib/app-params";
 import { useLanguage } from "@/lib/LanguageProvider";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -18,9 +18,15 @@ export default function ForgotPassword() {
     e.preventDefault();
     setLoading(true);
     try {
-      await base44.auth.resetPasswordRequest(email);
+      await fetch(`/api/apps/${appParams.appId}/auth/reset-password-request`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email }),
+      });
+      // The endpoint always returns a generic {sent:true} (even for unknown
+      // emails) to prevent account enumeration, so we always show the note.
     } catch {
-      // Always show success regardless
+      // Network error — still show the generic note rather than leak state.
     } finally {
       setLoading(false);
       setSent(true);

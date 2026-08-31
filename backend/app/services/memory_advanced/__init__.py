@@ -51,8 +51,14 @@ def is_expired(memory: AgentMemory) -> bool:
             created = datetime.fromisoformat(created)
         except ValueError:
             return False
+    if getattr(created, "tzinfo", None) is not None:
+        # Defensive: normalize aware inputs to naive UTC like Postgres.
+        created = created.astimezone(timezone.utc).replace(tzinfo=None)
     expiry = created + timedelta(days=memory.ttl_days)
-    return datetime.now(timezone.utc) > expiry
+    # Postgres TIMESTAMP columns are tz-naive UTC; build a naive now so the
+    # comparison never raises "can't compare offset-naive and offset-aware".
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    return now > expiry
 
 
 def filter_expired(memories: list[AgentMemory]) -> list[AgentMemory]:
@@ -239,13 +245,34 @@ def save_memory(
     user_id: str | None = None,
     importance: int = 0,
     ttl_days: int | None = None,
+    project_id: str | None = None,
 ) -> dict[str, Any]:
+    """Persist a memory, deduped by content hash.
+
+    Project scoping (2026-08-27): when ``project_id`` is provided, the
+    dedup lookup matches rows with that exact project_id and the new row
+    is created with that project_id — so auto-extracted memories attach
+    to the project the conversation belongs to and show up in that
+    project's Shared Memory panel. ``target='user'`` rows are always
+    cross-project (they describe WHO the user is), so project_id is
+    forced to None for them, mirroring memory_tool.py.
+    """
+    if target == "user":
+        project_id = None  # user profile is always cross-project
+
     content_hash = compute_content_hash(content)
-    existing = db.query(AgentMemory).filter(
+    existing_query = db.query(AgentMemory).filter(
         AgentMemory.agent_app_id == agent_app_id,
         AgentMemory.content_hash == content_hash,
-        AgentMemory.is_deleted == False,
-    ).first()
+        AgentMemory.is_deleted == False,  # noqa: E712
+    )
+    # Strict project match (no NULL fallback) so a project-scoped write
+    # never dedupes against — or attaches to — the legacy NULL bucket.
+    if project_id:
+        existing_query = existing_query.filter(AgentMemory.project_id == project_id)
+    else:
+        existing_query = existing_query.filter(AgentMemory.project_id.is_(None))
+    existing = existing_query.first()
 
     if existing:
         if hasattr(existing, "usage_count"):
@@ -260,6 +287,7 @@ def save_memory(
     memory = AgentMemory(
         agent_app_id=agent_app_id,
         user_id=user_id,
+        project_id=project_id,
         target=target,
         content=content,
         char_count=len(content),
@@ -317,8 +345,14 @@ async def auto_extract_memories(
     messages: list[dict[str, Any]],
     user_id: str | None = None,
     max_memories: int = 5,
+    project_id: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Extract memories from a conversation using LLM."""
+    """Extract memories from a conversation using LLM.
+
+    ``project_id`` (2026-08-27): when the conversation is bound to a
+    project, extracted memories are saved with that project_id so they
+    surface in the project's Shared Memory panel.
+    """
     if not messages or len(messages) < 4:
         return []
 
@@ -367,6 +401,7 @@ async def auto_extract_memories(
             save_result = save_memory(
                 db, agent_app_id, content, target=target,
                 user_id=user_id, importance=importance,
+                project_id=project_id,
             )
             if save_result.get("success") and not save_result.get("duplicate"):
                 saved.append(save_result)

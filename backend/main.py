@@ -25,9 +25,6 @@ from app.models import (
     AgentRun,
     AgentRunStep,
     LlmModel,
-    AlertLog,
-    WeeklyReportCard,
-    WeeklyReportProduct,
 )
 
 # Import tool_handlers to register all 8 new capability tools in the registry
@@ -57,17 +54,14 @@ from app.routers.automation_api import router as automation_api_router
 from app.routers.knowledge_bases import router as knowledge_bases_router
 from app.routers.dashboards import router as dashboards_router
 from app.routers.hooks import router as hooks_router
-from app.routers.market_dashboard import router as market_dashboard_router
-from app.routers.forecast_ops import router as forecast_ops_router
 from app.routers.admin_users import router as admin_users_router
+from app.routers.admin_evals import router as admin_evals_router
+from app.routers.admin_invocations import router as admin_invocations_router
 from app.routers.resource_shares import router as resource_shares_router
 from app.routers.access_policies import router as access_policies_router
-from app.routers.reports import router as reports_router
 from app.routers.llm import router as llm_router
 from app.routers.app_logs import router as app_logs_router
-from app.routers.alerts import router as alerts_router
-from app.routers.alert_preferences import router as alert_preferences_router
-from app.routers.weekly_digest_api import router as weekly_digest_router
+from app.routers.project_memories import router as project_memories_router  # project-scoped memory review/edit
 from app.services.project_knowledge.router import router as project_knowledge_router
 
 
@@ -131,6 +125,144 @@ def _cors_origins() -> list[str]:
     return unique
 
 
+def _is_postgres_url(url: str) -> bool:
+    """True for postgres://, postgresql://, postgresql+psycopg2://, etc."""
+    if not url:
+        return False
+    return url.split("://", 1)[0].split("+", 1)[0] in ("postgres", "postgresql")
+
+
+def _run_postgres_auto_migrations() -> None:
+    """Apply ``specific_migrations`` on Postgres (no PRAGMA available).
+
+    ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` is a no-op when the column
+    already exists, so this is safe to re-run on every startup.  This runs
+    BEFORE the SQLite path (which would crash trying to ``sqlite3.connect``
+    a Postgres URL).
+    """
+    import logging
+
+    logger = logging.getLogger(__name__)
+    from sqlalchemy import create_engine, text
+
+    specific_migrations = _specific_migrations()
+    engine = create_engine(settings.DATABASE_URL)
+    with engine.begin() as conn:
+        for table_name, columns in specific_migrations.items():
+            for col_name, col_type in columns:
+                try:
+                    # Postgres booleans need DEFAULT false, not DEFAULT 0
+                    # (0 is an integer literal — DatatypeMismatch).  Also,
+                    # when the column already exists, Postgres STILL
+                    # validates the default type, so normalize up front.
+                    if "BOOLEAN" in str(col_type).upper():
+                        col_type = str(col_type).replace("DEFAULT 0", "DEFAULT false")
+                    conn.execute(text(
+                        f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
+                    ))
+                    logger.info(
+                        "Postgres auto-migration: ensured column %s.%s (%s)",
+                        table_name, col_name, col_type,
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "Postgres auto-migration failed for %s.%s: %s",
+                        table_name, col_name, e,
+                    )
+
+
+def _specific_migrations() -> dict:
+    """The shared specific_migrations contract (SQLite + Postgres use it)."""
+    return {
+        "agent_apps": [
+            ("tool_config", "JSON"),
+            ("manifest_json", "JSON"),
+            ("data_bindings", "JSON"),
+            ("skill_bindings", "JSON"),
+            ("memory_scope", "VARCHAR(30) DEFAULT 'user_only'"),
+            ("policy_profile", "JSON"),
+            ("output_contract", "JSON"),
+            ("evaluation_profile", "JSON"),
+            ("project_id", "VARCHAR(36)"),
+            ("resource_type", "VARCHAR(20) DEFAULT 'personal' NOT NULL"),
+        ],
+        "projects": [
+            ("resource_type", "VARCHAR(20) DEFAULT 'personal' NOT NULL"),
+        ],
+        "resource_shares": [],  # table creation only — triggers schema check
+
+        "agent_memories": [
+            ("content_hash", "VARCHAR(64)"),
+            ("importance", "INTEGER DEFAULT 0"),
+            ("ttl_days", "INTEGER"),
+            ("usage_count", "INTEGER DEFAULT 0"),
+            # 2026-08-05 added `project_id` to the SQLAlchemy model for memory
+            # scoping (Q2 2026 sales-report leak — see MEMORY), but no Alembic
+            # migration was written; consolidation turns it into a 500. Mirror
+            # it in the runtime auto-migrate list so SQLite + Postgres both
+            # gain the column on next restart without needing alembic upgrade.
+            ("project_id", "VARCHAR(36)"),
+            # 2026-08-27 pinned memory (interactive review/edit UI).
+            ("pinned", "BOOLEAN DEFAULT 0"),
+        ],
+        "agent_run_steps": [
+            # 2026-08-27 run-timeline observability (tokens + outcome).
+            ("prompt_tokens", "INTEGER"),
+            ("completion_tokens", "INTEGER"),
+            ("total_tokens", "INTEGER"),
+            ("status", "VARCHAR(20)"),
+            ("error", "TEXT"),
+            ("retry_count", "INTEGER DEFAULT 0"),
+        ],
+        "knowledge_bases": [
+            ("project_id", "VARCHAR(36)"),
+        ],
+        "user_files": [
+            ("project_id", "VARCHAR(36)"),
+        ],
+        "automation_tasks": [
+            ("project_id", "VARCHAR(36)"),
+            ("prompt", "TEXT"),
+            ("cron_expression", "VARCHAR(100)"),
+            ("timezone", "VARCHAR(64) DEFAULT 'UTC'"),
+            ("next_run_at", "DATETIME"),
+            ("last_run_at", "DATETIME"),
+            ("output_format", "VARCHAR(30) DEFAULT 'html'"),
+            ("notify_chat", "VARCHAR(10) DEFAULT 'true'"),
+            ("max_retries", "VARCHAR(10) DEFAULT '2'"),
+            ("skip_confirmation", "VARCHAR(10) DEFAULT 'false'"),
+            ("agent_id", "VARCHAR(36)"),
+            # 2026-08-27 opt-in LLM-informed tick (smart scheduled runs).
+            ("llm_informed_tick", "BOOLEAN DEFAULT 0"),
+        ],
+        "automation_executions": [
+            # Phase 1 reliability columns. Also added portably at runtime
+            # by automation_dispatcher._ensure_schema() (covers Postgres),
+            # but mirrored here so SQLite deployments pick them up in the
+            # existing startup migration pass.
+            ("timeout_at", "DATETIME"),
+            ("lease_owner", "VARCHAR(64)"),
+            # Phase 2 live-run observability (Manus-style activity feed).
+            ("activity_steps", "JSON"),
+            ("current_phase", "VARCHAR(50)"),
+        ],
+        "chat_sessions": [
+            ("project_id", "VARCHAR(36)"),
+        ],
+        "agent_conversations": [
+            ("project_id", "VARCHAR(36)"),
+            ("dashboard_id", "VARCHAR(36)"),
+        ],
+        "skill_sources": [
+            # Visual branding for the source cards on the Browse Marketplace
+            # tab. Both columns are nullable — the API and the UI fall back
+            # to a neutral gray + the first letter of the name when missing.
+            ("brand_color", "VARCHAR(7)"),
+            ("icon_emoji", "VARCHAR(8)"),
+        ],
+    }
+
+
 def _run_auto_migrations():
     """Add missing columns to existing tables on either SQLite or Postgres.
 
@@ -152,6 +284,15 @@ def _run_auto_migrations():
     import logging
 
     logger = logging.getLogger(__name__)
+
+    # Postgres deployment: run the Postgres-specific migrations FIRST (the
+    # SQLite path below would crash on a Postgres URL — sqlite3.connect
+    # cannot open a postgresql:// string).  Early return keeps the legacy
+    # SQLite behavior untouched.  Note the URL may carry a dialect suffix
+    # (postgresql+psycopg2://) so we match on the bare scheme prefix.
+    if _is_postgres_url(settings.DATABASE_URL):
+        _run_postgres_auto_migrations()
+        return
 
     try:
         db_path = settings.DATABASE_URL.replace("sqlite:///", "")
@@ -191,81 +332,7 @@ def _run_auto_migrations():
                             )
 
         # --- Specific column additions for older schemas ---
-        specific_migrations = {
-        "agent_apps": [
-            ("tool_config", "JSON"),
-            ("manifest_json", "JSON"),
-            ("data_bindings", "JSON"),
-            ("skill_bindings", "JSON"),
-            ("memory_scope", "VARCHAR(30) DEFAULT 'user_only'"),
-            ("policy_profile", "JSON"),
-            ("output_contract", "JSON"),
-            ("evaluation_profile", "JSON"),
-            ("project_id", "VARCHAR(36)"),
-            ("resource_type", "VARCHAR(20) DEFAULT 'personal' NOT NULL"),
-        ],
-        "projects": [
-            ("resource_type", "VARCHAR(20) DEFAULT 'personal' NOT NULL"),
-        ],
-        "resource_shares": [],  # table creation only — triggers schema check
-
-            "agent_memories": [
-                ("content_hash", "VARCHAR(64)"),
-                ("importance", "INTEGER DEFAULT 0"),
-                ("ttl_days", "INTEGER"),
-                ("usage_count", "INTEGER DEFAULT 0"),
-                # 2026-08-05 added `project_id` to the SQLAlchemy model for memory
-                # scoping (Q2 2026 sales-report leak — see MEMORY), but no Alembic
-                # migration was written; consolidation turns it into a 500. Mirror
-                # it in the runtime auto-migrate list so SQLite + Postgres both
-                # gain the column on next restart without needing alembic upgrade.
-                ("project_id", "VARCHAR(36)"),
-            ],
-            "knowledge_bases": [
-                ("project_id", "VARCHAR(36)"),
-            ],
-            "user_files": [
-                ("project_id", "VARCHAR(36)"),
-            ],
-            "automation_tasks": [
-                ("project_id", "VARCHAR(36)"),
-                ("prompt", "TEXT"),
-                ("cron_expression", "VARCHAR(100)"),
-                ("timezone", "VARCHAR(64) DEFAULT 'UTC'"),
-                ("next_run_at", "DATETIME"),
-                ("last_run_at", "DATETIME"),
-                ("output_format", "VARCHAR(30) DEFAULT 'html'"),
-                ("notify_chat", "VARCHAR(10) DEFAULT 'true'"),
-                ("max_retries", "VARCHAR(10) DEFAULT '2'"),
-                ("skip_confirmation", "VARCHAR(10) DEFAULT 'false'"),
-                ("agent_id", "VARCHAR(36)"),
-            ],
-            "automation_executions": [
-                # Phase 1 reliability columns. Also added portably at runtime
-                # by automation_dispatcher._ensure_schema() (covers Postgres),
-                # but mirrored here so SQLite deployments pick them up in the
-                # existing startup migration pass.
-                ("timeout_at", "DATETIME"),
-                ("lease_owner", "VARCHAR(64)"),
-                # Phase 2 live-run observability (Manus-style activity feed).
-                ("activity_steps", "JSON"),
-                ("current_phase", "VARCHAR(50)"),
-            ],
-            "chat_sessions": [
-                ("project_id", "VARCHAR(36)"),
-            ],
-            "agent_conversations": [
-                ("project_id", "VARCHAR(36)"),
-                ("dashboard_id", "VARCHAR(36)"),
-            ],
-            "skill_sources": [
-                # Visual branding for the source cards on the Browse Marketplace
-                # tab. Both columns are nullable — the API and the UI fall back
-                # to a neutral gray + the first letter of the name when missing.
-                ("brand_color", "VARCHAR(7)"),
-                ("icon_emoji", "VARCHAR(8)"),
-            ],
-        }
+        specific_migrations = _specific_migrations()
 
         for table_name, columns in specific_migrations.items():
             try:
@@ -291,35 +358,9 @@ def _run_auto_migrations():
                                 table_name, col_name, e,
                             )
 
-        # --- Postgres path: apply the same specific_migrations contract ---
-        # The SQLite path above is the historical implementation; production
-        # uses Postgres, which doesn't have PRAGMA. Mirror just the
-        # ``specific_migrations`` block (the multi-tenant backfill above is
-        # already covered by the org_id/app_id columns added at create time
-        # for fresh Postgres deployments, and by an idempotent backfill
-        # script for older ones). ``ALTER TABLE ... ADD COLUMN IF NOT
-        # EXISTS`` is a no-op if the column is already there, so the call
-        # is safe to re-run on every startup.
-        if settings.DATABASE_URL.startswith(("postgresql://", "postgres://")):
-            from sqlalchemy import create_engine, text
-
-            engine = create_engine(settings.DATABASE_URL)
-            with engine.begin() as conn:
-                for table_name, columns in specific_migrations.items():
-                    for col_name, col_type in columns:
-                        try:
-                            conn.execute(text(
-                                f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {col_name} {col_type}"
-                            ))
-                            logger.info(
-                                "Postgres auto-migration: ensured column %s.%s (%s)",
-                                table_name, col_name, col_type,
-                            )
-                        except Exception as e:
-                            logger.warning(
-                                "Postgres auto-migration failed for %s.%s: %s",
-                                table_name, col_name, e,
-                            )
+        # (Postgres migrations now run via _run_postgres_auto_migrations()
+        # before this SQLite path — see the early return above.  This path
+        # is SQLite-only.)
 
         # --- Backfill project_id from existing project string fields ---
         # For any row whose `project` (legacy name string) is set but
@@ -589,7 +630,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Service initialization error (non-fatal): %s", e)
 
-    # Start periodic background tasks (memory consolidation, skill curation, alerting)
+    # Start periodic background tasks (memory consolidation, skill curation)
     try:
         from app.services.scheduled_tasks import start_scheduled_tasks
         start_scheduled_tasks()
@@ -745,17 +786,14 @@ def create_app() -> FastAPI:
     app.include_router(knowledge_bases_router, prefix="/api")
     app.include_router(dashboards_router, prefix="/api")
     app.include_router(hooks_router, prefix="/api")
-    app.include_router(market_dashboard_router, prefix="/api")
-    app.include_router(weekly_digest_router, prefix="/api")
-    app.include_router(forecast_ops_router, prefix="/api")
     app.include_router(admin_users_router, prefix="/api")
+    app.include_router(admin_evals_router, prefix="/api")
+    app.include_router(admin_invocations_router, prefix="/api")
     app.include_router(resource_shares_router, prefix="/api")
     app.include_router(access_policies_router, prefix="/api")
-    app.include_router(reports_router, prefix="/api")
     app.include_router(llm_router)
     app.include_router(app_logs_router, prefix="/api")
-    app.include_router(alerts_router, prefix="/api")
-    app.include_router(alert_preferences_router, prefix="/api")
+    app.include_router(project_memories_router, prefix="/api")  # /api/projects/{id}/memories
     app.include_router(project_knowledge_router, prefix="/api")  # 2026-08-25: project knowledge cache admin
     # NB: app_logs_router already declares its full path including ``/api/app-logs/...``
     # internally so it ignores the extra ``/api`` prefix and lives at

@@ -44,3 +44,8 @@ class ChatMessage(TimestampedBase):
     # at emission time — never contains SQL text, raw rows, or unverified
     # totals — so this persisted log is safe by construction.
     live_events: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Data-source citations for the answer (Kimi/GPT-style source chips).
+    # Each entry: {"source_id": str|None, "source_name": str, "rows": int|None}.
+    # Declared so the generic entity CRUD round-trips it on write/read
+    # (same pattern as tool_calls / live_events above).
+    sources: Mapped[list | None] = mapped_column(JSON, nullable=True)

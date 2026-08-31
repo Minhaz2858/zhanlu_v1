@@ -152,6 +152,32 @@ def test_single_record_200_for_creator_personal(db):
     assert r.json()["scope"] == "personal"
 
 
+def test_single_record_by_uuid_200(db):
+    """Regression: the frontend navigates to /dashboard/:id and passes the
+    record UUID to /app-records/{id}. The endpoint previously filtered by
+    slug only, so every UUID lookup 404'd and the dashboard page rendered
+    blank ("Error: dashboards API 404")."""
+    alice = _seed_user(db)
+    rec = _seed_dashboard(db, "uuid-lookup", created_by_id=alice.id, scope="personal")
+    client = _make_client(db, alice)
+    r = client.get(f"/api/dashboards/app-records/{rec.id}")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["id"] == str(rec.id)
+    assert body["slug"] == "uuid-lookup"
+
+
+def test_single_record_by_uuid_still_scoped(db):
+    """UUID lookup must keep T10 scope: another user's personal app is 404
+    even when resolved by id, not slug."""
+    alice = _seed_user(db)
+    bob = _seed_user(db)
+    rec = _seed_dashboard(db, "uuid-scope", created_by_id=alice.id, scope="personal")
+    client = _make_client(db, bob)
+    r = client.get(f"/api/dashboards/app-records/{rec.id}")
+    assert r.status_code == 404
+
+
 def test_mark_viewed_404_for_other_users_personal(db):
     alice = _seed_user(db)
     bob = _seed_user(db)

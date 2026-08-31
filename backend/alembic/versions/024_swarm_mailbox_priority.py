@@ -23,7 +23,14 @@ branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 
+def _has_table(bind, table: str) -> bool:
+    inspector = sa.inspect(bind)
+    return inspector.has_table(table)
+
+
 def _has_column(bind, table: str, column: str) -> bool:
+    if not _has_table(bind, table):
+        return False
     inspector = sa.inspect(bind)
     return column in {c["name"] for c in inspector.get_columns(table)}
 

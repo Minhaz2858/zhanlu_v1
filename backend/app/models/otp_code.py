@@ -12,5 +12,8 @@ class OtpCode(TimestampedBase):
 
     email: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     code: Mapped[str] = mapped_column(String(10), nullable=False)
+    # "registration" (verify-account OTP) or "login" (passwordless login code).
+    # Isolates the two flows so a registration code cannot be replayed to log in.
+    purpose: Mapped[str] = mapped_column(String(20), default="registration", nullable=False, index=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     used: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)

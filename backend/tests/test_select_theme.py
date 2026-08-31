@@ -1,6 +1,10 @@
 """Tests for select_theme() — keyword + deck_type resolution."""
-from app.services.artifacts.themes import select_theme
+from app.services.artifacts.themes import select_theme, THEME_CATALOG
 from app.services.synexia.contracts import DeckPlan, SlidePlan
+
+
+def _catalog_names() -> set[str]:
+    return {getattr(p, "name", "") for p in THEME_CATALOG.values()} - {""}
 
 
 def _plan(deck_type: str = "data_report") -> DeckPlan:
@@ -32,11 +36,17 @@ class TestSelectTheme:
     def test_keyword_tech_overrides(self):
         assert select_theme(_plan("executive_brief"), "tech update").name == "neon_cyber"
 
-    def test_unknown_deck_type_falls_back(self):
-        assert select_theme(_plan("nonexistent_type")).name == "electric_studio"
+    def test_unknown_deck_type_hash_rotates(self):
+        # No style word / planner pick / content word / deck-type default →
+        # hash rotation over the catalog (deterministic per message), NOT a
+        # fixed fallback. Same message → same theme (2026-08-29 theme variety).
+        assert select_theme(_plan("nonexistent_type")).name == select_theme(_plan("nonexistent_type")).name
+        assert select_theme(_plan("nonexistent_type")).name in _catalog_names()
 
-    def test_no_plan_falls_back(self):
-        assert select_theme(None).name == "electric_studio"
+    def test_no_plan_hash_rotates(self):
+        assert select_theme(None).name in _catalog_names()
+        # Deterministic: identical (no-signal) input → identical theme.
+        assert select_theme(None).name == select_theme(None).name
 
     def test_case_insensitive_keyword(self):
         assert select_theme(_plan("data_report"), "WELLNESS recap").name == "dark_botanical"

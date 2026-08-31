@@ -245,7 +245,7 @@ def _normalize_service_result(
     raw: Any,
     log: list[dict] | None = None,
 ) -> FacetResult:
-    """Map a service_call result (ErpKpiService / PerceptionService)
+    """Map a service_call result (reflected service payload)
     into a FacetResult."""
     log = log or []
     rows, source_label, source_sql, summary = _extract_service_payload(raw)
@@ -454,7 +454,7 @@ def _default_service_invoker() -> Callable[[str, dict], Awaitable[Any]]:
     resolved method; the LLM cannot influence the lookup target.
 
     SERVICE_WHITELIST entries follow the form ``ClassName.method_name``
-    (e.g. ``ErpKpiService.sales_summary_for_period``). The Class → module
+    (e.g. ``ReportService.sales_summary``). The Class → module
     mapping is the authoritative allowlist — even if a Class with the
     right name exists elsewhere, this resolver refuses it.
     """
@@ -492,13 +492,11 @@ def _default_service_invoker() -> Callable[[str, dict], Awaitable[Any]]:
             # whatever ``args`` overlap `__init__` (excluding `self`).
             has_self = "self" in params
             if has_self:
-                from app.services.erp.kpi import ErpKpiService
-                from app.services.perception.service import PerceptionService
-                instance_map = {
-                    "ErpKpiService": ErpKpiService,
-                    "PerceptionService": PerceptionService,
-                }
-                cls_obj = instance_map[class_name]
+                # Resolve the class through the authoritative _CLASS_TO_MODULE
+                # map (never a hardcoded instance allowlist).
+                module_path = _CLASS_TO_MODULE[class_name]
+                mod = __import__(module_path, fromlist=[class_name])
+                cls_obj = getattr(mod, class_name)
                 init_sig = inspect.signature(cls_obj.__init__)
                 init_kwargs = {
                     k: v for k, v in args.items()
@@ -521,10 +519,11 @@ def _default_service_invoker() -> Callable[[str, dict], Awaitable[Any]]:
 # uses the ``ClassName.method_name`` form; the executor resolves each
 # class name to its actual Python module here. This is the authoritative
 # whitelist — the LLM cannot dispatch to arbitrary Python code.
-_CLASS_TO_MODULE: dict[str, str] = {
-    "ErpKpiService": "app.services.erp.kpi",
-    "PerceptionService": "app.services.perception.service",
-}
+# Currently empty: the platform ships no reflected service classes, so
+# service_call facets are refused and the ad_hoc/NL2SQL path handles
+# every facet. Add entries here (plus profiler SERVICE_WHITELIST) when a
+# generic service is registered.
+_CLASS_TO_MODULE: dict[str, str] = {}
 
 
 def _default_ad_hoc_invoker(

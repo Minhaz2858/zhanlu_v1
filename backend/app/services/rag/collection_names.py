@@ -1,7 +1,7 @@
 """Semantic collection registry for the hybrid RAG layer.
 
 Defines the 9 ChromaDB collections used by zhanlu's RAG pipeline, mirroring
-EDIA 5.1.2's decomposition. Each collection represents a distinct semantic
+The legacy decomposition. Each collection represents a distinct semantic
 domain, with a stable English name, a Chinese display label, and a domain
 tag for grouping.
 

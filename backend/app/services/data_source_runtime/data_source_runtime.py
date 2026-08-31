@@ -48,6 +48,80 @@ from app.services import workspace_settings_service
 
 logger = logging.getLogger(__name__)
 
+# ── Demo/test source detection ─────────────────────────────────────────────
+# A bound KnowledgeBase whose name or database name matches these markers is
+# treated as a DEMO / TEST / SAMPLE source. When a conversation has BOTH a
+# demo source AND a real (non-demo) database source, the demo source is
+# EXCLUDED from the agent's bound set so the LLM can never mistake demo data
+# for production data (observed: supply-chain snapshot built from
+# "Demo E2E PostgreSQL" while the real ERP was bound — user saw fake-looking
+# customer names and reported "fabricated data"). Demo sources remain usable
+# ONLY when they are the sole bound source (i.e. a demo-only workspace).
+# Overridable via settings.DEMO_SOURCE_MARKERS (comma-separated).
+_DEMO_SOURCE_MARKERS: tuple[str, ...] = ("demo", "test", "sample", "e2e", "sandbox", "staging")
+
+
+def _demo_source_markers() -> tuple[str, ...]:
+    """Return the configured demo/test marker substrings (lowercase)."""
+    raw = getattr(settings, "DEMO_SOURCE_MARKERS", None)
+    if isinstance(raw, str) and raw.strip():
+        return tuple(m.strip().lower() for m in raw.split(",") if m.strip())
+    return _DEMO_SOURCE_MARKERS
+
+
+def is_demo_source_name(name: str | None, database_name: str | None = None) -> bool:
+    """True when a KB name / database name carries a demo/test marker.
+
+    DB-agnostic: matches substrings on metadata only (never table/column
+    names, never hardcoded ids). Case-insensitive.
+    """
+    markers = _demo_source_markers()
+    if not markers:
+        return False
+    haystacks = [s for s in (name, database_name) if s]
+    for marker in markers:
+        for hay in haystacks:
+            if marker in hay.lower():
+                return True
+    return False
+
+
+def split_demo_and_real_kb_ids(
+    kb_ids: list[str],
+    name_map: dict[str, tuple[str | None, str | None]] | None = None,
+) -> tuple[list[str], list[str]]:
+    """Partition KB ids into (demo_ids, real_ids) by id/name/database markers.
+
+    ``name_map`` maps kb_id → (name, database_name) so a KB whose NAME (not
+    just its id) carries a demo marker is classified correctly. Pure
+    metadata partition — no DB access. ``real_ids`` keeps ordering.
+    """
+    demo_ids: list[str] = []
+    real_ids: list[str] = []
+    for kb_id in kb_ids:
+        name, db_name = (name_map or {}).get(kb_id, (None, None))
+        if is_demo_source_name(kb_id, None) or is_demo_source_name(name, db_name):
+            demo_ids.append(kb_id)
+        else:
+            real_ids.append(kb_id)
+    return demo_ids, real_ids
+
+
+def exclude_demo_sources_when_real_present(
+    bound_ids: list[str],
+    name_map: dict[str, tuple[str | None, str | None]] | None = None,
+) -> list[str]:
+    """Drop demo-marked KB ids when at least one non-demo id is also bound.
+
+    The LLM then only sees real sources — it cannot pick the demo database
+    for a production deliverable. When ALL bound ids are demo (a demo-only
+    workspace), the list is returned unchanged so the demo still works.
+    """
+    demo_ids, real_ids = split_demo_and_real_kb_ids(bound_ids, name_map=name_map)
+    if real_ids and demo_ids:
+        return real_ids
+    return bound_ids
+
 
 def get_bound_data_source_ids(agent_app: AgentApp | None) -> list[str]:
     """Return the list of KB IDs the agent has bound.
@@ -61,6 +135,168 @@ def get_bound_data_source_ids(agent_app: AgentApp | None) -> list[str]:
     if isinstance(raw, list):
         return [str(x) for x in raw if x]
     return []
+
+
+# ── Layer-2 provenance assertion (artifact pipeline backstop) ──────────────
+# Layer 1 (prepare_data_source_runtime) removes demo sources from the agent's
+# prompt. This layer catches citations that still leak into an artifact:
+# historical ask_data results, orchestrator fallback paths that carry no
+# bound_kb_ids, or the LLM copying a demo source name verbatim into
+# payload["source"]. DB-agnostic: matches metadata (name/database_name) only.
+
+
+def _resolve_kb_name_map(db: Session, kb_ids: list[str]) -> dict[str, tuple[str | None, str | None]]:
+    """Fetch {kb_id: (name, database_name)} for a set of ids (best-effort)."""
+    name_map: dict[str, tuple[str | None, str | None]] = {}
+    if not kb_ids:
+        return name_map
+    try:
+        rows = db.query(KnowledgeBase).filter(
+            KnowledgeBase.id.in_(kb_ids),
+            KnowledgeBase.is_deleted == False,  # noqa: E712
+        ).all()
+        for kb in rows:
+            name_map[kb.id] = (kb.name, kb.database_name)
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return name_map
+
+
+def _cited_source_tokens(payload: Any, execution: Any = None) -> list[dict]:
+    """Extract cited source tokens from an artifact payload.
+
+    Returns a list of {"name", "id", "database"} dicts — the citation
+    carriers an artifact can express. Handles the flat ``source`` string,
+    ``sources``/``data_sources`` lists (strings or dicts), the nested
+    ``report_card_payload.source``, explicit ``source_kb_id``/``source_id``,
+    and the cached DataExecution result's source block.
+    """
+    tokens: list[dict] = []
+
+    def _add(name=None, sid=None, database=None):
+        name = (str(name or "").strip()) or None
+        sid = (str(sid or "").strip()) or None
+        database = (str(database or "").strip()) or None
+        if name or sid or database:
+            tokens.append({"name": name, "id": sid, "database": database})
+
+    if isinstance(payload, dict):
+        _add(
+            payload.get("source"),
+            payload.get("source_kb_id") or payload.get("source_id"),
+        )
+        for key in ("sources", "data_sources"):
+            raw = payload.get(key)
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, str):
+                        _add(item)
+                    elif isinstance(item, dict):
+                        _add(
+                            item.get("name"),
+                            item.get("id") or item.get("kb_id") or item.get("source_id"),
+                            item.get("database_name") or item.get("database"),
+                        )
+        rcp = payload.get("report_card_payload")
+        if isinstance(rcp, dict):
+            _add(rcp.get("source"))
+    if execution is not None:
+        result = getattr(execution, "result", None)
+        if isinstance(result, dict):
+            src = result.get("source") if isinstance(result.get("source"), dict) else {}
+            _add(
+                src.get("name") or result.get("source_name"),
+                src.get("id") or result.get("source_id"),
+                src.get("database_name") or src.get("database"),
+            )
+    return tokens
+
+
+def assert_artifact_source_provenance(
+    db: Session,
+    *,
+    payload: Any = None,
+    execution: Any = None,
+    context: dict | None = None,
+) -> dict:
+    """Layer-2 demo-source guard: reject artifacts that CITE a demo/test
+    source while a real source was available to the agent.
+
+    Returns:
+        {
+          "ok": bool, "reason": str,
+          "demo_cited": [{"name", "id", "database"}, ...],
+          "real_present": bool, "bound_ids": [...],
+          "mode": "reject" | "warn" | "off",
+        }
+
+    ``mode`` comes from settings.ARTIFACT_PROVENANCE_GUARD. In "warn" mode
+    the caller persists the artifact but records ``_provenance_warning`` on
+    the payload; in "reject" mode the caller must abort creation. Demo-only
+    workspaces always pass (mirrors layer-1 semantics).
+    """
+    mode = (getattr(settings, "ARTIFACT_PROVENANCE_GUARD", "reject") or "reject").strip().lower()
+    if mode == "off":
+        return {
+            "ok": True, "reason": "guard_off", "demo_cited": [],
+            "real_present": False, "bound_ids": [], "mode": mode,
+        }
+
+    # 1. Resolve the effective bound set. Prefer the post-layer-1 set from
+    #    the tool context; recompute from the agent when absent (orchestrator
+    #    marker/fallback paths only pass conversation_id + agent_app_id).
+    bound_ids: list[str] = []
+    ctx_bound = (context or {}).get("bound_kb_ids")
+    if isinstance(ctx_bound, list):
+        bound_ids = [str(x) for x in ctx_bound if x]
+    if not bound_ids:
+        agent_app = None
+        agent_app_id = (context or {}).get("agent_app_id")
+        if agent_app_id:
+            try:
+                agent_app = db.query(AgentApp).filter(AgentApp.id == agent_app_id).first()
+            except Exception:  # pragma: no cover - defensive
+                agent_app = None
+        bound_ids = get_bound_data_source_ids(agent_app)
+        try:
+            bound_ids = _extend_with_project_kbs(
+                db, agent_app, bound_ids,
+                project_id=(context or {}).get("project_id"),
+            )
+        except Exception:  # pragma: no cover - defensive
+            pass
+
+    name_map = _resolve_kb_name_map(db, bound_ids)
+    _, real_ids = split_demo_and_real_kb_ids(bound_ids, name_map=name_map)
+    real_present = bool(real_ids)
+
+    # 2. Classify every citation in the payload.
+    demo_cited: list[dict] = []
+    for token in _cited_source_tokens(payload, execution):
+        tid = token.get("id")
+        if tid and tid in name_map:
+            kb_name, kb_db = name_map[tid]
+            if is_demo_source_name(kb_name, kb_db):
+                demo_cited.append({
+                    "name": kb_name or token.get("name"),
+                    "id": tid,
+                    "database": kb_db or token.get("database"),
+                })
+                continue
+        if is_demo_source_name(token.get("name"), token.get("database")):
+            demo_cited.append(token)
+
+    if demo_cited and real_present:
+        return {
+            "ok": False, "reason": "demo_source_citation",
+            "demo_cited": demo_cited, "real_present": True,
+            "bound_ids": bound_ids, "mode": mode,
+        }
+    return {
+        "ok": True, "reason": "ok",
+        "demo_cited": demo_cited, "real_present": real_present,
+        "bound_ids": bound_ids, "mode": mode,
+    }
 
 
 # The prominent anti-hallucination directive, prepended to the system prompt
@@ -578,6 +814,11 @@ def _build_data_source_prompt_section(
             if kb["database_name"]:
                 label += f", database=`{kb['database_name']}`"
             label += ")"
+            if is_demo_source_name(kb["name"], kb.get("database_name")):
+                label += (
+                    " — **DEMO/TEST source — do NOT present its data as real "
+                    "business data in a deliverable.**"
+                )
             lines.append(label)
         lines.append("")
         if schema_slices:
@@ -970,6 +1211,55 @@ def _build_project_context_block(
     return "\n".join(lines)
 
 
+def _resolve_project_from_message(
+    db: Session,
+    user_message: str | None,
+    org_id: str,
+    app_id: str,
+) -> tuple[str | None, str | None]:
+    """Best-effort: map a project mention inside the user message to a project.
+
+    The global chat (``general_assistant`` with no project selected) has zero
+    bound data, but the user may explicitly name a project in the message
+    (\"make a c5 c9 market view ppt\" → C5_C9).  When that happens we scope
+    the agent to THAT project's data sources instead of leaving it with
+    nothing — same anti-leakage wall, but the user's explicit mention is the
+    selection.
+
+    Matching is deterministic and conservative:
+      * normalize both sides (lowercase, strip non-alphanumeric) so
+        \"C5_C9\" / \"c5 c9\" / \"c5-c9\" all match project \"C5_C9\";
+      * exact normalized match required — never prefix/partial fuzzy;
+      * the literal \"global\" is never a binding.
+    Returns (project_id, project_name) or (None, None).
+    """
+    if not user_message or not str(user_message).strip():
+        return None, None
+    from app.models.project import Project as _Project
+
+    def _norm(s: str) -> str:
+        return re.sub(r"[^a-z0-9\u4e00-\u9fff]+", "", s.lower())
+
+    needle = _norm(user_message)
+    if not needle or "global" in needle and needle == "global":
+        return None, None
+    try:
+        rows = (
+            db.query(_Project)
+            .filter(_Project.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for row in rows:
+            name = _normalize_project_name(row.name)
+            if not name:
+                continue
+            if _norm(name) and _norm(name) in needle:
+                return str(row.id), row.name
+    except Exception as e:  # noqa: BLE001 — resolution is best-effort
+        logger.debug("_resolve_project_from_message failed (non-fatal): %s", e)
+    return None, None
+
+
 def prepare_data_source_runtime(
     db: Session,
     agent_app: AgentApp | None,
@@ -980,6 +1270,7 @@ def prepare_data_source_runtime(
     pinned_data_source_id: str | None = None,
     user_id: str | None = None,
     target_context_window: int | None = None,
+    user_message: str | None = None,
 ) -> tuple[list[dict], str, dict]:
     """Augment the agent's tool list + system prompt for data source support.
 
@@ -1023,12 +1314,35 @@ def prepare_data_source_runtime(
             bound_ids = list(bound_ids) + [pinned_data_source_id]
 
     # Guard: general_assistant must have zero data source access when no
-    # project is selected. This prevents cross-project data leakage in
-    # ungrouped chats even if stale knowledge_bases or workspace auto-bind
-    # settings are present in the database.
+    # project is selected AND the user message does not name a project.
+    # This prevents cross-project data leakage in ungrouped chats even if
+    # stale knowledge_bases or workspace auto-bind settings are present in
+    # the database.  When the user explicitly names a project in the message
+    # (e.g. \"make a c5 c9 market view ppt\" → C5_C9), we scope the agent to
+    # THAT project's data sources — the explicit mention IS the selection,
+    # and the resolved project's KBs REPLACE any stale own/auto-bindings
+    # (cross-project leakage must stay impossible).
     if not selected_project_id and not _normalize_project_name(selected_project_name):
         if agent_app and getattr(agent_app, "name", None) == "general_assistant":
-            bound_ids = []
+            _msg_pid, _msg_pname = _resolve_project_from_message(
+                db, user_message,
+                getattr(agent_app, "org_id", "default-org"),
+                getattr(agent_app, "app_id", "default-app"),
+            )
+            if _msg_pid:
+                selected_project_id = _msg_pid
+                selected_project_name = _msg_pname
+                bound_ids = _extend_with_project_kbs(
+                    db, agent_app, [], _msg_pid,
+                    project_name=_msg_pname,
+                )
+                logger.info(
+                    "general_assistant: resolved project %s (%s) from "
+                    "user message → %d KB(s) bound",
+                    _msg_pid, _msg_pname, len(bound_ids),
+                )
+            else:
+                bound_ids = []
 
     # Inject project context (description + shared memory) whenever a
     # project is selected — independent of whether the agent has any bound
@@ -1038,6 +1352,37 @@ def prepare_data_source_runtime(
         project_block = _build_project_context_block(
             db, selected_project_id, agent_app
         )
+
+    # ── Demo/test source guard (2026-08-29) ─────────────────────────────
+    # When BOTH a demo/test-marked source AND a real database source are
+    # bound, the demo source is excluded so the LLM can never build a
+    # deliverable from demo data (observed: supply-chain snapshot used
+    # "Demo E2E PostgreSQL" while the real ERP was bound → user reported
+    # fabricated data). Uses the KB name + database_name metadata, NOT
+    # hardcoded ids. Demo-only workspaces are unaffected.
+    if bound_ids:
+        _kb_rows = (
+            db.query(KnowledgeBase)
+            .filter(
+                KnowledgeBase.id.in_(bound_ids),
+                KnowledgeBase.is_deleted == False,  # noqa: E712
+            )
+            .all()
+        )
+        _name_map = {
+            kb.id: (kb.name, kb.database_name)
+            for kb in _kb_rows
+        }
+        _filtered = exclude_demo_sources_when_real_present(bound_ids, name_map=_name_map)
+        if len(_filtered) != len(bound_ids):
+            logger.info(
+                "demo_source_guard: excluded %d demo/test source(s) from "
+                "bound set (%d → %d) — real source present; conv project=%s",
+                len(bound_ids) - len(_filtered),
+                len(bound_ids), len(_filtered),
+                selected_project_id or selected_project_name or "<none>",
+            )
+        bound_ids = _filtered
 
     # ── Project Data Map (entity graph, flag-gated) ──
     entity_block = ""
@@ -1071,6 +1416,51 @@ def prepare_data_source_runtime(
         if entry:
             from app.services.tool_registry import normalize_tool_schema
             augmented_tools.append(normalize_tool_schema(entry.schema, fallback_name=entry.name))
+
+    # ── Dashboard build toolset (2026-08-27) ────────────────────────────────
+    # A data-bound agent must ALSO be able to ship the deliverable the bound
+    # data makes possible: the full-stack realtime dashboard. Previously the
+    # data tools (ask_data_agent / fetch_data_batch) were injected but the
+    # build tools were NOT — so a chat served by an agent whose
+    # enabled_tools lacked create_fullstack_dashboard (e.g. the default
+    # general_assistant that serves project chats) could explore the schema
+    # but could never call the build tool. Every dashboard guard
+    # (should_force_create_dashboard / goal-contract force / narration
+    # nudge) is inert when the tool is absent, so the turn ended with a
+    # "readiness assessment" report instead of a live dashboard (observed
+    # conv 3e7fa92b, C5_C9 project, 2026-08-27).
+    #
+    # Fix: inject the full dashboard pipeline idempotently alongside the
+    # data tools when the full-stack pipeline is flag-enabled. Any agent
+    # with a bound datasource becomes dashboard-capable — DB-agnostic,
+    # no per-agent enabled_tools edits required.
+    if getattr(settings, "FULLSTACK_DASHBOARD_ENABLED", False):
+        _dash_tools = [
+            # Build pipeline
+            "create_fullstack_dashboard",
+            "update_fullstack_dashboard",
+            "revert_fullstack_dashboard",
+            "list_fullstack_dashboards",
+            # Design intelligence (dashboard turns start with uiux_design_system)
+            "uiux_design_system",
+            "uiux_search",
+            # Schema grounding (the dashboard guards require describe_schema
+            # evidence before forcing the build)
+            "list_data_sources",
+            "describe_schema",
+        ]
+        _dash_existing = {t.get("function", {}).get("name") for t in augmented_tools}
+        for _dash_name in _dash_tools:
+            if _dash_name in _dash_existing:
+                continue
+            _dash_entry = registry.get_entry(_dash_name)
+            if _dash_entry is None:
+                continue
+            from app.services.tool_registry import normalize_tool_schema
+            augmented_tools.append(
+                normalize_tool_schema(_dash_entry.schema, fallback_name=_dash_entry.name)
+            )
+            _dash_existing.add(_dash_name)
 
     bound_meta = _load_bound_kb_meta(db, bound_ids)
     schema_slices = _build_schema_slice(db, bound_ids)

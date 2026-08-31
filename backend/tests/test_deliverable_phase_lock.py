@@ -9,7 +9,10 @@ agents.py gate and the post-loop emission are thin wrappers around.
 
 from __future__ import annotations
 
-from app.routers.agents import _strip_internal_references
+from app.routers.agents import (
+    _phase_lock_should_block,
+    _strip_internal_references,
+)
 from app.services.goal_contract import build_goal_contract
 
 
@@ -34,6 +37,52 @@ def _record_answer(c, *, rows=None, tool_call_id="tc-answer", purpose="answer"):
 
 
 # ── Gate condition: block while requires_data and no answer data ─────────
+
+
+def test_phase_lock_blocks_bare_create_artifact():
+    """A create_artifact WITHOUT source_execution_id must be blocked while
+    no answer data exists (the original Bug 1/2 behavior)."""
+    call = {
+        "tool_name": "create_artifact",
+        "tool_call_id": "tc-1",
+        "args_str": '{"type": "docx", "title": "Shipment report", '
+                    '"payload": {"summary": "..."}}',
+    }
+    assert _phase_lock_should_block(call) is True
+
+
+def test_phase_lock_blocks_run_sandbox_skill():
+    call = {"tool_name": "run_sandbox_skill", "tool_call_id": "tc-2",
+            "args_str": '{"format": "pptx"}'}
+    assert _phase_lock_should_block(call) is True
+
+
+def test_phase_lock_exempts_reexport_with_source_execution_id():
+    """Regression (2026-08-29): the documented re-export path —
+    create_artifact(source_execution_id=evt_xxx) — builds from the CACHED
+    execution of a previous turn and must NOT be blocked, or the agent
+    flails (re-runs data / tries sandbox / fabricates a completion)."""
+    call = {
+        "tool_name": "create_artifact",
+        "tool_call_id": "tc-3",
+        "args_str": '{"type": "xlsx", "title": "Same report", '
+                    '"source_execution_id": "evt_abc123"}',
+    }
+    assert _phase_lock_should_block(call) is False
+
+
+def test_phase_lock_exempts_non_deliverable_tools():
+    call = {"tool_name": "ask_data_agent", "tool_call_id": "tc-4",
+            "args_str": '{"question": "shipments"}'}
+    assert _phase_lock_should_block(call) is False
+
+
+def test_phase_lock_malformed_args_still_blocks_create_artifact():
+    """Malformed args must fail closed (block) — never slip a bare build
+    through the gate because the payload could not be parsed."""
+    call = {"tool_name": "create_artifact", "tool_call_id": "tc-5",
+            "args_str": "not-json"}
+    assert _phase_lock_should_block(call) is True
 
 
 def test_gate_blocks_before_any_data():

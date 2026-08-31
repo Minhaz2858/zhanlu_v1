@@ -12,8 +12,8 @@ Pipeline (see the design spec at docs/superpowers/specs/):
 4. claim_tracker — SQL-grounded verification of every numeric claim
 5. renderers — dual truth-backed rendering (DOCX + inline HTML chat)
 
-Reuses existing services (ErpKpiService, PerceptionService, Two-Phase NL2SQL
-schema linker); introduces no new SQL, pip packages, flags, or migrations.
+Reuses existing services (Two-Phase NL2SQL schema linker); introduces
+no new SQL, pip packages, flags, or migrations.
 """
 
 # Re-export the public pipeline entry points so the tool wrapper and

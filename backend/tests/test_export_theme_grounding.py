@@ -67,6 +67,34 @@ def _sample_payload():
     )
 
 
+def _nonrich_payload():
+    """A payload with NO narrative fields — forces the row-based planner.
+
+    The rich-payload short-circuit (2026-08-28) renders any payload with
+    summary/chart/key_findings DIRECTLY via DocumentPlan → DeckPlan, so a
+    test that wants to exercise the row-based deck planner (theme / user
+    context threading) must pass a payload with no rich narrative.
+    """
+    from app.services.synexia.contracts import (
+        KPISpec,
+        ReportCardPayload,
+    )
+
+    return ReportCardPayload(
+        title="Sales by region",
+        source="erp",
+        generated_at="2026-08-01T00:00:00Z",
+        summary="",
+        kpis=[KPISpec(label="Total", value="100", delta="+5%", caption="All regions")],
+        chart=None,
+        insights=[],
+        actions=[],
+        next_step="",
+        user_signal="export",
+        warnings=[],
+    )
+
+
 def _make_artifact(db, *, conversation_id="conv-1", execution_id=None):
     from app.models.artifact import Artifact
 
@@ -197,7 +225,7 @@ def test_render_deck_pipeline_threads_theme_and_user_context(monkeypatch):
     rows = [{"region": "EA", "sales": 10}]
     svc = ExportService(_make_db())
     data, mime, ext, _audit = svc._render_deck_pipeline(
-        _sample_payload(), ctx, rows,
+        _nonrich_payload(), ctx, rows,
         user_message="Build me a regional sales deck",
         artifact=None, user_id="u1",
     )

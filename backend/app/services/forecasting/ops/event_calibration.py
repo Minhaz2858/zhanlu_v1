@@ -1,8 +1,9 @@
 """T2.2 Event-Impact Calibration — populate ForecastEventImpact from real data.
 
 For each closed IntelligenceEvent (whose impact window has passed), compute
-the real price/volume impact and write a ForecastEventImpact row.  The
-intelligence_overlay then uses this data instead of the heuristic mapping.
+the real price/volume impact and write a ForecastEventImpact row for later
+consumption by forecast tooling. Matching to products is done generically
+against known ForecastTarget product_keys (no hardcoded commodity aliases).
 """
 from __future__ import annotations
 
@@ -97,14 +98,12 @@ def _get_closed_events(
 ) -> list[dict[str, Any]]:
     """Fetch IntelligenceEvents whose impact window has closed.
 
-    Matches events to products via the same overlay logic to return
+    Matches events to known forecast targets generically (product_key
+    substring match against headline text) and returns
     (event, product_key) pairs ready for impact computation.
     """
     from app.models.intelligence import IntelligenceEvent
-    from app.services.forecasting.intelligence_overlay import (
-        _match_events_to_product,
-        _PRODUCT_ALIASES,
-    )
+    from app.models.forecasting import ForecastTarget
 
     cutoff = datetime.now(timezone.utc).date() - timedelta(days=window_days)
     rows = (
@@ -117,6 +116,12 @@ def _get_closed_events(
         .all()
     )
 
+    target_keys = [
+        t[0]
+        for t in db.query(ForecastTarget.product_key).all()
+        if t[0]
+    ]
+
     result: list[dict[str, Any]] = []
     for row in rows:
         ev_date = (
@@ -124,32 +129,39 @@ def _get_closed_events(
             if isinstance(row.created_date, datetime)
             else row.created_date
         )
-        # Match to each known product
-        for pk in _PRODUCT_ALIASES:
-            matched = _match_events_to_product([row], pk)
-            if matched:
-                result.append({
-                    "id": getattr(row, "event_id", row.id),
-                    "event_type": getattr(row, "event_type", "unknown"),
-                    "event_date": ev_date,
-                    "headline": getattr(row, "headline", ""),
-                    "product_key": pk,
-                    "direction": matched[0].get("direction", "neutral"),
-                    "magnitude_estimate": matched[0].get("magnitude_estimate", "minor"),
-                })
+        headline = (getattr(row, "headline", "") or "").lower()
+        # Match to each known forecast target
+        for pk in target_keys:
+            pk_lower = pk.lower()
+            if pk_lower not in headline:
+                continue
+            result.append({
+                "id": getattr(row, "event_id", row.id),
+                "event_type": getattr(row, "event_type", "unknown"),
+                "event_date": ev_date,
+                "headline": getattr(row, "headline", ""),
+                "product_key": pk,
+                "direction": getattr(row, "direction", "neutral") or "neutral",
+                "magnitude_estimate": getattr(row, "magnitude_estimate", "minor") or "minor",
+            })
     return result
 
 
 def _get_price_history_for_event(
     db: Session, product_key: str
 ) -> dict[str, float]:
-    """Fetch price history for a product as {date_str: price_float}."""
+    """Fetch price history for a product as {date_str: price_float}.
+
+    Reads through the forecasting-native external data source (the market
+    dashboard price reader was removed with that feature).
+    """
     try:
-        from app.services.market_dashboard_service import read_product_history_rows
-        rows = read_product_history_rows(product_key)
+        from app.services.forecasting.analyst.service import _read_history_rows
+
+        rows = _read_history_rows(product_key)
         out: dict[str, float] = {}
         for date_str, price in rows:
-            out[date_str[:10]] = float(price)
+            out[str(date_str)[:10]] = float(price)
         return out
     except Exception:
         logger.warning(

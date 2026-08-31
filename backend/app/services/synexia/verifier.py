@@ -518,6 +518,7 @@ def verify_with_llm(
     execution,
     result: VerificationResult,
     llm_callable: Optional[LLMRubricFn] = None,
+    endpoint=None,
 ) -> list[dict]:
     """Optional qualitative LLM rubric pass.
 
@@ -527,7 +528,8 @@ def verify_with_llm(
     The default ``llm_callable`` invokes the shared LLM service with a
     classify-prompt that asks the model to evaluate the execution's
     observations as a JSON rubric. Tests can inject a stub via
-    ``llm_callable``.
+    ``llm_callable``. ``endpoint`` (hierarchical LLMEndpoint) pins the
+    rubric call to a specific provider+model.
     """
     try:
         from app.config import settings
@@ -545,7 +547,12 @@ def verify_with_llm(
         except Exception as e:
             logger.debug("VERIFY: llm service unavailable (%s); skipping LLM pass", e)
             return []
-        llm_callable = chat_completion_json_sync  # type: ignore[assignment]
+        if endpoint is not None:
+            llm_callable = lambda prompt: chat_completion_json_sync(  # noqa: E731
+                prompt, endpoint=endpoint,
+            )
+        else:
+            llm_callable = chat_completion_json_sync  # type: ignore[assignment]
 
     observations = list(execution.observations or [])
     obs_summary = [

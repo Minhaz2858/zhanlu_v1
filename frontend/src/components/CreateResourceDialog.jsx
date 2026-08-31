@@ -79,6 +79,24 @@ const TEMPLATES = {
       { name: 'Equipment OEE Weekly', desc: 'Weekly statistics on equipment overall effectiveness (OEE) and degradation trends' },
     ],
   },
+  // Full-stack realtime dashboards. These are APP-BUILD requests — the
+  // prefill carries an explicit intent chip so the agent routes to the
+  // dashboard-generation skill (create_fullstack_dashboard + WebSocket live
+  // data), never the static-HTML fallback.
+  dashboard: {
+    zh: [
+      { name: '销售业绩看板', desc: '实时展示销售额、订单量、区域分布与TOP产品趋势，数据来源于已绑定的业务数据库' },
+      { name: '生产运营看板', desc: '实时监控产量、良率、设备状态与产能达成率等核心运营指标' },
+      { name: '设备OEE监控看板', desc: '实时追踪设备综合效率（OEE）、停机时间与衰退趋势' },
+      { name: '财务总览看板', desc: '实时汇总收入、支出、毛利与现金流等关键财务指标' },
+    ],
+    en: [
+      { name: 'Sales Performance Dashboard', desc: 'Live revenue, order volume, regional split and top-product trends from the bound business database' },
+      { name: 'Operations KPI Board', desc: 'Live production volume, yield rate, equipment status and capacity achievement KPIs' },
+      { name: 'Equipment OEE Monitor', desc: 'Live equipment overall effectiveness (OEE), downtime and degradation trends' },
+      { name: 'Financial Overview', desc: 'Live revenue, expenses, gross margin and cash-flow metrics' },
+    ],
+  },
   file: { zh: [], en: [] },
 };
 
@@ -104,6 +122,13 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
   // Skills enabled for the automation — persisted to automation_tasks.skills
   // via the chat prefill (create_automation) as an ordered string array.
   const [skills, setSkills] = useState([]);
+  // LLM-informed tick (opt-in): when enabled, each scheduled run gets a
+  // per-tick LLM briefing injected into the agent prompt. Emitted into
+  // the prefill so create_automation persists it as llm_informed_tick.
+  const [llmInformedTick, setLlmInformedTick] = useState(false);
+  // Dashboard refresh cadence (seconds) — emitted into the prefill so the
+  // fullstack dashboard is built with the chosen refresh_interval_seconds.
+  const [refreshInterval, setRefreshInterval] = useState(30);
   // Project data sources — fetched when a project is pre-selected so the
   // user can see what the Agent will inherit. Empty when no project.
   const [projectDataSources, setProjectDataSources] = useState([]);
@@ -115,6 +140,8 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
     setProjectDataSources([]);
     setOutputFormat('html');
     setSkills([]);
+    setLlmInformedTick(false);
+    setRefreshInterval(30);
     base44.entities.Project.filter({ status: 'active' })
       .then((projs) => setProjects(projs))
       .catch(() => setProjects([]));
@@ -178,7 +205,22 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
   }
 
   function buildPrefill() {
-    const lines = [isEn ? `Create a new ${resourceLabel}:` : `帮我新建一个${resourceLabel}：`];
+    const lines = [];
+    if (resourceType === 'dashboard') {
+      // Intent chip — the literal "dashboard" keyword deterministically
+      // routes the resolver to the dashboard-generation skill (format_intent
+      // / soft_intent), which enforces: design-system-first, data contract,
+      // create_fullstack_dashboard, WebSocket live updates. Never static HTML.
+      lines.push(isEn
+        ? 'Build a FULL-STACK REALTIME DASHBOARD (use create_fullstack_dashboard):'
+        : '请构建一个全栈实时仪表盘 dashboard（使用 create_fullstack_dashboard）：');
+      lines.push(`- ${isEn ? 'Mode' : '模式'}：${isEn
+        ? 'FULLSTACK_REALTIME — design-system-first (uiux_design_system), real data from the bound datasource, WebSocket live updates'
+        : '全栈实时——设计系统优先（uiux_design_system），基于已绑定数据源的真实数据，WebSocket 实时刷新'}`);
+      lines.push(`- ${isEn ? 'Refresh interval' : '刷新间隔'}：${refreshInterval}s`);
+    } else {
+      lines.push(isEn ? `Create a new ${resourceLabel}:` : `帮我新建一个${resourceLabel}：`);
+    }
     if (name) lines.push(`- ${isEn ? 'Name' : '名称'}：${name}`);
     if (type) lines.push(`- ${isEn ? 'Type' : '类型'}：${getTypeLabel(type)}`);
     if (schedule) lines.push(`- ${isEn ? 'Schedule' : '调度规则'}：${schedule}`);
@@ -190,12 +232,16 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
       // Skills chosen in the picker → emitted so create_automation persists
       // them as automation_tasks.skills (progressive-disclosure at runtime).
       if (skills.length) lines.push(`- ${isEn ? 'Skills' : '技能'}：${skills.join(', ')}`);
+      // LLM-informed tick → emitted so create_automation persists it as
+      // automation_tasks.llm_informed_tick. Explicit keyword makes the
+      // LLM pass llm_informed_tick=true in the tool-call args.
+      if (llmInformedTick) lines.push(`- ${isEn ? 'LLM-informed tick' : '智能调度'}: yes`);
     }
     if (capabilities) lines.push(`- ${isEn ? 'Tools' : '工具'}：${capabilities}`);
-    if (resourceType === 'agent' || resourceType === 'automation' || resourceType === 'kb') {
+    if (resourceType === 'agent' || resourceType === 'automation' || resourceType === 'kb' || resourceType === 'dashboard') {
       const projName = project === 'global' ? (isEn ? 'Ungrouped' : '未分组') : project;
       lines.push(`- ${isEn ? 'Project' : '所属项目'}：${projName}`);
-      if (resourceType === 'automation' && projectDataSources.length > 0) {
+      if (projectDataSources.length > 0) {
         // The chat agent is smart enough to look up the data source type
         // by name, so the prefill just lists the names. This also avoids
         // duplicating type labels when the name already contains them
@@ -276,7 +322,14 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
   // is only shown when the user opened the dialog from a place
   // without project context (e.g. the global Automation Tasks page).
   const projectLocked = Boolean(defaultProjectName);
-  const showProjectBlock = resourceType === 'agent' || resourceType === 'automation' || resourceType === 'kb';
+  const showProjectBlock = resourceType === 'agent' || resourceType === 'automation' || resourceType === 'kb' || resourceType === 'dashboard';
+
+  const REFRESH_OPTIONS = [
+    { value: 15, label: isEn ? '15s' : '15 秒' },
+    { value: 30, label: isEn ? '30s' : '30 秒' },
+    { value: 60, label: isEn ? '1 min' : '1 分钟' },
+    { value: 300, label: isEn ? '5 min' : '5 分钟' },
+  ];
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -372,6 +425,48 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
                 update={(patch) => { if ('skills' in patch) setSkills(coerceStringArray(patch.skills)); }}
                 t={t}
               />
+              {/* LLM-informed tick — opt-in per-tick LLM briefing for
+                  scheduled runs. Persisted via the prefill (create_automation
+                  → llm_informed_tick). */}
+              <label
+                data-testid="automation-llm-tick"
+                className="mt-3 flex cursor-pointer items-start gap-2 rounded-lg border border-border bg-background px-3 py-2.5"
+              >
+                <input
+                  type="checkbox"
+                  checked={llmInformedTick}
+                  onChange={(e) => setLlmInformedTick(e.target.checked)}
+                  className="mt-0.5 h-3.5 w-3.5 rounded border-border accent-primary"
+                />
+                <span className="min-w-0">
+                  <span className="block text-xs font-medium text-foreground">
+                    {isEn ? 'LLM-informed tick' : '智能调度'}
+                  </span>
+                  <span className="block text-[11px] leading-snug text-muted-foreground">
+                    {isEn
+                      ? 'Before each scheduled run, the agent gets a brief AI briefing on what changed since the last run and what to focus on. Slightly slower ticks, smarter context.'
+                      : '每次定时执行前，智能体会收到一份简报：上次运行后发生了什么变化、本次应重点关注什么。执行稍慢，但上下文更聪明。'}
+                  </span>
+                </span>
+              </label>
+            </div>
+          )}
+          {resourceType === 'dashboard' && (
+            <div>
+              <Label className="mb-1.5 block text-xs">{t.createDialog.refreshCadence}</Label>
+              <Select value={String(refreshInterval)} onValueChange={(v) => setRefreshInterval(Number(v))}>
+                <SelectTrigger data-testid="dashboard-refresh-select">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {REFRESH_OPTIONS.map((o) => (
+                    <SelectItem key={o.value} value={String(o.value)}>{o.label}</SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="mt-1.5 text-[11px] leading-snug text-muted-foreground">
+                {t.createDialog.dashboardHint}
+              </p>
             </div>
           )}
           {resourceType === 'agent' && (

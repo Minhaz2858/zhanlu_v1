@@ -7,7 +7,7 @@ MAPE, the ensemble is not adding value.  In that case we:
 2. Publish the seasonal_naive forecast instead of the ensemble
 3. Emit a warning log
 
-This ensures EDIA never silently ships bad forecasts.
+This ensures the platform never silently ships bad forecasts.
 """
 
 from __future__ import annotations

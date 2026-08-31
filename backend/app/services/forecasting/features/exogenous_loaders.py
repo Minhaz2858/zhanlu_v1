@@ -7,8 +7,8 @@ Design rules:
 - NEVER leak future data: loaders use only data <= window_end.
 - All prices in CNY. FX loader converts via USDCNY rate snapshot.
 - Event flags are binary columns (1 = relevant event within lookback).
-- For Phase 1, data is fetched from EDIA MySQL via raw SQL (matching
-  EdiaMysqlDataSource pattern), NOT via ORM.
+- For Phase 1, data is fetched from the external MySQL via raw SQL (matching
+  MysqlDataSource pattern), NOT via ORM.
 
 Phase F2: Added ``ErpTxLoader`` — reads ERP transaction prices from
 ``sale_erp_v_{product}_data`` tables. These go back to 2018 (vs ~88 days
@@ -26,9 +26,11 @@ import pandas as pd
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
+from app.services.domain_config import get_domain_config
+
 logger = logging.getLogger(__name__)
 
-# Sentinel values matching EdiaMysqlDataSource
+# Sentinel values matching MysqlDataSource
 _SENTINEL_VALUES = {"F7", "NaN", "nan", "None", "", "null", "NULL"}
 
 
@@ -45,10 +47,10 @@ def _resolve_mysql_engine() -> Engine | None:
 # ---------------------------------------------------------------------------
 
 class FeedstockLoader:
-    """Loads historical prices for feedstock products from EDIA MySQL.
+    """Loads historical prices for feedstock products from the external MySQL.
 
     In Phase 1, the loader reads `md_t_lz_price` via raw SQL (same path
-    as EdiaMysqlDataSource). For each feedstock key, it queries
+    as MysqlDataSource). For each feedstock key, it queries
     WHERE FMATERIAL_NAME LIKE '%{key}%' and returns the aggregated
     mean price per day.
 
@@ -266,7 +268,7 @@ class ErpTxLoader:
 
     Schema (from ``erp_mysql_schema.txt``)::
 
-        sale_erp_v_异戊二烯_data(
+        sale_erp_v_<product>_data(
             Unnamed: 0, qty, date, price, amount, product, supplier, ...
         )
 
@@ -293,10 +295,10 @@ class ErpTxLoader:
         Parameters
         ----------
         erp_table : str
-            Table name, e.g. ``"sale_erp_v_异戊二烯_data"``.
+            Table name, e.g. ``"sale_erp_v_<product>_data"``.
         product_filter : str
-            Value of the ``product`` column to filter by, e.g.
-            ``"异戊二烯"``. May be empty to take all rows.
+            Value of the ``product`` column to filter by (e.g. the product
+            display name). May be empty to take all rows.
         window_start, window_end : date
             Inclusive date range.
 
@@ -359,24 +361,16 @@ class ErpTxLoader:
 # ERP Volume Loader (Phase F1)
 # ---------------------------------------------------------------------------
 
-# English product_id → Chinese ERP table name (matching seed_ecisco_targets.py)
-_ERP_TABLE_MAP: dict[str, str] = {
-    "isoprene":               "sale_erp_v_异戊二烯_data",
-    "piperylene":             "sale_erp_v_间戊二烯_data",
-    "dcpd":                   "sale_erp_v_双环戊二烯_data",
-    "cracked_c5":             "sale_erp_v_工业用裂解碳五_data",
-    "cracked_c9":             "sale_erp_v_工业用裂解碳九_data",
-    "blowing_agent":          "sale_erp_v_戊烷发泡剂_data",
-    "c5_resin":               "sale_erp_v_碳五石油树脂_data",
-    "raffinate_c5":           "sale_erp_v_抽余碳五_data",
-    "ethylene_carbon_black":  "sale_erp_v_乙烯炭黑料_data",
-    "industrial_hexane":      "sale_erp_v_工业己烷_data",
-    "mixed_trimethylbenzene": "sale_erp_v_混三甲苯_data",
-}
+# Product_id → ERP table name map comes from the app's domain config
+# ("warehouse_table_map" block). Empty config = generic fallback that builds
+# ``sale_erp_v_<product_id>_data`` from the product id.
+_ERP_TABLE_MAP: dict[str, str] = dict(
+    (get_domain_config("") or {}).get("warehouse_table_map") or {}
+)
 
 
 class ErpVolumeLoader:
-    """Load daily sales volume from EDIA ERP (qty column — demand leading indicator).
+    """Load daily sales volume from the ERP mirror (qty column — demand leading indicator).
 
     Unlike ErpTxLoader which reads price, this reads sales quantity and
     aggregates by daily SUM (volume is additive, not point-in-time like price).

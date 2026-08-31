@@ -38,6 +38,12 @@ class StepOut(BaseModel):
     tool_name: Optional[str] = None
     iteration: int
     duration_ms: int
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
+    status: Optional[str] = None
+    error: Optional[str] = None
+    retry_count: Optional[int] = None
     created_at: Optional[str] = None
 
     class Config:
@@ -102,6 +108,12 @@ def _to_step_out(step) -> StepOut:
         tool_name=step.tool_name,
         iteration=step.iteration,
         duration_ms=step.duration_ms or 0,
+        prompt_tokens=getattr(step, "prompt_tokens", None),
+        completion_tokens=getattr(step, "completion_tokens", None),
+        total_tokens=getattr(step, "total_tokens", None),
+        status=getattr(step, "status", None),
+        error=getattr(step, "error", None),
+        retry_count=getattr(step, "retry_count", None),
         created_at=step.created_date.isoformat() if step.created_date else None,
     )
 

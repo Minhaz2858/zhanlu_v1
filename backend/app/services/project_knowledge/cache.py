@@ -27,7 +27,7 @@ from .models import CacheQueryResult, CacheStats, CacheStatus
 
 logger = logging.getLogger(__name__)
 
-# Try to import the static C5/C9 graph resolver (Layer 1).
+# Try to import the config-driven graph resolver (Layer 1).
 try:
     from app.services.knowledge_graph.resolver import resolve_product_id as _kg_resolve  # type: ignore
     from app.services.knowledge_graph.graph import (  # type: ignore
@@ -78,12 +78,12 @@ class ProjectKnowledgeCache:
         model_id: str | None = None,
     ) -> CacheQueryResult | None:
         """Layered lookup; first non-None wins. Returns None on full miss."""
-        if not getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
+        if not getattr(settings, "PROJECT_KNOWLEDGE_CACHE_ENABLED", False):
             return None
         if not question or not question.strip():
             return None
 
-        # Layer 1: static C5/C9 resolver
+        # Layer 1: config-driven product resolver
         try:
             r1 = self._layer1_resolver(question)
             if r1 is not None:
@@ -92,7 +92,7 @@ class ProjectKnowledgeCache:
             logger.debug("cache.query Layer1 failed (fallthrough): %s", e)
 
         # Layer 2: project entities
-        if getattr(settings, "ECISCO_BI_KG_LAYER_ENTITIES_ENABLED", True):
+        if getattr(settings, "PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED", True):
             try:
                 r2 = self._layer2_entities(db, question)
                 if r2 is not None:
@@ -101,7 +101,7 @@ class ProjectKnowledgeCache:
                 logger.debug("cache.query Layer2 failed (fallthrough): %s", e)
 
         # Layer 3: project metrics
-        if getattr(settings, "ECISCO_BI_KG_LAYER_METRICS_ENABLED", True):
+        if getattr(settings, "PROJECT_KNOWLEDGE_LAYER_METRICS_ENABLED", True):
             try:
                 r3 = self._layer3_metrics(db, question)
                 if r3 is not None:
@@ -139,7 +139,7 @@ class ProjectKnowledgeCache:
                 logger.warning("cache.invalidate links failed: %s", e)
         if scope == "all":
             # scope=all also soft-deletes the ProjectEntity rows themselves,
-            # so the next ingest() will re-seed them from the C5/C9 graph.
+            # so the next ingest() will re-seed them from the domain config.
             try:
                 rows = db.query(ProjectEntity).filter(
                     ProjectEntity.project_id == self.project_id,

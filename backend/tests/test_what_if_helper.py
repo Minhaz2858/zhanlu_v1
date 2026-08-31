@@ -60,14 +60,16 @@ def test_compute_what_if_returns_full_shape(monkeypatch):
     )
     result = what_if.compute_what_if(
         product_key="乙烯",
-        brent_delta_pct=0.0,
-        naphtha_delta_pct=10.0,
+        market_delta_pct=0.0,
+        feedstock_delta_pct=10.0,
         db=FakeDB(target=_target(), run=_run()),
     )
     assert result["product_key"] == "乙烯"
     assert result["base_forecast"] == [100.0, 101.0, 102.0]
     assert result["total_impact_pct"] == 5.0
-    assert result["adjustments"][0]["driver"] == "naphtha"
+    # The root-feedstock driver label is config-driven; empty config → generic
+    # "feedstock" (was hardcoded "naphtha" in the pre-de-hardcoding era).
+    assert result["adjustments"][0]["driver"] == "feedstock"
     assert result["adjustments"][0]["impact_pct"] == 5.0
     assert result["adjusted_forecast"] == [
         round(100.0 * 1.05, 2), round(101.0 * 1.05, 2), round(102.0 * 1.05, 2),
@@ -79,14 +81,14 @@ def test_compute_what_if_raises_lookup_error_when_target_missing():
     with pytest.raises(LookupError, match="no forecast target for 'unknown'"):
         what_if.compute_what_if(
             product_key="unknown",
-            brent_delta_pct=0.0,
-            naphtha_delta_pct=0.0,
+            market_delta_pct=0.0,
+            feedstock_delta_pct=0.0,
             db=FakeDB(target=None),
         )
 
 
-def test_compute_what_if_brent_uses_08_elasticity_proxy(monkeypatch):
-    """Brent shock is converted to naphtha with ~0.8 elasticity before propagation."""
+def test_compute_what_if_market_uses_08_elasticity_proxy(monkeypatch):
+    """Market shock is converted to the root feedstock with ~0.8 elasticity before propagation."""
     calls = {}
 
     def fake_adjustment(product_id, as_of_date, naphtha_pct_change):
@@ -96,10 +98,10 @@ def test_compute_what_if_brent_uses_08_elasticity_proxy(monkeypatch):
     monkeypatch.setattr(what_if, "compute_domain_signal_adjustment", fake_adjustment)
     result = what_if.compute_what_if(
         product_key="乙烯",
-        brent_delta_pct=5.0,
-        naphtha_delta_pct=0.0,
+        market_delta_pct=5.0,
+        feedstock_delta_pct=0.0,
         db=FakeDB(target=_target(), run=_run()),
     )
     assert calls["naphtha_pct_change"] == 5.0 * 0.8  # 4.0
-    assert result["adjustments"][0]["driver"] == "brent"
+    assert result["adjustments"][0]["driver"] == "market_index"
     assert result["total_impact_pct"] == 2.0

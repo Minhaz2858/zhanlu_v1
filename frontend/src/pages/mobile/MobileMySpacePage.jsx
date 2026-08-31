@@ -9,7 +9,7 @@ import ProjectsView from '@/components/project/ProjectsView';
 import FilesView from '@/components/files/FilesView';
 import KbCard from '@/components/kb/KbCard';
 import { filterUserAgents } from '@/lib/systemAgents';
-import { listDashboards, deleteDashboard } from '@/api/dashboards';
+import { listDashboards, listDashboardApps, deleteDashboard } from '@/api/dashboards';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
 import KbSetupDialog from '@/components/kb/KbSetupDialog';
 import DashboardPopup from '@/components/dashboard/DashboardPopup';
@@ -45,7 +45,17 @@ export default function MobileMySpacePage() {
     setLoading(true);
     try {
       if (tab === 'dashboard') {
-        setItems(await listDashboards());
+        // Merge legacy SQL-widget dashboards + full-stack realtime apps so
+        // mobile shows the same surface as desktop. App records navigate to
+        // the full DashboardView page (DashboardPopup is legacy-only).
+        const [legacy, apps] = await Promise.all([
+          listDashboards().catch(() => []),
+          listDashboardApps().catch(() => []),
+        ]);
+        setItems([
+          ...(Array.isArray(apps) ? apps : []).map((a) => ({ ...a, kind: 'app', id: a.slug })),
+          ...(Array.isArray(legacy) ? legacy : []).map((d) => ({ ...d, kind: 'legacy' })),
+        ]);
         return;
       }
       const current = TABS.find((x) => x.key === tab);
@@ -96,7 +106,7 @@ export default function MobileMySpacePage() {
             <x.icon className="h-4 w-4" /> {x.label}
           </button>
         ))}
-        {tab !== 'file' && tab !== 'project' && tab !== 'dashboard' && (
+        {tab !== 'file' && tab !== 'project' && (
           <button
             onClick={() => (tab === 'kb' ? (setKbEdit(null), setKbOpen(true)) : setDialogOpen(true))}
             className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-lg bg-primary px-2.5 py-1.5 text-xs font-medium text-primary-foreground"
@@ -123,15 +133,22 @@ export default function MobileMySpacePage() {
         ) : tab === 'dashboard' ? (
           <div className="grid grid-cols-1 gap-3 p-3">
             {items.map((d) => (
-              <div key={d.id} onClick={() => setOpenDashboardId(d.id)} className="cursor-pointer rounded-xl border border-border bg-card p-4">
+              <div key={d.id} onClick={() => (d.kind === 'app' ? navigate(`/dashboard/${d.id}`) : setOpenDashboardId(d.id))} className="cursor-pointer rounded-xl border border-border bg-card p-4">
                 <div className="mb-1 flex items-center gap-2">
                   <LayoutDashboard className="h-4 w-4 text-primary" />
                   <h3 className="flex-1 truncate font-display text-base text-foreground">{d.name}</h3>
+                  {d.kind === 'app' && (
+                    <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-[hsl(var(--chart-2))]/10 px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-[hsl(var(--chart-2))]">
+                      {lang === 'en' ? 'LIVE' : '实时'}
+                    </span>
+                  )}
                 </div>
                 <p className="mb-2 text-xs text-muted-foreground">{d.description || (lang === 'en' ? 'Live dashboard' : '实时仪表盘')}</p>
                 <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <button onClick={() => setOpenDashboardId(d.id)} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs"><Play className="h-3 w-3" /> {t.common.run}</button>
-                  <button onClick={async () => { await deleteDashboard(d.id); load(); }} className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground"><Trash2 className="h-3 w-3" /> {t.common.delete}</button>
+                  <button onClick={() => (d.kind === 'app' ? navigate(`/dashboard/${d.id}`) : setOpenDashboardId(d.id))} className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs"><Play className="h-3 w-3" /> {t.common.run}</button>
+                  {d.kind !== 'app' && (
+                    <button onClick={async () => { await deleteDashboard(d.id); load(); }} className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground"><Trash2 className="h-3 w-3" /> {t.common.delete}</button>
+                  )}
                 </div>
               </div>
             ))}

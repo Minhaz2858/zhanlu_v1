@@ -57,6 +57,7 @@ def run_via_fsm(
     agent_name: str = "general_assistant",
     attachments: Optional[list[str]] = None,
     on_state_change: Optional[Callable[[str], None]] = None,
+    endpoint: Optional[Any] = None,
 ) -> Optional[Any]:
     """Run the FSM for one user turn; return ExecutionResult or None.
 
@@ -68,6 +69,9 @@ def run_via_fsm(
     The caller is expected to log + render the assistant reply either
     way; this adapter never *replaces* the legacy path, it only
     *prefers* the FSM when enabled.
+
+    ``endpoint`` (hierarchical LLMEndpoint) is forwarded to the
+    ExecutionRequest so FSM internals use the pinned model.
     """
     if not is_fsm_enabled():
         return None
@@ -86,6 +90,7 @@ def run_via_fsm(
             mode="dynamic",
             org_id=getattr(conversation, "org_id", "default-org") or "default-org",
             app_id=getattr(conversation, "app_id", "default-app") or "default-app",
+            endpoint=endpoint,
         )
         fsm = SynexiaFSM(db=db)
         return fsm.run(request=request, on_state_change=on_state_change)

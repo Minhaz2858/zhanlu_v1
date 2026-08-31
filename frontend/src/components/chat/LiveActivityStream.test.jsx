@@ -214,9 +214,15 @@ describe('LiveActivityStream — event rendering', () => {
   it('renders artifact progress bar', () => {
     const events = [ev('artifact_progress', 'artifact_progress', { artifact_type: 'slide', current: 3, total: 12 })];
     const { container } = render(<LiveActivityStream events={events} isStreaming />);
-    const bar = container.querySelector('[class*="overflow-hidden rounded-full bg-secondary"]');
+    // 2026-08-31: scope to the PER-ROW bar inside the event list. The
+    // stream-level ProgressBar (added 2026-08-25) renders first in DOM
+    // order and enforces a 2% minimum width while running, so an unscoped
+    // selector hit the wrong bar and saw '2%' instead of '25%'.
+    const list = container.querySelector('[data-testid="live-activity-list"]');
+    const bar = list.querySelector('[class*="overflow-hidden rounded-full bg-secondary"]');
     expect(bar).toBeInTheDocument();
     const fill = bar.querySelector('[class*="bg-blue-500"]');
+    expect(fill).toBeInTheDocument();
     expect(fill.style.width).toBe('25%');
   });
 });
@@ -290,6 +296,11 @@ describe('LiveActivityStream — collapse behavior', () => {
 // ---------------------------------------------------------------------------
 // Thinking sub-section
 // ---------------------------------------------------------------------------
+// 2026-08-31: the collapsible Thinking block was REMOVED 2026-08-25 at the
+// user's request (see the comment in LiveActivityStream.jsx near the footer;
+// git commit 4a86311 has the removed implementation). Reasoning now streams
+// in the one-line LiveStatusLine while the turn is live and is rendered in
+// the bubble via ChatThinkingIndicator. These tests pin the current contract.
 
 describe('LiveActivityStream — thinking sub-section', () => {
   it('renders nothing when no reasoning is provided', () => {
@@ -297,19 +308,29 @@ describe('LiveActivityStream — thinking sub-section', () => {
     expect(screen.queryByTestId('live-activity-thinking-toggle')).toBeNull();
   });
 
-  it('renders the collapsed thinking block when reasoning exists', () => {
-    render(<LiveActivityStream events={FULL_FEED()} reasoning="step 1: parse request" isStreaming />);
-    const toggle = screen.getByTestId('live-activity-thinking-toggle');
-    expect(toggle).toBeInTheDocument();
-    expect(toggle.textContent).toContain('思考');
-    // Content is hidden until the toggle is clicked (collapsed by default).
-    expect(screen.queryByText('step 1: parse request')).toBeNull();
+  it('streams raw reasoning in the live status line instead of a thinking block', () => {
+    render(
+      <LiveActivityStream
+        events={FULL_FEED()}
+        streamingReasoning="step 1: parse request"
+        isStreaming
+      />,
+    );
+    // No collapsible thinking block in the feed anymore.
+    expect(screen.queryByTestId('live-activity-thinking-toggle')).toBeNull();
+    // While live, the one-line status bar shows the raw reasoning text.
+    expect(screen.getByTestId('live-status-line').textContent).toContain('step 1: parse request');
   });
 
-  it('expands to show raw reasoning when the toggle is clicked', () => {
-    render(<LiveActivityStream events={FULL_FEED()} reasoning="step 1: parse request" isStreaming />);
-    fireEvent.click(screen.getByTestId('live-activity-thinking-toggle'));
-    expect(screen.getByText('step 1: parse request')).toBeInTheDocument();
+  it('hides the reasoning status line once the stream ends', () => {
+    render(
+      <LiveActivityStream
+        events={FULL_FEED()}
+        streamingReasoning="step 1: parse request"
+      />,
+    );
+    expect(screen.queryByTestId('live-status-line')).toBeNull();
+    expect(screen.queryByTestId('live-activity-thinking-toggle')).toBeNull();
   });
 });
 

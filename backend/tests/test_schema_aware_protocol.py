@@ -27,7 +27,6 @@ from app.services.agent_prompts import (
 # Known system agents that ship with DB tools in their default toolset.
 DB_BOUND_SYSTEM_AGENTS = [
     "data_agent",
-    "ecisco_bi_assistant",
     "general_assistant",
     "automation_agent",
     "power_user",
@@ -96,9 +95,9 @@ class TestProtocolInjection:
     """get_system_prompt must append the protocol block to every db-bound
     agent when SCHEMA_GRAPH_ENABLED is on, and to nobody else."""
 
-    def test_ecisco_bi_assistant_gets_protocol_when_flag_on(self, monkeypatch):
+    def test_data_agent_gets_protocol_when_flag_on(self, monkeypatch):
         monkeypatch.setattr(settings, "SCHEMA_GRAPH_ENABLED", True)
-        prompt = get_system_prompt("ecisco_bi_assistant")
+        prompt = get_system_prompt("data_agent")
         assert "SCHEMA-AWARE QUERY PROTOCOL" in prompt
 
     def test_all_db_bound_system_agents_get_protocol(self, monkeypatch):
@@ -117,7 +116,7 @@ class TestProtocolInjection:
 
     def test_no_protocol_when_flag_off(self, monkeypatch):
         monkeypatch.setattr(settings, "SCHEMA_GRAPH_ENABLED", False)
-        prompt = get_system_prompt("ecisco_bi_assistant")
+        prompt = get_system_prompt("data_agent")
         assert "SCHEMA-AWARE QUERY PROTOCOL" not in prompt
 
     def test_no_protocol_for_non_db_agent(self, monkeypatch):

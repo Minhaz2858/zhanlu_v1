@@ -204,7 +204,7 @@ def archive_stale(
         AgentMemory.is_deleted == False,
     ).all()
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=stale_days)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=stale_days)
     archived = 0
 
     for m in memories:
@@ -219,6 +219,9 @@ def archive_stale(
                 created = datetime.fromisoformat(created)
             except ValueError:
                 continue
+        if created is not None and getattr(created, "tzinfo", None) is not None:
+            # Defensive: normalize aware inputs to naive UTC like Postgres.
+            created = created.astimezone(timezone.utc).replace(tzinfo=None)
         if not created or created >= cutoff:
             continue
 

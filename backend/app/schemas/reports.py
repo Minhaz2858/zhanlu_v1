@@ -1,6 +1,6 @@
 """Pydantic response schemas for the report endpoints.
 
-Field names mirror EDIA's frontend TypeScript interfaces:
+Field names mirror the platform's frontend TypeScript interfaces:
 - CustomerSalesReport.tsx:29-51 (SalesReport)
 - ContractPerformanceReport.tsx:18-60 (ContractReport)
 - AiAnalysisResult (SSE done event payload)

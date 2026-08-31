@@ -28,9 +28,9 @@ def test_heal_sets_agent_name_when_falsy():
     from app.services import automation_executor as ax
 
     conv = SimpleNamespace(agent_name=None)
-    healed = ax._heal_conv_agent_name(conv, SimpleNamespace(name="ecisco_bi_assistant"))
+    healed = ax._heal_conv_agent_name(conv, SimpleNamespace(name="automation_agent"))
     assert healed is True
-    assert conv.agent_name == "ecisco_bi_assistant"
+    assert conv.agent_name == "automation_agent"
 
 
 def test_heal_never_overwrites_existing_identity():
@@ -39,7 +39,7 @@ def test_heal_never_overwrites_existing_identity():
     from app.services import automation_executor as ax
 
     conv = SimpleNamespace(agent_name="automation_agent")
-    healed = ax._heal_conv_agent_name(conv, SimpleNamespace(name="ecisco_bi_assistant"))
+    healed = ax._heal_conv_agent_name(conv, SimpleNamespace(name="automation_agent"))
     assert healed is False
     assert conv.agent_name == "automation_agent"
 

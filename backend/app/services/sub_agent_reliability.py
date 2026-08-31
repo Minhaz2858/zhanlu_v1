@@ -150,17 +150,52 @@ async def call_llm_with_reliability(
 
 
 # ---------------------------------------------------------------------------
-# Pre-API-call prep (P1.3 pruning + P2 sanitization)
+# Pre-API-call prep (P1.3 pruning + P2 sanitization + orphan-tool-pair fix)
 # ---------------------------------------------------------------------------
 
 def pre_call_prep(messages: list[dict]) -> None:
-    """Prune old tool results and sanitize messages before an LLM API call.
+    """Prune old tool results, sanitize messages, AND drop orphan
+    ``assistant.tool_calls`` before an LLM API call.
 
-    Both operations mutate ``messages`` in place. Mirrors the sequence used
-    by the main agent loop (``agents.py`` lines ~2397-2398).
+    Sequence:
+      1. ``prune_tool_results_only(messages)`` — shrink oversized tool outputs.
+      2. ``sanitize_messages(messages)`` — surrogates / closed interrupted
+         tails / mid-list system demotion.
+      3. ``_sanitize_tool_call_pairing(messages)`` — defense-in-depth against
+         mid-conversation assistant-with-tool_calls messages that lost their
+         matching tool_result (truncate-by-mistake, message-rebuild race, or
+         partial persistence). Without this guard, deepseek/QWen/vLLM APIs
+         return HTTP 400 — "An assistant message with 'tool_calls' must be
+         followed by tool messages responding to each 'tool_call_id'."
+         The sub-agent path (``call_llm_with_reliability``) does NOT pass
+         through ``llm_service._sanitize_tool_call_pairing``, so we must
+         invoke it here. See ``llm_service.sanitize_tool_call_pairing`` for
+         full contract. Mutates ``messages`` in place.
+
+    Mirrors the sequence used by the main agent loop
+    (``agents.py`` lines ~2397-2398 + ``llm_service``).
     """
     prune_tool_results_only(messages)
     sanitize_messages(messages)
+    # Defense-in-depth: strip orphan assistant.tool_calls (idempotent if
+    # already clean). Uses the canonical sanitizer from llm_service so the
+    # sub-agent and main-loop rules stay in sync.
+    try:
+        from app.services.llm_service import _sanitize_tool_call_pairing
+        cleaned = _sanitize_tool_call_pairing(messages)
+        if len(cleaned) != len(messages) or any(
+            m1.get("tool_calls") != m2.get("tool_calls")
+            for m1, m2 in zip(cleaned, messages)
+        ):
+            logger.warning(
+                "pre_call_prep: orphan assistant.tool_calls sanitized (%d → %d)",
+                len(messages), len(cleaned),
+            )
+        messages[:] = cleaned
+    except Exception as exc:
+        # Sanitizer must never break the caller; fall through with a
+        # warning and hope the main sanitize pass caught it.
+        logger.warning("pre_call_prep: _sanitize_tool_call_pairing skipped: %s", exc)
 
 
 # ---------------------------------------------------------------------------
@@ -168,7 +203,9 @@ def pre_call_prep(messages: list[dict]) -> None:
 # ---------------------------------------------------------------------------
 
 def persist_result_str(
-    tool_name: str, result: dict, conversation_id: str | None
+    tool_name: str, result: dict, conversation_id: str | None,
+    *,
+    context_window_tokens: int | None = None,
 ) -> str:
     """Serialize a tool result dict, applying Layer 2 per-result persistence.
 
@@ -183,7 +220,11 @@ def persist_result_str(
             getattr(settings, "AGENT_WORKSPACE_DIR", "agent_workspace"),
             settings.TOOL_RESULT_STORAGE_DIR,
         )
-        ctx_window = get_context_window(get_model())
+        # Real per-model window (admin-set or auto-probed) drives budgets —
+        # never the name heuristic alone, so ANY model works.
+        ctx_window = get_context_window(
+            get_model(), context_window_tokens=context_window_tokens,
+        )
         config = budget_for_context_window(ctx_window)
         new_str, _meta = persist_tool_result(
             tool_name, result_str, storage_dir, config, conversation_id
@@ -199,6 +240,8 @@ def apply_turn_budget_to_batch(
     batch_tool_call_ids: list[str],
     batch_tool_names: list[str],
     conversation_id: str | None,
+    *,
+    context_window_tokens: int | None = None,
 ) -> None:
     """Layer 3: if total tool output in this batch exceeds budget, spill largest.
 
@@ -224,7 +267,11 @@ def apply_turn_budget_to_batch(
             return
 
         total = sum(len(c) for _, _, c in batch_contents)
-        config = budget_for_context_window(get_context_window(get_model()))
+        config = budget_for_context_window(
+            get_context_window(
+                get_model(), context_window_tokens=context_window_tokens,
+            )
+        )
         if total <= config.turn_budget_chars:
             return
 

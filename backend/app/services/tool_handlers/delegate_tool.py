@@ -35,6 +35,45 @@ logger = logging.getLogger(__name__)
 _RESTRICTED_TOOLS = {"delegate_task", "memory", "send_message"}
 
 
+def _normalize_subagent_schema(name: str, schema: dict, description: str = "") -> dict:
+    """Wrap a registry schema in the OpenAI function envelope.
+
+    Most registry entries are already wrapped (``{type: "function",
+    function: {...}}``). Two shapes are NOT and get rejected by
+    DeepSeek/OpenAI with ``400 tools[N].type: unknown variant 'object'``:
+
+    1. Bare parameters dicts — the ``universal_*`` DB-agnostic data tools
+       register ``{type: "object", properties, required}`` (no name).
+    2. Flat form — ``collect_enterprise_data`` is
+       ``{name, description, parameters}`` with no top-level ``type``.
+
+    This normalizes all three shapes to the envelope form.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    if schema.get("type") == "function" and "function" in schema:
+        return schema
+    if schema.get("name") or "parameters" in schema:
+        return {
+            "type": "function",
+            "function": {
+                "name": schema.get("name") or name,
+                "description": schema.get("description", ""),
+                "parameters": schema.get("parameters")
+                or {k: v for k, v in schema.items() if k not in ("name", "description")},
+            },
+        }
+    # Bare parameters dict (universal_* tools)
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": description or "",
+            "parameters": schema,
+        },
+    }
+
+
 async def _delegate_task(
     args: dict,
     db: Session,
@@ -52,7 +91,7 @@ async def _delegate_task(
     # Check for batch mode (list of tasks)
     tasks = args.get("tasks")
     if tasks and isinstance(tasks, list):
-        return await _delegate_batch(tasks, agent_name, db, user_id, max_iterations, endpoint)
+        return await _delegate_batch(tasks, agent_name, db, user_id, max_iterations, endpoint, context)
 
     # Single task
     result = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
@@ -66,13 +105,48 @@ async def _delegate_batch(
     user_id: str | None,
     max_iterations: int,
     endpoint: LLMEndpoint | None = None,
+    context: dict | None = None,
 ) -> dict:
-    """Run multiple sub-agent tasks concurrently."""
-    coros = [
-        _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
-        for task in tasks
-    ]
-    results = await asyncio.gather(*coros, return_exceptions=True)
+    """Run multiple sub-agent tasks concurrently.
+
+    When the v3 FSM passes ``context["progress_emitter"]`` (mutable list) +
+    ``context["step_counter"]`` ([int]), emits one activity_step pair per
+    sub-agent (running → done) so the chat UI shows parallel worker cards.
+    No-op otherwise (safe for tests / batch callers).
+    """
+    import time as _time
+
+    _progress = (context or {}).get("progress_emitter")
+    _step_ctr = (context or {}).get("step_counter")
+
+    def _emit(label: str, status: str, dur_ms: int | None = None, tool: str = "delegate_task") -> None:
+        if _progress is None or _step_ctr is None:
+            return
+        _step_ctr[0] += 1
+        from app.services.agent_loop.sse_builders import _emit_activity_step
+
+        _progress.append(
+            _emit_activity_step(_step_ctr[0], label, status, duration_ms=dur_ms, tool_name=tool)
+        )
+
+    starts = [_time.monotonic() for _ in tasks]
+    for i, task in enumerate(tasks):
+        _emit(f"Sub-agent {i + 1}: {task[:60]}", "running")
+
+    async def _run_one(i: int, task: str) -> dict:
+        try:
+            res = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
+        except Exception as exc:  # noqa: BLE001
+            res = {"success": False, "error": str(exc), "task": task}
+        dur = int((_time.monotonic() - starts[i]) * 1000)
+        _emit(
+            f"Sub-agent {i + 1}: {task[:60]}",
+            "done" if res.get("success") else "failed",
+            dur_ms=dur,
+        )
+        return res
+
+    results = await asyncio.gather(*[_run_one(i, t) for i, t in enumerate(tasks)], return_exceptions=True)
 
     batch_results = []
     for i, r in enumerate(results):
@@ -103,6 +177,52 @@ async def _run_sub_agent(
     max_iterations: int,
     endpoint: LLMEndpoint | None = None,
 ) -> dict:
+    """Run a sub-agent conversation with restricted tools (recorded)."""
+    from datetime import datetime, timezone
+
+    from app.services.agent_invocations import record_invocation
+
+    _started = datetime.now(timezone.utc)
+    try:
+        result = await _run_sub_agent_inner(
+            task, agent_name, db, user_id, max_iterations, endpoint,
+        )
+    except Exception as exc:  # noqa: BLE001
+        result = {"success": False, "error": str(exc), "task": task}
+    finally:
+        # Per-sub-agent invocation row (P1, 2026-08-29): duration + status so
+        # delegation is observable and costed like the main loop.
+        try:
+            _it = result.get("iterations")
+            record_invocation(
+                db,
+                conversation_id=None,
+                user_id=user_id,
+                invocation_type="sub_agent",
+                input_message=task[:2000],
+                status="completed" if result.get("success") else "failed",
+                output_json={"task": task[:200], "iterations": _it},
+                assistant_content=(result.get("response") or "")[:10000],
+                error_message=result.get("error"),
+                started_at=_started,
+                completed_at=datetime.now(timezone.utc),
+                duration_ms=max(0, int((datetime.now(timezone.utc) - _started).total_seconds() * 1000)),
+                model_name=endpoint.model_id if endpoint else None,
+                tool_call_count=_it if isinstance(_it, int) else None,
+            )
+        except Exception as _inv_err:  # noqa: BLE001 — non-fatal
+            logger.warning("delegate: invocation record failed (non-fatal): %s", _inv_err)
+    return result
+
+
+async def _run_sub_agent_inner(
+    task: str,
+    agent_name: str,
+    db: Session,
+    user_id: str | None,
+    max_iterations: int,
+    endpoint: LLMEndpoint | None = None,
+) -> dict:
     """Run a sub-agent conversation with restricted tools."""
     from app.services.agent_prompts import get_system_prompt, _get_all_crud_schemas
 
@@ -121,7 +241,7 @@ async def _run_sub_agent(
     for name in available_names:
         entry = registry.get_entry(name)
         if entry and entry.enabled_by_default:
-            tool_schemas.append(entry.schema)
+            tool_schemas.append(_normalize_subagent_schema(name, entry.schema, entry.description or ""))
 
     # Also include CRUD tool schemas if the sub-agent needs them
     # (but exclude delegate_task which is not in CRUD anyway)
@@ -246,7 +366,12 @@ async def _run_sub_agent(
                     },
                 }],
             })
-            _result_str = persist_result_str(call["tool_name"], result, None)
+            _result_str = persist_result_str(
+                call["tool_name"], result, None,
+                context_window_tokens=(
+                    endpoint.context_window if endpoint else None
+                ),
+            )
             messages.append({
                 "role": "tool",
                 "tool_call_id": call["tool_call_id"],
@@ -258,7 +383,12 @@ async def _run_sub_agent(
         # P0: Layer 3 — apply per-turn aggregate budget to this batch's results
         _batch_ids = [c["tool_call_id"] for c in parsed_calls]
         _batch_names = [c["tool_name"] for c in parsed_calls]
-        apply_turn_budget_to_batch(messages, _batch_ids, _batch_names, None)
+        apply_turn_budget_to_batch(
+            messages, _batch_ids, _batch_names, None,
+            context_window_tokens=(
+                endpoint.context_window if endpoint else None
+            ),
+        )
 
         # P0: if guardrail controller tripped a halt, inject nudge and break
         if guard_ctrl.halt_decision:

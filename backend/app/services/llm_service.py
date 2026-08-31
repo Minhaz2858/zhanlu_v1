@@ -7,7 +7,7 @@ use these helpers to call the configured OpenAI-compatible LLM (DeepSeek).
 import json
 import logging
 from dataclasses import dataclass
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import httpx
 from fastapi import HTTPException
@@ -333,11 +333,18 @@ async def call_llm(
     temperature: float = 0.7,
     response_json_schema: dict | None = None,
     task_type: str | None = None,
+    endpoint: Optional[Any] = None,
 ) -> dict:
     """Call the configured LLM and return a parsed response dict.
 
     Integrates model routing (per-task model selection), provider health
     (circuit-breaker), and optional Redis response caching (temperature=0).
+
+    ``endpoint`` (an ``LLMEndpoint`` from hierarchical LLM resolution) pins
+    the call to a specific provider+model: base_url / api_key / model_id are
+    used verbatim and task-based routing, provider failover, health routing
+    and response caching are bypassed.  When ``None`` (default), the legacy
+    behavior applies.
 
     Returns:
         dict with keys:
@@ -355,13 +362,24 @@ async def call_llm(
         body["response_json_schema"] = response_json_schema
 
     # ── Task-based model routing ──
-    from app.services.model_router import get_model_for_request
+    # When a hierarchical endpoint is pinned (project/agent → llm_models),
+    # it wins over task-based routing: the pinned model_id is used verbatim
+    # so the whole request answers with the selected model.
     resolved_messages = messages or [{"role": "user", "content": prompt}]
-    routed_model = get_model_for_request(
-        resolved_messages,
-        tools_specified=False,
-        explicit_task=task_type,
-    )
+    if endpoint is not None:
+        routed_model = endpoint.model_id
+        logger.info(
+            "call_llm: using pinned hierarchical endpoint model=%s base_url=%s",
+            endpoint.model_id, endpoint.base_url,
+        )
+    else:
+        from app.services.model_router import get_model_for_request
+
+        routed_model = get_model_for_request(
+            resolved_messages,
+            tools_specified=False,
+            explicit_task=task_type,
+        )
 
     payload, built_messages, has_schema = build_llm_payload(body, routed_model)
 
@@ -384,19 +402,23 @@ async def call_llm(
     built_messages = sanitized_messages
 
     # ── Cache check (temperature=0 only) ──
+    # Skipped for pinned endpoints: the cache key does not carry endpoint
+    # identity, so two endpoints sharing a model_id could collide.
     from app.services.llm_cache import get_cached_response, set_cached_response
-    cached = get_cached_response(
-        built_messages, routed_model, temperature,
-        schema=response_json_schema,
-    )
-    if cached is not None:
-        _get_tracer().record_llm_call(
-            model=routed_model,
-            prompt_tokens=cached.get("usage", {}).get("prompt_tokens", 0),
-            completion_tokens=cached.get("usage", {}).get("completion_tokens", 0),
-            latency_ms=0,
+
+    if endpoint is None:
+        cached = get_cached_response(
+            built_messages, routed_model, temperature,
+            schema=response_json_schema,
         )
-        return cached
+        if cached is not None:
+            _get_tracer().record_llm_call(
+                model=routed_model,
+                prompt_tokens=cached.get("usage", {}).get("prompt_tokens", 0),
+                completion_tokens=cached.get("usage", {}).get("completion_tokens", 0),
+                latency_ms=0,
+            )
+            return cached
 
     # ── P1-5: per-model tool-output cap (before pre-flight) ──
     # Apply the model's per-message tool-output cap to oversized tool
@@ -475,11 +497,23 @@ async def call_llm(
         payload["parallel_tool_calls"] = True
 
     # ── Health-based provider selection ──
-    providers = get_llm_providers()
-    if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
-        chosen = select_provider(providers)
-        # Reorder: chosen first, then the rest
-        providers = [chosen] + [p for p in providers if p.name != chosen.name]
+    if endpoint is not None:
+        # Pinned hierarchical endpoint: target it directly — no failover,
+        # no health routing (the caller explicitly selected this model).
+        providers = [
+            LLMProvider(
+                name="endpoint",
+                base_url=endpoint.base_url,
+                api_key=endpoint.api_key,
+                model=endpoint.model_id,
+            )
+        ]
+    else:
+        providers = get_llm_providers()
+        if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
+            chosen = select_provider(providers)
+            # Reorder: chosen first, then the rest
+            providers = [chosen] + [p for p in providers if p.name != chosen.name]
 
     last_error: Exception | None = None
     _llm_start = _time.monotonic()
@@ -563,10 +597,11 @@ async def call_llm(
         )
 
         # ── Cache result (temperature=0 only) ──
-        set_cached_response(
-            built_messages, provider.model, temperature,
-            result, schema=response_json_schema,
-        )
+        if endpoint is None:
+            set_cached_response(
+                built_messages, provider.model, temperature,
+                result, schema=response_json_schema,
+            )
 
         return result
 
@@ -643,6 +678,7 @@ def chat_completion_json_sync(
     prompt: str,
     schema: dict | None = None,
     temperature: float = 0.0,
+    endpoint: Optional[Any] = None,
 ) -> dict:
     """Synchronous JSON completion helper for small classifier-style calls.
 
@@ -650,6 +686,10 @@ def chat_completion_json_sync(
     thread on httpx (sync client), so only call from opt-in paths where a
     short (~200ms) classify latency is acceptable. On any error, returns
     ``{}`` — callers must treat empty dict as "no verdict".
+
+    ``endpoint`` (an ``LLMEndpoint`` from hierarchical LLM resolution) pins
+    the call to a specific provider+model.  When ``None`` (default), the
+    legacy provider-failover behavior applies.
     """
     body = {
         "prompt": prompt,
@@ -658,8 +698,19 @@ def chat_completion_json_sync(
     }
     if schema:
         body["response_json_schema"] = schema
-    payload, _, has_schema = build_llm_payload(body, get_model())
-    for provider in get_llm_providers():
+    payload, _, has_schema = build_llm_payload(body, endpoint.model_id if endpoint is not None else get_model())
+    if endpoint is not None:
+        providers = [
+            LLMProvider(
+                name="endpoint",
+                base_url=endpoint.base_url,
+                api_key=endpoint.api_key,
+                model=endpoint.model_id,
+            )
+        ]
+    else:
+        providers = get_llm_providers()
+    for provider in providers:
         request_payload = dict(payload)
         request_payload["model"] = provider.model
         try:
@@ -787,12 +838,17 @@ def test_llm_endpoint(
 async def stream_chat_completion(
     prompt: str,
     temperature: float = 0.7,
+    endpoint: Optional[Any] = None,
 ) -> AsyncGenerator[str, None]:
     """Stream content deltas from the chat completions endpoint.
 
     A lightweight streaming variant for plain-text responses (no tool-call
     parsing). Used by the FSM FINALIZE response streaming so FSM-routed
     turns stream token-by-token like ReAct turns.
+
+    ``endpoint`` (an ``LLMEndpoint`` from hierarchical LLM resolution) pins
+    the stream to a specific provider+model.  When ``None`` (default), the
+    legacy provider-failover behavior applies.
 
     Provider failover: the first provider to successfully OPEN the stream is
     used for the whole response — mid-stream failover is not possible once
@@ -806,13 +862,25 @@ async def stream_chat_completion(
     (lowest-latency healthy) provider is tried first.
     """
     body = {"prompt": prompt, "messages": None, "temperature": temperature}
-    payload, _, _ = build_llm_payload(body, get_model())
+    payload, _, _ = build_llm_payload(body, endpoint.model_id if endpoint is not None else get_model())
     payload["stream"] = True
 
-    providers = get_llm_providers()
-    if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
-        chosen = select_provider(providers)
-        providers = [chosen] + [p for p in providers if p.name != chosen.name]
+    if endpoint is not None:
+        # Pinned hierarchical endpoint: stream directly from it — no
+        # failover, no health routing (the caller explicitly selected it).
+        providers = [
+            LLMProvider(
+                name="endpoint",
+                base_url=endpoint.base_url,
+                api_key=endpoint.api_key,
+                model=endpoint.model_id,
+            )
+        ]
+    else:
+        providers = get_llm_providers()
+        if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
+            chosen = select_provider(providers)
+            providers = [chosen] + [p for p in providers if p.name != chosen.name]
 
     for provider in providers:
         if not is_healthy(provider.name):

@@ -94,6 +94,11 @@ class Settings(BaseSettings):
     PASSWORD_MIN_LENGTH: int = 10
     PASSWORD_REQUIRE_LETTER: bool = True
     PASSWORD_REQUIRE_DIGIT: bool = True
+    # When False, open self-registration (/auth/register) is disabled and
+    # accounts can ONLY be created by an admin via /api/admin/users. A fresh
+    # install with zero users can still bootstrap the first admin (see
+    # routers/auth.py). Enterprise / SaaS provisioning model.
+    ALLOW_PUBLIC_REGISTRATION: bool = False
 
     # Rate limits (in-memory, per IP). Zero = disabled.
     RATE_LIMIT_LOGIN_PER_MIN: int = 5
@@ -416,6 +421,18 @@ class Settings(BaseSettings):
     EVAL_MAX_SAMPLES_PER_RUN: int = 50
     PROMPT_AB_TEST_ENABLED: bool = False
 
+    # ── Golden-eval regression gate (2026-08-29) ──────────────────────
+    # Blocks (409) an admin model change when the candidate fails the golden
+    # test-case suite at parity with the champion. Default OFF — flipping it
+    # on activates the inline gate in the LLM admin endpoints (force=true
+    # bypasses). The /api/admin/evals/regression preflight endpoint works
+    # regardless of this flag.
+    EVAL_GATE_ENABLED: bool = False
+    EVAL_GATE_FLOOR: float = 0.8          # absolute minimum candidate pass rate
+    EVAL_GATE_PARITY_TOLERANCE: float = 0.05  # max allowed drop vs champion
+    EVAL_GATE_CASE_TIMEOUT_S: int = 60    # per-case fail-closed timeout
+    GOLDEN_EVAL_MAX_ITERATIONS: int = 6   # agent-loop iteration budget per case
+
     # Sandbox (P3)
     SANDBOX_BACKEND: str = ""  # auto-detect if empty
     SANDBOX_WORKSPACE: str = "agent_workspace"
@@ -585,6 +602,20 @@ class Settings(BaseSettings):
     # Populated by deployment, e.g. ["bold_signal", "electric_studio"].
     HTML_DESIGN_THEMES: list[str] = []
 
+    # ── Deck hero art & motion (2026-08-29) ─────────────────────────────
+    # Hero art: deterministic theme-aware SVG background on cover / section
+    # dividers / closing. DECK_HERO_ART_ENABLED is the reliable offline path
+    # (no API key). DECK_HERO_AI_IMAGES_ENABLED additionally tries the
+    # configured image provider (image_generation) and falls back to SVG on
+    # ANY failure — a deck is never blocked or slowed by image gen.
+    DECK_HERO_ART_ENABLED: bool = True
+    DECK_HERO_AI_IMAGES_ENABLED: bool = False
+    # Slide transitions: inject a fade <p:transition> into every slide of
+    # both PPTX paths. Pure XML addition, wrapped so it can never break a
+    # render. Image-fill slides are static PNGs so the transition is the
+    # only motion they can carry.
+    DECK_TRANSITIONS_ENABLED: bool = True
+
     # ── DELIVERABLE GUARANTEE (2026-08-18 incident hardening) ────────────
     # Fix 1a: a mid-turn report card (html_report artifact) must NOT satisfy
     # an explicit pptx/docx/xlsx/dashboard request. When enabled, the
@@ -613,6 +644,17 @@ class Settings(BaseSettings):
     # behavior (all detectors/guards run their legacy paths).
     GOAL_CONTRACT_ENABLED: bool = False
     GOAL_CONTRACT_MAX_FORCES: int = 3
+
+    # ── CLARIFY TURN SUSPENSION (2026-08-28) ─────────────────────────────
+    # When True, a successful `clarify` tool call ends the turn immediately —
+    # the user's next message IS the answer. Off = current behavior: the loop
+    # keeps iterating after clarify, which lets the model burn the remaining
+    # iteration budget on guard blocks / failing tools and end in a confusing
+    # "phase_enter.act failed" + "Verification failed" instead of a clean
+    # pause awaiting the user's answer (observed on the Sales Performance
+    # Dashboard turn, conv f62e4c2b: 2x clarify + 2 blocked create_artifact +
+    # 3 failed execute_code before the loop died).
+    CLARIFY_SUSPENDS_TURN_ENABLED: bool = False
 
     # ── LIVE REASONING STREAM (2026-08-27) ──────────────────────────────
     # When True, the streaming LLM payload requests the provider's
@@ -1151,6 +1193,22 @@ class Settings(BaseSettings):
     #   0 disables the cache.
     DATA_AGENT_FASTPATH_ENABLED: bool = False
     SCHEMA_CACHE_TTL_SECONDS: int = 3600
+
+    # ── Demo/test source guard ─────────────────────────────────────────────
+    # Comma-separated substrings (case-insensitive) matched against bound
+    # KnowledgeBase name + database_name. When a conversation has BOTH a
+    # demo-marked source AND a real (non-demo) database source, the demo
+    # source is excluded from the agent's bound set so it can never build a
+    # deliverable from demo data (user-visible fabrication). Demo-only
+    # workspaces are unaffected. Empty string disables the guard.
+    DEMO_SOURCE_MARKERS: str = "demo,test,sample,e2e,sandbox,staging"
+
+    # Layer-2 provenance guard on the artifact pipeline (backstop to
+    # DEMO_SOURCE_MARKERS): when an artifact's cited source is demo-marked
+    # while a real source was bound to the agent, "reject" raises before the
+    # artifact is persisted, "warn" persists but tags the payload with
+    # _provenance_warning, "off" disables the check entirely.
+    ARTIFACT_PROVENANCE_GUARD: str = "reject"
 
     # ── Hierarchical LLM Configuration ───────────────────────────────────
     # Master switch for admin-managed LLM catalog + project/agent model

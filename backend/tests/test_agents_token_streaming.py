@@ -406,6 +406,21 @@ class _RejectToolsThenSuccessClient:
         return _FakeStreamContext(self._success_lines, 200, b"")
 
 
+class _RejectToolChoiceThenSuccessClient:
+    """Fake client that rejects tool_choice-bearing payloads (DeepSeek
+    thinking-mode quirk), succeeding once tool_choice is dropped."""
+    def __init__(self, success_lines):
+        self._success_lines = list(success_lines)
+        self.payloads = []
+
+    def stream(self, method, url, **kwargs):
+        payload = kwargs.get("json") or {}
+        self.payloads.append(payload)
+        if payload.get("tool_choice"):
+            return _FakeStreamContext([], 400, b"tool_choice is not supported")
+        return _FakeStreamContext(self._success_lines, 200, b"")
+
+
 @pytest.mark.asyncio
 async def test_stream_emits_delta_then_done_for_text_only_response():
     """Plain text response: generator must yield ('delta', token) per
@@ -613,11 +628,42 @@ async def test_stream_does_not_surface_response_not_read_on_5xx():
 
 
 @pytest.mark.asyncio
-async def test_stream_retries_without_tools_when_provider_rejects_tools():
-    """Local OpenAI-compatible servers may expose chat completions but not
-    function calling. A 400/422 on a tool-bearing payload should fall back to a
-    plain streamed chat request instead of surfacing a broken connection.
-    """
+async def test_stream_retries_without_tool_choice_when_provider_rejects_it():
+    """DeepSeek thinking-mode quirk: a 400 on a tool_choice-bearing payload
+    must retry WITHOUT tool_choice. Tools STAY — the platform requires tool
+    calling for the agent to function; only the tool_choice field is the
+    rejected contract. Pins the deliberate retry contract (2026-08-27)."""
+    agents = _import_stream_generator()
+
+    canned = _make_sse_lines({"content": "local answer"})
+    client = _RejectToolChoiceThenSuccessClient(canned)
+    events = []
+    async for ev in agents._stream_llm_with_tools(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"type": "function", "function": {"name": "search"}}],
+        tool_choice={"type": "function", "function": {"name": "search"}},
+        client=client,
+    ):
+        events.append(ev)
+
+    # First payload carries tool_choice + tools; the retry drops tool_choice
+    # but KEEPS tools.
+    assert [p.get("tool_choice") for p in client.payloads] == [
+        {"type": "function", "function": {"name": "search"}},
+        None,
+    ]
+    assert all(p.get("tools") for p in client.payloads)
+    assert ("delta", "local answer") in events
+    assert ("done", "local answer") in events
+    assert not [e for e in events if e[0] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_stream_surfaces_error_when_provider_rejects_tools_without_tool_choice():
+    """A provider that rejects the tools field itself (text-only local
+    server) has no fallback — the platform requires tool calling — so the
+    error is surfaced as an ('error', ...) event instead of a hang or a
+    silent text-only answer. No retry happens when tool_choice is absent."""
     agents = _import_stream_generator()
 
     canned = _make_sse_lines({"content": "local answer"})
@@ -630,13 +676,12 @@ async def test_stream_retries_without_tools_when_provider_rejects_tools():
     ):
         events.append(ev)
 
+    # Exactly one attempt: no retry (tool_choice was None → immediate raise).
     assert [p.get("tools") for p in client.payloads] == [
         [{"type": "function", "function": {"name": "search"}}],
-        None,
     ]
-    assert ("delta", "local answer") in events
-    assert ("done", "local answer") in events
-    assert not [e for e in events if e[0] == "error"]
+    assert any(e[0] == "error" for e in events)
+    assert not any(e[0] == "done" for e in events)
 
 
 @pytest.mark.asyncio

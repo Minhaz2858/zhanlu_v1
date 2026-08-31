@@ -1,6 +1,6 @@
 """Canonical forecast read-model shared by the market dashboard and chat agents.
 
-Both the dashboard (``market_dashboard_service``) and the BI chat agent
+Both the dashboard and the BI chat agent
 (``forecast_get`` / ``forecast_run`` tools) read the SAME ``ForecastRun``
 table, so for a given target + horizon there is exactly ONE correct number:
 the first point of that horizon's ``base`` curve in the latest persisted run.

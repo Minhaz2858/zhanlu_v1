@@ -1,10 +1,11 @@
-"""Knowledge graph tool handler for the ecisco_bi_assistant.
+"""Knowledge graph tool handler for the Zhanlu agent runtime.
 
-Provides `ask_knowledge_graph` — query the C5/C9 product value-chain graph.
+Provides `ask_knowledge_graph` — query the product knowledge graph
+(the catalog is defined by the app's domain configuration).
 Registered via `register_knowledge_graph_tools(registry)` only when
-`ECISCO_BI_KNOWLEDGE_GRAPH_ENABLED` is True.
+`KNOWLEDGE_GRAPH_ENABLED` is True.
 
-Uses the static graph + resolver; no DB dependency.
+Uses the config-driven graph + resolver; no DB dependency.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ async def _handle_knowledge_graph(
     """Handle `ask_knowledge_graph` calls.
 
     Args:
-        question: Natural-language query (e.g. "what are upstream products of isoprene?")
+        question: Natural-language query (e.g. "what are the upstream products of a product?")
         product: Optional product name/ID to scope the query
         mode: "upstream", "downstream", "chain", "summary", or "resolve" (default: auto-detect)
 
@@ -186,7 +187,7 @@ def register_knowledge_graph_tools(registry) -> None:
     """Register knowledge graph tools in the tool registry.
 
     Safe to call multiple times (idempotent).  Only registers if
-    ECISCO_BI_KNOWLEDGE_GRAPH_ENABLED is True (checked at call site).
+    KNOWLEDGE_GRAPH_ENABLED is True (checked at call site).
     """
     try:
         registry.register(
@@ -197,25 +198,23 @@ def register_knowledge_graph_tools(registry) -> None:
                 "function": {
                     "name": "ask_knowledge_graph",
                     "description": (
-                        "Query the Ecisco BI C5/C9 product knowledge graph for "
-                        "product relationships. Use mode='upstream' to find what "
+                        "Query the product knowledge graph for product "
+                        "relationships; the catalog is defined by the app's "
+                        "domain configuration. Use mode='upstream' to find what "
                         "feeds into a product, 'downstream' for what it produces, "
                         "'chain' for the full value chain, 'summary' for an "
-                        "overview of all 12 products. Supports all C5/C9 products: "
-                        "crude_oil, naphtha, cracked_c5, mixed_c5, isoprene, "
-                        "piperylene, dcpd, sis, cracked_c9, styrene, c5_resin, "
-                        "raffinate_c5, blowing_agent."
+                        "overview of the configured catalog."
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
                             "question": {
                                 "type": "string",
-                                "description": "Natural language query about product relationships, e.g. 'what are the upstream products of isoprene?'",
+                                "description": "Natural language query about product relationships, e.g. 'what are the upstream products of a product?'",
                             },
                             "product": {
                                 "type": "string",
-                                "description": "Canonical product ID (e.g. isoprene, dcpd) or Chinese/English name (e.g. 异戊二烯).",
+                                "description": "Canonical product ID or Chinese/English name (list supported products via a summary query).",
                             },
                             "mode": {
                                 "type": "string",
@@ -227,7 +226,7 @@ def register_knowledge_graph_tools(registry) -> None:
                     },
                 },
             },
-            description="Query the C5/C9 product knowledge graph for upstream/downstream/chains.",
+            description="Query the product knowledge graph for upstream/downstream/chains.",
         )
         registry.register(
             name="resolve_products",
@@ -238,8 +237,9 @@ def register_knowledge_graph_tools(registry) -> None:
                     "name": "resolve_products",
                     "description": (
                         "Resolve free-text product names (Chinese, English, aliases) "
-                        "to canonical C5/C9 product IDs. Use this to extract which "
-                        "products a user is asking about."
+                        "to canonical product IDs (catalog from the app's domain "
+                        "configuration). Use this to extract which products a user "
+                        "is asking about."
                     ),
                     "parameters": {
                         "type": "object",

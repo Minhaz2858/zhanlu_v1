@@ -287,7 +287,7 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
 # ── table role classification (Entity Master Filter) ───────────────────────
 
 # Column-name signals for role classification.  Purely structural — these are
-# generic patterns that hold across any business schema (Ecisco, SaaS,
+# generic patterns that hold across any business schema (ERP, SaaS,
 # manufacturing, healthcare …).  Zero domain keywords, zero hardcoded table
 # names.
 _ROLE_NAME_RE = re.compile(r"(^|_)(name|fname|title|label)(_|$)", re.IGNORECASE)

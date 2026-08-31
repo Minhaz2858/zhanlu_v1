@@ -8,6 +8,7 @@ import { Button } from '@/components/ui/button';
 import { Star, Users, Loader2, ArrowRight, Tag, Lock, Copy, Check } from 'lucide-react';
 import { toast } from '@/components/ui/use-toast';
 import { generateAgentPrompts, recommendSkills } from '@/lib/generateAgentPrompts';
+import { CAD_TOOL_CONFIG } from '@/lib/launchMarketAgent';
 
 import { formatShortDateTime } from '@/lib/time';
 
@@ -52,6 +53,14 @@ export default function MarketAgentDetail() {
         skills,
         ...generateAgentPrompts(agent),
       });
+      // The CAD Agent must always carry its Fusion toolset — the generic
+      // clone flow does NOT copy tool_config, so a cloned CAD Agent would
+      // silently lose its Fusion tools; restore them here. Idempotent.
+      if (agent.name === 'CAD Agent') {
+        try {
+          await base44.entities.AgentApp.update(newAgent.id, { tool_config: { ...CAD_TOOL_CONFIG } });
+        } catch { /* best-effort — the seeded copy already has it */ }
+      }
       setCloned(true);
       toast({ title: t.agentConfig.cloned, description: agent.name });
       setTimeout(() => navigate(`/my-space/agent/${newAgent.id}`), 600);

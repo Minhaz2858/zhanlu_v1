@@ -6,7 +6,7 @@ import { base44 } from '@/api/base44Client';
  * field and the new `project_id` FK on AgentApp / KnowledgeBase / etc.
  *
  * Why this exists: previously the codebase wrote only `project` (a name
- * string like "ecisco" or "global") to associate an entity with a
+ * string like "enterprise" or "global") to associate an entity with a
  * Project. The Project Detail page now filters by `project_id` (the FK),
  * which left old rows invisible. This hook keeps both fields in sync:
  * whenever `project` changes (whether it's set to an id, a name, or the

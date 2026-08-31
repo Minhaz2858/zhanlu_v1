@@ -142,21 +142,21 @@ class TestBridgeIntegration:
     """Phase 1 intelligence layer integration helpers."""
 
     def test_intelligence_event_to_indexer(self, mock_kb):
-        # Mimic what an ExtractedEvent from Phase 1 would feed in
-        from app.services.intelligence.event_types import ExtractedEvent
-        ev = ExtractedEvent(
-            event_id="ev1",
-            event_type="supply_disruption",
-            headline="OPEC production cut announced",
-            affected_commodities=["naphtha"],
-            direction="down",
-            magnitude_estimate="medium",
-            certainty="high",
-            time_horizon="short_term",
-            geographic_scope="global",
-            relevance_to_c5_c9="high",
-            key_information="2M bpd for Q3",
-        )
+        # Mimic what an ExtractedEvent from the intelligence layer would feed
+        # in — smart_indexer is duck-typed and accepts plain dicts.
+        ev = {
+            "event_id": "ev1",
+            "event_type": "supply_disruption",
+            "headline": "OPEC production cut announced",
+            "affected_commodities": ["naphtha"],
+            "direction": "down",
+            "magnitude_estimate": "medium",
+            "certainty": "high",
+            "time_horizon": "short_term",
+            "geographic_scope": "global",
+            "relevance_to_c5_c9": "high",
+            "key_information": "2M bpd for Q3",
+        }
         idx = SmartIndexer()
-        ok = idx.index_event(ev.to_dict())
+        ok = idx.index_event(ev)
         assert ok is True

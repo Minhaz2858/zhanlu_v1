@@ -46,6 +46,7 @@ def generate_plan(
     *,
     failure_context: list[dict] | None = None,
     plan_version: int = 1,
+    endpoint=None,
 ) -> Plan:
     """Generate a PlanDAG from a TaskSpec using the LLM.
 
@@ -61,6 +62,9 @@ def generate_plan(
             re-plan and the FSM VERIFY re-plan).
         plan_version: Version number to stamp on the Plan row (1 for the
             initial plan, >1 for corrective re-plans).
+        endpoint: Optional hierarchical LLMEndpoint. When set, the planner
+            LLM call targets that exact provider+model instead of the
+            legacy .env defaults.
     """
     from app.services.llm_service import call_llm
     import json
@@ -199,21 +203,56 @@ Respond with ONLY a JSON array."""
     plan_steps = default_plan
     if _llm_planner_enabled:
         try:
+            # JSON schema forces the provider into json_object mode
+            # (build_llm_payload injects the schema hint + sets
+            # response_format).  DeepSeek and some local models ignore
+            # prose "respond with ONLY JSON" and emit prose instead,
+            # which silently degrades every plan to the generic default
+            # (whose "Process request" tool node then fails at runtime).
+            _plan_schema = {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "node_type": {
+                            "type": "string",
+                            "enum": ["skill", "tool", "nl2sql", "sandbox", "agent"],
+                        },
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "dependencies": {"type": "array", "items": {"type": "integer"}},
+                        "expected_output": {"type": "string"},
+                        "output_artifact_type": {"type": "string"},
+                        "inputs": {"type": "object"},
+                    },
+                    "required": ["node_type", "name", "dependencies", "inputs"],
+                },
+            }
             result = _run_llm_sync(call_llm(
                 prompt=system_prompt,
                 messages=[{"role": "user", "content": f"Plan this task: {task_spec}"}],
                 temperature=0,
+                response_json_schema=_plan_schema,
+                endpoint=endpoint,
             ))
 
-            response_text = result.get("response", "[]").strip()
-            if "```json" in response_text:
-                response_text = response_text.split("```json")[1].split("```")[0]
-            elif "```" in response_text:
-                response_text = response_text.split("```")[1].split("```")[0]
+            # With response_json_schema, call_llm returns the parsed
+            # value under ``data`` (list for an array schema) — NOT under
+            # ``response``.  Handle both the schema path (list) and the
+            # plain-text path (JSON string).
+            _parsed_plan = result.get("data")
+            if isinstance(_parsed_plan, list) and len(_parsed_plan) > 0:
+                plan_steps = _parsed_plan
+            else:
+                response_text = (result.get("response") or "[]").strip()
+                if "```json" in response_text:
+                    response_text = response_text.split("```json")[1].split("```")[0]
+                elif "```" in response_text:
+                    response_text = response_text.split("```")[1].split("```")[0]
 
-            parsed = json.loads(response_text)
-            if isinstance(parsed, list) and len(parsed) > 0:
-                plan_steps = parsed
+                parsed = json.loads(response_text)
+                if isinstance(parsed, list) and len(parsed) > 0:
+                    plan_steps = parsed
         except Exception as e:
             logger.warning("LLM plan generation failed, using default: %s", e)
             plan_steps = default_plan

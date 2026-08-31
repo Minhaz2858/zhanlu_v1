@@ -175,8 +175,8 @@ def _generate_root_cause_hypotheses(
         if large_error_days:
             hypotheses.append(
                 f"**Large error spike** detected on: {', '.join(large_error_days[:5])}. "
-                f"These may coincide with exogenous events (naphtha price shock, supply disruption, "
-                f"policy announcement). Cross-reference with Oilchem data and intelligence feed."
+                f"These may coincide with exogenous events (feedstock price shock, supply disruption, "
+                f"policy announcement). Cross-reference with upstream market data and intelligence feed."
             )
 
     # 4. Trend in errors: worsening over horizon
@@ -295,9 +295,9 @@ def generate_discrepancy_report(
     ][:horizon_days]
 
     # Fetch actuals
-    from app.services.forecasting.edia_source import EdiaMysqlDataSource
+    from app.services.forecasting.mysql_data_source import MysqlDataSource
     try:
-        edia = EdiaMysqlDataSource()
+        edia = MysqlDataSource()
         df = edia.read_history(target.datasource)
     except Exception as e:
         logger.exception("Failed to load actuals for %s: %s", product_key, e)
@@ -419,7 +419,7 @@ def _generate_recommendations(
             f"before drawing conclusions."
         )
 
-    recs.append("4. Review forecast feature freshness — stale technical indicators or missing Oilchem data.")
+    recs.append("4. Review forecast feature freshness — stale technical indicators or missing upstream market data.")
     recs.append("5. Consider enabling/disabling Wave 6 features (FORECAST_STACKING, FORECAST_REGIME_AWARE_POOL, FORECAST_VAR).")
 
     return recs

@@ -33,31 +33,36 @@ REFRESH_INTERVAL_S = {{ refresh_interval_seconds }}
 
 
 async def _refresh_once(mgr, last_hashes: dict[str, str]) -> None:
-    """Re-run every metric and broadcast on change. One full pass."""
-    db = SessionLocal()
-    try:
-        for m in METRICS:
-            try:
-                result = await run_metric(db, m["id"])
-                rows = result.get("rows", [])
-                h = compute_rows_hash(rows)
-                if last_hashes.get(m["id"]) != h:
-                    last_hashes[m["id"]] = h
-                    # Record that the underlying data changed so the
-                    # My Files "unread" badge can light up (Phase 2 T4).
-                    try:
-                        touch_last_data_change(SLUG)
-                    except Exception:
-                        logger.exception("dashboard %s touch_last_data_change failed", SLUG)
-                    await mgr.broadcast(SLUG, {
-                        "metric_id": m["id"],
-                        "title": m["title"],
-                        "data": result,
-                    })
-            except Exception:
-                logger.exception("dashboard %s poll failed for %s", SLUG, m.get("id"))
-    finally:
-        db.close()
+    """Re-run every metric and broadcast on change. One full pass.
+
+    Each metric gets its OWN short-lived session (closed in ``finally``) so a
+    slow or unreachable external datasource can never hold an app-pool
+    connection across the whole pass — a hung query leaks at most one pooled
+    connection for one metric and releases it as soon as the driver gives up.
+    """
+    for m in METRICS:
+        db = SessionLocal()
+        try:
+            result = await run_metric(db, m["id"])
+            rows = result.get("rows", [])
+            h = compute_rows_hash(rows)
+            if last_hashes.get(m["id"]) != h:
+                last_hashes[m["id"]] = h
+                # Record that the underlying data changed so the
+                # My Files "unread" badge can light up (Phase 2 T4).
+                try:
+                    await asyncio.to_thread(touch_last_data_change, SLUG)
+                except Exception:
+                    logger.exception("dashboard %s touch_last_data_change failed", SLUG)
+                await mgr.broadcast(SLUG, {
+                    "metric_id": m["id"],
+                    "title": m["title"],
+                    "data": result,
+                })
+        except Exception:
+            logger.exception("dashboard %s poll failed for %s", SLUG, m.get("id"))
+        finally:
+            db.close()
 
 
 async def _interval_poll_loop(mgr, last_hashes: dict[str, str]) -> None:

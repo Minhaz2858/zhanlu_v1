@@ -276,6 +276,54 @@ def render(payload: ReportCardPayload, ctx: Optional[ExportContext] = None) -> t
             flow.append(Paragraph(f"{emoji} &nbsp; {_html(ins.text)}", insight))
             flow.append(Spacer(1, 1 * mm))
 
+    # --- Methodology / Key Findings / Recommendations / Custom sections ---
+    # These were previously dropped by the PDF renderer (leaving the PDF far
+    # thinner than the DOCX). Render them the same way the DOCX renderer does.
+    # ``payload.sections`` may be pydantic ``SectionSpec`` (from
+    # ``_payload_to_reportcard``) or plain dicts (legacy callers) — tolerate
+    # both, plus the common key aliases the agent/LLM uses.
+    if payload.methodology:
+        flow.append(Paragraph("Methodology", h_h2))
+        flow.append(Paragraph(_html(payload.methodology), body))
+        flow.append(Spacer(1, 2 * mm))
+
+    if payload.key_findings:
+        flow.append(Paragraph("Key Findings", h_h2))
+        for fnd in payload.key_findings:
+            txt = fnd.text if hasattr(fnd, "text") else str(fnd)
+            flow.append(Paragraph("• &nbsp; " + _html(txt), insight))
+            flow.append(Spacer(1, 1 * mm))
+
+    if payload.recommendations:
+        flow.append(Paragraph("Recommendations", h_h2))
+        for rec in payload.recommendations:
+            txt = rec.text if hasattr(rec, "text") else str(rec)
+            flow.append(Paragraph("• &nbsp; " + _html(txt), insight))
+            flow.append(Spacer(1, 1 * mm))
+
+    for sec in (payload.sections or []):
+        if isinstance(sec, dict):
+            heading = sec.get("title") or sec.get("heading") or sec.get("name")
+            content = sec.get("content") or sec.get("body") or sec.get("text")
+            bullets = list(sec.get("bullets") or sec.get("paragraphs") or [])
+        else:
+            heading = getattr(sec, "title", None) or getattr(sec, "heading", None)
+            content = getattr(sec, "content", None) or getattr(sec, "body", None)
+            bullets = list(getattr(sec, "bullets", None) or [])
+        if heading:
+            flow.append(Paragraph(_html(str(heading)), h_h2))
+        if content:
+            if isinstance(content, list):
+                for line in content:
+                    flow.append(Paragraph(_html(str(line)), body))
+                    flow.append(Spacer(1, 1 * mm))
+            else:
+                flow.append(Paragraph(_html(str(content)), body))
+                flow.append(Spacer(1, 2 * mm))
+        for b in bullets:
+            flow.append(Paragraph("• &nbsp; " + _html(str(b)), insight))
+            flow.append(Spacer(1, 1 * mm))
+
     # NOTE: payload.next_step is intentionally NOT rendered — it is
     # conversational guidance for the in-chat card, not report content.
 

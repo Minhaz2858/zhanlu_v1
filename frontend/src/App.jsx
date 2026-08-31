@@ -46,12 +46,11 @@ const SkillExecutions = lazy(() => import('@/pages/SkillExecutions'));
 const AgentBuilder = lazy(() => import('@/pages/AgentBuilder'));
 const Settings = lazy(() => import('@/pages/Settings'));
 const AdminUsers = lazy(() => import('@/pages/AdminUsers'));
+const AdminObservability = lazy(() => import('@/pages/AdminObservability'));
 const ResourceDetail = lazy(() => import('@/pages/ResourceDetail'));
 const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
-const UITest = lazy(() => import('@/pages/UITest'));
 const DashboardView = lazy(() => import('@/pages/DashboardView'));
-const MarketDashboardLayout = lazy(() => import('@/pages/MarketDashboard/MarketDashboardLayout'));
-const ForecastAccuracyPage = lazy(() => import('@/pages/ForecastAccuracy/ForecastAccuracyPage'));
+const UITest = lazy(() => import('@/pages/UITest'));
 
 // Shared fallback for any suspended lazy route — matches the app's loading
 // spinner so navigation feels seamless instead of flashing blank content.
@@ -163,12 +162,11 @@ const AuthenticatedApp = () => {
         <Route path="/agent-builder" element={<AgentBuilder />} />
         <Route path="/settings" element={<Settings />} />
         <Route path="/admin/users" element={<AdminUsers />} />
+        <Route path="/admin/observability" element={<AdminObservability />} />
         <Route path="/dashboard/:id" element={<DashboardView />} />
         <Route path="/my-files" element={<MyFilesPage />} />
         <Route path="/from-personal" element={<FromPersonalPage />} />
         <Route path="/from-company" element={<FromCompanyPage />} />
-        <Route path="/market-dashboard/:section" element={<MarketDashboardLayout />} />
-        <Route path="/forecast-accuracy" element={<ForecastAccuracyPage />} />
       </Route>
     </Route>
   );

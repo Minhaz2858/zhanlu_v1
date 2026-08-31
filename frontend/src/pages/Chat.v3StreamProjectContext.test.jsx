@@ -4,7 +4,7 @@
  * context (URL has ``?project=`` / ``?projectName=`` OR pendingProject
  * is set). Without these, the backend's data-source runtime can't
  * extend the agent's bound KBs with the project's KBs — so an agent
- * running inside the Ecisco+BI project reports "no bound data sources"
+ * running inside a project reports "no bound data sources"
  * even though the project clearly has a MySQL KB attached.
  *
  * Why source-text tests?

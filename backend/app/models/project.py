@@ -19,7 +19,7 @@ class Project(TimestampedBase):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     color: Mapped[str | None] = mapped_column(String(50), nullable=True)
     status: Mapped[str | None] = mapped_column(String(50), nullable=True, default="active")
-    # ``is_system`` projects are platform-shipped (e.g. "Ecisco BI") and
+    # ``is_system`` projects are platform-shipped (e.g. a system default) and
     # visible to all users in the list endpoint — see entity_service.py
     # where ``(created_by_id == owner_id) OR created_by_id IS NULL``
     # includes system-owned rows.  Mirrors the AgentApp.is_system pattern.

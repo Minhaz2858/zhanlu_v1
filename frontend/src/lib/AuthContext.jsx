@@ -252,6 +252,9 @@ export const AuthProvider = ({ children }) => {
       appPublicSettings,
       authChecked,
       isAdmin: user?.role === 'admin',
+      // Whether open self-registration is enabled. Defaults to true when the
+      // field is absent so existing deployments keep working.
+      allowPublicRegistration: appPublicSettings?.public_settings?.allow_public_registration ?? true,
       logout,
       navigateToLogin,
       checkUserAuth,

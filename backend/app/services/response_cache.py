@@ -58,7 +58,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 def get_market_data_version() -> str:
     """Latest trading date (YYYY-MM-DD) from the market data source.
 
-    Queries ``MAX(FDATE)`` from ``md_t_lz_price`` via the shared EDIA
+    Queries ``MAX(FDATE)`` from ``md_t_lz_price`` via the shared external
     MySQL engine; falls back to today's UTC date on any failure.
     Best-effort — never raises.
     """

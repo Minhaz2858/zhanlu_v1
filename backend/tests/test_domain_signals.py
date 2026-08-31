@@ -1,4 +1,13 @@
-"""Tests for EDIA-ported domain signals: elasticities + seasonal rules."""
+"""Tests for the config-driven domain-signal overlay (elasticities + seasonal rules).
+
+Elasticities and seasonal rules are per-app domain-config data (the
+``domain_signals`` block in a ``domain_configs/<agent>.json`` file). With no
+config the overlay is a no-op — every adjustment is 0.0 and the platform stays
+generic. These tests exercise the config-driven mechanism using a temporary
+generic config injected through the ``domain_signals_config`` fixture
+(see tests/conftest.py), which also writes the JSON file and points
+ZHL_DOMAIN_CONFIG_DIR at it.
+"""
 from __future__ import annotations
 
 from datetime import datetime
@@ -15,140 +24,135 @@ from app.services.forecasting.domain_signals import (
 )
 
 
-# ── Elasticity constants ────────────────────────────────────────────────────
+# ── Empty config = fully generic platform (no data loaded) ─────────────────
 
-def test_elasticities_dict_has_known_products():
-    """The elasticity table should include the petrochem chain products."""
-    for pid in ("naphtha", "cracked_c5", "isoprene", "piperylene",
-                "dcpd", "c5_resin", "raffinate_c5", "sbs"):
-        assert pid in _ELASTICITIES, f"{pid} missing from _ELASTICITIES"
+def test_empty_config_tables_are_empty():
+    """No domain config → no elasticities / seasonal rules loaded."""
+    assert _ELASTICITIES == {}
+    assert _RAW_ELASTICITIES == {}
+    assert _SEASONAL_RULES == {}
 
 
-def test_elasticities_are_raw_times_dampening():
-    """Each effective coefficient = raw × tier_dampening, rounded to 4 dp."""
+def test_empty_config_compute_domain_signal_adjustment_all_zeros():
+    """Empty config → combined adjustment is 0.0 for ANY product."""
+    result = compute_domain_signal_adjustment(
+        product_id="widget",
+        as_of_date=datetime(2026, 12, 15),
+        naphtha_pct_change=10.0,
+    )
+    assert result["seasonal_pct"] == 0.0
+    assert result["causal_pct"] == 0.0
+    assert result["total_pct"] == 0.0
+    assert result["applied_rules"] == []
+
+
+def test_empty_config_seasonal_adjustment_zero_for_any_product():
+    """Empty config → seasonal adjustment is 0.0 for any (product, month)."""
+    assert compute_seasonal_adjustment("widget", 12) == 0.0
+    assert compute_seasonal_adjustment("gadget", 6) == 0.0
+
+
+def test_empty_config_causal_adjustment_zero_for_any_product():
+    """Empty config → causal-chain adjustment is 0.0 for any product."""
+    assert compute_causal_chain_adjustment("widget", 10.0) == 0.0
+    assert compute_causal_chain_adjustment("gadget", -5.0) == 0.0
+    assert compute_causal_chain_adjustment("widget", None) == 0.0
+
+
+def test_empty_config_no_elasticity_entries():
+    """Empty config → no product has an effective elasticity."""
+    for pid in ("widget", "gadget", "c5_resin", "naphtha"):
+        assert _ELASTICITIES.get(pid) is None
+
+
+# ── Config-driven data (injected via the domain_signals_config fixture) ────
+
+def test_config_elasticity_tables_loaded(domain_signals_config):
+    """Configured elasticities appear as raw × dampening, rounded to 4 dp."""
+    assert _RAW_ELASTICITIES["widget"] == (0.5, 1.0)
+    assert _ELASTICITIES["widget"] == 0.5
+    assert _ELASTICITIES["gadget"] == round(0.8 * 0.85, 4)  # 0.68
     for pid, (raw, damp) in _RAW_ELASTICITIES.items():
         expected = round(raw * damp, 4)
         assert _ELASTICITIES[pid] == expected, (
-            f"{pid}: {raw}×{damp}={expected} but _ELASTICITIES has {_ELASTICITIES[pid]}"
+            f"{pid}: {raw}×{damp}={expected} but _ELASTICITIES has "
+            f"{_ELASTICITIES[pid]}"
         )
 
 
-def test_naphtha_elasticity_is_unity():
-    """Naphtha is the root of the causal chain — elasticity 1.0."""
-    assert _ELASTICITIES["naphtha"] == 1.0
+def test_config_seasonal_rules_loaded(domain_signals_config):
+    """Configured "product|month" keys become (product, month) rule tuples."""
+    assert _SEASONAL_RULES[("widget", 12)] == -2.5
+    assert _SEASONAL_RULES[("widget", 6)] == 1.0
 
 
-def test_c5_resin_tier3_dampening():
-    """c5_resin is Tier 3: raw 0.62 × damp 0.72 = 0.4464."""
-    assert _RAW_ELASTICITIES["c5_resin"] == (0.62, 0.72)
-    assert _ELASTICITIES["c5_resin"] == 0.4464
+def test_config_compute_seasonal_adjustment_returns_configured_value(
+    domain_signals_config,
+):
+    """Known (product, month) → the configured pct value."""
+    assert compute_seasonal_adjustment("widget", 12) == -2.5
+    assert compute_seasonal_adjustment("widget", 6) == 1.0
 
 
-def test_isoprene_tier2_dampening():
-    """isoprene is Tier 2: raw 0.88 × damp 0.85 = 0.748."""
-    assert _ELASTICITIES["isoprene"] == 0.748
+def test_config_compute_seasonal_adjustment_unlisted_month(domain_signals_config):
+    """Product has rules, but no rule for this month → 0.0."""
+    assert compute_seasonal_adjustment("widget", 7) == 0.0
 
 
-# ── Seasonal rules ──────────────────────────────────────────────────────────
-
-def test_seasonal_rules_cover_c5_resin_full_year():
-    """c5_resin should have a rule for every month 1-12."""
-    c5_months = {m for (pid, m) in _SEASONAL_RULES if pid == "c5_resin"}
-    assert c5_months == set(range(1, 13)), (
-        f"c5_resin seasonal rules missing months: {set(range(1,13)) - c5_months}"
-    )
+def test_config_compute_causal_chain_adjustment(domain_signals_config):
+    """Feedstock +10% → widget moves +10 × 0.5 = +5.0%."""
+    pct = compute_causal_chain_adjustment("widget", 10.0)
+    assert pct == pytest.approx(5.0)
 
 
-def test_seasonal_c5_resin_winter_is_negative():
-    """c5_resin Nov-Feb should be -2.5% (winter demand dip)."""
-    for month in (11, 12, 1, 2):
-        assert _SEASONAL_RULES[("c5_resin", month)] == -2.5
+def test_config_compute_causal_chain_negative(domain_signals_config):
+    """Feedstock -5% → widget moves -5 × 0.5 = -2.5%."""
+    pct = compute_causal_chain_adjustment("widget", -5.0)
+    assert pct == pytest.approx(-2.5)
 
 
-def test_seasonal_c5_resin_spring_summer_is_positive():
-    """c5_resin Mar-Oct should be +1.0%."""
-    for month in range(3, 11):
-        assert _SEASONAL_RULES[("c5_resin", month)] == 1.0
+def test_config_compute_causal_chain_no_signal(domain_signals_config):
+    """No feedstock signal → 0.0 even when the product has an elasticity."""
+    assert compute_causal_chain_adjustment("widget", None) == 0.0
 
 
-def test_seasonal_adjustment_returns_zero_for_unknown_product():
-    """Unknown product → 0.0 (no adjustment)."""
-    assert compute_seasonal_adjustment("unknown_product", 7) == 0.0
-
-
-def test_seasonal_adjustment_returns_zero_for_unrule_month():
-    """Product with no rule for the given month → 0.0."""
-    # naphtha has no seasonal rules at all
-    assert compute_seasonal_adjustment("naphtha", 7) == 0.0
-
-
-def test_seasonal_adjustment_returns_pct_for_known_combo():
-    """Known (product, month) → the rule's pct value."""
-    assert compute_seasonal_adjustment("c5_resin", 12) == -2.5
-    assert compute_seasonal_adjustment("c5_resin", 6) == 1.0
-
-
-# ── Causal-chain adjustment ─────────────────────────────────────────────────
-
-def test_causal_chain_zero_when_no_naphtha_signal():
-    """No naphtha % change → causal adjustment is 0.0."""
-    assert compute_causal_chain_adjustment("c5_resin", None) == 0.0
-
-
-def test_causal_chain_zero_for_unknown_product():
-    """Unknown product → 0.0 even if naphtha moved."""
+def test_config_unknown_product_returns_zero(domain_signals_config):
+    """Unknown product → 0.0 even with a config loaded."""
+    assert compute_seasonal_adjustment("unknown", 12) == 0.0
     assert compute_causal_chain_adjustment("unknown", 10.0) == 0.0
 
 
-def test_causal_chain_propagates_naphtha_to_c5_resin():
-    """Naphtha +10% → c5_resin moves +10 × 0.4464 = +4.464%."""
-    pct = compute_causal_chain_adjustment("c5_resin", 10.0)
-    assert pct == pytest.approx(4.464, abs=1e-3)
+# ── Combined overlay ───────────────────────────────────────────────────────
 
-
-def test_causal_chain_propagates_negative_naphtha_move():
-    """Naphtha -5% → c5_resin moves -5 × 0.4464 = -2.232%."""
-    pct = compute_causal_chain_adjustment("c5_resin", -5.0)
-    assert pct == pytest.approx(-2.232, abs=1e-3)
-
-
-def test_causal_chain_naphtha_self_is_full_pass_through():
-    """Naphtha elasticity = 1.0, so naphtha +8% → naphtha +8%."""
-    pct = compute_causal_chain_adjustment("naphtha", 8.0)
-    assert pct == pytest.approx(8.0)
-
-
-# ── Combined domain signal adjustment ───────────────────────────────────────
-
-def test_combined_adjustment_seasonal_only_when_no_naphtha():
-    """Without a naphtha signal, only the seasonal rule applies."""
+def test_config_combined_seasonal_only_when_no_feedstock(domain_signals_config):
+    """Without a feedstock signal, only the seasonal rule applies."""
     result = compute_domain_signal_adjustment(
-        product_id="c5_resin",
+        product_id="widget",
         as_of_date=datetime(2026, 12, 15),  # December → -2.5%
         naphtha_pct_change=None,
     )
     assert result["seasonal_pct"] == -2.5
     assert result["causal_pct"] == 0.0
     assert result["total_pct"] == -2.5
-    assert "seasonal:c5_resin:12" in result["applied_rules"]
+    assert "seasonal:widget:12" in result["applied_rules"]
     assert not any(r.startswith("causal:") for r in result["applied_rules"])
 
 
-def test_combined_adjustment_applies_both_layers():
-    """Both seasonal + causal apply when naphtha signal is present."""
+def test_config_combined_applies_both_layers(domain_signals_config):
+    """Both seasonal + causal apply when a feedstock signal is present."""
     result = compute_domain_signal_adjustment(
-        product_id="c5_resin",
+        product_id="widget",
         as_of_date=datetime(2026, 6, 15),  # June → +1.0%
-        naphtha_pct_change=10.0,           # → +4.464%
+        naphtha_pct_change=10.0,           # → +5.0% causal
     )
     assert result["seasonal_pct"] == 1.0
-    assert result["causal_pct"] == pytest.approx(4.464, abs=1e-3)
-    assert result["total_pct"] == pytest.approx(5.464, abs=1e-3)
-    assert "seasonal:c5_resin:6" in result["applied_rules"]
-    assert "causal:c5_resin:naphtha=+10.0%" in result["applied_rules"]
+    assert result["causal_pct"] == pytest.approx(5.0)
+    assert result["total_pct"] == pytest.approx(6.0)
+    assert "seasonal:widget:6" in result["applied_rules"]
+    assert "causal:widget:feedstock=+10.0%" in result["applied_rules"]
 
 
-def test_combined_adjustment_no_rules_for_unknown_product():
+def test_config_combined_unknown_product_all_zeros(domain_signals_config):
     """Unknown product → all zeros, empty applied_rules."""
     result = compute_domain_signal_adjustment(
         product_id="unknown",
@@ -161,17 +165,34 @@ def test_combined_adjustment_no_rules_for_unknown_product():
     assert result["applied_rules"] == []
 
 
-# ── Naphtha fetcher ─────────────────────────────────────────────────────────
+# ── Config-file loading mechanism ──────────────────────────────────────────
 
-def test_fetch_naphtha_returns_none_when_no_target():
-    """No naphtha ForecastTarget → None (graceful degradation)."""
-    from app.services.forecasting.domain_signals import fetch_naphtha_recent_pct_change
+def test_config_file_loadable_via_env_dir(domain_signals_config):
+    """The temporary JSON is genuinely loadable through ZHL_DOMAIN_CONFIG_DIR."""
+    from app.services import domain_config as dc
+
+    raw = dc._load_file_for("forecast")  # file written by the fixture
+    assert raw["domain_signals"]["elasticities"]["widget"] == [0.5, 1.0]
+    assert raw["domain_signals"]["seasonal_rules"]["widget|12"] == -2.5
+
+
+# ── Feedstock signal fetcher ───────────────────────────────────────────────
+
+def test_fetch_feedstock_returns_none_when_no_target():
+    """No feedstock ForecastTarget → None (graceful degradation)."""
+    from app.services.forecasting.domain_signals import (
+        fetch_root_feedstock_pct_change,
+    )
 
     class _FakeQuery:
-        def filter(self, *a, **k): return self
-        def first(self): return None
+        def filter(self, *a, **k):
+            return self
+
+        def first(self):
+            return None
 
     class _FakeDb:
-        def query(self, model): return _FakeQuery()
+        def query(self, model):
+            return _FakeQuery()
 
-    assert fetch_naphtha_recent_pct_change(_FakeDb()) is None
+    assert fetch_root_feedstock_pct_change(_FakeDb()) is None

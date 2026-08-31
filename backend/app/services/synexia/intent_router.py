@@ -13,7 +13,25 @@ format X?" — used by:
   contains a downloadable artifact.
 * ``agent_prompts.py`` — to inject a routing rule into the system
   prompt for the General Assistant.
+* ``skill_routing/resolver.py`` — to auto-pick the built-in creation
+  skill for a requested format.
 * Frontend callers that want to mirror the backend's intent decision.
+
+CRITICAL (2026-08-31): the same format keyword can mean READ or CREATE.
+
+* ``"read this docx, summarize it"`` → the user points at an EXISTING
+  uploaded file — there is NO intent to create a docx. Before the READ
+  guard below, this returned ``"docx"`` and the skill resolver auto-picked
+  the docx creation skill, so the deliverable machinery fabricated a
+  docx artifact (with hallucinated "warehouse data") instead of reading
+  the upload.
+* ``"make me a DOCX sales report"`` → a CREATE request — must still
+  return ``"docx"``.
+
+``is_file_read_request`` implements the discrimination (read verbs /
+attachment references / target-format phrases), and ``detect_convert_target``
+returns the TARGET format of a conversion request (``"convert this docx to
+pdf"`` → ``"pdf"``, NOT ``"docx"``). Both run BEFORE any format matching.
 
 The check is intentionally cheap (no LLM call) so it sits in the hot
 path of every chat turn.  If we ever want fancier intent detection
@@ -55,6 +73,143 @@ _COMPILED: dict[FileFormat, re.Pattern[str]] = {
     fmt: re.compile(pat, re.IGNORECASE) for fmt, pat in _FORMAT_PATTERNS
 }
 
+# ---------------------------------------------------------------------------
+# READ / ANALYZE guard (2026-08-31)
+# ---------------------------------------------------------------------------
+# A format keyword in a READ request is the OBJECT of the read action
+# ("read this docx") — the user points at an EXISTING file, they are NOT
+# asking to create a file in that format.  Only CREATE/CONVERT requests
+# must route to the format's creation skill.  ``is_file_read_request`` is
+# the single discrimination point used by:
+#   * detect_file_intent          (format-intent tier of the skill resolver)
+#   * normalize_deliverable_intent (goal-contract normalizer)
+#   * detect_soft_intent           (soft-intent tier of the skill resolver)
+# so all three deterministic layers agree.
+
+# File-reading / analysis verbs.  Gerunds/3rd-person forms ("summarizing",
+# "summarizes") deliberately do NOT match — "make a docx summarizing Q3"
+# is a CREATE request.  The ZH list covers 读取/阅读/查看/总结/分析/解释 etc.
+_READ_VERB_RE = re.compile(
+    r"\b(?:read|summarize|summarise|analy[sz]e|explain|extract|translate|"
+    r"review|parse|interpret|describe|outline|recap|digest|preview|inspect|"
+    r"open|highlight|break\s+down|go\s+through|look\s+at|look\s+over|"
+    r"walk\s+me\s+through|tell\s+me\s+about|tell\s+me\s+what'?s\s+in|"
+    r"what'?s\s+in|what\s+is\s+in|contents?\s+of|details?\s+of)\b"
+    # "view"/"show" are ONLY read verbs in phrase form ("show me the pptx",
+    # "view this docx") — standalone they are nouns ("a dashboard view",
+    # "make a view of sales") and must not suppress CREATE routing.
+    r"|\bshow\s+me\b|\bshow\s+(?:the|this|that)\b|\bview\s+(?:the|this|that)\b"
+    r"|读取|阅读|查看|打开|总结|概括|分析|解释|提取|翻译|解读|读一下|看一看|内容"
+    r"|有什么|里面有什么|里有什么",
+    re.IGNORECASE,
+)
+
+# "summary/overview/... OF this / the attached / the uploaded <file>" — the
+# noun phrase points at an existing file, not a requested deliverable.
+# Bare "the" is deliberately EXCLUDED: "a summary of the data" is a CREATE
+# (make a file from data), while "a summary of this docx" is a READ.
+_READ_OF_REF_RE = re.compile(
+    r"\b(?:summary|overview|recap|digest|analysis|contents?|details?)\s+of\s+"
+    r"(?:this|that|the\s+attached|the\s+uploaded)\b"
+    r"|(?:总结|概括|分析|内容)\s*(?:一下|一下下)?\s*(?:这个|该|附件|上传的)",
+    re.IGNORECASE,
+)
+
+# Explicit reference to an existing/attached file ("this docx",
+# "the attached pptx", "this file", "I sent", 这个文件 / 附件 / 上传的...).
+_ATTACH_REF_RE = re.compile(
+    r"\b(?:this|that|the\s+attached|the\s+uploaded|the\s+file|the\s+document|"
+    r"attached\s+file|uploaded\s+file|attached|uploaded|sent)\b"
+    r"|这个|该文件|附件|上传的|此文件|我发的|我上传的|我附的",
+    re.IGNORECASE,
+)
+
+# Target-format phrase: "in a docx", "as a pdf", "into a pptx", "to xlsx" —
+# the format is the OUTPUT the user wants, so the turn is CREATE/CONVERT,
+# never a read of an existing file.  Checked FIRST so "summarize this docx
+# into a pdf" correctly falls through to conversion handling.
+_TARGET_PHRASE_RE = re.compile(
+    r"\b(?:in|as|into|to)\s+(?:a|an|the)?\s*(?:"
+    r"docx?|word\s*document|pptx?|powerpoint|xlsx?|excel|pdf|markdown|html?|"
+    r"report|summary|deck|presentation|dashboard|spreadsheet)\b"
+    r"|(?:格式|保存为|输出为|导出为|存成|写成|做成|整理成)\s*"
+    r"(?:docx?|pdf|pptx?|xlsx?|word|excel|powerpoint|markdown|html|报告|文档|总结|看板)",
+    re.IGNORECASE,
+)
+
+# Conversion verbs — "convert this docx to pdf" produces a PDF, not a docx.
+_CONVERT_VERB_RE = re.compile(
+    r"\b(?:convert|transform|change|turn)\b"
+    r"|转成|转换成|转为|转化为|改成|变为|导出为|保存为|转成|换成",
+    re.IGNORECASE,
+)
+
+# Target token → canonical format (for ``detect_convert_target``).
+_TARGET_TOKEN_MAP: dict[str, FileFormat] = {
+    "docx": "docx", "doc": "docx", "word": "docx", "worddocument": "docx",
+    "pptx": "pptx", "ppt": "pptx", "powerpoint": "pptx",
+    "xlsx": "xlsx", "xls": "xlsx", "excel": "xlsx",
+    "pdf": "pdf",
+    "md": "md", "markdown": "md",
+    "html": "html", "htm": "html", "webpage": "html",
+    "dashboard": "dashboard",
+}
+
+
+def is_file_read_request(text: Optional[str]) -> bool:
+    """True when the message asks to READ / ANALYZE an existing file.
+
+    Used as a guard by every deterministic intent layer: a format keyword
+    in a READ request is the object of the read action ("read this docx"),
+    not a request to create a file in that format.  Creation phrasing is
+    preserved: "make a docx summarizing Q3" has no READ verb ("summarizing"
+    does not match ``\\bsummarize\\b``) so it still routes to the docx skill.
+    """
+    if not text:
+        return False
+    # Target-format phrase ("in a docx", "as a pdf") means the format is the
+    # OUTPUT — never suppress a CREATE/CONVERT for those.
+    if _TARGET_PHRASE_RE.search(text):
+        return False
+    if _READ_OF_REF_RE.search(text):
+        return True
+    if _READ_VERB_RE.search(text):
+        if any(_COMPILED[f].search(text) for f in _COMPILED):
+            return True
+        if _ATTACH_REF_RE.search(text):
+            return True
+    return False
+
+
+def detect_convert_target(text: Optional[str]) -> Optional[FileFormat]:
+    """Return the TARGET format of a conversion request, or ``None``.
+
+    ``"convert this docx to pdf"`` → ``"pdf"`` (the pre-existing code
+    returned ``"docx"`` — the FIRST matched format — so the resolver
+    picked the docx skill for a convert-to-pdf request).  Returns ``None``
+    when the request is not a conversion, or the target token is not a
+    recognized deliverable format (let the LLM handle exotic targets).
+    """
+    if not text or not _CONVERT_VERB_RE.search(text):
+        return None
+    low = text.lower()
+    m = re.search(r"\b(?:to|into)\s+(?:a|an|the)?\s*([a-z][a-z0-9.]{1,20})\b", low)
+    target: Optional[str] = m.group(1) if m else None
+    if target is None:
+        m = re.search(
+            r"(?:转成|转换成|转为|转化为|改成|变为|导出为|保存为)\s*"
+            r"([\u4e00-\u9fff\w.]{1,12})",
+            low,
+        )
+        if m:
+            target = m.group(1)
+    if not target:
+        return None
+    norm = target.rstrip(".").strip().replace(" ", "")
+    if norm in _TARGET_TOKEN_MAP:
+        return _TARGET_TOKEN_MAP[norm]
+    return None
+
 
 def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
     """Return the file format the user asked for, or ``None``.
@@ -78,6 +233,22 @@ def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
     """
     if not text:
         return None
+    # ── READ / ANALYZE guard (2026-08-31) ───────────────────────────
+    # "read this docx" / "summarize the attached pptx" point at an EXISTING
+    # file: the format keyword is the object of the read, not a deliverable
+    # request.  Return None so the skill resolver does NOT auto-pick the
+    # format's creation skill (which fabricated an artifact instead of
+    # reading the upload).  CREATE phrasing ("make me a DOCX report") has
+    # no READ verb and falls through unchanged.
+    if is_file_read_request(text):
+        return None
+    # ── CONVERT: return the TARGET format ───────────────────────────
+    # "convert this docx to pdf" produces a PDF — the pre-existing code
+    # returned the FIRST matched format ("docx") and routed the wrong
+    # creation skill.
+    _conv = detect_convert_target(text)
+    if _conv is not None:
+        return _conv
     # Goal-Contract mode: the typo-tolerant normalizer is the single source
     # of truth for file-format intent (dashboard-first priority, EN+ZH,
     # Dashbord-class typos). Fall back to the legacy patterns only when it
@@ -89,8 +260,20 @@ def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
             from app.services.goal_contract import normalize_deliverable_intent
 
             fmt = normalize_deliverable_intent(text)
-            if fmt in {"docx", "pptx", "xlsx", "pdf", "md", "html", "dashboard"}:
+            if fmt in {"docx", "pptx", "xlsx", "pdf", "md", "html"}:
                 return fmt
+            if fmt == "dashboard":
+                # DASHBOARD_FUZZY_MATCH_ENABLED is authoritative for
+                # typo-tolerant dashboard detection ("Dashbord" etc.). When
+                # the flag is off, fall through to the legacy patterns —
+                # an EXACT "dashboard" is still matched by the compiled
+                # regex below, but typo/Chinese-normalizer matches are not
+                # (the flag exists precisely to gate those).
+                try:
+                    if getattr(settings, "DASHBOARD_FUZZY_MATCH_ENABLED", False):
+                        return fmt
+                except Exception:
+                    return fmt
     except Exception:
         pass
     # Iterate in priority order — first hit wins.

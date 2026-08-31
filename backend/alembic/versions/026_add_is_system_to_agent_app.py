@@ -56,7 +56,7 @@ def upgrade() -> None:
         )
         batch_op.create_index(
             "ix_agent_apps_is_system",
-            "is_system",
+            ["is_system"],
         )
 
     # Back-fill system-agent rows so the runtime / UI agree even

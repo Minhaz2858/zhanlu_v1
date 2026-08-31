@@ -68,7 +68,7 @@ def run_calibration_backtest(
     Args:
         y: Target time series.
         product_id: The dashboard product_id.
-        naphtha_pct_change: Recent naphtha % change (or None).
+        feedstock_pct_change: Recent feedstock % change (or None).
         as_of_date: Anchor date (determines seasonal month).
         horizons: List of forecast horizons to test. Default [7].
         min_train: Minimum training window size.

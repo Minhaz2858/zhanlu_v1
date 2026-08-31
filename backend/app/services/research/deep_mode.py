@@ -5,7 +5,7 @@ Splits a complex question into sub-questions, fans them out as queued agent
 runs in parallel, collects results, and synthesizes a final report.
 
 Gated by DEEP_RESEARCH_MODE_ENABLED (default False).
-Requires both AGENT_HARNESS_ENABLED and EDIA_DELEGATION_ASYNC_ENABLED.
+Requires both AGENT_HARNESS_ENABLED and DELEGATION_ASYNC_ENABLED.
 """
 
 from __future__ import annotations

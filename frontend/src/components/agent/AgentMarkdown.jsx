@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 function isTableRow(line) {
   return line.trim().startsWith('|');
@@ -225,7 +226,7 @@ export default function AgentMarkdown({ children, className, onOptionSelect, mul
       {segments.map((seg, i) => {
         if (seg.type === 'table') return <TableBlock key={i} content={seg.content} />;
         if (seg.type === 'options') return <OptionsBlock key={i} content={seg.content} onSelect={onOptionSelect} multiSelect={multiSelect} />;
-        return <ReactMarkdown key={i} components={mdComponents}>{seg.content}</ReactMarkdown>;
+        return <ReactMarkdown key={i} remarkPlugins={[remarkGfm]} components={mdComponents}>{seg.content}</ReactMarkdown>;
       })}
     </div>
   );

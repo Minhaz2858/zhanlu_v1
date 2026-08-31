@@ -37,11 +37,24 @@ class MySQLConnector:
         )
 
     def __enter__(self) -> "MySQLConnector":
-        self._engine = create_engine(
+        # Reuse a process-wide pooled engine (per connection signature) so
+        # repeated queries don't pay a fresh handshake each time.
+        from app.services.db.engine_cache import acquire_engine
+
+        # Hard driver-level timeouts so an unreachable/slow datasource can
+        # never hold a pooled connection (and thus an app-pool slot) forever:
+        # connect_timeout bounds DNS/TCP/handshake, read/write_timeout bound
+        # socket I/O. The per-statement MAX_EXECUTION_TIME hint handles query
+        # time, these handle everything else (and MariaDB, which ignores the
+        # hint).
+        self._engine = acquire_engine(
+            self.dialect,
             self._build_url(),
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            future=True,
+            connect_args={
+                "connect_timeout": 15,
+                "read_timeout": 60,
+                "write_timeout": 60,
+            },
         )
         return self
 
@@ -49,12 +62,9 @@ class MySQLConnector:
         self.close()
 
     def close(self) -> None:
-        if self._engine is not None:
-            try:
-                self._engine.dispose()
-            except Exception as e:
-                logger.debug("MySQL engine dispose failed: %s", e)
-            self._engine = None
+        # The engine is cached for reuse across queries — do NOT dispose it
+        # here. Only clear our local reference so the pool stays warm.
+        self._engine = None
 
     def list_tables(self) -> list[str]:
         assert self._engine is not None

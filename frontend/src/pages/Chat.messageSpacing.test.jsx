@@ -38,12 +38,20 @@ describe('Chat.jsx message list spacing', () => {
     // The exact pattern we expect:
     //   <div className="space-y-6">
     //   ...
-    //   {messages.filter((m) => !m.hidden).map((m) => { ... })}
+    //   {pendingDraft && ( ... )}
+    //   {(() => {
+    //     const visible = messages.filter((m) => ...);
+    //     return visible.map((m) => { ... });
+    //   })()}
     //   </div>
     // We allow any `space-y-N` class so the design can tighten or
     // loosen the gap without breaking this test.
+    // NOTE (2026-08-31): the visible-list build moved from an inline
+    // `messages.filter(...).map(...)` into an IIFE render block that
+    // hoists `visible` (so the last-assistant Regenerate check can
+    // reuse it). The spacing contract is unchanged.
     const messageMap = CHAT_JSX.match(
-      /<div\b[^>]*>\s*\{pendingDraft[\s\S]*?\{messages\.filter\(\(m\)\s*=>\s*!m\.hidden\)\.map\([\s\S]*?\}\)\}\s*<\/div>/,
+      /<div\b[^>]*>\s*\{pendingDraft[\s\S]*?\{\(\(\) => \{[\s\S]*?messages\.filter\(\(m\)\s*=>\s*[\s\S]{0,400}?\)\s*;[\s\S]*?visible\.map\([\s\S]*?}\)\(\)\}\s*<\/div>/,
     );
     expect(messageMap, 'Could not locate the messages.map wrapper div').not.toBeNull();
     const wrapper = messageMap[0];
@@ -56,7 +64,7 @@ describe('Chat.jsx message list spacing', () => {
     // moves the map directly under a div that has no `space-y-`
     // class, this test will catch it.
     const messageMap = CHAT_JSX.match(
-      /\{messages\.filter\(\(m\)\s*=>\s*!m\.hidden\)\.map\([\s\S]*?\}\)\}/,
+      /\{\(\(\) => \{[\s\S]*?messages\.filter\(\(m\)\s*=>\s*[\s\S]{0,400}?\)\s*;[\s\S]*?visible\.map\([\s\S]*?}\)\(\)\}/,
     );
     expect(messageMap, 'Could not locate messages.map').not.toBeNull();
     // Walk backwards from the map and find the nearest opening div

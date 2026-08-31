@@ -49,9 +49,9 @@ async def ingest_for_project(
     t0 = time.monotonic()
     status = CacheStatus(status="indexing")
 
-    if not getattr(settings, "ECISCO_BI_KG_PROJECT_CACHE_ENABLED", False):
+    if not getattr(settings, "PROJECT_KNOWLEDGE_CACHE_ENABLED", False):
         status.status = "pending"
-        status.error = "ECISCO_BI_KG_PROJECT_CACHE_ENABLED is False"
+        status.error = "PROJECT_KNOWLEDGE_CACHE_ENABLED is False"
         return status
 
     kb = _get_kb_or_none(db, kb_id)

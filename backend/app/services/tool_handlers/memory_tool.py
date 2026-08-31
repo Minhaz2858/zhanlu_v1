@@ -288,7 +288,7 @@ def load_memory_snapshot(
     is, not what they did in a specific project. ``target='memory'``
     rows are project-scoped: when ``project_id`` is set, the query
     matches ONLY the active project (strict — no NULL fallback) so
-    a note taken in "ECISCO BI" cannot leak into "Data Analysis".
+    a note taken in one project cannot leak into another.
     When ``project_id`` is None (the "Ungrouped" chat), **no**
     ``target='memory'`` rows are loaded at all. This prevents legacy
     pre-project-scoping memories (which all have project_id=NULL) from

@@ -35,24 +35,20 @@ class MSSQLConnector:
         return f"mssql+pymssql://{user_enc}:{pwd_enc}@{host}:{port}/{db}"
 
     def __enter__(self) -> "MSSQLConnector":
-        self._engine = create_engine(
-            self._build_url(),
-            pool_pre_ping=True,
-            pool_recycle=1800,
-            future=True,
-        )
+        # Reuse a process-wide pooled engine (per connection signature) so
+        # repeated queries don't pay a fresh handshake each time.
+        from app.services.db.engine_cache import acquire_engine
+
+        self._engine = acquire_engine(self.dialect, self._build_url())
         return self
 
     def __exit__(self, exc_type, exc, tb) -> None:
         self.close()
 
     def close(self) -> None:
-        if self._engine is not None:
-            try:
-                self._engine.dispose()
-            except Exception as e:
-                logger.debug("MSSQL engine dispose failed: %s", e)
-            self._engine = None
+        # The engine is cached for reuse across queries — do NOT dispose it
+        # here. Only clear our local reference so the pool stays warm.
+        self._engine = None
 
     def list_tables(self) -> list[str]:
         assert self._engine is not None

@@ -51,11 +51,28 @@ def render_html_deck(plan: DeckPlan, ctx: ExportContext) -> bytes:
     user_message = getattr(ctx, "user_message", "") or ""
     theme: ThemePreset = select_theme(plan, user_message)
 
-    # 1. Render each slide; skip unknown layouts
+    # 1. Optional AI hero image (best-effort, settings + provider gated).
+    #    Generates ONE cover image per deck; any failure falls back to the
+    #    deterministic SVG hero art inside the renderers. Never blocks.
+    ai_hero_url: str | None = None
+    from app.services.artifacts.deck_hero import ai_hero_for_deck
+
+    hero_attempted = False
+    if ai_hero_for_deck is not None:  # import guard for odd environments
+        hero_attempted = True
+        ai_hero_url = ai_hero_for_deck(plan.title or "", plan.summary or "")
+
+    # 2. Render each slide; skip unknown layouts
     slide_htmls: List[str] = []
+    notes: List[str] = []
     for slide in plan.slides:
+        if hero_attempted and ai_hero_url and slide.layout in (
+            "cover", "section_divider", "closing",
+        ) and not slide.hero_image:
+            slide.hero_image = ai_hero_url
         try:
             slide_htmls.append(render_slide(slide.layout, slide, theme))
+            notes.append(slide.notes or "")
         except NotImplementedError as exc:
             logger.warning(
                 "render_html_deck: layout %r not implemented, skipping: %s",
@@ -68,11 +85,16 @@ def render_html_deck(plan: DeckPlan, ctx: ExportContext) -> bytes:
 
     # 2. Build printable index.html (source footer baked in for image-fill)
     source_label = getattr(ctx, "source", "") or getattr(ctx, "source_label", "") or ""
-    stage_html = build_stage(slide_htmls, source_label=source_label)
+    stage_html = build_stage(
+        slide_htmls,
+        source_label=source_label,
+        deck_title=plan.title or "",
+    )
 
-    # 3. Convert to PPTX (image fill)
+    # 3. Convert to PPTX (image fill). Speaker notes ride along so the
+    #    deck carries a presenter script per slide (Kimi/Claude-grade).
     try:
-        return render_image_fill(stage_html)
+        return render_image_fill(stage_html, notes=notes)
     except (PptxRenderError, Exception) as exc:
         if isinstance(exc, PptxRenderError):
             raise RenderError(f"image_fill pipeline failed: {exc}") from exc

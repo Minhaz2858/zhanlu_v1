@@ -41,10 +41,8 @@ def build_features(
     demand_signal=None,  # DemandSignal | None
     supplier_dispersion_df: pd.DataFrame | None = None,
     # Wave 5: new feature engineering
-    oilchem_df: pd.DataFrame | None = None,
     tech_indicators_enabled: bool = False,
     fourier_enabled: bool = False,
-    oilchem_exog_enabled: bool = False,
     # P1-2A: cross-product lag features
     upstream_series_map: dict[str, pd.Series] | None = None,
     cross_product_lags_enabled: bool = False,
@@ -155,22 +153,9 @@ def build_features(
             logger.debug("Fourier feature computation failed for %s", target_product_key)
             fourier_df = None
 
-    # ---- Wave 5: Pre-process oilchem for lag extraction ----
-    _oilchem_index: pd.DatetimeIndex | None = None
-    _oilchem_series_map: dict[str, pd.Series] = {}
-    _oilchem_last_known: dict[str, float] = {}
-    if oilchem_exog_enabled and oilchem_df is not None and not oilchem_df.empty:
-        if not isinstance(oilchem_df.index, pd.DatetimeIndex):
-            if "date" in oilchem_df.columns:
-                oilchem_df = oilchem_df.set_index("date")
-        oilchem_df = oilchem_df.sort_index()
-        _oilchem_index = oilchem_df.index
-        for col in oilchem_df.columns:
-            oc_series = oilchem_df[col].dropna()
-            if len(oc_series) > 0:
-                _oilchem_series_map[col] = oc_series
-                _oilchem_last_known[col] = float(oc_series.iloc[-1])
-        logger.debug("Oilchem prepped: %d cols", len(_oilchem_series_map))
+    # ---- Wave 5: external upstream-price features ----
+    # (The industry-specific upstream-price loader was removed —
+    # feature engineering is now fully generic.)
 
     if not spec.feedstock_keys:
         # No feedstock features, but Wave 3 external exog may still contribute
@@ -184,10 +169,8 @@ def build_features(
             _use_supplier, _supplier_spread, _supplier_count,
             rsi_series=rsi_series, macd_series=macd_series, bb_bw_series=bb_bw_series,
             fourier_df=fourier_df,
-            oilchem_series_map=_oilchem_series_map, oilchem_last_known=_oilchem_last_known,
             tech_indicators_enabled=tech_indicators_enabled,
             fourier_enabled=fourier_enabled,
-            oilchem_exog_enabled=oilchem_exog_enabled,
         )
 
     y_dates = y.index
@@ -330,17 +313,6 @@ def build_features(
         if fourier_enabled and fourier_df is not None and date in fourier_df.index:
             for col in fourier_df.columns:
                 row[col] = float(fourier_df[col].loc[date])
-        # Wave 5: Oilchem exogenous lags (7-day lags, carry-forward on gaps)
-        if oilchem_exog_enabled and _oilchem_series_map:
-            for oc_col, oc_series in _oilchem_series_map.items():
-                for lag in range(1, 8):
-                    lag_date = date - timedelta(days=lag)
-                    col = f"oilchem_{oc_col}_lag{lag}"
-                    if lag_date in oc_series.index:
-                        row[col] = float(oc_series.loc[lag_date])
-                    else:
-                        prior = oc_series[oc_series.index <= lag_date]
-                        row[col] = float(prior.iloc[-1]) if len(prior) > 0 else _oilchem_last_known.get(oc_col, 0.0)
         train_rows.append(row)
         train_dates.append(date)
 
@@ -467,22 +439,6 @@ def build_features(
                 for h_idx in range(1, 4):  # harmonics 1–3
                     row[f"fourier_sin_{h_idx}"] = float(np.sin(2 * np.pi * h_idx * _future_position / _period))
                     row[f"fourier_cos_{h_idx}"] = float(np.cos(2 * np.pi * h_idx * _future_position / _period))
-            # Wave 5: Oilchem exogenous lags (carry last known value forward)
-            if oilchem_exog_enabled and _oilchem_series_map:
-                _last_date = y_dates[-1]
-                for oc_col in _oilchem_series_map:
-                    for lag in range(1, 8):
-                        lag_date = date - timedelta(days=lag)
-                        col = f"oilchem_{oc_col}_lag{lag}"
-                        if lag_date <= _last_date:
-                            oc_series = _oilchem_series_map[oc_col]
-                            if lag_date in oc_series.index:
-                                row[col] = float(oc_series.loc[lag_date])
-                            else:
-                                prior = oc_series[oc_series.index <= lag_date]
-                                row[col] = float(prior.iloc[-1]) if len(prior) > 0 else _oilchem_last_known.get(oc_col, 0.0)
-                        else:
-                            row[col] = _oilchem_last_known.get(oc_col, 0.0)
             future_rows.append(row)
         X_future = pd.DataFrame(future_rows, index=future_dates)
 
@@ -512,11 +468,8 @@ def _build_external_only_matrix(
     macd_series: pd.Series | None = None,
     bb_bw_series: pd.Series | None = None,
     fourier_df: pd.DataFrame | None = None,
-    oilchem_series_map: dict | None = None,
-    oilchem_last_known: dict | None = None,
     tech_indicators_enabled: bool = False,
     fourier_enabled: bool = False,
-    oilchem_exog_enabled: bool = False,
 ) -> FeatureMatrix:
     """Build a minimal feature matrix from Wave 3 external exog only.
 
@@ -583,18 +536,6 @@ def _build_external_only_matrix(
         if fourier_enabled and fourier_df is not None and date in fourier_df.index:
             for col in fourier_df.columns:
                 row[col] = float(fourier_df[col].loc[date])
-        # Wave 5: Oilchem lags
-        if oilchem_exog_enabled and oilchem_series_map:
-            for oc_col, oc_series in oilchem_series_map.items():
-                for lag in range(1, 8):
-                    lag_date = date - timedelta(days=lag)
-                    col = f"oilchem_{oc_col}_lag{lag}"
-                    if lag_date in oc_series.index:
-                        row[col] = float(oc_series.loc[lag_date])
-                    else:
-                        prior = oc_series[oc_series.index <= lag_date]
-                        lk = (oilchem_last_known or {}).get(oc_col, 0.0)
-                        row[col] = float(prior.iloc[-1]) if len(prior) > 0 else lk
         train_rows.append(row)
         train_dates.append(date)
 

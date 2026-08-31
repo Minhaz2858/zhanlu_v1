@@ -195,7 +195,7 @@ def score_pending_decisions(db) -> dict:
         score_decision,
         aggregate_roi,
     )
-    from app.services.forecasting.edia_source import _resolve_mysql_engine
+    from app.services.forecasting.mysql_data_source import _resolve_mysql_engine
 
     pending = get_pending_unrealized(db)
     if not pending:
@@ -205,7 +205,7 @@ def score_pending_decisions(db) -> dict:
     engine = _resolve_mysql_engine()
     if engine is None:
         return {"scored_count": 0, "total_roi_avg": None, "buy_count": 0,
-                "sell_count": 0, "errors": ["No EDIA MySQL engine"]}
+                "sell_count": 0, "errors": ["No external MySQL engine"]}
 
     scored = 0
     errors = []
@@ -218,7 +218,7 @@ def score_pending_decisions(db) -> dict:
             from app.services.forecasting.features.exogenous_loaders import _ERP_TABLE_MAP
 
             target_date = log.as_of_date + datetime.timedelta(days=log.horizon_day)
-            # Extract product_id from full product_key (e.g. "ecisco.dcpd" → "dcpd")
+            # Extract product_id from the full product_key (e.g. "<product>")
             product_id = log.product_id.split(".")[-1] if "." in log.product_id else log.product_id
             table = _ERP_TABLE_MAP.get(product_id, f"sale_erp_v_{product_id}_data")
 
@@ -301,7 +301,7 @@ def backfill_realized_prices(db) -> dict:
 
     engine = _resolve_mysql_engine()
     if engine is None:
-        logger.warning("[backfill] No EDIA MySQL engine — skipping")
+        logger.warning("[backfill] No external MySQL engine — skipping")
         return {"backfilled_t": 0, "backfilled_th": 0, "skipped": 0, "errors": ["No MySQL engine"]}
 
     now = datetime.now(timezone.utc)
@@ -317,7 +317,7 @@ def backfill_realized_prices(db) -> dict:
 
     for log in null_t_logs:
         try:
-            # Use md_t_lz_price (main EDIA price table) for all products
+            # Use md_t_lz_price (main price table) for all products
             # The product_id in decision logs maps to FMATERIAL_NAME
             target_date = log.as_of_date
             product_name = log.product_id

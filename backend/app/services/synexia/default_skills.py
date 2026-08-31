@@ -139,6 +139,16 @@ def detect_soft_intent(text: str) -> Optional[str]:
     """
     if not text:
         return None
+    # ── READ / ANALYZE guard (2026-08-31) ─────────────────────────────
+    # "summarize this report" (pointing at an attached file) is a READ —
+    # the soft "report" token must NOT route it to the docx creation skill.
+    # CREATE phrasing ("make a report") has no READ verb and still routes.
+    try:
+        from app.services.synexia.intent_router import is_file_read_request
+        if is_file_read_request(text):
+            return None
+    except Exception:
+        pass
     for fmt_key, pattern in _SOFT_INTENT_PATTERNS:
         if pattern.search(text):
             return fmt_key

@@ -21,7 +21,6 @@ _BACKEND_ROOT = Path(__file__).resolve().parents[1]
 if str(_BACKEND_ROOT) not in sys.path:
     sys.path.insert(0, str(_BACKEND_ROOT))
 
-
 def test_data_agent_prompt_has_freshness_check():
     """DATA_AGENT_PROMPT must enforce a MAX(date_column) freshness check."""
     from app.services.agent_definitions import DATA_AGENT_PROMPT
@@ -30,7 +29,6 @@ def test_data_agent_prompt_has_freshness_check():
     assert "freshness" in DATA_AGENT_PROMPT.lower()
     assert "last 30 days" in DATA_AGENT_PROMPT.lower() or "30 days" in DATA_AGENT_PROMPT.lower()
     assert "latest" in DATA_AGENT_PROMPT.lower()
-
 
 def test_data_agent_prompt_requires_stale_disclosure():
     """The prompt must force the agent to disclose staleness instead of lying."""
@@ -43,24 +41,6 @@ def test_data_agent_prompt_requires_stale_disclosure():
     assert "stale" in low
     assert "do not claim" in low or "never claim" in low or "do NOT claim" in DATA_AGENT_PROMPT
 
-
-def test_ecisco_schema_hint_block_prefers_live_tables():
-    """The Ecisco BI schema hint must prefer live outstock tables."""
-    from app.services.agent_prompts import _ECISCO_BI_SCHEMA_HINT_BLOCK
-
-    low = _ECISCO_BI_SCHEMA_HINT_BLOCK.lower()
-    assert "erp_t_sal_outstock" in low or "erp_v_sale_orderentry" in low
-    assert "erp_product_sales_details" in low
-    assert "stale" in low
-
-
-def test_ecisco_prompt_mentions_batch_tool():
-    """The Ecisco BI assistant pipeline must point at the batch tool."""
-    from app.services.agent_definitions import ECISCO_BI_ASSISTANT_PROMPT
-
-    assert "ask_perception_intelligence_diagnosis" in ECISCO_BI_ASSISTANT_PROMPT
-
-
 def test_weekly_report_skill_uses_batch_tool():
     """SKILL.md must use the batch tool instead of three serial calls."""
     from app.services.skills_loader import load_skill_package
@@ -70,17 +50,6 @@ def test_weekly_report_skill_uses_batch_tool():
     )
     assert skill is not None
     assert "ask_perception_intelligence_diagnosis" in skill.body
-
-
-def test_ecisco_schema_hint_block_mentions_inventory_tables():
-    """The Ecisco BI schema hint must name the inventory tables explicitly."""
-    from app.services.agent_prompts import _ECISCO_BI_SCHEMA_HINT_BLOCK
-
-    low = _ECISCO_BI_SCHEMA_HINT_BLOCK.lower()
-    assert "erp_v_stk_inventory" in low or "erp_t_stk_inventory" in low
-    assert "erp_v_sale_orderentry" in low or "erp_t_sal_outstock" in low
-    assert "inventory" in low
-
 
 def test_weekly_report_skill_covers_all_products_and_inventory():
     """SKILL.md must list ALL C5/C9 products and name the inventory table."""

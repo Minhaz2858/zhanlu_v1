@@ -1,7 +1,14 @@
 """Evidence pack builder — pure assembly."""
+import pytest
+
 from app.services.forecasting.analyst.evidence_pack import (
     UPSTREAM_MAP, build_pack, compute_price_percentile,
 )
+
+# The analyst pack's upstream map / elasticities / seasonal rules are
+# config-driven. Run every test in this file against a temporary generic
+# config ("widget" ← "gadget", etc.) injected by the shared fixture.
+pytestmark = pytest.mark.usefixtures("domain_signals_config")
 
 
 def _history(start=6000.0, n=100, step=1.0):
@@ -28,9 +35,9 @@ def _explanation():
 
 def _pack(**over):
     kw = dict(
-        product_id="dcpd", name_zh="双环戊二烯", day=7,
+        product_id="widget", name_zh="Widget", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
-        upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
+        upstream_histories={"gadget": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
         model_detail={"models_run": ["a"] * 8, "ensemble_mape": 0.09, "naive_mape": 0.11},
         explanation=_explanation(),
@@ -55,9 +62,10 @@ def test_pack_core_numbers():
 def test_pack_causal_transmission():
     p = _pack()
     up = p["upstream"][0]
-    assert up["product_id"] == "cracked_c5"
+    assert up["product_id"] == "gadget"
     assert up["chg_30d_pct"] is not None and up["chg_30d_pct"] < 0
-    assert p["causal"]["elasticity"] == 0.663
+    # widget: configured raw 0.5 × damp 1.0 → elasticity 0.5
+    assert p["causal"]["elasticity"] == 0.5
     assert p["causal"]["implied_pct"] < 0  # falling upstream → negative implied
 
 
@@ -71,10 +79,10 @@ def test_pack_divergence_flag():
 
 
 def test_pack_seasonal_label():
-    p = _pack()  # dcpd month 8 → +1.5 in rules
+    p = _pack()  # widget month 8 → +1.5 in rules
     assert p["seasonal"]["adj_pct"] == 1.5
     assert p["seasonal"]["label_zh"] == "传统需求旺季"
-    p_winter = _pack(as_of_month=12)
+    p_winter = _pack(as_of_month=12)  # widget|12 → -2.5
     assert p_winter["seasonal"]["label_zh"] == "传统需求淡季"
 
 
@@ -98,10 +106,10 @@ def test_price_percentile():
     assert compute_price_percentile(rows[:5]) is None  # <10 points
 
 
-def test_upstream_map_covers_board_products():
-    for pid in ("isoprene", "piperylene", "dcpd", "raffinate_c5", "sis",
-                "c5_resin", "styrene", "blowing_agent", "cracked_c5", "cracked_c9"):
-        assert pid in UPSTREAM_MAP
+def test_upstream_map_covers_configured_products():
+    """The upstream map is config-driven; configured products are present."""
+    assert "widget" in UPSTREAM_MAP
+    assert UPSTREAM_MAP["widget"] == ["gadget"]
 
 
 def test_pack_implied_change_pct():
@@ -113,17 +121,16 @@ def test_pack_implied_change_pct():
 
 
 def test_pack_product_group_classification():
-    # dcpd is midstream, naphtha is upstream, sis is downstream
-    assert _pack().get("product_group") == "midstream"
-    assert _pack(product_id="naphtha", name_zh="石脑油",
-                 upstream_histories={"crude_oil": _history(start=5000.0, step=1.0)}).get("product_group") == "upstream"
-    assert _pack(product_id="sis", name_zh="SIS橡胶",
-                 upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)}).get("product_group") == "downstream"
-    assert _pack(product_id="crude_oil", name_zh="原油",
-                 upstream_histories={}).get("product_group") == "upstream"
+    # widget is a downstream product (a key in the configured upstream map),
+    # gadget is its upstream, unknown products are unclassified.
+    assert _pack().get("product_group") == "downstream"
+    assert _pack(product_id="gadget", name_zh="Gadget",
+                 upstream_histories={"widget": _history(start=5000.0, step=1.0)}).get("product_group") == "upstream"
+    assert _pack(product_id="unknown_xyz", name_zh="Unknown",
+                 upstream_histories={}).get("product_group") == "unknown"
 
 
-def test_pack_crude_oil_has_empty_upstream():
-    p = _pack(product_id="crude_oil", name_zh="原油", upstream_histories={})
+def test_pack_unknown_product_has_empty_upstream():
+    p = _pack(product_id="unknown_xyz", name_zh="Unknown", upstream_histories={})
     assert p["upstream"] == []
     assert p["causal"]["elasticity"] is None

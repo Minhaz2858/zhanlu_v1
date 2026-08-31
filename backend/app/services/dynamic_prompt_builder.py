@@ -187,13 +187,13 @@ def _inject_learning_graph(prompt: str, agent_app_id: str) -> str:
 def _inject_recipes(prompt: str, agent_app_id: str) -> str:
     """Inject proven answer recipes (Layer 1) into the prompt.
 
-    Flag-gated by ECISCO_BI_RECIPE_LEARNING_ENABLED — off means no recipes
+    Flag-gated by RECIPE_LEARNING_ENABLED — off means no recipes
     are recorded, so nothing to inject anyway; the guard also protects
-    non-eisco deployments where the store is empty.
+    deployments where the store is empty.
     """
     try:
         from app.config import settings
-        if not settings.ECISCO_BI_RECIPE_LEARNING_ENABLED:
+        if not settings.RECIPE_LEARNING_ENABLED:
             return prompt
         from app.services.learning_graph import get_recipe_prompt
         recipe_text = get_recipe_prompt(agent_app_id)
@@ -207,14 +207,14 @@ def _inject_recipes(prompt: str, agent_app_id: str) -> str:
 def _inject_user_profile(prompt: str, agent_app_id: str, user_id: str | None) -> str:
     """Inject the user's profile (Layer 3) into the prompt.
 
-    Flag-gated by ECISCO_BI_USER_PROFILE_ENABLED. Only injected when a
+    Flag-gated by USER_PROFILE_ENABLED. Only injected when a
     user_id is known (per-user memory).
     """
     try:
         if not user_id:
             return prompt
         from app.config import settings
-        if not settings.ECISCO_BI_USER_PROFILE_ENABLED:
+        if not settings.USER_PROFILE_ENABLED:
             return prompt
         from app.services.user_profile import get_profile_prompt
         profile_text = get_profile_prompt(agent_app_id, user_id)

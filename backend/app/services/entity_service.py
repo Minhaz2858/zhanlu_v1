@@ -58,7 +58,7 @@ def _apply_owner(model, query, owner_id, include_shared=False, db=None):
 
     Platform-shipped but user-facing rows (is_system=False, created_by_id=NULL)
     are also visible to all users. These are seeded by ``ensure_system_agents``
-    with an explicit is_system=False (e.g. ``ecisco_bi_assistant``) so they appear in
+    with an explicit is_system=False so they appear in
     the agent picker and "My Space" — they are platform templates that every
     user can select and chat with, but are not auto-managed by the runtime.
 
@@ -131,6 +131,27 @@ _MODEL_IMMUTABLE_FIELDS = {
     "User": {"role"},
 }
 
+# Models whose ``created_by_id`` is treated as a client-claimable marker
+# (not a security boundary). The Skills tab UI marks a tool as "added
+# to My Skills" by sending ``{ created_by_id: <user.id> }`` on the
+# existing tool row — see ``Toolkit.addToMySkills`` on the frontend.
+#
+# Tool is NOT in ``USER_SCOPED_ENTITIES`` (it is a global catalog, not
+# per-user isolated data), so ``created_by_id`` on Tool is a UI marker,
+# not an isolation stamp. The general entity API still strips it via
+# ``_IMMUTABLE_FIELDS`` to keep every other model safe; the dedicated
+# ``_apply_claim_updates`` helper below re-allows it ONLY on Tool with
+# strict rules.
+#
+# 2026-08-28: Without this fix, clicking the ``+`` on a Skills card
+# silently no-ops because the backend strips ``created_by_id``. The
+# optimistic UI shows a green ✓ for the current session (held in a
+# frontend ref) but on reload or when "My Skills" is opened, the
+# filter ``tools.filter(x => x.created_by_id === ownerId)`` returns
+# empty — exactly the "No skills yet. Click Create to add one." state.
+_CLAIMABLE_MODELS = {"Tool"}
+_CLAIMABLE_FIELDS = {"created_by_id"}
+
 
 def _filter_data(model, data: dict) -> dict:
     """Filter incoming data to only valid, client-writable columns.
@@ -183,6 +204,56 @@ def _apply_updates(record, model, updates: dict) -> None:
     """Apply filtered, coerced updates to a SQLAlchemy record."""
     for key, value in updates.items():
         setattr(record, key, _coerce_for_model(model, key, value))
+
+
+def _apply_claim_updates(record, model, data: dict, claim_user_id: str | None) -> None:
+    """Apply ownership-claim semantics for ``Tool`` rows.
+
+    The Skills tab UI marks a tool as "added to My Skills" by sending
+    ``{ created_by_id: <user.id> }`` on the existing tool row. The generic
+    entity API strips ``created_by_id`` via ``_IMMUTABLE_FIELDS`` because
+    for ChatSession, Project, KnowledgeBase, etc. that field IS a security
+    boundary (it is the user-isolation stamp that the row-level scoping
+    filter in ``_apply_owner`` relies on).
+
+    On ``Tool`` it is NOT a security boundary — ``Tool`` is not in
+    ``USER_SCOPED_ENTITIES``, it is a global catalog, and the field is
+    re-used purely as a UI marker for "this user added this skill to
+    their My Skills view".  The frontend renders the My Skills modal
+    with ``tools.filter(x => x.created_by_id === ownerId)`` so the claim
+    MUST be persistable, otherwise the click is a no-op.
+
+    Rules enforced here:
+      * Only ``Tool`` accepts a ``created_by_id`` write (other entities
+        stay strictly immutable).
+      * The new value MUST equal the requesting user's id. No
+        cross-user reassignment, no nulling.
+      * Re-claim is allowed: any user can claim a Tool the previous
+        user already claimed. This matches the intent — "whoever
+        clicked it last owns it now" — and is safe because Tool is
+        not used as an isolation boundary.
+      * ``claim_user_id`` is required (must be an authenticated user).
+        This is independent of ``owner_id`` because ``Tool`` is not in
+        ``USER_SCOPED_ENTITIES`` — the router passes ``owner_id=None``
+        for non-scoped entities (so they stay visible to everyone for
+        reads), but the claim still needs to know "who clicked the
+        button" — that's ``claim_user_id``. See ``update_record``.
+    """
+    if claim_user_id is None:
+        return
+    if getattr(model, "__name__", "") not in _CLAIMABLE_MODELS:
+        return
+    for field in _CLAIMABLE_FIELDS:
+        if field not in data:
+            continue
+        new_value = data[field]
+        if str(new_value) != str(claim_user_id):
+            # Reject cross-user reassignment — silently ignore.  We don't
+            # 400 here because the frontend may send a normal Tool.update
+            # payload that happens to include a server-managed field; the
+            # correct behavior is to drop the disallowed sub-update.
+            continue
+        setattr(record, field, new_value)
 
 
 _SHAREABLE_MODELS = {"Project", "AgentApp"}
@@ -342,11 +413,20 @@ def create_record(model, data: dict, db: Session, created_by_id: str | None = No
     return record.to_dict()
 
 
-def update_record(model, record_id: str, data: dict, db: Session, owner_id: str | None = None) -> dict | None:
+def update_record(model, record_id: str, data: dict, db: Session, owner_id: str | None = None,
+                  claim_user_id: str | None = None) -> dict | None:
     """Update a non-deleted record by ID.
 
     ``owner_id`` (optional) scopes the update to the identity's own rows —
     a non-owner gets None (record hidden → router returns 404).
+
+    ``claim_user_id`` (optional, default None) is the authenticated user's
+    id used by ``_apply_claim_updates`` to enforce claim semantics on
+    ``Tool`` rows.  Routers should pass ``getattr(user, "id", None)``
+    whenever the entity is in ``_CLAIMABLE_MODELS``. This is independent
+    of ``owner_id`` because ``Tool`` is not user-scoped (the router passes
+    ``owner_id=None`` for non-scoped entities so reads stay global) — but
+    the claim still needs to know who clicked the button.
     """
     record = _apply_owner(model, _apply_tenant(model, db.query(model).filter(
         model.id == record_id, model.is_deleted == False
@@ -355,6 +435,12 @@ def update_record(model, record_id: str, data: dict, db: Session, owner_id: str 
         return None
 
     filtered = _filter_data(model, data)
+    # Apply ownership-claim updates AFTER the general filter — the filter
+    # strips ``created_by_id`` because for most entities it IS a
+    # security boundary, but for ``Tool`` we re-allow it under the
+    # strict claim rules in ``_apply_claim_updates``.  See the helper
+    # docstring for the rationale (2026-08-28 Skills-tab bug fix).
+    _apply_claim_updates(record, model, data, claim_user_id)
     _apply_updates(record, model, filtered)
 
     record.updated_date = datetime.now(timezone.utc)
@@ -371,10 +457,9 @@ def soft_delete_record(model, record_id: str, db: Session, owner_id: str | None 
 
     If the record has ``is_system=True`` on a model that carries the
     column, the delete is refused and ``False`` is returned. System
-    agents (e.g. ``ecisco_bi_assistant``) are platform-critical
-    orchestrators that the chat auto-select path depends on; deleting
-    them would break silent auto-selection for the Ecisco BI project
-    and every other place the runtime auto-injects them. The router
+    agents are platform-critical runtime components that the chat
+    auto-select path depends on; deleting them would break silent
+    auto-selection. The router
     treats False as 404, so callers cannot distinguish a hidden
     system agent from a missing one — which is the intended behavior.
     """

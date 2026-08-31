@@ -127,11 +127,44 @@ class DashboardAppGenerator:
                     "options": m.get("options", {}),
                 }
             )
+        # Declared dimension filters across ALL metrics, deduped by key. Each
+        # entry carries the display label (from the first metric that declared
+        # it) so the frontend filter bar can render dropdowns. These map to
+        # the backend's :dim_<key> tokens — only declared keys are accepted.
+        dim_filters: Dict[str, dict] = {}
+        for m in spec.get("metrics", []):
+            for f in (m.get("options") or {}).get("filters") or []:
+                key = f.get("key")
+                if not key:
+                    continue
+                dim_filters.setdefault(
+                    key,
+                    {
+                        "key": key,
+                        "label": f.get("label") or key,
+                        "column": f.get("column"),
+                    },
+                )
+        # Top-level AI insight strip: { title, body } pairs rendered above the
+        # widget grid. Computed server-side by the agent, never fabricated.
+        insights = spec.get("insights") or []
+        # Optional sectioned layout: [{title, widgets: [metric_id, ...]}] so the
+        # dashboard reads as a story (KPI strip → trends → detail) instead of
+        # one flat grid. Metrics not listed fall into a trailing "Other" group.
+        # Sections may also carry page + panels (see dashboard_tools.py docs).
+        layout = spec.get("layout") or []
+        # Decision-center extras: multi-page tabs, typed AI-analysis panels,
+        # executive header (greeting + market snapshot) and provenance footer.
+        pages = spec.get("pages") or []
+        panels = spec.get("panels") or []
+        header = spec.get("header")
+        footer = spec.get("footer")
         return {
             "name": spec.get("name", spec["slug"]),
             "slug": spec["slug"],
             "description": spec.get("description"),
             "theme": spec.get("theme", "light"),
+            "style": spec.get("style", "standard"),
             "refresh_interval_seconds": int(spec.get("refresh_interval_seconds", 30)),
             "design_system_ref": spec.get("design_system_ref"),
             # Machine-readable design tokens consumed by the React frontend.
@@ -139,6 +172,15 @@ class DashboardAppGenerator:
             # to its built-in slate defaults (backward compatible).
             "design": self._load_design_tokens(spec),
             "metrics": metrics,
+            # Filter bar metadata (declared dims) + AI insight strip.
+            "filters": list(dim_filters.values()),
+            "insights": insights,
+            "layout": layout,
+            # Decision-center information architecture (2026-08-29).
+            "pages": pages,
+            "panels": panels,
+            "header": header,
+            "footer": footer,
         }
 
     # ── design-system token loading ──

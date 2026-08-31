@@ -18,6 +18,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Optional
 from typing import Any
 
 import yaml
@@ -582,19 +583,19 @@ class SkillsRegistry:
     def search(self, query: str, limit: int = 10) -> list[SkillMetadata]:
         if not self._loaded:
             self.load()
-        query_lower = query.lower()
-        scored: list[tuple[int, SkillMetadata]] = []
+        tokens = _search_tokens(query)
+        if not tokens:
+            return []
+        scored: list[tuple[float, SkillMetadata]] = []
         for skill in self._skills.values():
-            score = 0
-            if query_lower in skill.name.lower():
-                score += 3
-            if query_lower in skill.description.lower():
-                score += 2
-            for tag in skill.tags:
-                if query_lower in tag.lower():
-                    score += 1
-            if skill.trigger and query_lower in skill.trigger.lower():
-                score += 2
+            score = _score_skill(
+                query,
+                name=skill.name,
+                description=skill.description,
+                trigger=skill.trigger or "",
+                tags=list(skill.tags),
+                tokens=tokens,
+            )
             if score > 0:
                 scored.append((score, skill))
         scored.sort(key=lambda x: -x[0])
@@ -610,6 +611,99 @@ class SkillsRegistry:
         self._skills.clear()
         self._loaded = False
         return self.load()
+
+
+def _score_skill(
+    query: str,
+    *,
+    name: str,
+    description: str,
+    trigger: str = "",
+    tags: Optional[list[str]] = None,
+    tokens: Optional[list[str]] = None,
+) -> float:
+    """Score one skill against a query (shared by FS registry + DB tiers).
+
+    Whole-phrase matches dominate; tokenized overlap (from ``_search_tokens``)
+    lets full user sentences match.  Name hits weigh more than description
+    hits, trigger/tags are tiebreakers.  Returns 0 when nothing matches.
+    """
+    tokens = tokens if tokens is not None else _search_tokens(query)
+    if not tokens:
+        return 0.0
+    query_lower = query.lower().strip()
+    name_l = (name or "").lower()
+    desc_l = (description or "").lower()
+    trig_l = (trigger or "").lower()
+    tags_l = [t.lower() for t in (tags or [])]
+
+    score = 0.0
+    if query_lower and (query_lower in name_l or query_lower == name_l):
+        score += 8.0
+    elif query_lower and query_lower in desc_l:
+        score += 4.0
+    for tok in tokens:
+        if tok in name_l:
+            score += 3.0
+        elif tok in desc_l:
+            score += 2.0
+        if trig_l and tok in trig_l:
+            score += 1.5
+        for t in tags_l:
+            if tok in t:
+                score += 1.0
+    return score
+
+
+# Tokens that carry no search signal — dropped from queries so full user
+# sentences don't drown the matching tokens in stopword noise.
+_STOPWORDS = frozenset({
+    "the", "a", "an", "and", "or", "of", "to", "for", "on", "in", "with",
+    "make", "makea", "makean", "write", "writeme", "create", "draft", "build",
+    "using", "from", "into", "this", "that", "these", "those", "please",
+    "can", "you", "your", "my", "me", "our", "we", "want", "need", "like",
+    "would", "could", "should", "how", "what", "why", "when", "where", "who",
+    "is", "are", "was", "were", "do", "does", "did", "it", "at", "by", "up",
+    "out", "over", "about", "give", "get", "show", "help", "some", "any",
+})
+
+
+def _search_tokens(query: str) -> list[str]:
+    """Tokenize a (possibly full-sentence) search query into meaningful terms.
+
+    - Latin text: split on non-alphanumeric, drop stopwords + short tokens.
+    - CJK text: no word boundaries, so emit the full string plus sliding
+      bigrams so a description containing any 2-char Chinese term matches.
+    Returns a deduplicated list; empty when the query has no signal.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return []
+    tokens: list[str] = []
+    has_cjk = any("\u4e00" <= ch <= "\u9fff" for ch in q)
+    if has_cjk:
+        # Whole string + sliding bigrams (2-char terms) for CJK matching.
+        tokens.append(q)
+        for i in range(len(q) - 1):
+            pair = q[i:i + 2]
+            if "\u4e00" <= pair[0] <= "\u9fff" or "\u4e00" <= pair[1] <= "\u9fff":
+                tokens.append(pair)
+    else:
+        for raw in q.replace("-", " ").replace("_", " ").split():
+            tok = raw.strip(".,;:!?()[]{}\"'")
+            if len(tok) < 2:
+                continue
+            if tok in _STOPWORDS:
+                continue
+            tokens.append(tok)
+    # Dedupe, keep order.
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in tokens:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
 
 
 _registry: SkillsRegistry | None = None
@@ -865,46 +959,67 @@ def unified_search(query: str, limit: int = 10, db=None) -> list[dict[str, Any]]
     query_lower = query.lower()
     seen: set[str] = set()
     results: list[dict[str, Any]] = []
+    tokens = _search_tokens(query)
+
+    def _add(name: str, description: str, category: str, trigger: str, source: str, kind: str) -> None:
+        if not name or name in seen:
+            return
+        score = _score_skill(
+            query,
+            name=name,
+            description=description or "",
+            trigger=trigger or "",
+            tags=[],
+            tokens=tokens,
+        )
+        if score <= 0:
+            return
+        seen.add(name)
+        results.append({
+            "name": name,
+            "description": description or "",
+            "category": category or "",
+            "trigger": trigger or "",
+            "source": source,
+            "kind": kind or "system_skill",
+            "_score": score,
+        })
 
     # 1. Search DB tools table
     if db is not None:
         try:
             from app.models.tool import Tool
-            tools = db.query(Tool).filter(
-                Tool.is_deleted == False,
-                Tool.enabled == True,
-                Tool.name.ilike(f"%{query}%") | Tool.description.ilike(f"%{query}%"),
-            ).limit(limit * 2).all()
+            q = db.query(Tool).filter(
+                Tool.is_deleted == False,  # noqa: E712
+                Tool.enabled == True,  # noqa: E712
+            )
+            if tokens:
+                import sqlalchemy as sa
+
+                conds: list = []
+                if query_lower:
+                    conds.append(Tool.name.ilike(f"%{query_lower}%"))
+                    conds.append(Tool.description.ilike(f"%{query_lower}%"))
+                for tok in tokens:
+                    conds.append(Tool.name.ilike(f"%{tok}%"))
+                    conds.append(Tool.description.ilike(f"%{tok}%"))
+                q = q.filter(sa.or_(*conds))
+                tools = q.limit(limit * 6).all()
+            else:
+                tools = []
             for t in tools:
-                if t.name in seen:
-                    continue
-                seen.add(t.name)
-                results.append({
-                    "name": t.name,
-                    "description": t.description or "",
-                    "category": t.category or "",
-                    "trigger": t.trigger or "",
-                    "source": "db",
-                    "kind": t.kind or "system_skill",
-                })
+                _add(t.name, t.description or "", t.category or "", t.trigger or "", "db", t.kind or "system_skill")
         except Exception as e:
             logger.debug("DB skill search failed (non-fatal): %s", e)
 
     # 2. Search filesystem registry
     fs_skills = get_skills_registry().search(query, limit=limit * 2)
     for skill in fs_skills:
-        if skill.name in seen:
-            continue
-        seen.add(skill.name)
-        results.append({
-            "name": skill.name,
-            "description": skill.description,
-            "category": skill.category,
-            "trigger": skill.trigger,
-            "source": "filesystem",
-            "kind": "system_skill",
-        })
+        _add(skill.name, skill.description, skill.category, skill.trigger or "", "filesystem", "system_skill")
 
+    # Merge: rank by score across BOTH tiers (the DB tier is no longer
+    # allowed to dump un-scored noise ahead of precise FS matches).
+    results.sort(key=lambda r: -float(r.pop("_score", 0.0)))
     return results[:limit]
 
 

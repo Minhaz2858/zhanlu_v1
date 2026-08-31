@@ -41,9 +41,9 @@ the previous table either had no matching rows or was stale.
 - Prefer tables with MORE rows and MORE recent coverage dates. A table with \
 14275 rows updated last week is far better than one with 0 rows updated in \
 2023.
-- If the failed SQL used a CJK table name (e.g. erp_t_sal_outstock), prefer \
-another CJK table from the catalog over an English-named view — business \
-data in this warehouse lives in CJK-named tables.
+- If the failed SQL used a CJK table name, prefer another table from the \
+catalog over an English-named view — business data may live in CJK-named \
+tables in this warehouse.
 
 Rules:
 - Output ONLY the revised question. No preamble, no markdown fences, no quotes.
@@ -193,7 +193,15 @@ async def llm_driven_retry_ask_data(
         if not isinstance(new_result, dict):
             return None
         rows = new_result.get("rows") or []
-        if rows:
+        # 2026-08-26: only treat as success if the rows are REAL business
+        # data, not metadata-only probes. A 1-row `MIN/MAX/COUNT` summary
+        # is technically "non-empty" but useless to the calling agent.
+        try:
+            from app.services.goal_contract import is_metadata_only_rows as _is_meta
+            _is_metadata_only = bool(rows) and _is_meta(rows)
+        except Exception:
+            _is_metadata_only = False
+        if rows and not _is_metadata_only:
             new_result["retried"] = True
             new_result["retried_question"] = revised
             new_result["retry_attempts"] = attempts
@@ -208,6 +216,17 @@ async def llm_driven_retry_ask_data(
                 revised[:120],
             )
             return new_result
+        if _is_metadata_only:
+            logger.info(
+                "smart-retry attempt %d returned %d metadata-only row(s) — "
+                "continuing retry to get real business data; sql=%s",
+                attempts, len(rows), str(new_result.get("sql") or "")[:200],
+            )
+            # Treat as a failed attempt so the loop continues
+            failed_result = new_result
+            last_sql = new_result.get("sql") or last_sql
+            last_error = "metadata-only rows returned (not real business data)"
+            continue
         # Still empty — feed the failure back for the next round.
         failed_result = new_result
         logger.info(

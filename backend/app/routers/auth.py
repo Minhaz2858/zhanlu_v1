@@ -26,6 +26,7 @@ from app.deps import get_db, get_current_user_required
 from app.middleware.rate_limit import rate_limit
 from app.models.user import User
 from app.services.auth_service import auth_service
+from app.services.mail_service import send_otp_email
 from app.services.password_policy import validate_password
 
 logger = logging.getLogger(__name__)
@@ -60,6 +61,57 @@ async def login(
     return {"access_token": access_token, "refresh_token": refresh_token, "user": user.to_dict()}
 
 
+@router.post("/apps/{app_id}/auth/request-login-code")
+async def request_login_code(
+    app_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    _rl=Depends(rate_limit(settings.RATE_LIMIT_LOGIN_PER_MIN, 60)),
+):
+    """Request a passwordless login code emailed to the user's address.
+
+    The code is only generated (and emailed) when the email belongs to a
+    registered, non-deleted account. The response is ALWAYS the generic
+    ``{"sent": true}`` so an attacker cannot enumerate which emails are
+    registered. The OTP is never returned in the response — it is emailed
+    (best-effort via SMTP) and logged server-side as a dev fallback.
+    """
+    email = body.get("email")
+    if not email:
+        raise HTTPException(status_code=400, detail="Email required")
+
+    otp = auth_service.request_login_code(email, db)
+    if otp:
+        try:
+            emailed = await send_otp_email(email, otp, purpose="log in to your account")
+        except Exception as e:  # noqa: BLE001 — email is best-effort
+            logger.error("request-login-code: send_otp_email raised: %s", e)
+            emailed = False
+        # Always log the code server-side as a fallback (and for dev without SMTP).
+        logger.warning("Login code for %s: %s (emailed=%s)", email, otp, emailed)
+    # Generic success regardless of whether the email exists.
+    return {"sent": True}
+
+
+@router.post("/apps/{app_id}/auth/login-with-code")
+async def login_with_code(
+    app_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """Log in with an emailed login code (passwordless). Returns {access_token, refresh_token, user}."""
+    email = body.get("email")
+    code = body.get("code")
+
+    if not email or not code:
+        raise HTTPException(status_code=400, detail="Email and code required")
+
+    result = auth_service.login_with_code(email, code, db)
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid or expired login code")
+    return result
+
+
 @router.post("/apps/{app_id}/auth/register")
 async def register(
     app_id: str,
@@ -74,7 +126,18 @@ async def register(
     - No OTP flow if no email verification is configured (first-time setup).
 
     Single-role model (plan 2026-07-27): every user is ``role="user"``.
+
+    When ``ALLOW_PUBLIC_REGISTRATION`` is False (enterprise / SaaS model),
+    open self-registration is blocked — accounts are provisioned only by an
+    admin via ``/api/admin/users``. A fresh install with zero users is still
+    permitted to bootstrap the first (admin) account.
     """
+    if not settings.ALLOW_PUBLIC_REGISTRATION and db.query(User).count() > 0:
+        raise HTTPException(
+            status_code=403,
+            detail="Public registration is disabled. Contact an administrator to request an account.",
+        )
+
     email = body.get("email")
     full_name = body.get("full_name")
     password = body.get("password")
@@ -208,6 +271,10 @@ async def reset_password(app_id: str, body: dict, db: Session = Depends(get_db))
     if not reset_token or not new_password:
         raise HTTPException(status_code=400, detail="reset_token and new_password required")
 
+    pw_errors = validate_password(new_password)
+    if pw_errors:
+        raise HTTPException(status_code=400, detail="; ".join(pw_errors))
+
     user_id = auth_service.verify_reset_token(reset_token, db)
     if not user_id:
         raise HTTPException(status_code=400, detail="Invalid or expired reset token")
@@ -218,6 +285,9 @@ async def reset_password(app_id: str, body: dict, db: Session = Depends(get_db))
 
     user.password_hash = auth_service.hash_password(new_password)
     db.commit()
+    # Invalidate all existing refresh tokens so the reset also logs out any
+    # active sessions (defense-in-depth if the old password was compromised).
+    auth_service.revoke_all_user_refresh_tokens(user.id, db)
     auth_service.consume_reset_token(reset_token, db)
     return {"success": True}
 
