@@ -42,7 +42,10 @@ from app.services.data_execution.session_state import SessionState, SessionState
 from app.services.data_execution.cache import cache_data_execution
 from app.services.data_execution.prompt_block import build_session_state_block
 from app.services.tool_handlers.artifact_tool import _create_artifact_tool
-from app.services.llm_service import llm_headers, llm_url, get_model, model_has_fixed_temperature
+from app.services.llm_service import (
+    llm_headers, llm_url, get_model, model_has_fixed_temperature,
+    maybe_enable_parallel_tool_calls,
+)
 from app.services.llm_router import resolve_effective_llm, resolve_message_project_id, EffectiveLLM
 from app.services.agent_prompts import (
     get_system_prompt,
@@ -849,9 +852,14 @@ def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
     or legacy ``tool_calls_for_frontend`` with a ``results`` dict) and
     collects unique, human-readable sources the answer is grounded in.
     Each citation is ``{"source_id": str|None, "source_name": str,
-    "rows": int|None}``.  Defensive: malformed shapes are skipped, and
-    the list is deduped by source id/name so repeated queries against
-    the same datasource render once.
+    "rows": int|None}`` plus optional ``url`` (clickable link) and
+    ``kind`` (``web`` / ``file``) fields:
+    - web_search results become web chips (title + live URL), capped at 5.
+    - file-bearing tool results (create_artifact / docx / read_file on an
+      upload) become file chips (file_name + file_url when safe).
+    Defensive: malformed shapes are skipped, and the list is deduped by
+    source id/name so repeated queries against the same datasource
+    render once.
     """
     citations: list[dict] = []
     # source key → index into `citations` (keeps the first name seen, lets
@@ -896,6 +904,45 @@ def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
         result = tc.get("result") if isinstance(tc.get("result"), dict) else tc.get("results")
         if not isinstance(result, dict):
             continue
+        # ── Web-search citations (Kimi/GPT-style live source links) ──────
+        # web_search returns {"success", "query", "results": [{title, url,
+        # description}], "count"} — none of the data-source fields below.
+        # Detect by shape (a top-level "query" string + url-bearing result
+        # rows) so fetch_data_batch / datasource shapes never match here.
+        _web_q = result.get("query")
+        _web_rows = result.get("results")
+        if (
+            isinstance(_web_q, str)
+            and isinstance(_web_rows, list)
+            and any(isinstance(s, dict) and isinstance(s.get("url"), str) for s in _web_rows)
+        ):
+            _web_added = 0
+            for _sub in _web_rows:
+                if not isinstance(_sub, dict):
+                    continue
+                _url = _sub.get("url")
+                if not isinstance(_url, str) or not _url.startswith(("http://", "https://")):
+                    continue
+                _title = _sub.get("title") or _sub.get("name") or _url
+                if isinstance(_title, str):
+                    _title = _title.strip()
+                if not _title:
+                    _title = _url
+                _key = f"web:{_url}"
+                if _key in seen:
+                    continue
+                seen[_key] = len(citations)
+                citations.append({
+                    "source_id": _url,
+                    "source_name": (_title[:120] + "…") if len(_title) > 120 else _title,
+                    "rows": None,
+                    "url": _url,
+                    "kind": "web",
+                })
+                _web_added += 1
+                if _web_added >= 5:
+                    break
+            continue
         src_id = result.get("source_id")
         src_name = (
             result.get("source_name")
@@ -935,6 +982,36 @@ def _extract_citations_from_tool_calls(tool_calls: list | None) -> list[dict]:
                 sub_id = sub.get("source_id")
                 if sub_id or sub_name:
                     _add_source(sub_id, sub_name, sub_row_count)
+        # ── File-bearing tool results (uploaded / generated files) ───────
+        # Tools that produced a file (create_artifact, docx/xlsx/pptx
+        # export, read_file on an upload) carry file_url/file_name —
+        # surface as a clickable file chip when the URL is safe.
+        _file_url = result.get("file_url")
+        _file_name = result.get("file_name")
+        if (
+            isinstance(_file_url, str)
+            and _file_url.startswith(("/api/uploads/", "http://", "https://"))
+        ):
+            _fkey = f"file:{_file_url}"
+            if _fkey not in seen:
+                seen[_fkey] = len(citations)
+                citations.append({
+                    "source_id": _file_url,
+                    "source_name": (_file_name.strip() if isinstance(_file_name, str) and _file_name.strip() else "file"),
+                    "rows": None,
+                    "url": _file_url,
+                    "kind": "file",
+                })
+        elif isinstance(_file_name, str) and _file_name.strip():
+            _fkey2 = f"file:{_file_name.strip()}"
+            if _fkey2 not in seen:
+                seen[_fkey2] = len(citations)
+                citations.append({
+                    "source_id": None,
+                    "source_name": _file_name.strip(),
+                    "rows": None,
+                    "kind": "file",
+                })
     return citations
 
 
@@ -1930,6 +2007,97 @@ def _build_aggregate_fallback(
 # fails (timeout, error, no data, missing flag, non-DB agent), it
 # returns ``None`` so the existing fallback chain runs unchanged.
 # ---------------------------------------------------------------------------
+
+
+async def _stream_deep_research_frames(
+    *,
+    question: str,
+    depth: str,
+    scope: str,
+    db,
+    user_id,
+    context,
+    endpoint,
+    emit_live,
+    conv,
+    live_events,
+    timeout_s: int = 90,
+):
+    """Run the deep-research protocol for a chat turn and yield SSE frames.
+
+    Mirrors the v3 FSM route's collect-then-yield pattern: live events are
+    pushed through ``emit_live`` during the run, buffered, then yielded;
+    the final report streams as ``delta`` chunks followed by a ``done``
+    frame carrying the persisted conversation. The assistant message is
+    persisted here because the early-return research branch skips the main
+    loop's final write.
+    """
+    from app.services.deep_research.llm_backend import (
+        build_critic,
+        build_planner,
+        build_synthesizer,
+        build_tool_executor,
+    )
+    from app.services.deep_research.orchestrator import (
+        DeepResearchRequest,
+        run_deep_research,
+    )
+
+    frames: list[str] = []
+
+    async def _emit(event_type, label_key=None, params=None):
+        frame = emit_live(event_type, label_key, params)
+        if frame:
+            frames.append(frame)
+
+    result = await run_deep_research(
+        DeepResearchRequest(question=question, depth=depth, scope=scope),
+        planner=build_planner(endpoint=endpoint, timeout_s=timeout_s),
+        tool_executor=build_tool_executor(
+            db=db, user_id=user_id, context=context,
+        ),
+        synthesizer=build_synthesizer(endpoint=endpoint, timeout_s=timeout_s),
+        critic=build_critic(endpoint=endpoint, timeout_s=timeout_s),
+        emit=_emit,
+    )
+
+    for frame in frames:
+        yield frame
+
+    report = result.report or "(deep research completed with no report.)"
+    _assistant_msg = {
+        "id": str(uuid.uuid4()),
+        "role": "assistant",
+        "content": report,
+        "created_date": datetime.now(timezone.utc).isoformat(),
+    }
+    if result.citations:
+        _assistant_msg["sources"] = result.citations
+    if live_events:
+        _assistant_msg["live_events"] = list(live_events)
+    _messages = list(conv.messages or [])
+    _messages.append(_assistant_msg)
+    conv.messages = list(_messages)
+    conv.updated_date = datetime.now(timezone.utc)
+    try:
+        db.commit()
+    except Exception as _persist_err:
+        logger.warning("deep research persistence failed (non-fatal): %s", _persist_err)
+        db.rollback()
+
+    for i in range(0, len(report), 80):
+        yield "data: " + json.dumps(
+            {"type": "delta", "content": report[i:i + 80]}
+        ) + "\n\n"
+    yield "data: " + json.dumps(
+        {
+            "type": "done",
+            "content": report,
+            "trace": [],
+            "conversation": conv.to_dict(),
+        }
+    ) + "\n\n"
+
 
 async def _research_analyst_fallback(
     user_content: str,
@@ -6142,6 +6310,37 @@ async def add_message(
                 pass
     agent_app_id = agent_app.id if agent_app else agent_name
 
+    # ── Agent Workflow chat path ─────────────────────────────────────
+    # flow_mode agents (canvas workflows with a Chat Trigger) run through
+    # the workflow runtime instead of the prompt-agent loop. The run is
+    # persisted as a WorkflowRun (trigger="chat") with per-node steps, and
+    # the workflow's final output becomes the assistant reply. The user
+    # message was already committed above, so conv.messages contains the
+    # current turn — the helper excludes it from the injected history.
+    if agent_app and agent_app.flow_mode:
+        from app.services.workflow_chat import run_workflow_for_chat
+        wf_result = run_workflow_for_chat(db, conv, agent_app, user_content, user)
+        _wf_assistant_msg = {
+            "id": str(uuid.uuid4()),
+            "role": "assistant",
+            "content": wf_result["content"] or "",
+            "created_date": datetime.now(timezone.utc).isoformat(),
+            "tool_calls": None,
+        }
+        messages.append(_wf_assistant_msg)
+        conv.messages = list(messages)
+        conv.updated_date = datetime.now(timezone.utc)
+        try:
+            db.commit()
+        except Exception as _wf_commit_err:
+            logger.warning("v2 workflow chat commit failed (non-fatal): %s", _wf_commit_err)
+            db.rollback()
+        try:
+            db.refresh(conv)
+        except Exception:
+            pass
+        return conv.to_dict()
+
     # Resolve the chat session that owns this conversation, if any. We do a
     # reverse lookup because the LLM cannot pass the chat session id in its
     # tool-call args (it doesn't know it). The result is injected into the
@@ -9125,6 +9324,9 @@ async def _call_llm_with_tools(
     _skip_tool_choice = _should_skip_tool_choice(endpoint)
     if tool_choice and not _skip_tool_choice:
         payload["tool_choice"] = tool_choice
+    # P0-2: parallel tool calls capability injection (flag-gated; the agent
+    # loops execute multiple tool_calls in parallel via execute_tool_batch).
+    maybe_enable_parallel_tool_calls(payload, _model)
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -9843,6 +10045,9 @@ async def _stream_llm_with_tools(
         # schemas. Normalize here so the LLM never sees a malformed tool.
         from app.services.tool_registry import normalize_tools_list
         base_payload["tools"] = normalize_tools_list(tools)
+    # P0-2: parallel tool calls capability injection (flag-gated; the v3
+    # loop executes multiple tool_calls in parallel via execute_tool_batch).
+    maybe_enable_parallel_tool_calls(base_payload, _model)
     # Proactively skip tool_choice for models that reject it (vLLM without
     # --enable-auto-tool-choice). Tool calls are recovered from content text.
     _skip_tool_choice = _should_skip_tool_choice(endpoint)
@@ -12003,13 +12208,67 @@ async def add_message_stream(
         _live_events: list[dict] = []
         _live_event_count = [0]
 
-        def _push_live_event(event_type: str, label_key: str, params: dict | None = None) -> str | None:
+        def _push_live_event(event_type: str, label_key: str, params: dict | None = None, sanitize: bool = True) -> str | None:
             """Build a live event, record for persistence, return its SSE frame."""
-            _ev = _build_live_event(event_type, label_key, params, count=_live_event_count)
+            _ev = _build_live_event(event_type, label_key, params, count=_live_event_count, sanitize=sanitize)
             if _ev is not None:
                 _live_events.append(_ev)
                 return _sse_live_event(_ev)
             return None
+
+        # ── Deep Research Mode (v1) ───────────────────────────────
+        # Flag-gated research protocol. When the frontend sends
+        # ``research: {enabled, depth, scope}`` metadata and the flag is on,
+        # the turn runs plan → parallel gather (with critique) → cited
+        # report instead of the default tool loop. Early-return: the main
+        # loop below is skipped entirely for research turns.
+        _research_meta = body.get("research") or {}
+        if (
+            getattr(settings, "DEEP_RESEARCH_ENABLED", False)
+            and bool(_research_meta.get("enabled"))
+            and (user_content or "").strip()
+        ):
+            try:
+                _dr_timeout = int(getattr(settings, "DEEP_RESEARCH_TIMEOUT_S", 90))
+                async for _dr_frame in _stream_deep_research_frames(
+                    question=user_content,
+                    depth=str(_research_meta.get("depth") or "balanced"),
+                    scope=str(_research_meta.get("scope") or "both"),
+                    db=db,
+                    user_id=getattr(user, "id", None),
+                    context={
+                        "conversation_id": conversation_id,
+                        "agent_name": getattr(conv, "agent_name", None),
+                        "org_id": getattr(conv, "org_id", None),
+                        "app_id": getattr(conv, "app_id", None),
+                    },
+                    endpoint=(
+                        effective_llm.endpoint
+                        if getattr(effective_llm, "endpoint", None) is not None
+                        else None
+                    ),
+                    emit_live=_push_live_event,
+                    conv=conv,
+                    live_events=_live_events,
+                    timeout_s=_dr_timeout,
+                ):
+                    yield _dr_frame
+                return
+            except Exception as _dr_err:  # noqa: BLE001 — research must never kill the stream
+                logger.warning(
+                    "Deep research failed (conv=%s): %s — emitting fail",
+                    conversation_id, _dr_err,
+                )
+                yield _emit_phase("fail")
+                yield "data: " + json.dumps(
+                    {
+                        "type": "error",
+                        "message": "Deep research failed. Please retry or disable "
+                                   "Deep Research mode.",
+                        "conversation": conv.to_dict(),
+                    }
+                ) + "\n\n"
+                return
 
         # Claude-style phase headline: the turn always opens in "Fathoming".
         yield _emit_phase("goal")
@@ -12264,8 +12523,27 @@ async def add_message_stream(
                     if "plan" not in _emitted_phases:
                         _emitted_phases.add("plan")
                         yield _emit_phase("plan")
+                        # Persist the plan phase as a typed live event so the
+                        # reloaded message shows the same "Laying out the plan"
+                        # headline the live stream showed (previously the plan
+                        # phase was raw-SSE only and vanished on reload).
+                        _le_plan_phase = _push_live_event("phase_enter", "phase_enter.plan")
+                        if _le_plan_phase:
+                            yield _le_plan_phase
                     for _st in _turn_plan.steps:
                         yield plan_step_added_frame(_st)
+                        # Persist each plan step as a typed live event so the
+                        # plan checklist survives reload. Titles are
+                        # server-generated plan metadata (same class as tool
+                        # labels) — bypass the SQL/ERP content scrubber so
+                        # "Query the bound data source" renders verbatim.
+                        _le_step = _push_live_event(
+                            "plan_step_added", "plan_step_added",
+                            {"step_index": _st.step_index, "title": _st.title_en},
+                            sanitize=False,
+                        )
+                        if _le_step:
+                            yield _le_step
                     llm_messages.append({
                         "role": "user",
                         "content": plan_to_system_block(_turn_plan),
@@ -14800,6 +15078,16 @@ async def add_message_stream(
                             _plan_st = _turn_plan.step_by_index(_plan_idx)
                             if _plan_st is not None:
                                 yield plan_step_completed_frame(_plan_st)
+                                # Persist the completion so the reloaded
+                                # checklist shows the tick (parity with the
+                                # live stream).
+                                _le_done = _push_live_event(
+                                    "plan_step_completed", "plan_step_completed",
+                                    {"step_index": _plan_st.step_index, "title": _plan_st.title_en},
+                                    sanitize=False,
+                                )
+                                if _le_done:
+                                    yield _le_done
                 # T19: record FAILED tool executions. `result` is already
                 # normalized here — exceptions were converted to
                 # {"success": False, "error": ...} by _run_tool_batch, and
@@ -15859,6 +16147,16 @@ async def add_message_stream(
                     _plan_st = _turn_plan.step_by_index(_plan_idx)
                     if _plan_st is not None:
                         yield plan_step_completed_frame(_plan_st)
+                        # Persist the final completion(s) so the reloaded
+                        # checklist shows the full plan ticked off (parity
+                        # with the live stream).
+                        _le_done = _push_live_event(
+                            "plan_step_completed", "plan_step_completed",
+                            {"step_index": _plan_st.step_index, "title": _plan_st.title_en},
+                            sanitize=False,
+                        )
+                        if _le_done:
+                            yield _le_done
         # Use the ``assistant_content`` already captured by the main loop's
         # last non-streaming ``_call_llm_with_tools`` call. DO NOT re-call
         # the LLM here: when the message history still contains assistant
@@ -15964,6 +16262,14 @@ async def add_message_stream(
             _le_fs = _push_live_event("finalize_started", "finalize_started")
             if _le_fs:
                 yield _le_fs
+            # Persist the finalize phase as a typed live event so the
+            # reloaded headline shows the terminal state ("Crystallizing /
+            # Wrapping everything up") — same as the live stream. Without it,
+            # the last persisted phase_enter would be the plan phase and the
+            # completed message would look mid-flight after reload.
+            _le_fin_phase = _push_live_event("phase_enter", "phase_enter.finalize")
+            if _le_fin_phase:
+                yield _le_fin_phase
 
         # ── Activity step: "Generating response" done ──
         _step_counter[0] += 1
