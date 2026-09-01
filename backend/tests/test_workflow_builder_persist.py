@@ -90,7 +90,33 @@ def _valid_payload():
     }
 
 
-def test_save_flow_valid_persists_draft(db, monkeypatch):
+def test_save_flow_assigns_missing_edge_ids(db):
+    """The builder agent often omits edge ids — normalize them so canvas
+    edits (delete/reconnect) have stable identities."""
+    _mk_workflow(db)
+    payload = {
+        "action": "save_flow",
+        "name": "Edge Ids",
+        "flow": {
+            "version": 1,
+            "nodes": [
+                {"id": "n1", "type": "trigger_chat", "position": {"x": 0, "y": 0}, "data": {"label": "T", "config": {}}},
+                {"id": "n2", "type": "output", "position": {"x": 200, "y": 0}, "data": {"label": "O", "config": {}}},
+            ],
+            "edges": [
+                {"source": "n1", "sourceHandle": "source-main", "target": "n2", "targetHandle": "target-main"},
+                {"source": "n1", "sourceHandle": "source-main", "target": "n2", "targetHandle": "target-main"},
+            ],
+        },
+    }
+    saved = wfr.save_flow_from_decision_summary(payload, "wf-1", db, _user())
+    assert saved["status"] == "flow_saved"
+    ids = [e.get("id") for e in saved["flow"]["edges"]]
+    assert ids == ["e1", "e2"]
+    assert len(set(ids)) == 2
+
+
+def test_save_flow_valid_persists_draft(db):
     _mk_workflow(db)
     payload = _valid_payload()
     saved = wfr.save_flow_from_decision_summary(payload, "wf-1", db, _user())

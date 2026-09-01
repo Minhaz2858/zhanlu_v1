@@ -179,6 +179,12 @@ def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -
     if errors:
         return {"status": "flow_invalid", "errors": errors}
 
+    # The builder agent often omits edge ids — assign stable ones (e1..eN)
+    # so canvas edits (delete/reconnect) have identities to work with.
+    for i, edge in enumerate(flow.get("edges") or [], start=1):
+        if not edge.get("id"):
+            edge["id"] = f"e{i}"
+
     notes = resolve_entity_references(flow, db, user)
     ref_errors = [n for n in notes if n.startswith("ERROR: ")]
     if ref_errors:
