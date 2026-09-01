@@ -83,4 +83,29 @@ describe('WorkflowBuilderChat.jsx workflow_builder streaming panel', () => {
     expect(SOURCE).toMatch(/streaming/);
     expect(SOURCE).toMatch(/disabled/);
   });
+
+  it('gates rendering on the open prop so an unconditional mount never covers the canvas', () => {
+    expect(SOURCE).toMatch(/if\s*\(!open\)\s*return\s*null/);
+  });
+
+  it('evaluates flow_saved for every streamed event (hoisted before the delta/done branching)', () => {
+    const flowSavedIdx = SOURCE.indexOf("evt.type === 'flow_saved'");
+    const deltaIdx = SOURCE.indexOf("evt.type === 'delta'");
+    expect(flowSavedIdx, "evt.type === 'flow_saved' check not found").toBeGreaterThan(-1);
+    expect(deltaIdx, "evt.type === 'delta' branch not found").toBeGreaterThan(-1);
+    // The flow_saved check must be hoisted above the delta branch — a
+    // standalone { type: 'flow_saved' } SSE event must not fall through.
+    expect(flowSavedIdx).toBeLessThan(deltaIdx);
+  });
+
+  it('closes on Escape via a document-level keydown listener (ReportSidePanel convention)', () => {
+    expect(SOURCE).toMatch(/Escape/);
+    expect(SOURCE).toMatch(/addEventListener\('keydown'/);
+    expect(SOURCE).toMatch(/removeEventListener\('keydown'/);
+  });
+
+  it('aborts in-flight streams on unmount/close (cleanup aborts the AbortController)', () => {
+    expect(SOURCE).toMatch(/cancelled\s*=\s*true/);
+    expect(SOURCE).toMatch(/abortRef\.current\.abort\(\)/);
+  });
 });

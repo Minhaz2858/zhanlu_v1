@@ -19,12 +19,19 @@ import { Send, X, Loader2, Sparkles } from 'lucide-react';
  * flow_saved detection is defensive because the backend may surface it as a
  * typed SSE event OR as a flag on the done-event conversation metadata
  * (conv.metadata.workflow_flow_saved — the model serializes the Python
- * `metadata_` attr under the DB column name `metadata`).
+ * `metadata_` attr under the DB column name `metadata`). The check runs for
+ * EVERY streamed event, so a standalone { type: 'flow_saved' } event is not
+ * swallowed by the delta/done branching.
+ *
+ * The panel gates its own rendering on the `open` prop (returns null when
+ * closed), so it can be mounted unconditionally by the parent without
+ * permanently covering the canvas. Escape closes it, matching the
+ * ReportSidePanel convention.
  */
 export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowSaved }) {
   const { lang } = useLanguage();
   const isEn = lang === 'en';
-  const [messages, setMessages] = useState([]); // { role, content }
+  const [messages, setMessages] = useState([]); // { role, content, _sessionError? }
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [convId, setConvId] = useState(null);
@@ -36,8 +43,13 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
   // createAgentConversation in Chat.jsx (agent_name 'workflow_builder',
   // metadata.workflow_id so the backend persistence branch knows which
   // workflow to save, top-level title per the documented contract).
+  // Cleanup aborts any in-flight stream when the panel closes or the
+  // component unmounts, so we never setState after unmount.
   useEffect(() => {
     if (!open || convIdRef.current) return;
+    // Drop any previous session-start error bubble so retrying (close +
+    // reopen) does not stack duplicate error bubbles.
+    setMessages((prev) => prev.filter((m) => !m._sessionError));
     let cancelled = false;
     createAgentConversation(
       'workflow_builder',
@@ -59,10 +71,17 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
             content: isEn
               ? 'Sorry, I could not start the workflow builder session. Please try again.'
               : '抱歉，无法启动工作流构建会话，请重试。',
+            _sessionError: true,
           },
         ]);
       });
-    return () => { cancelled = true; };
+    return () => {
+      cancelled = true;
+      if (abortRef.current) {
+        abortRef.current.abort();
+        abortRef.current = null;
+      }
+    };
   }, [open, workflowId]);
 
   // Abort any in-flight stream when the panel closes.
@@ -74,6 +93,18 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     }
     setStreaming(false);
   }, [open]);
+
+  // Close on Escape while open — same convention as ReportSidePanel.
+  // Escape closes regardless of focus (even while typing in the input);
+  // Enter-to-send is unaffected.
+  useEffect(() => {
+    if (!open || !onClose) return;
+    const handler = (e) => {
+      if (e.key === 'Escape') onClose();
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [open, onClose]);
 
   // Auto-scroll the message list to the newest message.
   useEffect(() => {
@@ -96,6 +127,9 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     const controller = new AbortController();
     abortRef.current = controller;
     let fullContent = '';
+    const friendlyErr = isEn
+      ? 'Sorry, the connection was interrupted. Please try again.'
+      : '抱歉，连接中断了，请重试。';
 
     try {
       for await (const evt of streamAgentResponse(
@@ -103,6 +137,23 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
         { role: 'user', content: text },
         controller.signal,
       )) {
+        // flow_saved — the backend persisted the draft graph. The signal
+        // may arrive as a typed event, a status field, or a conversation
+        // metadata flag (workflow_flow_saved). Evaluated for EVERY
+        // streamed event (not just 'done') so a standalone
+        // { type: 'flow_saved' } SSE event closes the panel and tells the
+        // canvas to reload instead of falling through unhandled.
+        const convMeta = evt.conversation?.metadata || evt.conversation?.metadata_ || {};
+        const flowSaved =
+          evt.type === 'flow_saved' ||
+          evt.status === 'flow_saved' ||
+          convMeta.workflow_flow_saved === true;
+        if (flowSaved && onFlowSaved) {
+          onFlowSaved();
+          if (onClose) onClose();
+          break;
+        }
+
         if (evt.type === 'delta' && typeof evt.content === 'string') {
           fullContent += evt.content;
           setMessages((prev) => {
@@ -130,28 +181,23 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
             next[next.length - 1] = { role: 'assistant', content: fullContent };
             return next;
           });
-          // flow_saved — the backend persisted the draft graph. The signal
-          // may arrive as a typed event, a status field, or a conversation
-          // metadata flag (workflow_flow_saved). Any of them closes the
-          // panel and tells the canvas to reload.
-          const convMeta = evt.conversation?.metadata || evt.conversation?.metadata_ || {};
-          const flowSaved =
-            evt.type === 'flow_saved' ||
-            evt.status === 'flow_saved' ||
-            convMeta.workflow_flow_saved === true;
-          if (flowSaved && onFlowSaved) {
-            onFlowSaved();
-            if (onClose) onClose();
-          }
         }
       }
+      // Normal stream exit without an explicit 'done' event — fill the
+      // placeholder bubble with whatever content accumulated (or the
+      // friendly fallback) so it is not stuck empty.
+      setMessages((prev) => {
+        const next = [...prev];
+        next[next.length - 1] = {
+          role: 'assistant',
+          content: (next[next.length - 1]?.content || fullContent) || friendlyErr,
+        };
+        return next;
+      });
     } catch (err) {
       // AbortError → user closed the panel mid-stream; stay quiet.
       if (err && (err.name === 'AbortError' || err.code === 20)) return;
       console.error('[WorkflowBuilderChat stream error]', err);
-      const friendlyErr = isEn
-        ? 'Sorry, the connection was interrupted. Please try again.'
-        : '抱歉，连接中断了，请重试。';
       setMessages((prev) => {
         const next = [...prev];
         next[next.length - 1] = {
@@ -166,6 +212,10 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     }
   }
 
+  // Gate rendering on `open` so an unconditional mount (Task 8) does not
+  // permanently cover the canvas. All hooks run above, so this is safe.
+  if (!open) return null;
+
   return (
     <div className="fixed inset-y-0 right-0 z-50 flex w-[380px] flex-col border-l bg-background shadow-xl">
       {/* Header */}
@@ -174,7 +224,7 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
         <h2 className="flex-1 text-sm font-semibold">
           {isEn ? 'Build with AI' : 'AI 构建'}
         </h2>
-        <Button variant="ghost" size="icon" onClick={onClose} title={isEn ? 'Close' : '关闭'}>
+        <Button variant="ghost" size="icon" onClick={onClose} title={isEn ? 'Close (Esc)' : '关闭 (Esc)'}>
           <X className="h-4 w-4" />
         </Button>
       </div>
