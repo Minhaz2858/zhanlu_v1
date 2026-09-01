@@ -2615,21 +2615,21 @@ _AGENT_CREATION_HEADER_RE = re.compile(
     r"(?imx)"
     r"("
     # EN: the noun MUST be "agent" — no other word fits this slot.
-    r"create\s+(?:a\s+|an\s+|new\s+|me\s+|custom\s+|the\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
-    r"|build\s+(?:me\s+|a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
-    r"|make\s+(?:me\s+|a\s+|an\s+|new\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
-    r"|set\s+up\s+(?:a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
-    r"|design\s+(?:a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+)*agent"
+    r"create\s+(?:a\s+|an\s+|new\s+|me\s+|custom\s+|the\s+)*(?:AI\s+|intelligent\s+|new\s+|workflow\s+)*agent"
+    r"|build\s+(?:me\s+|a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+|workflow\s+)*agent"
+    r"|make\s+(?:me\s+|a\s+|an\s+|new\s+)*(?:AI\s+|intelligent\s+|new\s+|workflow\s+)*agent"
+    r"|set\s+up\s+(?:a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+|workflow\s+)*agent"
+    r"|design\s+(?:a\s+|an\s+|new\s+|custom\s+)*(?:AI\s+|intelligent\s+|new\s+|workflow\s+)*agent"
     r"|new\s+agent"
     # ZH — ``(?:[一]?\s*个?)?`` covers "新建智能体" (no counter) and
     # "新建一个智能体" / "新建一个AI智能体" (counter word present).
-    r"|新建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
-    r"|创建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
-    r"|帮我创建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
-    r"|做\s*一个?\s*(?:AI\s*|新\s*|自定义\s*)*智能体"
-    r"|构建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
-    r"|设计\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*)*智能体"
-    r"|添加\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*)*智能体"
+    r"|新建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*|工作流\s*)*智能体"
+    r"|创建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*|工作流\s*)*智能体"
+    r"|帮我创建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*|工作流\s*)*智能体"
+    r"|做\s*一个?\s*(?:AI\s*|新\s*|自定义\s*|工作流\s*)*智能体"
+    r"|构建\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*|工作流\s*)*智能体"
+    r"|设计\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|自定义\s*|工作流\s*)*智能体"
+    r"|添加\s*(?:[一]?\s*个?\s*)?(?:AI\s*|新\s*|工作流\s*)*智能体"
     r")"
 )
 
@@ -2638,40 +2638,45 @@ _SKILL_CREATION_HEADER_RE = re.compile(
     r"(?imx)"
     r"("
     # EN: noun MUST be "skill" — disjoint from automation and agent headers.
-    r"create\s+(?:a\s+|new\s+|custom\s+|reusable\s+|the\s+)*skill"
-    r"|build\s+(?:me\s+|a\s+|new\s+|custom\s+|reusable\s+)*skill"
-    r"|make\s+(?:me\s+|a\s+|new\s+|custom\s+|reusable\s+)*skill"
-    r"|set\s+up\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
-    r"|design\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
-    r"|write\s+(?:a\s+|the\s+|new\s+|custom\s+)?SKILL\.md"
-    r"|write\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
-    r"|add\s+(?:a\s+|new\s+|custom\s+|reusable\s+)*skill"
+    r"create\s+(?:a\s+|new\s+|custom\s+|reusable\s+|the\s+|workflow\s+)*skill"
+    r"|build\s+(?:me\s+|a\s+|new\s+|custom\s+|reusable\s+|workflow\s+)*skill"
+    r"|make\s+(?:me\s+|a\s+|new\s+|custom\s+|reusable\s+|workflow\s+)*skill"
+    r"|set\s+up\s+(?:a\s+|new\s+|custom\s+|reusable\s+|workflow\s+)*skill"
+    r"|design\s+(?:a\s+|new\s+|custom\s+|reusable\s+|workflow\s+)*skill"
+    r"|write\s+(?:a\s+|the\s+|new\s+|custom\s+|workflow\s+)?SKILL\.md"
+    r"|write\s+(?:a\s+|new\s+|custom\s+|reusable\s+|workflow\s+)*skill"
+    r"|add\s+(?:a\s+|new\s+|custom\s+|reusable\s+|workflow\s+)*skill"
     r"|new\s+skill\b"
     # ZH — counter word ``一个`` is common in ZH; allow it.
-    r"|新建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*)*技能"
-    r"|创建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*)*技能"
-    r"|做\s*一个?\s*(?:新\s*|可复用\s*|自定义\s*)*技能"
-    r"|构建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*)*技能"
-    r"|写\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*)*技能"
-    r"|添加\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*)*技能"
+    r"|新建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*|工作流\s*)*技能"
+    r"|创建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*|工作流\s*)*技能"
+    r"|做\s*一个?\s*(?:新\s*|可复用\s*|自定义\s*|工作流\s*)*技能"
+    r"|构建\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|自定义\s*|工作流\s*)*技能"
+    r"|写\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|工作流\s*)*技能"
+    r"|添加\s*(?:[一]?\s*个?\s*)?(?:新\s*|可复用\s*|工作流\s*)*技能"
     r")"
 )
 
 # Header anchors for WORKFLOW creation (rebind target: workflow_builder).
 # Must NOT collide with agent/skill headers — the noun is "workflow" /
-# "工作流" / "智能体工作流".
+# "工作流" / "智能体工作流". Each EN branch carries a negative lookahead so
+# "create a workflow agent / skill" (noun = agent/skill) falls through to
+# the agent/skill headers; the ZH branches mirror it with 智能体/技能.
 _WORKFLOW_CREATION_HEADER_RE = re.compile(
     r"(?imx)"
     r"("
-    r"create\s+(?:a\s+|an\s+|new\s+|me\s+|the\s+)*(?:agent\s+)?workflow"
-    r"|build\s+(?:me\s+|a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow"
-    r"|make\s+(?:me\s+|a\s+|an\s+|new\s+)*(?:agent\s+)?workflow"
-    r"|design\s+(?:a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow"
-    r"|new\s+workflow\b"
-    r"|创建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流"
-    r"|新建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流"
-    r"|做一个?\s*(?:智能体\s*)?工作流"
-    r"|帮我设计\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流"
+    r"create\s+(?:a\s+|an\s+|new\s+|me\s+|the\s+)*(?:agent\s+)?workflow(?!\s+(?:agent|skill)\b)"
+    r"|build\s+(?:me\s+|a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow(?!\s+(?:agent|skill)\b)"
+    r"|make\s+(?:me\s+|a\s+|an\s+|new\s+)*(?:agent\s+)?workflow(?!\s+(?:agent|skill)\b)"
+    r"|design\s+(?:a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow(?!\s+(?:agent|skill)\b)"
+    r"|set\s+up\s+(?:a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow(?!\s+(?:agent|skill)\b)"
+    r"|new\s+workflow\b(?!\s+(?:agent|skill)\b)"
+    r"|创建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流(?!\s*(?:智能体|技能))"
+    r"|新建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流(?!\s*(?:智能体|技能))"
+    r"|做一个?\s*(?:智能体\s*)?工作流(?!\s*(?:智能体|技能))"
+    r"|帮我设计\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流(?!\s*(?:智能体|技能))"
+    r"|设计\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流(?!\s*(?:智能体|技能))"
+    r"|构建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流(?!\s*(?:智能体|技能))"
     r")"
 )
 
@@ -2717,11 +2722,12 @@ def _detect_system_agent_intent(
 
     The detector scans a small priority-ordered table of header +
     (optional) structure regexes. Each entry corresponds to a system
-    agent whose dedicated purpose (automation setup / agent creation /
-    skill creation) is missing from the runtime project agent's
-    toolset. The router rebinds the conversation so the LLM uses the
-    right tool (``create_automation`` / agent-creation / skill-creator)
-    instead of misfiring on ``ask_data_agent``.
+    agent whose dedicated purpose (automation setup / workflow
+    creation / agent creation / skill creation) is missing from the
+    runtime project agent's toolset. The router rebinds the
+    conversation so the LLM uses the right tool (``create_automation``
+    / workflow-builder / agent-creation / skill-creator) instead of
+    misfiring on ``ask_data_agent``.
 
     First match wins. The table is intentionally narrow — false
     positives just route the user to a clarifying prompt; false
