@@ -61,6 +61,35 @@ def _render(template: str, ctx: Any) -> str:
     return re.sub(r"\{\{\s*([^}]+)\s*\}\}", repl, template)
 
 
+def first_item(ctx: Any, node_id: str) -> dict:
+    """First upstream item for a node, defaulting to the text output."""
+    out = ctx.outputs.get(node_id, {})
+    items = out.get("items")
+    if items:
+        return items[0] if isinstance(items[0], dict) else {"value": items[0]}
+    return {"text": out.get("text", "")}
+
+
+def all_items(ctx: Any, node_id: str) -> list[dict]:
+    """All upstream items for a node, defaulting to a single text item."""
+    out = ctx.outputs.get(node_id, {})
+    items = out.get("items")
+    if items:
+        return [i if isinstance(i, dict) else {"value": i} for i in items]
+    return [{"text": out.get("text", "")}]
+
+
+def _upstream_id(ctx: Any, node: dict) -> str:
+    """First node id in current_upstream (fallback: first output)."""
+    if getattr(ctx, "current_upstream", None):
+        return next(iter(ctx.current_upstream), "")
+    return next(iter(ctx.outputs), "")
+
+
+def _json_summary(items: list[dict]) -> str:
+    return json.dumps(items[:3], ensure_ascii=False) if items else "0 items"
+
+
 def handle_trigger(ctx, node):
     return {"text": ctx.trigger_input, "trigger": getattr(ctx, "trigger", "chat")}
 

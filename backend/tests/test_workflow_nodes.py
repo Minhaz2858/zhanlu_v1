@@ -1,5 +1,7 @@
 from app.services.workflow_nodes import (
     _render,
+    all_items,
+    first_item,
     handle_agent,
     handle_condition,
     handle_db_query,
@@ -10,6 +12,30 @@ from app.services.workflow_nodes import (
     handle_switch,
     handle_trigger,
 )
+
+
+def test_first_item_defaults_to_text():
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "hi"}
+    assert first_item(ctx, "n1") == {"text": "hi"}
+
+
+def test_first_item_returns_first_dict():
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "x", "items": [{"a": 1}, {"a": 2}]}
+    assert first_item(ctx, "n1") == {"a": 1}
+
+
+def test_all_items_passthrough():
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "x", "items": [{"a": 1}]}
+    assert all_items(ctx, "n1") == [{"a": 1}]
+
+
+def test_all_items_defaults_to_text_item():
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "hi"}
+    assert all_items(ctx, "n1") == [{"text": "hi"}]
 
 
 class FakeCtx:
