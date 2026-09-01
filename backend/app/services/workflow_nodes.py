@@ -51,7 +51,7 @@ def _render(template: str, ctx: Any) -> str:
                 head, _, tail = rest[0].partition("[")
                 if head == "items":
                     idx = tail.rstrip("]")
-                    segments = ["items", idx] + rest[2:]
+                    segments = ["items", idx] + rest[1:]
                     val = _resolve_value(val, segments)
                     return "" if val is None else str(val)
             val = _resolve_value(val, rest)
