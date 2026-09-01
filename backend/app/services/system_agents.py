@@ -219,9 +219,7 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
             "topology": "standalone",
             "status": "active",
             "tool_config": {
-                "enabled_tools": _tools_in_registry(registry, [
-                    "list_tools", "create_artifact",
-                ]),
+                "enabled_tools": _tools_in_registry(registry, []),
             },
             **_BASE_HARNESS,
             "manifest_json": {

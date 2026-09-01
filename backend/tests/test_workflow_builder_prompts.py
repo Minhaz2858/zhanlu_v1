@@ -14,6 +14,12 @@ def test_workflow_builder_prompt_allows_large_graphs():
     assert "include ALL steps" in p or "do not simplify away" in p
 
 
+def test_workflow_builder_prompt_forbids_tools():
+    p = get_system_prompt("workflow_builder")
+    assert "no tools" in p.lower()
+    assert "never attempt tool calls" in p.lower() or "do not call" in p.lower()
+
+
 def test_workflow_builder_prompt_has_registry():
     p = get_system_prompt("workflow_builder")
     assert "decision-summary" in p

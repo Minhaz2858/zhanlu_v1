@@ -2097,7 +2097,8 @@ WORKFLOW_BUILDER_RULES = """RULES (HARD):
    - `data.config` must include every REQUIRED config field listed for the node type (see registry). Optional fields may be omitted.
 5. Config values that reference entities (database connector, agent, tool, knowledge base) may use their display NAME — the system resolves names to ids. Never invent an id you were not given.
 6. String fields may use template syntax to reference another node's output: {{inputs.<nodeId>.<field>}} — e.g. {{inputs.n1.text}} (the trigger node's user message) or {{inputs.n1.history}} (prior chat turns).
-7. Workflows may range from 3 to 20 nodes. Use the smallest graph that accomplishes the task, but include ALL steps the user asks for — do not simplify away requested branches, sub-agents, or data steps. Larger multi-agent designs (orchestrator + specialist sub-agents + data sources) are explicitly allowed."""
+7. Workflows may range from 3 to 20 nodes. Use the smallest graph that accomplishes the task, but include ALL steps the user asks for — do not simplify away requested branches, sub-agents, or data steps. Larger multi-agent designs (orchestrator + specialist sub-agents + data sources) are explicitly allowed.
+8. You have NO tools available. Never attempt tool calls — do not call create_artifact, list_tools, or any other tool. Your only output is the decision-summary block in your final message."""
 
 WORKFLOW_BUILDER_NON_GOALS = """NON-GOALS (NEVER do these):
 - Never publish, deploy, or share workflows — you only produce the graph.
