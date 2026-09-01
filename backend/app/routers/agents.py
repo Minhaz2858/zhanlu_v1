@@ -2657,6 +2657,24 @@ _SKILL_CREATION_HEADER_RE = re.compile(
     r")"
 )
 
+# Header anchors for WORKFLOW creation (rebind target: workflow_builder).
+# Must NOT collide with agent/skill headers — the noun is "workflow" /
+# "工作流" / "智能体工作流".
+_WORKFLOW_CREATION_HEADER_RE = re.compile(
+    r"(?imx)"
+    r"("
+    r"create\s+(?:a\s+|an\s+|new\s+|me\s+|the\s+)*(?:agent\s+)?workflow"
+    r"|build\s+(?:me\s+|a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow"
+    r"|make\s+(?:me\s+|a\s+|an\s+|new\s+)*(?:agent\s+)?workflow"
+    r"|design\s+(?:a\s+|an\s+|new\s+|the\s+)*(?:agent\s+)?workflow"
+    r"|new\s+workflow\b"
+    r"|创建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流"
+    r"|新建\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流"
+    r"|做一个?\s*(?:智能体\s*)?工作流"
+    r"|帮我设计\s*(?:[一]?个?\s*)?(?:智能体\s*)?工作流"
+    r")"
+)
+
 # Intent table — order matters: most-specific match wins. The automation
 # header is the most distinctive ("automation task" pattern), so it goes
 # first; agent-creation and skill-creation headers are distinguished by
@@ -2669,6 +2687,12 @@ _SYSTEM_AGENT_INTENT_TABLE: list[tuple[str, str, "re.Pattern[str]", "re.Pattern[
         "automation_agent",
         _AUTOMATION_SETUP_HEADER_RE,
         _AUTOMATION_SETUP_STRUCTURE_RE,
+    ),
+    (
+        "workflow_creation",
+        "workflow_builder",
+        _WORKFLOW_CREATION_HEADER_RE,
+        None,
     ),
     (
         "agent_creation",
