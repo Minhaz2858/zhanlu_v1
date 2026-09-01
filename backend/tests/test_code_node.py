@@ -64,16 +64,18 @@ def test_run_code_non_serializable_output():
     assert "JSON" in r["text"]
 
 
-def test_handler_passes_first_item_and_timeout():
+def test_handler_passes_each_item_and_timeout():
     ctx = _FakeCtx({"success": True, "text": "{}", "items": [{"x": 1}]})
-    ctx.outputs = {"n1": {"text": "t", "items": [{"x": 1}]}}
-    ctx.current_upstream = {"n1": {"text": "t", "items": [{"x": 1}]}}
+    ctx.outputs = {"n1": {"text": "t", "items": [{"x": 1}, {"x": 2}]}}
+    ctx.current_upstream = {"n1": {"text": "t", "items": [{"x": 1}, {"x": 2}]}}
     node = _node({"code": 'output = {"x": input.get("x")}', "timeout": 3})
     out = handle_code(ctx, node)
-    (code, item, timeout) = ctx.calls[-1]
+    assert len(ctx.calls) == 2  # run once per item
+    (code, item, timeout) = ctx.calls[0]
     assert item == {"x": 1}
     assert timeout == 3
-    assert out["items"] == [{"x": 1}]
+    assert (code, ctx.calls[1][1], ctx.calls[1][2]) == (code, {"x": 2}, 3)
+    assert out["items"] == [{"x": 1}, {"x": 1}]  # fake returns same for both items
 
 
 def test_handler_surfaces_sandbox_failure():

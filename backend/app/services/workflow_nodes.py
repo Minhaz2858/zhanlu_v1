@@ -240,11 +240,15 @@ def handle_code(ctx, node):
     config = node["data"].get("config") or {}
     code = _render(config.get("code", ""), ctx)
     upstream_id = _upstream_id(ctx, node)
-    item = first_item(ctx, upstream_id) if upstream_id else {"text": ""}
-    result = ctx.run_code(code, item, timeout=int(config.get("timeout", 10)))
-    if result.get("success"):
-        return {"text": result.get("text", ""), "items": result.get("items", []), "success": True}
-    return {"text": result.get("text", "Code failed"), "items": [], "success": False}
+    items_in = all_items(ctx, upstream_id) if upstream_id else [{"text": ""}]
+    timeout = int(config.get("timeout", 10))
+    out_items: list[dict] = []
+    for it in items_in:
+        result = ctx.run_code(code, it, timeout=timeout)
+        if not result.get("success"):
+            return {"text": result.get("text", "Code failed"), "items": [], "success": False}
+        out_items.extend(result.get("items", []))
+    return {"text": _json_summary(out_items), "items": out_items, "success": True}
 
 
 def handle_set_fields(ctx, node):
