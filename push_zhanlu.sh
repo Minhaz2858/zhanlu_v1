@@ -10,10 +10,15 @@ if ssh -T -o ConnectTimeout=8 -o BatchMode=yes git@github.com 2>&1 | grep -q "su
   exit 0
 fi
 
-# Otherwise use the keychain fine-grained token (option B: token must have Contents: write on zhanlu_v1)
-TOKEN=$(security find-internet-password -s github.com -a Minhaz2858 -w 2>/dev/null)
+# Otherwise use a keychain token. Priority:
+#   1. GitHub Desktop OAuth token (gho_...) — generic password, has full repo write
+#   2. Fine-grained PAT (github_pat_...) — only works if given Contents: write on the repo
+TOKEN=$(security find-generic-password -s "GitHub - https://api.github.com" -a Minhaz2858 -w 2>/dev/null)
 if [ -z "$TOKEN" ]; then
-  echo "No GitHub credential found. Register the SSH key (github.com/settings/ssh/new) or fix the token, then rerun."
+  TOKEN=$(security find-internet-password -s github.com -a Minhaz2858 -w 2>/dev/null)
+fi
+if [ -z "$TOKEN" ]; then
+  echo "No GitHub credential found in keychain. Open GitHub Desktop once to refresh the login, then rerun."
   exit 1
 fi
 printf 'https://x-access-token:%s@github.com\n' "$TOKEN" > /tmp/gh-cred.tmp
