@@ -91,14 +91,15 @@ def _json_summary(items: list[dict]) -> str:
 
 
 def handle_trigger(ctx, node):
-    return {"text": ctx.trigger_input, "trigger": getattr(ctx, "trigger", "chat")}
+    text = ctx.trigger_input
+    return {"text": text, "trigger": getattr(ctx, "trigger", "chat"), "items": [{"text": text}]}
 
 
 def handle_llm(ctx, node):
     config = node["data"].get("config") or {}
     prompt = _render(config.get("prompt", ""), ctx)
     text = ctx.llm_complete(prompt, model=config.get("model") or "automatic")
-    return {"text": text}
+    return {"text": text, "items": [{"text": text}]}
 
 
 def _node_config(ctx: Any, node_id: str) -> dict:
@@ -150,7 +151,8 @@ def handle_agent(ctx, node):
             )
 
     result = ctx.run_agent(agent_id, input_text, **kwargs)
-    return {"text": str(result.get("text", result))}
+    text = str(result.get("text", result))
+    return {"text": text, "items": [{"text": text}]}
 
 
 def handle_tool(ctx, node):
@@ -158,14 +160,15 @@ def handle_tool(ctx, node):
     tool_id = config["tool_id"]
     input_text = _render(config.get("input_template", "{{inputs}}"), ctx)
     result = ctx.run_tool(tool_id, input_text)
-    return {"text": str(result.get("text", result))}
+    text = str(result.get("text", result))
+    return {"text": text, "items": [{"text": text}]}
 
 
 def handle_kb_search(ctx, node):
     config = node["data"].get("config") or {}
     query = _render(config.get("query", "{{inputs}}"), ctx)
     docs = ctx.kb_search(config["kb_id"], query, top_k=int(config.get("top_k", 5)))
-    return {"text": "\n\n".join(d.get("text", "") for d in docs), "docs": docs}
+    return {"text": "\n\n".join(d.get("text", "") for d in docs), "docs": docs, "items": docs}
 
 
 def handle_db_query(ctx, node):
@@ -184,6 +187,7 @@ def handle_db_query(ctx, node):
         "rows": rows,
         "count": len(rows),
         "mode": mode,
+        "items": rows,
     }
 
 
@@ -204,8 +208,10 @@ def handle_mcp_tool(ctx, node):
         arguments = {"input": upstream.get("text", "")}
     result = ctx.mcp_call(server_id, tool_name, arguments)
     if result.get("success"):
-        return {"text": result.get("result", ""), "success": True, "tool": tool_name}
-    return {"text": result.get("error", "MCP tool call failed"), "success": False, "tool": tool_name}
+        text = result.get("result", "")
+        return {"text": text, "success": True, "tool": tool_name, "items": [{"text": text}]}
+    text = result.get("error", "MCP tool call failed")
+    return {"text": text, "success": False, "tool": tool_name, "items": [{"text": text}]}
 
 
 def _eval_op(value: str, op: str, target: str) -> bool:
@@ -253,6 +259,7 @@ def handle_condition(ctx, node):
         "text": value,
         "branch": config.get("on_true", "true") if ok else config.get("on_false", "false"),
         "_route": [0] if ok else [1],
+        "items": upstream.get("items") or [{"text": value}],
     }
 
 
@@ -283,12 +290,14 @@ def handle_switch(ctx, node):
                 "case": i,
                 "branch": f"case_{i + 1}",
                 "_route": [i],
+                "items": upstream.get("items") or [{"text": value_to_test}],
             }
     return {
         "text": value,
         "case": "default",
         "branch": config.get("fallback_label", "default"),
         "_route": [SWITCH_DEFAULT_PORT],
+        "items": upstream.get("items") or [{"text": value}],
     }
 
 
@@ -297,9 +306,12 @@ def handle_output(ctx, node):
     fmt = config.get("format", "markdown")
     upstream = next(iter(ctx.current_upstream.values()), {})
     text = upstream.get("text", "")
+    items = upstream.get("items")
     if fmt == "json":
         text = json.dumps(upstream, ensure_ascii=False)
-    return {"text": text, "format": fmt}
+    elif fmt == "table" and items:
+        text = "\n".join(json.dumps(i, ensure_ascii=False) for i in items)
+    return {"text": text, "format": fmt, "items": items}
 
 
 NODE_HANDLERS = {

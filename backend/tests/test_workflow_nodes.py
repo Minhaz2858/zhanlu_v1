@@ -73,7 +73,7 @@ def _node(nid, ntype, config):
 def test_trigger_passes_message():
     ctx = FakeCtx()
     out = handle_trigger(ctx, _node("n1", "trigger_chat", {}))
-    assert out == {"text": "hello", "trigger": "chat"}
+    assert out == {"text": "hello", "trigger": "chat", "items": [{"text": "hello"}]}
 
 
 def test_llm_uses_prompt_template_and_upstream():
@@ -135,6 +135,36 @@ def test_render_leaves_unknown_placeholders_untouched():
     ctx.outputs["n2"] = {"text": "x", "items": []}
     assert _render("{{inputs.n9.anything}}", ctx) == ""
     assert _render("{{ not_a_path }}", ctx) == "{{ not_a_path }}"
+
+
+def test_trigger_emits_item():
+    out = handle_trigger(FakeCtx(), _node("n1", "trigger_chat", {}))
+    assert out["items"] == [{"text": "hello"}]
+
+
+def test_llm_emits_item():
+    out = handle_llm(FakeCtx(), _node("n2", "llm", {"prompt": "hi"}))
+    assert out["items"] == [{"text": "llm-ok"}]
+
+
+def test_db_query_emits_rows_as_items():
+    ctx = FakeCtx(db_result={"text": "a", "rows": [{"a": 1}, {"a": 2}]})
+    out = handle_db_query(ctx, _node("n6", "db_query", {"kb_id": "k", "mode": "sql", "sql": "S"}))
+    assert out["items"] == [{"a": 1}, {"a": 2}]
+
+
+def test_kb_search_emits_docs_as_items():
+    ctx = FakeCtx(kb_results=[{"text": "d1", "source": "s1", "score": 0.9}])
+    out = handle_kb_search(ctx, _node("n5", "kb_search", {"kb_id": "k", "query": "q"}))
+    assert out["items"][0]["source"] == "s1"
+
+
+def test_condition_passes_items_through():
+    ctx = FakeCtx()
+    ctx.current_upstream = {"n1": {"text": "x", "items": [{"a": 1}]}}
+    out = handle_condition(ctx, _node("n4", "condition", {"op": "eq", "value": "x"}))
+    assert out["_route"] == [0]
+    assert out["items"] == [{"a": 1}]
 
 
 def test_agent_resolves_providers_from_supplemental_connections():
@@ -229,9 +259,9 @@ def test_condition_schema_form_field_op_value():
     ctx.current_upstream = {"n1": {"text": "7"}}
     node = _node("n3", "condition", {"field": "{{inputs.n1.text}}", "op": "gt", "value": "5", "on_true": "big", "on_false": "small"})
     out = handle_condition(ctx, node)
-    assert out == {"text": "7", "branch": "big", "_route": [0]}
+    assert out == {"text": "7", "branch": "big", "_route": [0], "items": [{"text": "7"}]}
     node2 = _node("n3", "condition", {"field": "", "op": "gt", "value": "10", "on_true": "big", "on_false": "small"})
-    assert handle_condition(ctx, node2) == {"text": "7", "branch": "small", "_route": [1]}
+    assert handle_condition(ctx, node2) == {"text": "7", "branch": "small", "_route": [1], "items": [{"text": "7"}]}
 
 
 def test_switch_routes_to_first_matching_case():
