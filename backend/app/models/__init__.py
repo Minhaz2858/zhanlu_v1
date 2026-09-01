@@ -48,6 +48,7 @@ from app.models.marketplace_rating import MarketplaceRating
 from app.models.skill_run import SkillRun
 from app.models.agent_invocation import AgentInvocation
 from app.models.agent_test_case import AgentTestCase
+from app.models.workflow_run import WorkflowRun, WorkflowRunStep
 from app.models.skill_test_case import SkillTestCase
 from app.models.artifact_build_manifest import ArtifactBuildManifest
 from app.models.datasource import Datasource
