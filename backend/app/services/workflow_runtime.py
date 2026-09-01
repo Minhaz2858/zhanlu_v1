@@ -16,6 +16,7 @@ run_workflow_agent() orchestrates: validate -> persist WorkflowRun ->
 execute_flow_graph -> persist per-node WorkflowRunStep -> final status.
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -77,20 +78,23 @@ class WorkflowExecutionContext:
         trigger_input: str,
         created_by_id: str | None = None,
         on_event: Callable[[dict], None] | None = None,
+        run_id: str | None = None,
+        trigger: str = "chat",
     ):
         self.db = db
         self.org_id = org_id
         self.app_id = app_id
         self.agent = agent
         self.trigger_input = trigger_input
+        self.trigger = trigger
         self.created_by_id = created_by_id
         self.on_event = on_event or (lambda ev: None)
         self.outputs: dict[str, Any] = {}
-        self.run_id = str(uuid.uuid4())
+        self.run_id = run_id or str(uuid.uuid4())
         self.run = WorkflowRun(
             id=self.run_id,
             agent_app_id=agent.id,
-            trigger="chat",
+            trigger=trigger,
             status="running",
             created_by_id=created_by_id,
             org_id=org_id,
@@ -145,7 +149,8 @@ class WorkflowExecutionContext:
     def llm_complete(self, prompt: str, model: str | None = None) -> str:
         return _sync_text_completion(prompt, model)
 
-    def run_agent(self, agent_id: str, input_text: str) -> dict:
+    def run_agent(self, agent_id: str, input_text: str, model: str | None = None,
+                  extra_context: str | None = None) -> dict:
         agent = self.db.query(AgentApp).filter(
             AgentApp.id == agent_id,
             AgentApp.is_deleted.is_(False),
@@ -157,7 +162,9 @@ class WorkflowExecutionContext:
             agent.prompt_reasoning, agent.prompt_tools, agent.prompt_output,
         ] if p]
         system = "\n\n".join(parts) or "You are a helpful assistant."
-        text = self.llm_complete(f"{system}\n\n{input_text}", model=agent.model)
+        if extra_context:
+            system = f"{system}\n\n{extra_context}"
+        text = self.llm_complete(f"{system}\n\n{input_text}", model=model or agent.model)
         return {"text": text}
 
     def run_tool(self, tool_id: str, input_text: str) -> dict:
@@ -186,6 +193,170 @@ class WorkflowExecutionContext:
         chunks = rag_retriever.retrieve(query, n_results=top_k, collection=collection)
         return [{"text": c.text, "source": c.source, "score": c.score} for c in chunks]
 
+    def db_query(self, kb_id: str, query: str, mode: str = "sql", limit: int = 50) -> dict:
+        """Run SQL (or translate a NL question) against a database connector.
+
+        NL mode builds a schema summary from the connector's own metadata,
+        has the LLM produce the SQL, then executes it — so both modes go
+        through the same dialect-aware, read-only execute() path.
+        """
+        from app.models.knowledge_base import KnowledgeBase
+        from app.services.db.connector_factory import get_connector
+
+        kb = self.db.query(KnowledgeBase).filter(
+            KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted.is_(False),
+        ).first()
+        if kb is None:
+            raise RuntimeError(f"database connector {kb_id!r} not found")
+        if not kb.db_type:
+            raise RuntimeError(f"connector {kb.name!r} is not a database connector")
+
+        with get_connector(kb) as conn:
+            sql = query.strip()
+            if mode == "nl":
+                sql = self._translate_to_sql(conn, query)
+            rows = conn.execute(sql, max_rows=max(limit, 1), timeout_s=30)
+
+        if not rows:
+            text = "0 rows returned."
+        else:
+            text = "\n".join(
+                json.dumps(r, ensure_ascii=False, default=str) for r in rows
+            )
+        return {"text": text, "rows": rows}
+
+    def _translate_to_sql(self, conn, question: str) -> str:
+        """NL → SQL using the connector's own schema (no hardcoded tables)."""
+        tables = conn.list_tables()[:25]
+        schema_parts = []
+        for t in tables:
+            try:
+                cols = conn.describe_table(t)
+            except Exception:  # noqa: BLE001
+                continue
+            schema_parts.append(f"{t}(" + ", ".join(c["name"] for c in cols[:40]) + ")")
+        schema = "\n".join(schema_parts) or "(no tables accessible)"
+        prompt = (
+            "You translate natural-language questions into READ-ONLY SQL "
+            f"for this database schema:\n{schema}\n\n"
+            f"Question: {question}\n\n"
+            "Return ONLY the SQL statement (no markdown fences, no explanation). "
+            "Use LIMIT 100. Never write UPDATE/INSERT/DELETE/DDL."
+        )
+        sql = self.llm_complete(prompt).strip()
+        sql = sql.removeprefix("```sql").removeprefix("```").removesuffix("```").strip()
+        if not sql.lower().lstrip().startswith("select"):
+            raise RuntimeError(f"NL query did not produce a SELECT: {sql[:120]!r}")
+        return sql
+
+    def mcp_call(self, server_id: str, tool_name: str, arguments: dict) -> dict:
+        """Invoke a tool on a connected MCP server (stdio JSON-RPC)."""
+        from app.models.mcp_server import McpServer
+        from app.services.tool_handlers.mcp_proxy import call_mcp_tool
+
+        server = self.db.query(McpServer).filter(
+            McpServer.id == server_id, McpServer.is_deleted.is_(False),
+        ).first()
+        if server is None:
+            raise RuntimeError(f"MCP server {server_id!r} not found")
+        return call_mcp_tool(server.server_url, tool_name, arguments)
+
+    def run_code(self, code: str, item: dict, timeout: int = 10) -> dict:
+        """Run user Python in a restricted sandbox (thread + timeout).
+
+        Available names: json, math, len, str, int, float, bool, list, dict,
+        range, abs, min, max, sum, round, isinstance, print, and `input`
+        (the upstream item dict). NO __import__ (import statements fail),
+        no open/eval/exec, no filesystem/network. Script must assign `output`.
+        """
+        import threading
+
+        safe_builtins = {
+            "len": len, "str": str, "int": int, "float": float,
+            "bool": bool, "list": list, "dict": dict, "range": range,
+            "enumerate": enumerate, "zip": zip, "abs": abs, "min": min,
+            "max": max, "sum": sum, "round": round, "isinstance": isinstance,
+            "Exception": Exception, "ValueError": ValueError,
+            "TypeError": TypeError, "KeyError": KeyError,
+            "True": True, "False": False, "None": None, "print": print,
+        }
+        restricted = {
+            "__builtins__": safe_builtins,
+            "json": json,
+            "math": __import__("math"),
+            "input": item,
+        }
+        box: dict = {}
+        def _run():
+            try:
+                exec(compile(code, "<code>", "exec"), restricted, box)
+            except Exception as exc:  # noqa: BLE001
+                box["_error"] = repr(exc)
+        t = threading.Thread(target=_run, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            return {"success": False, "text": f"Code timed out after {timeout}s"}
+        if "_error" in box:
+            return {"success": False, "text": f"Code error: {box['_error']}"}
+        if "output" not in box:
+            return {"success": False, "text": "Code must assign an `output` variable"}
+        out = box["output"]
+        try:
+            json.dumps(out)
+        except TypeError:
+            return {"success": False, "text": "output is not JSON-serializable"}
+        if isinstance(out, dict):
+            return {"success": True, "text": json.dumps(out, ensure_ascii=False), "items": [out]}
+        if isinstance(out, list):
+            return {"success": True, "text": json.dumps(out, ensure_ascii=False), "items": out}
+        return {"success": True, "text": str(out), "items": [{"value": out}]}
+
+    def http_request(
+        self,
+        method: str,
+        url: str,
+        headers: list | None = None,
+        body: str | None = None,
+        timeout: int = 15,
+        auth_type: str = "none",
+        bearer_token: str = "",
+        response_format: str = "auto",
+    ) -> dict:
+        """Call a REST API with httpx (sync — executor already runs in a worker)."""
+        import httpx
+
+        hdrs = {h["key"]: str(h["value"]) for h in (headers or []) if h.get("key")}
+        if auth_type == "bearer" and bearer_token:
+            hdrs["Authorization"] = f"Bearer {bearer_token}"
+        data = None
+        if method != "GET" and body and body.strip():
+            try:
+                data = json.loads(body)
+            except json.JSONDecodeError:
+                data = body
+        try:
+            resp = httpx.request(
+                method, url, headers=hdrs,
+                json=data if isinstance(data, dict) else None,
+                content=data if isinstance(data, str) else None,
+                timeout=timeout, follow_redirects=True,
+            )
+        except Exception as exc:  # noqa: BLE001
+            return {"text": f"HTTP error: {exc}", "items": [], "status": 0, "success": False}
+        text = resp.text[:1_000_000]
+        items = None
+        if response_format != "text" and resp.headers.get("content-type", "").startswith("application/json"):
+            try:
+                parsed = json.loads(text)
+                items = parsed if isinstance(parsed, list) else [parsed]
+            except json.JSONDecodeError:
+                items = None
+        if items is None:
+            items = [{"body": text, "status": resp.status_code}]
+        ok = 200 <= resp.status_code < 300
+        return {"text": text, "items": items, "status": resp.status_code, "success": ok}
+
 
 def _flow_dict(flow: Any) -> dict:
     """agent_apps.flow is a JSON column typed list|None — our format is a dict."""
@@ -200,6 +371,8 @@ def run_workflow_agent(
     trigger_input: str,
     created_by_id: str | None = None,
     on_event: Callable[[dict], None] | None = None,
+    run_id: str | None = None,
+    trigger: str = "chat",
 ) -> dict[str, Any]:
     """Validate + execute a flow_mode agent. Returns {status, error, output}."""
     flow = _flow_dict(agent.flow)
@@ -208,7 +381,8 @@ def run_workflow_agent(
         return {"status": "failed", "error": "; ".join(errors), "output": None}
     ctx = WorkflowExecutionContext(
         db, org_id, app_id, agent, trigger_input,
-        created_by_id=created_by_id, on_event=on_event,
+        created_by_id=created_by_id, on_event=on_event, run_id=run_id,
+        trigger=trigger,
     )
     try:
         result = execute_flow_graph(flow, ctx, NODE_HANDLERS)

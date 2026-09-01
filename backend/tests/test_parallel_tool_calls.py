@@ -43,9 +43,27 @@ class TestSupportsParallelToolCalls:
                   "anthropic/claude-3-5-sonnet"]:
             assert svc._supports_parallel_tool_calls(m) is False, m
 
+    def test_qwen_models_supported(self):
+        for m in ["qwen3.6-27b", "qwen-turbo", "qwen-plus", "qwen-max",
+                  "dashscope/qwen-max"]:
+            assert svc._supports_parallel_tool_calls(m) is True, m
+
+    def test_kimi_moonshot_models_supported(self):
+        for m in ["kimi-k2", "moonshot-v1-8k", "moonshot/kimi-k2-0711-preview",
+                  "KIMI-K2-TURBO"]:
+            assert svc._supports_parallel_tool_calls(m) is True, m
+
+    def test_minimax_models_supported(self):
+        for m in ["minimax-m2", "MiniMax-M1", "minimax/M2"]:
+            assert svc._supports_parallel_tool_calls(m) is True, m
+
+    def test_glm_zhipu_models_supported(self):
+        for m in ["glm-4-plus", "glm-4.5", "zhipu/glm-4.5-air"]:
+            assert svc._supports_parallel_tool_calls(m) is True, m
+
     def test_unknown_models_rejected(self):
         # Conservative: if we don't recognise the model, we DON'T inject.
-        for m in ["qwen3.6-27b", "llama-3-70b", "mistral-large", ""]:
+        for m in ["llama-3-70b", "mistral-large", ""]:
             assert svc._supports_parallel_tool_calls(m) is False, m
 
 
@@ -136,6 +154,48 @@ class TestPayloadInjection:
     def test_flag_on_unknown_model_does_not_inject(self, monkeypatch):
         """Conservative default: unrecognised models get no injection."""
         payload = self._capture_payload(
+            monkeypatch, "llama-3-70b", flag_value=True,
+        )
+        assert "parallel_tool_calls" not in payload
+
+    def test_flag_on_qwen_model_injects_true(self, monkeypatch):
+        payload = self._capture_payload(
             monkeypatch, "qwen3.6-27b", flag_value=True,
         )
+        assert payload.get("parallel_tool_calls") is True
+
+    def test_flag_on_kimi_model_injects_true(self, monkeypatch):
+        payload = self._capture_payload(
+            monkeypatch, "kimi-k2", flag_value=True,
+        )
+        assert payload.get("parallel_tool_calls") is True
+
+
+# ── shared-helper tests ────────────────────────────────────────────────────
+
+class TestMaybeEnableParallelToolCalls:
+    """The shared helper every payload site must route through
+    (llm_service.call_llm, sub_agent_reliability, agents.py main loop).
+    """
+
+    def test_flag_off_payload_unchanged(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", False)
+        payload = {"model": "deepseek-chat", "messages": []}
+        out = svc.maybe_enable_parallel_tool_calls(payload, "deepseek-chat")
+        assert out is payload
+        assert "parallel_tool_calls" not in payload
+
+    def test_flag_on_supported_injects_true(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", True)
+        payload = {"model": "qwen3.6-27b", "messages": []}
+        svc.maybe_enable_parallel_tool_calls(payload, "qwen3.6-27b")
+        assert payload.get("parallel_tool_calls") is True
+
+    def test_flag_on_anthropic_unchanged(self, monkeypatch):
+        from app.config import settings
+        monkeypatch.setattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", True)
+        payload = {"model": "claude-sonnet-4", "messages": []}
+        svc.maybe_enable_parallel_tool_calls(payload, "claude-sonnet-4")
         assert "parallel_tool_calls" not in payload

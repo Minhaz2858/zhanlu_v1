@@ -167,3 +167,49 @@ class TestChunkTextMode:
         text = "Hello world. " * 50
         out = chunk_text(text, max_tokens=30, overlap=5, mode="chinese")
         assert len(out) >= 1
+
+
+class TestSingleParagraphOverlapRegression:
+    """Regression: overlap was applied as a SENTENCE count in _sub_split,
+    which exploded chunk output ~100x for long single-paragraph docs (each
+    flush re-emitted the whole sentence tail). Overlap must be word-based."""
+
+    def test_long_single_paragraph_does_not_explode(self):
+        filler = (
+            "This is routine logistics documentation for warehouse "
+            "operations. Nothing unusual here, just inventory movements "
+            "and standard shipping procedures. "
+        )
+        text = (filler * 900) + "\n\nCONFIDENTIAL ANNEX: The ZEPHYR-9 code is 7734.\n"
+        chunks = chunk_text(text, max_tokens=800, overlap=100)
+        assert 0 < len(chunks) < 100  # was ~1700 before the fix
+        joined = "".join(c["text"] for c in chunks)
+        # Overlap redundancy must stay small, not ~140x.
+        assert len(joined) < len(text) * 3
+        # The tail (facts at the end) must survive chunking.
+        assert any("ZEPHYR-9" in c["text"] for c in chunks)
+        # Sequential indices.
+        assert [c["index"] for c in chunks] == list(range(len(chunks)))
+
+
+class TestSingleParagraphOverlapRegression:
+    """Regression: overlap was applied as a SENTENCE count in _sub_split,
+    which exploded chunk output ~100x for long single-paragraph docs (each
+    flush re-emitted the whole sentence tail). Overlap must be word-based."""
+
+    def test_long_single_paragraph_does_not_explode(self):
+        filler = (
+            "This is routine logistics documentation for warehouse "
+            "operations. Nothing unusual here, just inventory movements "
+            "and standard shipping procedures. "
+        )
+        text = (filler * 900) + "\n\nCONFIDENTIAL ANNEX: The ZEPHYR-9 code is 7734.\n"
+        chunks = chunk_text(text, max_tokens=800, overlap=100)
+        assert 0 < len(chunks) < 100  # was ~1700 before the fix
+        joined = "".join(c["text"] for c in chunks)
+        # Overlap redundancy must stay small, not ~140x.
+        assert len(joined) < len(text) * 3
+        # The tail (facts at the end) must survive chunking.
+        assert any("ZEPHYR-9" in c["text"] for c in chunks)
+        # Sequential indices.
+        assert [c["index"] for c in chunks] == list(range(len(chunks)))

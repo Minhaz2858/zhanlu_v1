@@ -214,6 +214,78 @@ def handle_mcp_tool(ctx, node):
     return {"text": text, "success": False, "tool": tool_name, "items": [{"text": text}]}
 
 
+def handle_http_request(ctx, node):
+    config = node["data"].get("config") or {}
+    url = _render(config.get("url", ""), ctx)
+    headers = []
+    for h in config.get("headers") or []:
+        headers.append({"key": _render(str(h.get("key", "")), ctx), "value": _render(str(h.get("value", "")), ctx)})
+    body = _render(config.get("body", ""), ctx)
+    bearer = _render(config.get("bearer_token", ""), ctx)
+    result = ctx.http_request(
+        config.get("method", "GET"), url, headers=headers, body=body,
+        timeout=int(config.get("timeout", 15)),
+        auth_type=config.get("auth_type", "none"), bearer_token=bearer,
+        response_format=config.get("response_format", "auto"),
+    )
+    return {
+        "text": result.get("text", ""),
+        "items": result.get("items") or [],
+        "status": result.get("status", 0),
+        "success": result.get("success", False),
+    }
+
+
+def handle_code(ctx, node):
+    config = node["data"].get("config") or {}
+    code = _render(config.get("code", ""), ctx)
+    upstream_id = _upstream_id(ctx, node)
+    item = first_item(ctx, upstream_id) if upstream_id else {"text": ""}
+    result = ctx.run_code(code, item, timeout=int(config.get("timeout", 10)))
+    if result.get("success"):
+        return {"text": result.get("text", ""), "items": result.get("items", []), "success": True}
+    return {"text": result.get("text", "Code failed"), "items": [], "success": False}
+
+
+def handle_set_fields(ctx, node):
+    config = node["data"].get("config") or {}
+    items = [dict(it) for it in all_items(ctx, _upstream_id(ctx, node))]
+    for it in items:
+        for f in config.get("fields") or []:
+            if f.get("name"):
+                it[f["name"]] = _render(str(f.get("value", "")), ctx)
+    return {"text": _json_summary(items), "items": items}
+
+
+def handle_split_out(ctx, node):
+    config = node["data"].get("config") or {}
+    field = _render(config.get("field", "items"), ctx)
+    item_field = config.get("item_field", "item")
+    out_items: list[dict] = []
+    for it in all_items(ctx, _upstream_id(ctx, node)):
+        arr = it.get(field)
+        if isinstance(arr, list) and arr:
+            for elem in arr:
+                out_items.append({**it, item_field: elem})
+        else:
+            out_items.append(it)
+    return {"text": _json_summary(out_items), "items": out_items}
+
+
+def handle_remove_duplicates(ctx, node):
+    config = node["data"].get("config") or {}
+    field = _render(config.get("field", "id"), ctx)
+    seen: set[str] = set()
+    out_items: list[dict] = []
+    for it in all_items(ctx, _upstream_id(ctx, node)):
+        key = str(it.get(field, ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        out_items.append(it)
+    return {"text": _json_summary(out_items), "items": out_items}
+
+
 def _eval_op(value: str, op: str, target: str) -> bool:
     try:
         if op == "gt":
@@ -325,6 +397,11 @@ NODE_HANDLERS = {
     "kb_search": handle_kb_search,
     "db_query": handle_db_query,
     "mcp_tool": handle_mcp_tool,
+    "http_request": handle_http_request,
+    "code": handle_code,
+    "set_fields": handle_set_fields,
+    "split_out": handle_split_out,
+    "remove_duplicates": handle_remove_duplicates,
     "condition": handle_condition,
     "switch": handle_switch,
     "output": handle_output,
