@@ -6208,6 +6208,11 @@ async def add_message(
     # skill-creation template (EN/ZH/structural), so the LLM uses the
     # correct toolset instead of misfiring on ask_data_agent.
     _route_to_dedicated_system_agent(conv, user_content, user_role, db)
+    # Capture the user id as a plain string NOW — the auth dependency's User
+    # instance can be detached/expired after the early user-message commit
+    # below, and the workflow branch touches created_by_id after it. Passing
+    # the ORM object there raises DetachedInstanceError.
+    _wf_user_id = str(user.id)
     user_model_v2: str | None = body.get("model")
     # FIX 2026-08-23: extract selected skill from chip so
     # _build_selected_skill_runtime_block can inject SKILL.md
@@ -6319,7 +6324,7 @@ async def add_message(
     # current turn — the helper excludes it from the injected history.
     if agent_app and agent_app.flow_mode:
         from app.services.workflow_chat import run_workflow_for_chat
-        wf_result = run_workflow_for_chat(db, conv, agent_app, user_content, user)
+        wf_result = run_workflow_for_chat(db, conv, agent_app, user_content, user_id=_wf_user_id)
         _wf_assistant_msg = {
             "id": str(uuid.uuid4()),
             "role": "assistant",
@@ -10782,6 +10787,11 @@ async def add_message_stream(
     # when the user pastes an automation-setup / agent-creation /
     # skill-creation template (EN/ZH/structural).
     _route_to_dedicated_system_agent(conv, user_content, user_role, db)
+    # Capture the user id as a plain string NOW — the auth dependency's User
+    # instance can be detached/expired after the early user-message commit
+    # below, and the workflow stream generator touches created_by_id after
+    # it. Passing the ORM object there raises DetachedInstanceError.
+    _wf_user_id = str(user.id)
     selected_skill = body.get("selected_skill") if isinstance(body.get("selected_skill"), dict) else None
     selected_skill_id = body.get("selected_skill_id") or (selected_skill or {}).get("id")
     if selected_skill and selected_skill_id and not selected_skill.get("id"):
@@ -10925,7 +10935,7 @@ async def add_message_stream(
 
         async def _workflow_stream():
             try:
-                wf_result = run_workflow_for_chat(db, conv, _wf_agent_app, user_content, user)
+                wf_result = run_workflow_for_chat(db, conv, _wf_agent_app, user_content, user_id=_wf_user_id)
             except Exception as _wf_err:  # noqa: BLE001 — stream error, not a crash
                 logger.exception("v3 workflow chat run failed (conv=%s)", conversation_id)
                 try:
@@ -10948,23 +10958,40 @@ async def add_message_stream(
                 "content": wf_result["content"] or "",
                 "created_date": datetime.now(timezone.utc).isoformat(),
             }
-            conv.messages = list((conv.messages or []) + [_wf_msg])
-            conv.updated_date = datetime.now(timezone.utc)
+            # Persist via a FRESH session. By the time the stream
+            # generator runs, the request-scoped session's ``conv``
+            # instance is no longer tracked (observed: state.session is
+            # not the request db, dirty=0, db.get returns a different
+            # instance) — committing on it silently flushes nothing.
+            # Reloading the row in a new session — the same pattern the
+            # data-source runtime uses when the request db is in an
+            # aborted state — guarantees the assistant message lands in
+            # the DB. The done event then carries the authoritative row.
+            _conv_dict = None
             try:
-                db.commit()
-            except Exception:
-                db.rollback()
-            try:
-                db.refresh(conv)
-            except Exception:
-                pass
+                from sqlalchemy.orm import sessionmaker as _wf_sessionmaker
+                _wf_db = _wf_sessionmaker(bind=db.get_bind())()
+                try:
+                    _row = _wf_db.query(AgentConversation).filter(
+                        AgentConversation.id == conversation_id
+                    ).first()
+                    if _row:
+                        _row.messages = list((_row.messages or []) + [_wf_msg])
+                        _row.updated_date = datetime.now(timezone.utc)
+                        _wf_db.commit()
+                        _wf_db.refresh(_row)
+                        _conv_dict = _row.to_dict()
+                finally:
+                    _wf_db.close()
+            except Exception as _wf_persist_err:  # noqa: BLE001
+                logger.exception("v3 workflow chat persist failed (conv=%s)", conversation_id)
             yield (
                 "data: "
                 + json.dumps({
                     "type": "done",
                     "content": wf_result["content"] or "",
                     "trace": [],
-                    "conversation": conv.to_dict(),
+                    "conversation": _conv_dict or conv.to_dict(),
                 })
                 + "\n\n"
             )

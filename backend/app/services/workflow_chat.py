@@ -43,10 +43,15 @@ def build_history(messages, exclude_content: str | None = None) -> list[dict]:
     return turns[-MAX_HISTORY_TURNS:]
 
 
-def run_workflow_for_chat(db, conv, agent_app, user_content, user) -> dict:
+def run_workflow_for_chat(db, conv, agent_app, user_content, user_id: str | None = None) -> dict:
     """Run a flow_mode agent from the chat path.
 
     Returns ``{"content": str, "status": "completed"|"failed", "run_id": str|None}``.
+
+    ``user_id`` must be a plain string, NOT an ORM User instance: the
+    auth dependency's User can be detached/expired by the time the
+    stream generator runs (the early user-message commit expires
+    attributes), and touching it raises DetachedInstanceError.
     """
     flow = agent_app.flow if isinstance(agent_app.flow, dict) else {}
     if not has_chat_trigger(flow):
@@ -61,7 +66,7 @@ def run_workflow_for_chat(db, conv, agent_app, user_content, user) -> dict:
         agent_app.app_id or "default-app",
         agent_app,
         user_content,
-        created_by_id=getattr(user, "id", None),
+        created_by_id=user_id,
         trigger="chat",
         history=build_history(getattr(conv, "messages", None) or [], exclude_content=user_content),
     )

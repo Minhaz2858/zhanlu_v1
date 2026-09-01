@@ -7,7 +7,6 @@ in-memory engine, direct function calls, no TestClient.
 import sys
 import os
 import uuid
-from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import create_engine
@@ -42,10 +41,6 @@ def db():
         yield s
     finally:
         s.close()
-
-
-def _user(uid="user-1"):
-    return SimpleNamespace(id=uid)
 
 
 def _workflow_agent(db, *, trigger="trigger_chat", aid=None, name="chat wf"):
@@ -114,7 +109,7 @@ def test_run_workflow_for_chat_completed_with_history(db, monkeypatch):
         {"role": "user", "content": "earlier question"},
         {"role": "assistant", "content": "earlier answer"},
     ])
-    out = wc.run_workflow_for_chat(db, conv, agent, "current question", _user())
+    out = wc.run_workflow_for_chat(db, conv, agent, "current question", user_id="user-1")
     assert out["status"] == "completed"
     assert out["content"] == "workflow-answer"
     assert out["run_id"]
@@ -130,7 +125,7 @@ def test_run_workflow_for_chat_completed_with_history(db, monkeypatch):
 def test_run_workflow_for_chat_no_chat_trigger(db):
     agent = _workflow_agent(db, trigger="trigger_manual")
     conv = _conv(db, agent, [])
-    out = wc.run_workflow_for_chat(db, conv, agent, "hi", _user())
+    out = wc.run_workflow_for_chat(db, conv, agent, "hi", user_id="user-1")
     assert out["status"] == "failed"
     assert "no Chat Trigger" in out["content"]
     assert out["run_id"] is None
@@ -144,7 +139,7 @@ def test_run_workflow_for_chat_failure_reports_error(db, monkeypatch):
     monkeypatch.setattr(wfr, "_sync_text_completion", boom)
     agent = _workflow_agent(db)
     conv = _conv(db, agent, [])
-    out = wc.run_workflow_for_chat(db, conv, agent, "hi", _user())
+    out = wc.run_workflow_for_chat(db, conv, agent, "hi", user_id="user-1")
     assert out["status"] == "failed"
     assert "Workflow failed" in out["content"]
     assert "llm provider down" in out["content"]
