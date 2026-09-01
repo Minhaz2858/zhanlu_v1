@@ -1,0 +1,1 @@
+# Synexia cognitive core package

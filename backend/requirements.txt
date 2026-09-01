@@ -1,0 +1,73 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+sqlalchemy==2.0.36
+alembic==1.14.0
+psycopg2-binary==2.9.10
+psycopg[binary]==3.2.3
+pydantic==2.10.4
+pydantic-settings==2.7.1
+pyjwt==2.10.1
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.20
+bcrypt==4.2.1
+httpx==0.28.1
+python-docx>=1.1.0
+python-pptx>=0.6.23
+matplotlib>=3.8,<3.11
+# Redis client (sandbox queue + prestart health check)
+redis==5.2.0
+# MinIO client (optional — artifact blob storage)
+minio==7.2.10
+# Async PostgreSQL driver
+asyncpg==0.30.0
+# Artifact export renderers (Task 6 — artifact-export skills)
+reportlab>=4.0,<6.0
+openpyxl>=3.1,<4.0
+pillow>=10.0,<14.0
+# Docker SDK (sandbox container execution)
+docker>=7.0,<8.0
+# ── DB drivers (pre-installed so lazy_deps.ensure() is a no-op) ────
+# The connectors in app/services/db/ call lazy_deps.ensure(feature) on
+# first use. We pre-install these so the on-first-query pip install
+# (which would hit default PyPI and time out on slow networks) is never
+# triggered.
+pymysql>=1.1
+cryptography>=41.0
+psycopg2-binary>=2.9,<3.0
+pyodbc>=5.0
+# cx-Oracle>=8.3  # only needed if an Oracle data source is configured
+# jsonschema (used by several validators) — also pre-installed
+jsonschema>=4.0
+# DOCX → HTML preview (Task 1 — docx inline preview)
+mammoth==1.8.0
+# NL2SQL dependencies
+sqlglot>=25.0,<27.0
+# ── Pre-installed lazy deps (avoid PyPI fallback on first use) ─────
+PyYAML>=6.0    # skill_manager
+mcp>=1.0       # mcp
+# cron expression parser used by automation_dispatcher for next_run_at()
+croniter>=2.0.0,<4.0
+# ── Document RAG (KB file source_kind) ─────────────────────────────
+chromadb>=0.5.0,<0.7.0
+sentence-transformers>=3.0,<5.0
+pypdf>=4.0,<6.0
+markdown>=3.5,<5.0
+# ── Chat file upload ingestion (Phase 1/2) ─────────────────────────
+# HTML extraction for .html/.htm uploads
+beautifulsoup4>=4.12,<5.0
+# Image OCR for png/jpg/webp/scanned PDFs (binary also needs Tesseract
+# installed on the host — see install_binary / apt-get tesseract-ocr).
+# When unavailable, _extract_image returns "" and the multimodal LLM
+# path takes over, so this is a soft dependency.
+pytesseract>=0.3.10
+# ── Forecasting Engine (Section 2) ──────────────────────────────────
+pandas>=2.0,<3.0
+numpy>=1.26,<3.0
+statsmodels>=0.14,<1.0
+scikit-learn>=1.4,<2.0
+xgboost>=2.0,<3.0
+# ── CAD Agent (Fusion 360) ──────────────────────────────────────────
+# Engineering-drawing DXF generation (fusion360_make_drawing). Lazily
+# imported with a graceful error if missing, but install it for the
+# drawing tool to work.
+ezdxf>=1.4

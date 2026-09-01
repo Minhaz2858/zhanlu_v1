@@ -1,0 +1,228 @@
+{
+  "name": "UserSetting",
+  "type": "object",
+  "properties": {
+    "language": {
+      "type": "string",
+      "enum": [
+        "zh",
+        "en"
+      ],
+      "default": "zh"
+    },
+    "timezone": {
+      "type": "string",
+      "default": "Asia/Shanghai"
+    },
+    "date_format": {
+      "type": "string",
+      "enum": [
+        "YYYY-MM-DD",
+        "DD/MM/YYYY",
+        "MM/DD/YYYY"
+      ],
+      "default": "YYYY-MM-DD"
+    },
+    "context_length": {
+      "type": "number",
+      "default": 10
+    },
+    "default_model": {
+      "type": "string",
+      "default": "automatic"
+    },
+    "fallback_model": {
+      "type": "string",
+      "default": "gpt_5_mini"
+    },
+    "max_tokens": {
+      "type": "number",
+      "default": 4096
+    },
+    "temperature": {
+      "type": "number",
+      "default": 0.7
+    },
+    "file_upload_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "session_retention_days": {
+      "type": "number",
+      "default": 30
+    },
+    "voice_interaction_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "voice_language": {
+      "type": "string",
+      "default": "zh-CN"
+    },
+    "sso_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "mfa_required": {
+      "type": "boolean",
+      "default": true
+    },
+    "rbac_mode": {
+      "type": "string",
+      "enum": [
+        "flat",
+        "hierarchical",
+        "abac"
+      ],
+      "default": "hierarchical"
+    },
+    "session_timeout_minutes": {
+      "type": "number",
+      "default": 60
+    },
+    "password_min_length": {
+      "type": "number",
+      "default": 12
+    },
+    "compute_quota": {
+      "type": "number",
+      "default": 1000
+    },
+    "kb_storage_limit": {
+      "type": "number",
+      "default": 5000
+    },
+    "agent_call_limit": {
+      "type": "number",
+      "default": 500
+    },
+    "task_count_limit": {
+      "type": "number",
+      "default": 50
+    },
+    "gpu_quota": {
+      "type": "number",
+      "default": 100
+    },
+    "api_rate_limit": {
+      "type": "number",
+      "default": 1000
+    },
+    "data_masking": {
+      "type": "boolean",
+      "default": true
+    },
+    "pii_detection": {
+      "type": "boolean",
+      "default": true
+    },
+    "encryption_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "third_party_whitelist": {
+      "type": "string",
+      "default": ""
+    },
+    "ip_whitelist": {
+      "type": "string",
+      "default": ""
+    },
+    "audit_logging": {
+      "type": "boolean",
+      "default": true
+    },
+    "audit_retention_days": {
+      "type": "number",
+      "default": 180
+    },
+    "compliance_mode": {
+      "type": "string",
+      "enum": [
+        "standard",
+        "strict",
+        "regulated"
+      ],
+      "default": "strict"
+    },
+    "data_residency": {
+      "type": "string",
+      "default": "cn"
+    },
+    "data_quality_check": {
+      "type": "boolean",
+      "default": true
+    },
+    "lineage_tracking": {
+      "type": "boolean",
+      "default": true
+    },
+    "data_retention_policy": {
+      "type": "string",
+      "default": "365"
+    },
+    "monitoring_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "log_level": {
+      "type": "string",
+      "enum": [
+        "debug",
+        "info",
+        "warn",
+        "error"
+      ],
+      "default": "info"
+    },
+    "tracing_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "alerting_enabled": {
+      "type": "boolean",
+      "default": true
+    },
+    "monthly_budget": {
+      "type": "number",
+      "default": 10000
+    },
+    "cost_alert_threshold": {
+      "type": "number",
+      "default": 80
+    },
+    "usage_analytics": {
+      "type": "boolean",
+      "default": true
+    },
+    "api_key_rotation_days": {
+      "type": "number",
+      "default": 90
+    },
+    "webhook_url": {
+      "type": "string",
+      "default": ""
+    },
+    "sdk_access_enabled": {
+      "type": "boolean",
+      "default": false
+    },
+    "cluster_region": {
+      "type": "string",
+      "default": "cn-east-1"
+    },
+    "auto_scaling": {
+      "type": "boolean",
+      "default": true
+    },
+    "maintenance_window": {
+      "type": "string",
+      "default": "02:00-04:00"
+    },
+    "backup_schedule": {
+      "type": "string",
+      "default": "daily"
+    }
+  },
+  "required": []
+}

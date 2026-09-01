@@ -1,0 +1,65 @@
+# Default policy pack — baseline rules for all Synexia FSM executions
+#
+# Evaluated at GATE (whole-plan) and ACT (per-node) states.
+
+name: default
+version: "1.0"
+description: Baseline policy rules for all executions
+
+rules:
+  # Low-risk tasks are always allowed
+  - id: allow_low_risk
+    condition: "risk_tier == 'low'"
+    decision: allow
+    description: "Low-risk tasks are auto-approved"
+
+  # Medium-risk tasks require user confirmation
+  - id: confirm_medium_risk
+    condition: "risk_tier == 'medium'"
+    decision: require_confirm
+    description: "Medium-risk tasks require user confirmation"
+
+  # High-risk tasks require explicit approval
+  - id: deny_high_risk_without_approval
+    condition: "risk_tier == 'high' and not has_approval"
+    decision: deny
+    description: "High-risk tasks require explicit approval"
+
+  # Sandbox execution always elevates risk
+  - id: sandbox_elevates_risk
+    condition: "has_sandbox and risk_tier == 'low'"
+    decision: require_confirm
+    description: "Sandbox execution elevates risk to medium"
+
+# Risk assessment rules
+risk_assessment:
+  low:
+    - "task_kind in ['answer_question', 'general']"
+    - "complexity == 'simple'"
+    - "no sandbox nodes"
+    - "no system configuration"
+
+  medium:
+    - "task_kind == 'create_artifact'"
+    - "has sandbox nodes"
+    - "complexity == 'moderate'"
+    - "requires_data == true"
+
+  high:
+    - "task_kind == 'configure_system'"
+    - "requires_confirmation on any node"
+    - "complexity == 'complex' and has_sandbox"
+
+# Per-node rules (evaluated at ACT state)
+node_rules:
+  - condition: "node_type == 'nl2sql'"
+    decision: allow
+    description: "Read-only data queries are always allowed"
+
+  - condition: "node_type == 'sandbox' and plan_approved"
+    decision: allow
+    description: "Sandbox execution approved at gate level"
+
+  - condition: "node_type == 'sandbox' and not plan_approved"
+    decision: deny
+    description: "Sandbox execution requires plan approval first"

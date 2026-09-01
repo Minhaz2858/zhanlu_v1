@@ -1,0 +1,71 @@
+{
+  "name": "ChatMessage",
+  "type": "object",
+  "properties": {
+    "session_id": {
+      "type": "string"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "user",
+        "assistant"
+      ]
+    },
+    "content": {
+      "type": "string"
+    },
+    "order": {
+      "type": "number",
+      "default": 0
+    },
+    "trace": {
+      "type": "array",
+      "description": "\u52a9\u624b\u56de\u590d\u7684\u6267\u884c\u8ffd\u8e2a\u6b65\u9aa4\uff08\u4ec5\u5f53\u667a\u80fd\u4f53\u542f\u7528\u53ef\u8ffd\u6eaf\u65f6\u751f\u6210\uff09",
+      "items": {
+        "type": "object",
+        "properties": {
+          "step": {
+            "type": "number"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "thinking",
+              "tool",
+              "output"
+            ]
+          },
+          "title": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "success",
+              "failed",
+              "skipped"
+            ],
+            "default": "success"
+          },
+          "duration_ms": {
+            "type": "number"
+          }
+        },
+        "required": [
+          "step",
+          "type",
+          "title"
+        ]
+      }
+    }
+  },
+  "required": [
+    "session_id",
+    "role",
+    "content"
+  ]
+}

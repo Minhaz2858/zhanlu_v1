@@ -1,0 +1,164 @@
+{
+  "name": "Sales Performance Dashboard",
+  "slug": "sales-performance-live",
+  "description": "Chinese BI style, Live revenue, order volume, regional split and top-product trends from the bound business database",
+  "theme": "dark",
+  "style": "standard",
+  "refresh_interval_seconds": 30,
+  "design_system_ref": "design-system/C5_C9/MASTER.md",
+  "design": {},
+  "metrics": [
+    {
+      "id": "kpi_revenue",
+      "title": "实时销售额",
+      "type": "kpi",
+      "options": {
+        "compare_label": "2026年至今",
+        "precision": 0,
+        "unit": "¥"
+      }
+    },
+    {
+      "id": "kpi_orders",
+      "title": "订单量",
+      "type": "kpi",
+      "options": {
+        "compare_label": "2026年至今",
+        "precision": 0,
+        "unit": "单"
+      }
+    },
+    {
+      "id": "kpi_qty",
+      "title": "销量",
+      "type": "kpi",
+      "options": {
+        "compare_label": "2026年至今",
+        "precision": 1,
+        "unit": "吨"
+      }
+    },
+    {
+      "id": "kpi_avg_order",
+      "title": "客单价",
+      "type": "kpi",
+      "options": {
+        "compare_label": "单均成交额",
+        "precision": 0,
+        "unit": "¥"
+      }
+    },
+    {
+      "id": "trend_revenue",
+      "title": "月度销售趋势",
+      "type": "area",
+      "options": {
+        "stacked": false,
+        "x": "month",
+        "y": "revenue",
+        "delta": 123.07,
+        "deltaLabel": "vs prev. period",
+        "_locked": {
+          "current": 348986022.3273,
+          "previous": 156444806.9482
+        }
+      }
+    },
+    {
+      "id": "trend_daily",
+      "title": "日销售趋势",
+      "type": "line",
+      "options": {
+        "x": "day",
+        "y": "revenue",
+        "delta": -13.34,
+        "deltaLabel": "vs prev. period",
+        "_locked": {
+          "current": 10396200.0,
+          "previous": 11996600.0
+        }
+      }
+    },
+    {
+      "id": "split_org",
+      "title": "区域销售占比",
+      "type": "pie",
+      "options": {
+        "label": "org",
+        "value": "revenue",
+        "topItem": {
+          "label": "惠州伊斯科",
+          "value": 1814050075.0719,
+          "share_pct": 78.6
+        }
+      }
+    },
+    {
+      "id": "top_materials",
+      "title": "TOP10 产品销售额",
+      "type": "bar",
+      "options": {
+        "horizontal": true,
+        "x": "material",
+        "y": "revenue",
+        "topItem": {
+          "label": "异戊二烯",
+          "value": 509887532.5906,
+          "share_pct": 22.4
+        }
+      }
+    },
+    {
+      "id": "top_customers",
+      "title": "TOP10 客户",
+      "type": "table",
+      "options": {
+        "topItem": {
+          "label": "中国石化化工销售有限公司华中分公司",
+          "value": 294861494.05,
+          "share_pct": 23.4
+        }
+      }
+    },
+    {
+      "id": "region_trend",
+      "title": "区域月度对比",
+      "type": "combo",
+      "options": {
+        "series": "org",
+        "x": "month",
+        "y": "revenue",
+        "delta": -85.45,
+        "deltaLabel": "vs prev. period",
+        "_locked": {
+          "current": 36182700.0,
+          "previous": 248657330.6588
+        }
+      }
+    }
+  ],
+  "filters": [],
+  "insights": [
+    {
+      "body": "截至2026年8月，累计销售额约23.08亿元，其中惠州伊斯科贡献约78.6%的营收（18.14亿），广东伊斯科约20.2%（4.67亿）。",
+      "title": "2026年累计销售额"
+    },
+    {
+      "body": "TOP3产品（异戊二烯、工业用裂解碳五、碳五石油树脂）合计贡献超12.8亿元，占全年营收的55%以上，产品结构集中风险需关注。",
+      "title": "主力产品集中度高"
+    },
+    {
+      "title": "📈 月度销售趋势",
+      "body": "月度销售趋势 moved 123.1% up vs the previous period (locked server-side from the live datasource at build time)."
+    },
+    {
+      "title": "📉 日销售趋势",
+      "body": "日销售趋势 moved 13.3% down vs the previous period (locked server-side from the live datasource at build time)."
+    },
+    {
+      "title": "🏆 Top: 惠州伊斯科",
+      "body": "惠州伊斯科 leads with 1,814,050,075 (78.6% of the total)."
+    }
+  ],
+  "layout": []
+}

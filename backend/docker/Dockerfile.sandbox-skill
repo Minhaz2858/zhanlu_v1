@@ -1,0 +1,66 @@
+# Prebuilt SKILL sandbox image — unified image for the skill-driven
+# document-generation runner.  Combines:
+#   - Python 3.11 + all Python-based document libraries (python-docx,
+#     openpyxl, python-pptx, reportlab, markitdown, ...)
+#   - Node.js 20 + npm (for the docx-js and pptxgenjs workflows)
+#   - LibreOffice (for HTML→PPTX conversion and DOCX↔PDF fallback)
+#   - Poppler / pdftoppm (for thumbnail generation during visual
+#     validation)
+#
+# Based on zhanlu-sandbox-office so we inherit the proven base layers
+# (Aliyun apt/pip mirrors, Python data-science stack) without redeclaring
+# them here.
+FROM zhanlu-sandbox-office:latest
+
+# ── Re-apply Aliyun mirror (defensive — parent already sets it) ─────────
+RUN rm -rf /var/lib/apt/lists 2>/dev/null; rm -rf /var/cache/apt/archives 2>/dev/null; mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial \
+    && sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+    && apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        gnupg \
+        poppler-utils \
+    && apt-get clean && rm -rf /var/lib/apt/lists
+
+# ── Install Node.js 20 (LTS) ──────────────────────────────────────────────
+# Use NodeSource's official setup script with Aliyun as the upstream to
+# avoid slow downloads from nodesource.com inside China.
+RUN curl -fsSL https://mirrors.aliyun.com/nodesource/deb_20.x \
+        -o /tmp/nodesource_setup.sh \
+    && bash /tmp/nodesource_setup.sh \
+    && apt-get update && apt-get install -y --no-install-recommends nodejs \
+    && apt-get clean && rm -rf /var/lib/apt/lists /tmp/nodesource_setup.sh \
+    && node --version && npm --version
+
+# ── Configure npm to use the Taobao mirror ────────────────────────────────
+RUN npm config set registry https://registry.npmmirror.com \
+    && npm config set fetch-retries 3 \
+    && npm config set fetch-timeout 60000
+
+# ── Install the Node skill libraries globally ────────────────────────────
+#   docx         — the docx-js library used by the docx SKILL.md workflow
+#   pptxgenjs    — PPTX generation from the html2pptx pipeline
+#   sharp        — image processing (thumbnails, image embedding)
+#   pptx-automizer / html2pptx — bundled in skill bundle, not in image
+RUN npm install -g \
+        docx@^9 \
+        pptxgenjs@^3.12 \
+        sharp@^0.33 \
+    && npm cache clean --force
+
+# ── Install additional Python libraries used by the runner ───────────────
+#   markitdown    — Markdown extraction for validation
+#   defusedxml    — safe XML parsing of generated OOXML for sanity checks
+#   pillow already present
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
+        markitdown \
+        defusedxml \
+    && pip cache purge
+
+# ── Runtime directories ──────────────────────────────────────────────────
+RUN mkdir -p /input /output /skill /tmp /var/run
+
+# ── Working directory + default command ──────────────────────────────────
+WORKDIR /output
+CMD ["python", "/skill/run.py"]

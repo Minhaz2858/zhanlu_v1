@@ -1,0 +1,45 @@
+{
+  "name": "McpServer",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "description": {
+      "type": "string"
+    },
+    "server_url": {
+      "type": "string"
+    },
+    "transport": {
+      "type": "string",
+      "enum": [
+        "stdio",
+        "sse",
+        "streamable"
+      ],
+      "default": "sse"
+    },
+    "status": {
+      "type": "string",
+      "enum": [
+        "connected",
+        "disconnected",
+        "error"
+      ],
+      "default": "disconnected"
+    },
+    "tools_count": {
+      "type": "number",
+      "default": 0
+    },
+    "resources_count": {
+      "type": "number",
+      "default": 0
+    }
+  },
+  "required": [
+    "name",
+    "server_url"
+  ]
+}

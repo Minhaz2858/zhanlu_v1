@@ -1,0 +1,43 @@
+# Prebuilt Python sandbox image — base for all Python-based skills
+# Includes common data science and document generation libraries
+
+FROM python:3.11-slim
+
+# ── Use Aliyun mirror for apt (faster than Tuna in most regions) ───────
+# deb.debian.org and security.debian.org → mirrors.aliyun.com
+# (python:3.11-slim is Debian bookworm, uses DEB822 sources format.)
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+    /etc/apt/sources.list.d/debian.sources
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    curl \
+    && apt-get clean && rm -rf /var/lib/apt/lists
+
+# Install Python libraries for data processing and artifact generation
+# ── Use Aliyun PyPI mirror ───────────────────────────────────────────
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
+    python-pptx \
+    python-docx \
+    openpyxl \
+    xlsxwriter \
+    pandas \
+    matplotlib \
+    seaborn \
+    plotly \
+    markdown \
+    jinja2 \
+    Pillow \
+    PyMuPDF \
+    reportlab
+
+# Create directories for input/output
+RUN mkdir -p /input /output /skill /tmp
+
+# Set working directory
+WORKDIR /output
+
+# Default entrypoint (overridden by skill-specific commands)
+CMD ["python", "/skill/run.py"]

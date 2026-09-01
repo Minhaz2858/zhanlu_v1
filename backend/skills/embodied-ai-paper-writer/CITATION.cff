@@ -1,0 +1,34 @@
+cff-version: 1.2.0
+message: "If this skill helped your writing, please cite this repository."
+title: "Embodied AI Paper Writer: A portable agent skill for crafting top-conference robotics papers"
+abstract: >
+  A portable agent skill (SKILL.md + reference playbooks) distilled from 63
+  top-conference papers across CoRL, RSS, ICRA, IROS, and Science Robotics
+  (2022–2026), covering writing craft only: vocabulary, sentence patterns,
+  paragraph flow, figure/table conventions, section-by-section construction,
+  rhetorical pivots, and appendix norms. Works with any LLM agent that can
+  load markdown context. Built using the Nuwa skill-distillation methodology.
+authors:
+  - family-names: Ge
+    given-names: Haizhou
+    alias: OpenGHz
+type: software
+version: "0.1.0"
+date-released: 2026-05-25
+license: MIT
+repository-code: "https://github.com/OpenGHz/embodied-ai-paper-writer"
+keywords:
+  - agent-skill
+  - llm-skill
+  - claude-skill
+  - system-prompt
+  - prompt-engineering
+  - academic-writing
+  - embodied-ai
+  - robotics
+  - paper-writing
+  - corl
+  - rss
+  - icra
+  - iros
+  - science-robotics

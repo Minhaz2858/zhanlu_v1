@@ -1,0 +1,81 @@
+# ── Zhanlu — gitignore ──────────────────────────────────────────────
+
+# Environment secrets (keep only .env.example)
+.env
+.env.*
+!.env.example
+*.env.local
+*.env.production
+*.env.bak*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual envs
+venv/
+.venv/
+venv.broken/
+env/
+
+# Node
+node_modules/
+.pnpm-store/
+
+# Build outputs
+dist/
+dist-ssr/
+dist-new/
+dist_old/
+dist.bak*/
+dist.old*/
+dist.backup*/
+
+# SQLite databases
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# Runtime data
+agent_workspace/
+ohmo/
+uploads/
+tool_artifacts/
+outputs/
+logs/
+*.log
+backend/data/chroma/
+backend/data/hf_cache/
+backend/data/generated/
+backend/data/uploads/
+infra/minio/data/
+
+# Test artifacts
+test-results/
+playwright-report/
+.playwright-cli/
+e2e/.auth/
+*.snap.yaml
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*.swn
+
+# Agent tool state
+.codebuddy/
+.hermes/
+.superpowers/
+.workbuddy/
+.worktrees/

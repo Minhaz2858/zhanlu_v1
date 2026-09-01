@@ -1,0 +1,100 @@
+{
+  "name": "botanical-garden",
+  "description": "A fresh and organic theme featuring vibrant garden-inspired colors for lively presentations.",
+  "best_for": [
+    "Food presentations",
+    "Farm-to-table content",
+    "Botanical brands",
+    "Natural products"
+  ],
+  "colors": {
+    "light": {
+      "primary": "#3a6a49",
+      "secondary": "#f9a620",
+      "surface": "#f5f3ed",
+      "background": "#ffffff",
+      "text": "#1a2e22",
+      "text_muted": "#5a6b5e",
+      "border": "#d4d0c4",
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "error": "#dc2626",
+      "info": "#0ea5e9"
+    },
+    "dark": {
+      "primary": "#6ba87a",
+      "secondary": "#fbbf24",
+      "surface": "#1a2e22",
+      "background": "#0f1a14",
+      "text": "#e8f0e5",
+      "text_muted": "#94a3b8",
+      "border": "#2d4a36",
+      "success": "#22c55e",
+      "warning": "#fbbf24",
+      "error": "#ef4444",
+      "info": "#38bdf8"
+    }
+  },
+  "fonts": {
+    "heading": "Merriweather",
+    "body": "Inter",
+    "mono": "JetBrains Mono"
+  },
+  "typography": {
+    "heading_scale": [
+      2.5,
+      2.0,
+      1.5,
+      1.25,
+      1.0
+    ],
+    "body_size": "16px",
+    "line_height": "1.6"
+  },
+  "spacing": {
+    "unit": 4,
+    "scale": [
+      0,
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ]
+  },
+  "radius": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "full": 9999
+  },
+  "shadows": {
+    "sm": "0 1px 2px rgba(0,0,0,0.05)",
+    "md": "0 4px 6px rgba(0,0,0,0.07)",
+    "lg": "0 10px 15px rgba(0,0,0,0.1)"
+  },
+  "source_palette": {
+    "origin": "anthropics/theme-factory",
+    "colors": [
+      {
+        "name": "Fern Green",
+        "hex": "#4a7c59"
+      },
+      {
+        "name": "Marigold",
+        "hex": "#f9a620"
+      },
+      {
+        "name": "Terracotta",
+        "hex": "#b7472a"
+      },
+      {
+        "name": "Cream",
+        "hex": "#f5f3ed"
+      }
+    ]
+  }
+}

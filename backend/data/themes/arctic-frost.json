@@ -1,0 +1,100 @@
+{
+  "name": "arctic-frost",
+  "description": "A cool and crisp winter-inspired theme conveying clarity, precision, and professionalism.",
+  "best_for": [
+    "Healthcare presentations",
+    "Technology solutions",
+    "Clean tech",
+    "Pharmaceutical content"
+  ],
+  "colors": {
+    "light": {
+      "primary": "#3a5a8f",
+      "secondary": "#7b9ccc",
+      "surface": "#d4e4f7",
+      "background": "#fafafa",
+      "text": "#1e293b",
+      "text_muted": "#475569",
+      "border": "#cbd5e1",
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "error": "#dc2626",
+      "info": "#0ea5e9"
+    },
+    "dark": {
+      "primary": "#7b9ccc",
+      "secondary": "#4a6fa5",
+      "surface": "#1e293b",
+      "background": "#0f172a",
+      "text": "#f1f5f9",
+      "text_muted": "#8b9abb",
+      "border": "#334155",
+      "success": "#22c55e",
+      "warning": "#fbbf24",
+      "error": "#ef4444",
+      "info": "#38bdf8"
+    }
+  },
+  "fonts": {
+    "heading": "Inter",
+    "body": "Inter",
+    "mono": "JetBrains Mono"
+  },
+  "typography": {
+    "heading_scale": [
+      2.5,
+      2.0,
+      1.5,
+      1.25,
+      1.0
+    ],
+    "body_size": "16px",
+    "line_height": "1.6"
+  },
+  "spacing": {
+    "unit": 4,
+    "scale": [
+      0,
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ]
+  },
+  "radius": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "full": 9999
+  },
+  "shadows": {
+    "sm": "0 1px 2px rgba(0,0,0,0.05)",
+    "md": "0 4px 6px rgba(0,0,0,0.07)",
+    "lg": "0 10px 15px rgba(0,0,0,0.1)"
+  },
+  "source_palette": {
+    "origin": "anthropics/theme-factory",
+    "colors": [
+      {
+        "name": "Ice Blue",
+        "hex": "#d4e4f7"
+      },
+      {
+        "name": "Steel Blue",
+        "hex": "#4a6fa5"
+      },
+      {
+        "name": "Silver",
+        "hex": "#c0c0c0"
+      },
+      {
+        "name": "Crisp White",
+        "hex": "#fafafa"
+      }
+    ]
+  }
+}

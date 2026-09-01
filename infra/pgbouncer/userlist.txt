@@ -1,0 +1,4 @@
+# This file is informational only — the edoburu/pgbouncer Docker image
+# auto-generates userlist.txt from DB_USER / DB_PASSWORD environment variables.
+# The docker-compose.yml sets DB_USER=zhanlu_app for least-privilege access.
+"zhanlu_app" "zhanlu_app_secret_replace_in_production"

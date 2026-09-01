@@ -1,0 +1,234 @@
+# ── Zhanlu Stack ───────────────────────────────────────────────────────
+# Full local stack — PostgreSQL, Redis, MinIO, backend, sandbox-worker.
+#   docker compose up -d                             # or: make up
+#
+# Usage:
+#   make up          Build + start full stack
+#   make logs        Tail all service logs
+#   make down        Stop and remove containers
+#   make down-v      Stop + remove containers + delete volumes
+#
+# Security note: /var/run/docker.sock is mounted ONLY on sandbox-worker.
+# The backend and all other services do NOT have Docker access.
+
+services:
+  # ── Backend ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: docker/backend.Dockerfile
+    image: zhanlu-backend:latest
+    container_name: zhanlu-backend
+    env_file: .env
+    ports:
+      - "${BACKEND_PORT:-5002}:5002"
+    volumes:
+      - ./backend:/app:cached
+      - ./scripts:/app/scripts:cached
+      - ~/.cache/chroma:/home/zhanlu/.cache/chroma:cached  # Persist ChromaDB model cache across restarts
+      # FIX 2026-08-29: persist user-created personal skills (source=user,
+      # written to ~/.zhanlu/skills) across container recreations.
+      - zhanlu_user_skills:/home/zhanlu/.zhanlu/skills
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    networks:
+      - app_net
+      - data_net
+    # Memory: limit backend to 4g (Chromium + Python + uvicorn + torch for RAG).
+    # Disable --reload in prestart.sh unless explicitly asked.
+    deploy:
+      resources:
+        limits:
+          memory: 4g
+    command: ["./scripts/prestart.sh"]
+
+  # ── Sandbox Worker ──────────────────────────────────────────────────
+  # Polls Redis queue, spawns Docker containers from sandbox images.
+  # Only service allowed to mount /var/run/docker.sock.
+  sandbox-worker:
+    build:
+      context: ./backend
+      dockerfile: docker/sandbox-worker.Dockerfile
+    image: zhanlu-sandbox-worker:latest
+    container_name: zhanlu-sandbox-worker
+    # Host docker.sock group id on Linux servers is usually 994 (docker
+    # group). On macOS Docker Desktop the socket presents as root:root, so
+    # the non-root worker also needs gid 0 to open it. group_add 0 is a
+    # no-op security-wise here: a worker with docker.sock access is already
+    # host-root-equivalent; the spawned sandboxes stay fully sandboxed.
+    group_add:
+      - "994"
+      - "0"
+    env_file: .env
+    environment:
+      PYTHONPATH: ""
+      SANDBOX_LLM_PROXY_SOCKET: "/tmp/zhanlu_sandbox/llm-proxy/zhanlu-llm-proxy.sock"
+      SANDBOX_LLM_PROXY_SOCKET_IN_CONTAINER: "/var/run/llm-proxy.sock"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # Live backend code (bind-mounted, same as the backend service) so
+      # the worker picks up code changes — e.g. prepare_input_package's
+      # skill_bundle handling for the skills `run` action — without an
+      # image rebuild.
+      - ./backend:/app:cached
+      # Host bind mount (NOT a named volume): job workspaces written here
+      # must be visible to the host Docker daemon, which resolves bind-mount
+      # sources for spawned sandbox containers on the host filesystem.
+      # The worker discovers the host path via `docker inspect` (DooD).
+      - ./data/sandbox_tmp:/tmp/zhanlu_sandbox
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - app_net
+      - data_net
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  # ── PostgreSQL ──────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: zhanlu-postgres
+    env_file: .env
+    ports:
+      - "5400:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    networks:
+      - data_net
+    # Limit PG memory: shared_buffers will be auto-tuned within this cap.
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-zhanlu} -d ${POSTGRES_DB:-zhanlu}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  # ── Redis ───────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: zhanlu-redis
+    command: redis-server /usr/local/etc/redis/redis.conf
+    ports:
+      - "6300:6379"
+    volumes:
+      - redis_data:/data
+      - ./infra/redis/redis.conf:/usr/local/etc/redis/redis.conf:ro
+    networks:
+      - data_net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 3s
+
+  # ── MinIO ───────────────────────────────────────────────────────────
+  minio:
+    image: minio/minio:latest
+    container_name: zhanlu-minio
+    command: server /data --console-address ":9001"
+    env_file: .env
+    ports:
+      - "9400:9000"
+      - "9401:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - data_net
+    deploy:
+      resources:
+        limits:
+          memory: 256m
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+
+  # MinIO init — creates the zhanlu-artifacts bucket once.
+  minio-init:
+    image: minio/mc:latest
+    container_name: zhanlu-minio-init
+    env_file: .env
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - data_net
+    volumes:
+      - ./infra/minio/init.sh:/init.sh:ro
+    entrypoint: ["sh", "/init.sh"]
+
+  # ── Sandbox images ──────────────────────────────────────────────────
+  # Built and tagged locally so sandbox-worker can spawn containers.
+  # These services exit immediately after building — they exist only as
+  # Docker images, not as running containers.
+  # Build order matters: python first (office/pptx FROM python).
+  sandbox-python:
+    image: zhanlu-sandbox-python:latest
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.sandbox-python
+    command: ["echo", "sandbox-python image ready"]
+
+  sandbox-office:
+    image: zhanlu-sandbox-office:latest
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.sandbox-office
+    command: ["echo", "sandbox-office image ready"]
+    depends_on:
+      sandbox-python:
+        condition: service_completed_successfully
+
+  sandbox-pptx:
+    image: zhanlu-sandbox-pptx:latest
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.sandbox-pptx
+    command: ["echo", "sandbox-pptx image ready"]
+    depends_on:
+      sandbox-python:
+        condition: service_completed_successfully
+
+  sandbox-webapp:
+    image: zhanlu-sandbox-webapp:latest
+    build:
+      context: ./backend
+      dockerfile: docker/Dockerfile.sandbox-webapp
+    command: ["echo", "sandbox-webapp image ready"]
+
+# ── Networks ──────────────────────────────────────────────────────────
+# app_net  — backend ↔ sandbox-worker (internal service communication)
+# data_net — backend/postgres/redis/minio (data layer isolation)
+networks:
+  app_net: {}
+  data_net: {}
+
+# ── Volumes ───────────────────────────────────────────────────────────
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  sandbox_tmp:
+  # FIX 2026-08-29: user-created personal skills (written by create_skill /
+  # write_skill_md to ~/.zhanlu/skills inside the container) previously lived
+  # in the container's ephemeral layer and vanished on every `docker compose
+  # down`/recreate. Named volume keeps personal skills durable across deploys.
+  zhanlu_user_skills:

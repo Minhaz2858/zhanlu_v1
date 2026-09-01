@@ -1,0 +1,159 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zhanlu.dev/schemas/skill-manifest.json",
+  "title": "Skill Manifest",
+  "description": "A manifest.yaml declaring a skill package's metadata, inputs, outputs, and runtime requirements.",
+  "type": "object",
+  "required": ["name", "version"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Unique skill identifier (slug).",
+      "pattern": "^[a-z0-9][a-z0-9._-]*$",
+      "minLength": 1,
+      "maxLength": 100
+    },
+    "display_name": {
+      "type": "string",
+      "description": "Human-readable name for UI display.",
+      "maxLength": 200
+    },
+    "version": {
+      "type": "string",
+      "description": "SemVer version string.",
+      "pattern": "^\\d+\\.\\d+\\.\\d+(-[a-zA-Z0-9._-]+)?(\\+[a-zA-Z0-9._-]+)?$"
+    },
+    "description": {
+      "type": "string",
+      "description": "Full description of what the skill does.",
+      "maxLength": 5000
+    },
+    "summary": {
+      "type": "string",
+      "description": "Short summary for compact prompt injection (≤500 chars).",
+      "maxLength": 500
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "license": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "category": {
+      "type": "string",
+      "description": "Category for grouping in UI.",
+      "maxLength": 100
+    },
+    "tags": {
+      "type": "array",
+      "items": {"type": "string", "maxLength": 100},
+      "uniqueItems": true
+    },
+    "platforms": {
+      "type": "array",
+      "items": {"type": "string", "enum": ["mac", "windows", "linux", "web"]},
+      "uniqueItems": true
+    },
+    "trigger": {
+      "type": "string",
+      "description": "Natural-language trigger phrase for automatic invocation.",
+      "maxLength": 500
+    },
+    "runtime": {
+      "type": "string",
+      "description": "Runtime environment requirement (e.g. 'node', 'python311').",
+      "maxLength": 50
+    },
+    "user_invocable": {
+      "type": "boolean",
+      "description": "Whether the user can invoke this skill directly.",
+      "default": true
+    },
+    "source": {
+      "type": "string",
+      "enum": ["bundled", "user", "marketplace", "generated"],
+      "default": "bundled"
+    },
+    "artifact_types": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Artifact types this skill can produce (pptx, docx, etc.)."
+    },
+    "compatible_formats": {
+      "type": "array",
+      "items": {"type": "string"},
+      "description": "Output formats this skill is compatible with (pptx, docx, pdf, xlsx, html). Absent/empty means universal — compatible with every output_format."
+    },
+    "references_manifest": {
+      "type": "object",
+      "description": "Map of reference filename (e.g. 'output-formats.md') to a one-line summary. Reference files live under references/ and are loaded on-demand by the agent.",
+      "additionalProperties": {"type": "string"}
+    },
+    "assets_manifest": {
+      "type": "object",
+      "description": "Map of asset relative path (e.g. 'templates/default-report.docx') to a one-line description. Asset files live under assets/ and are downloaded on-demand.",
+      "additionalProperties": {"type": "string"}
+    },
+    "requires_sandbox": {
+      "type": "boolean",
+      "default": false
+    },
+    "sandbox_image": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "prerequisites": {
+      "type": "object",
+      "description": "External prerequisites (packages, API keys, etc.)."
+    },
+    "trust_level": {
+      "type": "string",
+      "enum": ["untrusted", "community", "verified", "official"],
+      "default": "official"
+    },
+    "entry_point": {
+      "type": "object",
+      "description": "Entry point configuration for the skill.",
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["markdown", "python", "node", "bash"]
+        },
+        "file": {"type": "string"}
+      }
+    },
+    "input_schema": {
+      "$ref": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON Schema for skill input validation."
+    },
+    "output_schema": {
+      "$ref": "https://json-schema.org/draft/2020-12/schema",
+      "description": "JSON Schema for skill output validation."
+    },
+    "validators": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "type": {"type": "string"},
+          "config": {"type": "object"}
+        }
+      },
+      "description": "Post-execution validation checks."
+    },
+    "test_cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "input": {},
+          "expected_output": {}
+        }
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,100 @@
+{
+  "name": "tech-innovation",
+  "description": "A bold and modern theme with high-contrast colors for cutting-edge technology presentations.",
+  "best_for": [
+    "Tech startups",
+    "Software launches",
+    "Innovation showcases",
+    "AI/ML presentations"
+  ],
+  "colors": {
+    "light": {
+      "primary": "#0052cc",
+      "secondary": "#00bcd4",
+      "surface": "#e2e8f0",
+      "background": "#ffffff",
+      "text": "#1e1e1e",
+      "text_muted": "#5a616a",
+      "border": "#cbd5e1",
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "error": "#dc2626",
+      "info": "#0ea5e9"
+    },
+    "dark": {
+      "primary": "#3b82f6",
+      "secondary": "#00bcd4",
+      "surface": "#1e1e1e",
+      "background": "#0d0d0d",
+      "text": "#ffffff",
+      "text_muted": "#9ca3af",
+      "border": "#2d2d2d",
+      "success": "#22c55e",
+      "warning": "#fbbf24",
+      "error": "#ef4444",
+      "info": "#38bdf8"
+    }
+  },
+  "fonts": {
+    "heading": "Inter",
+    "body": "Inter",
+    "mono": "JetBrains Mono"
+  },
+  "typography": {
+    "heading_scale": [
+      2.5,
+      2.0,
+      1.5,
+      1.25,
+      1.0
+    ],
+    "body_size": "16px",
+    "line_height": "1.6"
+  },
+  "spacing": {
+    "unit": 4,
+    "scale": [
+      0,
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ]
+  },
+  "radius": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "full": 9999
+  },
+  "shadows": {
+    "sm": "0 1px 2px rgba(0,0,0,0.05)",
+    "md": "0 4px 6px rgba(0,0,0,0.07)",
+    "lg": "0 10px 15px rgba(0,0,0,0.1)"
+  },
+  "source_palette": {
+    "origin": "anthropics/theme-factory",
+    "colors": [
+      {
+        "name": "Electric Blue",
+        "hex": "#0066ff"
+      },
+      {
+        "name": "Neon Cyan",
+        "hex": "#00ffff"
+      },
+      {
+        "name": "Dark Gray",
+        "hex": "#1e1e1e"
+      },
+      {
+        "name": "White",
+        "hex": "#ffffff"
+      }
+    ]
+  }
+}

@@ -1,0 +1,26 @@
+name: data-viz-design
+display_name: Data Viz Design
+version: 1.0.0
+description: >
+  Choose the right chart type and visual encoding for each metric: chart
+  selection heuristics, token-based color, number formatting, and
+  axis/legend conventions. Compose with dashboard-generation.
+summary: >
+  Chart-type selection (kpi/line/bar/pie/table), visual encoding rules,
+  theme-token colors, number/date formatting, axis/legend conventions.
+category: visualization
+tags:
+  - dashboard
+  - charts
+  - data-visualization
+  - design
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - dashboard
+requires_sandbox: false
+entry_point:
+  type: markdown
+  file: SKILL.md

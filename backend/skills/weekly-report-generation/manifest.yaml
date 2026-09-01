@@ -1,0 +1,34 @@
+name: weekly-report-generation
+display_name: Weekly Market Report
+version: 1.0.0
+description: >
+  Generates a CEO-level weekly market report for C5/C9 petrochemical products.
+  Uses a structured 4-step pipeline: (1) batch market context via
+  ask_perception + ask_intelligence + ask_diagnosis, (2) sales/inventory
+  deep-dive via ask_data_agent, (3) forward view via ask_forecast_agent +
+  ask_pricing, (4) structured markdown synthesis with tables and risk flags.
+  Produces Executive Summary, Price Dashboard, Volume & Sales, Inventory
+  Status, Key Risks & Opportunities, and Forward Outlook sections.
+summary: >
+  Produce a CEO-level weekly market report for C5/C9: batched market context,
+  sales/inventory deep-dive, forecast + pricing, and structured markdown
+  synthesis with tables and risk flags.
+category: reporting
+tags:
+  - reporting
+  - market-analysis
+  - ecisco
+  - c5-c9
+  - weekly
+  - ceo
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - report
+requires_sandbox: false
+trigger: "weekly report, 周报, weekly market report, market report, weekly summary"
+entry_point:
+  type: markdown
+  file: SKILL.md

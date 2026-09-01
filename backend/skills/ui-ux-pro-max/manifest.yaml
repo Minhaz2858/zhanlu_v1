@@ -1,0 +1,28 @@
+name: ui-ux-pro-max
+version: 2.11.0
+description: >
+  AI-powered design intelligence with 192 color palettes, 84 UI styles, 74
+  font pairings, 25 chart types, and 98 UX guidelines across 22 tech stacks.
+  Use this skill BEFORE building any visual artifact (dashboards, HTML pages,
+  slide decks) so the output uses a vetted design system rather than ad-hoc
+  CSS. Backed by a BM25 + regex search engine across 12 domains (style,
+  color, chart, landing, product, ux, typography, google-fonts, icons, gsap,
+  react, web). Companion to build-dashboard — call this first, then build.
+author: NextLevelBuilder
+license: MIT
+category: ui-ux-pro-max
+source: bundled
+requires_sandbox: false
+runtime: python
+tags:
+  - design
+  - ui
+  - ux
+  - dashboard
+  - styling
+  - color-palette
+  - typography
+  - chart-types
+  - accessibility
+artifact_types:
+  - html

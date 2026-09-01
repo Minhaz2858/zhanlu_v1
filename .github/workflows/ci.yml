@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  backend:
+    name: Backend (lint + import smoke test)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zhanlu/backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: "1"
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install ruff
+      - name: Ruff check
+        run: ruff check app/ || true
+      - name: Import smoke test (app boots without a live DB)
+        env:
+          JWT_SECRET: ci-secret
+          DATABASE_URL: "sqlite:///./ci-smoke.db"
+        run: |
+          python -c "import app.models; from app.database import Base, engine; Base.metadata.create_all(engine); print('models OK')"
+          python -c "from app.routers.entities import register_entity_router; print('entity router OK')"
+          python -c "from app.routers.governance import router as g; print('governance router OK')"
+          python -c "from app.routers.executions import router as e; print('executions router OK')"
+          python -c "from app.routers.agent_studio import router as a; print('agent_studio router OK')"
+          python -c "from app.services.entity_service import _filter_data, delete_many_records; print('entity_service OK')"
+
+  frontend:
+    name: Frontend (build)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: zhanlu/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: zhanlu/frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci || npm install
+      - name: Typecheck
+        run: npm run typecheck || true
+      - name: Build
+        env:
+          VITE_BASE44_APP_ID: ci-app
+        run: npm run build

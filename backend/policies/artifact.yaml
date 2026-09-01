@@ -1,0 +1,39 @@
+# Artifact policy pack — rules for artifact-generating tasks
+#
+# Applied when the task_spec has artifact_intents.
+
+name: artifact
+version: "1.0"
+description: Rules for artifact-generating tasks
+
+rules:
+  - id: artifact_requires_snapshot
+    condition: "has_artifact and requires_data and not has_snapshot"
+    decision: require_confirm
+    description: "Data-driven artifacts should cite DataSnapshots"
+
+  - id: artifact_max_versions
+    condition: "version_count > 10"
+    decision: require_confirm
+    description: "More than 10 versions — consider archiving old versions"
+
+  - id: artifact_auto_publish
+    condition: "risk_tier == 'low' and artifact_type in ['md', 'html', 'chart']"
+    decision: allow
+    description: "Low-risk artifact types can be auto-published"
+
+  - id: pptx_requires_validation
+    condition: "artifact_type == 'pptx'"
+    decision: require_confirm
+    description: "PPTX artifacts require validation before publishing"
+
+artifact_rules:
+  # Artifacts must have a preview before being published
+  - condition: "status == 'published' and not has_preview"
+    decision: deny
+    description: "Cannot publish artifact without preview"
+
+  # Artifacts must cite their data sources
+  - condition: "requires_data and not has_snapshot_reference"
+    decision: require_confirm
+    description: "Data-driven artifacts should cite DataSnapshots for provenance"

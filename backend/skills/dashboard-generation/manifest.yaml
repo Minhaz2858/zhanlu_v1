@@ -1,0 +1,29 @@
+name: dashboard-generation
+display_name: Dashboard Generation
+version: 1.1.0
+description: >
+  Design a live database dashboard and build it via the create_dashboard tool.
+  Composes with ui-ux-pro-max (general design research, tool-backed) plus
+  data-viz-design, dashboard-layout-architecture, dashboard-ui-polish, and
+  dashboard-interaction-state for professional zhanlu-token output.
+summary: >
+  Build a live, auto-refreshing DB dashboard via create_dashboard; query
+  ui-ux-pro-max for general design guidance, then load the four dashboard
+  design companions before designing widgets.
+category: visualization
+tags:
+  - dashboard
+  - charts
+  - kpi
+  - live-data
+  - sql
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - dashboard
+requires_sandbox: false
+entry_point:
+  type: markdown
+  file: SKILL.md

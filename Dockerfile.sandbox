@@ -1,0 +1,54 @@
+# Zhanlu Sandbox Image — Python 3.12
+# 
+# This image is used by the sandbox container runner for isolated
+# code execution. It includes commonly needed libraries so skills
+# can do data analysis, report generation, and light ML work.
+#
+# Build:
+#   docker build -t zhanlu-sandbox-python:latest -f Dockerfile.sandbox .
+#
+# Security design:
+#   - Container runs with --network none, --read-only, --cap-drop ALL
+#   - No database credentials are ever passed into the container
+#   - Expected to run as a non-root user (sandboxuser)
+FROM python:3.12-slim
+
+LABEL org.zhanlu.sandbox="python" \
+      org.zhanlu.version="1.0"
+
+# ── Use Aliyun mirror for apt (faster than Tuna) ────────────────────
+# deb.debian.org and security.debian.org → mirrors.aliyun.com
+# (python:3.12-slim is Debian bookworm, uses DEB822 sources format.)
+RUN sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' \
+    /etc/apt/sources.list.d/debian.sources
+
+# Install common data science & document libraries
+# ── Use Aliyun PyPI mirror ────────────────────────────────────────────
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
+    pandas==2.2.* \
+    numpy==1.26.* \
+    openpyxl==3.1.* \
+    python-pptx==0.6.* \
+    python-docx==1.1.* \
+    reportlab==4.* \
+    matplotlib==3.9.* \
+    jinja2==3.1.* \
+    sqlalchemy==2.0.* \
+    pymysql==1.1.* \
+    && rm -rf /root/.cache
+
+# Create a non-root user for execution
+RUN useradd --create-home --shell /bin/bash sandboxuser
+
+# Create writable directories
+RUN mkdir -p /tmp /output && chown sandboxuser:sandboxuser /tmp /output
+
+# Default working directory is the writable output mount
+WORKDIR /output
+
+# Run as sandboxuser
+USER sandboxuser
+
+# Default entrypoint: run a Python script
+ENTRYPOINT ["python"]

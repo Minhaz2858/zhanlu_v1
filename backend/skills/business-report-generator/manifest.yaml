@@ -1,0 +1,30 @@
+name: business-report-generator
+description: >
+  Generates polished business reports (weekly ops, monthly performance, QBR,
+  investor updates) from raw data. Produces an executive summary, structured
+  sections, charts, and a formatted document using the bundled templates.
+version: 1.0.0
+author: zhanlu
+license: MIT
+category: reporting
+tags:
+  - report
+  - business
+  - document
+  - analytics
+trigger: "generate a business report"
+summary: >
+  Turn raw business data into a structured, presentation-ready report with
+  executive summary, charts, and a templated document export.
+runtime: python
+user_invocable: true
+source: bundled
+compatible_formats:
+  - docx
+  - pdf
+  - pptx
+references:
+  - output-formats.md
+  - report-structures.md
+assets:
+  - templates/default-report-template.docx

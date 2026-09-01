@@ -1,0 +1,973 @@
+@import url('https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,600;9..144,900&family=Newsreader:ital,wght@0,300;0,400;0,600;1,400&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/*
+ * Design-token defaults — matching the legacy slate palette so dashboards that
+ * have no persisted design system render exactly as before. When config.design
+ * is present, useDesignTokens.js overwrites these with the ui-ux-pro-max values.
+ */
+:root {
+  --ds-primary: #2563eb;
+  --ds-primary-rgb: 37 99 235;
+  --ds-on-primary: #ffffff;
+  --ds-on-primary-rgb: 255 255 255;
+  --ds-secondary: #64748b;
+  --ds-secondary-rgb: 100 116 139;
+  --ds-accent: #f59e0b;
+  --ds-accent-rgb: 245 158 11;
+  --ds-background: #f8fafc;
+  --ds-background-rgb: 248 250 252;
+  --ds-foreground: #0f172a;
+  --ds-foreground-rgb: 15 23 42;
+  --ds-muted: #f1f5f9;
+  --ds-muted-rgb: 241 245 249;
+  --ds-border: #e2e8f0;
+  --ds-border-rgb: 226 232 240;
+  --ds-destructive: #ef4444;
+  --ds-destructive-rgb: 239 68 68;
+  --ds-ring: #2563eb;
+  --ds-ring-rgb: 37 99 235;
+  --ds-chart-1: #2563eb;
+  --ds-chart-1-rgb: 37 99 235;
+  --ds-chart-2: #10b981;
+  --ds-chart-2-rgb: 16 185 129;
+  --ds-chart-3: #f59e0b;
+  --ds-chart-3-rgb: 245 158 11;
+  --ds-chart-4: #ef4444;
+  --ds-chart-4-rgb: 239 68 68;
+  --ds-chart-5: #8b5cf6;
+  --ds-chart-5-rgb: 139 92 246;
+  --ds-chart-6: #06b6d4;
+  --ds-chart-6-rgb: 6 182 212;
+  --ds-card-radius: 8px;
+  --ds-font-heading: 'Inter', sans-serif;
+  --ds-font-body: 'Inter', sans-serif;
+
+  --ds-background-dark: #020617;
+  --ds-background-dark-rgb: 2 6 23;
+  --ds-foreground-dark: #f8fafc;
+  --ds-foreground-dark-rgb: 248 250 252;
+  --ds-muted-dark: #1e293b;
+  --ds-muted-dark-rgb: 30 41 59;
+  --ds-border-dark: #334155;
+  --ds-border-dark-rgb: 51 65 85;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   LOCKED PROFESSIONAL POLISH (Tier 1, Aug 2026) — server-side defaults.
+   Typographic scale, 8px spacing rhythm, elevation scale, shimmer loading
+   and tabular figures. ui-ux-pro-max design systems may override the COLOR
+   palette, but the SCALE stays locked so every generated board keeps the
+   same professional rhythm regardless of design tokens.
+   ═══════════════════════════════════════════════════════════════════════ */
+:root {
+  /* Typographic scale (modular, ~1.25 ratio) */
+  --text-xs: 0.75rem;     /* 12px — captions, badges, table cells */
+  --text-sm: 0.875rem;    /* 14px — body, section titles */
+  --text-base: 1rem;      /* 16px — card titles */
+  --text-lg: 1.125rem;    /* 18px — sub-values */
+  --text-xl: 1.25rem;     /* 20px — page title */
+  --text-2xl: 1.5rem;     /* 24px */
+  --text-3xl: 1.875rem;   /* 30px */
+  --text-4xl: 2.25rem;    /* 36px — hero KPI */
+
+  /* 8px spacing rhythm — every gap/offset snaps to this grid */
+  --space-1: 0.25rem;
+  --space-2: 0.5rem;
+  --space-3: 0.75rem;
+  --space-4: 1rem;
+  --space-5: 1.25rem;
+  --space-6: 1.5rem;
+  --space-8: 2rem;
+  --space-10: 2.5rem;
+
+  /* Elevation scale — flat (0) → raised (1) → floating (2) → overlay (3) */
+  --shadow-0: none;
+  --shadow-1: 0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-2: 0 4px 6px -1px rgba(15, 23, 42, 0.05), 0 2px 4px -2px rgba(15, 23, 42, 0.05);
+  --shadow-3: 0 10px 22px -4px rgba(15, 23, 42, 0.1), 0 4px 8px -4px rgba(15, 23, 42, 0.06);
+}
+
+/* Card chrome uses the elevation tokens (hover raises one level). */
+.dash-card {
+  box-shadow: var(--shadow-1);
+  transition: box-shadow 200ms ease, border-color 200ms ease;
+}
+.dash-card:hover {
+  box-shadow: var(--shadow-2);
+}
+
+/* Numbers: tabular figures so digits never shift as values tick. Applied to
+   the heading font class AND every .tabular-nums element (Tailwind utility
+   is the same property — this makes it a hard contract even if a widget
+   forgets the class). */
+.font-heading,
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Loading shimmer — moving highlight sweep instead of a flat pulse. */
+@keyframes dash-shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.dash-shimmer {
+  background: linear-gradient(
+    90deg,
+    var(--ds-muted) 0%,
+    var(--ds-muted-shimmer, rgba(100, 116, 139, 0.18)) 40%,
+    var(--ds-muted) 80%
+  );
+  background-size: 800px 100%;
+  animation: dash-shimmer 1.4s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .dash-shimmer { animation: none; }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  @apply bg-background text-foreground;
+}
+
+::selection {
+  background: rgb(var(--ds-primary-rgb) / 0.2);
+}
+
+/* Dark mode: swap the surface palette via the .dark class. */
+.dark {
+  --ds-background: var(--ds-background-dark);
+  --ds-background-rgb: var(--ds-background-dark-rgb);
+  --ds-foreground: var(--ds-foreground-dark);
+  --ds-foreground-rgb: var(--ds-foreground-dark-rgb);
+  --ds-muted: var(--ds-muted-dark);
+  --ds-muted-rgb: var(--ds-muted-dark-rgb);
+  --ds-border: var(--ds-border-dark);
+  --ds-border-rgb: var(--ds-border-dark-rgb);
+}
+
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-thumb {
+  @apply rounded bg-border;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CHINESE BI STYLE (大屏 DataV look) — applied via .chinese-bi on <html>.
+   For China-region customers: dark navy glow background, cyan/gold accent
+   light beams, glowing card borders, Chinese font stack, and the Chinese
+   market convention RED = up / GREEN = down (opposite of Western BI).
+   The .chinese-bi root swaps the design tokens AND overrides the widget
+   delta badge colors (text-emerald-600 = up → red; text-red-500 = down →
+   green) so existing widgets flip semantics automatically.
+   ═══════════════════════════════════════════════════════════════════════ */
+.chinese-bi {
+  --ds-background: #071a33;
+  --ds-background-rgb: 7 26 51;
+  --ds-foreground: #e8f1ff;
+  --ds-foreground-rgb: 232 241 255;
+  --ds-muted: #0f2b52;
+  --ds-muted-rgb: 15 43 82;
+  --ds-border: #1d4477;
+  --ds-border-rgb: 29 68 119;
+  --ds-primary: #22d3ee;
+  --ds-primary-rgb: 34 211 238;
+  --ds-accent: #fbbf24;
+  --ds-accent-rgb: 251 191 36;
+  --ds-secondary: #38bdf8;
+  --ds-secondary-rgb: 56 189 248;
+  --ds-ring: #22d3ee;
+  --ds-ring-rgb: 34 211 238;
+  --ds-card-radius: 10px;
+  --ds-font-heading: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'Source Han Sans SC', sans-serif;
+  --ds-font-body: 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', 'Source Han Sans SC', sans-serif;
+  --ds-muted-shimmer: rgba(56, 189, 248, 0.16);
+  color-scheme: dark;
+}
+
+/* Deep navy gradient + subtle grid + top light beams (大屏 signature) */
+.chinese-bi body,
+.chinese-bi #root {
+  background:
+    radial-gradient(1200px 500px at 20% -10%, rgba(34, 211, 238, 0.12), transparent 60%),
+    radial-gradient(1000px 460px at 85% -15%, rgba(251, 191, 36, 0.08), transparent 55%),
+    linear-gradient(180deg, #071a33 0%, #04101f 100%);
+}
+
+/* Header: glowing title underline + gradient separator */
+.chinese-bi header {
+  border-bottom: 1px solid rgba(34, 211, 238, 0.25);
+  background: linear-gradient(180deg, rgba(34, 211, 238, 0.06), transparent);
+}
+.chinese-bi header h1 {
+  background: linear-gradient(90deg, #22d3ee, #fbbf24);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+
+/* Cards: dark glass + cyan glow border, hover brightens the glow */
+.chinese-bi section[aria-label] {
+  background: linear-gradient(160deg, rgba(15, 43, 82, 0.55), rgba(7, 26, 51, 0.85));
+  border-color: rgba(34, 211, 238, 0.28);
+  box-shadow: 0 0 0 1px rgba(34, 211, 238, 0.06), 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(6px);
+}
+.chinese-bi section[aria-label]:hover {
+  border-color: rgba(34, 211, 238, 0.6);
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.18), 0 12px 32px rgba(0, 0, 0, 0.45);
+}
+
+/* Section headers: cyan accent + wider tracking (仪表盘 section labels) */
+.chinese-bi h2 {
+  letter-spacing: 0.08em;
+}
+
+/* KPI number: cyan glow text (数据大屏 numbers pop on navy) */
+.chinese-bi .font-heading {
+  text-shadow: 0 0 14px rgba(34, 211, 238, 0.35);
+}
+
+/* ── Chinese color semantics: RED = up / GREEN = down ───────────────
+   The widgets render delta badges as emerald (>=0) / red (<0). In China
+   the market convention is inverted, so we swap the rendered colors:
+   emerald (positive/up) → red; red (negative/down) → green.           */
+.chinese-bi .text-emerald-600,
+.chinese-bi .text-emerald-400 {
+  color: #f87171 !important; /* red = up */
+}
+.chinese-bi .text-red-500,
+.chinese-bi .text-red-400 {
+  color: #34d399 !important; /* green = down */
+}
+.chinese-bi .bg-emerald-500\/10,
+.chinese-bi .bg-emerald-100 {
+  background: rgba(248, 113, 113, 0.12) !important;
+}
+.chinese-bi .bg-red-500 {
+  background: #34d399 !important;
+}
+
+/* Top-item callout: gold accent in Chinese BI */
+.chinese-bi div[class*="bg-primary/5"] {
+  background: rgba(251, 191, 36, 0.08) !important;
+  border: 1px solid rgba(251, 191, 36, 0.25);
+}
+.chinese-bi div[class*="bg-primary/5"] span {
+  color: #fbbf24;
+}
+
+/* Live badge stays readable on navy */
+.chinese-bi .bg-emerald-500\/10 {
+  background: rgba(52, 211, 153, 0.15) !important;
+}
+.chinese-bi .bg-emerald-500\/10 .bg-emerald-500 {
+  background: #34d399;
+}
+
+/* Filters: dark inputs on navy */
+.chinese-bi input,
+.chinese-bi select {
+  background: rgba(15, 43, 82, 0.7);
+  border-color: rgba(34, 211, 238, 0.25);
+  color: #e8f1ff;
+}
+
+/* Scrollbars on navy */
+.chinese-bi ::-webkit-scrollbar-thumb {
+  background: #1d4477;
+}
+
+/* Chart grid lines: faint cyan */
+.chinese-bi .recharts-cartesian-grid line {
+  stroke: rgba(34, 211, 238, 0.12);
+}
+.chinese-bi .recharts-default-tooltip {
+  background: #0f2b52 !important;
+  border: 1px solid rgba(34, 211, 238, 0.35) !important;
+}
+
+
+/* ═══════════════════════════════════════════════════════════════════════
+   CEO STYLE (决策中心 · dark petroleum decision center) — applied via
+   .ceo-bi on <html> when spec style="ceo". Ported from the Ecisco CEO
+   Command Center reference: near-black ink palette, amber/gold decision
+   accent, subtle card rims, live-pulse header dot, and an alert-strip
+   treatment for the insight cards (left-border severity rail). Western
+   semantics: GREEN = up / RED = down (opposite of chinese_bi).
+   ═══════════════════════════════════════════════════════════════════════ */
+.ceo-bi {
+  --ds-background: #0B0E14;
+  --ds-background-rgb: 11 14 20;
+  --ds-foreground: #F1F5F9;
+  --ds-foreground-rgb: 241 245 249;
+  --ds-muted: #171C2B;
+  --ds-muted-rgb: 23 28 43;
+  --ds-border: #242B3D;
+  --ds-border-rgb: 36 43 61;
+  --ds-primary: #F0A500;
+  --ds-primary-rgb: 240 165 0;
+  --ds-on-primary: #000000;
+  --ds-on-primary-rgb: 0 0 0;
+  --ds-secondary: #3B82F6;
+  --ds-secondary-rgb: 59 130 246;
+  --ds-accent: #F59E0B;
+  --ds-accent-rgb: 245 158 11;
+  --ds-destructive: #EF4444;
+  --ds-destructive-rgb: 239 68 68;
+  --ds-ring: #F0A500;
+  --ds-ring-rgb: 240 165 0;
+  --ds-chart-1: #F0A500;
+  --ds-chart-1-rgb: 240 165 0;
+  --ds-chart-2: #3B82F6;
+  --ds-chart-2-rgb: 59 130 246;
+  --ds-chart-3: #22C55E;
+  --ds-chart-3-rgb: 34 197 94;
+  --ds-chart-4: #EF4444;
+  --ds-chart-4-rgb: 239 68 68;
+  --ds-chart-5: #8B5CF6;
+  --ds-chart-5-rgb: 139 92 246;
+  --ds-chart-6: #14B8A6;
+  --ds-chart-6-rgb: 20 184 166;
+  --ds-card-radius: 12px;
+  --ds-font-heading: 'Inter', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
+  --ds-font-body: 'Inter', 'Helvetica Neue', 'Microsoft YaHei', sans-serif;
+  --ds-muted-shimmer: rgba(148, 163, 184, 0.16);
+  color-scheme: dark;
+}
+
+/* Petroleum dark backdrop with a faint gold decision glow */
+.ceo-bi body,
+.ceo-bi #root {
+  background:
+    radial-gradient(1100px 420px at 18% -12%, rgba(240, 165, 0, 0.07), transparent 55%),
+    radial-gradient(900px 400px at 88% -10%, rgba(59, 130, 246, 0.06), transparent 50%),
+    linear-gradient(180deg, #0B0E14 0%, #0E1220 100%);
+}
+
+/* Header: sticky decision-bar with gold underline */
+.ceo-bi header {
+  background: rgba(17, 21, 32, 0.92);
+  border-bottom: 1px solid rgba(240, 165, 0, 0.22);
+  backdrop-filter: blur(6px);
+}
+.ceo-bi header h1 {
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--ds-foreground);
+}
+
+/* Cards: ink surfaces with hairline rims, gold glow on hover */
+.ceo-bi section[aria-label] {
+  background: linear-gradient(165deg, #171C2B 0%, #111520 100%);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: var(--ds-card-radius);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.03), 0 8px 24px rgba(0, 0, 0, 0.35);
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.ceo-bi section[aria-label]:hover {
+  border-color: rgba(240, 165, 0, 0.35);
+  box-shadow: 0 0 0 1px rgba(240, 165, 0, 0.08), 0 12px 32px rgba(0, 0, 0, 0.5);
+}
+
+/* Section titles: uppercase tracking, muted steel */
+.ceo-bi h2 {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-size: 0.72rem;
+  color: #94A3B8;
+  font-weight: 600;
+}
+
+/* KPI values: crisp white with gold accent ticker for the headline number */
+.ceo-bi .font-heading {
+  color: #F1F5F9;
+}
+
+/* Insight cards → decision alert strip: left severity rail + gold CTA */
+.ceo-bi div[class*="rounded-card border border-primary/20 bg-primary/5"] {
+  background: rgba(240, 165, 0, 0.06);
+  border: 1px solid rgba(240, 165, 0, 0.28) !important;
+  border-left: 3px solid var(--ds-primary) !important;
+  border-radius: 8px;
+}
+.ceo-bi div[class*="rounded-card border border-primary/20 bg-primary/5"] span,
+.ceo-bi div[class*="rounded-card border border-primary/20 bg-primary/5"] div {
+  color: var(--ds-primary) !important;
+}
+
+/* Tables: mono headers on ink, hairline rows */
+.ceo-bi thead th {
+  background: rgba(23, 28, 43, 0.8);
+  color: #94A3B8;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  font-weight: 600;
+}
+.ceo-bi tbody td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #CBD5E1;
+}
+
+/* Filter inputs: dark ink controls */
+.ceo-bi input,
+.ceo-bi select {
+  background: rgba(23, 28, 43, 0.9);
+  border-color: rgba(255, 255, 255, 0.12);
+  color: #F1F5F9;
+}
+
+/* Scrollbars + chart chrome on ink */
+.ceo-bi ::-webkit-scrollbar-thumb { background: #2D3650; }
+.ceo-bi .recharts-cartesian-grid line { stroke: rgba(255, 255, 255, 0.06); }
+.ceo-bi .recharts-default-tooltip {
+  background: #171C2B !important;
+  border: 1px solid rgba(240, 165, 0, 0.3) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   EDITORIAL STYLE (light print report) — applied via .editorial-bi on
+   <html> when spec style="editorial". Ported from the EDIA Sales Report
+   reference: warm paper background, cream cards, Fraunces serif display,
+   Newsreader body, IBM Plex Mono numerals + labels, hairline rules, and a
+   deep-maroon accent. Reads like a printed executive report.
+   ═══════════════════════════════════════════════════════════════════════ */
+.editorial-bi {
+  --ds-background: #f1ece1;
+  --ds-background-rgb: 241 236 225;
+  --ds-foreground: #1b1813;
+  --ds-foreground-rgb: 27 24 19;
+  --ds-muted: #f6f4ec;
+  --ds-muted-rgb: 246 244 236;
+  --ds-border: #e2d9c8;
+  --ds-border-rgb: 226 217 200;
+  --ds-primary: #7a2e22;
+  --ds-primary-rgb: 122 46 34;
+  --ds-on-primary: #ffffff;
+  --ds-on-primary-rgb: 255 255 255;
+  --ds-secondary: #9a8f7c;
+  --ds-secondary-rgb: 154 143 124;
+  --ds-accent: #c98a2b;
+  --ds-accent-rgb: 201 138 43;
+  --ds-destructive: #b1442f;
+  --ds-destructive-rgb: 177 68 47;
+  --ds-ring: #7a2e22;
+  --ds-ring-rgb: 122 46 34;
+  --ds-chart-1: #7a2e22;
+  --ds-chart-1-rgb: 122 46 34;
+  --ds-chart-2: #2f7d57;
+  --ds-chart-2-rgb: 47 125 87;
+  --ds-chart-3: #c98a2b;
+  --ds-chart-3-rgb: 201 138 43;
+  --ds-chart-4: #b1442f;
+  --ds-chart-4-rgb: 177 68 47;
+  --ds-chart-5: #5a6b8c;
+  --ds-chart-5-rgb: 90 107 140;
+  --ds-chart-6: #8a6d3b;
+  --ds-chart-6-rgb: 138 109 59;
+  --ds-card-radius: 11px;
+  --ds-font-heading: 'Fraunces', Georgia, 'Times New Roman', serif;
+  --ds-font-body: 'Newsreader', Georgia, serif;
+  --ds-muted-shimmer: rgba(122, 46, 34, 0.08);
+  color-scheme: light;
+}
+
+/* Warm paper backdrop */
+.editorial-bi body,
+.editorial-bi #root {
+  background:
+    radial-gradient(900px 400px at 85% -5%, rgba(201, 138, 43, 0.06), transparent 55%),
+    var(--ds-background);
+}
+
+/* Header: editorial masthead with rule underline */
+.editorial-bi header {
+  background: rgba(241, 236, 225, 0.92);
+  border-bottom: 1.5px solid var(--ds-foreground);
+  backdrop-filter: blur(4px);
+}
+.editorial-bi header h1 {
+  font-family: var(--ds-font-heading);
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  color: var(--ds-foreground);
+}
+
+/* Cards: cream paper with hairline rules, no heavy shadows */
+.editorial-bi section[aria-label] {
+  background: #fffdf8;
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-card-radius);
+  box-shadow: none;
+}
+.editorial-bi section[aria-label]:hover {
+  border-color: rgba(122, 46, 34, 0.45);
+}
+
+/* Section titles: mono uppercase labels (report footers style) */
+.editorial-bi h2 {
+  font-family: 'IBM Plex Mono', monospace;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  font-size: 0.68rem;
+  color: #9c9384;
+  font-weight: 600;
+}
+
+/* KPI values: serif display numerals */
+.editorial-bi .font-heading {
+  font-family: var(--ds-font-heading);
+  font-weight: 600;
+}
+
+/* Insight cards → editorial pull-quotes with maroon rail */
+.editorial-bi div[class*="rounded-card border border-primary/20 bg-primary/5"] {
+  background: #f6f4ec;
+  border: 1px solid var(--ds-border) !important;
+  border-left: 3px solid var(--ds-primary) !important;
+  border-radius: 6px;
+}
+.editorial-bi div[class*="rounded-card border border-primary/20 bg-primary/5"] span,
+.editorial-bi div[class*="rounded-card border border-primary/20 bg-primary/5"] div {
+  color: var(--ds-primary) !important;
+}
+
+/* Tables: mono uppercase headers on cream, hairline rows */
+.editorial-bi thead th {
+  background: #f6f4ec;
+  color: #7a7164;
+  border-bottom: 1.5px solid var(--ds-border);
+  font-family: 'IBM Plex Mono', monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+.editorial-bi tbody td {
+  border-bottom: 1px solid #ece4d5;
+  color: #5c5548;
+}
+.editorial-bi tbody td .font-heading,
+.editorial-bi td.font-heading {
+  font-family: 'Fraunces', serif;
+  color: var(--ds-foreground);
+}
+
+/* Filter inputs: paper controls */
+.editorial-bi input,
+.editorial-bi select {
+  background: #fffdf8;
+  border-color: var(--ds-border);
+  color: var(--ds-foreground);
+}
+
+/* Scrollbars + chart chrome on paper */
+.editorial-bi ::-webkit-scrollbar-thumb { background: #d8cfbd; }
+.editorial-bi .recharts-cartesian-grid line { stroke: rgba(122, 46, 34, 0.08); }
+.editorial-bi .recharts-default-tooltip {
+  background: #fffdf8 !important;
+  border: 1px solid var(--ds-border) !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   DECISION-CENTER INFORMATION ARCHITECTURE (2026-08-29)
+   Typed AI-analysis panels + multi-page tabs + executive header/footer.
+   Ported from the Ecisco CEO Command Center reference (ecisco_ceo_dashboard.html).
+   Token-driven (.dc-* classes use --ds-* vars) so every style inherits:
+   standard / chinese_bi / ceo / editorial.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Tone semantics (base: up=green, down=red; chinese_bi swaps) ── */
+:root {
+  --tone-up: #16a34a;
+  --tone-up-dim: rgba(22, 163, 74, 0.12);
+  --tone-down: #dc2626;
+  --tone-down-dim: rgba(220, 38, 38, 0.12);
+  --tone-warn: #d97706;
+  --tone-warn-dim: rgba(217, 119, 6, 0.12);
+  --tone-neutral: rgba(128, 128, 128, 0.75);
+  --dc-crit: #ef4444;
+  --dc-warn: #f59e0b;
+  --dc-opp: #22c55e;
+  --dc-info: #3b82f6;
+}
+.chinese-bi {
+  /* China market convention: red = up, green = down */
+  --tone-up: #ef4444;
+  --tone-up-dim: rgba(239, 68, 68, 0.14);
+  --tone-down: #22c55e;
+  --tone-down-dim: rgba(34, 197, 94, 0.14);
+}
+.tone-up { color: var(--tone-up); }
+.tone-down { color: var(--tone-down); }
+.tone-warn { color: var(--tone-warn); }
+.tone-neutral { color: var(--tone-neutral); }
+.tone-good { color: var(--tone-up); }
+.tone-bad { color: var(--tone-down); }
+
+/* ── Executive page header (greeting + market snapshot chips) ── */
+.dc-exec-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 14px;
+  border-bottom: 1px solid var(--ds-border);
+}
+.dc-greeting {
+  font-size: 19px;
+  font-weight: 700;
+  letter-spacing: -0.3px;
+  color: var(--ds-foreground);
+  line-height: 1.3;
+}
+.dc-snapshot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin-top: 6px;
+  font-size: 12px;
+}
+.dc-chip { display: inline-flex; gap: 5px; align-items: baseline; }
+.dc-chip-label { color: var(--ds-foreground); opacity: 0.65; }
+.dc-chip-value { font-weight: 700; color: var(--ds-foreground); font-variant-numeric: tabular-nums; }
+.dc-chip-delta { font-weight: 600; }
+.dc-period {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: var(--ds-foreground);
+  opacity: 0.5;
+  padding-top: 4px;
+}
+
+/* ── Multi-page tabs ── */
+.dc-tabs {
+  display: flex;
+  gap: 0;
+  border-bottom: 1px solid var(--ds-border);
+  overflow-x: auto;
+}
+.dc-tab {
+  appearance: none;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  padding: 8px 16px;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ds-foreground);
+  opacity: 0.55;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: opacity 0.12s, border-color 0.12s;
+}
+.dc-tab:hover { opacity: 0.9; }
+.dc-tab.on {
+  opacity: 1;
+  border-bottom-color: var(--ds-primary);
+  color: var(--ds-primary);
+}
+
+/* ── Panel base + flow grid ── */
+.dc-panel {
+  background: var(--ds-muted);
+  border: 1px solid var(--ds-border);
+  border-radius: var(--ds-card-radius, 10px);
+  padding: 12px 14px;
+}
+.dc-flow {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 12px;
+}
+@media (min-width: 1024px) {
+  .dc-span-half { grid-column: span 1; }
+  .dc-span-third { grid-column: span 1; }
+  .dc-flow { grid-template-columns: repeat(2, 1fr); }
+  .dc-flow .dc-span-full { grid-column: 1 / -1; }
+  .dc-flow .dc-span-third { grid-column: span 1; }
+}
+@media (min-width: 1280px) {
+  .dc-flow { grid-template-columns: repeat(3, 1fr); }
+  .dc-flow .dc-span-full { grid-column: 1 / -1; }
+  .dc-flow .dc-span-half { grid-column: span 1; }
+  .dc-flow .dc-span-third { grid-column: span 1; }
+}
+.dc-panel-title {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-foreground);
+  opacity: 0.55;
+  margin-bottom: 9px;
+}
+.dc-rail .dc-panel { padding: 12px 14px; }
+
+/* ── Alert strip (data → why → recommendation → CTA) ── */
+.dc-strip { display: flex; flex-direction: column; gap: 7px; }
+.dc-alert {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 13px;
+  border-radius: 8px;
+  border-left: 3px solid var(--dc-info);
+  background: color-mix(in srgb, var(--dc-info) 8%, transparent);
+}
+.dc-alert.sev-crit { border-left-color: var(--dc-crit); background: color-mix(in srgb, var(--dc-crit) 8%, transparent); }
+.dc-alert.sev-warn { border-left-color: var(--dc-warn); background: color-mix(in srgb, var(--dc-warn) 7%, transparent); }
+.dc-alert.sev-opp  { border-left-color: var(--dc-opp); background: color-mix(in srgb, var(--dc-opp) 7%, transparent); }
+.dc-alert-icon {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  flex-shrink: 0;
+  margin-top: 1px;
+  background: var(--ds-background);
+  color: var(--dc-info);
+}
+.sev-crit .dc-alert-icon { color: var(--dc-crit); }
+.sev-warn .dc-alert-icon { color: var(--dc-warn); }
+.sev-opp .dc-alert-icon { color: var(--dc-opp); }
+.dc-alert-body { flex: 1; min-width: 0; }
+.dc-alert-title { font-size: 12.5px; font-weight: 600; color: var(--ds-foreground); line-height: 1.45; }
+.dc-alert-desc { font-size: 11.5px; color: var(--ds-foreground); opacity: 0.72; margin-top: 2px; line-height: 1.55; }
+.dc-alert-cta {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--ds-primary);
+  white-space: nowrap;
+  align-self: center;
+  padding: 4px 10px;
+  border: 1px solid var(--ds-primary);
+  border-radius: 5px;
+  flex-shrink: 0;
+  opacity: 0.9;
+}
+.dc-alert-time { font-size: 10px; color: var(--ds-foreground); opacity: 0.45; white-space: nowrap; align-self: center; }
+
+/* ── Decision cards (approval workflow + quantified P&L) ── */
+.dc-dec-stack { display: flex; flex-direction: column; gap: 10px; }
+.dc-dec { border-radius: 8px; padding: 11px 13px; border: 1px solid var(--ds-border); }
+.dc-dec.neg { background: color-mix(in srgb, var(--dc-crit) 7%, transparent); border-color: color-mix(in srgb, var(--dc-crit) 30%, transparent); }
+.dc-dec.pos { background: color-mix(in srgb, var(--dc-opp) 7%, transparent); border-color: color-mix(in srgb, var(--dc-opp) 25%, transparent); }
+.dc-dec.warn { background: color-mix(in srgb, var(--dc-warn) 7%, transparent); border-color: color-mix(in srgb, var(--dc-warn) 25%, transparent); }
+.dc-dec-tag {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 3px;
+  display: inline-block;
+  margin-bottom: 5px;
+  background: var(--ds-background);
+}
+.dc-dec-prod { font-size: 13.5px; font-weight: 700; color: var(--ds-foreground); margin-bottom: 3px; }
+.dc-dec-action { font-size: 12px; font-weight: 600; margin-bottom: 5px; }
+.dc-dec-body { font-size: 11.5px; color: var(--ds-foreground); opacity: 0.72; line-height: 1.55; margin-bottom: 7px; }
+.dc-dec-pnl {
+  font-size: 10.5px;
+  font-weight: 700;
+  padding: 3px 9px;
+  border-radius: 4px;
+  display: inline-block;
+  margin-bottom: 8px;
+  background: var(--ds-background);
+}
+.dc-dec-btns { display: flex; gap: 7px; }
+.dc-dec-btns button {
+  flex: 1;
+  padding: 5px 0;
+  border-radius: 6px;
+  border: none;
+  font-size: 11.5px;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: center;
+  opacity: 0.85;
+  transition: opacity 0.1s;
+}
+.dc-dec-btns .dbtn-a { background: var(--ds-primary); color: var(--ds-on-primary); }
+.dc-dec-btns .dbtn-d { background: var(--ds-background); color: var(--ds-foreground); opacity: 0.6; border: 1px solid var(--ds-border); }
+
+/* ── AI narrative analysis block ── */
+.dc-narrative {
+  background: color-mix(in srgb, var(--ds-primary) 4%, var(--ds-muted));
+  border: 1px solid var(--ds-border);
+  border-radius: 8px;
+  padding: 13px 15px;
+}
+.dc-narrative-head { display: flex; align-items: center; gap: 7px; margin-bottom: 6px; }
+.dc-ai-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 1.5px 7px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, #7c3aed, #4f46e5);
+  color: #fff;
+  letter-spacing: 0.04em;
+}
+.dc-narrative-title { font-size: 10.5px; font-weight: 600; color: var(--ds-foreground); opacity: 0.7; }
+.dc-narrative-body { font-size: 12px; color: var(--ds-foreground); opacity: 0.85; line-height: 1.75; }
+
+/* ── Cost / value cascade chain ── */
+.dc-chain { display: flex; align-items: stretch; flex-wrap: wrap; }
+.dc-chain-wrap { display: flex; align-items: center; flex: 1 1 140px; min-width: 0; }
+.dc-chain-arrow { padding: 0 6px; font-size: 17px; color: var(--ds-foreground); opacity: 0.35; flex-shrink: 0; }
+.dc-chain-node { flex: 1; padding: 10px 4px; border-right: 1px solid var(--ds-border); min-width: 0; }
+.dc-chain-wrap:last-child .dc-chain-node { border-right: none; }
+.dc-chain-lbl {
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--ds-foreground);
+  opacity: 0.5;
+  margin-bottom: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dc-chain-val { font-size: 20px; font-weight: 700; letter-spacing: -0.4px; color: var(--ds-foreground); font-variant-numeric: tabular-nums; }
+.dc-chain-unit { font-size: 10px; color: var(--ds-foreground); opacity: 0.5; }
+.dc-chain-delta { font-size: 11px; font-weight: 600; margin-top: 3px; }
+.dc-chain-note { font-size: 10px; margin-top: 4px; opacity: 0.85; }
+
+/* ── Account-health rows ── */
+.dc-customers { display: flex; flex-direction: column; }
+.dc-cust-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--ds-border);
+}
+.dc-cust-row:last-child { border-bottom: none; }
+.dc-cust-av {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
+  background: var(--ds-background);
+  color: var(--ds-primary);
+}
+.dc-cust-main { flex: 1; min-width: 0; }
+.dc-cust-name { font-size: 12.5px; font-weight: 500; color: var(--ds-foreground); }
+.dc-cust-sub { font-size: 10.5px; color: var(--ds-foreground); opacity: 0.5; }
+.dc-cust-side { text-align: right; }
+.dc-cust-rev { font-size: 12.5px; font-weight: 700; color: var(--ds-foreground); font-variant-numeric: tabular-nums; }
+.dc-cust-status { font-size: 10.5px; }
+
+/* ── Inventory coverage bars ── */
+.dc-inv { display: flex; flex-direction: column; gap: 7px; }
+.dc-inv-row { display: flex; align-items: center; gap: 8px; }
+.dc-inv-lbl { font-size: 11.5px; font-weight: 500; color: var(--ds-foreground); min-width: 88px; }
+.dc-inv-track { flex: 1; height: 5px; background: var(--ds-background); border-radius: 3px; overflow: hidden; }
+.dc-inv-fill { height: 100%; border-radius: 3px; background: var(--tone-neutral); }
+.dc-inv-fill.tone-up { background: var(--tone-up); }
+.dc-inv-fill.tone-down { background: var(--tone-down); }
+.dc-inv-fill.tone-warn { background: var(--tone-warn); }
+.dc-inv-val { font-size: 11.5px; font-weight: 700; min-width: 42px; text-align: right; font-variant-numeric: tabular-nums; }
+.dc-inv-status { font-size: 10px; min-width: 34px; text-align: right; }
+
+/* ── Competitor pricing-position bands ── */
+.dc-comp-row { display: flex; align-items: center; gap: 10px; padding: 7px 0; border-bottom: 1px solid var(--ds-border); }
+.dc-comp-row:last-child { border-bottom: none; }
+.dc-comp-name { font-size: 11.5px; font-weight: 500; color: var(--ds-foreground); min-width: 84px; }
+.dc-comp-track { flex: 1; position: relative; height: 16px; background: var(--ds-background); border-radius: 4px; }
+.dc-comp-range { position: absolute; left: 10%; width: 80%; top: 3px; height: 10px; border-radius: 3px; background: var(--ds-foreground); opacity: 0.07; }
+.dc-comp-dot { position: absolute; top: 2px; width: 12px; height: 12px; border-radius: 50%; border: 1.5px solid var(--ds-muted); transform: translateX(-50%); }
+.dc-comp-pin { position: absolute; top: 1px; width: 3px; height: 14px; background: var(--ds-primary); border-radius: 2px; transform: translateX(-50%); }
+.dc-comp-val { font-size: 11.5px; font-weight: 700; color: var(--ds-foreground); min-width: 54px; text-align: right; font-variant-numeric: tabular-nums; }
+.dc-comp-diff { font-size: 10px; min-width: 42px; text-align: right; font-weight: 600; }
+
+/* ── Activity / competitor news feed ── */
+.dc-news { display: flex; flex-direction: column; }
+.dc-news-row { display: flex; align-items: flex-start; gap: 9px; padding: 8px 0; border-bottom: 1px solid var(--ds-border); }
+.dc-news-row:last-child { border-bottom: none; }
+.dc-news-badge {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--ds-background);
+  flex-shrink: 0;
+  white-space: nowrap;
+  margin-top: 1px;
+}
+.dc-news-text { font-size: 12px; color: var(--ds-foreground); opacity: 0.78; flex: 1; line-height: 1.55; }
+.dc-news-time { font-size: 10px; color: var(--ds-foreground); opacity: 0.45; white-space: nowrap; }
+
+/* ── Signal-table primitives (pills, forecast chips, row tints) ── */
+.dc-pill {
+  font-size: 9.5px;
+  font-weight: 700;
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid;
+  display: inline-block;
+  white-space: nowrap;
+}
+.dc-pill-up { background: var(--tone-up-dim); color: var(--tone-up); border-color: color-mix(in srgb, var(--tone-up) 35%, transparent); }
+.dc-pill-down { background: var(--tone-down-dim); color: var(--tone-down); border-color: color-mix(in srgb, var(--tone-down) 35%, transparent); }
+.dc-pill-warn { background: var(--tone-warn-dim); color: var(--tone-warn); border-color: color-mix(in srgb, var(--tone-warn) 35%, transparent); }
+.dc-pill-neutral { background: var(--ds-background); color: var(--ds-foreground); opacity: 0.65; border-color: var(--ds-border); }
+.dc-fsig {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1.5px 7px;
+  border-radius: 4px;
+  display: inline-block;
+  white-space: nowrap;
+  background: var(--ds-background);
+}
+tbody tr.row-good { background: var(--tone-up-dim); }
+tbody tr.row-bad { background: var(--tone-down-dim); }
+tbody tr.row-warn { background: var(--tone-warn-dim); }
+
+/* ── Provenance footer ── */
+.dc-footer {
+  margin-top: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--ds-border);
+  font-size: 10px;
+  color: var(--ds-foreground);
+  opacity: 0.5;
+  text-align: center;
+}
+
+/* CEO style: decision-center panels get the ink + gold treatment */
+.ceo-bi .dc-panel,
+.ceo-bi .dc-narrative {
+  background: var(--ink2, #171c2b);
+  border-color: rgba(255, 255, 255, 0.08);
+}
+.ceo-bi .dc-alert.sev-crit { background: rgba(239, 68, 68, 0.1); }
+.ceo-bi .dc-alert.sev-warn { background: rgba(245, 158, 11, 0.08); }
+.ceo-bi .dc-alert.sev-opp { background: rgba(34, 197, 94, 0.08); }
+.ceo-bi .dc-alert.sev-info { background: rgba(59, 130, 246, 0.08); }
+.ceo-bi .dc-chain-node { border-right-color: rgba(255, 255, 255, 0.07); }
+.ceo-bi .dc-tab.on { color: #f0a500; border-bottom-color: #f0a500; }
+.ceo-bi .dc-greeting { color: #f1f5f9; }

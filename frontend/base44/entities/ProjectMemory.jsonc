@@ -1,0 +1,58 @@
+{
+  "name": "ProjectMemory",
+  "type": "object",
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id — the owning project; required (NOT NULL on the backend)."
+    },
+    "agent_app_id": {
+      "type": "string",
+      "description": "Contributing agent id; null when written directly by a user."
+    },
+    "entry_type": {
+      "type": "string",
+      "enum": [
+        "fact",
+        "decision",
+        "artifact_ref",
+        "conversation_summary",
+        "data_insight"
+      ],
+      "default": "fact"
+    },
+    "content": {
+      "type": "string"
+    },
+    "content_hash": {
+      "type": "string",
+      "description": "SHA-256 hex of the content for dedup."
+    },
+    "importance": {
+      "type": "number",
+      "default": 0
+    },
+    "ttl_days": {
+      "type": "number"
+    },
+    "usage_count": {
+      "type": "number",
+      "default": 0
+    },
+    "source_conversation_id": {
+      "type": "string"
+    },
+    "source_artifact_id": {
+      "type": "string"
+    },
+    "last_accessed_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "required": [
+    "project_id",
+    "entry_type",
+    "content"
+  ]
+}

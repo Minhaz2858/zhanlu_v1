@@ -1,0 +1,138 @@
+{
+  "name": "Ecisco CEO Decision Center",
+  "slug": "ceo-demo-001",
+  "description": "Executive decision center over the demo sales dataset (CEO style).",
+  "theme": "dark",
+  "style": "ceo",
+  "refresh_interval_seconds": 30,
+  "design_system_ref": null,
+  "design": {},
+  "metrics": [
+    {
+      "id": "kpi_revenue",
+      "title": "Total Revenue",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "kpi_products",
+      "title": "Products",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "kpi_orders",
+      "title": "Orders",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "kpi_margin",
+      "title": "Top Customer",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "bar_customers",
+      "title": "Top 5 Customers by Revenue",
+      "type": "bar",
+      "options": {
+        "topItem": {
+          "label": "Acme Corp",
+          "value": 1250000.0,
+          "share_pct": 27.3
+        }
+      }
+    },
+    {
+      "id": "bar_products",
+      "title": "Top 5 Products by Volume",
+      "type": "bar",
+      "options": {
+        "topItem": {
+          "label": "Widget A",
+          "value": 170.0,
+          "share_pct": 26.6
+        }
+      }
+    },
+    {
+      "id": "line_margin",
+      "title": "Margin by Region",
+      "type": "line",
+      "options": {
+        "delta": 28.89,
+        "deltaLabel": "vs prev. period",
+        "_locked": {
+          "current": 0.58,
+          "previous": 0.45
+        }
+      }
+    },
+    {
+      "id": "table_orders",
+      "title": "Largest Orders",
+      "type": "table",
+      "options": {
+        "topItem": {
+          "label": "Acme Corp",
+          "value": 120.0,
+          "share_pct": 21.1
+        }
+      }
+    }
+  ],
+  "filters": [],
+  "insights": [
+    {
+      "title": "Revenue Concentration",
+      "body": "Acme Corp alone accounts for 27% of top-5 revenue."
+    },
+    {
+      "title": "Volume Leaders",
+      "body": "Widget A + Widget B drive ~50% of top-5 volume."
+    },
+    {
+      "title": "🏆 Top: Acme Corp",
+      "body": "Acme Corp leads with 1,250,000 (27.3% of the total)."
+    },
+    {
+      "title": "🏆 Top: Widget A",
+      "body": "Widget A leads with 170 (26.6% of the total)."
+    },
+    {
+      "title": "📈 Margin by Region",
+      "body": "Margin by Region moved 28.9% up vs the previous period (locked server-side from the live datasource at build time)."
+    }
+  ],
+  "layout": [
+    {
+      "title": "Executive Pulse",
+      "widgets": [
+        "kpi_revenue",
+        "kpi_products",
+        "kpi_orders",
+        "kpi_margin"
+      ]
+    },
+    {
+      "title": "Top Performers",
+      "widgets": [
+        "bar_customers",
+        "bar_products"
+      ]
+    },
+    {
+      "title": "Margin by Region",
+      "widgets": [
+        "line_margin"
+      ]
+    },
+    {
+      "title": "Order Detail",
+      "widgets": [
+        "table_orders"
+      ]
+    }
+  ]
+}

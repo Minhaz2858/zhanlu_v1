@@ -1,0 +1,95 @@
+{
+  "name": "EDIA Sales Report — July",
+  "slug": "editorial-demo-001",
+  "description": "Polished print-style sales report (editorial style).",
+  "theme": "light",
+  "style": "editorial",
+  "refresh_interval_seconds": 30,
+  "design_system_ref": null,
+  "design": {},
+  "metrics": [
+    {
+      "id": "kpi_revenue",
+      "title": "Total Revenue",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "kpi_products",
+      "title": "Products",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "kpi_orders",
+      "title": "Orders",
+      "type": "kpi",
+      "options": {}
+    },
+    {
+      "id": "bar_customers",
+      "title": "Top Customers by Revenue",
+      "type": "bar",
+      "options": {
+        "topItem": {
+          "label": "Acme Corp",
+          "value": 1250000.0,
+          "share_pct": 27.3
+        }
+      }
+    },
+    {
+      "id": "bar_products",
+      "title": "Top Products by Volume",
+      "type": "bar",
+      "options": {
+        "topItem": {
+          "label": "Widget A",
+          "value": 170.0,
+          "share_pct": 26.6
+        }
+      }
+    }
+  ],
+  "filters": [],
+  "insights": [
+    {
+      "title": "Revenue Leader",
+      "body": "Acme Corp leads at $1.25M — 27% of the top-5 total."
+    },
+    {
+      "title": "Volume Mix",
+      "body": "Widget A and Widget B dominate volume."
+    },
+    {
+      "title": "🏆 Top: Acme Corp",
+      "body": "Acme Corp leads with 1,250,000 (27.3% of the total)."
+    },
+    {
+      "title": "🏆 Top: Widget A",
+      "body": "Widget A leads with 170 (26.6% of the total)."
+    }
+  ],
+  "layout": [
+    {
+      "title": "At a Glance",
+      "widgets": [
+        "kpi_revenue",
+        "kpi_products",
+        "kpi_orders"
+      ]
+    },
+    {
+      "title": "Customer Ranking",
+      "widgets": [
+        "bar_customers"
+      ]
+    },
+    {
+      "title": "Product Ranking",
+      "widgets": [
+        "bar_products"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,24 @@
+# Prebuilt PPTX sandbox image — for PowerPoint generation skills
+# Based on sandbox-python with additional PPTX-specific tools
+
+FROM zhanlu-sandbox-python:latest
+
+# Fix stale apt lock from parent, then install LibreOffice for PPTX generation
+# ── Re-apply Aliyun mirror (defensive — parent already sets it) ─────────
+RUN rm -rf /var/lib/apt/lists 2>/dev/null; rm -rf /var/cache/apt/archives 2>/dev/null; mkdir -p /var/lib/apt/lists/partial /var/cache/apt/archives/partial \
+    && sed -i 's|deb.debian.org|mirrors.aliyun.com|g; s|security.debian.org|mirrors.aliyun.com|g' /etc/apt/sources.list.d/debian.sources 2>/dev/null || true \
+    && apt-get update && apt-get install -y --no-install-recommends \
+    libreoffice-impress \
+    libreoffice-core \
+    fonts-dejavu \
+    && apt-get clean && rm -rf /var/lib/apt/lists
+
+# Install additional PPTX-related Python libraries
+# ── Use Aliyun PyPI mirror ────────────────────────────────────────────
+ARG PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple/
+RUN pip install --no-cache-dir -i ${PIP_INDEX_URL} \
+    svglib \
+    cairosvg
+
+WORKDIR /output
+CMD ["python", "/skill/run.py"]

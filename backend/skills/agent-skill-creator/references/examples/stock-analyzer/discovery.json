@@ -1,0 +1,22 @@
+{
+  "question": "Does the available market evidence justify further investigation of this stock?",
+  "trigger": ["A user requests analysis of a named public equity"],
+  "decision": ["Continue investment research", "Reject the candidate based on defined evidence gaps"],
+  "evidence": ["Price history", "Volume history", "Calculated technical indicators"],
+  "success_measure": "The analysis is reproducible from cited market inputs and exposes material evidence gaps",
+  "outcome": "Produce an evidence-backed technical stock analysis",
+  "environment": {
+    "documentation_sources": ["Configured market-data provider documentation"],
+    "data_sources": ["Public equity price and volume history"],
+    "required_capabilities": ["Read market data"],
+    "readiness_checks": ["The ticker resolves and sufficient history is available"]
+  },
+  "risk": {"tier": "low", "permissions": ["Read public market data"], "mutation_boundary": "read-only", "approval_required": []},
+  "software_mutation": {"applies": false},
+  "data_interfaces": {"applies": true, "interface_types": ["api"], "authoritative_sources": ["Public market-data API documentation"], "entities": ["Security", "Price observation"], "identifiers": ["Security ticker", "Observation timestamp"], "relationships": ["Each price observation belongs to one security"], "field_semantics": ["Price values use the currency declared by the source"], "invariants": ["Observation timestamps are ordered within a series"], "freshness_and_pagination": ["Historical series freshness and pagination follow the provider documentation"], "nullability": ["Missing observations are distinguished from zero prices"], "readiness_checks": ["One safe response matches the documented market-data schema"]},
+  "semantic_contract": {"applies": false},
+  "routing_tests": {
+    "should_trigger": ["Analyze AAPL technical indicators", "Does this stock warrant more research?", "Review price and volume for MSFT"],
+    "should_not_trigger": ["Buy AAPL", "Rebalance my portfolio", "Prepare a CRM report"]
+  }
+}

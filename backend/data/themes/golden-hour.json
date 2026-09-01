@@ -1,0 +1,100 @@
+{
+  "name": "golden-hour",
+  "description": "A rich and warm autumnal palette that creates an inviting and sophisticated atmosphere.",
+  "best_for": [
+    "Restaurant presentations",
+    "Hospitality brands",
+    "Fall campaigns",
+    "Artisan products"
+  ],
+  "colors": {
+    "light": {
+      "primary": "#805500",
+      "secondary": "#c1666b",
+      "surface": "#f5edd9",
+      "background": "#fdfbf7",
+      "text": "#4a403a",
+      "text_muted": "#6a5d4e",
+      "border": "#d4ccc0",
+      "success": "#16a34a",
+      "warning": "#d97706",
+      "error": "#dc2626",
+      "info": "#0ea5e9"
+    },
+    "dark": {
+      "primary": "#fbbf24",
+      "secondary": "#d4848a",
+      "surface": "#2a2420",
+      "background": "#1a1614",
+      "text": "#f5edd9",
+      "text_muted": "#a89590",
+      "border": "#3d3530",
+      "success": "#22c55e",
+      "warning": "#fbbf24",
+      "error": "#ef4444",
+      "info": "#38bdf8"
+    }
+  },
+  "fonts": {
+    "heading": "Lora",
+    "body": "Inter",
+    "mono": "JetBrains Mono"
+  },
+  "typography": {
+    "heading_scale": [
+      2.5,
+      2.0,
+      1.5,
+      1.25,
+      1.0
+    ],
+    "body_size": "16px",
+    "line_height": "1.6"
+  },
+  "spacing": {
+    "unit": 4,
+    "scale": [
+      0,
+      4,
+      8,
+      12,
+      16,
+      24,
+      32,
+      48,
+      64
+    ]
+  },
+  "radius": {
+    "sm": 4,
+    "md": 8,
+    "lg": 16,
+    "full": 9999
+  },
+  "shadows": {
+    "sm": "0 1px 2px rgba(0,0,0,0.05)",
+    "md": "0 4px 6px rgba(0,0,0,0.07)",
+    "lg": "0 10px 15px rgba(0,0,0,0.1)"
+  },
+  "source_palette": {
+    "origin": "anthropics/theme-factory",
+    "colors": [
+      {
+        "name": "Mustard Yellow",
+        "hex": "#f4a900"
+      },
+      {
+        "name": "Terracotta",
+        "hex": "#c1666b"
+      },
+      {
+        "name": "Warm Beige",
+        "hex": "#d4b896"
+      },
+      {
+        "name": "Chocolate Brown",
+        "hex": "#4a403a"
+      }
+    ]
+  }
+}

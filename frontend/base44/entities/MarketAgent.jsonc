@@ -1,0 +1,39 @@
+{
+  "name": "MarketAgent",
+  "type": "object",
+  "properties": {
+    "name": {
+      "type": "string"
+    },
+    "category": {
+      "type": "string",
+      "enum": [
+        "industry",
+        "office",
+        "ops_governance",
+        "data_processing"
+      ]
+    },
+    "description": {
+      "type": "string"
+    },
+    "capabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "rating": {
+      "type": "number",
+      "default": 4.5
+    },
+    "subscribers": {
+      "type": "number",
+      "default": 0
+    }
+  },
+  "required": [
+    "name",
+    "category"
+  ]
+}

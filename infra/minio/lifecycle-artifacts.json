@@ -1,0 +1,28 @@
+{
+  "Rules": [
+    {
+      "ID": "transition-to-glacier-after-90d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Transitions": [
+        {
+          "Days": 90,
+          "StorageClass": "GLACIER"
+        }
+      ]
+    },
+    {
+      "ID": "expire-after-365d",
+      "Status": "Enabled",
+      "Filter": {
+        "Prefix": ""
+      },
+      "Expiration": {
+        "Days": 365,
+        "DeleteMarker": true
+      }
+    }
+  ]
+}

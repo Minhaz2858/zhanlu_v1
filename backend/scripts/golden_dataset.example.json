@@ -1,0 +1,30 @@
+[
+  {
+    "id": "general-greeting",
+    "user_message": "Hello, what can you help me with?",
+    "agent_name": "general_assistant",
+    "expected_accuracy": 0.6,
+    "require_no_failed_required": true,
+    "grounding_must_pass": false
+  },
+  {
+    "id": "pptx-report",
+    "user_message": "Create a 3-slide PPT summarizing quarterly revenue.",
+    "agent_name": "general_assistant",
+    "expected_accuracy": 0.8,
+    "expected_artifact_type": "pptx",
+    "expected_min_confidence": 0.5,
+    "require_no_failed_required": true,
+    "grounding_must_pass": true
+  },
+  {
+    "id": "docx-memo",
+    "user_message": "Write a one-page Word memo about the new leave policy.",
+    "agent_name": "general_assistant",
+    "expected_accuracy": 0.8,
+    "expected_artifact_type": "docx",
+    "expected_min_confidence": 0.5,
+    "require_no_failed_required": true,
+    "grounding_must_pass": true
+  }
+]

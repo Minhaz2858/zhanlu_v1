@@ -1,0 +1,28 @@
+{
+  "name": "ProjectAgent",
+  "type": "object",
+  "description": "Many-to-many association between Project and AgentApp. An agent can belong to multiple projects simultaneously; an agent's runtime context inherits the union of every project it is a member of.",
+  "properties": {
+    "project_id": {
+      "type": "string",
+      "description": "FK to Project.id"
+    },
+    "agent_id": {
+      "type": "string",
+      "description": "FK to AgentApp.id"
+    },
+    "role": {
+      "type": "string",
+      "enum": [
+        "primary",
+        "member"
+      ],
+      "default": "member",
+      "description": "primary = the agent's home project (synced with AgentApp.project_id). member = an additional project membership."
+    }
+  },
+  "required": [
+    "project_id",
+    "agent_id"
+  ]
+}
