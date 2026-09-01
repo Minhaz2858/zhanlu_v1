@@ -58,6 +58,16 @@ def test_workflow_builder_prompt_requires_output_node():
     assert "at least one `output` node" in p
 
 
+def test_workflow_builder_prompt_warns_about_unconnected_switch_ports():
+    """AI-built switches must not leave the default port unconnected — an
+    unconnected port silently kills the branch (empty reply in chat)."""
+    p = get_system_prompt("workflow_builder")
+    assert "source-main-3" in p
+    assert "fallback_label" in p
+    assert "unconnected port" in p
+    assert "{{inputs.<orchestrator>.text}}" in p
+
+
 def test_workflow_builder_prompt_template_example_matches_runtime():
     """The runtime exposes {{inputs.<node>.text}} / .history, never chatInput."""
     p = get_system_prompt("workflow_builder")

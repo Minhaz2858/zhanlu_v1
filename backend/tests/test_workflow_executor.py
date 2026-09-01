@@ -128,8 +128,154 @@ def test_false_branch_executes_true_branch_skipped():
     }
     ctx = FakeContext("stop")
     result = execute_flow_graph(flow, ctx, handlers)
-    assert result["status"] == "completed"
+    # The only output node (n5) sits on the true branch; routing to the
+    # false branch means NO output node executes. That must fail loudly
+    # with a routing error — a silent "completed" with empty output looks
+    # like a broken bot in chat (regression: dead switch port returned
+    # empty replies).
+    assert result["status"] == "failed"
+    assert "no output" in result["error"]
     statuses = {s["node_id"]: s["status"] for s in ctx.step_events}
     assert statuses["n3"] == "skipped"
     assert statuses["n4"] == "completed"
     assert "n3" not in ctx.outputs
+
+
+def test_unconnected_switch_port_fails_with_routing_hint():
+    """A switch routing to a port with no outgoing edge must surface a
+    helpful error naming the nodes that never ran — not a blank reply."""
+    flow = {
+        "nodes": [
+            {"id": "n1", "type": "trigger_chat", "position": {"x": 0, "y": 0}, "data": {"label": "T", "config": {}}},
+            {"id": "n2", "type": "condition", "position": {"x": 1, "y": 0}, "data": {"label": "C", "config": {}}},
+            {"id": "n3", "type": "llm", "position": {"x": 2, "y": 0}, "data": {"label": "Branch", "config": {"prompt": "x"}}},
+            {"id": "n4", "type": "output", "position": {"x": 3, "y": 0}, "data": {"label": "O", "config": {}}},
+        ],
+        # n2 routes to port 1 (false) but only port 0 has an edge — n3/n4
+        # never run, the graph completes with no output node executed.
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2"},
+            {"id": "e2", "source": "n2", "sourceHandle": "source-main", "target": "n3"},
+            {"id": "e3", "source": "n3", "target": "n4"},
+        ],
+    }
+    handlers = {
+        "trigger_chat": fake_trigger_handler,
+        "condition": fake_condition_handler,
+        "llm": fake_llm_handler,
+        "output": fake_output_handler,
+    }
+    ctx = FakeContext("stop")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "failed"
+    assert "no output" in result["error"]
+    assert "n3" in result["error"] and "n4" in result["error"]
+
+
+# ---------------------------------------------------------------------------
+# n8n-style failure policy: retryOnFail + continueOnFail (per-node config)
+# ---------------------------------------------------------------------------
+
+def _linear_flow(node_cfg=None, n2_type="llm"):
+    return {
+        "nodes": [
+            {"id": "n1", "type": "trigger_chat", "position": {"x": 0, "y": 0}, "data": {"label": "T", "config": {}}},
+            {"id": "n2", "type": n2_type, "position": {"x": 1, "y": 0}, "data": {"label": "L", "config": node_cfg or {"prompt": "x"}}},
+            {"id": "n3", "type": "output", "position": {"x": 2, "y": 0}, "data": {"label": "O", "config": {}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2"},
+            {"id": "e2", "source": "n2", "target": "n3"},
+        ],
+    }
+
+
+def test_retry_recovers_after_transient_failure():
+    flow = _linear_flow({"prompt": "x", "retryOnFail": 1})
+    calls = {"n": 0}
+
+    def flaky(ctx, node):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("transient")
+        return {"text": "recovered"}
+
+    handlers = {"trigger_chat": fake_trigger_handler, "llm": flaky, "output": fake_output_handler}
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "completed"
+    assert result["output"] == "recovered"
+    assert calls["n"] == 2
+    statuses = [s["status"] for s in ctx.step_events if s["node_id"] == "n2"]
+    assert statuses == ["running", "retrying", "running", "completed"]
+
+
+def test_retry_exhausted_aborts_with_failed_node_info():
+    flow = _linear_flow({"prompt": "x", "retryOnFail": 2})
+
+    def boom(ctx, node):
+        raise RuntimeError("kaboom")
+
+    handlers = {"trigger_chat": fake_trigger_handler, "llm": boom, "output": fake_output_handler}
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "failed"
+    assert "kaboom" in result["error"]
+    assert result["failed_node_id"] == "n2"
+    assert result["failed_node_type"] == "llm"
+    # 1 initial + 2 retries = 3 attempts, then failed
+    statuses = [s["status"] for s in ctx.step_events if s["node_id"] == "n2"]
+    assert statuses == ["running", "retrying", "running", "retrying", "running", "failed"]
+    assert "n3" not in ctx.outputs
+
+
+def test_continue_on_fail_keeps_workflow_running():
+    flow = _linear_flow({"prompt": "x", "continueOnFail": True})
+
+    def boom(ctx, node):
+        raise RuntimeError("kaboom")
+
+    handlers = {"trigger_chat": fake_trigger_handler, "llm": boom, "output": fake_output_handler}
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "completed"
+    assert "kaboom" in result["output"]  # output node received the error item text
+    statuses = {s["node_id"]: s["status"] for s in ctx.step_events}
+    assert statuses["n2"] == "failed"
+    assert statuses["n3"] == "completed"
+    assert ctx.outputs["n2"]["success"] is False
+    assert ctx.outputs["n2"]["error"] == "kaboom"
+
+
+def test_continue_on_fail_combines_retry_then_continue():
+    """retryOnFail=1 + continueOnFail=True: after both attempts fail, the
+    workflow continues with the error item instead of aborting."""
+    flow = _linear_flow({"prompt": "x", "retryOnFail": 1, "continueOnFail": True})
+    calls = {"n": 0}
+
+    def always_flaky(ctx, node):
+        calls["n"] += 1
+        raise RuntimeError("transient")
+
+    handlers = {"trigger_chat": fake_trigger_handler, "llm": always_flaky, "output": fake_output_handler}
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "completed"
+    assert "transient" in result["output"]  # error item flowed downstream
+    assert calls["n"] == 2                  # 1 initial + 1 retry
+    statuses = {s["node_id"]: s["status"] for s in ctx.step_events}
+    assert statuses["n2"] == "failed"
+    assert statuses["n3"] == "completed"
+
+
+def test_continue_off_by_default_aborts():
+    flow = _linear_flow({"prompt": "x"})  # no flags — default abort
+
+    def boom(ctx, node):
+        raise RuntimeError("kaboom")
+
+    handlers = {"trigger_chat": fake_trigger_handler, "llm": boom, "output": fake_output_handler}
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "failed"
+    assert result["failed_node_id"] == "n2"
