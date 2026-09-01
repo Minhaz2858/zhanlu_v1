@@ -9,6 +9,7 @@ Router-direct pattern (no TestClient): StaticPool SQLite session,
 SimpleNamespace user — mirrors tests/routers/test_workflows_router.py.
 """
 
+import asyncio
 import sys
 import os
 import uuid
@@ -24,9 +25,11 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 from app.database import Base  # noqa: E402
 import app.models  # noqa: F401,E402  register all models
 from app.models.agent_app import AgentApp  # noqa: E402
+from app.models.agent_conversation import AgentConversation  # noqa: E402
 from app.models.knowledge_base import KnowledgeBase  # noqa: E402
 from app.models.mcp_server import McpServer  # noqa: E402
 from app.models.tool import Tool  # noqa: E402
+from app.routers import agents  # noqa: E402
 from app.services import workflow_runtime as wfr  # noqa: E402
 
 _engine = create_engine(
@@ -194,3 +197,59 @@ def test_save_flow_ambiguous_entity_name_returns_flow_invalid(db):
     out = wfr.save_flow_from_decision_summary(payload, "wf-1", db, _user())
     assert out["status"] == "flow_invalid"
     assert any("ambigu" in e.lower() for e in out["errors"])
+
+
+# ── Task 5: metadata.workflow_id passthrough at conversation creation ──────
+# Pins the chain that feeds the save_flow branch (agents.py ~line 4711 reads
+# ``(conv.metadata_ or {}).get("workflow_id")``): WorkflowBuilderChat.jsx calls
+# ``createAgentConversation('workflow_builder', { workflow_id }, ...)``, which
+# POSTs ``{agent_name, metadata: {workflow_id, ...}}`` to
+# POST /apps/{app_id}/agents/conversations. create_conversation must persist
+# that metadata so the workflow id reaches the save_flow branch.
+def test_create_conversation_persists_workflow_id_metadata(db):
+    conv = asyncio.run(agents.create_conversation(
+        app_id="default-app",
+        body={
+            "agent_name": "workflow_builder",
+            "title": "Workflow builder",
+            "metadata": {"workflow_id": "wf-1"},
+        },
+        db=db,
+        user=_user(),
+    ))
+
+    # to_dict() serializes the metadata_ column under its DB name "metadata".
+    assert conv["agent_name"] == "workflow_builder"
+    assert conv["metadata"]["workflow_id"] == "wf-1"
+
+    # The ORM row exposes it exactly the way the save_flow branch reads it.
+    row = db.query(AgentConversation).filter(AgentConversation.id == conv["id"]).first()
+    assert row is not None
+    assert (row.metadata_ or {}).get("workflow_id") == "wf-1"
+
+
+def test_create_conversation_metadata_workflow_id_survives_stale_project_id(db):
+    """The project_id validation in create_conversation strips phantom project
+    keys from metadata when the referenced project no longer exists — but must
+    never strip unrelated keys like workflow_id."""
+    conv = asyncio.run(agents.create_conversation(
+        app_id="default-app",
+        body={
+            "agent_name": "workflow_builder",
+            "title": "Workflow builder",
+            "metadata": {
+                "workflow_id": "wf-1",
+                "project_id": "00000000-0000-0000-0000-000000000000",  # phantom
+                "project_name": "Ghost",
+            },
+        },
+        db=db,
+        user=_user(),
+    ))
+
+    assert conv["metadata"]["workflow_id"] == "wf-1"
+    assert "project_id" not in conv["metadata"]
+    assert "project_name" not in conv["metadata"]
+
+    row = db.query(AgentConversation).filter(AgentConversation.id == conv["id"]).first()
+    assert (row.metadata_ or {}).get("workflow_id") == "wf-1"
