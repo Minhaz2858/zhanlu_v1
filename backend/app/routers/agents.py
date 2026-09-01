@@ -4653,6 +4653,7 @@ def _persist_decision_summary_pause(
     tool_calls_for_frontend: list[dict],
     raw_assistant_text: str,
     tool_call_payload: dict | None = None,
+    user=None,
 ) -> tuple[bool, str, str]:
     """If the assistant text contains a `:::decision-summary` block,
     parse it, persist the pending payload to ``conv.metadata_``,
@@ -4690,6 +4691,82 @@ def _persist_decision_summary_pause(
             conv.id,
         )
         return False, raw_assistant_text, ""
+
+    # workflow_builder save_flow branch: the decision summary is a workflow
+    # GRAPH (action == "save_flow"), not an agent draft. Persist it as a
+    # draft workflow via save_flow_from_decision_summary and mark the
+    # conversation saved so the frontend WorkflowBuilderChat flips to its
+    # saved state. The RAW (unsanitised) payload is used here — the
+    # sanitizer allow-list is agent_builder-shaped and would strip
+    # `action`/`flow`. Unlike the agent_builder branch this does NOT pause
+    # for review: the save is final, so the caller emits a `flow_saved`
+    # SSE event instead of a `paused` one.
+    if (
+        conv.agent_name == "workflow_builder"
+        and isinstance(payload, dict)
+        and payload.get("action") == "save_flow"
+    ):
+        from app.services import workflow_runtime as _wfr
+
+        workflow_id = (conv.metadata_ or {}).get("workflow_id")
+        if not workflow_id:
+            logger.warning(
+                "workflow_builder save_flow without conv.metadata_.workflow_id "
+                "in conv %s; refusing to persist graph",
+                conv.id,
+            )
+            _failed_text = (
+                strip_decision_summary_block(raw_assistant_text).rstrip()
+                + "\n\nI couldn't save the workflow: this conversation has no "
+                  "workflow attached to it. Open it from the workflow canvas "
+                  "and try again."
+            )
+            return False, _failed_text, "flow_save_failed"
+        result = _wfr.save_flow_from_decision_summary(
+            payload, workflow_id, db, user,
+        )
+        if result.get("status") == "flow_invalid":
+            # Repair loop: append the validation errors to the assistant
+            # text so the LLM sees them on the next iteration and can fix
+            # the graph. Do NOT mark saved, do NOT persist the graph.
+            _errs = result.get("errors") or []
+            _invalid_text = raw_assistant_text.rstrip()
+            if _errs:
+                _invalid_text += (
+                    "\n\nI couldn't save the workflow yet:\n- "
+                    + "\n- ".join(str(e) for e in _errs)
+                )
+            return False, _invalid_text, "flow_invalid"
+        # flow_saved: mark the conversation saved and persist the
+        # (fence-stripped) assistant message so the bubble shows clean
+        # prose. Same JSON change-detection convention as the agent_builder
+        # branch: build a NEW dict so SQLAlchemy persists the flag.
+        md = dict(conv.metadata_ or {})
+        md["workflow_flow_saved"] = True
+        conv.metadata_ = md
+        stripped = strip_decision_summary_block(raw_assistant_text)
+        assistant_msg = {
+            "id": assistant_msg_id,
+            "role": "assistant",
+            "content": stripped,
+            "created_date": datetime.now(timezone.utc).isoformat(),
+        }
+        if tool_calls_for_frontend:
+            assistant_msg["tool_calls"] = tool_calls_for_frontend
+        messages.append(assistant_msg)
+        conv.messages = list(messages)
+        conv.updated_date = datetime.now(timezone.utc)
+        try:
+            db.commit()
+        except Exception as e:
+            logger.error("Failed to persist workflow save: %s", e)
+            db.rollback()
+            return False, raw_assistant_text, ""
+        logger.info(
+            "workflow_builder save_flow persisted for conv %s workflow_id=%s",
+            conv.id, workflow_id,
+        )
+        return True, stripped, "flow_saved"
 
     # The bubble's ``extractDecisionSummary`` parses the
     # ``:::decision-summary`` block from ``message.content`` and renders
@@ -7403,7 +7480,12 @@ async def add_message(
                     db, conv, messages, assistant_msg_id,
                     tool_calls_for_frontend, assistant_content,
                     tool_call_payload=intercept_payload,
+                    user=user,
                 )
+                if _note in ("flow_invalid", "flow_save_failed") and _stripped:
+                    # Repair-loop text (validation errors / no workflow_id)
+                    # — the LLM sees it next turn.
+                    assistant_content = _stripped
                 if paused:
                     try:
                         db.refresh(conv)
@@ -7794,7 +7876,11 @@ async def add_message(
         paused, _stripped, _note = _persist_decision_summary_pause(
             db, conv, messages, assistant_msg_id,
             tool_calls_for_frontend, assistant_content,
+            user=user,
         )
+        if _note in ("flow_invalid", "flow_save_failed") and _stripped:
+            # Repair-loop text — the LLM sees it next turn.
+            assistant_content = _stripped
         if paused:
             # Fresh refresh so the response includes the metadata
             try:
@@ -7847,7 +7933,11 @@ async def add_message(
                     db, conv, messages, assistant_msg_id,
                     tool_calls_for_frontend, assistant_content,
                     tool_call_payload=forced_clean,
+                    user=user,
                 )
+                if _note in ("flow_invalid", "flow_save_failed") and _stripped:
+                    # Repair-loop text — the LLM sees it next turn.
+                    assistant_content = _stripped
                 if paused:
                     try:
                         db.refresh(conv)
@@ -8698,7 +8788,11 @@ async def resume_conversation(
                 db, conv, messages, _resume_assistant_msg_id,
                 tool_calls_for_frontend, assistant_content,
                 tool_call_payload=intercept_payload,
+                user=user,
             )
+            if _note in ("flow_invalid", "flow_save_failed") and _stripped:
+                # Repair-loop text — the LLM sees it next turn.
+                assistant_content = _stripped
             if paused:
                 try:
                     db.refresh(conv)
@@ -8858,7 +8952,11 @@ async def resume_conversation(
     paused, _stripped, _note = _persist_decision_summary_pause(
         db, conv, messages, _resume_assistant_msg_id,
         tool_calls_for_frontend, assistant_content,
+        user=user,
     )
+    if _note in ("flow_invalid", "flow_save_failed") and _stripped:
+        # Repair-loop text — the LLM sees it next turn.
+        assistant_content = _stripped
     if paused:
         try:
             db.refresh(conv)
@@ -14834,7 +14932,11 @@ async def add_message_stream(
                     db, conv, messages, assistant_msg_id,
                     tool_calls_for_frontend, assistant_content,
                     tool_call_payload=intercept_payload,
+                    user=user,
                 )
+                if _note in ("flow_invalid", "flow_save_failed") and stripped_for_ui:
+                    # Repair-loop text — the LLM sees it next turn.
+                    assistant_content = stripped_for_ui
                 if paused:
                     # Stream the assistant's narrative prose first so the user
                     # sees the agent's recommendation.
@@ -14847,6 +14949,17 @@ async def add_message_stream(
                         ).first() or conv
                     except Exception:
                         pass
+                    if _note == "flow_saved":
+                        # workflow_builder save_flow: typed event so the
+                        # frontend WorkflowBuilderChat closes and reloads
+                        # the graph from the backend.
+                        yield f'data: {json.dumps({"type": "flow_saved", "status": "flow_saved", "conversation": conv.to_dict()})}\n\n'
+                        _discard_steer(conversation_id)
+                        return
+                if _note == "flow_save_failed":
+                    yield f'data: {json.dumps({"type": "flow_save_failed", "status": "flow_save_failed", "conversation": conv.to_dict()})}\n\n'
+                    _discard_steer(conversation_id)
+                    return
                 yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'
                 _discard_steer(conversation_id)
                 return
@@ -16157,7 +16270,11 @@ async def add_message_stream(
                         db, conv, messages, assistant_msg_id,
                         tool_calls_for_frontend, assistant_content,
                         tool_call_payload=forced_clean,
+                        user=user,
                     )
+                    if _note in ("flow_invalid", "flow_save_failed") and stripped_for_ui:
+                        # Repair-loop text — the LLM sees it next turn.
+                        assistant_content = stripped_for_ui
                     if paused:
                         if stripped_for_ui:
                             yield f'data: {json.dumps({"type": "delta", "content": stripped_for_ui})}\n\n'
@@ -16173,6 +16290,12 @@ async def add_message_stream(
                             ).first() or conv
                         except Exception:
                             pass
+                        if _note == "flow_saved":
+                            # workflow_builder save_flow: typed event so the
+                            # frontend WorkflowBuilderChat closes and reloads
+                            # the graph from the backend.
+                            yield f'data: {json.dumps({"type": "flow_saved", "status": "flow_saved", "conversation": conv.to_dict()})}\n\n'
+                            return
                         yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'
                         return
                     # Sanitiser rejected — fall through. Very rare.
@@ -16348,7 +16471,13 @@ async def add_message_stream(
         paused, stripped_for_ui, _note = _persist_decision_summary_pause(
             db, conv, messages, assistant_msg_id,
             tool_calls_for_frontend, assistant_content,
+            user=user,
         )
+        if _note in ("flow_invalid", "flow_save_failed") and stripped_for_ui:
+            # Repair-loop text (validation errors / no workflow_id) — the
+            # LLM sees it next turn; flow_save_failed also emits the typed
+            # SSE event below before the normal final-message path.
+            assistant_content = stripped_for_ui
         if paused:
             # Stream the user-visible (block-stripped) text first — but
             # only if we haven't already streamed the (unstripped) text
@@ -16359,15 +16488,26 @@ async def add_message_stream(
             if not content_streamed:
                 yield f'data: {json.dumps({"type": "delta", "content": stripped_for_ui})}\n\n'
             # Refresh the conversation so the SSE payload reflects the
-            # newly-written `awaiting_decision_summary` metadata.
+            # newly-written metadata.
             try:
                 conv = db.query(AgentConversation).filter(
                     AgentConversation.id == conversation_id,
                 ).first() or conv
             except Exception:
                 pass
+            if _note == "flow_saved":
+                # workflow_builder save_flow: emit the typed event BEFORE
+                # any done event so the frontend WorkflowBuilderChat closes
+                # and reloads the graph from the backend.
+                yield f'data: {json.dumps({"type": "flow_saved", "status": "flow_saved", "conversation": conv.to_dict()})}\n\n'
+                return
             yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'
             return
+        if _note == "flow_save_failed":
+            # No workflow_id attached — the graph was not persisted. Emit
+            # the typed event; the normal path below persists the
+            # assistant text so the user sees the explanation.
+            yield f'data: {json.dumps({"type": "flow_save_failed", "status": "flow_save_failed", "conversation": conv.to_dict()})}\n\n'
 
         # Phase headline: composing the final response = "Crystallizing".
         if "finalize" not in _emitted_phases:

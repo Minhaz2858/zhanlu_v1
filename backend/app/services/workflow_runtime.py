@@ -17,6 +17,7 @@ execute_flow_graph -> persist per-node WorkflowRunStep -> final status.
 """
 
 import json
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -28,6 +29,134 @@ from app.models.agent_app import AgentApp
 from app.models.workflow_run import WorkflowRun, WorkflowRunStep
 from app.services import llm_service
 from app.services.workflow_executor import execute_flow_graph
+
+
+def _resolve_entity(db, model, value: str):
+    """Resolve a config identifier to a live row — by id first, then by name.
+
+    The node forms historically stored the option's NAME into config fields
+    that the runtime resolves by ID (agent_id/tool_id/kb_id/server_id), so a
+    flow saved from the UI could carry a name and fail with "<x> not found".
+    New flows store ids (frontend fixed); this fallback keeps already-saved
+    flows working. Name lookups require a unique live match — ambiguous names
+    still raise so we never silently pick the wrong entity.
+    """
+    if not value:
+        return None
+    row = db.query(model).filter(
+        model.id == value, model.is_deleted.is_(False),
+    ).first()
+    if row is not None:
+        return row
+    if hasattr(model, "name"):
+        matches = db.query(model).filter(
+            model.name == value, model.is_deleted.is_(False),
+        ).all()
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"identifier {value!r} is ambiguous ({len(matches)} rows with that name)"
+            )
+    return None
+
+
+# Config keys in node data.config that reference entities by id at runtime.
+# workflow_builder may emit display NAMEs instead of ids (the prompt says the
+# system resolves names), so before persisting we walk the graph and swap
+# names for the canonical row id — same id-first/unique-name semantics the
+# runtime itself uses via _resolve_entity.
+_UUID_RE = re.compile(
+    r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-"
+    r"[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
+)
+
+
+def resolve_entity_references(flow: dict, db) -> list[str]:
+    """Walk node configs and resolve display-NAME references to ids in place.
+
+    Handles kb_id/agent_id/tool_id/server_id config keys (the entity types the
+    runtime resolves by id). Uses _resolve_entity (id-first, unique-name
+    fallback, raises on ambiguity). Already-id values (UUID-shaped) and
+    unresolvable names are left untouched — the runtime reports not-found at
+    execution time. Returns a list of resolution notes; notes prefixed with
+    "ERROR: " indicate a fatal ambiguity the caller should surface as a
+    validation failure instead of persisting a wrong graph.
+    """
+    from app.models.agent_app import AgentApp
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.mcp_server import McpServer
+    from app.models.tool import Tool
+
+    key_model = {
+        "kb_id": KnowledgeBase,
+        "agent_id": AgentApp,
+        "tool_id": Tool,
+        "server_id": McpServer,
+    }
+    notes: list[str] = []
+    for node in flow.get("nodes") or []:
+        node_id = node.get("id")
+        config = (node.get("data") or {}).get("config") or {}
+        for key, model in key_model.items():
+            value = config.get(key)
+            if not isinstance(value, str) or not value.strip():
+                continue
+            value = value.strip()
+            if _UUID_RE.match(value):
+                continue  # already an id — runtime resolves it directly
+            try:
+                row = _resolve_entity(db, model, value)
+            except RuntimeError as exc:  # ambiguity — never pick one silently
+                notes.append(f"ERROR: node {node_id}: {exc}")
+                continue
+            if row is not None and row.id != value:
+                config[key] = row.id
+                notes.append(
+                    f"node {node_id}: resolved {key} {value!r} -> {row.id}"
+                )
+    return notes
+
+
+def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -> dict:
+    """Validate + persist a workflow graph emitted by workflow_builder.
+
+    Returns {"status": "flow_saved", "flow": ...} or
+    {"status": "flow_invalid", "errors": [...]}.
+
+    Entity display-NAME references in node configs (kb_id/agent_id/tool_id/
+    server_id) are resolved to ids in place before saving; ambiguous names
+    are treated as validation errors (repair loop — the agent sees them next
+    turn and can disambiguate).
+    """
+    from app.config import settings
+    from app.routers.workflows import save_workflow, SaveBody
+
+    name = (payload.get("name") or "Untitled Workflow").strip()
+    description = (payload.get("description") or "").strip()
+    flow = payload.get("flow")
+    if not isinstance(flow, dict) or not isinstance(flow.get("nodes"), list):
+        return {"status": "flow_invalid", "errors": ["flow.nodes must be a list"]}
+
+    errors = validate_flow(flow)
+    if errors:
+        return {"status": "flow_invalid", "errors": errors}
+
+    notes = resolve_entity_references(flow, db)
+    ref_errors = [n for n in notes if n.startswith("ERROR: ")]
+    if ref_errors:
+        return {"status": "flow_invalid", "errors": ref_errors}
+
+    save_workflow(
+        workflow_id,
+        SaveBody(name=name, description=description, flow=flow),
+        settings.DEFAULT_APP_ID,
+        db=db,
+        user=user,
+    )
+    return {"status": "flow_saved", "flow": flow}
+
+
 from app.services.workflow_nodes import NODE_HANDLERS
 from app.services.workflow_validation import validate_flow
 
@@ -157,10 +286,7 @@ class WorkflowExecutionContext:
 
     def run_agent(self, agent_id: str, input_text: str, model: str | None = None,
                   extra_context: str | None = None) -> dict:
-        agent = self.db.query(AgentApp).filter(
-            AgentApp.id == agent_id,
-            AgentApp.is_deleted.is_(False),
-        ).first()
+        agent = _resolve_entity(self.db, AgentApp, agent_id)
         if agent is None:
             raise RuntimeError(f"sub-agent {agent_id!r} not found")
         parts = [p for p in [
@@ -175,9 +301,7 @@ class WorkflowExecutionContext:
 
     def run_tool(self, tool_id: str, input_text: str) -> dict:
         from app.models.tool import Tool
-        tool = self.db.query(Tool).filter(
-            Tool.id == tool_id, Tool.is_deleted.is_(False),
-        ).first()
+        tool = _resolve_entity(self.db, Tool, tool_id)
         if tool is None:
             raise RuntimeError(f"tool {tool_id!r} not found")
         if not tool.skill_md:
@@ -192,9 +316,9 @@ class WorkflowExecutionContext:
     def kb_search(self, kb_id: str, query: str, top_k: int = 5) -> list[dict]:
         from app.models.knowledge_base import KnowledgeBase
         from app.services.rag import rag_retriever
-        kb = self.db.query(KnowledgeBase).filter(
-            KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted.is_(False),
-        ).first()
+        kb = _resolve_entity(self.db, KnowledgeBase, kb_id)
+        if kb is None:
+            raise RuntimeError(f"knowledge base {kb_id!r} not found")
         collection = getattr(kb, "collection", None) or rag_retriever.DEFAULT_COLLECTION
         chunks = rag_retriever.retrieve(query, n_results=top_k, collection=collection)
         return [{"text": c.text, "source": c.source, "score": c.score} for c in chunks]
@@ -209,9 +333,7 @@ class WorkflowExecutionContext:
         from app.models.knowledge_base import KnowledgeBase
         from app.services.db.connector_factory import get_connector
 
-        kb = self.db.query(KnowledgeBase).filter(
-            KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted.is_(False),
-        ).first()
+        kb = _resolve_entity(self.db, KnowledgeBase, kb_id)
         if kb is None:
             raise RuntimeError(f"database connector {kb_id!r} not found")
         if not kb.db_type:
@@ -233,7 +355,16 @@ class WorkflowExecutionContext:
 
     def _translate_to_sql(self, conn, question: str) -> str:
         """NL → SQL using the connector's own schema (no hardcoded tables)."""
-        tables = conn.list_tables()[:25]
+        # Include the full business schema, not just the first 25 tables —
+        # large ERP warehouses (60+ tables) push their sales/order views past
+        # a small cap and NL questions then fail with "table not found".
+        # Skip framework tables (auth_*/django_*/_ref_*) so the prompt stays
+        # focused on business data and the LLM doesn't aggregate over users.
+        _SYSTEM_PREFIXES = ("auth_", "django_", "_ref_", "access_", "alert_")
+        tables = [
+            t for t in conn.list_tables()[:100]
+            if not t.lower().startswith(_SYSTEM_PREFIXES)
+        ][:60]
         schema_parts = []
         for t in tables:
             try:
@@ -246,7 +377,9 @@ class WorkflowExecutionContext:
             "You translate natural-language questions into READ-ONLY SQL "
             f"for this database schema:\n{schema}\n\n"
             f"Question: {question}\n\n"
-            "Return ONLY the SQL statement (no markdown fences, no explanation). "
+            "Prefer denormalized business views (names like *_v_* / erp_v_*) "
+            "for aggregations when the schema offers them. Return ONLY the SQL "
+            "statement (no markdown fences, no explanation). "
             "Use LIMIT 100. Never write UPDATE/INSERT/DELETE/DDL."
         )
         sql = self.llm_complete(prompt).strip()
@@ -260,9 +393,7 @@ class WorkflowExecutionContext:
         from app.models.mcp_server import McpServer
         from app.services.tool_handlers.mcp_proxy import call_mcp_tool
 
-        server = self.db.query(McpServer).filter(
-            McpServer.id == server_id, McpServer.is_deleted.is_(False),
-        ).first()
+        server = _resolve_entity(self.db, McpServer, server_id)
         if server is None:
             raise RuntimeError(f"MCP server {server_id!r} not found")
         return call_mcp_tool(server.server_url, tool_name, arguments)
@@ -385,12 +516,8 @@ def _run_error_workflow(db, org_id: str, app_id: str, agent: AgentApp,
     error_wf_id = (flow.get("settings") or {}).get("on_error_workflow_id")
     if not error_wf_id:
         return
-    error_wf = db.query(AgentApp).filter(
-        AgentApp.id == error_wf_id,
-        AgentApp.flow_mode.is_(True),
-        AgentApp.is_deleted.is_(False),
-    ).first()
-    if error_wf is None:
+    error_wf = _resolve_entity(db, AgentApp, error_wf_id)
+    if error_wf is None or not error_wf.flow_mode:
         return
     payload = _json.dumps({
         "error": result.get("error"),
