@@ -1,14 +1,101 @@
-# Zhanlu
+# Zhanlu — Enterprise AI OS
 
-FastAPI backend + React (Vite) frontend, glued together by the `@base44/sdk`.
+Zhanlu is an enterprise AI operating system built by SYNEXIA. Users chat with an
+autonomous main agent that plans, delegates to subagents, connects to business
+databases, and produces polished artifacts (PPT, DOCX, dashboards, HTML) through
+a governed, audited runtime — all inside a single web workspace.
+
+- **Frontend:** React (Vite) + Tailwind — chat, agent studio, capability picker,
+  live execution timeline, inline artifact preview.
+- **Backend:** FastAPI + PostgreSQL + Redis + MinIO + Docker sandbox execution.
+
+## Architecture
+
+Zhanlu is organized in seven layers (see `docs/07_existing_architecture/`):
+
+```
+Layer 1 — Enterprise Interaction & Identity Layer
+  User channels, identity, app/workspace selection, inline artifact preview
+
+Layer 2 — Synexia Cognitive Core
+  Goal, context, planning, reasoning, decision, reflection, learning
+  (creates TaskSpec, ContextManifest, PlanDAG, PolicyDecision)
+
+Layer 3 — Enterprise Harness Agent, Skill & Data Runtime
+  Harness agent profiles, agent/datasource/skill bindings, Tool/Skill Gateway,
+  governed NL2SQL, skill discovery + factory
+
+Layer 4 — Enterprise Memory & Knowledge Layer
+  Memory, knowledge graph, semantic model, metric definitions, experience library
+
+Layer 5 — Enterprise Execution Layer
+  Workflow engine, automation engine, sandbox runtime, artifact generation
+
+Layer 6 — Enterprise Platform Services
+  Security, observability, governance, cost, model management
+
+Layer 7 — Infrastructure Layer
+  Docker, PostgreSQL, Redis, MinIO, network, compute
+```
+
+Core design principles:
+
+- **Synexia is the only orchestration brain.** Main agents may delegate to
+  subagents under its control; users select high-level **capabilities** (Make
+  PPT, Database Analysis, Make Dashboard, Make DOCX, Scheduled Reports), not raw
+  internal skills (raw skills are available in Advanced Settings for
+  developers/admins only).
+- **Governed data access.** Users connect databases once in My Space / Databases
+  & KB. Each agent uses only the datasources explicitly bound to it; subagents
+  inherit none by default. All DB access goes through the Datasource Gateway and
+  produces DataSnapshots. **The sandbox never receives raw database
+  credentials.**
+- **Artifacts, not attachments.** Generated files are versioned Artifacts with
+  permission-checked inline preview (MD / HTML / PPTX / DOCX / dashboard /
+  mini-app).
+- **PostgreSQL is the source of truth.** Redis is temporary queue/cache/locks/
+  events only. Sandbox filesystems are ephemeral and destroyed after execution.
+
+## Repository layout
+
+```
+backend/          FastAPI app: routers, services, models, skills, sandbox_worker
+  app/routers/    HTTP API (auth, apps, agents, conversations, artifacts, ...)
+  app/services/   auth, agent FSM, dashboard pipeline, tool handlers, ...
+  app/models/     SQLAlchemy models
+  alembic/        database migrations
+  sandbox_worker/ Redis-queue worker that spawns disposable Docker sandboxes
+  skills/         built-in skills (PPT, DOCX, dashboard, data analysis, ...)
+  tests/          pytest suite
+frontend/         React (Vite) app: chat UI, agent studio, preview cards
+docs/             architecture specs, API contract, database schema, plans
+deploy/ infra/    deployment and infrastructure assets
+docker-compose.yml            full stack: backend, worker, postgres, redis, minio, sandboxes
+docker-compose.override.yml   local development overrides
+.env.example                  environment template (root)
+```
+
+## Quick start (Docker)
+
+```bash
+cp .env.example .env            # then fill in secrets (JWT_SECRET, DB passwords, LLM key)
+docker compose up -d --build
+```
+
+Services: `zhanlu-backend` (API + agent FSM + dashboard pipeline),
+`zhanlu-sandbox-worker` (BRPOPs the Redis `sandbox:queue`, spawns disposable
+sandbox containers for skill execution), PostgreSQL 16, Redis 7, MinIO (artifact
+blob storage), and sandbox images (python / office / pptx / webapp).
+
+Frontend development runs separately with Vite (see `frontend/README.md`).
 
 ## Authentication
 
 Login is **required for every page and every mutating/LLM/data endpoint** — there
 is no anonymous access.
 
-- **Methods:** email + password only. Registration verifies via an emailed OTP
-  code (unless no users exist yet, for first-time setup).
+- **Methods:** email + password. Registration verifies via an emailed OTP code
+  (unless no users exist yet, for first-time setup).
 - **Tokens:** a short-lived access JWT (default 15 min, carries a `jti`) plus a
   long-lived refresh token (default 30 days, rotated on each refresh, stored as
   a SHA-256 hash in `refresh_tokens`). On logout the access token's JTI is
@@ -34,37 +121,35 @@ See `backend/.env.example` under the `===== Auth =====` section. Key settings:
 | `PASSWORD_REQUIRE_LETTER` / `PASSWORD_REQUIRE_DIGIT` | true | complexity flags |
 | `RATE_LIMIT_LOGIN_PER_MIN` | 5 | login attempts per IP per minute |
 | `RATE_LIMIT_REGISTER_PER_10MIN` | 3 | registrations per IP per 10 min |
+| `RATE_LIMIT_OTP_PER_10MIN` | 3 | OTP requests per IP per 10 min |
+| `RATE_LIMIT_RESET_PER_10MIN` | 3 | password resets per IP per 10 min |
 
 ### Migrations
 
 The `refresh_tokens` + `revoked_tokens` tables are created by Alembic revision
-`031` (chains off `030`). Apply with `python -m alembic upgrade head` against
-the target database.
-
-### Deployment
-
-**HARD RULE — every backend deploy restarts BOTH backend containers:**
+`031` (chains off `030`). Apply migrations with:
 
 ```bash
-docker restart zhanlu-backend zhanlu-sandbox-worker
+cd backend && python -m alembic upgrade head
 ```
 
-- Both containers bind-mount the same repo (`/home/ysk2025/zhanlu_7_30/backend` →
-  `/app`), but a bind-mount **never reloads a running process's imported modules** —
-  a process keeps the code it imported at startup until it is restarted.
-- `zhanlu-backend` runs the API + agent FSM + the dashboard pipeline
-  (`create_fullstack_dashboard` / `update_fullstack_dashboard` execute **in-process**
-  here via `DashboardAppGenerator` — they do NOT route through the sandbox).
-- `zhanlu-sandbox-worker` runs `python -m sandbox_worker.main`: it BRPOPs the Redis
-  `sandbox:queue` (jobs enqueued by `SandboxService` from `run_sandbox_skill`) and
-  spawns disposable Docker containers via the docker socket. A stale worker silently
-  runs old skill-runner code even though the repo is already updated.
-- Frontend-only changes need no restart (dist is bind-mounted `:ro`).
+### Deployment notes
 
-### Known follow-ups
+- Backend code changes require **restarting both** `zhanlu-backend` and
+  `zhanlu-sandbox-worker` — bind-mounted code is only picked up at process start.
+- Dashboard generation (`create_fullstack_dashboard` / `update_fullstack_dashboard`)
+  executes **in-process** in the backend via `DashboardAppGenerator` — it does
+  not route through the sandbox.
+- Frontend-only changes need no container restart (dist is bind-mounted `:ro`).
 
-- The access/refresh tokens live in `localStorage` (constrained by the
-  `@base44/sdk` transport). Migrating to httpOnly cookies requires forking the
-  SDK's axios client + rewriting `AuthContext.jsx`.
-- Mid-session 401 auto-refresh (for ongoing SDK calls, not just page load) is
-  part of that same follow-up.
+## Documentation
+
+The `docs/` folder contains the full design corpus: `00_INDEX.md` is the entry
+point, followed by the API contract (`01_api_contract/`), database schema
+(`02_database/`), runtime contracts (`03_runtime_contracts/`), sandbox and
+artifact specs (`04_sandbox_artifacts/`), architecture layers
+(`07_existing_architecture/`), and final UI decisions (`09_final_ui_decisions/`).
+
+## License
+
+See `LICENSE`.
