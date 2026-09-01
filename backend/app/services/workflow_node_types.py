@@ -108,7 +108,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
         "inputs": [],
         "outputs": ["main"],
         "properties": [
-            notice("Fires on every user message. The message text is available as {{inputs.<node>.text}}."),
+            notice("Fires on every user message. The message text is available as {{inputs.<node>.text}}. When run from the main chatbot, the recent conversation (last 10 turns) is available as {{inputs.<node>.history}}."),
         ],
     },
     "trigger_manual": {
@@ -490,13 +490,37 @@ def is_router_type(node_type: str) -> bool:
     return node_type in ("condition", "switch")
 
 
+# ---------------------------------------------------------------------------
+# Universal error-handling properties (n8n "On Error" settings)
+# ---------------------------------------------------------------------------
+# Appended to EVERY node type's property list by list_node_types() — no
+# per-node registry edits needed. The executor reads these from
+# node.data.config (missing keys fall back to defaults).
+ERROR_HANDLING_PROPS = [
+    prop("Retry on fail", "retryOnFail", "number", default=0,
+         description="Number of times to retry the node after a failure before it is considered failed. 0 = no retry."),
+    prop("Continue on fail", "continueOnFail", "boolean", default=False,
+         description="When enabled, a failed node emits an error item and the workflow continues to the next node instead of aborting (n8n 'Continue On Fail')."),
+]
+
+
 def list_node_types() -> list[dict[str, Any]]:
-    """Registry as a JSON-serializable list (ordered by category)."""
+    """Registry as a JSON-serializable list (ordered by category), with the
+    universal error-handling properties (retryOnFail / continueOnFail)
+    appended to every node type — n8n's per-node 'On Error' settings.
+
+    Returns COPIES: the shared NODE_TYPES registry is never mutated.
+    """
     order = {"Triggers": 0, "AI": 1, "Logic": 2, "Data": 3, "Output": 4}
-    return sorted(
+    out = []
+    for t in sorted(
         NODE_TYPES.values(),
         key=lambda t: (order.get(t["category"], 9), t["displayName"]),
-    )
+    ):
+        entry = dict(t)
+        entry["properties"] = list(t["properties"]) + list(ERROR_HANDLING_PROPS)
+        out.append(entry)
+    return out
 
 
 def required_config_fields(node_type: str) -> list[str]:

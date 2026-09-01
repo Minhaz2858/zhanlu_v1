@@ -80,6 +80,7 @@ class WorkflowExecutionContext:
         on_event: Callable[[dict], None] | None = None,
         run_id: str | None = None,
         trigger: str = "chat",
+        history: list | None = None,
     ):
         self.db = db
         self.org_id = org_id
@@ -87,6 +88,7 @@ class WorkflowExecutionContext:
         self.agent = agent
         self.trigger_input = trigger_input
         self.trigger = trigger
+        self.trigger_history = history or []
         self.created_by_id = created_by_id
         self.on_event = on_event or (lambda ev: None)
         self.outputs: dict[str, Any] = {}
@@ -136,13 +138,17 @@ class WorkflowExecutionContext:
             "error": error,
         })
 
-    def finish_run(self, status: str, error: str | None = None, output: Any = None) -> None:
+    def finish_run(self, status: str, error: str | None = None, output: Any = None,
+                   extra: dict | None = None) -> None:
         self.run.status = status
         self.run.error = error
         self.run.finished_at = datetime.now(timezone.utc)
         self.db.commit()
-        self.on_event({"type": "run_finished", "run_id": self.run_id,
-                       "status": status, "error": error, "output": output})
+        ev = {"type": "run_finished", "run_id": self.run_id,
+              "status": status, "error": error, "output": output}
+        if extra:
+            ev.update(extra)
+        self.on_event(ev)
 
     # ---- dependency bindings ----
 
@@ -363,6 +369,54 @@ def _flow_dict(flow: Any) -> dict:
     return flow if isinstance(flow, dict) else {}
 
 
+def _run_error_workflow(db, org_id: str, app_id: str, agent: AgentApp,
+                        result: dict, ctx: WorkflowExecutionContext,
+                        created_by_id: str | None = None) -> None:
+    """Execute the workflow's configured error workflow (n8n Error Workflow).
+
+    The error workflow receives a JSON input describing the failure:
+    {error, workflow_id, workflow_name, run_id, node_id, node_type, trigger}.
+    Runs one level deep only — is_error_run=True blocks recursion, so a
+    failing error workflow never spawns another error workflow.
+    """
+    import json as _json
+
+    flow = _flow_dict(agent.flow)
+    error_wf_id = (flow.get("settings") or {}).get("on_error_workflow_id")
+    if not error_wf_id:
+        return
+    error_wf = db.query(AgentApp).filter(
+        AgentApp.id == error_wf_id,
+        AgentApp.flow_mode.is_(True),
+        AgentApp.is_deleted.is_(False),
+    ).first()
+    if error_wf is None:
+        return
+    payload = _json.dumps({
+        "error": result.get("error"),
+        "workflow_id": agent.id,
+        "workflow_name": agent.name,
+        "run_id": ctx.run_id,
+        "node_id": result.get("failed_node_id"),
+        "node_type": result.get("failed_node_type"),
+        "trigger": ctx.trigger,
+    }, ensure_ascii=False)
+    try:
+        sub = run_workflow_agent(
+            db, org_id, app_id, error_wf, payload,
+            created_by_id=created_by_id,
+            on_event=ctx.on_event,
+            trigger="error",
+            is_error_run=True,
+        )
+        result["error_workflow_run_id"] = sub.get("run_id")
+        result["error_workflow_status"] = sub.get("status")
+        if sub.get("error"):
+            result["error_workflow_error"] = sub["error"]
+    except Exception as exc:  # noqa: BLE001
+        result["error_workflow_error"] = str(exc)
+
+
 def run_workflow_agent(
     db,
     org_id: str,
@@ -373,8 +427,17 @@ def run_workflow_agent(
     on_event: Callable[[dict], None] | None = None,
     run_id: str | None = None,
     trigger: str = "chat",
+    is_error_run: bool = False,
+    history: list | None = None,
 ) -> dict[str, Any]:
-    """Validate + execute a flow_mode agent. Returns {status, error, output}."""
+    """Validate + execute a flow_mode agent. Returns {status, error, output}.
+
+    On failure, if the workflow defines an error workflow
+    (flow.settings.on_error_workflow_id), it is executed with the failure
+    context as its input BEFORE the main run is marked finished — the live
+    stream stays open so subscribers see the error workflow execute. Error
+    runs never recurse (is_error_run guard, one level deep).
+    """
     flow = _flow_dict(agent.flow)
     errors = validate_flow(flow)
     if errors:
@@ -382,11 +445,23 @@ def run_workflow_agent(
     ctx = WorkflowExecutionContext(
         db, org_id, app_id, agent, trigger_input,
         created_by_id=created_by_id, on_event=on_event, run_id=run_id,
-        trigger=trigger,
+        trigger=trigger, history=history,
     )
     try:
         result = execute_flow_graph(flow, ctx, NODE_HANDLERS)
-        ctx.finish_run(result["status"], error=result["error"], output=result["output"])
+        if result["status"] == "failed" and not is_error_run:
+            _run_error_workflow(db, org_id, app_id, agent, result, ctx,
+                                created_by_id=created_by_id)
+        extra = {}
+        if result.get("error_workflow_run_id"):
+            extra = {
+                "error_workflow_run_id": result["error_workflow_run_id"],
+                "error_workflow_status": result["error_workflow_status"],
+            }
+            if result.get("error_workflow_error"):
+                extra["error_workflow_error"] = result["error_workflow_error"]
+        ctx.finish_run(result["status"], error=result["error"],
+                       output=result["output"], extra=extra)
         result["run_id"] = ctx.run_id
         return result
     except Exception as exc:  # noqa: BLE001

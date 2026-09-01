@@ -12,6 +12,7 @@ from app.services.workflow_nodes import (
     handle_switch,
     handle_trigger,
 )
+from app.services.workflow_node_types import NODE_TYPES, list_node_types
 
 
 def test_first_item_defaults_to_text():
@@ -44,6 +45,7 @@ class FakeCtx:
         self.outputs = {}
         self.current_upstream = {}
         self.trigger_input = "hello"
+        self.trigger_history = []
         self.calls = []
 
     def llm_complete(self, prompt, model=None, **kw):
@@ -74,6 +76,36 @@ def test_trigger_passes_message():
     ctx = FakeCtx()
     out = handle_trigger(ctx, _node("n1", "trigger_chat", {}))
     assert out == {"text": "hello", "trigger": "chat", "items": [{"text": "hello"}]}
+
+
+def test_trigger_emits_history_transcript():
+    ctx = FakeCtx()
+    ctx.trigger_history = [
+        {"role": "user", "content": "first question"},
+        {"role": "assistant", "content": "first answer"},
+        {"role": "user", "content": ""},  # empty content skipped
+    ]
+    out = handle_trigger(ctx, _node("n1", "trigger_chat", {}))
+    assert "User: first question" in out["history"]
+    assert "Assistant: first answer" in out["history"]
+    assert out["history"].count("User:") == 1  # empty-content turn skipped
+    assert out["text"] == "hello"  # current message unchanged
+
+
+def test_trigger_without_history_has_no_history_key():
+    ctx = FakeCtx()
+    ctx.trigger_history = []
+    out = handle_trigger(ctx, _node("n1", "trigger_chat", {}))
+    assert "history" not in out
+
+
+def test_trigger_history_caps_at_ten_turns():
+    ctx = FakeCtx()
+    ctx.trigger_history = [
+        {"role": "user", "content": f"turn {i}"} for i in range(15)
+    ]
+    out = handle_trigger(ctx, _node("n1", "trigger_chat", {}))
+    assert out["history"].count("User:") == 10
 
 
 def test_llm_uses_prompt_template_and_upstream():
@@ -119,6 +151,7 @@ def test_render_resolves_item_field_paths():
         "items": [{"name": "Laptop", "price": 1200}, {"name": "Chair", "price": 150}],
     }
     assert _render("{{inputs.n2.items[0].name}} costs {{inputs.n2.items[0].price}}", ctx) == "Laptop costs 1200"
+
     assert _render("{{inputs.n2.items}}", ctx) == "[{'name': 'Laptop', 'price': 1200}, {'name': 'Chair', 'price': 150}]"
     assert _render("{{inputs.n2.text}}", ctx) == "rows"  # back-compat
     assert _render("{{inputs.n2.items[9].name}}", ctx) == ""  # out of range -> ""
@@ -299,3 +332,44 @@ def test_switch_third_case_routes_to_port_two():
     out = handle_switch(ctx, node)
     assert out["case"] == 2
     assert out["_route"] == [2]
+
+
+# ---------------------------------------------------------------------------
+# Universal error-handling properties (retryOnFail / continueOnFail) are
+# injected into EVERY node type by list_node_types() — n8n's per-node
+# "On Error" settings. The shared registry stays unpolluted (copies).
+# ---------------------------------------------------------------------------
+
+def test_every_node_type_has_error_handling_props():
+    types = list_node_types()
+    assert types, "registry should not be empty"
+    for t in types:
+        names = {p["name"] for p in t["properties"]}
+        assert "retryOnFail" in names, f"{t['name']} missing retryOnFail"
+        assert "continueOnFail" in names, f"{t['name']} missing continueOnFail"
+
+
+def test_error_handling_props_defaults():
+    types = list_node_types()
+    for t in types:
+        props = {p["name"]: p for p in t["properties"]}
+        assert props["retryOnFail"]["default"] == 0
+        assert props["retryOnFail"]["type"] == "number"
+        assert props["continueOnFail"]["default"] is False
+        assert props["continueOnFail"]["type"] == "boolean"
+
+
+def test_list_node_types_does_not_mutate_registry():
+    before = {name: [p["name"] for p in t["properties"]] for name, t in NODE_TYPES.items()}
+    list_node_types()
+    list_node_types()
+    after = {name: [p["name"] for p in t["properties"]] for name, t in NODE_TYPES.items()}
+    assert before == after
+    assert all("retryOnFail" not in props for props in after.values())
+
+
+def test_trigger_chat_notice_documents_history():
+    """The chat trigger's settings form documents {{inputs.<node>.history}}."""
+    t = NODE_TYPES["trigger_chat"]
+    notices = [p["displayName"] for p in t["properties"] if p["type"] == "notice"]
+    assert any("history" in n for n in notices)

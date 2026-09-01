@@ -92,7 +92,21 @@ def _json_summary(items: list[dict]) -> str:
 
 def handle_trigger(ctx, node):
     text = ctx.trigger_input
-    return {"text": text, "trigger": getattr(ctx, "trigger", "chat"), "items": [{"text": text}]}
+    out = {"text": text, "trigger": getattr(ctx, "trigger", "chat"), "items": [{"text": text}]}
+    # Chat-trigger history (option B): when the chat path injected prior
+    # turns via ctx.trigger_history, expose a rendered transcript so
+    # workflow authors can reference {{inputs.<node>.history}}.
+    history = getattr(ctx, "trigger_history", None)
+    if history:
+        lines = []
+        for m in history[-10:]:
+            role = "User" if m.get("role") == "user" else "Assistant"
+            content = str(m.get("content", ""))
+            if content:
+                lines.append(f"{role}: {content}")
+        if lines:
+            out["history"] = "\n".join(lines)
+    return out
 
 
 def handle_llm(ctx, node):
