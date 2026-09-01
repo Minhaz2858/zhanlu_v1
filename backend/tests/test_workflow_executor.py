@@ -13,6 +13,10 @@ class FakeContext:
         self.step_events.append({"node_id": node_id, "status": status})
 
 
+def fake_trigger_handler(ctx, node):
+    return {"text": ctx.trigger_input}
+
+
 def fake_llm_handler(ctx, node):
     upstream = ctx.outputs.get("n1", {})
     return {"text": f"llm({upstream.get('text', '')})"}
@@ -23,7 +27,7 @@ def fake_output_handler(ctx, node):
     return {"text": upstream.get("text", "")}
 
 
-NODE_HANDLERS = {"llm": fake_llm_handler, "output": fake_output_handler}
+NODE_HANDLERS = {"trigger_chat": fake_trigger_handler, "llm": fake_llm_handler, "output": fake_output_handler}
 
 
 def test_executes_in_topological_order():
@@ -60,7 +64,7 @@ def test_node_failure_routed_to_output():
     def boom(ctx, node):
         raise RuntimeError("kaboom")
 
-    handlers = {"llm": boom, "output": fake_output_handler}
+    handlers = {"trigger_chat": fake_trigger_handler, "llm": boom, "output": fake_output_handler}
     ctx = FakeContext("hello")
     result = execute_flow_graph(flow, ctx, handlers)
     assert result["status"] == "failed"
