@@ -46,7 +46,7 @@ def _render(template: str, ctx: Any) -> str:
             node_id = parts[1]
             rest = parts[2:]
             val = ctx.outputs.get(node_id, {})
-            if rest[0] == "items" and len(rest) >= 2 and "[" in rest[0]:
+            if len(rest) >= 2 and "[" in rest[0]:
                 # items[0].field → ['items', '0', 'field'] (split [N])
                 head, _, tail = rest[0].partition("[")
                 if head == "items":
