@@ -10,6 +10,7 @@ SimpleNamespace user — mirrors tests/routers/test_workflows_router.py.
 """
 
 import asyncio
+import json
 import sys
 import os
 import uuid
@@ -253,3 +254,186 @@ def test_create_conversation_metadata_workflow_id_survives_stale_project_id(db):
 
     row = db.query(AgentConversation).filter(AgentConversation.id == conv["id"]).first()
     assert (row.metadata_ or {}).get("workflow_id") == "wf-1"
+
+
+# ── Task 4 follow-ups: agents.py-side save_flow branch tests ─────────────────
+# Exercise _persist_decision_summary_pause directly (router-direct pattern,
+# same as the wfr-level tests above): fence + save_flow payload through the
+# full branch, including the metadata flag, message persistence, repair-loop
+# text, and the stale/foreign-workflow 404 conversion.
+
+
+def _mk_wb_conv(db, wf_id: str | None = "wf-1", owner="user-1"):
+    conv = AgentConversation(
+        id=str(uuid.uuid4()),
+        agent_name="workflow_builder",
+        title="Workflow builder",
+        status="active",
+        messages=[],
+        metadata_={"workflow_id": wf_id},
+        app_id="default-app",
+        org_id="default-org",
+        created_by_id=owner,
+    )
+    db.add(conv)
+    db.commit()
+    return conv
+
+
+def _fence_text(payload, prose="Here is the workflow I built."):
+    body = json.dumps(payload, ensure_ascii=False, indent=2)
+    return f"{prose}\n\n:::decision-summary\n{body}\n:::"
+
+
+def test_persist_decision_summary_pause_save_flow_success(db):
+    _mk_workflow(db)
+    conv = _mk_wb_conv(db)
+    raw = _fence_text(_valid_payload())
+    messages: list[dict] = []
+    ok, stripped, note = agents._persist_decision_summary_pause(
+        db, conv, messages, "asm-1", [], raw, user=_user(),
+    )
+    assert ok is True
+    assert note == "flow_saved"
+    assert ":::decision-summary" not in stripped
+    assert "Here is the workflow I built." in stripped
+    # Metadata flag set + assistant message stored WITHOUT the fence.
+    assert (conv.metadata_ or {}).get("workflow_flow_saved") is True
+    assert len(messages) == 1
+    assert messages[0]["id"] == "asm-1"
+    assert ":::decision-summary" not in messages[0]["content"]
+    # And the graph was actually persisted to the workflow row.
+    row = db.query(AgentApp).filter(AgentApp.id == "wf-1").first()
+    assert row.name == "Order Summary"
+    assert row.flow["nodes"][0]["type"] == "trigger_chat"
+
+
+def test_persist_decision_summary_pause_save_flow_invalid_repair_text(db):
+    _mk_workflow(db)
+    conv = _mk_wb_conv(db)
+    payload = {"action": "save_flow", "name": "Bad", "flow": {"version": 1, "nodes": [], "edges": []}}
+    raw = _fence_text(payload)
+    messages: list[dict] = []
+    ok, text, note = agents._persist_decision_summary_pause(
+        db, conv, messages, "asm-2", [], raw, user=_user(),
+    )
+    assert ok is False
+    assert note == "flow_invalid"
+    # Repair text carries the validation error for the LLM to fix next turn.
+    assert "I couldn't save the workflow yet" in text
+    assert "trigger" in text.lower()
+    # Metadata flag NOT set, message NOT persisted, graph NOT overwritten.
+    assert not (conv.metadata_ or {}).get("workflow_flow_saved")
+    assert messages == []
+    row = db.query(AgentApp).filter(AgentApp.id == "wf-1").first()
+    assert row.flow == {"version": 1, "nodes": [], "edges": []}
+
+
+def test_persist_decision_summary_pause_save_flow_missing_workflow_id(db):
+    conv = _mk_wb_conv(db, wf_id=None)
+    raw = _fence_text(_valid_payload())
+    messages: list[dict] = []
+    ok, text, note = agents._persist_decision_summary_pause(
+        db, conv, messages, "asm-3", [], raw, user=_user(),
+    )
+    assert ok is False
+    assert note == "flow_save_failed"
+    assert "no workflow attached" in text
+    assert not (conv.metadata_ or {}).get("workflow_flow_saved")
+    assert messages == []
+    # Nothing persisted anywhere.
+    assert db.query(AgentApp).count() == 0
+
+
+def test_persist_decision_summary_pause_save_flow_stale_workflow(db):
+    # No AgentApp row with id "wf-ghost" exists → save_workflow raises 404.
+    # Fix: save_flow_from_decision_summary converts it to flow_save_failed —
+    # no crash, no partial persist, explanation appended to the text.
+    conv = _mk_wb_conv(db, wf_id="wf-ghost")
+    raw = _fence_text(_valid_payload())
+    messages: list[dict] = []
+    ok, text, note = agents._persist_decision_summary_pause(
+        db, conv, messages, "asm-4", [], raw, user=_user(),
+    )
+    assert ok is False
+    assert note == "flow_save_failed"
+    assert "I couldn't save the workflow" in text
+    assert "not found or not owned" in text
+    assert not (conv.metadata_ or {}).get("workflow_flow_saved")
+    assert messages == []
+
+
+def test_persist_decision_summary_pause_save_flow_not_owned(db):
+    # The workflow row exists but belongs to another user → 404 from
+    # _get_owned_workflow → flow_save_failed, and the row is untouched.
+    _mk_workflow(db, wf_id="wf-other", owner="user-2")
+    conv = _mk_wb_conv(db, wf_id="wf-other")
+    raw = _fence_text(_valid_payload())
+    messages: list[dict] = []
+    ok, text, note = agents._persist_decision_summary_pause(
+        db, conv, messages, "asm-5", [], raw, user=_user(),
+    )
+    assert ok is False
+    assert note == "flow_save_failed"
+    assert "not found or not owned" in text
+    row = db.query(AgentApp).filter(AgentApp.id == "wf-other").first()
+    assert row.flow == {"version": 1, "nodes": [], "edges": []}  # untouched
+
+
+def test_persist_decision_summary_pause_save_flow_without_name_defaults(db):
+    # Name-gate ordering: a save_flow payload WITHOUT a name must still reach
+    # the branch (defaults to "Untitled Workflow") instead of being silently
+    # dropped by the agent_builder name gate.
+    _mk_workflow(db)
+    conv = _mk_wb_conv(db)
+    payload = _valid_payload()
+    payload.pop("name")
+    raw = _fence_text(payload)
+    messages: list[dict] = []
+    ok, stripped, note = agents._persist_decision_summary_pause(
+        db, conv, messages, "asm-6", [], raw, user=_user(),
+    )
+    assert ok is True
+    assert note == "flow_saved"
+    row = db.query(AgentApp).filter(AgentApp.id == "wf-1").first()
+    assert row.name == "Untitled Workflow"
+
+
+def test_save_flow_stale_workflow_returns_flow_save_failed(db):
+    # wfr-level: save_workflow raises HTTPException(404) for a missing row;
+    # save_flow_from_decision_summary must convert it to a flow_save_failed
+    # result instead of propagating the exception into the SSE stream.
+    payload = _valid_payload()
+    out = wfr.save_flow_from_decision_summary(payload, "wf-ghost", db, _user())
+    assert out["status"] == "flow_save_failed"
+    assert any(
+        "not found" in e.lower() or "not owned" in e.lower()
+        for e in out["errors"]
+    )
+
+
+def test_resolve_entity_references_scoped_to_owner(db):
+    # user-2 owns the only "Order Agent"; user-1's flow must NOT resolve it —
+    # the name stays untouched (consistent with unknown names), no ERROR note.
+    db.add(AgentApp(id="agent-2", name="Order Agent", flow_mode=False, status="draft",
+                    app_id="default-app", org_id="default-org", created_by_id="user-2"))
+    db.commit()
+    flow = _entity_ref_flow()
+    notes = wfr.resolve_entity_references(flow, db, user=_user())
+    configs = {n["id"]: n["data"]["config"] for n in flow["nodes"]}
+    assert configs["n2"]["agent_id"] == "Order Agent"  # unresolved
+    assert not any(n.startswith("ERROR: ") for n in notes)
+
+    # An admin is NOT ownership-scoped — the name resolves to user-2's row.
+    flow_admin = _entity_ref_flow()
+    wfr.resolve_entity_references(flow_admin, db, user=_user(role="admin"))
+    assert flow_admin["nodes"][1]["data"]["config"]["agent_id"] == "agent-2"
+
+    # When the user owns an entity with the same name, the scoped lookup
+    # resolves to THEIR row, not the other user's.
+    db.add(AgentApp(id="agent-1", name="Order Agent", flow_mode=False, status="draft",
+                    app_id="default-app", org_id="default-org", created_by_id="user-1"))
+    db.commit()
+    flow_own = _entity_ref_flow()
+    wfr.resolve_entity_references(flow_own, db, user=_user())
+    assert flow_own["nodes"][1]["data"]["config"]["agent_id"] == "agent-1"

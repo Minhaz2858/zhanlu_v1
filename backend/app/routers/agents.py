@@ -4683,14 +4683,6 @@ def _persist_decision_summary_pause(
         return False, raw_assistant_text, ""
 
     clean_payload = _sanitize_decision_payload(payload)
-    if not clean_payload.get("name"):
-        # A decision summary without a name is not actionable. Refuse to
-        # pause — let the LLM try again on the next iteration.
-        logger.warning(
-            "Decision summary found but no 'name' field; ignoring in conv %s",
-            conv.id,
-        )
-        return False, raw_assistant_text, ""
 
     # workflow_builder save_flow branch: the decision summary is a workflow
     # GRAPH (action == "save_flow"), not an agent draft. Persist it as a
@@ -4701,6 +4693,11 @@ def _persist_decision_summary_pause(
     # `action`/`flow`. Unlike the agent_builder branch this does NOT pause
     # for review: the save is final, so the caller emits a `flow_saved`
     # SSE event instead of a `paused` one.
+    #
+    # NOTE: this branch runs BEFORE the name gate below — a save_flow
+    # payload without a name must still reach it (the branch defaults to
+    # "Untitled Workflow"); the name gate only applies to agent_builder
+    # drafts.
     if (
         conv.agent_name == "workflow_builder"
         and isinstance(payload, dict)
@@ -4737,6 +4734,20 @@ def _persist_decision_summary_pause(
                     + "\n- ".join(str(e) for e in _errs)
                 )
             return False, _invalid_text, "flow_invalid"
+        if result.get("status") == "flow_save_failed":
+            # Stale/foreign workflow (row missing, soft-deleted, or owned by
+            # another user) or persistence failure — the graph was NOT
+            # persisted. Append the reason to the assistant text so the user
+            # sees an explanation; the v3 stream emits the typed
+            # flow_save_failed SSE event.
+            _errs = result.get("errors") or []
+            _failed_text = strip_decision_summary_block(raw_assistant_text).rstrip()
+            if _errs:
+                _failed_text += (
+                    "\n\nI couldn't save the workflow:\n- "
+                    + "\n- ".join(str(e) for e in _errs)
+                )
+            return False, _failed_text, "flow_save_failed"
         # flow_saved: mark the conversation saved and persist the
         # (fence-stripped) assistant message so the bubble shows clean
         # prose. Same JSON change-detection convention as the agent_builder
@@ -4767,6 +4778,18 @@ def _persist_decision_summary_pause(
             conv.id, workflow_id,
         )
         return True, stripped, "flow_saved"
+
+    if not clean_payload.get("name"):
+        # A decision summary without a name is not actionable. Refuse to
+        # pause — let the LLM try again on the next iteration. The
+        # workflow_builder save_flow branch above runs FIRST — a save_flow
+        # payload without a name still reaches it (defaults to
+        # "Untitled Workflow"); this gate applies to agent_builder drafts.
+        logger.warning(
+            "Decision summary found but no 'name' field; ignoring in conv %s",
+            conv.id,
+        )
+        return False, raw_assistant_text, ""
 
     # The bubble's ``extractDecisionSummary`` parses the
     # ``:::decision-summary`` block from ``message.content`` and renders
@@ -14957,7 +14980,30 @@ async def add_message_stream(
                         _discard_steer(conversation_id)
                         return
                 if _note == "flow_save_failed":
+                    # Align with the main path (block 3): emit the typed
+                    # event, then persist + stream the explanation text so
+                    # the frontend doesn't show "connection interrupted" and
+                    # the repair text survives reload.
                     yield f'data: {json.dumps({"type": "flow_save_failed", "status": "flow_save_failed", "conversation": conv.to_dict()})}\n\n'
+                    _fsf_msg = {
+                        "id": assistant_msg_id,
+                        "role": "assistant",
+                        "content": stripped_for_ui or "",
+                        "created_date": datetime.now(timezone.utc).isoformat(),
+                    }
+                    if tool_calls_for_frontend:
+                        _fsf_msg["tool_calls"] = tool_calls_for_frontend
+                    messages.append(_fsf_msg)
+                    conv.messages = list(messages)
+                    conv.updated_date = datetime.now(timezone.utc)
+                    try:
+                        db.commit()
+                    except Exception as _fsf_err:  # noqa: BLE001
+                        logger.error(
+                            "Failed to persist flow_save_failed text: %s", _fsf_err
+                        )
+                        db.rollback()
+                    yield f'data: {json.dumps({"type": "done", "content": stripped_for_ui or "", "trace": [], "conversation": conv.to_dict()})}\n\n'
                     _discard_steer(conversation_id)
                     return
                 yield f'data: {json.dumps({"type": "paused", "reason": "awaiting_decision_summary", "conversation": conv.to_dict()})}\n\n'

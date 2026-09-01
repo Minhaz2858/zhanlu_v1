@@ -17,6 +17,7 @@ execute_flow_graph -> persist per-node WorkflowRunStep -> final status.
 """
 
 import json
+import logging
 import re
 import uuid
 from datetime import datetime, timezone
@@ -30,8 +31,10 @@ from app.models.workflow_run import WorkflowRun, WorkflowRunStep
 from app.services import llm_service
 from app.services.workflow_executor import execute_flow_graph
 
+logger = logging.getLogger(__name__)
 
-def _resolve_entity(db, model, value: str):
+
+def _resolve_entity(db, model, value: str, scope_col=None, scope_value=None):
     """Resolve a config identifier to a live row — by id first, then by name.
 
     The node forms historically stored the option's NAME into config fields
@@ -40,6 +43,14 @@ def _resolve_entity(db, model, value: str):
     New flows store ids (frontend fixed); this fallback keeps already-saved
     flows working. Name lookups require a unique live match — ambiguous names
     still raise so we never silently pick the wrong entity.
+
+    ``scope_col``/``scope_value`` (optional): when both are provided, the NAME
+    lookup is additionally filtered to rows owned by ``scope_value`` (e.g.
+    ``model.created_by_id == user.id``) so a display name never resolves to an
+    entity the current user doesn't own. Id lookups are never scoped — ids are
+    globally unique primary keys. Existing runtime call sites (run_agent/
+    run_tool/kb_search/db_query/mcp_call) do not pass scope params and keep
+    the original unscoped behaviour.
     """
     if not value:
         return None
@@ -49,9 +60,12 @@ def _resolve_entity(db, model, value: str):
     if row is not None:
         return row
     if hasattr(model, "name"):
-        matches = db.query(model).filter(
+        q = db.query(model).filter(
             model.name == value, model.is_deleted.is_(False),
-        ).all()
+        )
+        if scope_col is not None and scope_value is not None:
+            q = q.filter(scope_col == scope_value)
+        matches = q.all()
         if len(matches) == 1:
             return matches[0]
         if len(matches) > 1:
@@ -72,7 +86,7 @@ _UUID_RE = re.compile(
 )
 
 
-def resolve_entity_references(flow: dict, db) -> list[str]:
+def resolve_entity_references(flow: dict, db, user=None) -> list[str]:
     """Walk node configs and resolve display-NAME references to ids in place.
 
     Handles kb_id/agent_id/tool_id/server_id config keys (the entity types the
@@ -82,6 +96,14 @@ def resolve_entity_references(flow: dict, db) -> list[str]:
     execution time. Returns a list of resolution notes; notes prefixed with
     "ERROR: " indicate a fatal ambiguity the caller should surface as a
     validation failure instead of persisting a wrong graph.
+
+    ``user`` (optional): when provided and not an admin, NAME lookups are
+    scoped to entities the user owns (``created_by_id == user.id``) so a name
+    matching only ANOTHER user's entity does not resolve — it is left
+    untouched, consistent with unknown names. All entity models handled here
+    (AgentApp, Tool, KnowledgeBase, McpServer) inherit ``created_by_id`` from
+    TimestampedBase; a model without a usable scope column falls back to the
+    unscoped lookup.
     """
     from app.models.agent_app import AgentApp
     from app.models.knowledge_base import KnowledgeBase
@@ -94,6 +116,9 @@ def resolve_entity_references(flow: dict, db) -> list[str]:
         "tool_id": Tool,
         "server_id": McpServer,
     }
+    user_id = getattr(user, "id", None)
+    is_admin = getattr(user, "role", None) == "admin"
+    scope_value = user_id if (user_id and not is_admin) else None
     notes: list[str] = []
     for node in flow.get("nodes") or []:
         node_id = node.get("id")
@@ -105,8 +130,14 @@ def resolve_entity_references(flow: dict, db) -> list[str]:
             value = value.strip()
             if _UUID_RE.match(value):
                 continue  # already an id — runtime resolves it directly
+            # Scope name→id resolution to the user's own entities so a
+            # display name never resolves to a row the user doesn't own.
+            scope_col = getattr(model, "created_by_id", None) if scope_value else None
             try:
-                row = _resolve_entity(db, model, value)
+                row = _resolve_entity(
+                    db, model, value,
+                    scope_col=scope_col, scope_value=scope_value,
+                )
             except RuntimeError as exc:  # ambiguity — never pick one silently
                 notes.append(f"ERROR: node {node_id}: {exc}")
                 continue
@@ -121,14 +152,20 @@ def resolve_entity_references(flow: dict, db) -> list[str]:
 def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -> dict:
     """Validate + persist a workflow graph emitted by workflow_builder.
 
-    Returns {"status": "flow_saved", "flow": ...} or
-    {"status": "flow_invalid", "errors": [...]}.
+    Returns {"status": "flow_saved", "flow": ...},
+    {"status": "flow_invalid", "errors": [...]}, or
+    {"status": "flow_save_failed", "errors": [...]} when the target workflow
+    row is missing / not owned (or persistence raised) — the caller emits the
+    typed flow_save_failed SSE event instead of crashing the stream.
 
     Entity display-NAME references in node configs (kb_id/agent_id/tool_id/
-    server_id) are resolved to ids in place before saving; ambiguous names
-    are treated as validation errors (repair loop — the agent sees them next
-    turn and can disambiguate).
+    server_id) are resolved to ids in place before saving — scoped to the
+    user's own entities for non-admin users; ambiguous names are treated as
+    validation errors (repair loop — the agent sees them next turn and can
+    disambiguate).
     """
+    from fastapi import HTTPException
+
     from app.config import settings
     from app.routers.workflows import save_workflow, SaveBody
 
@@ -142,18 +179,43 @@ def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -
     if errors:
         return {"status": "flow_invalid", "errors": errors}
 
-    notes = resolve_entity_references(flow, db)
+    notes = resolve_entity_references(flow, db, user)
     ref_errors = [n for n in notes if n.startswith("ERROR: ")]
     if ref_errors:
         return {"status": "flow_invalid", "errors": ref_errors}
 
-    save_workflow(
-        workflow_id,
-        SaveBody(name=name, description=description, flow=flow),
-        settings.DEFAULT_APP_ID,
-        db=db,
-        user=user,
-    )
+    try:
+        save_workflow(
+            workflow_id,
+            SaveBody(name=name, description=description, flow=flow),
+            settings.DEFAULT_APP_ID,
+            db=db,
+            user=user,
+        )
+    except HTTPException as exc:
+        # Stale/foreign workflow: the owning row is missing, soft-deleted, or
+        # belongs to another user (save_workflow raises 404). Convert to a
+        # flow_save_failed-style result so the v3 stream emits the typed SSE
+        # event instead of aborting mid-stream.
+        logger.warning(
+            "save_flow: workflow %s not savable (HTTP %s): %s",
+            workflow_id, exc.status_code, exc.detail,
+        )
+        db.rollback()
+        return {
+            "status": "flow_save_failed",
+            "errors": ["workflow not found or not owned"],
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "save_flow: unexpected error persisting workflow %s: %s",
+            workflow_id, exc,
+        )
+        db.rollback()
+        return {
+            "status": "flow_save_failed",
+            "errors": [f"failed to save workflow: {exc}"],
+        }
     return {"status": "flow_saved", "flow": flow}
 
 
