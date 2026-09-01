@@ -53,6 +53,7 @@ from app.routers.nl2sql import router as nl2sql_router
 from app.routers.automation_api import router as automation_api_router
 from app.routers.knowledge_bases import router as knowledge_bases_router
 from app.routers.dashboards import router as dashboards_router
+from app.routers.workflows import router as workflows_router
 from app.routers.hooks import router as hooks_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.admin_evals import router as admin_evals_router
@@ -787,6 +788,7 @@ def create_app() -> FastAPI:
     app.include_router(automation_api_router, prefix="/api")
     app.include_router(knowledge_bases_router, prefix="/api")
     app.include_router(dashboards_router, prefix="/api")
+    app.include_router(workflows_router, prefix="/api")
     app.include_router(hooks_router, prefix="/api")
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(admin_evals_router, prefix="/api")

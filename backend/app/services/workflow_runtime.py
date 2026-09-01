@@ -213,7 +213,8 @@ def run_workflow_agent(
     try:
         result = execute_flow_graph(flow, ctx, NODE_HANDLERS)
         ctx.finish_run(result["status"], error=result["error"], output=result["output"])
+        result["run_id"] = ctx.run_id
         return result
     except Exception as exc:  # noqa: BLE001
         ctx.finish_run("failed", error=str(exc))
-        return {"status": "failed", "error": str(exc), "output": None}
+        return {"status": "failed", "error": str(exc), "output": None, "run_id": ctx.run_id}

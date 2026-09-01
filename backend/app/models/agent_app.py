@@ -43,7 +43,8 @@ class AgentApp(TimestampedBase):
 
     # Flow (advanced mode)
     flow_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True, default=False)
-    flow: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Graph JSON: {version, nodes[], edges[]} for flow_mode agents.
+    flow: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # Limits
     max_call_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
