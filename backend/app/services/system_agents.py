@@ -1,8 +1,8 @@
 """Idempotent system-agent seeding.
 
-Ensures the DB-backed system meta-agents (agent_builder, skill_agent,
-automation_agent, general_assistant, power_user) always exist in the
-``agent_apps`` table with up-to-date tool_config. These are normally
+Ensures the DB-backed system meta-agents (agent_builder, workflow_builder,
+skill_agent, automation_agent, general_assistant, power_user) always exist
+in the ``agent_apps`` table with up-to-date tool_config. These are normally
 created by ``seed.py``, but if the database was partially seeded (e.g.
 a user existed before the system agents were added) they may be
 missing — which breaks tool_config resolution, data source binding, and
@@ -208,6 +208,45 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                 "allowed_domains": [],
                 "retention_days": 30,
             },
+        },
+        {
+            "name": "workflow_builder",
+            "description": "Designs AI agent workflows from plain-English descriptions",
+            "project": "global",
+            "capabilities": ["workflow_creation", "workflow_design"],
+            "model": "gpt-4o-mini",
+            "agent_type": "sequential",
+            "topology": "standalone",
+            "status": "active",
+            "tool_config": {
+                "enabled_tools": _tools_in_registry(registry, [
+                    "list_tools", "create_artifact",
+                ]),
+            },
+            **_BASE_HARNESS,
+            "manifest_json": {
+                "agent_name": "workflow_builder",
+                "version": "1.0.0",
+                "mission": "Design AI agent workflow graphs from plain-English descriptions and emit them as decision-summary blocks",
+                "task_scope": ["workflow_creation", "workflow_design"],
+                "boundaries": {
+                    "allowed": ["workflow_design"],
+                    "forbidden": ["delete_workflow", "publish_workflow", "access_user_data"],
+                },
+                "risk_tier": "medium",
+                "created_by": "system",
+            },
+            "policy_profile": {
+                "risk_tier": "medium",
+                "requires_confirmation": False,
+                "max_concurrent_calls": 3,
+                "rate_limit_per_minute": 30,
+                "allowed_domains": [],
+                "retention_days": 30,
+            },
+            # Hidden from the agent picker, My Space, and the active-agent
+            # chip — system agent, not user-facing.
+            "is_system": True,
         },
         {
             "name": "skill_agent",
