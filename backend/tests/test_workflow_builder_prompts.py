@@ -8,6 +8,12 @@ must carry the node-type registry so emitted nodes only use known types.
 from app.services.agent_prompts import get_system_prompt
 
 
+def test_workflow_builder_prompt_allows_large_graphs():
+    p = get_system_prompt("workflow_builder")
+    assert "3 to 20 nodes" in p or "3-20 nodes" in p
+    assert "include ALL steps" in p or "do not simplify away" in p
+
+
 def test_workflow_builder_prompt_has_registry():
     p = get_system_prompt("workflow_builder")
     assert "decision-summary" in p
