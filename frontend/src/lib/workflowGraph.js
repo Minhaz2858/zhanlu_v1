@@ -83,8 +83,11 @@ export function flowToXY(flow) {
     position: n.position || { x: 0, y: 0 },
     data: { label: n.data?.label || n.type, config: n.data?.config || {} },
   }));
-  const edges = (flow?.edges || []).map((e) => ({
-    id: e.id,
+  // xyflow requires a unique id per edge — flows persisted without ids
+  // (e.g. AI-builder saves that bypassed normalization) would otherwise
+  // render as unconnected nodes. Assign stable e1..eN ids on load.
+  const edges = (flow?.edges || []).map((e, i) => ({
+    id: e.id || `e${i + 1}`,
     source: e.source,
     sourceHandle: e.sourceHandle || null,
     target: e.target,
@@ -94,17 +97,18 @@ export function flowToXY(flow) {
 }
 
 // xyflow -> flow JSON
-export function xyToFlow(nodes, edges) {
+export function xyToFlow(nodes, edges, settings) {
   return {
     version: 1,
+    settings: settings || {},
     nodes: nodes.map((n) => ({
       id: n.id,
       type: n.type,
       position: { x: Math.round(n.position.x), y: Math.round(n.position.y) },
       data: { label: n.data.label || NODE_DEF_MAP[n.type]?.label.en || n.type, config: n.data.config || {} },
     })),
-    edges: edges.map((e) => ({
-      id: e.id,
+    edges: edges.map((e, i) => ({
+      id: e.id || `e${i + 1}`,
       source: e.source,
       sourceHandle: e.sourceHandle || null,
       target: e.target,

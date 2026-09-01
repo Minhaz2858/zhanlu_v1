@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", ".."))
 from app.database import Base  # noqa: E402
 import app.models  # noqa: F401,E402  register all models
 from app.models.agent_app import AgentApp  # noqa: E402
-from app.models.workflow_run import WorkflowRun  # noqa: E402
+from app.models.workflow_run import WorkflowRun, WorkflowRunStep  # noqa: E402
 from app.routers import workflows as wf_mod  # noqa: E402
 from app.services import workflow_runtime as wfr  # noqa: E402
 
@@ -113,6 +113,32 @@ def test_save_workflow_valid_saves_graph(db):
     assert out["flow"]["nodes"][1]["data"]["config"]["prompt"] == "updated"
 
 
+def test_save_workflow_normalizes_missing_edge_ids(db):
+    """Edges without ids (AI-builder output) get stable e1..eN ids.
+
+    xyflow requires a unique id per edge — null ids would render as
+    unconnected nodes on the canvas, so the PUT path must normalize.
+    """
+    wf = _mk_workflow(db, flow=_flow())
+    new_flow = _flow()
+    for e in new_flow["edges"]:
+        e.pop("id", None)
+    out = wf_mod.save_workflow(
+        wf.id, wf_mod.SaveBody(flow=new_flow),
+        "app-1", db=db, user=_user(),
+    )
+    ids = [e["id"] for e in out["flow"]["edges"]]
+    assert ids == ["e1", "e2"]
+    # Existing ids are preserved untouched.
+    preserved = _flow()
+    preserved["edges"][0]["id"] = "keep-me"
+    out2 = wf_mod.save_workflow(
+        wf.id, wf_mod.SaveBody(flow=preserved),
+        "app-1", db=db, user=_user(),
+    )
+    assert [e["id"] for e in out2["flow"]["edges"]] == ["keep-me", "e2"]
+
+
 def test_validate_endpoint(db):
     wf = _mk_workflow(db, flow=_flow())
     ok = wf_mod.validate_workflow(wf.id, "app-1", db=db, user=_user())
@@ -149,3 +175,95 @@ def test_other_users_workflow_is_404(db):
     with pytest.raises(HTTPException) as exc:
         wf_mod.get_workflow(wf.id, "app-1", db=db, user=_user("user-1"))
     assert exc.value.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Error workflow (n8n Error Workflow): flow.settings.on_error_workflow_id
+# runs automatically when the main workflow fails — one level deep.
+# ---------------------------------------------------------------------------
+
+def _error_flow_workflow(db, owner="user-1"):
+    """trigger_manual -> output: echoes the JSON failure payload it receives."""
+    flow = {
+        "version": 1,
+        "nodes": [
+            {"id": "e1", "type": "trigger_manual", "position": {"x": 0, "y": 0}, "data": {"label": "T", "config": {}}},
+            {"id": "e2", "type": "output", "position": {"x": 1, "y": 0}, "data": {"label": "O", "config": {}}},
+        ],
+        "edges": [{"id": "ee1", "source": "e1", "target": "e2"}],
+    }
+    return _mk_workflow(db, owner=owner, flow=flow)
+
+
+def test_run_failure_triggers_error_workflow(db, monkeypatch):
+    def boom(prompt, model=None):
+        raise RuntimeError("llm provider down")
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", boom)
+    err_wf = _error_flow_workflow(db)
+    main_flow = _flow()
+    main_flow["settings"] = {"on_error_workflow_id": err_wf.id}
+    wf = _mk_workflow(db, flow=main_flow)
+
+    out = wf_mod.run_workflow(wf.id, wf_mod.RunBody(input="hi"), "app-1", db=db, user=_user())
+    assert out["status"] == "failed"
+    assert "llm provider down" in out["error"]
+    assert out["failed_node_id"] == "n2"
+    assert out["error_workflow_run_id"]
+    assert out["error_workflow_status"] == "completed"
+
+    # The error workflow executed and its output node received the failure
+    # context (JSON payload containing the error message).
+    err_steps = (
+        db.query(WorkflowRunStep)
+        .filter(WorkflowRunStep.run_id == out["error_workflow_run_id"])
+        .order_by(WorkflowRunStep.created_date.asc())
+        .all()
+    )
+    output_text = ""
+    for s in err_steps:
+        if s.node_id == "e2" and s.status == "completed":
+            output_text = (s.output_json or {}).get("text", "")
+    assert "llm provider down" in output_text
+    assert '"workflow_name": "wf"' in output_text
+    assert '"node_type": "llm"' in output_text
+
+    # Error workflow runs are recorded as their own WorkflowRun rows.
+    err_run = db.query(WorkflowRun).filter(WorkflowRun.id == out["error_workflow_run_id"]).first()
+    assert err_run is not None
+    assert err_run.agent_app_id == err_wf.id
+    assert err_run.trigger == "error"
+
+
+def test_run_failure_without_error_workflow_has_no_extra(db, monkeypatch):
+    def boom(prompt, model=None):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", boom)
+    wf = _mk_workflow(db, flow=_flow())  # no settings
+    out = wf_mod.run_workflow(wf.id, wf_mod.RunBody(input="hi"), "app-1", db=db, user=_user())
+    assert out["status"] == "failed"
+    assert "error_workflow_run_id" not in out
+    # Only the main run exists — no error workflow was spawned.
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == wf.id).count() == 1
+
+
+def test_error_workflow_does_not_recurse(db, monkeypatch):
+    """A failing error workflow never spawns another error workflow."""
+    def boom(prompt, model=None):
+        raise RuntimeError("down")
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", boom)
+    # Error workflow whose LLM node ALSO fails (same monkeypatched provider).
+    err_flow = _flow()  # trigger_chat -> llm -> output
+    err_wf = _mk_workflow(db, flow=err_flow)
+    main_flow = _flow()
+    main_flow["settings"] = {"on_error_workflow_id": err_wf.id}
+    wf = _mk_workflow(db, flow=main_flow)
+
+    out = wf_mod.run_workflow(wf.id, wf_mod.RunBody(input="hi"), "app-1", db=db, user=_user())
+    assert out["status"] == "failed"
+    assert out["error_workflow_run_id"]
+    assert out["error_workflow_status"] == "failed"
+    # Exactly 2 runs total: the main one + the error one. No recursion.
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id.in_([wf.id, err_wf.id])).count() == 2
