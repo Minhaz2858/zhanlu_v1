@@ -2067,6 +2067,77 @@ def assemble_user_agent_prompt(agent_app) -> str:
     return "\n".join(parts)
 
 
+# ---------------------------------------------------------------------------
+# workflow_builder system prompt
+# ---------------------------------------------------------------------------
+# The workflow_builder agent turns plain-English requests into AI-agent
+# workflow graphs. It emits a fenced `:::decision-summary` block containing a
+# JSON save_flow payload; the router parses it (same parser the agent_builder
+# uses) so the user can review the graph before any write happens. The
+# node-type registry is embedded (lazily) so the LLM only emits known node
+# types with their required config fields.
+
+WORKFLOW_BUILDER_MISSION = (
+    "You are the Workflow Builder. Your mission: design AI agent workflow "
+    "graphs from plain-English requests. Given the user's description of a "
+    "task, produce a complete, minimal workflow graph using ONLY the node "
+    "types listed in the registry below."
+)
+
+WORKFLOW_BUILDER_RULES = """RULES (HARD):
+1. Emit EXACTLY ONE `:::decision-summary` fenced block in your final message, containing JSON with this shape:
+:::decision-summary
+{"action": "save_flow", "name": "<workflow title>", "description": "<short>", "flow": {"version": 1, "nodes": [...], "edges": [...]}}
+:::
+   - No other `:::decision-summary` blocks may appear. The block is the ONLY machine-readable part of your reply.
+2. Use ONLY node types from the registry list embedded below. Any node whose type is not in the registry will be rejected.
+3. Every workflow needs EXACTLY ONE `trigger_chat` node. Connect the main ports of chained nodes with sourceHandle: "source-main" and targetHandle: "target-main".
+4. Node shape: {"id": "n1", "type": "<node_type>", "position": {"x": <num>, "y": <num>}, "data": {"label": "<display name>", "config": {<required config fields>}}}
+   - `id` values must be unique strings (n1, n2, ...). `position` is any sane canvas coordinate. `data.label` is the human-readable display name.
+   - `data.config` must include every REQUIRED config field listed for the node type (see registry). Optional fields may be omitted.
+5. Config values that reference entities (database connector, agent, tool, knowledge base) may use their display NAME — the system resolves names to ids. Never invent an id you were not given.
+6. String fields may use template syntax to reference another node's output: {{inputs.<nodeId>.<field>}} (e.g. {{inputs.n1.chatInput}}).
+7. Keep workflows minimal: 3-6 nodes. Prefer the smallest graph that accomplishes the task."""
+
+WORKFLOW_BUILDER_NON_GOALS = """NON-GOALS (NEVER do these):
+- Never publish, deploy, or share workflows — you only produce the graph.
+- Never delete or edit other workflows — you always emit a FULL replacement graph for the current workflow in the block.
+- Never invent node types or config fields that are not in the registry."""
+
+
+def _workflow_builder_registry_block() -> str:
+    """Compact node-type registry: name | displayName | required config fields."""
+    try:
+        from app.services.workflow_node_types import list_node_types
+
+        lines = []
+        for t in list_node_types():
+            req = [
+                p["name"]
+                for p in t["properties"]
+                if p.get("required") and p["type"] in ("string", "options", "number")
+            ]
+            req_txt = ", ".join(req) if req else "(none)"
+            lines.append(f"- {t['name']} | {t['displayName']} | required config: {req_txt}")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001 — registry must never break prompt build
+        _logger.warning("workflow_builder: node registry load failed (non-fatal): %s", e)
+        return "- (registry unavailable)"
+
+
+def workflow_builder_system_prompt() -> str:
+    """Assemble the full workflow_builder system prompt with the registry."""
+    return "\n\n".join(
+        [
+            WORKFLOW_BUILDER_MISSION,
+            WORKFLOW_BUILDER_RULES,
+            "NODE-TYPE REGISTRY (the ONLY allowed node types):",
+            _workflow_builder_registry_block(),
+            WORKFLOW_BUILDER_NON_GOALS,
+        ]
+    )
+
+
 def get_system_prompt(
     agent_name: str | None,
     agent_app=None,
@@ -2113,6 +2184,8 @@ def get_system_prompt(
         prompt = SKILL_AGENT_SYSTEM_PROMPT
     elif prompt is None and agent_name == "automation_agent":
         prompt = AUTOMATION_AGENT_SYSTEM_PROMPT
+    elif prompt is None and agent_name == "workflow_builder":
+        prompt = workflow_builder_system_prompt()
     elif prompt is None and agent_name == "general_assistant":
         prompt = GENERAL_ASSISTANT_SYSTEM_PROMPT + _DEFAULT_SKILLS_BLOCK
     elif prompt is None and agent_name == "power_user":
