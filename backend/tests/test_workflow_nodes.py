@@ -11,6 +11,7 @@ class FakeCtx:
     def __init__(self, **deps):
         self.deps = deps
         self.outputs = {}
+        self.current_upstream = {}
         self.trigger_input = "hello"
 
     def llm_complete(self, prompt, model=None, **kw):
@@ -41,7 +42,7 @@ def test_llm_uses_prompt_template_and_upstream():
 
 def test_condition_routes_by_upstream_value():
     ctx = FakeCtx()
-    ctx.outputs["n1"] = {"text": "5"}
+    ctx.current_upstream = {"n1": {"text": "5"}}
     node = _node("n3", "condition", {"branches": [
         {"op": "gt", "value": "3", "on_true": "pass"},
         {"op": "default", "on_true": "fail"},
@@ -52,7 +53,7 @@ def test_condition_routes_by_upstream_value():
 
 def test_output_formats_markdown():
     ctx = FakeCtx()
-    ctx.outputs["n1"] = {"text": "# Title"}
+    ctx.current_upstream = {"n1": {"text": "# Title"}}
     out = handle_output(ctx, _node("n4", "output", {"format": "markdown"}))
     assert out["text"] == "# Title"
 

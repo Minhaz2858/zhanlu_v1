@@ -82,7 +82,7 @@ def _eval_op(value: str, op: str, target: str) -> bool:
 
 def handle_condition(ctx, node):
     config = node["data"].get("config") or {}
-    upstream = next(iter(ctx.outputs.values()), {})
+    upstream = next(iter(ctx.current_upstream.values()), {})
     value = str(upstream.get("text", ""))
     for branch in config.get("branches", []):
         if branch.get("op") == "default" or _eval_op(
@@ -95,7 +95,7 @@ def handle_condition(ctx, node):
 def handle_output(ctx, node):
     config = node["data"].get("config") or {}
     fmt = config.get("format", "markdown")
-    upstream = next(iter(ctx.outputs.values()), {})
+    upstream = next(iter(ctx.current_upstream.values()), {})
     text = upstream.get("text", "")
     if fmt == "json":
         text = json.dumps(upstream, ensure_ascii=False)

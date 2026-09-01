@@ -48,10 +48,20 @@ def execute_flow_graph(
     nodes = flow.get("nodes") or []
     edges = flow.get("edges") or []
     ordered = _topo_order(nodes, edges)
+    # Direct upstreams per node (from edges) — condition/output nodes must
+    # consume the node they're actually wired to, not dict-insertion order.
+    upstream_map: dict[str, list[str]] = {n["id"]: [] for n in nodes}
+    for e in edges:
+        upstream_map.setdefault(e["target"], []).append(e["source"])
     final_output = None
     for node in ordered:
         nid = node["id"]
         ntype = node["type"]
+        ctx.current_upstream = {
+            src: ctx.outputs[src]
+            for src in upstream_map.get(nid, [])
+            if src in ctx.outputs
+        }
         handler = handlers.get(ntype)
         if handler is None:
             err = f"node {nid}: no handler for type {ntype!r}"
