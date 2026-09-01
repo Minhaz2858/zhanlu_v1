@@ -2091,12 +2091,12 @@ WORKFLOW_BUILDER_RULES = """RULES (HARD):
 :::
    - No other `:::decision-summary` blocks may appear. The block is the ONLY machine-readable part of your reply.
 2. Use ONLY node types from the registry list embedded below. Any node whose type is not in the registry will be rejected.
-3. Every workflow needs EXACTLY ONE `trigger_chat` node. Connect the main ports of chained nodes with sourceHandle: "source-main" and targetHandle: "target-main".
+3. Every workflow needs EXACTLY ONE `trigger_chat` node AND at least one `output` node (the terminal node — validation rejects flows without one). Connect the main ports of chained nodes with sourceHandle: "source-main" and targetHandle: "target-main". Edges are objects like {"source": "n1", "target": "n2", "sourceHandle": "source-main", "targetHandle": "target-main"}.
 4. Node shape: {"id": "n1", "type": "<node_type>", "position": {"x": <num>, "y": <num>}, "data": {"label": "<display name>", "config": {<required config fields>}}}
    - `id` values must be unique strings (n1, n2, ...). `position` is any sane canvas coordinate. `data.label` is the human-readable display name.
    - `data.config` must include every REQUIRED config field listed for the node type (see registry). Optional fields may be omitted.
 5. Config values that reference entities (database connector, agent, tool, knowledge base) may use their display NAME — the system resolves names to ids. Never invent an id you were not given.
-6. String fields may use template syntax to reference another node's output: {{inputs.<nodeId>.<field>}} (e.g. {{inputs.n1.chatInput}}).
+6. String fields may use template syntax to reference another node's output: {{inputs.<nodeId>.<field>}} — e.g. {{inputs.n1.text}} (the trigger node's user message) or {{inputs.n1.history}} (prior chat turns).
 7. Keep workflows minimal: 3-6 nodes. Prefer the smallest graph that accomplishes the task."""
 
 WORKFLOW_BUILDER_NON_GOALS = """NON-GOALS (NEVER do these):
@@ -2109,9 +2109,12 @@ def _workflow_builder_registry_block() -> str:
     """Compact node-type registry: name | displayName | required config fields."""
     try:
         from app.services.workflow_node_types import list_node_types
-
-        lines = []
-        for t in list_node_types():
+    except Exception as e:  # noqa: BLE001 — registry must never break prompt build
+        _logger.warning("workflow_builder: node registry load failed (non-fatal): %s", e)
+        return "- (registry unavailable)"
+    lines = []
+    for t in list_node_types():
+        try:
             req = [
                 p["name"]
                 for p in t["properties"]
@@ -2119,10 +2122,9 @@ def _workflow_builder_registry_block() -> str:
             ]
             req_txt = ", ".join(req) if req else "(none)"
             lines.append(f"- {t['name']} | {t['displayName']} | required config: {req_txt}")
-        return "\n".join(lines)
-    except Exception as e:  # noqa: BLE001 — registry must never break prompt build
-        _logger.warning("workflow_builder: node registry load failed (non-fatal): %s", e)
-        return "- (registry unavailable)"
+        except Exception as e:  # noqa: BLE001 — skip a drifted entry, keep the rest
+            _logger.warning("workflow_builder: skipping unparsable node type entry: %s", e)
+    return "\n".join(lines) if lines else "- (registry unavailable)"
 
 
 def workflow_builder_system_prompt() -> str:
