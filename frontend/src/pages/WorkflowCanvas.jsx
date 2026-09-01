@@ -2,16 +2,17 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { applyNodeChanges, applyEdgeChanges } from '@xyflow/react';
 import { useLanguage } from '@/lib/LanguageProvider';
-import { getWorkflow, saveWorkflow, validateWorkflow, publishWorkflow, deleteWorkflow } from '@/api/workflows';
+import { getWorkflow, saveWorkflow, validateWorkflow, publishWorkflow, deleteWorkflow, listWorkflows } from '@/api/workflows';
 import { NodeRegistryProvider, getNodeTypeRegistry } from '@/lib/nodeTypeRegistry';
 import { flowToXY, xyToFlow } from '@/lib/workflowGraph';
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas';
 import NodePalette from '@/components/workflow/NodePalette';
 import NodeDetailView from '@/components/workflow/NodeDetailView';
 import RunDrawer from '@/components/workflow/RunDrawer';
+import WorkflowBuilderChat from '@/components/workflow/WorkflowBuilderChat';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { ArrowLeft, Check, Loader2, Play, Redo2, Rocket, Save, Trash2, Undo2 } from 'lucide-react';
+import { ArrowLeft, Check, Loader2, MessageSquare, Play, Redo2, Rocket, Save, Trash2, Undo2 } from 'lucide-react';
 
 /**
  * Workflow canvas page — CONTROLLED canvas architecture (n8n canvas.store
@@ -31,9 +32,12 @@ export default function WorkflowCanvasPage() {
   const [selectedNodeId, setSelectedNodeId] = useState(null);
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
+  const [builderOpen, setBuilderOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
   const [name, setName] = useState('');
+  const [settings, setSettings] = useState({});          // flow.settings (error workflow, …)
+  const [errorWfOptions, setErrorWfOptions] = useState([]); // candidate error workflows
   const [notFound, setNotFound] = useState(false);
   const [registry, setRegistry] = useState(null);
 
@@ -57,24 +61,39 @@ export default function WorkflowCanvasPage() {
     getNodeTypeRegistry().then(setRegistry).catch(() => {});
   }, []);
 
+  // Candidate error workflows (n8n Error Workflow picker): every other
+  // workflow in the app, excluding this one.
   useEffect(() => {
-    let alive = true;
+    listWorkflows()
+      .then((rows) => setErrorWfOptions((Array.isArray(rows) ? rows : []).filter((r) => r.id !== id)))
+      .catch(() => {});
+  }, [id]);
+
+  // reloadWorkflow — fetch + hydrate the canvas (wf row, name, settings,
+  // xyflow nodes/edges, reset undo/redo). Runs on mount / id change and is
+  // re-invoked after the AI builder persists a flow (onFlowSaved) so the
+  // generated graph appears without a manual refresh.
+  const reloadWorkflow = useCallback(() => {
     getWorkflow(id)
       .then((row) => {
-        if (!alive) return;
         setWf(row);
         setName(row.name || 'Untitled Workflow');
         const loaded = row.flow || { version: 1, nodes: [], edges: [] };
+        setSettings((loaded.settings) || {});
         const xy = flowToXY(loaded);
         setXyNodes(xy.nodes);
         setXyEdges(xy.edges);
         lastStructuralKey.current = structuralKey(xy.nodes, xy.edges);
         undoStack.current = [];
         redoStack.current = [];
+        setDirty(false);
       })
-      .catch(() => alive && setNotFound(true));
-    return () => { alive = false; };
+      .catch(() => setNotFound(true));
   }, [id]);
+
+  useEffect(() => {
+    reloadWorkflow();
+  }, [reloadWorkflow]);
 
   // ---- change plumbing (canvas -> page) -----------------------------------
 
@@ -208,7 +227,7 @@ export default function WorkflowCanvasPage() {
     if (!xyNodes) return;
     setSaving(true);
     try {
-      const flow = xyToFlow(xyNodes, xyEdges);
+      const flow = xyToFlow(xyNodes, xyEdges, settings);
       const updated = await saveWorkflow(id, { name, description: wf?.description, flow });
       setWf(updated);
       setDirty(false);
@@ -293,6 +312,23 @@ export default function WorkflowCanvasPage() {
             {saving ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Save className="mr-1 h-3.5 w-3.5" />}
             {lang === 'zh' ? '保存' : 'Save'}
           </Button>
+          <select
+            value={settings.on_error_workflow_id || ''}
+            onChange={(e) => {
+              setSettings((s) => ({ ...s, on_error_workflow_id: e.target.value || null }));
+              setDirty(true);
+            }}
+            className="h-8 w-48 rounded-lg border border-border bg-card px-2 text-xs text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
+            title={lang === 'zh' ? '错误工作流：主工作流运行失败时自动执行（n8n Error Workflow）' : 'Error workflow: executed automatically when this workflow fails (n8n Error Workflow)'}
+          >
+            <option value="">{lang === 'zh' ? '错误工作流：无' : 'Error workflow: none'}</option>
+            {errorWfOptions.map((w) => (
+              <option key={w.id} value={w.id}>{w.name}</option>
+            ))}
+          </select>
+          <Button size="sm" variant="outline" onClick={() => setBuilderOpen(true)} title={lang === 'zh' ? 'AI 构建' : 'Build with AI'}>
+            <MessageSquare className="mr-1 h-3.5 w-3.5" /> {lang === 'zh' ? 'AI 构建' : 'Build with AI'}
+          </Button>
           <Button size="sm" variant="outline" onClick={() => setRunOpen(true)}>
             <Play className="mr-1 h-3.5 w-3.5" /> {lang === 'zh' ? '运行' : 'Run'}
           </Button>
@@ -345,6 +381,16 @@ export default function WorkflowCanvasPage() {
           />
         )}
       </div>
+
+      {/* AI builder slide-over — gates its own rendering on `open`, so the
+          unconditional mount never covers the canvas while closed. On
+          flow_saved it closes itself and reloads the graph from the backend. */}
+      <WorkflowBuilderChat
+        workflowId={id}
+        open={builderOpen}
+        onClose={() => setBuilderOpen(false)}
+        onFlowSaved={() => { setBuilderOpen(false); reloadWorkflow(); }}
+      />
     </div>
   );
 }
