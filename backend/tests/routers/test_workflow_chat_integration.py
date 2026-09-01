@@ -141,3 +141,48 @@ def test_v2_add_message_flow_without_chat_trigger_reports_error(db):
     assert msgs[-1]["role"] == "assistant"
     assert "no Chat Trigger" in msgs[-1]["content"]
     assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).count() == 0
+
+
+def test_v3_stream_runs_flow_mode_workflow(db, monkeypatch):
+    captured = {}
+
+    def fake_llm(prompt, model=None):
+        captured["prompt"] = prompt
+        return "wf-answer"
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", fake_llm)
+    user = _user(db)
+    agent = _workflow_agent(db)
+    conv = _conv(db, agent, [
+        {"role": "user", "content": "prior q"},
+        {"role": "assistant", "content": "prior a"},
+    ])
+
+    resp = asyncio.run(agents.add_message_stream(
+        app_id="default-app",
+        conversation_id=conv.id,
+        body={"content": "current q"},
+        db=db,
+        user=user,
+    ))
+    assert resp.media_type == "text/event-stream"
+
+    async def drain():
+        chunks = []
+        async for c in resp.body_iterator:
+            chunks.append(c)
+        return "".join(chunks) if chunks and isinstance(chunks[0], str) else b"".join(chunks).decode()
+
+    text = asyncio.run(drain())
+    assert '"type": "done"' in text
+    assert "wf-answer" in text
+    # History reached the workflow LLM prompt; current turn excluded.
+    assert "User: prior q" in captured["prompt"]
+    assert "Reply to: current q" in captured["prompt"]
+    assert "User: current q" not in captured["prompt"]
+    # Assistant message persisted + chat-triggered run recorded.
+    refreshed = db.query(AgentConversation).filter(AgentConversation.id == conv.id).first()
+    assert refreshed.messages[-1]["role"] == "assistant"
+    assert refreshed.messages[-1]["content"] == "wf-answer"
+    run = db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).first()
+    assert run is not None and run.trigger == "chat"

@@ -10904,6 +10904,77 @@ async def add_message_stream(
         # Don't fail the request — the loop's own error handler can
         # still attempt a persist. But log loudly so we notice.
 
+    # ── Agent Workflow chat path (streaming) ─────────────────────────
+    # flow_mode agents (canvas workflows with a Chat Trigger) execute
+    # through the workflow runtime. The run is synchronous; the final
+    # output is streamed as one SSE "done" event (no token deltas —
+    # per-node steps are visible in the workflow's run history). Mirrors
+    # the v2 blocking branch's persistence. Workflows skip the response
+    # cache entirely: they are side-effectful pipelines, not idempotent
+    # Q&A, so a cached answer could replay stale node output.
+    if conv.agent_name:
+        _wf_agent_app = (
+            db.query(AgentApp)
+            .filter(AgentApp.name == conv.agent_name, AgentApp.is_deleted == False)  # noqa: E712
+            .first()
+        )
+    else:
+        _wf_agent_app = None
+    if _wf_agent_app and _wf_agent_app.flow_mode:
+        from app.services.workflow_chat import run_workflow_for_chat
+
+        async def _workflow_stream():
+            try:
+                wf_result = run_workflow_for_chat(db, conv, _wf_agent_app, user_content, user)
+            except Exception as _wf_err:  # noqa: BLE001 — stream error, not a crash
+                logger.exception("v3 workflow chat run failed (conv=%s)", conversation_id)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                yield (
+                    "data: "
+                    + json.dumps({
+                        "type": "error",
+                        "message": f"Workflow failed: {_wf_err}",
+                        "conversation": conv.to_dict(),
+                    })
+                    + "\n\n"
+                )
+                return
+            _wf_msg = {
+                "id": str(uuid.uuid4()),
+                "role": "assistant",
+                "content": wf_result["content"] or "",
+                "created_date": datetime.now(timezone.utc).isoformat(),
+            }
+            conv.messages = list((conv.messages or []) + [_wf_msg])
+            conv.updated_date = datetime.now(timezone.utc)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+            try:
+                db.refresh(conv)
+            except Exception:
+                pass
+            yield (
+                "data: "
+                + json.dumps({
+                    "type": "done",
+                    "content": wf_result["content"] or "",
+                    "trace": [],
+                    "conversation": conv.to_dict(),
+                })
+                + "\n\n"
+            )
+
+        return StreamingResponse(
+            _sse_with_heartbeat(_workflow_stream()),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     # ── Experience layer (Phase B): semantic response cache ──────────────
     # When RESPONSE_CACHE_ENABLED is on, attempt an early cache
     # lookup BEFORE the FSM/tool loop runs. On hit, stream the cached
