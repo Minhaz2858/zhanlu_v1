@@ -5,7 +5,7 @@ FastAPI backend + React (Vite) frontend, glued together by the `@base44/sdk`.
 ## Authentication
 
 Login is **required for every page and every mutating/LLM/data endpoint** — there
-is no anonymous access (see `docs/superpowers/plans/2026-07-27-claude-style-auth-hardening.md`).
+is no anonymous access.
 
 - **Methods:** email + password only. Registration verifies via an emailed OTP
   code (unless no users exist yet, for first-time setup).
@@ -65,7 +65,6 @@ docker restart zhanlu-backend zhanlu-sandbox-worker
 
 - The access/refresh tokens live in `localStorage` (constrained by the
   `@base44/sdk` transport). Migrating to httpOnly cookies requires forking the
-  SDK's axios client + rewriting `AuthContext.jsx` — see
-  `docs/superpowers/followups/httpOnly-cookie-auth-migration.md`.
+  SDK's axios client + rewriting `AuthContext.jsx`.
 - Mid-session 401 auto-refresh (for ongoing SDK calls, not just page load) is
   part of that same follow-up.
