@@ -31,7 +31,11 @@ export default function InvokePicker({ activeSkill, activeAgent, onSelectSkill, 
         setSkills(ownerId ? tools.filter((x) => x.created_by_id === ownerId) : []);
       })
       .catch(() => {});
-    base44.entities.AgentApp.list('-updated_date', 100).then(setAgents).catch(() => {});
+    // Workflows (flow_mode agents) are not regular agents — they have
+    // their own entry point in the + menu's "Agent Workflow" section.
+    base44.entities.AgentApp.list('-updated_date', 100)
+      .then((rows) => setAgents((rows || []).filter((a) => !a.flow_mode)))
+      .catch(() => {});
   }, []);
 
   useEffect(() => {

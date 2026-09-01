@@ -1,20 +1,23 @@
 import { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { base44 } from '@/api/base44Client';
+import { listWorkflows } from '@/api/workflows';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { filterUserAgents } from '@/lib/systemAgents';
-import { Plus, Upload, Wrench, Bot, Search, ChevronLeft, Check, Folder } from 'lucide-react';
+import { Plus, Upload, Wrench, Bot, Search, ChevronLeft, Check, Folder, Workflow } from 'lucide-react';
 import { toast } from 'sonner';
 
 export default function PlusMenu({
-  onUpload, onSelectSkill, onSelectAgent, onSelectProject,
+  onUpload, onSelectSkill, onSelectAgent, onSelectWorkflow, onSelectProject,
   activeSkill, activeAgent, activeProject, disabled,
+  uploadEnabled = true,
 }) {
   const { t } = useLanguage();
   const [view, setView] = useState('main');
   const [open, setOpen] = useState(false);
   const [skills, setSkills] = useState([]);
   const [agents, setAgents] = useState([]);
+  const [workflows, setWorkflows] = useState([]);
   const [projects, setProjects] = useState([]);
   const [q, setQ] = useState('');
   const [uploading, setUploading] = useState(false);
@@ -56,6 +59,10 @@ export default function PlusMenu({
       setSkills(u ? tools.filter((x) => x.created_by_id === u.id) : tools);
     }).catch(() => {});
     base44.entities.AgentApp.list('-updated_date', 100).then((rows) => setAgents(filterUserAgents(rows))).catch(() => {});
+    // Agent Workflows (flow_mode agents) — only those with a Chat Trigger
+    // can be used from chat; the backend v2/v3 endpoints run them on every
+    // message. Non-chat-trigger workflows stay on the canvas only.
+    listWorkflows().then((rows) => setWorkflows(rows || [])).catch(() => {});
     // Fetch projects (non-archived) so the user can switch project
     // directly from the + menu without going to the sidebar.
     base44.entities.Project.list('-updated_date', 200)
@@ -122,7 +129,11 @@ export default function PlusMenu({
 
   const ql = q.toLowerCase();
   const filteredSkills = skills.filter((s) => (s.name || '').toLowerCase().includes(ql) || (s.trigger || '').toLowerCase().includes(ql));
-  const filteredAgents = agents.filter((a) => (a.name || '').toLowerCase().includes(ql));
+  // Workflows are NOT regular agents — exclude flow_mode rows so they only
+  // appear in the dedicated "Agent Workflow" section below.
+  const filteredAgents = agents.filter((a) => !a.flow_mode && (a.name || '').toLowerCase().includes(ql));
+  const hasChatTrigger = (w) => Array.isArray(w?.flow?.nodes) && w.flow.nodes.some((n) => n?.type === 'trigger_chat');
+  const filteredWorkflows = workflows.filter((w) => hasChatTrigger(w) && (w.name || '').toLowerCase().includes(ql));
   const filteredProjects = projects.filter((p) => p.name.toLowerCase().includes(ql));
 
   // The dropdown is rendered in a portal so it's never clipped by an
@@ -138,14 +149,16 @@ export default function PlusMenu({
     >
       {view === 'main' ? (
         <div className="p-1">
-          <button
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading}
-            className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70 disabled:opacity-50"
-          >
-            <Upload className="h-3.5 w-3.5 text-muted-foreground" />
-            {uploading ? t.chat.plus.uploading : t.chat.plus.upload}
-          </button>
+          {uploadEnabled && (
+            <button
+              onClick={() => fileRef.current?.click()}
+              disabled={uploading}
+              className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70 disabled:opacity-50"
+            >
+              <Upload className="h-3.5 w-3.5 text-muted-foreground" />
+              {uploading ? t.chat.plus.uploading : t.chat.plus.upload}
+            </button>
+          )}
           <button onClick={() => setView('project')} className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
             <Folder className="h-3.5 w-3.5 text-muted-foreground" /> Select project
             {activeProject && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-amber-700 dark:text-amber-300">{activeProject}</span>}
@@ -156,7 +169,11 @@ export default function PlusMenu({
           </button>
           <button onClick={() => setView('agent')} className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
             <Bot className="h-3.5 w-3.5 text-muted-foreground" /> {t.chat.plus.agent}
-            {activeAgent && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
+            {activeAgent && !activeAgent.flow_mode && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
+          </button>
+          <button onClick={() => setView('workflow')} className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
+            <Workflow className="h-3.5 w-3.5 text-muted-foreground" /> Agent Workflow
+            {activeAgent?.flow_mode && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
           </button>
         </div>
       ) : (
@@ -166,7 +183,7 @@ export default function PlusMenu({
               <ChevronLeft className="h-3.5 w-3.5" />
             </button>
             <span className="text-xs font-medium text-foreground">
-              {view === 'skill' ? t.chat.plus.skill : view === 'agent' ? t.chat.plus.agent : 'Select project'}
+              {view === 'skill' ? t.chat.plus.skill : view === 'agent' ? t.chat.plus.agent : view === 'workflow' ? 'Agent Workflow' : 'Select project'}
             </span>
           </div>
           <div className="border-b border-border p-2">
@@ -194,6 +211,15 @@ export default function PlusMenu({
                 <Bot className="h-3 w-3 shrink-0 text-muted-foreground" />
                 <span className="truncate">{a.name}</span>
                 {activeAgent?.id === a.id && <Check className="ml-auto h-3 w-3 shrink-0 text-primary" />}
+              </button>
+            )))}
+            {view === 'workflow' && (filteredWorkflows.length === 0 ? (
+              <p className="px-2 py-3 text-center text-xs text-muted-foreground">No chat workflows found</p>
+            ) : filteredWorkflows.map((w) => (
+              <button key={w.id} onClick={() => { onSelectWorkflow?.(w); setOpen(false); setView('main'); setQ(''); }} className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
+                <Workflow className="h-3 w-3 shrink-0 text-muted-foreground" />
+                <span className="truncate">{w.name}</span>
+                {activeAgent?.id === w.id && <Check className="ml-auto h-3 w-3 shrink-0 text-primary" />}
               </button>
             )))}
             {view === 'project' && (filteredProjects.length === 0 ? (
@@ -224,15 +250,17 @@ export default function PlusMenu({
         <Plus className="h-4 w-4" />
       </button>
       {typeof document !== 'undefined' && createPortal(dropdown, document.body)}
-      <input
-        ref={fileRef}
-        type="file"
-        className="hidden"
-        multiple
-        data-testid="file-upload-input"
-        accept=".pdf,.docx,.pptx,.ppt,.xlsx,.xls,.csv,.txt,.md,.json,.html,.htm,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff,.tif,.mp3,.m4a,.wav,.mp4,.mov,.webm"
-        onChange={handleFileChange}
-      />
+      {uploadEnabled && (
+        <input
+          ref={fileRef}
+          type="file"
+          className="hidden"
+          multiple
+          data-testid="file-upload-input"
+          accept=".pdf,.docx,.pptx,.ppt,.xlsx,.xls,.csv,.txt,.md,.json,.html,.htm,.png,.jpg,.jpeg,.webp,.gif,.bmp,.tiff,.tif,.mp3,.m4a,.wav,.mp4,.mov,.webm"
+          onChange={handleFileChange}
+        />
+      )}
     </div>
   );
 }

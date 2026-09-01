@@ -262,6 +262,7 @@ export default function Chat() {
   const [latestExecution, setLatestExecution] = useState(null);
   const [attachments, setAttachments] = useState([]);
   const [streamingId, setStreamingId] = useState(null);
+  const [researchConfig, setResearchConfig] = useState(null);  // deep research composer mode (v1)
   const [streamingConvId, setStreamingConvId] = useState(null);  // P2: conv id of the in-flight v3 stream (for steer routing)
   // Completion notifications (Kimi/GPT-style): dedupe per run so a
   // run that completes through multiple code paths fires one toast.
@@ -1220,7 +1221,7 @@ export default function Chat() {
 
   async function handleSend(text, opts = {}) {
     const gen = ++genRef.current;
-    const { hidden = false, newSessionTitle = null, newSessionProject = null, newSessionProjectId = null } = opts; // hidden=true → don't render the bubble
+    const { hidden = false, newSessionTitle = null, newSessionProject = null, newSessionProjectId = null, research = null } = opts; // hidden=true → don't render the bubble
     // `newSession*` opts are used when the caller wants the message to
     // land in a brand-new session (e.g. from the New-Automation dialog)
     // rather than appending to the currently-active one. The session is
@@ -1443,6 +1444,7 @@ export default function Chat() {
           aiMsg,
           fileUrls,
           lang: effectiveAiLang,
+          research,
         });
       } finally {
         if (gen === genRef.current) {
@@ -2039,7 +2041,7 @@ export default function Chat() {
     };
   }
 
-  async function handleAgentSend(text, { activeAgent, activeSkill, sid, gen, sessionId, aiMsg, fileUrls, lang, regenerate = false }) {
+  async function handleAgentSend(text, { activeAgent, activeSkill, sid, gen, sessionId, aiMsg, fileUrls, lang, regenerate = false, research = null }) {
     // Ask for notification permission once, on the first send (user gesture).
     try {
       if (typeof Notification !== 'undefined' && Notification.permission === 'default') {
@@ -2198,6 +2200,7 @@ export default function Chat() {
           ...(fileUrls && fileUrls.length ? { file_urls: fileUrls } : {}),
           ...(lang ? { lang } : {}),
           ...(selectedSkill ? { selected_skill: selectedSkill, selected_skill_id: selectedSkill.id } : {}),
+          ...(research ? { research } : {}),
           // Forward the current project context in the stream body
           // so the backend's prepare_data_source_runtime can extend
           // the agent's bound KBs with the project's KBs — even when
@@ -2847,6 +2850,54 @@ export default function Chat() {
   }
   function handlePickSkill(skillObj) { setActiveSkill(skillObj); }
   function handlePickAgent(agent) { setActiveAgent(agent); }
+
+  // "+ → Agent Workflow": start a NEW chat session bound to a flow-mode
+  // workflow (canvas agent). The backend v2/v3 endpoints detect
+  // flow_mode and run the workflow on every message; the conversation is
+  // bound via agent_name (existing resolution) plus metadata.workflow_id
+  // (stable rebinding handle). Fresh session per the design decision —
+  // nothing is inherited from the previous session.
+  async function handlePickWorkflow(wf) {
+    handleNewChat();          // reset messages/chips/stream state
+    setActiveAgent(wf);       // header chip shows the workflow name
+    try {
+      // Session row first (mirrors handleSend's lazy creation) so the
+      // sidebar shows the new session immediately.
+      const session = await base44.entities.ChatSession.create({
+        title: (wf.name || 'Workflow').slice(0, 24),
+        project: pendingProject || null,
+        ...(pendingProjectId ? { project_id: pendingProjectId } : {}),
+        last_message_at: new Date().toISOString(),
+      });
+      setActiveId(session.id);
+      prependSession(session);
+      // Conversation bound to the workflow. Title = workflow name so the
+      // Recent Chats list is readable (see the createAgentConversation
+      // title contract at handleSend).
+      const conv = await createAgentConversation(wf.name, {
+        description: wf.description || '',
+        agent_app_id: wf.id,
+        workflow_id: wf.id,
+      }, wf.name);
+      try {
+        await base44.entities.ChatSession.update(session.id, {
+          conversation_id: conv.id,
+          agent_name: wf.name,
+        });
+      } catch { /* best-effort — the link only matters for future reopens */ }
+      setStreamingConvId(conv.id);
+      try {
+        const url = new URL(window.location.href);
+        url.searchParams.set('conv', conv.id);
+        if (wf.name) url.searchParams.set('agentName', wf.name);
+        window.history.replaceState({}, '', url.toString());
+      } catch { /* SSR / test env */ }
+      refreshSessions();
+    } catch (err) {
+      console.error('[Chat] workflow session create failed:', err);
+      toast.error(err?.message || 'Failed to start workflow chat');
+    }
+  }
   function handleRemoveSkill() {
     setActiveSkill(null);
   }
@@ -3140,7 +3191,7 @@ export default function Chat() {
                     list and the "→ steer" pills are no longer needed. */}
                   </div>
                 </div>
-                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} />
+                <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null)} onSelectProject={setPendingProject} inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
               </>
             ) : (
               <div className="flex flex-1 flex-col items-center justify-center px-6 pb-12">
@@ -3149,7 +3200,7 @@ export default function Chat() {
                 </div>
                 <h1 className="break-words px-4 text-center font-display text-3xl tracking-tight text-foreground">{t.chat.coreTitle}</h1>
                 <div className="mt-8 w-full max-w-4xl">
-                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} />
+                  <ChatInput value={inputValue} onChange={setInputValue} onSend={handleSend} onClear={handleClear} chips={chips} categoryLabels={CATEGORIES.reduce((acc, c) => { acc[c.key] = t.chat.categories[c.key].label; return acc; }, {})} onRemoveChip={handleRemoveChip} activeSkill={activeSkill} onRemoveSkill={handleRemoveSkill} activeAgent={activeAgent} onRemoveAgent={handleRemoveAgent} onSelectSkill={handlePickSkill} onSelectAgent={handlePickAgent} onSelectWorkflow={handlePickWorkflow} disabled={loading || isRunInFlight(latestExecution)} isStreaming={chatInputBusy} onStop={stream.abort} onStopAutomation={isRunInFlight(latestExecution) ? handleStopAutomation : undefined} inputRef={inputRef} onUploadFile={handleUploadFile} attachments={attachments} onRemoveAttachment={(i) => setAttachments((prev) => prev.filter((_, idx) => idx !== i))} pendingProject={pendingProject} onClearProject={() => setPendingProject(null, null)} onSelectProject={(name, id) => setPendingProject(name, id)} centered inheritedKbCount={inheritedKbCount} pendingProjectId={pendingProjectId} researchConfig={researchConfig} onResearchChange={setResearchConfig} />
                   {chips.length > 0 && (
                     <RelatedContent
                       chips={chips}

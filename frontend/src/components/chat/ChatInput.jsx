@@ -1,8 +1,9 @@
-import { useState } from 'react';
-import { Send, Square, X, Wrench, Bot, Folder, FileText, FileSpreadsheet, Image as ImageIcon, File, Database } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { Send, Square, X, Wrench, Bot, Folder, FileText, FileSpreadsheet, Image as ImageIcon, File, Database, Search } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { isSystemAgent } from '@/lib/systemAgents';
 import { isUngroupedProjectName } from '@/lib/projectGrouping';
+import { base44 } from '@/api/base44Client';
 import PlusMenu from './PlusMenu';
 import VoiceInput from './VoiceInput';
 import AgentSuggestions from './AgentSuggestions';
@@ -54,7 +55,7 @@ function isAllowedFile(file) {
  * to read the database — it just hides the visual hint.
  */
 export default function ChatInput({
-  value, onChange, onSend, onSelectSkill, onSelectAgent, onSelectProject,
+  value, onChange, onSend, onSelectSkill, onSelectAgent, onSelectWorkflow, onSelectProject,
   onRemoveSkill, onRemoveAgent, activeSkill, activeAgent,
   disabled, centered, inputRef, onUploadFile,
   attachments = [], onRemoveAttachment,
@@ -70,6 +71,8 @@ export default function ChatInput({
   pendingProject, onClearProject,
   inheritedKbCount = 0,
   pendingProjectId = null,
+  researchConfig = null,
+  onResearchChange = () => {},
 }) {
   const { t, lang } = useLanguage();
   const [dragCounter, setDragCounter] = useState(0);
@@ -85,9 +88,27 @@ export default function ChatInput({
     ? (lang === 'en' ? 'Stop run' : '停止运行')
     : (lang === 'en' ? 'Stop generating' : '停止生成');
 
+  // Whether file upload is allowed for this user. Read from the per-user
+  // UserSetting row (file_upload_enabled, default true). The backend
+  // enforces the same setting with a 403 — this state only hides the
+  // affordances so the UI matches the policy. Defaults to true while the
+  // fetch is in flight so the toolbar never flashes empty.
+  const [uploadEnabled, setUploadEnabled] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    base44.entities.UserSetting.list('', 1)
+      .then((rows) => {
+        if (!alive) return;
+        setUploadEnabled(!(rows?.[0]?.file_upload_enabled === false));
+      })
+      .catch(() => { /* keep default (enabled) */ });
+    return () => { alive = false; };
+  }, []);
+
   function handleSend() {
     if (!value.trim() || disabled) return;
-    onSend(value.trim());
+    onSend(value.trim(), { research: researchConfig });
   }
 
   // Phase 3: drag-and-drop onto the composer. Each dropped file is
@@ -102,6 +123,11 @@ export default function ChatInput({
     if (disabled) return;
     const files = Array.from(e.dataTransfer?.files || []);
     if (!files.length) return;
+    if (!uploadEnabled) {
+      setRejectedFile(lang === 'en' ? 'File upload is disabled in Settings' : '文件上传已禁用（请在设置中开启）');
+      setTimeout(() => setRejectedFile(null), 3000);
+      return;
+    }
     const ok = files.filter(isAllowedFile);
     const bad = files.filter((f) => !isAllowedFile(f));
     if (bad.length) {
@@ -119,7 +145,7 @@ export default function ChatInput({
   // have no name. Only the first image is taken per paste to avoid
   // spamming the attachments on an over-eager paste.
   async function handlePaste(e) {
-    if (disabled) return;
+    if (disabled || !uploadEnabled) return;
     const items = Array.from(e.clipboardData?.items || []);
     let tookImage = false;
     for (const item of items) {
@@ -185,6 +211,45 @@ export default function ChatInput({
             disabled={disabled}
             className="w-full resize-none bg-transparent px-4 py-3 text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
           />
+          {researchConfig && (
+            <div className="flex flex-wrap items-center gap-1.5 px-3 pb-1.5" data-testid="deep-research-chips">
+              {['quick', 'balanced', 'deep'].map((d) => (
+                <button
+                  key={d}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => onResearchChange({ ...researchConfig, depth: d })}
+                  className={`inline-flex h-6 items-center rounded-full px-2.5 text-xs font-medium transition-colors ${
+                    researchConfig.depth === d
+                      ? 'bg-indigo-100 text-indigo-700'
+                      : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                  }`}
+                >
+                  {d === 'quick' ? (lang === 'en' ? 'Quick' : '快速')
+                    : d === 'balanced' ? (lang === 'en' ? 'Balanced' : '均衡')
+                    : (lang === 'en' ? 'Deep' : '深度')}
+                </button>
+              ))}
+              <span className="mx-1 text-zinc-300">|</span>
+              {['web', 'internal', 'both'].map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={disabled}
+                  onClick={() => onResearchChange({ ...researchConfig, scope: s })}
+                  className={`inline-flex h-6 items-center rounded-full px-2.5 text-xs font-medium transition-colors ${
+                    researchConfig.scope === s
+                      ? 'bg-indigo-100 text-indigo-700'
+                      : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                  }`}
+                >
+                  {s === 'web' ? (lang === 'en' ? 'Web' : '网页')
+                    : s === 'internal' ? (lang === 'en' ? 'Internal Data' : '内部数据')
+                    : (lang === 'en' ? 'Both' : '全部')}
+                </button>
+              ))}
+            </div>
+          )}
           <div className="flex items-center justify-between gap-2 px-3 pb-2">
             {/*
               Context chips live BESIDE the + button so they're
@@ -196,11 +261,13 @@ export default function ChatInput({
                 onUpload={onUploadFile}
                 onSelectSkill={onSelectSkill}
                 onSelectAgent={onSelectAgent}
+                onSelectWorkflow={onSelectWorkflow}
                 onSelectProject={onSelectProject}
                 activeSkill={activeSkill}
                 activeAgent={activeAgent}
                 activeProject={pendingProject}
                 disabled={disabled}
+                uploadEnabled={uploadEnabled}
               />
               {/* The project chip is only shown for a real, bound
                   project. A session without a project is the
@@ -354,6 +421,22 @@ export default function ChatInput({
                 // Idle: mic + Send button. The mic routes voice
                 // transcripts into the input via onChange.
                 <>
+                  <button
+                    type="button"
+                    disabled={disabled}
+                    onClick={() => onResearchChange(researchConfig ? null : { enabled: true, depth: 'balanced', scope: 'both' })}
+                    title={lang === 'en' ? 'Deep Research' : '深度研究'}
+                    aria-label={lang === 'en' ? 'Deep Research' : '深度研究'}
+                    data-testid="btn-deep-research"
+                    className={`inline-flex h-8 items-center gap-1 rounded-full px-2.5 text-xs font-medium transition-colors ${
+                      researchConfig
+                        ? 'bg-indigo-500 text-white shadow-md shadow-indigo-500/25'
+                        : 'border border-zinc-200 bg-zinc-100 text-zinc-600 hover:bg-zinc-200'
+                    }`}
+                  >
+                    <Search className="h-3.5 w-3.5" />
+                    {lang === 'en' ? 'Deep Research' : '深度研究'}
+                  </button>
                   <VoiceInput onTranscript={(text) => onChange(value ? `${value} ${text}` : text)} disabled={disabled} lang={lang} />
                   <button
                     type="button"
