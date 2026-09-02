@@ -116,6 +116,33 @@ nodes = [
     node("n18", "output", {"format": "markdown"}, "CEO Brief"),
 ]
 
+# Canvas layout — layered by stage (x), fanned out vertically (y).
+# Columns: input | classifier | routes | branches | grounded data | analyst | synthesis | output
+LAYOUT = {
+    "n1": (0, 420),        # CEO Question
+    "n2": (320, 420),      # Intent Classifier
+    "n3": (640, 340),      # Route Intent I
+    "n6": (640, 760),      # Route Intent II
+    "n4": (960, 0),        # Sales Detail
+    "n5": (960, 170),      # Customer Revenue Detail
+    "n7": (960, 340),      # Product Detail
+    "n8": (960, 510),      # Inventory / Backlog Detail
+    "n9": (960, 680),      # Financial Detail
+    "n10": (960, 850),     # Weekly Report Writer
+    "n11": (960, 1020),    # General Assistant
+    "n12": (1280, 0),      # KPI Snapshot
+    "n13": (1280, 170),    # Top Rankings
+    "n14": (1280, 340),    # 8-Week Trend
+    "n15": (1280, 510),    # 12-Month Trend
+    "n16": (1600, 425),    # Trend & Anomaly Analyst
+    "n17": (1920, 425),    # CEO Synthesis
+    "n18": (2240, 425),    # CEO Brief
+}
+
+for nd in nodes:
+    x, y = LAYOUT.get(nd["id"], (0, 0))
+    nd["position"] = {"x": x, "y": y}
+
 edges = [
     ("n1", "n2", "source-main", "target-main"),
     ("n1", "n12", "source-main", "target-main"),
