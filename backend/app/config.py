@@ -106,6 +106,21 @@ class Settings(BaseSettings):
     RATE_LIMIT_OTP_PER_10MIN: int = 3
     RATE_LIMIT_RESET_PER_10MIN: int = 3
 
+    # ── SSO / OIDC (roadmap item 7) ────────────────────────────────────
+    # OFF by default — local email/password login is unaffected. Enabling
+    # SSO does NOT disable local login (SSO is additive account linking).
+    SSO_ENABLED: bool = False
+    # JSON array of provider configs:
+    #   [{"id": "google", "name": "Google", "client_id": "...",
+    #     "client_secret": "...", "issuer": "https://accounts.google.com",
+    #     "discovery_url": "", "scopes": "openid email profile"}]
+    # discovery_url optional — defaults to {issuer}/.well-known/openid-configuration.
+    SSO_PROVIDERS: list[dict] = []
+    # Optional email-domain allowlist (host or subdomain match; empty = allow all).
+    SSO_ALLOWED_EMAIL_DOMAINS: list[str] = []
+    # OIDC authorize-state TTL (seconds). In-memory store — single-process.
+    SSO_STATE_TTL_S: int = 600
+
     # App
     APP_ID: str = "local-zhanlu-app"
     FRONTEND_URL: str = "http://localhost:5157"
@@ -717,7 +732,10 @@ class Settings(BaseSettings):
     # pause awaiting the user's answer (observed on the Sales Performance
     # Dashboard turn, conv f62e4c2b: 2x clarify + 2 blocked create_artifact +
     # 3 failed execute_code before the loop died).
-    CLARIFY_SUSPENDS_TURN_ENABLED: bool = False
+    # Default ON since 2026-09-02 (clarify-card parity): an agent that asks
+    # the user a question must STOP and wait for the answer — never continue
+    # working on a guess. Rollback: set False (pre-2026-09-02 behavior).
+    CLARIFY_SUSPENDS_TURN_ENABLED: bool = True
 
     # ── LIVE REASONING STREAM (2026-08-27) ──────────────────────────────
     # When True, the streaming LLM payload requests the provider's

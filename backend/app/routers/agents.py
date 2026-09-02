@@ -5787,6 +5787,34 @@ def _gate_tool_results_from_frontend(tool_calls_for_frontend: list[dict]) -> lis
     return out
 
 
+_DATA_GATE_DATA_TOOLS = frozenset({
+    "ask_data_agent", "execute_query", "answer_from_database",
+    "describe_schema", "nl2sql",
+})
+
+
+def _turn_ran_data_tool(tool_calls_for_frontend: list | None) -> bool:
+    """True when the turn executed a row-producing data tool.
+
+    The answer-verification gate is DATA-oriented (column-coverage,
+    part-whole, arithmetic detectors). Turns that never ran a data tool —
+    automation/agent/skill CRUD (AutomationTask.create, create_automation),
+    save_flow, file/env work — must be exempt: the dimension extractor pulls
+    ordinary request words out of the user message (e.g. "send", "updates")
+    and appends a bogus "[Gap disclosure]" to a valid deliverable. Same
+    misfire class as the workflow_builder exemption (2026-09-02), observed on
+    an automation-creation turn that ran only list_knowledge_bases +
+    AutomationTask.create.
+    """
+    if not tool_calls_for_frontend:
+        return False
+    for _tc in tool_calls_for_frontend:
+        _tn = (_tc.get("name") or _tc.get("tool_name") or "").split(".")[0]
+        if _tn in _DATA_GATE_DATA_TOOLS:
+            return True
+    return False
+
+
 async def _check_answer_verification_gate(
     user_message: str,
     tool_calls_for_frontend: list[dict],
@@ -5830,6 +5858,9 @@ async def _check_answer_verification_gate(
         _tn = _tc.get("name") or _tc.get("tool_name") or ""
         if _tn.startswith("fusion360_"):
             return _AnswerGateResult("none", "")
+    # DATA gate only polices DATA turns (see _turn_ran_data_tool).
+    if not _turn_ran_data_tool(tool_calls_for_frontend):
+        return _AnswerGateResult("none", "")
     tool_results = _gate_tool_results_from_frontend(tool_calls_for_frontend)
     if not tool_results:
         return _AnswerGateResult("none", "")
@@ -12373,6 +12404,23 @@ async def add_message_stream(
     except Exception as _exc:
         logger.debug("[session-state] injection failed: %s", _exc)
 
+    # ── DASHBOARD STATE block (2026-09-02, fail-open) ──────────────────
+    # ONE dashboard per chat session. Tell the agent which dashboard THIS
+    # conversation owns (dashboard_apps.chat_thread_id anchor) so follow-up
+    # edits ("make it white and blue", "widgets are missing", "rebuild it" —
+    # requests that never say "dashboard") route to update_fullstack_dashboard
+    # instead of spawning clone boards via create_fullstack_dashboard.
+    try:
+        from app.services.data_execution.prompt_block import (
+            build_dashboard_state_block,
+        )
+
+        dash_block = build_dashboard_state_block(db, conversation_id=conversation_id)
+        if dash_block:
+            system_prompt = system_prompt + dash_block
+    except Exception as _exc:
+        logger.debug("[dashboard-state] injection failed: %s", _exc)
+
     # ── P1-4: delegation nudge (2026-08-29) ─────────────────────────────
     # Parallelizable asks (>=2 top-N/list/comparison clauses) get a one-shot
     # directive to fan out via delegate_task instead of answering linearly.
@@ -12607,6 +12655,7 @@ async def add_message_stream(
         # (Sales Performance Dashboard turn, conv f62e4c2b).
         _clarify_issued = False
         _clarify_question_text = ""
+        _clarify_choices: list = []
         # Batch-replay guard state: fingerprint (sorted tool name+args JSON) →
         # count within THIS turn. A large identical batch re-emitted N times
         # escapes the per-tool loop guard (each tool appears once per batch),
@@ -15373,6 +15422,9 @@ async def add_message_stream(
                     _clarify_question_text = (
                         result.get("question") or _clarify_question_text
                     )
+                    _clarify_choices = [
+                        str(c) for c in (result.get("choices") or [])
+                    ]
                 # T12: count describe_schema executions + record executed tool
                 # names (canonical) so the pre-execution interception zone can
                 # enforce the per-turn cap on the NEXT iteration.
@@ -16258,6 +16310,26 @@ async def add_message_stream(
                     assistant_content = _clarify_question_text
                     logger.info(
                         "v3 stream: clarify question used as final content "
+                        "(conv=%s, iter=%d)",
+                        conversation_id, iteration,
+                    )
+                # Deterministic card: when the model asked via the clarify
+                # TOOL (not a [[CLARIFY]] text block), guarantee the final
+                # message renders the clickable card — never trust prose.
+                if _clarify_question_text and "[[CLARIFY" not in assistant_content:
+                    _clarify_block = {"prompt": _clarify_question_text}
+                    if _clarify_choices:
+                        _clarify_block["options"] = [
+                            {"label": c} for c in _clarify_choices
+                        ]
+                    assistant_content = (
+                        assistant_content.rstrip()
+                        + "\n\n[[CLARIFY]]\n"
+                        + json.dumps(_clarify_block, ensure_ascii=False)
+                        + "\n[[END]]"
+                    )
+                    logger.info(
+                        "v3 stream: appended [[CLARIFY]] card to final content "
                         "(conv=%s, iter=%d)",
                         conversation_id, iteration,
                     )

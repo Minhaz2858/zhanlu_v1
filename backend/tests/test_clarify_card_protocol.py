@@ -103,3 +103,46 @@ def test_automation_agent_keeps_its_own_clarify_protocol():
 def test_skill_agent_unchanged():
     # Skill-agent chat also renders :::options via AgentMarkdown.
     assert ":::options" in ap.SKILL_AGENT_SYSTEM_PROMPT
+
+
+# ---------------------------------------------------------------------------
+# Regression: the agent must STOP after asking (suspend default ON) and the
+# DATA answer-verification gate must not misfire on non-data turns.
+# ---------------------------------------------------------------------------
+
+def test_clarify_suspends_turn_default_on():
+    # config.py default flipped ON 2026-09-02: after a clarify the v3 loop
+    # breaks and waits for the user's answer instead of guessing and burning
+    # the budget (the "created your automation" + bogus disclosure turn).
+    from app.config import settings
+    assert settings.CLARIFY_SUSPENDS_TURN_ENABLED is True
+
+
+def test_gate_exempts_non_data_turns():
+    from app.routers.agents import _turn_ran_data_tool
+    # Data-row tools -> gate runs.
+    assert _turn_ran_data_tool([{"name": "ask_data_agent"}]) is True
+    assert _turn_ran_data_tool([{"name": "execute_query"}]) is True
+    assert _turn_ran_data_tool([{"tool_name": "describe_schema"}]) is True
+    # CRUD / discovery / deliverable turns -> gate skips (the misfire class:
+    # automation creation ran list_knowledge_bases + AutomationTask.create and
+    # got "requested dimensions not found in the data: send" appended).
+    assert _turn_ran_data_tool([{"name": "AutomationTask.create"}]) is False
+    assert _turn_ran_data_tool([{"name": "create_automation"}]) is False
+    assert _turn_ran_data_tool([{"name": "list_knowledge_bases"}]) is False
+    assert _turn_ran_data_tool([{"name": "save_flow"}]) is False
+    assert _turn_ran_data_tool([{"name": "create_artifact"}]) is False
+    assert _turn_ran_data_tool([]) is False
+    assert _turn_ran_data_tool(None) is False
+
+
+def test_clarify_tool_suspend_emits_deterministic_card():
+    # Source contract: when the model asks via the clarify TOOL, the v3
+    # finalize site must append a [[CLARIFY]] card (never trust prose) so the
+    # chat always renders clickable options after a suspended turn.
+    import pathlib
+    agents_src = pathlib.Path(__file__).resolve().parents[1] / "app" / "routers" / "agents.py"
+    src = agents_src.read_text(encoding="utf-8")
+    assert '"[[CLARIFY" not in assistant_content' in src
+    assert "appended [[CLARIFY]] card to final content" in src
+    assert "suspending turn awaiting user answer" in src
