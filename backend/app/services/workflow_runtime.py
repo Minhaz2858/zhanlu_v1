@@ -16,6 +16,7 @@ run_workflow_agent() orchestrates: validate -> persist WorkflowRun ->
 execute_flow_graph -> persist per-node WorkflowRunStep -> final status.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -147,6 +148,35 @@ def resolve_entity_references(flow: dict, db, user=None) -> list[str]:
                     f"node {node_id}: resolved {key} {value!r} -> {row.id}"
                 )
     return notes
+
+
+def _kb_datasource_config(kb) -> dict | None:
+    """Map a KnowledgeBase connector to the governed nl2sql adapter config.
+
+    The nl2sql pipeline builds its adapter from a ``datasource_config``
+    dict; the MySQL adapter wraps a KnowledgeBase directly (same
+    MySQLConnector the workflow runtime uses), Postgres/SQLite map to
+    connection params. Returns None when the connector type is
+    unsupported (caller falls back to the legacy translator).
+    """
+    dialect = (kb.db_type or "").lower()
+    if dialect.startswith("mysql"):
+        return {"dialect": "mysql", "kb": kb}
+    if dialect.startswith("postgres"):
+        return {
+            "dialect": "postgres",
+            "host": kb.host or "localhost",
+            "port": int(kb.port or 5432),
+            "database": kb.database_name or "",
+            "username": kb.username or "",
+            "password": kb.password or "",
+        }
+    if dialect.startswith("sqlite"):
+        path = kb.file_url or kb.database_name or ""
+        if not path:
+            return None
+        return {"dialect": "sqlite", "path": path}
+    return None
 
 
 def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -> dict:
@@ -394,9 +424,13 @@ class WorkflowExecutionContext:
     def db_query(self, kb_id: str, query: str, mode: str = "sql", limit: int = 50) -> dict:
         """Run SQL (or translate a NL question) against a database connector.
 
-        NL mode builds a schema summary from the connector's own metadata,
-        has the LLM produce the SQL, then executes it — so both modes go
-        through the same dialect-aware, read-only execute() path.
+        NL mode first routes through the GOVERNED nl2sql pipeline
+        (``app.services.nl2sql.ask`` — semantic resolution, M-Schema
+        context, validated + retried SQL generation, policy, audit; the
+        same service the agent tool layer uses). If the pipeline can't
+        run for this connector (unsupported dialect, no adapter), it
+        falls back to the legacy schema-summary translator. SQL mode is
+        always deterministic and never touches the translator.
         """
         from app.models.knowledge_base import KnowledgeBase
         from app.services.db.connector_factory import get_connector
@@ -406,6 +440,11 @@ class WorkflowExecutionContext:
             raise RuntimeError(f"database connector {kb_id!r} not found")
         if not kb.db_type:
             raise RuntimeError(f"connector {kb.name!r} is not a database connector")
+
+        if mode == "nl":
+            governed = self._nl2sql_governed(kb, query, limit)
+            if governed is not None:
+                return governed
 
         with get_connector(kb) as conn:
             sql = query.strip()
@@ -420,6 +459,53 @@ class WorkflowExecutionContext:
                 json.dumps(r, ensure_ascii=False, default=str) for r in rows
             )
         return {"text": text, "rows": rows}
+
+    def _nl2sql_governed(self, kb, question: str, limit: int) -> dict | None:
+        """Route a workflow NL query through the governed nl2sql pipeline.
+
+        Returns the db_query-shaped result dict, or None when the
+        pipeline cannot run (unsupported dialect / adapter failure /
+        generation failure) so the caller falls back to the legacy
+        translator. Never raises into the served path.
+        """
+        try:
+            from app.services.nl2sql import ask as nl2sql_ask
+
+            config = _kb_datasource_config(kb)
+            if config is None:
+                return None
+            # audit_events.binding_id is varchar(36) — the synthetic id
+            # MUST fit or the audit flush fails and poisons the shared
+            # SQLAlchemy session (workflow then dies with "transaction
+            # has been rolled back"). Compact form: wf:<agent8>:<q-hash16>
+            q_hash = hashlib.sha1(str(question).encode("utf-8")).hexdigest()[:16]
+            binding_id = f"wf:{str(self.agent.id)[:8]}:{q_hash}"
+            res = nl2sql_ask(
+                question,
+                binding_id=binding_id,
+                db=self.db,
+                datasource_config=config,
+            )
+            if not res.success or res.data is None:
+                logger.warning(
+                    "db_query nl: governed nl2sql failed (%s) — falling back",
+                    res.error or "no data",
+                )
+                return None
+            rows = [
+                {col: val for col, val in zip(res.data.columns, row)}
+                for row in res.data.rows
+            ][:max(limit, 1)]
+            if not rows:
+                text = "0 rows returned."
+            else:
+                text = "\n".join(
+                    json.dumps(r, ensure_ascii=False, default=str) for r in rows
+                )
+            return {"text": text, "rows": rows, "sql": res.sql, "engine": "nl2sql"}
+        except Exception as exc:  # noqa: BLE001 — fallback, never crash the node
+            logger.warning("db_query nl: governed nl2sql unavailable (%s) — falling back", exc)
+            return None
 
     def _translate_to_sql(self, conn, question: str) -> str:
         """NL → SQL using the connector's own schema (no hardcoded tables)."""
@@ -467,55 +553,17 @@ class WorkflowExecutionContext:
         return call_mcp_tool(server.server_url, tool_name, arguments)
 
     def run_code(self, code: str, item: dict, timeout: int = 10) -> dict:
-        """Run user Python in a restricted sandbox (thread + timeout).
+        """Run user Python in the Docker sandbox (agent-sandbox pattern).
 
-        Available names: json, math, len, str, int, float, bool, list, dict,
-        range, abs, min, max, sum, round, isinstance, print, and `input`
-        (the upstream item dict). NO __import__ (import statements fail),
-        no open/eval/exec, no filesystem/network. Script must assign `output`.
+        Enqueues a ``workflow_code`` SandboxJob via the sandbox-worker and
+        returns its captured result. When the sandbox path is unavailable
+        (dev / Docker down) it falls back to the restricted in-process exec
+        — same semantics as the sandbox runner (restricted builtins,
+        ``input`` = upstream item, must assign ``output``), no isolation.
         """
-        import threading
+        from app.services.workflow_sandbox import run_code_sandboxed
 
-        safe_builtins = {
-            "len": len, "str": str, "int": int, "float": float,
-            "bool": bool, "list": list, "dict": dict, "range": range,
-            "enumerate": enumerate, "zip": zip, "abs": abs, "min": min,
-            "max": max, "sum": sum, "round": round, "isinstance": isinstance,
-            "Exception": Exception, "ValueError": ValueError,
-            "TypeError": TypeError, "KeyError": KeyError,
-            "True": True, "False": False, "None": None, "print": print,
-        }
-        restricted = {
-            "__builtins__": safe_builtins,
-            "json": json,
-            "math": __import__("math"),
-            "input": item,
-        }
-        box: dict = {}
-        def _run():
-            try:
-                exec(compile(code, "<code>", "exec"), restricted, box)
-            except Exception as exc:  # noqa: BLE001
-                box["_error"] = repr(exc)
-        t = threading.Thread(target=_run, daemon=True)
-        t.start()
-        t.join(timeout)
-        if t.is_alive():
-            return {"success": False, "text": f"Code timed out after {timeout}s"}
-        if "_error" in box:
-            return {"success": False, "text": f"Code error: {box['_error']}"}
-        if "output" not in box:
-            return {"success": False, "text": "Code must assign an `output` variable"}
-        out = box["output"]
-        try:
-            json.dumps(out)
-        except TypeError:
-            return {"success": False, "text": "output is not JSON-serializable"}
-        if isinstance(out, dict):
-            return {"success": True, "text": json.dumps(out, ensure_ascii=False), "items": [out]}
-        if isinstance(out, list):
-            return {"success": True, "text": json.dumps(out, ensure_ascii=False), "items": out}
-        return {"success": True, "text": str(out), "items": [{"value": out}]}
+        return run_code_sandboxed(self.db, code, item, timeout)
 
     def http_request(
         self,
