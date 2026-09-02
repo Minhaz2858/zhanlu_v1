@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { Button } from '@/components/ui/button';
-import { Info, Plus, Trash2 } from 'lucide-react';
+import { Info, Plus, Trash2, ChevronDown } from 'lucide-react';
 
 /**
  * Schema-driven parameter form — n8n's ParameterInput pattern.
@@ -65,7 +65,12 @@ function useDynamicOptions(prop, config) {
           setOptions(
             (Array.isArray(rows) ? rows : []).map((r) => ({
               name: r.name || r.title || r.tool_name || String(r.id),
-              value: String(r.name || r.tool_name || r.id),
+              // CRITICAL: entity pickers (AgentApp/Tool/KnowledgeBase/McpServer)
+              // resolve by ID in the backend (agent_id/tool_id/kb_id/server_id).
+              // Storing the NAME here saved a name into the config and every
+              // run failed with "<name> not found". Prefer r.id when present;
+              // only MCP tools (no id) fall back to their name.
+              value: String(r.id ?? r.tool_name ?? r.name),
             }))
           );
         })
@@ -179,6 +184,19 @@ function StringInput({ prop, value, onChange, upstreamFields }) {
 
 function OptionsInput({ prop, value, onChange, config }) {
   const options = useDynamicOptions(prop, config);
+  const autoSelected = useRef(false);
+  // Non-IT first: when a picker resolves to exactly ONE option (e.g. the
+  // user has a single connected database), select it automatically — no
+  // "— select —" dropdown step. Guarded by a ref so the onChange-identity
+  // churn across renders cannot loop.
+  useEffect(() => {
+    if (autoSelected.current) return;
+    if (prop.type === 'multiOptions') return;
+    if (options && options.length === 1 && (value === '' || value == null)) {
+      autoSelected.current = true;
+      onChange(options[0].value);
+    }
+  }, [options, value, onChange, prop.type]);
   if (options === null) {
     return <div className="h-8 animate-pulse rounded-lg bg-muted" />;
   }
@@ -272,6 +290,15 @@ function CollectionInput({ prop, value, onChange, config }) {
 }
 
 export function SchemaField({ prop, value, onChange, config, upstreamFields }) {
+  // Conditional fields (n8n displayOptions.show): hide unless the governing
+  // config field matches. e.g. db_query mode 'nl' → Question only;
+  // mode 'sql' → SQL only. Non-IT users never see both inputs at once.
+  if (prop.visible_when) {
+    const visible = Object.entries(prop.visible_when).every(
+      ([k, v]) => config?.[k] === v,
+    );
+    if (!visible) return null;
+  }
   switch (prop.type) {
     case 'notice':
       return (
@@ -316,9 +343,15 @@ export default function NodeParameterForm({ node, registry, upstreamFields, onCh
 
   if (!def) return null;
 
+  // Non-IT first: power-user props (limits, error handling) collapse into
+  // an "Advanced (optional)" section; the visible defaults are the fields a
+  // business user actually needs.
+  const basicProps = def.properties.filter((p) => !p.advanced);
+  const advancedProps = def.properties.filter((p) => p.advanced);
+
   return (
     <div className="space-y-4">
-      {def.properties.map((prop) => (
+      {basicProps.map((prop) => (
         <SchemaField
           key={prop.name}
           prop={prop}
@@ -328,6 +361,26 @@ export default function NodeParameterForm({ node, registry, upstreamFields, onCh
           onChange={(v) => onChange({ [prop.name]: v })}
         />
       ))}
+      {advancedProps.length > 0 && (
+        <details className="group rounded-lg border border-border bg-card/40 px-3 py-2">
+          <summary className="flex cursor-pointer select-none items-center gap-1.5 text-xs font-medium text-muted-foreground hover:text-foreground">
+            <ChevronDown className="h-3.5 w-3.5 transition-transform group-open:rotate-180" />
+            {lang === 'zh' ? '高级设置（可选）' : 'Advanced (optional)'}
+          </summary>
+          <div className="mt-3 space-y-4">
+            {advancedProps.map((prop) => (
+              <SchemaField
+                key={prop.name}
+                prop={prop}
+                config={config}
+                upstreamFields={upstreamFields}
+                value={config[prop.name]}
+                onChange={(v) => onChange({ [prop.name]: v })}
+              />
+            ))}
+          </div>
+        </details>
+      )}
       {lang === 'zh' && def.description_zh && (
         <p className="text-[11px] text-muted-foreground/70">{def.description_zh}</p>
       )}
