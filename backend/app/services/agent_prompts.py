@@ -2699,8 +2699,21 @@ def _get_tools_base(agent_name: str | None, tool_config: dict | None = None, age
         agent_app: Optional AgentApp ORM object. Used to resolve tools from
                    the agent's ``skills`` field when no tool_config is set.
     """
-    if tool_config and isinstance(tool_config, dict) and tool_config.get("enabled_tools"):
+    if tool_config and isinstance(tool_config, dict) and tool_config.get("enabled_tools") is not None:
         from app.services.tool_registry import resolve_tools_for_agent, registry
+
+        if not tool_config["enabled_tools"]:
+            # Explicit EMPTY enabled_tools = the agent deliberately has NO
+            # tools (e.g. workflow_builder, whose deliverable is the save_flow
+            # decision summary). The old truthy check treated [] as "no
+            # config" and fell through to DEFAULT_USER_AGENT_TOOLS — the
+            # builder got create_artifact, tried to emit the graph as a
+            # markdown artifact, and the deliverable phase-lock + file-turn
+            # guard hijacked the turn (2026-09-02 regression: "Markdown
+            # document could not be generated within this turn's tool
+            # budget"). An explicit empty list must NEVER fall back to the
+            # default tool set.
+            return []
 
         tool_names = resolve_tools_for_agent(agent_name, tool_config)
 

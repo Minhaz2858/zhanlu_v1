@@ -36,6 +36,52 @@ def _flag(value: bool):
 
 # ── is_file_deliverable_request ──────────────────────────────────────────
 
+class TestWorkflowBuilderExemption:
+    """Build-with-AI turns deliver a flow GRAPH (save_flow decision summary),
+    never a file artifact. A builder prompt like "...and a markdown output
+    node" is a NODE-TYPE description, not a request for a Markdown document —
+    the file-turn guard must be inert for workflow_builder turns (regression
+    2026-09-02: the builder chat appended "(The requested Markdown document
+    could not be generated within this turn's tool budget...)" and the graph
+    was never saved).
+    """
+
+    BUILDER_PROMPT = (
+        "Create a workflow called 'Sales Assistant' that answers sales questions. "
+        "It should have: a chat trigger node; an LLM node that classifies the question "
+        "into exactly one of SALES, CUSTOMERS, or GENERAL; a switch node that routes on "
+        "that classification; a database query node in natural language mode on the "
+        "aipdp_data_warehouse_prod database for the SALES branch; a database query node "
+        "for the CUSTOMERS branch; an agent node using general_assistant for the GENERAL "
+        "branch; an LLM node that merges the branch answer; and a markdown output node. "
+        "Connect everything in order."
+    )
+
+    def test_workflow_builder_turn_is_exempt(self):
+        with _flag(True):
+            result = file_turn_guard(
+                self.BUILDER_PROMPT,
+                [],
+                budget_remaining=0,
+                attempts=0,
+                agent_name="workflow_builder",
+            )
+        assert result.action == "none"
+        assert result.message == ""
+
+    def test_other_agents_still_get_disclosure(self):
+        with _flag(True):
+            result = file_turn_guard(
+                self.BUILDER_PROMPT,
+                [],
+                budget_remaining=0,
+                attempts=0,
+                agent_name="general_assistant",
+            )
+        assert result.action == "disclose"
+        assert "tool budget" in result.message
+
+
 class TestIsFileDeliverableRequest:
     def test_html_keyword(self):
         ok, fmt = is_file_deliverable_request("create an HTML report")

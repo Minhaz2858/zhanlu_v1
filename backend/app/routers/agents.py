@@ -650,6 +650,7 @@ def _choose_fallback(
     tool_calls_for_frontend: list[dict],
     orch_created: list[dict],
     user_content: str = "",
+    agent_name: str = "",
 ) -> str:
     """Choose the best fallback message based on what was produced this turn.
 
@@ -747,6 +748,13 @@ def _choose_fallback(
     # sees a real confirmation, not the generic "I gathered some
     # information but had trouble putting it all together" apology.
     _is_file, _fmt = is_file_deliverable_request(user_content)
+    # workflow_builder exemption (2026-09-02 regression): Build-with-AI turns
+    # deliver a flow GRAPH via the save_flow decision summary — never a file
+    # artifact. A prompt like "...and a markdown output node" is a NODE-TYPE
+    # description, not a request for a Markdown document, so the empty-content
+    # fallback must not append the tool-budget disclosure for builder turns.
+    if agent_name == "workflow_builder":
+        _is_file, _fmt = False, None
     if _is_file and _fmt:
         if file_artifact_created(tool_calls_for_frontend, _fmt):
             return _automation_scheduled_confirmation(
@@ -7230,6 +7238,7 @@ async def add_message(
                         tool_calls_for_frontend,
                         budget_remaining=MAX_TOOL_ITERATIONS - iteration,
                         attempts=_file_nudge_attempts,
+                        agent_name=conv.agent_name,
                     )
                     if _file_guard.action == "nudge":
                         llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -8683,6 +8692,7 @@ async def resume_conversation(
                     tool_calls_for_frontend,
                     budget_remaining=_final_iteration - iteration,
                     attempts=_file_nudge_attempts,
+                    agent_name=conv.agent_name,
                 )
                 if _file_guard.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -13996,6 +14006,7 @@ async def add_message_stream(
                         budget_remaining=MAX_TOOL_ITERATIONS - iteration,
                         attempts=_file_nudge_attempts,
                         output_format=_output_format,
+                        agent_name=conv.agent_name,
                     )
                     if _file_guard.action == "nudge":
                                         llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -16506,6 +16517,7 @@ async def add_message_stream(
                 else:
                     assistant_content = _choose_fallback(
                         tool_calls_for_frontend, _orch_created, user_content=user_content,
+                        agent_name=conv.agent_name,
                     )
 
         # Decision-summary pause (R4): if the assistant text contains a
@@ -16984,6 +16996,7 @@ async def add_message_stream(
                                 assistant_content = _choose_fallback(
                                     tool_calls_for_frontend, _orch_created,
                                     user_content=user_content,
+                                    agent_name=conv.agent_name,
                                 )
                 logger.info(
                     "Post-loop fallback: empty assistant_content, using fallback message "
@@ -17743,6 +17756,7 @@ async def add_message_stream(
                     accumulated_content = _choose_fallback(
                         tool_calls_for_frontend, _orch_created,
                         user_content=user_content,
+                        agent_name=conv.agent_name,
                     )
                 except Exception as _guarantee_err:
                     logger.warning(
@@ -17826,6 +17840,7 @@ async def add_message_stream(
                     accumulated_content = _choose_fallback(
                         tool_calls_for_frontend, _orch_created,
                         user_content=user_content,
+                        agent_name=conv.agent_name,
                     )
                 except Exception:
                     accumulated_content = _GENERIC_EMPTY_CONTENT_FALLBACK

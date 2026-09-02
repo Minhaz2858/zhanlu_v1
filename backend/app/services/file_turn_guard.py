@@ -420,6 +420,7 @@ def file_turn_guard(
     attempts: int,
     output_format: str | None = None,
     final_assistant_text: str | None = None,
+    agent_name: str | None = None,
 ) -> FileTurnGuardResult:
     """Synthesis-boundary check: nudge (cap per turn) or disclose.
 
@@ -430,8 +431,18 @@ def file_turn_guard(
     turn — when it is a graceful-fallback apology (see ``detect_give_up``),
     a stronger give-up re-prompt is emitted instead of the plain nudge, and
     pptx requests are caught here too (2026-08-28 QA deck case).
+    ``agent_name`` names the resolved agent for the turn. Build-with-AI turns
+    (workflow_builder) deliver a flow GRAPH via the save_flow decision
+    summary — never a file artifact — so the guard is inert for them even
+    when the prompt mentions a file format as a node type (e.g. "...and a
+    markdown output node" is a node description, not a document request).
     """
     if not getattr(settings, "FILE_TURN_GUARD_ENABLED", False):
+        return FileTurnGuardResult("none")
+    # workflow_builder exemption (2026-09-02 regression): the builder chat
+    # misdetected "markdown output node" as a Markdown-document request,
+    # appended the tool-budget disclosure, and the graph was never saved.
+    if agent_name == "workflow_builder":
         return FileTurnGuardResult("none")
     cap = int(getattr(settings, "FILE_NUDGE_MAX", _FILE_NUDGE_CAP) or _FILE_NUDGE_CAP)
     if attempts >= cap:
