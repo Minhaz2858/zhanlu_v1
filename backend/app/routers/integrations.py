@@ -8,8 +8,9 @@ from datetime import datetime
 import httpx
 from fastapi import APIRouter, UploadFile, File, HTTPException, Depends
 from fastapi.responses import StreamingResponse
+from sqlalchemy.orm import Session
 from app.config import settings
-from app.deps import get_current_user_required
+from app.deps import get_current_user_required, get_db
 from app.services.llm_service import (
     build_llm_payload,
     llm_headers as _llm_headers,
@@ -180,10 +181,45 @@ async def invoke_llm_stream(app_id: str, body: dict = None, user=Depends(get_cur
     )
 
 
+def _upload_blocked_reason(user, db) -> str | None:
+    """Return a reason string when file upload is disabled for ``user``, else None.
+
+    Reads the per-user ``UserSetting.file_upload_enabled`` row (default True
+    when no row exists). Exposed as a pure function so the gating logic is
+    unit-testable without booting FastAPI. Fails OPEN (returns None) on any
+    settings-read error — the endpoint's own 500 path covers real storage
+    failures, and an absent row means "enabled" by model default.
+    """
+    if user is None or db is None:
+        return None
+    try:
+        from app.models import UserSetting
+
+        setting = (
+            db.query(UserSetting)
+            .filter(UserSetting.created_by_id == user.id)
+            .first()
+        )
+    except Exception:
+        logger.warning(
+            "upload gate: settings read failed — allowing upload (default)",
+            exc_info=True,
+        )
+        return None
+    if setting is not None and setting.file_upload_enabled is False:
+        return (
+            "File upload is disabled for this user. "
+            "Enable 'Allow file upload' in Settings → Chat."
+        )
+    return None
+
+
 @router.post("/apps/{app_id}/integration-endpoints/Core/UploadFile")
 async def upload_file(
     app_id: str,
     file: UploadFile = File(...),
+    user=Depends(get_current_user_required),
+    db: Session = Depends(get_db),
 ):
     """Upload a file and return its URL. Saves to the uploads/ directory.
 
@@ -192,7 +228,16 @@ async def upload_file(
     server with a multi-GB upload. The allowlist covers the text formats
     the extractors support (pdf, docx, pptx, xlsx, csv, txt, md, json,
     html) plus common image formats for the multimodal LLM path.
+
+    Phase 2 gating: refuses uploads (403) when the user's
+    ``file_upload_enabled`` setting is off — the Settings toggle is now
+    enforced server-side, not just cosmetic.
     """
+    # ── Settings gate (file_upload_enabled) ─────────────────────────────
+    _blocked = _upload_blocked_reason(user, db)
+    if _blocked:
+        raise HTTPException(status_code=403, detail=_blocked)
+
     # ── Extension allowlist ────────────────────────────────────────────
     # Match by extension (lowercased, with the dot). Content-Type is
     # ignored — it's user-controlled and unreliable.

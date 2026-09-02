@@ -74,6 +74,94 @@ class OrchestratedResult:
     error: Optional[str] = None
 
 
+async def run_task_with_retries(
+    team_id: str,
+    task: OrchestratedTask,
+    policy: OrchestrationPolicy,
+    runner: Runner,
+) -> OrchestratedResult:
+    """Run one task with re-dispatch and (optionally) escalation.
+
+    Shared by the sequential :meth:`SwarmOrchestrator.orchestrate` and the
+    concurrent :class:`app.services.swarm.pool.FanOutPool` so both paths
+    apply exactly the same retry/escalation policy.
+    """
+    agent = task.agent_name
+    prompt = task.task
+    attempts = 0
+    escalated = False
+    result = None
+    while True:
+        try:
+            result = await runner(team_id, agent, prompt, task.member_name)
+        except Exception as e:  # noqa: BLE001
+            from app.services.swarm.runtime import SwarmAgentResult
+            result = SwarmAgentResult(
+                member_name=task.member_name or agent, agent_name=agent,
+                task=prompt, success=False, error=str(e),
+            )
+        attempts += 1
+        if result.success or attempts > policy.max_retries:
+            break
+        # Failure with retries remaining — prepare a re-dispatch.
+        if (
+            attempts >= policy.max_retries
+            and policy.escalate_to
+            and agent != policy.escalate_to
+        ):
+            # Final retry: escalate to a stronger agent.
+            agent = policy.escalate_to
+            escalated = True
+        prompt = policy.retry_hint(
+            task.task, result.error or "failed", result.final_response or "",
+        )
+
+    return OrchestratedResult(
+        task=task,
+        success=bool(result and result.success),
+        final_response=(result.final_response if result else ""),
+        attempts=attempts,
+        escalated=escalated,
+        error=(result.error if result and not result.success else None),
+    )
+
+
+def post_summary(
+    coordinator,
+    team_id: str,
+    results: list[OrchestratedResult],
+) -> None:
+    """Post an aggregated outcome summary to the team lead's mailbox.
+
+    Uses high priority so the orchestrator's final verdict is dequeued
+    ahead of ordinary worker chatter.
+    """
+    team = coordinator.registry.get_team(team_id)
+    if not team:
+        return
+    # Ensure a "main"/lead recipient exists. send_message resolves "main"
+    # to the first lead member; if there's no lead, the message is dropped
+    # (reported as success) — acceptable for a best-effort summary.
+    sender = "orchestrator"
+    if sender not in team.members:
+        coordinator.registry.add_member(team_id, sender, role="lead")
+    succeeded = sum(1 for r in results if r.success)
+    lines = [f"Orchestration complete: {succeeded}/{len(results)} tasks succeeded."]
+    for r in results:
+        status = "OK" if r.success else "FAIL"
+        esc = " (escalated)" if r.escalated else ""
+        lines.append(
+            f"  [{status}] {r.task.task[:80]} — attempts={r.attempts}{esc}"
+            + (f" err={r.error}" if r.error else "")
+        )
+    body = "\n".join(lines)
+    coordinator.registry.send_message(
+        team_id, sender, "main", body,
+        summary=f"Orchestration: {succeeded}/{len(results)} succeeded",
+        priority=10,
+    )
+
+
 class SwarmOrchestrator:
     """Run subtasks with result-driven re-dispatch and escalation."""
 
@@ -107,75 +195,15 @@ class SwarmOrchestrator:
         results: list[OrchestratedResult] = []
 
         for t in tasks:
-            agent = t.agent_name
-            prompt = t.task
-            attempts = 0
-            escalated = False
-            result = None
-            while True:
-                try:
-                    result = await runner(team_id, agent, prompt, t.member_name)
-                except Exception as e:  # noqa: BLE001
-                    from app.services.swarm.runtime import SwarmAgentResult
-                    result = SwarmAgentResult(
-                        member_name=t.member_name or agent, agent_name=agent,
-                        task=prompt, success=False, error=str(e),
-                    )
-                attempts += 1
-                if result.success or attempts > policy.max_retries:
-                    break
-                # Failure with retries remaining — prepare a re-dispatch.
-                if (
-                    attempts >= policy.max_retries
-                    and policy.escalate_to
-                    and agent != policy.escalate_to
-                ):
-                    # Final retry: escalate to a stronger agent.
-                    agent = policy.escalate_to
-                    escalated = True
-                prompt = policy.retry_hint(
-                    t.task, result.error or "failed", result.final_response or "",
-                )
+            results.append(await run_task_with_retries(team_id, t, policy, runner))
 
-            results.append(OrchestratedResult(
-                task=t,
-                success=bool(result and result.success),
-                final_response=(result.final_response if result else ""),
-                attempts=attempts,
-                escalated=escalated,
-                error=(result.error if result and not result.success else None),
-            ))
-
-        self._post_summary(team_id, results)
+        post_summary(self.coordinator, team_id, results)
         return results
 
     def _post_summary(self, team_id: str, results: list[OrchestratedResult]) -> None:
         """Post an aggregated outcome summary to the team lead's mailbox.
 
-        Uses high priority so the orchestrator's final verdict is dequeued
-        ahead of ordinary worker chatter.
+        Thin wrapper over the module-level :func:`post_summary` (also used
+        by the fan-out pool) for backward compatibility.
         """
-        team = self.coordinator.registry.get_team(team_id)
-        if not team:
-            return
-        # Ensure a "main"/lead recipient exists. send_message resolves "main"
-        # to the first lead member; if there's no lead, the message is dropped
-        # (reported as success) — acceptable for a best-effort summary.
-        sender = "orchestrator"
-        if sender not in team.members:
-            self.coordinator.registry.add_member(team_id, sender, role="lead")
-        succeeded = sum(1 for r in results if r.success)
-        lines = [f"Orchestration complete: {succeeded}/{len(results)} tasks succeeded."]
-        for r in results:
-            status = "OK" if r.success else "FAIL"
-            esc = " (escalated)" if r.escalated else ""
-            lines.append(
-                f"  [{status}] {r.task.task[:80]} — attempts={r.attempts}{esc}"
-                + (f" err={r.error}" if r.error else "")
-            )
-        body = "\n".join(lines)
-        self.coordinator.registry.send_message(
-            team_id, sender, "main", body,
-            summary=f"Orchestration: {succeeded}/{len(results)} succeeded",
-            priority=10,
-        )
+        post_summary(self.coordinator, team_id, results)

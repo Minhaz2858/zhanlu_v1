@@ -31,6 +31,15 @@ class OtelSpan(Span):
             except Exception:
                 pass  # best-effort
 
+    def __exit__(self, *exc_info: Any) -> None:
+        """Close the underlying OTel span (and record duration on the base)."""
+        super().__exit__(*exc_info)
+        if self._otel_span is not None:
+            try:
+                self._otel_span.__exit__(*exc_info)
+            except Exception:
+                pass  # best-effort
+
 
 def _trace_status_error(description: str):
     """Helper to create an OTEL error status without importing at module level."""

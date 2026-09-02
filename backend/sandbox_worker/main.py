@@ -278,18 +278,20 @@ def execute_job(job_id: str, skill_name: str):
                     duration_ms=result["duration_ms"],
                 )
 
+                # Collect outputs regardless of exit code — the workflow_code
+                # runner writes result.json ({"output"|"error"}) before
+                # exiting, so its result must be captured on failure too.
+                outputs = collect_outputs(output_dir)
+                service.record_event(job_id, "file_created", f"Generated {len(outputs)} output files",
+                                     {"files": [o["file_name"] for o in outputs]})
+
+                # Workflow Code node: capture the runner's result.json as a
+                # job event so the backend's synchronous poller can read it
+                # without an artifact round-trip.
+                if job.skill_name == "workflow_code":
+                    _record_workflow_code_result(service, job_id, outputs)
+
                 if result["exit_code"] == 0:
-                    # Collect outputs
-                    outputs = collect_outputs(output_dir)
-                    service.record_event(job_id, "file_created", f"Generated {len(outputs)} output files",
-                                         {"files": [o["file_name"] for o in outputs]})
-
-                    # Workflow Code node: capture the runner's result.json as
-                    # a job event so the backend's synchronous poller can read
-                    # it without an artifact round-trip.
-                    if job.skill_name == "workflow_code":
-                        _record_workflow_code_result(service, job_id, outputs)
-
                     # Store outputs as artifact blobs
                     if job.artifact_version_id:
                         _store_outputs_as_blobs(db, job, outputs, service)

@@ -514,6 +514,13 @@ def _write_audit(
         from uuid import uuid4
         from datetime import datetime as _dt
         from app.models.audit_event import AuditEvent
+        # audit_events.binding_id + trace_id are varchar(36)/varchar(64) —
+        # a synthetic id longer than the column truncates at FLUSH time,
+        # and a failed flush poisons the shared SQLAlchemy session for the
+        # caller (next commit dies with "transaction has been rolled back").
+        # Bound it defensively so this helper can never crash its caller.
+        if len(binding_id) > 36:
+            binding_id = binding_id[:36]
         outcome = "success" if decision == "allowed" else ("denied" if decision == "denied" else "failure")
         event = AuditEvent(
             id=str(uuid4()),
@@ -545,6 +552,14 @@ def _write_audit(
         db.add(event)
         db.commit()
     except Exception as e:
+        # A flush error leaves the session in a pending-rollback state;
+        # without rollback() the CALLER's next commit fails with
+        # "This Session's transaction has been rolled back". Recovery
+        # must happen here, in the component that broke the transaction.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.warning("Failed to write audit event: %s", e)
 
 
@@ -596,4 +611,11 @@ def _write_telemetry(
         db.add(log)
         db.commit()
     except Exception as e:
+        # Recovery — see _write_audit: a failed flush poisons the session
+        # for the caller; roll back here so the caller's transaction
+        # survives a telemetry write failure.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         logger.warning("Failed to write telemetry log: %s", e)

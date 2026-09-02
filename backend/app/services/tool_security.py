@@ -136,6 +136,48 @@ def is_safe_url(url: str) -> bool:
         return False
 
 
+def is_url_in_allowlist(url: str, allowlist: list[str] | None = None) -> bool:
+    """Return True when ``url`` matches the allowlist patterns.
+
+    An empty/None allowlist permits everything — the SSRF guard in
+    :func:`is_safe_url` still applies to every ``open``. Pattern rules:
+
+    - ``example.com`` matches the host and any subdomain (``docs.example.com``)
+    - ``*.example.com`` matches subdomains only (not the bare host)
+    - ``https://example.com/a`` (has a scheme) matches as a URL prefix
+
+    Fails closed on unparseable URLs.
+    """
+    if not allowlist:
+        return True
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip().lower().rstrip(".")
+    except ValueError:
+        return False
+    if not host:
+        return False
+    lowered_url = url.strip().lower()
+    for pattern in allowlist:
+        p = (pattern or "").strip().lower().rstrip("/")
+        if not p:
+            continue
+        if "://" in p:
+            if lowered_url.startswith(p):
+                return True
+            continue
+        wildcard = p.startswith("*.")
+        pat = p.lstrip("*.").lower().rstrip(".")
+        if not pat:
+            continue
+        if wildcard:
+            if host.endswith("." + pat):
+                return True
+        elif host == pat or host.endswith("." + pat):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Path Safety
 # ---------------------------------------------------------------------------

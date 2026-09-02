@@ -130,6 +130,25 @@ def _restricted_exec(code: str, item: dict, timeout: int) -> dict:
     return {"success": True, "text": str(out), "items": [{"value": out}]}
 
 
+def _normalize_runner_result(result: dict) -> dict:
+    """Convert the runner's raw result.json into the runtime's output shape.
+
+    Runner writes ``{"output": <json>}`` or ``{"error": "<repr>"}``; the
+    runtime shape is ``{"success", "text", "items"?}`` (same normalization
+    as ``_restricted_exec`` so sandboxed and fallback paths agree).
+    """
+    if "error" in result:
+        return {"success": False, "text": f"Code error: {result['error']}"}
+    if "output" not in result:
+        return {"success": False, "text": "Sandbox runner produced no output"}
+    out = result["output"]
+    if isinstance(out, dict):
+        return {"success": True, "text": json.dumps(out, ensure_ascii=False), "items": [out]}
+    if isinstance(out, list):
+        return {"success": True, "text": json.dumps(out, ensure_ascii=False), "items": out}
+    return {"success": True, "text": str(out), "items": [{"value": out}]}
+
+
 def _job_timeout_seconds(code_timeout: int) -> int:
     """Code timeout + container overhead, capped (job-level hard timeout)."""
     return min(code_timeout + 30, 300)
@@ -145,9 +164,9 @@ def run_code_sandboxed(db, code: str, input_item: dict, timeout: int = 10) -> di
         input_package = {
             "runner_script": base64.b64encode(WORKFLOW_CODE_RUNNER.encode()).decode(),
             "runner_script_name": _RUNNER_NAME,
-            "config_json": json.dumps(
-                {"code": code, "input_item": input_item or {}}, ensure_ascii=False
-            ),
+            # prepare_input_package materializes ONLY skill_config →
+            # /input/config.json; the runner reads code + input_item from it.
+            "skill_config": {"code": code, "input_item": input_item or {}},
             "instructions": "Run the workflow Code node in the sandbox.",
         }
         service = SandboxService(db)
@@ -161,17 +180,30 @@ def run_code_sandboxed(db, code: str, input_item: dict, timeout: int = 10) -> di
 
         deadline = time.monotonic() + _job_timeout_seconds(timeout)
         while time.monotonic() < deadline:
+            # The creating session caches the job in its identity map (status
+            # 'queued'); expire it so get_job re-reads the worker's updates
+            # from the DB instead of returning the stale object forever.
+            if db is not None:
+                db.expire_all()
             cur = service.get_job(job.id)
             if cur is None:
                 break
             if cur.status == "completed":
                 for ev in (cur.events or []):
                     if getattr(ev, "event_type", None) == "workflow_code_result":
-                        result = (ev.data_json or {}).get("result")
-                        if isinstance(result, dict):
-                            return result
+                        raw = (ev.data_json or {}).get("result")
+                        if isinstance(raw, dict):
+                            return _normalize_runner_result(raw)
                 return {"success": False, "text": "Sandbox finished without a result"}
             if cur.status == "failed":
+                # The runner may have captured a real error in result.json
+                # even though the container exited non-zero — prefer it over
+                # the (often empty) container stderr.
+                for ev in (cur.events or []):
+                    if getattr(ev, "event_type", None) == "workflow_code_result":
+                        raw = (ev.data_json or {}).get("result")
+                        if isinstance(raw, dict):
+                            return _normalize_runner_result(raw)
                 return {
                     "success": False,
                     "text": cur.error_message or "Sandbox execution failed",

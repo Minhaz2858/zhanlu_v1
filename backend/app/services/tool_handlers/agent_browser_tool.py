@@ -18,9 +18,11 @@ new tool surface mirrors the most common CLI verbs:
   - close        → ``agent-browser close``
 
 Heavy dep: ``agent-browser`` (npm package) + a working Chromium. The CLI
-is invoked via ``subprocess.run`` per call; per-conversation sessions are
-keyed on ``context["conversation_id"]`` so the same CLI session can be
-reused across calls in the same chat.
+is invoked via the shared ``app.services.computer_use`` manager
+(``subprocess.run`` per call); per-conversation sessions are keyed on
+``context["conversation_id"]`` and shared with the ``computer_use`` tool,
+so the same CLI session (one Chromium per chat) is reused across calls in
+the same conversation.
 
 If the CLI binary is not on ``$PATH`` the handler returns the standard
 ``missing_config_response`` shape (same contract as every other tool in
@@ -32,18 +34,19 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
-import shutil
-import subprocess
-import threading
 import uuid
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
 
 from app.config import settings
+from app.services.computer_use import manager as _cu_manager
+from app.services.computer_use.session import (
+    BROWSER_DIR as _BROWSER_DIR,
+    cleanup_session as _cleanup_session_impl,
+    get_session as _get_session_impl,
+)
 from app.services.tool_handlers._missing_config import (
     missing_config_response,
     check_binaries,
@@ -54,84 +57,30 @@ from app.services.tool_security import is_safe_url
 logger = logging.getLogger(__name__)
 
 
-# ── Filesystem layout ────────────────────────────────────────────────────
-_BROWSER_DIR = Path(
-    os.environ.get("ZHANLU_BROWSER_DIR", "/tmp/zhanlu_browser")
-)
-try:
-    _BROWSER_DIR.mkdir(parents=True, exist_ok=True)
-except PermissionError:
-    _BROWSER_DIR = Path("/var/tmp/zhanlu_browser")
-    _BROWSER_DIR.mkdir(parents=True, exist_ok=True)
-
-
-# Per-conversation session store. The CLI manages its own Chromium
-# process; we just remember the ``--session <id>`` argument we passed
-# on ``navigate`` so subsequent calls in the same chat can reuse it.
-_lock = threading.Lock()
-_sessions: Dict[str, Dict[str, Any]] = {}
-
+# ── Shared session store ─────────────────────────────────────────────────
+# The session store lives in ``app.services.computer_use.session`` so
+# ``agent_browser`` and ``computer_use`` share ONE Chromium session per
+# conversation (with TTL + per-conversation action budget). The CLI
+# manages its own Chromium process; we just remember the ``--session
+# <id>`` argument passed on ``navigate`` so subsequent calls in the same
+# chat can reuse it. ``_get_session`` / ``_cleanup_session`` / ``_run_cli``
+# are thin wrappers kept for call-site and test compatibility.
 
 def _get_session(conversation_id: str) -> Dict[str, Any]:
-    with _lock:
-        if conversation_id not in _sessions:
-            _sessions[conversation_id] = {
-                "session_id": f"zhanlu-{conversation_id}-{uuid.uuid4().hex[:8]}",
-                "url": None,
-                "title": None,
-            }
-        return _sessions[conversation_id]
+    """Return the shared per-conversation session record (TTL-managed)."""
+    return _get_session_impl(
+        conversation_id, ttl_seconds=settings.COMPUTER_USE_SESSION_TTL_S
+    )
 
 
 def _cleanup_session(conversation_id: str) -> None:
-    """Forget a session and best-effort close the underlying CLI session."""
-    with _lock:
-        sess = _sessions.pop(conversation_id, None)
-    if not sess:
-        return
-    try:
-        subprocess.run(
-            ["agent-browser", "close", "--session", sess["session_id"]],
-            check=False,
-            capture_output=True,
-            timeout=10,
-        )
-    except Exception as exc:  # pragma: no cover — best-effort cleanup
-        logger.debug("agent-browser close failed for %s: %s", conversation_id, exc)
+    """Forget the session and best-effort close the underlying CLI session."""
+    _cleanup_session_impl(conversation_id)
 
-
-# ── Action dispatch ──────────────────────────────────────────────────────
 
 def _run_cli(args: List[str], timeout: int = 60) -> Dict[str, Any]:
-    """Run the agent-browser CLI and return a normalized result dict.
-
-    agent-browser writes its primary result to stdout. Non-zero exit
-    means an error; stderr usually explains why.
-    """
-    try:
-        proc = subprocess.run(
-            args,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired:
-        return {"success": False, "error": f"agent-browser timed out after {timeout}s"}
-    except FileNotFoundError:
-        return missing_config_response(
-            "agent_browser",
-            missing_binaries=["agent-browser"],
-        )
-    except Exception as exc:  # pragma: no cover
-        return {"success": False, "error": f"agent-browser invocation failed: {exc}"}
-
-    if proc.returncode != 0:
-        return {
-            "success": False,
-            "error": (proc.stderr or proc.stdout or "").strip() or f"exit {proc.returncode}",
-        }
-    return {"success": True, "stdout": proc.stdout, "stderr": proc.stderr}
+    """Run the agent-browser CLI via the shared computer_use manager."""
+    return _cu_manager.run_cli(args, timeout=timeout)
 
 
 def _maybe_json(text: str) -> Any:
@@ -509,7 +458,7 @@ AGENT_BROWSER_SCHEMA = {
 
 def _is_available() -> bool:
     """Check the agent-browser binary is on PATH (TTL-cached by registry)."""
-    return shutil.which("agent-browser") is not None
+    return _cu_manager.is_available()
 
 
 registry.register(

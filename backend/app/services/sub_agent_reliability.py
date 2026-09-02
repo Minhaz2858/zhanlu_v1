@@ -27,7 +27,7 @@ from app.config import settings
 from app.services.llm_router import LLMEndpoint
 from app.services.llm_service import (
     llm_headers, llm_url, get_model, model_has_fixed_temperature,
-    _supports_parallel_tool_calls,
+    maybe_enable_parallel_tool_calls,
 )
 from app.services.prompt_caching import apply_cache_control
 from app.services.api_error_classifier import classify_api_error
@@ -111,12 +111,8 @@ async def call_llm_with_reliability(
     if tools:
         payload["tools"] = tools
     # P0-2: parallel tool calls capability injection (default off; gated
-    # on the helper so anthropic models never receive the field).
-    if (
-        getattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", False)
-        and _supports_parallel_tool_calls(_model)
-    ):
-        payload["parallel_tool_calls"] = True
+    # on the shared helper so anthropic models never receive the field).
+    maybe_enable_parallel_tool_calls(payload, _model)
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:

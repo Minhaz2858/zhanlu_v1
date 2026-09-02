@@ -49,12 +49,41 @@ def resolve(
         A ``ResolvedIntent`` with the best match (may be empty) and
         ``candidates`` populated with up to ``top_k`` alternatives.
     """
-    from rapidfuzz import fuzz, process
+    try:
+        from rapidfuzz import fuzz, process
+    except ImportError:  # optional dep — degrade to a deterministic substring matcher
+        fuzz = None
+        process = None
 
     intent = ResolvedIntent(top_k=top_k)
 
     if not metrics and not mappings:
         return intent
+
+    def _extract(question: str, choices: list[str], limit: int) -> list[tuple[str, int, int]]:
+        """Best-match choices → [(choice, score01, idx)]. Uses rapidfuzz
+        when available; otherwise a deterministic substring/equality score
+        so the governed pipeline degrades gracefully without the optional
+        dependency."""
+        if process is not None and fuzz is not None:
+            return [
+                (m, s, i)
+                for m, s, i in process.extract(question, choices, scorer=fuzz.token_set_ratio, limit=limit)
+            ]
+        q = question.lower()
+        scored = []
+        for i, choice in enumerate(choices):
+            c = choice.lower()
+            if c == q:
+                scored.append((choice, 100, i))
+            elif c in q:
+                scored.append((choice, 90, i))
+            elif q in c:
+                scored.append((choice, 75, i))
+            else:
+                scored.append((choice, 0, i))
+        scored.sort(key=lambda t: t[1], reverse=True)
+        return scored[:limit]
 
     # ── Step 1: find best metric ─────────────────────────────────
     metric_candidates: list[tuple[str, str, list[str]]] = []
@@ -66,7 +95,7 @@ def resolve(
 
     if metric_candidates:
         choices = [c[2] for c in metric_candidates]
-        results = process.extract(question, choices, scorer=fuzz.token_set_ratio, limit=top_k)
+        results = _extract(question, choices, top_k)
         for _match, score, idx in results:
             if score >= int(min_confidence * 100):
                 c = metric_candidates[idx]
@@ -97,7 +126,7 @@ def resolve(
 
     if mapping_candidates:
         choices = [c[2] for c in mapping_candidates]
-        results = process.extract(question, choices, scorer=fuzz.token_set_ratio, limit=top_k)
+        results = _extract(question, choices, top_k)
         for _match, score, idx in results:
             if score >= int(min_confidence * 100):
                 c = mapping_candidates[idx]

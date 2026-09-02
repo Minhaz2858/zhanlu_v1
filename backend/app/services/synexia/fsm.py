@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.execution import Execution, Plan, PlanNode, ObservationRecord, FSM_STATES
+from app.services.tracing.spans import fsm_run_span, fsm_state_span
 from app.services.planning_trigger import is_followup_refinement as _is_followup_refinement
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,10 @@ class SynexiaFSM:
             except Exception as _cb_err:
                 logger.warning("FSM run() init callback raised (non-fatal): %s", _cb_err)
 
+        _run_span = fsm_run_span(
+            self.execution.id, request.agent_name, request.mode,
+        )
+        _run_span.__enter__()
         try:
             # GOAL — parse user message into TaskSpec
             self._transition(FSMState.GOAL, on_state_change=on_state_change)
@@ -267,18 +272,23 @@ class SynexiaFSM:
 
             # FINALIZE — compute confidence, prepare result
             self._transition(FSMState.FINALIZE, on_state_change=on_state_change)
-            return self._run_finalize(
+            _result = self._run_finalize(
                 request,
                 generate_response=generate_response,
                 on_state_change=on_state_change,
             )
+            _run_span.set_attribute("execution.state", _result.state)
+            _run_span.__exit__(None, None, None)
+            return _result
 
         except Exception as e:
             logger.error("FSM execution failed: %s", e)
+            _run_span.set_attribute("error", str(e)[:500])
             self._transition(FSMState.FAIL, on_state_change=on_state_change)
             self.execution.error_message = str(e)
             self.execution.current_state = FSMState.FAIL.value
             self.db.commit()
+            _run_span.__exit__(None, None, None)
             return ExecutionResult(
                 execution_id=self.execution.id,
                 assistant_content=f"I encountered an error while processing your request: {e}",
@@ -297,15 +307,16 @@ class SynexiaFSM:
                 the callback are caught and logged — a misbehaving callback
                 must never corrupt the FSM pipeline.
         """
-        old_state = self.execution.current_state
-        self.execution.current_state = new_state.value
-        self.db.commit()
-        logger.debug("FSM transition: %s → %s (execution=%s)", old_state, new_state.value, self.execution.id)
-        if on_state_change is not None:
-            try:
-                on_state_change(new_state.value)
-            except Exception as _cb_err:
-                logger.warning("FSM _transition callback raised (non-fatal): %s", _cb_err)
+        with fsm_state_span(new_state.value, self.execution.id):
+            old_state = self.execution.current_state
+            self.execution.current_state = new_state.value
+            self.db.commit()
+            logger.debug("FSM transition: %s → %s (execution=%s)", old_state, new_state.value, self.execution.id)
+            if on_state_change is not None:
+                try:
+                    on_state_change(new_state.value)
+                except Exception as _cb_err:
+                    logger.warning("FSM _transition callback raised (non-fatal): %s", _cb_err)
 
     def _run_goal(self, request: ExecutionRequest):
         """GOAL state — parse user message into a TaskSpec using LLM."""

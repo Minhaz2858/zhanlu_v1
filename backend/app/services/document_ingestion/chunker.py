@@ -187,9 +187,16 @@ def _sub_split(
                 buf = [joined[-keep:]]
                 buf_tokens = approx(buf[0])
             else:
+                # Overlap is expressed in TOKENS; convert to words and keep
+                # that many trailing WORDS (not sentences — keeping whole
+                # sentences here explodes chunk count ~100x for long
+                # single-paragraph documents: each flush re-emits the whole
+                # sentence tail, so every char is duplicated dozens of
+                # times and retrieval index sizes balloon).
                 keep = max(1, int(overlap / _WORDS_PER_TOKEN))
-                buf = buf[-keep:]
-                buf_tokens = sum(approx(x) for x in buf)
+                tail_words = " ".join(buf).split()
+                buf = [" ".join(tail_words[-keep:])] if tail_words else []
+                buf_tokens = approx(buf[0]) if buf else 0
         if st > max_tokens:
             # single sentence still too big — hard char/word-split window
             if mode == "chinese":

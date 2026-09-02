@@ -149,9 +149,12 @@ _ORCHESTRATE_SCHEMA: dict[str, Any] = {
         "description": (
             "Run a list of subtasks with result-driven re-dispatch: each subtask "
             "is retried on failure (with the failure context appended) and "
-            "escalated to a stronger agent on the final retry. An aggregated "
-            "summary is posted to the team lead's mailbox. Runs in the "
-            "background — poll the mailbox for results."
+            "escalated to a stronger agent on the final retry. Subtasks run "
+            "concurrently in a bounded fan-out pool (SWARM_MAX_CONCURRENT "
+            "concurrency + cost/wall-time budgets — budgets stop NEW spawns; "
+            "skipped tasks are reported as failed). An aggregated summary is "
+            "posted to the team lead's mailbox. Runs in the background — poll "
+            "the mailbox for results."
         ),
         "parameters": {
             "type": "object",
@@ -307,10 +310,13 @@ def _handle_scratch_get(arguments: dict, db, user_id) -> dict:
 
 
 def _handle_orchestrate(arguments: dict, db, user_id) -> dict:
-    from app.services.swarm.team_registry import get_swarm_coordinator
+    from app.config import settings
+    from app.services.agent_tools import TOOL_CONTEXT
     from app.services.swarm.orchestrator import (
         SwarmOrchestrator, OrchestratedTask, OrchestrationPolicy,
     )
+    from app.services.swarm.pool import FanOutPool
+    from app.services.swarm.team_registry import get_swarm_coordinator
 
     team_id = arguments.get("team_id")
     raw_tasks = arguments.get("tasks") or []
@@ -336,22 +342,61 @@ def _handle_orchestrate(arguments: dict, db, user_id) -> dict:
         return {"success": False, "error": "no valid tasks parsed"}
 
     orchestrator = SwarmOrchestrator(get_swarm_coordinator())
+    # conversation_id (when present) keys the default delta-cost cost_fn.
+    conversation_id = (TOOL_CONTEXT or {}).get("conversation_id")
 
-    async def _go():
-        return await orchestrator.orchestrate(team_id, tasks, policy=policy)
+    async def _run_pool(progress_cb=None):
+        pool = FanOutPool(
+            max_concurrent=settings.SWARM_MAX_CONCURRENT,
+            max_total_cost_usd=settings.SWARM_MAX_COST_USD,
+            max_wall_time_s=settings.SWARM_MAX_WALL_S,
+            progress_callback=progress_cb,
+            conversation_id=conversation_id,
+        )
+        results = await pool.run(
+            team_id, tasks, policy=policy,
+            runner=orchestrator.coordinator.run_task,
+        )
+        # Aggregate the per-task outcomes into the lead's mailbox.
+        orchestrator._post_summary(team_id, results)
+        return results
+
+    def _summary(results, progress):
+        return {
+            "success": True,
+            "task_count": len(tasks),
+            "pooled": True,
+            "max_concurrent": settings.SWARM_MAX_CONCURRENT,
+            "succeeded": sum(1 for r in results if r.success),
+            "failed": sum(1 for r in results if not r.success),
+            "progress": progress,
+            "note": "orchestration completed via fan-out pool; results posted to mailbox",
+        }
 
     import asyncio
     try:
         loop = asyncio.get_event_loop()
         if loop.is_running():
-            asyncio.create_task(_go())  # fire-and-forget; summary → mailbox
+            asyncio.create_task(_run_pool(None))  # fire-and-forget; summary → mailbox
             return {"success": True, "spawned": True, "task_count": len(tasks),
-                    "note": "orchestration started in background; results posted to mailbox"}
-        loop.run_until_complete(_go())
+                    "pooled": True,
+                    "max_concurrent": settings.SWARM_MAX_CONCURRENT,
+                    "note": "orchestration started in background (fan-out pool); "
+                            "results posted to mailbox"}
+        progress: list[dict] = []
+
+        async def _collect(event: dict) -> None:
+            progress.append(event)
+
+        results = loop.run_until_complete(_run_pool(_collect))
     except RuntimeError:
-        asyncio.run(_go())
-    return {"success": True, "task_count": len(tasks),
-            "note": "orchestration completed; results posted to mailbox"}
+        progress = []
+
+        async def _collect(event: dict) -> None:
+            progress.append(event)
+
+        results = asyncio.run(_run_pool(_collect))
+    return _summary(results, progress)
 
 
 # ---------------------------------------------------------------------------

@@ -586,20 +586,28 @@ async def execute_tool(
 
     handler = registry.get_handler(tool_name)
 
-    if handler is not None:
-        result = await _execute_with_reliability(
-            tool_name, arguments, handler, db, user_id, context,
-            use_context=True,
-        )
-    else:
-        # 2. Fall back to local CRUD dispatch (existing tools)
-        crud_handler = _CRUD_DISPATCH.get(tool_name)
-        if crud_handler is None:
-            return {"success": False, "error": f"Unknown tool: {tool_name}"}
-        result = await _execute_with_reliability(
-            tool_name, arguments, crud_handler, db, user_id, context,
-            use_context=False,
-        )
+    from app.services.tracing import genai as _genai
+    from app.services.tracing.spans import tool_exec_span
+
+    with tool_exec_span(tool_name, arguments) as _tool_span:
+        if handler is not None:
+            result = await _execute_with_reliability(
+                tool_name, arguments, handler, db, user_id, context,
+                use_context=True,
+            )
+        else:
+            # 2. Fall back to local CRUD dispatch (existing tools)
+            crud_handler = _CRUD_DISPATCH.get(tool_name)
+            if crud_handler is None:
+                result = {"success": False, "error": f"Unknown tool: {tool_name}"}
+            else:
+                result = await _execute_with_reliability(
+                    tool_name, arguments, crud_handler, db, user_id, context,
+                    use_context=False,
+                )
+        _tool_span.set_attribute(_genai.GEN_AI_TOOL_SUCCESS, bool(result.get("success")))
+        if not result.get("success"):
+            _tool_span.set_attribute("error", str(result.get("error", ""))[:500])
 
     # 3. Post-tool hook execution
     try:

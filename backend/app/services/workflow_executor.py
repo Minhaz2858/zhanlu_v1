@@ -25,6 +25,7 @@ The context contract (ctx):
 from typing import Any, Callable
 
 from app.services.workflow_node_types import is_router_type
+from app.services.tracing.spans import workflow_node_span
 
 
 def _topo_order(nodes: list[dict], edges: list[dict]) -> list[dict]:
@@ -141,41 +142,45 @@ def execute_flow_graph(
             retry_on_fail = 0
         continue_on_fail = bool(config.get("continueOnFail"))
 
-        out: dict = {}
-        failure: Exception | None = None
-        attempts = retry_on_fail + 1
-        for attempt in range(attempts):
-            try:
-                if attempt > 0 and hasattr(ctx, "record_step"):
-                    ctx.record_step(nid, "retrying", error=f"attempt {attempt + 1} of {attempts}")
+        with workflow_node_span(nid, ntype) as _node_span:
+            out: dict = {}
+            failure: Exception | None = None
+            attempts = retry_on_fail + 1
+            for attempt in range(attempts):
+                try:
+                    if attempt > 0 and hasattr(ctx, "record_step"):
+                        ctx.record_step(nid, "retrying", error=f"attempt {attempt + 1} of {attempts}")
+                    if hasattr(ctx, "record_step"):
+                        ctx.record_step(nid, "running")
+                    out = handler(ctx, node)
+                    failure = None
+                    break
+                except Exception as exc:  # noqa: BLE001
+                    failure = exc
+            if failure is not None:
+                err = f"node {nid} ({ntype}) failed: {failure}"
                 if hasattr(ctx, "record_step"):
-                    ctx.record_step(nid, "running")
-                out = handler(ctx, node)
-                failure = None
-                break
-            except Exception as exc:  # noqa: BLE001
-                failure = exc
-        if failure is not None:
-            err = f"node {nid} ({ntype}) failed: {failure}"
-            if hasattr(ctx, "record_step"):
-                ctx.record_step(nid, "failed", error=err)
-            if not continue_on_fail:
-                return {
-                    "status": "failed", "error": err, "output": None,
-                    "failed_node_id": nid, "failed_node_type": ntype,
+                    ctx.record_step(nid, "failed", error=err)
+                _node_span.set_attribute("success", False)
+                _node_span.set_attribute("error", err[:500])
+                if not continue_on_fail:
+                    return {
+                        "status": "failed", "error": err, "output": None,
+                        "failed_node_id": nid, "failed_node_type": ntype,
+                    }
+                # Continue-on-fail (n8n semantics): downstream nodes receive an
+                # error item; the node itself stays marked failed in the run log.
+                out = {
+                    "text": f"[{ntype} failed: {failure}]",
+                    "items": [],
+                    "success": False,
+                    "error": str(failure),
                 }
-            # Continue-on-fail (n8n semantics): downstream nodes receive an
-            # error item; the node itself stays marked failed in the run log.
-            out = {
-                "text": f"[{ntype} failed: {failure}]",
-                "items": [],
-                "success": False,
-                "error": str(failure),
-            }
-        else:
-            if hasattr(ctx, "record_step"):
-                ctx.record_step(nid, "completed", output=out)
-        ctx.outputs[nid] = out
+            else:
+                _node_span.set_attribute("success", True)
+                if hasattr(ctx, "record_step"):
+                    ctx.record_step(nid, "completed", output=out)
+            ctx.outputs[nid] = out
         if ntype == "output":
             final_output = out.get("text") or out.get("json") or str(out)
         _activate(nid, ntype, out)

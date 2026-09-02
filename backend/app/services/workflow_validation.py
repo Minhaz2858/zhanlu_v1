@@ -1,19 +1,12 @@
-"""Flow graph validation. Pure functions — no DB, no side effects."""
+"""Flow graph validation. Pure functions — no DB, no side effects.
+
+Required-config rules come from the node-type registry
+(services/workflow_node_types.py) so the schema stays in ONE place.
+"""
 
 from typing import Any
 
-NODE_TYPES = {"trigger_chat", "llm", "agent", "tool", "kb_search", "condition", "output"}
-
-# config fields that MUST be present (non-empty) per node type
-REQUIRED_CONFIG = {
-    "llm": ["prompt"],
-    "agent": ["agent_id"],
-    "tool": ["tool_id"],
-    "kb_search": ["kb_id"],
-    "condition": ["branches"],
-    "trigger_chat": [],
-    "output": [],
-}
+from app.services.workflow_node_types import NODE_TYPES, is_trigger_type, required_config_fields
 
 
 def validate_flow(flow: dict[str, Any]) -> list[str]:
@@ -35,7 +28,7 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
             errors.append(f"node {nid}: unknown type {ntype!r}")
             continue
         config = (n.get("data") or {}).get("config") or {}
-        for field in REQUIRED_CONFIG.get(ntype, []):
+        for field in required_config_fields(ntype):
             if not config.get(field):
                 errors.append(f"node {nid} ({ntype}): missing required config '{field}'")
     # dangling edges
@@ -62,8 +55,8 @@ def validate_flow(flow: dict[str, Any]) -> list[str]:
         errors.append("cycle detected in workflow graph")
     # structural requirements
     types = {n.get("id"): n.get("type") for n in nodes}
-    if sum(1 for t in types.values() if t == "trigger_chat") != 1:
-        errors.append("workflow must have exactly one trigger_chat node")
+    if sum(1 for t in types.values() if is_trigger_type(t)) != 1:
+        errors.append("workflow must have exactly one trigger node (chat, manual, schedule or webhook)")
     if "output" not in types.values():
         errors.append("workflow must have at least one output node")
     return errors

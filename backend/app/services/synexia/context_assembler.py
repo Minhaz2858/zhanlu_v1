@@ -117,6 +117,23 @@ def assemble_context(
     token_estimate = 0
     prepared_attachments: list[dict] = []
 
+    # Chat-upload RAG (2026-08-31, FSM parity with the v3 stream): large
+    # uploads are indexed into the ChromaDB session collection and answered
+    # via top-k retrieval instead of the truncated text dump. Fail-open.
+    _rag_on = False
+    _upload_rag_mod = None
+    _rag_inline_max = 6000
+    try:
+        from app.config import settings as _rag_settings
+
+        _rag_inline_max = _rag_settings.RAG_UPLOADS_INLINE_MAX_CHARS
+        if _rag_settings.RAG_UPLOADS_ENABLED:
+            from app.services.document_ingestion import upload_rag as _upload_rag_mod
+
+            _rag_on = _upload_rag_mod.availability()
+    except Exception:
+        _rag_on = False
+
     # 1. Agent configuration
     agent_config = _get_agent_config(db, agent_name)
     if agent_config:
@@ -154,7 +171,12 @@ def assemble_context(
                             f"--- {fname} (image, no OCR text — see multimodal block) ---"
                         )
                 elif prep.get("text"):
-                    attach_parts.append(f"--- {fname} ---\n{prep['text']}")
+                    if _rag_on and len(prep["text"]) > _rag_inline_max:
+                        attach_parts.append(
+                            f"--- {fname} (large file — relevant passages retrieved below) ---"
+                        )
+                    else:
+                        attach_parts.append(f"--- {fname} ---\n{prep['text']}")
                 elif prep.get("error"):
                     attach_parts.append(
                         f"--- {fname} [could not read: {prep['error']}] ---"
@@ -213,7 +235,13 @@ def assemble_context(
                             f"--- {fname} (image uploaded earlier; no OCR text) ---"
                         )
                 elif prep.get("text"):
-                    hist_parts.append(f"--- {fname} (uploaded earlier) ---\n{prep['text']}")
+                    if _rag_on and len(prep["text"]) > _rag_inline_max:
+                        hist_parts.append(
+                            f"--- {fname} (uploaded earlier, large file — "
+                            "relevant passages retrieved below) ---"
+                        )
+                    else:
+                        hist_parts.append(f"--- {fname} (uploaded earlier) ---\n{prep['text']}")
                 elif prep.get("error"):
                     hist_parts.append(
                         f"--- {fname} [could not read: {prep['error']}] ---"
@@ -246,6 +274,79 @@ def assemble_context(
                 "priority": "high",
             })
             token_estimate += _estimate_tokens(hist_block)
+
+    # 1d. Chat-upload RAG retrieval — when any attachment was too large to
+    # inline, index it (once, idempotent) and retrieve the top-k chunks
+    # most relevant to THIS turn's question. Mirrors the v3 stream path.
+    if _rag_on and (attachments or historical_urls):
+        try:
+            _rag_session = conversation_id or "default"
+            _rag_org = "default"
+            _rag_agent = agent_name or ""
+            _rag_pid = ""
+            try:
+                from app.models.agent_conversation import AgentConversation
+
+                _conv_row = (
+                    db.query(AgentConversation)
+                    .filter(AgentConversation.id == conversation_id)
+                    .first()
+                )
+                if _conv_row and getattr(_conv_row, "project_id", None):
+                    _rag_pid = _conv_row.project_id or ""
+            except Exception:
+                pass
+            _big = False
+            for _furl in dict.fromkeys(
+                [*(attachments or []), *historical_urls]
+            ):
+                if not isinstance(_furl, str) or not _furl:
+                    continue
+                try:
+                    from app.services.document_ingestion.service import (
+                        prepare_for_context,
+                    )
+
+                    _p = prepare_for_context(_furl)
+                    _t = _p.get("text") or ""
+                    if len(_t) > _rag_inline_max:
+                        if _p.get("truncated"):
+                            _fp = prepare_for_context(_furl, max_chars=5_000_000)
+                            _t = _fp.get("text") or _t
+                        _n = _upload_rag_mod.index_upload_text(
+                            _furl, _rag_session, _rag_org, _t,
+                            file_name=_p.get("file_name") or _furl,
+                            agent=_rag_agent,
+                            project_id=_rag_pid,
+                        )
+                        _big = _big or bool(_n and _n > 0)
+                except Exception as _rag_idx_err:
+                    logger.debug(
+                        "assemble_context: upload index failed (non-fatal): %s",
+                        _rag_idx_err,
+                    )
+            if _big:
+                _chunks = _upload_rag_mod.retrieve_upload_chunks(
+                    _rag_session, _rag_org, user_message,
+                    agent=_rag_agent,
+                    project_id=_rag_pid,
+                )
+                _blk = _upload_rag_mod.build_retrieval_block(
+                    user_message, _chunks
+                )
+                if _blk:
+                    items.append({
+                        "type": "user_attachments",
+                        "content": _blk,
+                        "source": "upload_rag",
+                        "priority": "high",
+                    })
+                    token_estimate += _estimate_tokens(_blk)
+        except Exception as _rag_err:
+            logger.debug(
+                "assemble_context: upload retrieval failed (non-fatal): %s",
+                _rag_err,
+            )
 
     # 2. Conversation history
     history = _get_conversation_history(db, conversation_id)

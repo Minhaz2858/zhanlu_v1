@@ -111,6 +111,12 @@ def get_tracer() -> TracingProvider:
     return _tracer
 
 
+def set_tracer(tracer: TracingProvider) -> None:
+    """Install a custom TracingProvider (used by tests and embedding)."""
+    global _tracer
+    _tracer = tracer
+
+
 def reset_tracer() -> None:
     """Reset the singleton (for testing)."""
     global _tracer
@@ -123,5 +129,6 @@ __all__ = [
     "NoOpTracer",
     "TraceContext",
     "get_tracer",
+    "set_tracer",
     "reset_tracer",
 ]

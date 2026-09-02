@@ -11,6 +11,8 @@ This service is the core of the evidence layer.  It:
 The golden rule: data-driven artifacts cite DataSnapshot IDs, never live queries.
 """
 
+import asyncio
+import concurrent.futures
 import hashlib
 import json
 import logging
@@ -25,6 +27,24 @@ from app.models.data_snapshot import DataSnapshot, SnapshotArtifactLink, SNAPSHO
 from app.services.data_snapshot.sql_validator import validate_sql
 
 logger = logging.getLogger(__name__)
+
+
+def _await_llm(coro):
+    """Run an async ``call_llm`` coroutine from a synchronous context.
+
+    Safe in both a plain sync route (no running loop → ``asyncio.run``)
+    and inside a running event loop (FastAPI async route, workflow chat
+    generator → the coroutine is run on a fresh loop in a worker thread).
+    Without this bridge the coroutine object leaks out and the governed
+    NL2SQL pipeline fails with ``'coroutine' object has no attribute
+    'get'``.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
 
 
 class DataSnapshotService:
@@ -244,11 +264,13 @@ Database Schema:
 Respond with ONLY the SQL query, no explanation. Start with SELECT or WITH."""
 
         try:
-            result = call_llm(
-                prompt=system_prompt,
-                messages=[{"role": "user", "content": question}],
+            result = _await_llm(call_llm(
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": question},
+                ],
                 temperature=0,
-            )
+            ))
 
             sql = result.get("response", "").strip()
             # Remove markdown code fences if present

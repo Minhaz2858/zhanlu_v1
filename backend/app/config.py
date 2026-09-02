@@ -350,10 +350,27 @@ class Settings(BaseSettings):
     LLM_HEALTH_ROUTING_ENABLED: bool = False
 
     # Inject ``parallel_tool_calls: True`` into LLM request payloads for
-    # OpenAI-compatible models (deepseek*, openai/*, gpt-*).  Anthropic
-    # models are excluded automatically (they reject the field).  When
-    # False (default), no injection — behaviour is unchanged.
+    # OpenAI-compatible models (deepseek*, openai/*, gpt-*, qwen*,
+    # moonshot/kimi*, minimax*, glm/zhipu*).  Anthropic models are excluded
+    # automatically (they reject the field).  When False (default), no
+    # injection — behaviour is unchanged.
     LLM_PARALLEL_TOOL_CALLS_ENABLED: bool = False
+
+    # Seed well-known LLM catalog rows (kimi-k2, MiniMax-M2, ...) into the
+    # llm_models table on startup. "missing-only" (default) inserts a row
+    # only when no row with the same model_id exists for the tenant, so
+    # admin edits survive reseeding; "skip" disables catalog seeding.
+    LLM_CATALOG_SEED_MODE: str = "missing-only"
+
+    # ── Deep Research Mode (v1) ────────────────────────────────────────
+    # In-loop research protocol: plan → parallel gather rounds (with
+    # critique/refine between rounds) → cited final report. Flag-gated;
+    # when False, research metadata on a message is ignored.
+    DEEP_RESEARCH_ENABLED: bool = False
+    # Hard cap on gather rounds regardless of depth preset.
+    DEEP_RESEARCH_MAX_ROUNDS: int = 3
+    # Per-LLM-call timeout inside the research protocol (seconds).
+    DEEP_RESEARCH_TIMEOUT_S: int = 90
 
     # ── P1-5 context economics: per-model tool-output caps ──────────────
     # Each entry caps the *content* of a single tool-role message at the
@@ -410,6 +427,52 @@ class Settings(BaseSettings):
     RETRIEVAL_HYBRID_ENABLED: bool = False
     RETRIEVAL_HYBRID_TOP_K: int = 10
     RETRIEVAL_HYBRID_MIN_SCORE: float = 0.5
+
+    # ── Chat Upload RAG (2026-08-31) ───────────────────────────────────
+    # Route LARGE uploaded files (and many-file turns) through the existing
+    # ChromaDB + local-embedding pipeline instead of dumping the whole text
+    # into the prompt (the 120k-char / ~30k-token wall). Files smaller than
+    # RAG_UPLOADS_INLINE_MAX_CHARS keep the exact inline behavior; bigger
+    # files are indexed once (idempotent per session+file) and the top-k
+    # most relevant chunks are injected per turn. Embeddings are LOCAL
+    # (sentence-transformers MiniLM, cached under /app/data/hf_cache) — no
+    # cloud dependency. Fail-open: any embedding/store error degrades back
+    # to the plain text dump.
+    RAG_UPLOADS_ENABLED: bool = True
+    RAG_UPLOADS_COLLECTION: str = "chat_uploads"
+    RAG_UPLOADS_TOP_K: int = 8
+    # Files with extracted text at or below this many chars stay fully
+    # inline (no retrieval loss for small files).
+    RAG_UPLOADS_INLINE_MAX_CHARS: int = 6000
+    # When a single turn has more uploaded files than this, retrieve
+    # instead of dumping every file's full text.
+    RAG_UPLOADS_MAX_FILES_INLINE: int = 3
+
+    # ── Dynamic Tool Loading (2026-08-31) ──────────────────────────────
+    # Mode "dynamic": per turn, keep the always-on core tools and add only
+    # the intent-relevant periphery tools (embedding or lexical match on the
+    # user message). Mode "all": every tool schema every turn (legacy).
+    # Fail-open: any selection error returns the full list.
+    TOOL_LOADING_MODE: str = "dynamic"
+    TOOL_LOADING_PERIPHERY_TOP_K: int = 12
+    TOOL_LOADING_CORE: list[str] = [
+        # conversation / memory
+        "memory", "project_memory", "session_search", "clarify",
+        # files + code
+        "read_file", "write_file", "execute_code", "sandbox_code",
+        # knowledge + grounding
+        "web_search", "web_extract", "search_skills", "list_skills",
+        "list_default_skills", "list_knowledge_bases",
+        # delegation / agentic
+        "delegate_task", "send_message", "interrupt",
+        # data + dashboards (core Zhanlu value)
+        "sql_query", "ask_data_agent", "comprehensive_data",
+        "create_dashboard", "create_fullstack_dashboard", "edit_dashboard",
+        "create_artifact", "edit_artifact",
+        # skills
+        "load_skill_body", "skill_manager", "list_fullstack_dashboards",
+        "approval",
+    ]
 
     # ── NLU / Intent (Part 2 Gap Analysis) ────────────────────────────
     INTENT_PLANNER_ENABLED: bool = False
@@ -1233,6 +1296,14 @@ class Settings(BaseSettings):
     # run_id immediately instead of blocking (fire-and-collect pattern).
     DELEGATION_ASYNC_ENABLED: bool = False
 
+    # ── Swarm fan-out pool (roadmap item 6) ────────────────────────────
+    # Bounded parallel executor for swarm_orchestrate. Budgets gate NEW
+    # spawns only (in-flight tasks complete); skipped tasks are reported
+    # as failed results so the lead's summary still accounts for them.
+    SWARM_MAX_CONCURRENT: int = 8        # max simultaneous workers (0 = unlimited)
+    SWARM_MAX_COST_USD: float = 0.0      # cost cap per orchestration (0 = unlimited)
+    SWARM_MAX_WALL_S: float = 900.0      # wall-clock cap per orchestration (0 = unlimited)
+
     # ── P2 Durability & Observability ────────────────────────────────────
     # When AGENT_HARNESS_ENABLED + AGENT_TRACING_ENABLED are both True,
     # the orchestrator loop opens OTEL spans for each iteration and each
@@ -1341,7 +1412,26 @@ class Settings(BaseSettings):
     TRACING_PROVIDER: str = "noop"            # "noop" | "otel"
     OTEL_EXPORTER_OTLP_ENDPOINT: str = ""      # standard OTEL env var
     OTEL_SERVICE_NAME: str = "zhanlu-backend"
+    TRACE_SPAN_SAMPLING_RATE: float = 1.0     # 1.0 = all spans; lower = sampled
+    TRACE_INCLUDE_TOOL_INPUT: bool = False    # never send raw tool args to traces
+    TRACE_METRICS_ENABLED: bool = False       # in-process rollup for Admin dashboard
     AUTHZ_PROVIDER: str = "rbac"              # "rbac" | "none"
+
+    # ── B4: Computer use (managed-browser facade) ─────────────────────
+    # computer_use tool over the agent-browser CLI. OFF by default — the
+    # handler returns the legacy "not implemented" stub until enabled.
+    COMPUTER_USE_ENABLED: bool = False
+    # Per-conversation action budget; `close` resets it.
+    COMPUTER_USE_MAX_STEPS: int = 20
+    # Reserved for a future engine launch config (the agent-browser CLI
+    # has no --viewport flag yet).
+    COMPUTER_USE_VIEWPORT: str = "1280,800"
+    # Idle session expiry in seconds (one shared Chromium per conversation).
+    COMPUTER_USE_SESSION_TTL_S: int = 1800
+    # URL allowlist for computer_use `open` — JSON array of hosts and/or
+    # URL prefixes (e.g. ["example.com", "https://docs.example.com/a"]).
+    # Empty = SSRF guard only.
+    COMPUTER_USE_ALLOWED_URLS: list[str] = []
 
     @property
     def upload_path(self) -> Path:

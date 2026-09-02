@@ -58,6 +58,9 @@ from app.routers.hooks import router as hooks_router
 from app.routers.admin_users import router as admin_users_router
 from app.routers.admin_evals import router as admin_evals_router
 from app.routers.admin_invocations import router as admin_invocations_router
+from app.routers.admin_observability_traces import router as admin_traces_router
+from app.services.mcp_server.fastmcp_app import get_mcp_http_app
+from app.routers.a2a import router as a2a_router
 from app.routers.resource_shares import router as resource_shares_router
 from app.routers.access_policies import router as access_policies_router
 from app.routers.chat_tools import router as chat_tools_router
@@ -574,6 +577,25 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Super-admin seeding error (non-fatal): %s", e)
 
+    # Seed well-known LLM catalog rows (kimi-k2, MiniMax-M2, ...) so the
+    # admin model UI is useful out of the box. Idempotent (missing-only);
+    # set LLM_CATALOG_SEED_MODE=skip to disable.
+    try:
+        from app.services.llm_catalog import seed_llm_catalog, should_seed_catalog
+        if should_seed_catalog():
+            from app.database import SessionLocal
+            cat_db = SessionLocal()
+            try:
+                created = seed_llm_catalog(cat_db)
+                if created:
+                    startup_logger.info(
+                        "Startup: seeded %d well-known LLM catalog row(s)", len(created)
+                    )
+            finally:
+                cat_db.close()
+    except Exception as e:
+        startup_logger.warning("LLM catalog seeding error (non-fatal): %s", e)
+
     # Normalize prompt_tools for all agents with bound KnowledgeBases.
     try:
         from app.services.agent_tools import normalize_all_agent_prompts
@@ -662,6 +684,15 @@ async def lifespan(app: FastAPI):
             "Automation startup reaper error (non-fatal): %s", e
         )
 
+    # Start the workflow Schedule-Trigger daemon (n8n Schedule Trigger).
+    try:
+        from app.services.workflow_scheduler import workflow_scheduler
+        workflow_scheduler.start()
+    except Exception as e:
+        startup_logger.warning(
+            "Workflow scheduler startup error (non-fatal): %s", e
+        )
+
     # Start the DataExecution cleanup loop (TTL sweep + per-session cap)
     if getattr(settings, "DATA_EXECUTION_CLEANUP_ENABLED", False):
         try:
@@ -702,7 +733,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Dashboard app manager startup error (non-fatal): %s", e)
 
+    # FastMCP streamable-HTTP session manager (external MCP transport at
+    # /api/ext-mcp/mcp). Mounts don't run child lifespans, so drive it here.
+    _mcp_lifespan = None
+    try:
+        from app.services.mcp_server.fastmcp_app import get_fastmcp_lifespan
+        _mcp_lifespan = get_fastmcp_lifespan()
+        await _mcp_lifespan.__aenter__()
+    except Exception as e:
+        startup_logger.warning("FastMCP transport startup error (non-fatal): %s", e)
+        _mcp_lifespan = None
+
     yield
+
+    if _mcp_lifespan is not None:
+        try:
+            await _mcp_lifespan.__aexit__(None, None, None)
+        except Exception as e:
+            startup_logger.warning("FastMCP transport shutdown error (non-fatal): %s", e)
 
     # ── Shutdown ──
     try:
@@ -726,6 +774,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning(
             "Automation dispatcher shutdown error (non-fatal): %s", e
+        )
+
+    try:
+        from app.services.workflow_scheduler import workflow_scheduler
+        workflow_scheduler.stop()
+    except Exception as e:
+        startup_logger.warning(
+            "Workflow scheduler shutdown error (non-fatal): %s", e
         )
 
 
@@ -784,6 +840,7 @@ def create_app() -> FastAPI:
     app.include_router(workspace_settings_router, prefix="/api")
     app.include_router(marketplace_router, prefix="/api")
     app.include_router(mcp_router, prefix="/api")
+    app.include_router(a2a_router)  # /a2a AgentCard + JSON-RPC
     app.include_router(nl2sql_router, prefix="/api")
     app.include_router(automation_api_router, prefix="/api")
     app.include_router(knowledge_bases_router, prefix="/api")
@@ -793,6 +850,9 @@ def create_app() -> FastAPI:
     app.include_router(admin_users_router, prefix="/api")
     app.include_router(admin_evals_router, prefix="/api")
     app.include_router(admin_invocations_router, prefix="/api")
+    app.include_router(admin_traces_router, prefix="/api")
+    # 2026-spec MCP server transport — external MCP clients connect here.
+    app.mount("/api/ext-mcp", get_mcp_http_app())  # external MCP clients: base_url = https://host/api/ext-mcp/mcp
     app.include_router(resource_shares_router, prefix="/api")
     app.include_router(access_policies_router, prefix="/api")
     app.include_router(chat_tools_router, prefix="/api")

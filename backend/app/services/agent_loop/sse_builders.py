@@ -241,12 +241,18 @@ def _build_live_event(
     label_key: str,
     params: dict | None = None,
     count: list[int] | None = None,
+    sanitize: bool = True,
 ) -> dict | None:
     """Build a typed live-event container, enforcing the per-turn event cap.
 
     Returns ``None`` once ``_LIVE_EVENT_CAP`` events have been produced so
     callers can skip emission without breaking the stream. Overflow events
     are logged at warning level.
+
+    ``sanitize=False`` bypasses the content-invariant scrubber for
+    server-generated metadata (plan step titles — same class as tool labels,
+    which must survive verbatim). Raw model text / SQL / table names must
+    never be routed through this path.
     """
     if count is not None:
         if count[0] >= _LIVE_EVENT_CAP:
@@ -259,7 +265,7 @@ def _build_live_event(
     return {
         "type": event_type,
         "label_key": label_key,
-        "params": _sanitize_live_event_params(params),
+        "params": _sanitize_live_event_params(params) if sanitize else dict(params or {}),
         "ts": datetime.now(timezone.utc).isoformat(),
     }
 

@@ -84,10 +84,24 @@ def validate(
         result.errors.append(f"Forbidden function: {fn_name}")
 
     # ── Parse ────────────────────────────────────────────────────
+    # Use sqlglot.parse (plural) so multi-statement input is detected —
+    # parse_one silently drops trailing statements, which would let
+    # "SELECT 1; DROP TABLE users" pass validation.
     try:
-        parsed = sqlglot.parse_one(sql, read="postgres")
+        statements = sqlglot.parse(sql, read="postgres")
     except Exception as e:
         result.errors.append(f"SQL parse error: {e}")
+        return result
+
+    if not statements or len(statements) != 1:
+        result.errors.append(
+            f"Multi-statement SQL is not allowed ({len(statements)} statements)"
+        )
+        return result
+
+    parsed = statements[0]
+    if parsed is None:  # type guard for sqlglot's Optional typing
+        result.errors.append("SQL parse produced no statement")
         return result
 
     # ── Rule 1: Must be SELECT ───────────────────────────────────

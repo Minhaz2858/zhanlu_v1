@@ -96,3 +96,124 @@ def test_run_workflow_agent_passes_history_to_trigger(monkeypatch):
     assert "User: earlier question" in out.get("history", "")
     assert "Assistant: earlier answer" in out.get("history", "")
     assert out.get("text") == "hello"
+
+
+def test_resolve_entity_by_id_or_name():
+    """Config identifiers resolve by id first, then by a unique name."""
+    db = SessionLocal()
+    _agent(db, _flow(), aid="wf-entity-a")
+    # give this row a UNIQUE name so the name lookup is unambiguous
+    row = db.query(AgentApp).filter(AgentApp.id == "wf-entity-a").first()
+    row.name = "unique entity name"
+    db.commit()
+    # id hit
+    r1 = wfr._resolve_entity(db, AgentApp, "wf-entity-a")
+    assert r1 is not None and r1.id == "wf-entity-a"
+    # name hit (unique)
+    r2 = wfr._resolve_entity(db, AgentApp, "unique entity name")
+    assert r2 is not None and r2.id == "wf-entity-a"
+    # unknown -> None (not a crash)
+    assert wfr._resolve_entity(db, AgentApp, "does-not-exist") is None
+    # empty -> None
+    assert wfr._resolve_entity(db, AgentApp, "") is None
+    # ambiguous name -> raises (never silently picks the wrong row)
+    try:
+        wfr._resolve_entity(db, AgentApp, "test flow")
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised
+
+
+def _kb(db, kid="kb-mysql-1", db_type="mysql"):
+    from app.models.knowledge_base import KnowledgeBase
+
+    kb = KnowledgeBase(
+        id=kid, name=kid, type="database", db_type=db_type,
+        host="10.0.0.1", port=3306, database_name="erp",
+        username="root", password="pw",
+    )
+    db.add(kb)
+    db.commit()
+    return kb
+
+
+def test_db_query_nl_uses_governed_nl2sql(monkeypatch):
+    """NL-mode db_query routes through the governed nl2sql pipeline and
+    maps its result to the db_query shape (dict rows + text)."""
+    from app.services.nl2sql import NL2SQLResult
+
+    db = SessionLocal()
+    _kb(db)
+    agent = _agent(db, _flow(), aid="wf-agent-nl2sql")
+
+    class FakeData:
+        columns = ["total_amount"]
+        rows = [(18410129637.66,)]
+        row_count = 1
+
+    captured = {}
+
+    def fake_ask(question, *, binding_id, db, datasource_config=None, **kw):
+        captured["question"] = question
+        captured["config"] = datasource_config
+        captured["binding_id"] = binding_id
+        return NL2SQLResult(success=True, question=question, sql="SELECT SUM(x)", data=FakeData())
+
+    monkeypatch.setattr("app.services.nl2sql.ask", fake_ask)
+    ctx = wfr.WorkflowExecutionContext(db, "default-org", "default-app", agent, "hello", created_by_id="u1")
+    out = ctx.db_query("kb-mysql-1", "what is total sales?", mode="nl", limit=10)
+
+    assert captured["question"] == "what is total sales?"
+    assert captured["config"]["dialect"] == "mysql"
+    assert captured["config"]["kb"] is not None
+    # synthetic binding_id must fit audit_events.binding_id varchar(36)
+    assert captured["binding_id"].startswith("wf:wf-agent")
+    assert len(captured["binding_id"]) <= 36
+    assert out["engine"] == "nl2sql"
+    assert out["sql"] == "SELECT SUM(x)"
+    assert out["rows"] == [{"total_amount": 18410129637.66}]
+    assert "18410129637.66" in out["text"]
+
+
+def test_db_query_nl_falls_back_when_nl2sql_fails(monkeypatch):
+    """When the governed pipeline fails, NL mode falls back to the legacy
+    schema-summary translator instead of crashing the node."""
+    db = SessionLocal()
+    _kb(db, kid="kb-mysql-2")
+    agent = _agent(db, _flow(), aid="wf-agent-nl2sql-fb")
+
+    monkeypatch.setattr("app.services.nl2sql.ask", lambda *a, **kw: None)  # unexpected failure
+
+    class FakeConn:
+        def execute(self, sql, max_rows=1, timeout_s=30):
+            return [{"v": 42.0}]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr("app.services.db.connector_factory.get_connector", lambda kb: FakeConn())
+    monkeypatch.setattr(
+        wfr.WorkflowExecutionContext, "_translate_to_sql",
+        lambda self, conn, q: "SELECT 42",
+    )
+    ctx = wfr.WorkflowExecutionContext(db, "default-org", "default-app", agent, "hello", created_by_id="u1")
+    out = ctx.db_query("kb-mysql-2", "total?", mode="nl", limit=10)
+
+    assert "engine" not in out  # legacy path has no engine marker
+    assert out["rows"] == [{"v": 42.0}]
+
+
+def test_kb_datasource_config_maps_dialects():
+    from app.models.knowledge_base import KnowledgeBase
+
+    mysql = KnowledgeBase(db_type="mysql")
+    assert wfr._kb_datasource_config(mysql)["dialect"] == "mysql"
+    pg = KnowledgeBase(db_type="postgresql", host="h", port=5432, database_name="d", username="u", password="p")
+    cfg = wfr._kb_datasource_config(pg)
+    assert cfg["dialect"] == "postgres" and cfg["database"] == "d"
+    assert wfr._kb_datasource_config(KnowledgeBase(db_type="oracle")) is None
+    assert wfr._kb_datasource_config(KnowledgeBase(db_type="sqlite")) is None  # no path

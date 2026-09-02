@@ -105,17 +105,19 @@ def _result_event(result):
 
 
 def test_run_code_sandboxed_returns_worker_result(monkeypatch):
-    result = {"success": True, "text": '{"greeting": "hi Ana"}', "items": [{"greeting": "hi Ana"}]}
-    svc = _FakeSandboxService(_job(events=[_result_event(result)]))
+    # Worker event carries the RAW runner result.json; the service must
+    # normalize it to the runtime shape {success, text, items}.
+    raw = {"output": {"greeting": "hi Ana"}}
+    svc = _FakeSandboxService(_job(events=[_result_event(raw)]))
     monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
 
     out = ws.run_code_sandboxed(db=None, code="output = {'greeting': 'hi ' + str(input.get('name',''))}", input_item={"name": "Ana"}, timeout=5)
-    assert out == result
+    assert out == {"success": True, "text": '{"greeting": "hi Ana"}', "items": [{"greeting": "hi Ana"}]}
     assert svc.created["skill_name"] == "workflow_code"
     assert svc.created["image_name"].startswith("zhanlu-sandbox-python")
     assert "runner_script" in svc.created["input_package"]
     assert svc.created["input_package"]["runner_script_name"] == "workflow_code_runner.py"
-    cfg = json.loads(svc.created["input_package"]["config_json"])
+    cfg = svc.created["input_package"]["skill_config"]
     assert cfg["input_item"] == {"name": "Ana"}
 
 
@@ -125,6 +127,20 @@ def test_run_code_sandboxed_failed_job_returns_error(monkeypatch):
     out = ws.run_code_sandboxed(db=None, code="output = 1", input_item={}, timeout=5)
     assert out["success"] is False
     assert "boom" in out["text"]
+
+
+def test_run_code_sandboxed_failed_job_prefers_runner_error_event(monkeypatch):
+    # Container exits non-zero but the runner captured the real error in
+    # result.json — the poller must surface it, not the empty stderr.
+    svc = _FakeSandboxService(_job(
+        status="failed",
+        error_message="",
+        events=[_result_event({"error": "ZeroDivisionError('division by zero')"})],
+    ))
+    monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
+    out = ws.run_code_sandboxed(db=None, code="output = 1/0", input_item={}, timeout=5)
+    assert out["success"] is False
+    assert "ZeroDivisionError" in out["text"]
 
 
 def test_run_code_sandboxed_falls_back_when_docker_unavailable(monkeypatch):

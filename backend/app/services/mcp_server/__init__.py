@@ -7,6 +7,7 @@ and invoke skills as MCP tools.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any
@@ -57,7 +58,12 @@ class ZhanluMCPServer:
 
         try:
             if entry.handler:
-                result = await entry.handler(arguments or {}, context=context)
+                if asyncio.iscoroutinefunction(entry.handler):
+                    result = await entry.handler(arguments or {}, context=context)
+                else:
+                    result = await asyncio.to_thread(
+                        entry.handler, arguments or {}, None, None, context=context,
+                    )
             else:
                 result = {"error": f"Tool '{name}' has no handler"}
         except Exception as exc:

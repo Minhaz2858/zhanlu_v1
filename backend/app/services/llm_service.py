@@ -14,6 +14,7 @@ from fastapi import HTTPException
 
 from app.config import settings
 from app.services.tracing import get_tracer as _get_tracer
+from app.services.tracing.spans import note_llm_usage, llm_completion_span, traced_llm_call
 from app.services.provider_health import (
     is_healthy, record_success, record_failure, select_provider,
 )
@@ -177,7 +178,36 @@ def _supports_parallel_tool_calls(model: str) -> bool:
         return True
     if m.startswith("openai/") or m.startswith("gpt-"):
         return True
+    # Chinese-market OpenAI-compatible families (chat-completions API
+    # accepts the field and emits multiple tool_calls per message):
+    # Aliyun/DashScope qwen, Moonshot Kimi, MiniMax, Zhipu GLM.
+    if "qwen" in m:
+        return True
+    if "moonshot" in m or "kimi" in m:
+        return True
+    if "minimax" in m:
+        return True
+    if "glm" in m or "zhipu" in m:
+        return True
     return False
+
+
+def maybe_enable_parallel_tool_calls(payload: dict, model: str) -> dict:
+    """Inject ``parallel_tool_calls: True`` into ``payload`` when the
+    ``LLM_PARALLEL_TOOL_CALLS_ENABLED`` flag is on AND ``model`` accepts the
+    field (see :func:`_supports_parallel_tool_calls`).
+
+    Single shared entry point for every payload site (llm_service.call_llm,
+    sub-agent reliability wrapper, the agents.py main loops) so the flag
+    behaves identically everywhere. Mutates and returns ``payload``; no-op
+    when the flag is off or the model is unsupported (Anthropic/unknown).
+    """
+    if (
+        getattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", False)
+        and _supports_parallel_tool_calls(model)
+    ):
+        payload["parallel_tool_calls"] = True
+    return payload
 
 
 def llm_headers() -> dict:
@@ -327,6 +357,7 @@ def _provider_headers(provider: LLMProvider) -> dict:
     }
 
 
+@traced_llm_call()
 async def call_llm(
     prompt: str = "",
     messages: list[dict] | None = None,
@@ -418,6 +449,11 @@ async def call_llm(
                 completion_tokens=cached.get("usage", {}).get("completion_tokens", 0),
                 latency_ms=0,
             )
+            note_llm_usage(
+                model=routed_model,
+                prompt_tokens=cached.get("usage", {}).get("prompt_tokens", 0),
+                completion_tokens=cached.get("usage", {}).get("completion_tokens", 0),
+            )
             return cached
 
     # ── P1-5: per-model tool-output cap (before pre-flight) ──
@@ -484,17 +520,10 @@ async def call_llm(
         )
 
     # ── P0-2 parallel tool calls capability injection ──
-    # When the feature flag is on AND the routed model accepts the
-    # field, declare ``parallel_tool_calls: True`` so the LLM may emit
-    # multiple tool_calls in a single assistant message.  This is a
-    # no-op (default-off) for the existing 220+ payload call sites that
-    # still go through this function; each provider's own gating on
-    # the field decides the actual behaviour.
-    if (
-        getattr(settings, "LLM_PARALLEL_TOOL_CALLS_ENABLED", False)
-        and _supports_parallel_tool_calls(routed_model)
-    ):
-        payload["parallel_tool_calls"] = True
+    # Shared helper: flag-gated + model-allowlisted (Anthropic excluded).
+    # When the LLM emits multiple tool_calls in one assistant message the
+    # agent loops already execute them in parallel via execute_tool_batch.
+    maybe_enable_parallel_tool_calls(payload, routed_model)
 
     # ── Health-based provider selection ──
     if endpoint is not None:
@@ -595,6 +624,11 @@ async def call_llm(
             completion_tokens=_llm_completion_tokens,
             latency_ms=latency_ms,
         )
+        note_llm_usage(
+            model=_llm_model,
+            prompt_tokens=_llm_prompt_tokens,
+            completion_tokens=_llm_completion_tokens,
+        )
 
         # ── Cache result (temperature=0 only) ──
         if endpoint is None:
@@ -611,6 +645,12 @@ async def call_llm(
         prompt_tokens=_llm_prompt_tokens,
         completion_tokens=_llm_completion_tokens,
         latency_ms=(_time.monotonic() - _llm_start) * 1000,
+        error=_llm_error,
+    )
+    note_llm_usage(
+        model=_llm_model,
+        prompt_tokens=_llm_prompt_tokens,
+        completion_tokens=_llm_completion_tokens,
         error=_llm_error,
     )
     if isinstance(last_error, httpx.HTTPStatusError):
@@ -886,6 +926,8 @@ async def stream_chat_completion(
         if not is_healthy(provider.name):
             logger.debug("stream_chat_completion: provider '%s' unhealthy — skip", provider.name)
             continue
+        _stream_span = llm_completion_span(provider.model, temperature=temperature)
+        _stream_span.__enter__()
         request_payload = dict(payload)
         request_payload["model"] = provider.model
         started = False
@@ -904,6 +946,7 @@ async def stream_chat_completion(
                         data_str = line[len("data: "):]
                         if data_str.strip() == "[DONE]":
                             record_success(provider.name, 0)
+                            _stream_span.__exit__(None, None, None)
                             return
                         try:
                             chunk = json.loads(data_str)
@@ -914,6 +957,7 @@ async def stream_chat_completion(
                             started = True
                             yield content
             record_success(provider.name, 0)
+            _stream_span.__exit__(None, None, None)
             return  # streamed successfully from this provider
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             record_failure(provider.name, type(e).__name__)
@@ -927,5 +971,6 @@ async def stream_chat_completion(
                 "stream_chat_completion: provider '%s' failed to connect: %s — trying next",
                 provider.name, e,
             )
+            _stream_span.__exit__(None, None, None)
             continue
     return  # no provider connected; caller falls back

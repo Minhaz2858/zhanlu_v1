@@ -44,7 +44,7 @@ mammoth==1.8.0
 sqlglot>=25.0,<27.0
 # ── Pre-installed lazy deps (avoid PyPI fallback on first use) ─────
 PyYAML>=6.0    # skill_manager
-mcp>=1.0       # mcp
+mcp>=1.26,<2  # mcp (1.x API; 2.x renamed FastMCP -> MCPServer)
 # cron expression parser used by automation_dispatcher for next_run_at()
 croniter>=2.0.0,<4.0
 # ── Document RAG (KB file source_kind) ─────────────────────────────
@@ -71,3 +71,4 @@ xgboost>=2.0,<3.0
 # imported with a graceful error if missing, but install it for the
 # drawing tool to work.
 ezdxf>=1.4
+rapidfuzz

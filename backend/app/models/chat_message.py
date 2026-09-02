@@ -49,3 +49,10 @@ class ChatMessage(TimestampedBase):
     # Declared so the generic entity CRUD round-trips it on write/read
     # (same pattern as tool_calls / live_events above).
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Files the USER attached to this message (Kimi/ChatGPT-style history).
+    # Each entry: {"name": str, "file_url": "/api/uploads/...", "ext": str,
+    # "kind": "data_file"|"html_file"|"document"|"image"}.
+    # Written by the frontend on ChatMessage.create for user messages and
+    # round-tripped by the generic entity CRUD so the attachment cards
+    # survive a page refresh (same pattern as tool_calls / sources above).
+    attachments: Mapped[list | None] = mapped_column(JSON, nullable=True)
