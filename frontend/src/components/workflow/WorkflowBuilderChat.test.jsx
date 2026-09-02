@@ -108,4 +108,31 @@ describe('WorkflowBuilderChat.jsx workflow_builder streaming panel', () => {
     expect(SOURCE).toMatch(/cancelled\s*=\s*true/);
     expect(SOURCE).toMatch(/abortRef\.current\.abort\(\)/);
   });
+
+  it('resumes the latest existing session for the workflow (listAgentConversations by workflow_id, limit 1)', () => {
+    expect(SOURCE).toMatch(/listAgentConversations/);
+    const resumeBlock = SOURCE.match(/listAgentConversations\('workflow_builder',\s*\{[\s\S]{0,120}?\}\)/);
+    expect(resumeBlock, 'listAgentConversations call not found').not.toBeNull();
+    expect(resumeBlock[0]).toMatch(/workflowId/);
+    expect(resumeBlock[0]).toMatch(/limit:\s*1/);
+    // Reuses the found conversation id and hydrates its stored messages.
+    expect(SOURCE).toMatch(/existing\[0\]/);
+    expect(SOURCE).toMatch(/conv\.messages/);
+    expect(SOURCE).toMatch(/setResumed\(true\)/);
+  });
+
+  it('falls through to createAgentConversation when no session exists yet', () => {
+    // The resume path returns early only when a row exists; otherwise the
+    // original create call with workflow_builder + workflow_id must run.
+    const createIdx = SOURCE.indexOf("createAgentConversation(\n          'workflow_builder',");
+    expect(createIdx, 'create fallback not found').toBeGreaterThan(-1);
+    expect(SOURCE.indexOf('existing.length > 0')).toBeLessThan(createIdx);
+  });
+
+  it('offers a New session button that starts a fresh conversation (RotateCcw + startNewSession)', () => {
+    expect(SOURCE).toMatch(/RotateCcw/);
+    expect(SOURCE).toMatch(/startNewSession/);
+    expect(SOURCE).toMatch(/setResumed\(false\)/);
+    expect(SOURCE).toMatch(/setMessages\(\[\]\)/);
+  });
 });

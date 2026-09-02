@@ -211,6 +211,34 @@ export async function createAgentConversation(agentName, metadata = {}, title) {
 }
 
 /**
+ * List agent conversations, optionally filtered by agent + workflow_id.
+ *
+ * The Build-with-AI panel uses this to resume the latest session for a
+ * workflow: conversations are created with ``metadata.workflow_id`` set, and
+ * the backend (GET /agents/conversations?workflow_id=...) filters on it.
+ * Rows are returned most-recent-first and include the full ``messages``
+ * array, so the caller can hydrate history straight from the first row.
+ *
+ * @param {string} agentName — filter by agent (e.g. 'workflow_builder')
+ * @param {{workflowId?: string, limit?: number}} [opts]
+ * @returns {Promise<Array<{id: string, agent_name: string, messages: Array, metadata: object, ...}>>}
+ */
+export async function listAgentConversations(agentName, { workflowId, limit } = {}) {
+  const params = new URLSearchParams();
+  if (agentName) params.set('agent_name', agentName);
+  if (workflowId) params.set('workflow_id', workflowId);
+  if (limit) params.set('limit', String(limit));
+  const qs = params.toString();
+  const resp = await authFetch(
+    `${API_BASE}/agents/conversations${qs ? `?${qs}` : ''}`
+  );
+  if (!resp.ok) {
+    throw new Error(`Failed to list conversations: ${resp.statusText}`);
+  }
+  return resp.json();
+}
+
+/**
  * Mid-turn steer — enqueue a user steer message for an in-flight v3 SSE
  * stream (P2). The backend drains pending steer messages between
  * tool-loop iterations and injects them into the next LLM call as user

@@ -8,7 +8,7 @@ vi.mock('@/lib/app-params', () => ({
   appParams: { appId: mockAppId },
 }));
 
-import { createAgentConversation, streamAgentResponse, setPermissionMode } from '@/api/agentEnhanced';
+import { createAgentConversation, streamAgentResponse, setPermissionMode, listAgentConversations } from '@/api/agentEnhanced';
 
 describe('agentEnhanced URL construction', () => {
   let originalFetch;
@@ -107,5 +107,27 @@ describe('agentEnhanced URL construction', () => {
     const url = calls[0].url;
     expect(url).toContain(`/api/apps/${mockAppId}/agents/conversations/conv-xyz/permission-mode`);
     expect(url).not.toContain('/apps/undefined/');
+  });
+
+  it('listAgentConversations queries /agents/conversations with agent_name + workflow_id', async () => {
+    const calls = captureFetch();
+    await listAgentConversations('workflow_builder', { workflowId: 'wf-1', limit: 1 });
+    expect(calls).toHaveLength(1);
+    const url = calls[0].url;
+    expect(url.startsWith(`/api/apps/${mockAppId}/agents/conversations`)).toBe(true);
+    expect(url).toContain('agent_name=workflow_builder');
+    expect(url).toContain('workflow_id=wf-1');
+    expect(url).toContain('limit=1');
+    // A read — authFetch sends no method option for GET (never POST).
+    expect(calls[0].opts.method).not.toBe('POST');
+  });
+
+  it('listAgentConversations omits query params it is not given', async () => {
+    const calls = captureFetch();
+    await listAgentConversations('workflow_builder');
+    const url = calls[0].url;
+    expect(url.startsWith(`/api/apps/${mockAppId}/agents/conversations`)).toBe(true);
+    expect(url).not.toContain('workflow_id=');
+    expect(url).not.toContain('limit=');
   });
 });

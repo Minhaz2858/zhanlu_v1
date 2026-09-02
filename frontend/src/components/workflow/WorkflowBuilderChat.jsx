@@ -1,8 +1,12 @@
 import { useRef, useState, useEffect } from 'react';
 import { useLanguage } from '@/lib/LanguageProvider';
-import { createAgentConversation, streamAgentResponse } from '@/api/agentEnhanced';
+import {
+  createAgentConversation,
+  listAgentConversations,
+  streamAgentResponse,
+} from '@/api/agentEnhanced';
 import { Button } from '@/components/ui/button';
-import { Send, X, Loader2, Sparkles } from 'lucide-react';
+import { Send, X, Loader2, Sparkles, RotateCcw } from 'lucide-react';
 
 /**
  * WorkflowBuilderChat — right slide-over chat panel for the workflow canvas.
@@ -35,14 +39,20 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [convId, setConvId] = useState(null);
+  const [resumed, setResumed] = useState(false); // true when the panel reused an existing session
+  const [startingSession, setStartingSession] = useState(false);
   const convIdRef = useRef(null);
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
 
-  // Create the agent conversation on first open — mirrors
+  // Start-or-resume the workflow builder session on first open — mirrors
   // createAgentConversation in Chat.jsx (agent_name 'workflow_builder',
   // metadata.workflow_id so the backend persistence branch knows which
-  // workflow to save, top-level title per the documented contract).
+  // workflow to save, top-level title per the documented contract). If a
+  // session for this workflow already exists (listAgentConversations filtered
+  // by workflow_id), resume the LATEST one: reuse its conversation id and
+  // hydrate its message history so reopening the panel continues where the
+  // user left off. The header "New session" button starts fresh instead.
   // Cleanup aborts any in-flight stream when the panel closes or the
   // component unmounts, so we never setState after unmount.
   useEffect(() => {
@@ -51,17 +61,39 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     // reopen) does not stack duplicate error bubbles.
     setMessages((prev) => prev.filter((m) => !m._sessionError));
     let cancelled = false;
-    createAgentConversation(
-      'workflow_builder',
-      { workflow_id: workflowId },
-      'Workflow builder',
-    )
-      .then((conv) => {
+    async function startOrResume() {
+      try {
+        const existing = await listAgentConversations('workflow_builder', {
+          workflowId,
+          limit: 1,
+        });
+        if (cancelled) return;
+        if (existing && existing.length > 0) {
+          // Most-recent-first order → [0] is the latest session.
+          const conv = existing[0];
+          convIdRef.current = conv.id;
+          setConvId(conv.id);
+          setResumed(true);
+          setMessages(
+            (conv.messages || [])
+              .map((m) => ({
+                role: m.role === 'user' ? 'user' : 'assistant',
+                content: typeof m.content === 'string' ? m.content : '',
+              }))
+              .filter((m) => m.content),
+          );
+          return;
+        }
+        const conv = await createAgentConversation(
+          'workflow_builder',
+          { workflow_id: workflowId },
+          'Workflow builder',
+        );
         if (cancelled) return;
         convIdRef.current = conv.id;
         setConvId(conv.id);
-      })
-      .catch((err) => {
+        setResumed(false);
+      } catch (err) {
         if (cancelled) return;
         console.error('[WorkflowBuilderChat] conversation create failed', err);
         setMessages((prev) => [
@@ -74,7 +106,9 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
             _sessionError: true,
           },
         ]);
-      });
+      }
+    }
+    startOrResume();
     return () => {
       cancelled = true;
       if (abortRef.current) {
@@ -83,6 +117,30 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
       }
     };
   }, [open, workflowId]);
+
+  // Start a brand-new build session for this workflow: create a fresh
+  // conversation and clear the panel (history stays on the server under the
+  // old conversation, reachable again on next open via resume). Guarded
+  // while a session is starting or a stream is in flight.
+  async function startNewSession() {
+    if (startingSession || streaming || !workflowId) return;
+    setStartingSession(true);
+    try {
+      const conv = await createAgentConversation(
+        'workflow_builder',
+        { workflow_id: workflowId },
+        'Workflow builder',
+      );
+      convIdRef.current = conv.id;
+      setConvId(conv.id);
+      setResumed(false);
+      setMessages([]);
+    } catch (err) {
+      console.error('[WorkflowBuilderChat] new session create failed', err);
+    } finally {
+      setStartingSession(false);
+    }
+  }
 
   // Abort any in-flight stream when the panel closes.
   useEffect(() => {
@@ -224,6 +282,19 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
         <h2 className="flex-1 text-sm font-semibold">
           {isEn ? 'Build with AI' : 'AI 构建'}
         </h2>
+        {resumed && !streaming && (
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={startNewSession}
+            disabled={startingSession}
+            title={isEn ? 'Start a new session' : '新建会话'}
+            className="mr-1"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            {isEn ? 'New' : '新建'}
+          </Button>
+        )}
         <Button variant="ghost" size="icon" onClick={onClose} title={isEn ? 'Close (Esc)' : '关闭 (Esc)'}>
           <X className="h-4 w-4" />
         </Button>
