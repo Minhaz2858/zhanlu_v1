@@ -8,19 +8,25 @@ test, document reindex, indexing status, and manual discovery re-scan.
 
 import asyncio
 import logging
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_current_user_required, get_db
 from app.models.knowledge_base import KnowledgeBase
+from app.routers.integrations import _upload_blocked_reason
 from app.services.db.connector_factory import (
     DriverUnavailable,
     get_connector,
 )
 from app.services.document_ingestion import service as ingestion_service
+from app.services.file_datasource import (
+    ALLOWED_EXTS,
+    import_spreadsheet_to_sqlite,
+)
 from app.services.forecasting.discovery import discover as run_discovery
 from app.services.universal_analytics.auto_discover import _write_targets
 
@@ -157,6 +163,71 @@ async def test_connection(
             return {"ok": False, "info": str(e)}
 
     return await asyncio.to_thread(_do_test)
+
+
+@router.post("/upload-query-file")
+async def upload_query_file(
+    app_id: str,
+    file: UploadFile = File(...),
+    name: str = Form(""),
+    description: str = Form(""),
+    project: str = Form("global"),
+    user=Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
+    """Upload a CSV/XLSX and register it as a queryable SQLite datasource.
+
+    The spreadsheet is parsed into a local SQLite file and registered as a
+    KnowledgeBase row with ``db_type='sqlite'`` (``file_url`` = the sqlite
+    path), so it shows up in the workflow Database Query node's picker
+    (``listDatabases`` = rows with a truthy ``db_type``) and runs through the
+    existing SQLiteConnector — SQL and natural-language mode both work with
+    no runtime changes. Returns the created KB row (entities-router shape).
+    """
+    # ── Settings gate (file_upload_enabled) — same as Core/UploadFile ───
+    blocked = _upload_blocked_reason(user, db)
+    if blocked:
+        raise HTTPException(status_code=403, detail=blocked)
+
+    raw_name = file.filename or ""
+    ext = Path(raw_name).suffix.lower()
+    if ext not in ALLOWED_EXTS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type '{ext or '(none)'}' — upload a .csv, .xlsx or .xls spreadsheet",
+        )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+
+    try:
+        parsed = import_spreadsheet_to_sqlite(data, raw_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    kb = KnowledgeBase(
+        name=(name.strip() or Path(raw_name).stem)[:255],
+        description=(description.strip() or None),
+        project=(project.strip() or "global"),
+        source_kind="database",
+        type="sqlite",
+        db_type="sqlite",
+        file_url=str(parsed["db_path"]),
+        file_type=ext.lstrip("."),
+        item_count=parsed["total_rows"],
+        status="active",
+        created_by_id=getattr(user, "id", None),
+        app_id=app_id or "default-app",
+    )
+    db.add(kb)
+    db.commit()
+    db.refresh(kb)
+    logger.info(
+        "upload-query-file: registered %s as sqlite datasource %s (%d rows, tables=%s)",
+        kb.name, kb.id, kb.item_count, parsed["tables"],
+    )
+    return kb.to_dict()
 
 
 def _humanize_db_type(db_type: str) -> str:
