@@ -66,8 +66,20 @@ def prop(
     options: list[dict] | None = None,
     item_label: str | None = None,
     load_options_method: str | None = None,
+    visible_when: dict | None = None,
+    advanced: bool = False,
 ) -> dict[str, Any]:
-    """Build a node property descriptor (n8n INodeProperties subset)."""
+    """Build a node property descriptor (n8n INodeProperties subset).
+
+    ``visible_when`` ({field: value}) makes the field conditional — the form
+    hides it unless ``config[field]`` equals the value (n8n
+    ``displayOptions.show``). Used by db_query to show only the input that
+    matches the selected mode.
+
+    ``advanced`` moves the field into the collapsible "Advanced (optional)"
+    section of the node form — for power-user knobs (limits, error handling)
+    that non-IT users should not have to reason about.
+    """
     p: dict[str, Any] = {
         "displayName": display_name,
         "name": name,
@@ -86,6 +98,10 @@ def prop(
         p["itemLabel"] = item_label
     if load_options_method is not None:
         p["loadOptionsMethod"] = load_options_method
+    if visible_when is not None:
+        p["visible_when"] = visible_when
+    if advanced:
+        p["advanced"] = True
     return p
 
 
@@ -248,28 +264,31 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
         "category": "Data",
         "icon": "🗄️",
         "color": "#3b82f6",
-        "description": "Run SQL (or a natural-language question) against a connected database",
-        "description_zh": "对已连接的数据库执行 SQL（或自然语言查询）",
+        "description": "Ask a question in plain language — the AI finds the right tables and writes the SQL",
+        "description_zh": "用自然语言提问，AI 自动查表并生成 SQL",
         "inputs": ["main"],
         "outputs": ["main"],
         "properties": [
-            prop("Connector", "kb_id", "options", default="", required=True,
-                 description="The database connector to query. Loaded from your connectors (database-type only).",
+            notice("Ask in plain language — the AI searches your tables and writes the SQL for you."),
+            prop("Database", "kb_id", "options", default="", required=True,
+                 description="Your connected database — the AI reads its tables automatically. Loaded from your connectors (database-type only).",
                  options=[], load_options_method="listDatabases"),
-            prop("Mode", "mode", "options", default="sql",
+            prop("Mode", "mode", "options", default="nl",
                  options=[
-                     {"name": "SQL", "value": "sql"},
                      {"name": "Natural language", "value": "nl"},
+                     {"name": "SQL", "value": "sql"},
                  ],
-                 description="SQL runs the statement directly. Natural language translates the question with the connector's schema context."),
+                 description="Natural language: ask in plain words, the AI writes the SQL. SQL: write the statement yourself."),
+            prop("Question", "question", "string", default="",
+                 placeholder="e.g. total revenue by month",
+                 description="Ask in plain language — the AI finds the right tables and writes the SQL for you.",
+                 visible_when={"mode": "nl"}),
             prop("SQL", "sql", "string", default="",
                  placeholder="SELECT * FROM orders WHERE status = 'open' LIMIT 10",
-                 description="Read-only SQL statement. Supports {{inputs.<node>.<field>}} templates."),
-            prop("Question", "question", "string", default="",
-                 placeholder="{{inputs.n1.text}} — e.g. total revenue by month",
-                 description="Natural-language question about the connected database."),
+                 description="Read-only SQL statement. Supports {{inputs.<node>.<field>}} templates.",
+                 visible_when={"mode": "sql"}),
             prop("Limit", "limit", "number", default=50,
-                 description="Maximum rows returned."),
+                 description="Maximum rows returned.", advanced=True),
         ],
     },
     "mcp_tool": {
@@ -512,9 +531,11 @@ def is_router_type(node_type: str) -> bool:
 # node.data.config (missing keys fall back to defaults).
 ERROR_HANDLING_PROPS = [
     prop("Retry on fail", "retryOnFail", "number", default=0,
-         description="Number of times to retry the node after a failure before it is considered failed. 0 = no retry."),
+         description="Number of times to retry the node after a failure before it is considered failed. 0 = no retry.",
+         advanced=True),
     prop("Continue on fail", "continueOnFail", "boolean", default=False,
-         description="When enabled, a failed node emits an error item and the workflow continues to the next node instead of aborting (n8n 'Continue On Fail')."),
+         description="When enabled, a failed node emits an error item and the workflow continues to the next node instead of aborting (n8n 'Continue On Fail').",
+         advanced=True),
 ]
 
 
