@@ -51,13 +51,28 @@ def parallelizable_ask_count(user_content: str | None) -> int:
     return score
 
 
-def delegation_nudge_directive(user_content: str | None) -> str | None:
+def delegation_nudge_directive(
+    user_content: str | None,
+    agent_name: str | None = None,
+) -> str | None:
     """Return a system-prompt directive when the ask is parallelizable.
 
     Returns ``None`` when the request is single-item, dashboard-shaped, or
     empty. The directive is appended to the system prompt ONCE before the
     tool loop so it cannot interfere with mid-loop control flow.
+
+    ``agent_name`` — when the turn belongs to an agent that holds no
+    ``delegate_task`` tool, the directive is pointless noise that only makes
+    the model argue with its own system prompt. ``workflow_builder`` is
+    exempt (2026-09-02): its deliverable is the save_flow decision summary,
+    and semicolon-separated workflow specs ("a chat trigger node; an LLM
+    node that classifies...; ... Connect everything in order") routinely
+    score >=2 on the clause heuristic, injecting "PARALLEL WORK DETECTED:
+    ... Call delegate_task(tasks=[...])" into builder turns that can never
+    act on it.
     """
+    if agent_name == "workflow_builder":
+        return None
     if not user_content:
         return None
     text = user_content.lower()

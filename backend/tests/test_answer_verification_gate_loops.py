@@ -58,6 +58,51 @@ def test_gate_flag_off_returns_none_without_calling_evaluator(monkeypatch):
     assert result.message == ""
 
 
+def test_gate_inert_for_workflow_builder(monkeypatch):
+    """Build-with-AI turns must never get a DATA-oriented gap disclosure.
+
+    2026-09-02 regression: the universal self-eval gate ran on a
+    workflow_builder turn (its tool-loop had recorded a stray tool call) and
+    appended "[Gap disclosure] I was unable to fully answer this request:
+    requested dimensions not found in the data: called, classify, connect,
+    everyth, exactly" to a perfectly valid save_flow delivery. The builder's
+    deliverable is the flow GRAPH, not data rows — the coverage/arithmetic/
+    part-whole detectors are meaningless there. The gate must be inert for
+    workflow_builder regardless of tool records (mirrors the fusion360_* tool
+    exemption).
+    """
+    def _should_not_run(*a, **k):
+        raise AssertionError("evaluate_answer must not run for workflow_builder")
+
+    monkeypatch.setattr(agents, "evaluate_answer", _should_not_run)
+    result = _run(agents._check_answer_verification_gate(
+        "Create a workflow called 'Sales Assistant' ... and a markdown output "
+        "node. Connect everything in order.",
+        _tool_calls(("edit_slide", {"status": "blocked"})),
+        "The **Sales Assistant** workflow is complete and correct.",
+        attempts=0,
+        budget_remaining=38,
+        agent_name="workflow_builder",
+    ))
+    assert result.action == "none"
+    assert result.message == ""
+
+    # A non-builder agent with the same inputs still runs the evaluator.
+    from app.services.answer_verification import VerificationResult
+
+    monkeypatch.setattr(agents, "evaluate_answer", lambda *a, **k: VerificationResult(status="COMPLETE", signals=["mocked"]))
+    result = _run(agents._check_answer_verification_gate(
+        "Create a workflow called 'Sales Assistant' ... and a markdown output "
+        "node. Connect everything in order.",
+        _tool_calls(("edit_slide", {"status": "blocked"})),
+        "The **Sales Assistant** workflow is complete and correct.",
+        attempts=0,
+        budget_remaining=38,
+        agent_name="general_assistant",
+    ))
+    assert result.action == "none"  # COMPLETE → none, but the evaluator RAN
+
+
 def test_gate_flag_off_with_tools_never_evaluates(monkeypatch):
     """Even with tools present, flag-off never evaluates."""
     monkeypatch.setattr(settings, "SELF_EVAL_REPLAN_ENABLED", False)

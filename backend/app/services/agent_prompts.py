@@ -2841,8 +2841,16 @@ def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app
     Thin wrapper around :func:`_get_tools_base` that appends the deck-edit
     tools (``edit_slide`` / ``add_slide`` / ... ) when
     ``DECK_EDIT_ROUTING_ENABLED`` is on, so agents can edit generated decks.
+    ``workflow_builder`` is exempt from that append (2026-09-02): its
+    explicit ``enabled_tools: []`` is a hard no-tools contract — its system
+    prompt says "You have NO tools available. Never attempt tool calls" —
+    and the deck-edit schemas surfaced to the LLM made the model argue it
+    had tools ("my available tools are limited to edit_slide, add_slide,
+    ...") instead of emitting the save_flow decision summary.
     """
     schemas = _get_tools_base(agent_name, tool_config, agent_app)
+    if agent_name == "workflow_builder":
+        return schemas
     deck_edit = _get_deck_edit_schemas()
     if deck_edit:
         # Avoid duplicate injection (defensive, e.g. tool_config already

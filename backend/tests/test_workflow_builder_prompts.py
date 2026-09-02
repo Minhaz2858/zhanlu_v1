@@ -83,3 +83,39 @@ def test_workflow_builder_prompt_shows_edge_object_shape():
         '"source": "n1", "target": "n2", '
         '"sourceHandle": "source-main", "targetHandle": "target-main"' in p
     )
+
+
+def test_workflow_builder_is_exempt_from_delegation_directive():
+    """A semicolon-list workflow spec must NOT trigger the delegate_task nudge.
+
+    2026-09-02 regression: ``delegation_nudge_directive`` counts ASCII ``;`` as a
+    Chinese enumeration separator, so a workflow spec that lists node types
+    ("a chat trigger node; an LLM node that classifies...; a switch node...;
+    ... Connect everything in order") scored 8 "independent clauses" and the
+    v3 stream injected "PARALLEL WORK DETECTED: ... Call delegate_task(tasks=
+    [...])" into the builder's system prompt — plus the hard enforcement at
+    iter=2 (observed in backend logs). The builder has NO delegate_task tool,
+    so the model wasted iterations arguing with the guardrail instead of
+    emitting the save_flow decision summary.
+    """
+    from app.services.delegation_nudge import delegation_nudge_directive
+
+    prompt = (
+        "Create a workflow called 'Sales Assistant' that answers sales "
+        "questions. It should have: a chat trigger node; an LLM node that "
+        "classifies the question into exactly one of SALES, CUSTOMERS, or "
+        "GENERAL; a switch node that routes on that classification; a "
+        "database query node in natural language mode for the SALES branch; "
+        "a database query node for the CUSTOMERS branch; an agent node using "
+        "general_assistant for the GENERAL branch; an LLM node that merges "
+        "the branch answer into a final response; and a markdown output "
+        "node. Connect everything in order."
+    )
+    # Sanity: the heuristic still fires on the raw prompt...
+    assert delegation_nudge_directive(prompt) is not None
+    # ...but the builder is exempt (its deliverable is the graph, and it has
+    # no delegate_task tool to act on the directive).
+    assert delegation_nudge_directive(prompt, agent_name="workflow_builder") is None
+    # Other agents keep the old behavior.
+    assert delegation_nudge_directive(prompt, agent_name="general_assistant") is not None
+

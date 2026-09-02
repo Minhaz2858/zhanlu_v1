@@ -5795,6 +5795,7 @@ async def _check_answer_verification_gate(
     attempts: int,
     budget_remaining: int,
     catalog_meta: dict | None = None,
+    agent_name: str | None = None,
 ) -> _AnswerGateResult:
     """Universal Self-Evaluation & Re-Planning gate.
 
@@ -5804,7 +5805,17 @@ async def _check_answer_verification_gate(
     should append the message and continue the loop, ``disclose`` means the
     caller should append the gap disclosure to the final answer and break.
     Flag-off returns ``none`` immediately (byte-identical behavior).
+
+    ``agent_name`` — workflow_builder turns are exempt (2026-09-02): the
+    gate is DATA-oriented (coverage / arithmetic / part-whole detectors) and
+    the builder's deliverable is the flow GRAPH. When a builder turn carries
+    stray tool records, the evaluator appended a bogus disclosure —
+    "requested dimensions not found in the data: called, classify, connect,
+    everyth, exactly" — to a valid save_flow delivery. Mirrors the
+    fusion360_* tool exemption above.
     """
+    if agent_name == "workflow_builder":
+        return _AnswerGateResult("none", "")
     if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
         return _AnswerGateResult("none", "")
     if not tool_calls_for_frontend:
@@ -7269,6 +7280,7 @@ async def add_message(
                     attempts=_gate_attempts,
                     budget_remaining=MAX_TOOL_ITERATIONS - iteration,
                     catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
+                    agent_name=conv.agent_name,
                 )
                 if _gate_result.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -8722,6 +8734,7 @@ async def resume_conversation(
                 attempts=_gate_attempts,
                 budget_remaining=_final_iteration - iteration,
                 catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
+                agent_name=conv.agent_name,
             )
             if _gate_result.action == "nudge":
                 llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -12349,7 +12362,7 @@ async def add_message_stream(
     try:
         from app.services.delegation_nudge import delegation_nudge_directive
 
-        _del_directive = delegation_nudge_directive(user_content)
+        _del_directive = delegation_nudge_directive(user_content, agent_name=conv.agent_name)
         if _del_directive:
             system_prompt += _del_directive
     except Exception as _del_err:  # noqa: BLE001 — non-fatal
@@ -14098,6 +14111,7 @@ async def add_message_stream(
                         attempts=_gate_attempts,
                         budget_remaining=MAX_TOOL_ITERATIONS - iteration,
                         catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
+                        agent_name=conv.agent_name,
                     )
                 if _gate_result is not None and _gate_result.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -14599,7 +14613,9 @@ async def add_message_stream(
                 try:
                     from app.services.delegation_nudge import delegation_nudge_directive
 
-                    _del_hard = delegation_nudge_directive(user_content)
+                    _del_hard = delegation_nudge_directive(
+                        user_content, agent_name=conv.agent_name
+                    )
                 except Exception:  # noqa: BLE001
                     _del_hard = None
                 if (

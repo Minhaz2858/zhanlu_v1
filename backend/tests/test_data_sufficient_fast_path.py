@@ -100,7 +100,17 @@ def test_data_sufficient_pending_action_only_returns_none_action(monkeypatch):
 
 
 def test_short_prose_pending_action_still_nudges(monkeypatch):
-    """Short prose does not trigger the fast-path; gate returns 'nudge'."""
+    """Short prose does not trigger the data-sufficient downgrade; gate nudges.
+
+    NOTE (2026-09-02): the gate has two fast-paths that an attempts=0 call
+    with real rows never survives — (1) the 2026-08-26 "Change 1" gate-internal
+    fast-path returns ``none`` when attempts==0 AND tool results contain real
+    data rows; (2) with SELF_EVAL_MAX_REPLANS=1, attempts=1 escalates straight
+    to IMPOSSIBLE → disclose. To exercise the actual pending_action downgrade
+    (short prose < SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE → INCOMPLETE → nudge)
+    the test raises the cap above attempts.
+    """
+    monkeypatch.setattr(settings, "SELF_EVAL_MAX_REPLANS", 3)
     result = _run(agents._check_answer_verification_gate(
         "give me last month sales report",
         _tool_calls((
@@ -108,7 +118,7 @@ def test_short_prose_pending_action_still_nudges(monkeypatch):
             {"rows": [{"FNAME": "PVC", "units": 1200}]},
         )),
         "Top seller: PVC. Let me check details.",
-        attempts=0,
+        attempts=1,
         budget_remaining=38,
     ))
     assert result.action == "nudge"

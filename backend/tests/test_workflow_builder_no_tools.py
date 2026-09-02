@@ -47,6 +47,37 @@ def test_workflow_builder_has_no_create_artifact():
     assert "create_artifact" not in _tool_names(tools)
 
 
+def test_workflow_builder_gets_no_deck_tools_even_with_routing_enabled(monkeypatch):
+    """The deck-edit append must NOT violate the builder's no-tools contract.
+
+    2026-09-02: ``get_tools`` appends the deck-edit schemas (edit_slide,
+    add_slide, ...) for EVERY agent when DECK_EDIT_ROUTING_ENABLED is on —
+    including workflow_builder, whose system prompt says "You have NO tools
+    available. Never attempt tool calls." The LLM then saw
+    edit_slide/add_slide/restyle_deck/update_chart/remove_slide/reorder_slide
+    in its function list and argued it had tools ("my available tools are
+    limited to edit_slide, add_slide, ...") instead of emitting the
+    save_flow decision summary. The explicit empty enabled_tools list is a
+    hard contract: the builder gets ZERO tools, deck-edit included.
+    """
+    import app.services.agent_prompts as ap
+
+    monkeypatch.setattr(ap.settings, "DECK_EDIT_ROUTING_ENABLED", True)
+    tools = get_tools("workflow_builder", {"enabled_tools": []})
+    assert _tool_names(tools) == []
+
+
+def test_deck_tools_still_appended_for_default_agents(monkeypatch):
+    """The deck-edit feature itself must keep working for non-builder agents."""
+    import app.services.agent_prompts as ap
+
+    monkeypatch.setattr(ap.settings, "DECK_EDIT_ROUTING_ENABLED", True)
+    tools = get_tools("general_assistant", None)
+    names = _tool_names(tools)
+    assert "edit_slide" in names
+    assert "add_slide" in names
+
+
 def test_missing_tool_config_still_falls_back_to_defaults():
     """No tool_config (None) keeps the old behavior: default user tools."""
     tools = get_tools("general_assistant", None)
