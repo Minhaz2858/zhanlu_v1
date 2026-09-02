@@ -133,3 +133,46 @@ def test_run_code_sandboxed_falls_back_when_docker_unavailable(monkeypatch):
     out = ws.run_code_sandboxed(db=None, code="output = {'n': input.get('n', 0) + 1}", input_item={"n": 41}, timeout=5)
     assert out["success"] is True
     assert out["items"] == [{"n": 42}]
+
+
+# ── Worker result hook (_record_workflow_code_result) ────────────────────
+
+import base64 as _b64  # noqa: E402
+
+
+class _FakeService:
+    def __init__(self):
+        self.events = []
+
+    def record_event(self, job_id, event_type, message, data_json=None):
+        self.events.append({"job_id": job_id, "event_type": event_type, "data_json": data_json})
+
+
+def _out(file_name, obj):
+    return {
+        "file_name": file_name,
+        "mime_type": "application/json",
+        "data_base64": _b64.b64encode(json.dumps(obj).encode()).decode(),
+        "file_size": 0,
+    }
+
+
+def test_worker_records_workflow_code_result_event():
+    from sandbox_worker import main as worker
+
+    svc = _FakeService()
+    worker._record_workflow_code_result(
+        svc, "job-1",
+        [_out("result.json", {"output": {"greeting": "hi Ana"}})],
+    )
+    assert svc.events[-1]["event_type"] == "workflow_code_result"
+    assert svc.events[-1]["data_json"]["result"] == {"output": {"greeting": "hi Ana"}}
+
+
+def test_worker_records_missing_result_event():
+    from sandbox_worker import main as worker
+
+    svc = _FakeService()
+    worker._record_workflow_code_result(svc, "job-1", [_out("other.txt", "x")])
+    assert svc.events[-1]["event_type"] == "workflow_code_result"
+    assert svc.events[-1]["data_json"]["result"]["success"] is False

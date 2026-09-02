@@ -284,6 +284,12 @@ def execute_job(job_id: str, skill_name: str):
                     service.record_event(job_id, "file_created", f"Generated {len(outputs)} output files",
                                          {"files": [o["file_name"] for o in outputs]})
 
+                    # Workflow Code node: capture the runner's result.json as
+                    # a job event so the backend's synchronous poller can read
+                    # it without an artifact round-trip.
+                    if job.skill_name == "workflow_code":
+                        _record_workflow_code_result(service, job_id, outputs)
+
                     # Store outputs as artifact blobs
                     if job.artifact_version_id:
                         _store_outputs_as_blobs(db, job, outputs, service)
@@ -339,6 +345,39 @@ def _execute_in_process(service: SandboxService, job: SandboxJob):
         logger.error("In-process execution failed: %s", e)
         service.record_event(job.id, "job_failed", str(e))
         service.update_job_status(job.id, "failed", error_message=str(e))
+
+
+def _record_workflow_code_result(service: SandboxService, job_id: str, outputs: list[dict]):
+    """Capture the workflow_code runner's result.json as a job event.
+
+    The runner writes /output/result.json as ``{"output": <json>}`` or
+    ``{"error": "<repr>"}``; the backend's synchronous poller reads this
+    event instead of doing an artifact round-trip.
+    """
+    import base64
+
+    for output in outputs:
+        if output.get("file_name") != "result.json":
+            continue
+        try:
+            raw = base64.b64decode(output["data_base64"]).decode("utf-8")
+            result = json.loads(raw)
+        except Exception as exc:  # noqa: BLE001
+            service.record_event(
+                job_id, "workflow_code_result",
+                f"Could not parse result.json: {exc}",
+                {"result": {"success": False, "text": f"Sandbox result parse error: {exc}"}},
+            )
+            return
+        service.record_event(
+            job_id, "workflow_code_result", "Workflow code result captured",
+            {"result": result},
+        )
+        return
+    service.record_event(
+        job_id, "workflow_code_result", "Runner produced no result.json",
+        {"result": {"success": False, "text": "Sandbox runner produced no result.json"}},
+    )
 
 
 def _store_outputs_as_blobs(db, job: SandboxJob, outputs: list[dict], service: SandboxService):
