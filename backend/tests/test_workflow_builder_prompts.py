@@ -119,3 +119,25 @@ def test_workflow_builder_is_exempt_from_delegation_directive():
     # Other agents keep the old behavior.
     assert delegation_nudge_directive(prompt, agent_name="general_assistant") is not None
 
+
+def test_builder_registry_block_embeds_field_names_and_option_values():
+    """The registry block must expose config field names AND option VALUES.
+
+    2026-09-02 regression: the block only listed REQUIRED fields
+    ("db_query | Database Query | required config: kb_id"). The LLM had no
+    way to know db_query's mode option values are ``sql|nl`` (not the
+    display label "natural_language") or that the NL question field is named
+    ``question`` — it invented both, and the saved node executed an empty
+    SQL statement (MySQL error 1065 "Query was empty" on node n4).
+    """
+    from app.services.agent_prompts import _workflow_builder_registry_block
+
+    block = _workflow_builder_registry_block()
+    assert "question" in block  # the NL question field name
+    assert "sql|nl" in block or "sql / nl" in block  # mode option VALUES
+    assert "natural_language" not in block  # never advertise the wrong value
+    # The db_query entry must carry its full config shape, not just kb_id.
+    db_entry = next((l for l in block.splitlines() if l.startswith("- db_query")), "")
+    assert "kb_id" in db_entry
+    assert "mode" in db_entry
+

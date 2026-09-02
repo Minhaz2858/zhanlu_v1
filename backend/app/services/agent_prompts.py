@@ -2108,7 +2108,16 @@ WORKFLOW_BUILDER_NON_GOALS = """NON-GOALS (NEVER do these):
 
 
 def _workflow_builder_registry_block() -> str:
-    """Compact node-type registry: name | displayName | required config fields."""
+    """Compact node-type registry: name | displayName | full config fields.
+
+    Every property is rendered as ``field(type[, options: a|b][, required])``
+    so the LLM writes SCHEMA-CORRECT config keys and option VALUES.
+    2026-09-02 regression: only REQUIRED fields were listed, so the builder
+    had no way to know db_query's mode values are ``sql|nl`` (it wrote the
+    display label "natural_language") or that the NL question field is named
+    ``question`` (it invented a nonexistent ``query`` key) — the saved node
+    executed an empty SQL statement (MySQL error 1065).
+    """
     try:
         from app.services.workflow_node_types import list_node_types
     except Exception as e:  # noqa: BLE001 — registry must never break prompt build
@@ -2117,13 +2126,20 @@ def _workflow_builder_registry_block() -> str:
     lines = []
     for t in list_node_types():
         try:
-            req = [
-                p["name"]
-                for p in t["properties"]
-                if p.get("required") and p["type"] in ("string", "options", "number")
-            ]
-            req_txt = ", ".join(req) if req else "(none)"
-            lines.append(f"- {t['name']} | {t['displayName']} | required config: {req_txt}")
+            props = []
+            for p in t["properties"]:
+                name = p.get("name", "?")
+                ptype = p.get("type", "?")
+                bits = [str(ptype)]
+                if ptype == "options" and p.get("options"):
+                    vals = [str(o.get("value", o)) for o in p["options"] if o.get("value") is not None]
+                    if vals:
+                        bits.append("options: " + "|".join(vals))
+                if p.get("required"):
+                    bits.append("required")
+                props.append(f"{name}({', '.join(bits)})")
+            config_txt = ", ".join(props) if props else "(none)"
+            lines.append(f"- {t['name']} | {t['displayName']} | config: {config_txt}")
         except Exception as e:  # noqa: BLE001 — skip a drifted entry, keep the rest
             _logger.warning("workflow_builder: skipping unparsable node type entry: %s", e)
     return "\n".join(lines) if lines else "- (registry unavailable)"

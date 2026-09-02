@@ -188,12 +188,32 @@ def handle_kb_search(ctx, node):
 def handle_db_query(ctx, node):
     config = node["data"].get("config") or {}
     kb_id = config["kb_id"]
-    mode = config.get("mode", "sql")
-    limit = int(config.get("limit", 50))
-    if mode == "nl":
-        query = _render(config.get("question", ""), ctx)
+    # Normalize the mode value — the registry option value is "nl", but
+    # LLM-built flows (workflow_builder) have emitted the display label
+    # "natural_language" / "Natural language" (2026-09-02: the node then
+    # fell into SQL mode and executed an EMPTY statement — MySQL error 1065
+    # "Query was empty"). Accept every alias; anything else is SQL mode.
+    mode_raw = str(config.get("mode", "sql")).strip().lower().replace(" ", "_")
+    is_nl = mode_raw in ("nl", "natural_language", "natural")
+    mode = "nl" if is_nl else "sql"
+    if is_nl:
+        # The registry field is `question`; the builder has also emitted a
+        # `query` alias — accept both so saved flows never execute "".
+        question = config.get("question", "") or config.get("query", "")
+        query = _render(question, ctx)
     else:
         query = _render(config.get("sql", ""), ctx)
+    if not query.strip():
+        if is_nl:
+            raise ValueError(
+                f"db_query node {node['id']}: NL mode has no question — set the "
+                "'question' field (or 'query') on the node"
+            )
+        raise ValueError(
+            f"db_query node {node['id']}: SQL mode has an empty statement — set "
+            "the 'sql' field on the node"
+        )
+    limit = int(config.get("limit", 50))
     result = ctx.db_query(kb_id, query, mode=mode, limit=limit)
     rows = result.get("rows") or []
     return {

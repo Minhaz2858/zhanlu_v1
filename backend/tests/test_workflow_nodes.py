@@ -254,6 +254,82 @@ def test_db_query_nl_mode_uses_question():
     assert out["count"] == 0
 
 
+def test_db_query_natural_language_alias_normalizes_to_nl():
+    """Builder-emitted 'natural_language' mode must behave as NL mode.
+
+    2026-09-02 regression: the workflow_builder LLM wrote
+    ``config.mode = "natural_language"`` (the registry DISPLAY label, not the
+    option value "nl") plus a ``query`` field. ``handle_db_query`` only
+    recognized the exact value "nl", so the node fell into SQL mode,
+    rendered the empty ``sql`` field and executed "" — MySQL error 1065
+    'Query was empty' (observed live on the Sales Assistant workflow, node
+    n4). The handler must normalize display aliases AND read the
+    ``question``/``query`` fields.
+    """
+    ctx = FakeCtx(db_result={"text": "0 rows returned.", "rows": []})
+    ctx.outputs["n1"] = {"text": "Sales figures for last week"}
+    node = _node("n6", "db_query", {
+        "kb_id": "kb_sales",
+        "mode": "natural_language",
+        "query": "Answer about revenue and order trends. Question: {{inputs.n1.text}}",
+    })
+    handle_db_query(ctx, node)
+    call = ctx.calls[-1]
+    assert call["mode"] == "nl"
+    assert call["query"] == (
+        "Answer about revenue and order trends. Question: Sales figures for last week"
+    )
+
+
+def test_db_query_title_case_mode_alias_normalizes_to_nl():
+    """'Natural language' (display label, title case) also routes to NL."""
+    ctx = FakeCtx(db_result={"text": "0 rows returned.", "rows": []})
+    ctx.outputs["n1"] = {"text": "top customers"}
+    node = _node("n6", "db_query", {
+        "kb_id": "kb_sales", "mode": "Natural language",
+        "question": "{{inputs.n1.text}}",
+    })
+    handle_db_query(ctx, node)
+    call = ctx.calls[-1]
+    assert call["mode"] == "nl"
+    assert call["query"] == "top customers"
+
+
+def test_db_query_empty_query_raises_clear_error():
+    """An empty SQL/question must raise a CLEAR node error, never execute ''.
+
+    Executing "" against MySQL yields the cryptic pymysql error 1065
+    'Query was empty'. A node with no usable statement should fail with an
+    actionable message naming the node and the missing field — the executor
+    then applies retry/continue-on-fail/error-workflow semantics.
+    """
+    ctx = FakeCtx()
+    node = _node("n6", "db_query", {"kb_id": "kb_sales", "mode": "sql"})
+    try:
+        handle_db_query(ctx, node)
+    except ValueError as exc:
+        msg = str(exc)
+        assert "n6" in msg
+        assert "db_query" in msg
+        assert "sql" in msg
+    else:
+        raise AssertionError("expected ValueError for empty db_query")
+    assert ctx.calls == []  # nothing was executed
+
+
+def test_db_query_empty_nl_question_raises_clear_error():
+    """NL mode with no question/query field raises instead of executing ''."""
+    ctx = FakeCtx()
+    node = _node("n6", "db_query", {"kb_id": "kb_sales", "mode": "nl"})
+    try:
+        handle_db_query(ctx, node)
+    except ValueError as exc:
+        assert "question" in str(exc)
+    else:
+        raise AssertionError("expected ValueError for empty NL question")
+    assert ctx.calls == []
+
+
 def test_mcp_tool_passes_arguments_json_with_template():
     ctx = FakeCtx(mcp_result={"success": True, "result": "feishu msg sent"})
     ctx.outputs["n1"] = {"text": "hello"}
