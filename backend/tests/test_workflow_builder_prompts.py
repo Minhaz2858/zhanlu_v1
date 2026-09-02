@@ -68,6 +68,15 @@ def test_workflow_builder_prompt_warns_about_unconnected_switch_ports():
     assert "{{inputs.<orchestrator>.text}}" in p
 
 
+def test_workflow_builder_prompt_teaches_merge_convergence():
+    """Rule 10: the builder knows merge appends ALL connected inputs and that
+    the second input handle is target-main-1."""
+    p = get_system_prompt("workflow_builder")
+    assert "MERGE" in p
+    assert "appends every item from ALL connected inputs" in p
+    assert "target-main-1" in p
+
+
 def test_workflow_builder_prompt_template_example_matches_runtime():
     """The runtime exposes {{inputs.<node>.text}} / .history, never chatInput."""
     p = get_system_prompt("workflow_builder")

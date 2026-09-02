@@ -8,6 +8,7 @@ from app.services.workflow_nodes import (
     handle_kb_search,
     handle_llm,
     handle_mcp_tool,
+    handle_merge,
     handle_output,
     handle_switch,
     handle_trigger,
@@ -449,3 +450,49 @@ def test_trigger_chat_notice_documents_history():
     t = NODE_TYPES["trigger_chat"]
     notices = [p["displayName"] for p in t["properties"] if p["type"] == "notice"]
     assert any("history" in n for n in notices)
+
+
+# ---------------------------------------------------------------------------
+# merge (n8n Merge): append items from ALL active upstream inputs, edge order
+# ---------------------------------------------------------------------------
+
+def test_merge_in_registry():
+    """Merge lives in the Data category with TWO main input ports (n8n default)."""
+    t = NODE_TYPES["merge"]
+    assert t["category"] == "Data"
+    assert t["inputs"] == ["main", "main"]
+    assert t["outputs"] == ["main"]
+
+
+def test_merge_appends_items_in_edge_order():
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "A", "items": [{"id": 1}, {"id": 2}]}
+    ctx.outputs["n2"] = {"text": "B", "items": [{"id": 3}]}
+    ctx.current_upstream = {"n1": ctx.outputs["n1"], "n2": ctx.outputs["n2"]}
+    out = handle_merge(ctx, _node("m1", "merge", {}))
+    assert out["items"] == [{"id": 1}, {"id": 2}, {"id": 3}]
+    assert out["text"]  # _json_summary present
+
+
+def test_merge_falls_back_to_text_items():
+    """Text-only upstream outputs contribute [{"text": ...}] items."""
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "hello"}
+    ctx.outputs["n2"] = {"text": "world", "items": [{"a": 1}]}
+    ctx.current_upstream = {"n1": ctx.outputs["n1"], "n2": ctx.outputs["n2"]}
+    out = handle_merge(ctx, _node("m1", "merge", {}))
+    assert out["items"] == [{"text": "hello"}, {"a": 1}]
+
+
+def test_merge_single_upstream_is_passthrough():
+    ctx = FakeCtx()
+    ctx.outputs["n1"] = {"text": "only", "items": [{"x": 1}]}
+    ctx.current_upstream = {"n1": ctx.outputs["n1"]}
+    out = handle_merge(ctx, _node("m1", "merge", {}))
+    assert out["items"] == [{"x": 1}]
+
+
+def test_merge_no_upstream_returns_empty_items():
+    ctx = FakeCtx()
+    out = handle_merge(ctx, _node("m1", "merge", {}))
+    assert out["items"] == []

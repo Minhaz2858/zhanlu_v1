@@ -387,6 +387,20 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
             prop("Key field", "field", "string", default="id"),
         ],
     },
+    "merge": {
+        "name": "merge",
+        "displayName": "Merge",
+        "category": "Data",
+        "icon": "🔗",
+        "color": "#f59e0b",
+        "description": "Combine items from multiple inputs into one list",
+        "description_zh": "将多个输入的数据项合并为一个列表",
+        "inputs": ["main", "main"],
+        "outputs": ["main"],
+        "properties": [
+            notice("Appends every item from ALL connected inputs, in order. Use it to combine parallel branches into one list before a final LLM or Output node. References upstream items as {{inputs.<node>.items}}."),
+        ],
+    },
     "condition": {
         "name": "condition",
         "displayName": "Condition",

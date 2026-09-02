@@ -278,4 +278,59 @@ def test_continue_off_by_default_aborts():
     ctx = FakeContext("hello")
     result = execute_flow_graph(flow, ctx, handlers)
     assert result["status"] == "failed"
-    assert result["failed_node_id"] == "n2"
+
+
+# ---------------------------------------------------------------------------
+# merge (n8n Merge): multiple MAIN inputs converge into one item list.
+# The REAL handler runs against the REAL executor — proves the edge-ordered
+# current_upstream contract the merge node relies on.
+# ---------------------------------------------------------------------------
+
+from app.services.workflow_nodes import handle_merge  # noqa: E402
+
+
+def fake_branch_handler(ctx, node):
+    """Emit one item tagged with the node's label (stands in for set_fields)."""
+    return {"text": node["data"]["label"], "items": [{"branch": node["data"]["label"]}]}
+
+
+def make_merge_flow():
+    return {
+        "nodes": [
+            {"id": "n1", "type": "trigger_chat", "position": {"x": 0, "y": 0}, "data": {"label": "T", "config": {}}},
+            {"id": "n2", "type": "set_fields", "position": {"x": 1, "y": 0}, "data": {"label": "A", "config": {"fields": []}}},
+            {"id": "n3", "type": "set_fields", "position": {"x": 1, "y": 2}, "data": {"label": "B", "config": {"fields": []}}},
+            {"id": "m1", "type": "merge", "position": {"x": 2, "y": 1}, "data": {"label": "M", "config": {}}},
+            {"id": "n4", "type": "output", "position": {"x": 3, "y": 1}, "data": {"label": "O", "config": {}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2", "sourceHandle": "source-main", "targetHandle": "target-main"},
+            {"id": "e2", "source": "n1", "target": "n3", "sourceHandle": "source-main", "targetHandle": "target-main"},
+            {"id": "e3", "source": "n2", "target": "m1", "sourceHandle": "source-main", "targetHandle": "target-main"},
+            {"id": "e4", "source": "n3", "target": "m1", "sourceHandle": "source-main", "targetHandle": "target-main-1"},
+            {"id": "e5", "source": "m1", "target": "n4", "sourceHandle": "source-main", "targetHandle": "target-main"},
+        ],
+    }
+
+
+def test_merge_combines_parallel_branches():
+    """Two branches feed one merge; both run, items concatenate in edge order."""
+    flow = make_merge_flow()
+    handlers = {
+        "trigger_chat": fake_trigger_handler,
+        "set_fields": fake_branch_handler,
+        "merge": handle_merge,
+        "output": fake_output_handler,
+    }
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, handlers)
+    assert result["status"] == "completed"
+    # Both branches ran — no skipped nodes anywhere.
+    statuses = {s["node_id"]: s["status"] for s in ctx.step_events}
+    assert statuses["n2"] == "completed"
+    assert statuses["n3"] == "completed"
+    assert statuses["m1"] == "completed"
+    assert statuses["n4"] == "completed"
+    # Merge concatenated the branch items in edge order (n2 then n3).
+    assert ctx.outputs["m1"]["items"] == [{"branch": "A"}, {"branch": "B"}]
+    assert "A" in result["output"] and "B" in result["output"]

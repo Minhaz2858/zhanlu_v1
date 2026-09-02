@@ -155,3 +155,25 @@ def test_mcp_tool_requires_server_and_tool():
     }
     errs = validate_flow(flow)
     assert any("tool_name" in e.lower() for e in errs)
+
+
+def test_merge_flow_validates():
+    """A merge receiving TWO upstream edges (parallel branches) validates clean."""
+    flow = {
+        "version": 1,
+        "nodes": [
+            {"id": "n1", "type": "trigger_chat", "position": {"x": 0, "y": 0}, "data": {"label": "in", "config": {}}},
+            {"id": "n2", "type": "set_fields", "position": {"x": 320, "y": 0}, "data": {"label": "a", "config": {"fields": []}}},
+            {"id": "n3", "type": "set_fields", "position": {"x": 320, "y": 200}, "data": {"label": "b", "config": {"fields": []}}},
+            {"id": "m1", "type": "merge", "position": {"x": 640, "y": 100}, "data": {"label": "m", "config": {}}},
+            {"id": "n4", "type": "output", "position": {"x": 960, "y": 100}, "data": {"label": "out", "config": {}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2", "sourceHandle": "source-main", "targetHandle": "target-main"},
+            {"id": "e2", "source": "n1", "target": "n3", "sourceHandle": "source-main", "targetHandle": "target-main"},
+            {"id": "e3", "source": "n2", "target": "m1", "sourceHandle": "source-main", "targetHandle": "target-main"},
+            {"id": "e4", "source": "n3", "target": "m1", "sourceHandle": "source-main", "targetHandle": "target-main-1"},
+            {"id": "e5", "source": "m1", "target": "n4", "sourceHandle": "source-main", "targetHandle": "target-main"},
+        ],
+    }
+    assert validate_flow(flow) == []

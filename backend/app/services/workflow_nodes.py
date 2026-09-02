@@ -324,6 +324,20 @@ def handle_remove_duplicates(ctx, node):
     return {"text": _json_summary(out_items), "items": out_items}
 
 
+def handle_merge(ctx, node):
+    """Append items from every active upstream input, in edge order (n8n Merge).
+
+    The executor builds ``ctx.current_upstream`` from the incoming MAIN edges
+    in edge order, so dict iteration order IS the wiring order. Text-only
+    upstream outputs contribute their ``text`` as a single item via
+    ``all_items``' fallback.
+    """
+    merged: list[dict] = []
+    for src in ctx.current_upstream:
+        merged.extend(all_items(ctx, src) or [])
+    return {"text": _json_summary(merged), "items": merged}
+
+
 def _eval_op(value: str, op: str, target: str) -> bool:
     try:
         if op == "gt":
@@ -440,6 +454,7 @@ NODE_HANDLERS = {
     "set_fields": handle_set_fields,
     "split_out": handle_split_out,
     "remove_duplicates": handle_remove_duplicates,
+    "merge": handle_merge,
     "condition": handle_condition,
     "switch": handle_switch,
     "output": handle_output,
