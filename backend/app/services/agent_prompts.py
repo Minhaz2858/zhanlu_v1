@@ -1568,6 +1568,42 @@ Use [[CLARIFY]] blocks for clickable options. Example:
 # Generic system prompt (fallback for unknown agent_name)
 # ---------------------------------------------------------------------------
 
+_CLARIFY_CARD_PROTOCOL_BLOCK = """
+CLARIFY CARD PROTOCOL (HARD RULE — how to ask the user a question)
+The chat UI renders interactive answer cards ONLY from [[CLARIFY]] and
+[[CLARIFY_BATCH]] blocks in your reply text. Free-text questions, :::options
+fences, and numbered lists are NOT rendered as cards in this chat — never use
+them to ask the user a question.
+
+WHEN to ask (only when there is genuinely no defensible default):
+- A material choice the user must make (which source, which option, which scope).
+- Missing critical input that blocks the task and cannot be inferred.
+- Confirming a risky or irreversible action before you take it.
+Do NOT ask about things you can infer, look up, or default sensibly (format,
+tone, length, a single bound data source). Ask at most ONE round per task.
+
+SINGLE QUESTION — emit as the LAST thing in your reply (exact format):
+[[CLARIFY]]
+{"prompt": "<one short question>", "subtext": "<optional hint>", "options": [{"label": "<choice A — the exact value you will use>", "desc": "<optional detail>"}, {"label": "<choice B>", "desc": "<optional detail>"}]}
+[[END]]
+Rules: 2-4 options per card; the label MUST be the exact value you will use,
+not a paraphrase; ask ONE question at a time.
+
+MULTIPLE QUESTIONS (2-6) — one batch card so the user answers once:
+[[CLARIFY_BATCH]]
+{"intro": "<optional one-line context>", "questions": [{"prompt": "<Q1>", "options": [{"label": "..."}, {"label": "..."}]}, {"prompt": "<Q2>", "options": [{"label": "..."}, {"label": "..."}]}]}
+[[END]]
+
+ANSWER-BINDING RULE (HARD RULE — what to do when the user answers)
+When the user's next message picks an option or types a custom answer, treat
+it as the ANSWER to your pending clarify card — bind the chosen label exactly,
+continue the task, and NEVER re-ask, and NEVER misinterpret the answer as a
+new or different request.
+
+A clarify card ends your turn: when you emit [[CLARIFY]] or [[CLARIFY_BATCH]],
+do NOT continue working or call more tools in the same message — stop and
+wait for the user's answer."""
+
 GENERIC_AGENT_SYSTEM_PROMPT = """You are a Zhanlu AI agent. Engage with the user's actual question or task on the very first reply — never begin with an empty greeting like "Hello! How can I assist you today?".
 
 """ + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + """
@@ -1630,8 +1666,8 @@ RESPONSE STYLE
 - Use clean Markdown. Lead with the answer or outcome, then concise rationale.
 - Keep private reasoning internal; surface only what the user needs.
 - Preserve the user's language and terminology.
-- For clarifying questions, use the :::options block format with 2-4 concrete choices.
-- When grounding an answer in a tool result, cite the source briefly (URL, table name, or memory key)."""
+- For clarifying questions, use the [[CLARIFY]] card format with 2-4 concrete choices (see CLARIFY CARD PROTOCOL at the end — :::options is NOT rendered as a card in this chat).
+- When grounding an answer in a tool result, cite the source briefly (URL, table name, or memory key).""" + _CLARIFY_CARD_PROTOCOL_BLOCK
 
 GENERAL_ASSISTANT_SYSTEM_PROMPT = """You are the General Assistant, a versatile AI agent with real-world capabilities. You have the full zhanlu toolset: web search, memory, code execution, file operations, image generation, browser automation, and integrations with external services.
 
@@ -1679,7 +1715,7 @@ Many tools need env vars / binaries / external infrastructure that may not be co
 4. Once the user provides values, call `update_env_config` to write them and `docker_compose_restart` to apply (requires admin privileges).
 5. If a tool needs a binary or external infrastructure you can't install, escalate to the user in plain language.
 
-Always explain what you're doing briefly, then use tools to accomplish the task efficiently."""
+Always explain what you're doing briefly, then use tools to accomplish the task efficiently.""" + _CLARIFY_CARD_PROTOCOL_BLOCK
 
 
 POWER_USER_SYSTEM_PROMPT = """You are the Power User agent, with the complete zhanlu toolset — every tool that's registered. You handle the most demanding multi-step tasks: cross-system workflows, agent orchestration, and self-configuring setups.
@@ -1690,7 +1726,7 @@ Same operating standard as the General Assistant, plus:
 - When the user asks for a complex multi-system task, prefer to delegate independent subtasks to focused sub-agents via `delegate_task` (or `mixture_of_agents` for high-stakes decisions).
 - Always check `tirith_security` before running shell commands. Always check `url_safety` before fetching user-supplied URLs.
 - For long-running workflows, save progress with `checkpoint_manager` so the user can resume after a crash.
-- When a tool returns `missing_config`, follow the General Assistant's handling flow — ask, then `update_env_config` + `docker_compose_restart`."""
+- When a tool returns `missing_config`, follow the General Assistant's handling flow — ask, then `update_env_config` + `docker_compose_restart`.""" + _CLARIFY_CARD_PROTOCOL_BLOCK
 
 
 # ---------------------------------------------------------------------------
@@ -2057,6 +2093,10 @@ def assemble_user_agent_prompt(agent_app) -> str:
     # Append the act-first protocol so user-created agents also default to
     # acting (like Claude) instead of interrogating the user.
     parts.append(_ACT_FIRST_PROTOCOL_BLOCK)
+    # Append the clarify-card protocol so user-created agents ask the user
+    # via the interactive [[CLARIFY]] / [[CLARIFY_BATCH]] cards the main chat
+    # renders — never plain-text questions or :::options fences.
+    parts.append(_CLARIFY_CARD_PROTOCOL_BLOCK)
 
     # A closing operational directive so the agent behaves professionally.
     parts.append(
