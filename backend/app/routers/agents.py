@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import String, cast, func
 
 from app.config import settings
 from app.deps import get_db, get_current_user_required
@@ -6120,6 +6120,7 @@ async def list_runtime_agents(
 async def list_conversations(
     app_id: str,
     agent_name: str | None = Query(None),
+    workflow_id: str | None = Query(None),
     limit: int | None = Query(None),
     skip: int | None = Query(None),
     sort_by: str | None = Query(None),
@@ -6131,17 +6132,35 @@ async def list_conversations(
     Optional ``agent_name`` query param filters by agent (e.g. ``skill_agent``,
     ``agent_builder``).  This is used by the SDK's ``listConversations({agent_name})``.
 
-    Owner-scoped: a non-admin user only sees conversations they created.
+    Optional ``workflow_id`` filters by the per-workflow session key stored in
+    ``metadata.workflow_id`` at conversation creation (Build-with-AI panel and
+    chat ``+`` workflow picks).  Used to resume the latest build session for a
+    workflow.  Owner-scoped: a non-admin user only sees conversations they created.
     """
     query = db.query(AgentConversation).filter(AgentConversation.is_deleted == False)
     if user.role != "admin":
         query = query.filter(AgentConversation.created_by_id == user.id)
     if agent_name:
         query = query.filter(AgentConversation.agent_name == agent_name)
+    if workflow_id:
+        # JSON-path filter on the metadata column, dialect-conditional:
+        #  - PostgreSQL: ``CAST(metadata -> 'workflow_id' AS VARCHAR)``
+        #  - SQLite (tests): raw ``json_extract`` — plain ``cast(..., String)``
+        #    would wrap the value in JSON_QUOTE (``"wf-1"`` != ``wf-1``) and
+        #    never match; ``.astext`` is not implemented for this column type.
+        _dialect = (db.bind.dialect.name if db.bind is not None else "postgresql")
+        if _dialect == "postgresql":
+            query = query.filter(
+                cast(AgentConversation.metadata_["workflow_id"], String) == workflow_id
+            )
+        else:
+            query = query.filter(
+                func.json_extract(AgentConversation.metadata_, '$."workflow_id"') == workflow_id
+            )
     query = query.order_by(AgentConversation.created_date.desc())
-    if skip:
+    if skip is not None:
         query = query.offset(skip)
-    if limit:
+    if limit is not None:
         query = query.limit(limit)
     return [r.to_dict() for r in query.all()]
 

@@ -463,3 +463,74 @@ def test_resolve_entity_references_scoped_to_owner(db):
     flow_own = _entity_ref_flow()
     wfr.resolve_entity_references(flow_own, db, user=_user())
     assert flow_own["nodes"][1]["data"]["config"]["agent_id"] == "agent-1"
+
+
+# ── Workflow session recognition: list_conversations workflow_id filter ─────
+# The Build-with-AI panel resumes the latest session per workflow by querying
+# GET /agents/conversations?agent_name=workflow_builder&workflow_id=<id>. The
+# filter must be agent-scoped and backward-compatible (no workflow_id → all).
+
+def test_list_conversations_filters_by_workflow_id(db):
+    for wf in ("wf-1", "wf-2"):
+        asyncio.run(agents.create_conversation(
+            app_id="default-app",
+            body={"agent_name": "workflow_builder", "title": "Builder",
+                  "metadata": {"workflow_id": wf}},
+            db=db, user=_user(),
+        ))
+
+    rows = asyncio.run(agents.list_conversations(
+        app_id="default-app", agent_name="workflow_builder", workflow_id="wf-1",
+        limit=None, skip=None, sort_by=None, db=db, user=_user(),
+    ))
+    assert len(rows) == 1
+    assert rows[0]["metadata"]["workflow_id"] == "wf-1"
+
+    # Backward compat: no workflow_id → both conversations.
+    rows_all = asyncio.run(agents.list_conversations(
+        app_id="default-app", agent_name="workflow_builder",
+        workflow_id=None, limit=None, skip=None, sort_by=None, db=db, user=_user(),
+    ))
+    assert len(rows_all) == 2
+
+
+def test_list_conversations_workflow_id_filter_is_agent_scoped(db):
+    """workflow_id alone must not leak other agents' conversations."""
+    asyncio.run(agents.create_conversation(
+        app_id="default-app",
+        body={"agent_name": "workflow_builder", "title": "B", "metadata": {"workflow_id": "wf-1"}},
+        db=db, user=_user(),
+    ))
+    asyncio.run(agents.create_conversation(
+        app_id="default-app",
+        body={"agent_name": "general_assistant", "title": "G", "metadata": {"workflow_id": "wf-1"}},
+        db=db, user=_user(),
+    ))
+    rows = asyncio.run(agents.list_conversations(
+        app_id="default-app", agent_name="workflow_builder", workflow_id="wf-1",
+        limit=None, skip=None, sort_by=None, db=db, user=_user(),
+    ))
+    assert len(rows) == 1
+    assert rows[0]["agent_name"] == "workflow_builder"
+
+
+def test_list_conversations_workflow_id_filter_returns_messages(db):
+    """Resume needs the full conversation row — messages must be in to_dict."""
+    conv = asyncio.run(agents.create_conversation(
+        app_id="default-app",
+        body={"agent_name": "workflow_builder", "title": "B",
+              "metadata": {"workflow_id": "wf-9"}},
+        db=db, user=_user(),
+    ))
+    row = db.query(AgentConversation).filter(AgentConversation.id == conv["id"]).first()
+    row.messages = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "ok"}]
+    db.commit()
+
+    rows = asyncio.run(agents.list_conversations(
+        app_id="default-app", agent_name="workflow_builder", workflow_id="wf-9",
+        limit=None, skip=None, sort_by=None, db=db, user=_user(),
+    ))
+    assert rows[0]["messages"] == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ok"},
+    ]
