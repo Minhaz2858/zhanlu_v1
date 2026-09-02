@@ -141,3 +141,41 @@ export function nodeConfigError(type, config) {
   }
   return null;
 }
+
+/**
+ * Build a pasted graph from a clipboard snapshot: fresh ids, position offset,
+ * internal edges remapped, and {{inputs.<oldId>.}} expression refs rewritten
+ * to the pasted ids (references to nodes NOT in the clipboard stay as-is).
+ */
+export function buildPasteGraph(clipboard, offset = { x: 24, y: 24 }) {
+  const nodes = clipboard.nodes || [];
+  const edges = clipboard.edges || [];
+  const idMap = {};
+  const stamp = () => `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
+  const newNodes = nodes.map((n) => {
+    const newId = `n_${stamp()}`;
+    idMap[n.id] = newId;
+    return {
+      ...n,
+      id: newId,
+      position: { x: (n.position?.x || 0) + offset.x, y: (n.position?.y || 0) + offset.y },
+      selected: false,
+      data: remapExpressions(n.data, idMap),
+    };
+  });
+  const newEdges = edges
+    .filter((e) => idMap[e.source] && idMap[e.target])
+    .map((e) => ({ ...e, id: `e_${stamp()}`, source: idMap[e.source], target: idMap[e.target], selected: false }));
+  return { nodes: newNodes, edges: newEdges };
+}
+
+function remapExpressions(value, idMap) {
+  if (typeof value === 'string') {
+    return value.replace(/\{\{inputs\.([A-Za-z0-9_]+)\./g, (m, id) => (idMap[id] ? `{{inputs.${idMap[id]}.` : m));
+  }
+  if (Array.isArray(value)) return value.map((v) => remapExpressions(v, idMap));
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, remapExpressions(v, idMap)]));
+  }
+  return value;
+}
