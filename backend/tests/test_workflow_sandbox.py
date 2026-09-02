@@ -111,7 +111,7 @@ def test_run_code_sandboxed_returns_worker_result(monkeypatch):
     svc = _FakeSandboxService(_job(events=[_result_event(raw)]))
     monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
 
-    out = ws.run_code_sandboxed(db=None, code="output = {'greeting': 'hi ' + str(input.get('name',''))}", input_item={"name": "Ana"}, timeout=5)
+    out = ws.run_code_sandboxed(db=object(), code="output = {'greeting': 'hi ' + str(input.get('name',''))}", input_item={"name": "Ana"}, timeout=5)
     assert out == {"success": True, "text": '{"greeting": "hi Ana"}', "items": [{"greeting": "hi Ana"}]}
     assert svc.created["skill_name"] == "workflow_code"
     assert svc.created["image_name"].startswith("zhanlu-sandbox-python")
@@ -124,7 +124,7 @@ def test_run_code_sandboxed_returns_worker_result(monkeypatch):
 def test_run_code_sandboxed_failed_job_returns_error(monkeypatch):
     svc = _FakeSandboxService(_job(status="failed", error_message="boom"))
     monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
-    out = ws.run_code_sandboxed(db=None, code="output = 1", input_item={}, timeout=5)
+    out = ws.run_code_sandboxed(db=object(), code="output = 1", input_item={}, timeout=5)
     assert out["success"] is False
     assert "boom" in out["text"]
 
@@ -138,7 +138,7 @@ def test_run_code_sandboxed_failed_job_prefers_runner_error_event(monkeypatch):
         events=[_result_event({"error": "ZeroDivisionError('division by zero')"})],
     ))
     monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
-    out = ws.run_code_sandboxed(db=None, code="output = 1/0", input_item={}, timeout=5)
+    out = ws.run_code_sandboxed(db=object(), code="output = 1/0", input_item={}, timeout=5)
     assert out["success"] is False
     assert "ZeroDivisionError" in out["text"]
 
@@ -146,7 +146,7 @@ def test_run_code_sandboxed_failed_job_prefers_runner_error_event(monkeypatch):
 def test_run_code_sandboxed_falls_back_when_docker_unavailable(monkeypatch):
     svc = _FakeSandboxService(None, fail_create=True)
     monkeypatch.setattr(ws, "SandboxService", lambda db: svc)
-    out = ws.run_code_sandboxed(db=None, code="output = {'n': input.get('n', 0) + 1}", input_item={"n": 41}, timeout=5)
+    out = ws.run_code_sandboxed(db=object(), code="output = {'n': input.get('n', 0) + 1}", input_item={"n": 41}, timeout=5)
     assert out["success"] is True
     assert out["items"] == [{"n": 42}]
 

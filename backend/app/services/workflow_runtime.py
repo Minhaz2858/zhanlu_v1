@@ -563,7 +563,9 @@ class WorkflowExecutionContext:
         """
         from app.services.workflow_sandbox import run_code_sandboxed
 
-        return run_code_sandboxed(self.db, code, item, timeout)
+        # db may be absent on bare contexts (semantics-only tests); the
+        # sandbox service falls back to the in-process restricted exec.
+        return run_code_sandboxed(getattr(self, "db", None), code, item, timeout)
 
     def http_request(
         self,

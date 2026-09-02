@@ -160,6 +160,11 @@ def run_code_sandboxed(db, code: str, input_item: dict, timeout: int = 10) -> di
     Returns the same shape as the previous in-process implementation:
     ``{"success", "text", "items"?}``.
     """
+    # Without a DB session the job row cannot persist — the sandbox path is
+    # impossible; use the in-process restricted exec directly (also what the
+    # old semantics-only tests exercise, no db on the context).
+    if db is None:
+        return _restricted_exec(code, input_item, timeout)
     try:
         input_package = {
             "runner_script": base64.b64encode(WORKFLOW_CODE_RUNNER.encode()).decode(),
@@ -183,7 +188,7 @@ def run_code_sandboxed(db, code: str, input_item: dict, timeout: int = 10) -> di
             # The creating session caches the job in its identity map (status
             # 'queued'); expire it so get_job re-reads the worker's updates
             # from the DB instead of returning the stale object forever.
-            if db is not None:
+            if db is not None and hasattr(db, "expire_all"):
                 db.expire_all()
             cur = service.get_job(job.id)
             if cur is None:
