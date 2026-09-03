@@ -12881,6 +12881,19 @@ async def add_message_stream(
         # wall-clock cap (180s for fusion agents) still bounds runaway turns.
         if _is_fusion_agent:
             _effective_budget = max(_effective_budget, _v3_max_iterations)
+        # 2026-09-03: multi-step data/report turn plans (the planner's
+        # "data" kind, e.g. "weekly summary and forecast") need the same
+        # report-class loop budget as explicit file-intent turns. The old
+        # 60s chat cap fired mid-data-collection on a 5-step C5C9 weekly
+        # plan and the post-loop synthesis had to write the report from
+        # partial fetches (observed: 43% of prior-week comparables were
+        # NULL — the second fetch_data_batch never ran). Plan-derived, not
+        # keyword-derived: any slow data plan gets room; fast turns still
+        # end before any cap matters.
+        _is_plan_report_or_data = bool(
+            _turn_plan is not None
+            and getattr(_turn_plan, "kind", None) in ("report", "data")
+        )
         _LOOP_WALL_CLOCK_CAP_S = (
             # Dashboard builds (2026-08-27): 30-minute wall clock — effectively
             # no cap. The pipeline is multi-phase and the local LLM takes ~20s
@@ -12890,7 +12903,11 @@ async def add_message_stream(
             # connection stays alive for the full build.
             settings.DASHBOARD_BUILD_WALL_CLOCK_CAP_S
             if _is_dashboard_build
-            else (180.0 if (_orch_doc_format or _is_fusion_agent) else 60.0)
+            else (
+                180.0
+                if (_orch_doc_format or _is_fusion_agent or _is_plan_report_or_data)
+                else 60.0
+            )
         )
         for iteration in range(_v3_max_iterations):
             # 2026-08-25: wall-clock cap. If we've been looping >60s, break
