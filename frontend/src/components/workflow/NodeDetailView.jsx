@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { getNodeTypeRegistry, nodeTypeOf } from '@/lib/nodeTypeRegistry';
-import { listWorkflowRuns } from '@/api/workflows';
+import { nodeLabel } from '@/lib/workflowGraph';
+import { listWorkflowRuns, testNode } from '@/api/workflows';
 import NodeParameterForm from '@/components/workflow/NodeParameterForm';
 import { X } from 'lucide-react';
 
@@ -25,7 +26,7 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
     return sources.map((sid) => {
       const src = (nodes || []).find((n) => n.id === sid);
       const def = (localRegistry && localRegistry.nodeTypes && localRegistry.nodeTypes[src.type]) || null;
-      const label = (src && src.data && src.data.label) || (def && def.displayName) || sid;
+      const label = (src && src.data && src.data.label) || (def && (nodeLabel(src.type, lang) || def.displayName)) || sid;
       return {
         nodeId: sid,
         label,
@@ -38,6 +39,13 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
     });
   }, [node, nodes, localRegistry]);
   const [loadingRun, setLoadingRun] = useState(false);
+  // "Test node" drawer: single-node run with an editable payload whose
+  // upstreams are prefilled from the last completed run.
+  const [testOpen, setTestOpen] = useState(false);
+  const [testPayloadText, setTestPayloadText] = useState('');
+  const [testPrefillLoading, setTestPrefillLoading] = useState(false);
+  const [testRunning, setTestRunning] = useState(false);
+  const [testResult, setTestResult] = useState(null); // { status, output, error }
   const type = node?.type;
   const def = localRegistry ? nodeTypeOf(type) : null;
 
@@ -79,6 +87,55 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
     return () => { alive = false; };
   }, [tab, workflowId, node?.id, node?._flowEdges]);
 
+  // Fetch the latest run and prefill the drawer payload ({ trigger_input: '',
+  // upstreams: { directMainUpstreamId: lastCompletedOutputJson } }).
+  const refreshTestPayload = () => {
+    if (!workflowId || !node || !node.id) {
+      setTestPayloadText(JSON.stringify({ trigger_input: '', upstreams: {} }, null, 2));
+      return;
+    }
+    setTestPrefillLoading(true);
+    listWorkflowRuns(workflowId)
+      .then((runs) => {
+        const run = Array.isArray(runs) && runs.length > 0 ? runs[0] : null;
+        setTestPayloadText(JSON.stringify({ trigger_input: '', upstreams: buildUpstreamPrefill(run, node) }, null, 2));
+      })
+      .catch(() => setTestPayloadText(JSON.stringify({ trigger_input: '', upstreams: {} }, null, 2)))
+      .finally(() => setTestPrefillLoading(false));
+  };
+
+  const openTestDrawer = () => {
+    setTestOpen(true);
+    setTestResult(null);
+    setTestRunning(false);
+    setTestPayloadText('');
+    refreshTestPayload();
+  };
+
+  // Run the selected node alone. Errors are rendered inline in the drawer —
+  // never thrown / never surfaced through the app toaster.
+  const runNodeTest = async () => {
+    if (testRunning) return;
+    let payload;
+    try {
+      payload = JSON.parse(testPayloadText || '{}');
+    } catch {
+      setTestResult({ status: 'failed', error: lang === 'zh' ? '负载不是合法的 JSON' : 'Payload is not valid JSON' });
+      return;
+    }
+    setTestRunning(true);
+    setTestResult(null);
+    try {
+      const res = await testNode(workflowId, node.id, payload);
+      if (res && (res.status === 'completed' || res.output !== undefined)) setTestResult(res);
+      else setTestResult({ status: 'failed', error: lang === 'zh' ? '测试端点未返回结果' : 'Test endpoint returned no result' });
+    } catch (err) {
+      setTestResult({ status: 'failed', error: (err && err.message) ? err.message : String(err) });
+    } finally {
+      setTestRunning(false);
+    }
+  };
+
   if (!node || !def) {
     return (
       <div className="flex h-full w-80 flex-col border-l border-border bg-card/60">
@@ -93,6 +150,11 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
     );
   }
 
+  const testParsedPayload = (() => {
+    try { return JSON.parse(testPayloadText || '{}'); } catch { return null; }
+  })();
+  const testHasUpstreams = !!(testParsedPayload && testParsedPayload.upstreams && Object.keys(testParsedPayload.upstreams).length > 0);
+
   return (
     <div className="flex h-full w-80 flex-col border-l border-border bg-card/60">
       {/* Header */}
@@ -100,12 +162,12 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
         <div className="flex min-w-0 items-center gap-2">
           <span className="text-base leading-none" style={{ color: def.color }}>{def.icon}</span>
           <div className="min-w-0">
-            <div className="truncate text-xs font-semibold text-foreground">{def.displayName}</div>
+            <div className="truncate text-xs font-semibold text-foreground">{nodeLabel(type, lang) || def.displayName}</div>
             <input
               value={node.data.label || ''}
               onChange={(e) => onConfigChange(node.id, config, e.target.value)}
               className="w-full truncate rounded border border-transparent bg-transparent px-1 py-0.5 text-[11px] text-muted-foreground focus:border-border focus:bg-card focus:outline-none"
-              placeholder={def.displayName}
+              placeholder={nodeLabel(type, lang) || def.displayName}
             />
           </div>
         </div>
@@ -127,8 +189,112 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
         ))}
       </div>
 
+      {/* Test-node action */}
+      <div className="flex items-center justify-between border-b border-border px-2 py-1">
+        <button
+          onClick={() => (testOpen ? setTestOpen(false) : openTestDrawer())}
+          className={`inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
+            testOpen ? 'bg-primary/10 text-primary' : 'text-muted-foreground hover:bg-secondary hover:text-foreground'
+          }`}
+        >
+          <span className="text-[9px] leading-none">▶</span>
+          {lang === 'zh' ? '测试节点' : 'Test node'}
+        </button>
+        {testResult && !testOpen && (
+          <span className={`truncate text-[10px] ${testResult.status === 'failed' ? 'text-red-500' : 'text-emerald-500'}`}>
+            {testResult.status === 'failed'
+              ? (lang === 'zh' ? '上次测试失败' : 'Last test failed')
+              : (lang === 'zh' ? '上次测试完成' : 'Last test completed')}
+          </span>
+        )}
+      </div>
+
       {/* Tab bodies */}
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
+        {testOpen ? (
+          <div className="space-y-2">
+            {/* Drawer header */}
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] font-semibold text-foreground">
+                {lang === 'zh' ? '测试节点' : 'Test node'}
+              </span>
+              <button
+                onClick={() => setTestOpen(false)}
+                title={lang === 'zh' ? '关闭' : 'Close'}
+                className="rounded-md p-1 text-muted-foreground hover:bg-secondary"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+
+            {!testHasUpstreams && !testPrefillLoading && (
+              <p className="text-[10px] leading-relaxed text-muted-foreground">
+                {lang === 'zh'
+                  ? '暂无已完成的运行数据 — upstreams 留空。trigger_input 可用 {"text": "..."} 模拟聊天输入。'
+                  : 'No completed run data yet — upstreams left empty. trigger_input accepts {"text": "..."} to simulate chat input.'}
+              </p>
+            )}
+
+            <textarea
+              value={testPayloadText}
+              onChange={(e) => setTestPayloadText(e.target.value)}
+              rows={10}
+              spellCheck={false}
+              placeholder='{"text": "..."}'
+              className="w-full resize-y rounded-lg border border-border bg-card px-2 py-1.5 font-mono text-[11px] text-foreground outline-none focus:border-primary"
+            />
+            {testPrefillLoading && <div className="h-5 animate-pulse rounded-md bg-muted" />}
+
+            <div className="flex flex-wrap items-center gap-1.5">
+              <button
+                onClick={runNodeTest}
+                disabled={testRunning || testPrefillLoading}
+                className="rounded-md bg-primary px-2.5 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {testRunning ? (lang === 'zh' ? '运行中…' : 'Running…') : (lang === 'zh' ? '运行测试' : 'Run test')}
+              </button>
+              <button
+                onClick={refreshTestPayload}
+                disabled={testPrefillLoading}
+                className="rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground disabled:opacity-50"
+              >
+                {lang === 'zh' ? '从上次运行加载' : 'Reload from last run'}
+              </button>
+              <button
+                onClick={() => setTestOpen(false)}
+                className="rounded-md border border-border px-2.5 py-1 text-[11px] text-muted-foreground hover:bg-secondary hover:text-foreground"
+              >
+                {lang === 'zh' ? '关闭' : 'Close'}
+              </button>
+            </div>
+
+            {testResult && (
+              testResult.status === 'failed' ? (
+                <div className="flex items-start gap-1.5 rounded-lg border border-red-500/30 bg-red-500/5 px-2.5 py-2 text-[11px] text-red-500">
+                  <StatusDot status="failed" />
+                  <span className="min-w-0 whitespace-pre-wrap break-words">{String(testResult.error || (lang === 'zh' ? '测试失败' : 'Test failed'))}</span>
+                </div>
+              ) : (
+                <div className="space-y-1">
+                  <div className="flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                    <StatusDot status="completed" />
+                    <span>{lang === 'zh' ? '输出' : 'Output'}</span>
+                  </div>
+                  <pre className="max-h-72 overflow-auto whitespace-pre-wrap rounded-lg border border-border bg-card px-3 py-2 font-mono text-[11px] text-foreground">
+                    {JSON.stringify(testResult.output ?? null, null, 2)}
+                  </pre>
+                </div>
+              )
+            )}
+
+            <p className="pt-1 text-[10px] leading-relaxed text-muted-foreground/80">
+              {lang === 'zh'
+                ? '测试运行会忽略重试 / 出错设置，且不会保存到运行历史。'
+                : 'Test runs ignore retry / on-error settings and are not saved to run history.'}
+            </p>
+          </div>
+        ) : (
+          <>
         {tab === 'parameters' && (
           localRegistry ? (
             <NodeParameterForm node={node} registry={localRegistry} upstreamFields={upstreamFields} onChange={(patch) => onConfigChange(node.id, { ...config, ...patch })} />
@@ -176,9 +342,35 @@ export default function NodeDetailView({ workflowId, nodes = [], node, registry,
             </div>
           )
         )}
+          </>
+        )}
       </div>
     </div>
   );
+}
+
+// Main edges only: this app's handles are `${type}-${connectionType}` with an
+// optional numeric suffix for repeated outputs (e.g. Switch's Default/Cases =
+// `source-main`, `source-main-1`, ...). Supplemental outputs (error/success…)
+// carry their own connection type, so we keep `undefined`/empty + `source-main*`.
+function isMainSourceEdge(e) {
+  if (!e) return false;
+  const h = e.sourceHandle;
+  return !h || h === 'source-main' || h.indexOf('source-main-') === 0;
+}
+
+// Upstream prefill for the test-node payload: for each DIRECT MAIN upstream
+// (edge.target === this node) take the LAST completed step of the latest run
+// and use its output_json, keyed by the source node id.
+function buildUpstreamPrefill(run, node) {
+  const upstreams = {};
+  const steps = (run && run.steps) || [];
+  (node._flowEdges || []).forEach((e) => {
+    if (e.target !== node.id || !isMainSourceEdge(e)) return;
+    const done = steps.filter((s) => s.node_id === e.source && s.status === 'completed' && s.output_json != null);
+    if (done.length > 0) upstreams[e.source] = done[done.length - 1].output_json;
+  });
+  return upstreams;
 }
 
 function StatusDot({ status }) {
