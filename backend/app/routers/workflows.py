@@ -17,7 +17,7 @@ from app.config import settings
 from app.models.agent_app import AgentApp
 from app.models.user import User
 from app.models.workflow_run import WorkflowRun, WorkflowRunStep
-from app.services.workflow_runtime import run_workflow_agent
+from app.services.workflow_runtime import run_workflow_agent, test_node
 from app.services.workflow_validation import validate_flow
 from app.services.workflow_node_types import (
     CONNECTION_TYPE_META,
@@ -353,6 +353,44 @@ def rerun_workflow(
 
     ThreadPoolExecutor(max_workers=4).submit(_run_in_thread)
     return {"run_id": run_id}
+
+
+class TestNodeBody(BaseModel):
+    trigger_input: str = ""
+    upstreams: dict = {}
+
+
+@router.post("/{workflow_id}/nodes/{node_id}/test")
+def test_workflow_node(
+    workflow_id: str,
+    node_id: str,
+    body: TestNodeBody,
+    app_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Execute ONE node's handler in isolation — synchronous and ephemeral.
+
+    Iterate-loop primitive ("test this node" on the canvas): the caller
+    supplies the node to test plus the exact upstream payloads that node
+    would receive in a real run (``upstreams`` maps upstream node_id ->
+    output dict). The handler runs against the REAL service bindings with
+    those outputs pre-loaded into an ephemeral context — no WorkflowRun or
+    WorkflowRunStep row is created, no run events are emitted, and there is
+    exactly one attempt (no retry/error-workflow policy). Returns
+    {status: "completed"|"failed", node_id, node_type, output, error} —
+    a handler failure is a diagnostic 200 dict, NOT an HTTP error.
+    """
+    agent = _get_owned_workflow(db, app_id, workflow_id, user)
+    try:
+        return test_node(
+            db, agent.org_id, agent.app_id, agent, node_id,
+            trigger_input=body.trigger_input,
+            upstreams=body.upstreams or {},
+            created_by_id=user.id,
+        )
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Node not found in workflow")
 
 
 @router.api_route("/{workflow_id}/webhook/{token}", methods=["POST", "GET"])

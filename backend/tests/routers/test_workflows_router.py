@@ -394,3 +394,80 @@ def test_rerun_returns_run_id_and_streams(db, monkeypatch):
     )
     assert {s.node_id for s in steps} == {"n2", "n3"}
     assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == wf.id).count() == 2
+
+
+# ---------------------------------------------------------------------------
+# Single-node test HTTP entry (iterate-loop Task 7): POST
+# /{workflow_id}/nodes/{node_id}/test — SYNCHRONOUS and ephemeral. The node's
+# handler runs ONCE against real service bindings with caller-supplied
+# upstreams; no WorkflowRun / WorkflowRunStep row is created and no run
+# events are emitted. Failures are diagnostic dicts, not HTTP errors.
+# ---------------------------------------------------------------------------
+
+
+def test_test_node_returns_output_sync(db, monkeypatch):
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "answer")
+    wf = _mk_workflow(db, flow=_flow())
+    out = wf_mod.test_workflow_node(
+        wf.id, "n2", wf_mod.TestNodeBody(trigger_input="hello"), "app-1",
+        db=db, user=_user(),
+    )
+    assert out["status"] == "completed"
+    assert out["node_id"] == "n2"
+    assert out["node_type"] == "llm"
+    assert out["output"] == {"text": "answer", "items": [{"text": "answer"}]}
+    assert out["error"] is None
+
+
+def test_test_node_creates_no_run_row(db, monkeypatch):
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "answer")
+    wf = _mk_workflow(db, flow=_flow())
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == wf.id).count() == 0
+    assert db.query(WorkflowRunStep).count() == 0
+    out = wf_mod.test_workflow_node(
+        wf.id, "n2", wf_mod.TestNodeBody(trigger_input="hello"), "app-1",
+        db=db, user=_user(),
+    )
+    assert out["status"] == "completed"
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == wf.id).count() == 0
+    assert db.query(WorkflowRunStep).count() == 0
+
+
+def test_test_node_owner_guard_404_for_other_user(db):
+    """Owner guard follows the router convention (_get_owned_workflow):
+    another user's workflow is a 404 (same as the other-user run tests)."""
+    wf = _mk_workflow(db, owner="user-2", flow=_flow())
+    with pytest.raises(HTTPException) as exc:
+        wf_mod.test_workflow_node(
+            wf.id, "n2", wf_mod.TestNodeBody(), "app-1", db=db, user=_user("user-1"),
+        )
+    assert exc.value.status_code == 404
+
+
+def test_test_node_missing_node_404(db):
+    wf = _mk_workflow(db, flow=_flow())
+    with pytest.raises(HTTPException) as exc:
+        wf_mod.test_workflow_node(
+            wf.id, "nope", wf_mod.TestNodeBody(), "app-1", db=db, user=_user(),
+        )
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Node not found in workflow"
+
+
+def test_test_node_failure_returns_failed_status(db, monkeypatch):
+    """A node handler raising is a diagnostic 200-equivalent dict, NOT an
+    exception/HTTP error — the canvas shows the error inline for iteration."""
+
+    def boom(prompt, model=None):
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", boom)
+    wf = _mk_workflow(db, flow=_flow())
+    out = wf_mod.test_workflow_node(
+        wf.id, "n2", wf_mod.TestNodeBody(), "app-1", db=db, user=_user(),
+    )
+    assert out["status"] == "failed"
+    assert out["node_id"] == "n2"
+    assert out["node_type"] == "llm"
+    assert out["output"] is None
+    assert "provider down" in out["error"]
