@@ -318,6 +318,8 @@ class WorkflowExecutionContext:
         trigger: str = "chat",
         history: list | None = None,
         ephemeral: bool = False,
+        rerun_of: str | None = None,
+        rerun_from_node: str | None = None,
     ):
         self.db = db
         self.org_id = org_id
@@ -344,6 +346,8 @@ class WorkflowExecutionContext:
             org_id=org_id,
             app_id=app_id,
             started_at=datetime.now(timezone.utc),
+            rerun_of=rerun_of,
+            rerun_from_node=rerun_from_node,
         )
         db.add(self.run)
         db.commit()
@@ -693,6 +697,9 @@ def run_workflow_agent(
     trigger: str = "chat",
     is_error_run: bool = False,
     history: list | None = None,
+    partial_from: str | None = None,
+    seed_outputs: dict[str, dict] | None = None,
+    rerun_of: str | None = None,
 ) -> dict[str, Any]:
     """Validate + execute a flow_mode agent. Returns {status, error, output}.
 
@@ -701,6 +708,15 @@ def run_workflow_agent(
     context as its input BEFORE the main run is marked finished — the live
     stream stays open so subscribers see the error workflow execute. Error
     runs never recurse (is_error_run guard, one level deep).
+
+    Rerun-from-node (``partial_from``): executes ONLY the rerun subgraph
+    (that node + everything downstream) through the same orchestrator —
+    same error-workflow + finish semantics as a full run. Outputs of every
+    node outside the subgraph must be supplied in ``seed_outputs`` (captured
+    from a prior completed run); seeded nodes are not re-executed. The
+    persisted run row is tagged with ``rerun_of`` (the original run id) and
+    ``rerun_from_node``. With no rerun kwargs the behavior is byte-identical
+    to a plain full run.
     """
     flow = _flow_dict(agent.flow)
     errors = validate_flow(flow)
@@ -710,9 +726,12 @@ def run_workflow_agent(
         db, org_id, app_id, agent, trigger_input,
         created_by_id=created_by_id, on_event=on_event, run_id=run_id,
         trigger=trigger, history=history,
+        rerun_of=rerun_of, rerun_from_node=partial_from,
     )
     try:
-        result = execute_flow_graph(flow, ctx, NODE_HANDLERS)
+        result = execute_flow_graph(flow, ctx, NODE_HANDLERS,
+                                    partial_from=partial_from,
+                                    seed_outputs=seed_outputs)
         if result["status"] == "failed" and not is_error_run:
             _run_error_workflow(db, org_id, app_id, agent, result, ctx,
                                 created_by_id=created_by_id)

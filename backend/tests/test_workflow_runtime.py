@@ -373,3 +373,74 @@ def test_test_node_trigger_uses_trigger_input(monkeypatch):
     assert out["text"] == "hello"
     assert out["items"] == [{"text": "hello"}]
 
+
+# ---- rerun-from-node via the SAME orchestrator (iterate-loop Task 5) -------
+
+
+def test_run_workflow_agent_partial_rerun(monkeypatch):
+    """Rerun-from-node flows through run_workflow_agent exactly like a full
+    run: seeded upstream nodes are NOT re-executed, the rerun subgraph runs
+    live through the real executor, and the new run row is tagged with
+    rerun_of + rerun_from_node."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "llm-answer")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-agent-rerun-1")
+
+    calls = {"n": 0}
+    original = wfr.NODE_HANDLERS["trigger_chat"]
+
+    def counting_trigger(ctx, node):
+        calls["n"] += 1
+        return original(ctx, node)
+
+    monkeypatch.setitem(wfr.NODE_HANDLERS, "trigger_chat", counting_trigger)
+
+    # First full run — records n1's step output for seeding.
+    first = wfr.run_workflow_agent(db, "default-org", "default-app", agent, "hello")
+    assert first["status"] == "completed"
+    assert calls["n"] == 1
+    first_run = db.query(WorkflowRun).filter(WorkflowRun.id == first["run_id"]).first()
+    assert first_run is not None
+    n1_step = (
+        db.query(WorkflowRunStep)
+        .filter(WorkflowRunStep.run_id == first["run_id"], WorkflowRunStep.node_id == "n1")
+        .order_by(WorkflowRunStep.created_date.desc())
+        .first()
+    )
+    assert n1_step is not None
+    n1_output = n1_step.output_json
+
+    # Partial rerun from n2 with n1's stored output seeded.
+    second = wfr.run_workflow_agent(
+        db, "default-org", "default-app", agent, "hello again",
+        partial_from="n2",
+        seed_outputs={"n1": n1_output},
+        rerun_of=first["run_id"],
+    )
+    assert second["status"] == "completed"
+    assert second["output"] == "llm-answer"
+    assert calls["n"] == 1  # seeded trigger NOT executed again
+
+    new_run = db.query(WorkflowRun).filter(WorkflowRun.id == second["run_id"]).first()
+    assert new_run is not None
+    assert new_run.rerun_of == first["run_id"]
+    assert new_run.rerun_from_node == "n2"
+    # Only the rerun subgraph leaves step rows under the new run.
+    new_steps = db.query(WorkflowRunStep).filter(WorkflowRunStep.run_id == second["run_id"]).all()
+    assert {s.node_id for s in new_steps} == {"n2", "n3"}
+
+
+def test_run_workflow_agent_full_run_has_null_rerun_columns(monkeypatch):
+    """A plain full run (no rerun kwargs) persists rerun_of and
+    rerun_from_node as NULL — defaults keep existing callers
+    byte-identical."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "llm-answer")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-agent-rerun-null")
+    result = wfr.run_workflow_agent(db, "default-org", "default-app", agent, "hello")
+    assert result["status"] == "completed"
+    run = db.query(WorkflowRun).filter(WorkflowRun.id == result["run_id"]).first()
+    assert run is not None
+    assert run.rerun_of is None
+    assert run.rerun_from_node is None
+
