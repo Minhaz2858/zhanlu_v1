@@ -6,6 +6,7 @@ Covers create/list/save/validate/run/publish plus the user-scope wall
 
 import sys
 import os
+import time
 import uuid
 from types import SimpleNamespace
 
@@ -267,3 +268,129 @@ def test_error_workflow_does_not_recurse(db, monkeypatch):
     assert out["error_workflow_status"] == "failed"
     # Exactly 2 runs total: the main one + the error one. No recursion.
     assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id.in_([wf.id, err_wf.id])).count() == 2
+
+
+# ---------------------------------------------------------------------------
+# Rerun-from-node HTTP entry (iterate-loop Task 6): POST /{workflow_id}/rerun
+# kicks off a TAGGED background partial rerun that reuses completed step
+# outputs from a reference run (run_id + start_node_id body).
+# ---------------------------------------------------------------------------
+
+
+def _wait_run(run_id, timeout=10.0):
+    """Poll the DB (fresh session per attempt) until the async run reaches a
+    terminal state. The rerun endpoint executes in a background thread with
+    its own SessionLocal, so the fixture session cannot see it directly."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        s = _TestSession()
+        try:
+            run = s.query(WorkflowRun).filter(WorkflowRun.id == run_id).first()
+            if run is not None and run.status in ("completed", "failed"):
+                return run
+        finally:
+            s.close()
+        time.sleep(0.05)
+    raise AssertionError(f"run {run_id} did not reach terminal state within {timeout}s")
+
+
+def test_rerun_requires_owned_workflow_and_reference_run(db):
+    """Owner guard first: another user's workflow is a 404; an owned workflow
+    with a missing/foreign reference run is a 404 too."""
+    wf = _mk_workflow(db, owner="user-2", flow=_flow())
+    with pytest.raises(HTTPException) as exc:
+        wf_mod.rerun_workflow(
+            wf.id, wf_mod.RerunBody(run_id="run-x", start_node_id="n2"),
+            "app-1", db=db, user=_user("user-1"),
+        )
+    assert exc.value.status_code == 404
+
+    mine = _mk_workflow(db, owner="user-1", flow=_flow())
+    with pytest.raises(HTTPException) as exc:
+        wf_mod.rerun_workflow(
+            mine.id, wf_mod.RerunBody(run_id="missing-run", start_node_id="n2"),
+            "app-1", db=db, user=_user("user-1"),
+        )
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Reference run not found"
+
+
+def test_rerun_unknown_start_node_404(db, monkeypatch):
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "answer")
+    wf = _mk_workflow(db, flow=_flow())
+    ref = wf_mod.run_workflow(wf.id, wf_mod.RunBody(input="hello"), "app-1", db=db, user=_user())
+    assert ref["status"] == "completed"
+    with pytest.raises(HTTPException) as exc:
+        wf_mod.rerun_workflow(
+            wf.id, wf_mod.RerunBody(run_id=ref["run_id"], start_node_id="nope"),
+            "app-1", db=db, user=_user(),
+        )
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Start node not found in workflow"
+
+
+def test_rerun_reference_run_other_agent_404(db, monkeypatch):
+    """A reference run belonging to a DIFFERENT workflow agent is not usable."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "answer")
+    other = _mk_workflow(db, flow=_flow())
+    ref = wf_mod.run_workflow(other.id, wf_mod.RunBody(input="hello"), "app-1", db=db, user=_user())
+    assert ref["status"] == "completed"
+    mine = _mk_workflow(db, flow=_flow())
+    with pytest.raises(HTTPException) as exc:
+        wf_mod.rerun_workflow(
+            mine.id, wf_mod.RerunBody(run_id=ref["run_id"], start_node_id="n2"),
+            "app-1", db=db, user=_user(),
+        )
+    assert exc.value.status_code == 404
+    assert exc.value.detail == "Reference run not found"
+
+
+def test_rerun_returns_run_id_and_streams(db, monkeypatch):
+    """Full round-trip: complete a seeded full run first, then POST rerun with
+    run_id + start_node_id=n2. The endpoint returns the new run_id immediately;
+    the background run completes, is tagged rerun_of/rerun_from_node, and only
+    the downstream subgraph (n2/n3) leaves step rows — n1 is seeded from the
+    reference run and its handler is NOT re-invoked."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "answer")
+    calls = {"trigger": 0}
+    original_trigger = wfr.NODE_HANDLERS["trigger_chat"]
+
+    def counting_trigger(ctx, node):
+        calls["trigger"] += 1
+        return original_trigger(ctx, node)
+
+    monkeypatch.setitem(wfr.NODE_HANDLERS, "trigger_chat", counting_trigger)
+    # The rerun endpoint's background thread opens its OWN SessionLocal — point
+    # app.database.SessionLocal at the in-memory test engine so the async run
+    # lands in this DB (same pattern as run-async's thread).
+    monkeypatch.setattr("app.database.SessionLocal", _TestSession)
+
+    wf = _mk_workflow(db, flow=_flow())
+    ref = wf_mod.run_workflow(wf.id, wf_mod.RunBody(input="hello"), "app-1", db=db, user=_user())
+    assert ref["status"] == "completed"
+    assert calls["trigger"] == 1  # full run executed the chat trigger once
+
+    # Partial rerun from n2 — n1's completed step output is the seed.
+    out = wf_mod.rerun_workflow(
+        wf.id, wf_mod.RerunBody(run_id=ref["run_id"], start_node_id="n2", input="again"),
+        "app-1", db=db, user=_user(),
+    )
+    assert list(out) == ["run_id"]
+    assert isinstance(out["run_id"], str) and out["run_id"]
+    assert out["run_id"] != ref["run_id"]
+
+    new_run = _wait_run(out["run_id"])
+    assert new_run.status == "completed"
+    assert new_run.agent_app_id == wf.id
+    assert new_run.rerun_of == ref["run_id"]
+    assert new_run.rerun_from_node == "n2"
+    assert calls["trigger"] == 1  # seeded trigger NOT re-executed by the rerun
+
+    steps = (
+        db.query(WorkflowRunStep)
+        .filter(WorkflowRunStep.run_id == out["run_id"], WorkflowRunStep.is_deleted.is_(False))
+        .order_by(WorkflowRunStep.created_date.asc())
+        .all()
+    )
+    assert {s.node_id for s in steps} == {"n2", "n3"}
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == wf.id).count() == 2

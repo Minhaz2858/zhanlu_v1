@@ -258,6 +258,103 @@ def run_workflow_async(
     return {"run_id": run_id}
 
 
+class RerunBody(BaseModel):
+    run_id: str
+    start_node_id: str
+    input: str = ""
+
+
+@router.post("/{workflow_id}/rerun")
+def rerun_workflow(
+    workflow_id: str,
+    body: RerunBody,
+    app_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Kick off a tagged partial rerun in a background thread (iterate loop).
+
+    n8n "execute from this node": ``run_id`` names a prior completed run of
+    this workflow; the completed step outputs of that reference run seed every
+    node upstream of ``start_node_id``, and only ``start_node_id`` + its
+    downstream subgraph executes again. The new WorkflowRun row is tagged with
+    ``rerun_of`` (reference run id) and ``rerun_from_node`` so the run drawer
+    can show the relationship. Returns the new run_id immediately — the client
+    then subscribes to GET /runs/{run_id}/stream for live per-node events
+    (replayed from the DB first, then pushed live).
+    """
+    import uuid
+    from concurrent.futures import ThreadPoolExecutor
+
+    from app.database import SessionLocal
+    from app.services.workflow_events import publish
+
+    agent = _get_owned_workflow(db, app_id, workflow_id, user)
+    ref = (
+        db.query(WorkflowRun)
+        .filter(
+            WorkflowRun.id == body.run_id,
+            WorkflowRun.agent_app_id == agent.id,
+            WorkflowRun.is_deleted.is_(False),
+        )
+        .first()
+    )
+    if ref is None:
+        raise HTTPException(status_code=404, detail="Reference run not found")
+    flow = agent.flow if isinstance(agent.flow, dict) else {}
+    if not any(n.get("id") == body.start_node_id for n in (flow.get("nodes") or [])):
+        raise HTTPException(status_code=404, detail="Start node not found in workflow")
+    # Seed map: completed step outputs of the reference run — the executor
+    # pre-loads these for nodes OUTSIDE the rerun subgraph (they are not
+    # re-executed; seeds for nodes inside the subgraph are ignored).
+    steps = (
+        db.query(WorkflowRunStep)
+        .filter(
+            WorkflowRunStep.run_id == ref.id,
+            WorkflowRunStep.is_deleted.is_(False),
+            WorkflowRunStep.status == "completed",
+        )
+        .all()
+    )
+    seed_outputs = {s.node_id: (s.output_json or {}) for s in steps}
+
+    run_id = str(uuid.uuid4())
+    input_text = body.input
+    org_id, agent_app_id = agent.org_id, agent.app_id
+    agent_id = agent.id
+    trigger = _trigger_source(agent)
+    start_node_id = body.start_node_id
+    ref_id = ref.id
+    created_by_id = user.id
+
+    def _run_in_thread():
+        # Own session for the background thread (request session closes).
+        thread_db = SessionLocal()
+        try:
+            thread_agent = thread_db.query(AgentApp).filter(
+                AgentApp.id == agent_id, AgentApp.is_deleted.is_(False),
+            ).first()
+            if thread_agent is None:
+                publish(run_id, {"type": "run_finished", "run_id": run_id,
+                                 "status": "failed", "error": "workflow not found", "output": None})
+                return
+            run_workflow_agent(
+                thread_db, org_id, agent_app_id, thread_agent, input_text,
+                created_by_id=created_by_id,
+                on_event=lambda ev: publish(ev.get("run_id", run_id), ev),
+                run_id=run_id,
+                trigger=trigger,
+                partial_from=start_node_id,
+                seed_outputs=seed_outputs,
+                rerun_of=ref_id,
+            )
+        finally:
+            thread_db.close()
+
+    ThreadPoolExecutor(max_workers=4).submit(_run_in_thread)
+    return {"run_id": run_id}
+
+
 @router.api_route("/{workflow_id}/webhook/{token}", methods=["POST", "GET"])
 async def webhook_trigger(
     workflow_id: str,
