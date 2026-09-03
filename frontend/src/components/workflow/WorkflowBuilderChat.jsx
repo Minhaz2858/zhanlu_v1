@@ -458,7 +458,7 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
           placeholder={isEn ? 'Describe your workflow…' : '描述你的工作流…'}
           className="h-9 flex-1 rounded-md border bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
         />
-        <Button size="icon" onClick={handleSend} disabled={streaming} title={isEn ? 'Send' : '发送'}>
+        <Button size="icon" onClick={() => handleSend()} disabled={streaming} title={isEn ? 'Send' : '发送'}>
           {streaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
         </Button>
       </div>
