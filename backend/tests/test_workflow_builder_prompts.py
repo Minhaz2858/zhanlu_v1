@@ -143,10 +143,13 @@ def test_builder_registry_block_embeds_field_names_and_option_values():
 
     block = _workflow_builder_registry_block()
     assert "question" in block  # the NL question field name
-    assert "sql|nl" in block or "sql / nl" in block  # mode option VALUES
-    assert "natural_language" not in block  # never advertise the wrong value
     # The db_query entry must carry its full config shape, not just kb_id.
     db_entry = next((l for l in block.splitlines() if l.startswith("- db_query")), "")
     assert "kb_id" in db_entry
     assert "mode" in db_entry
+    # mode option VALUES are order-agnostic (NL2SQL-first schema orders
+    # nl|sql; the display label "natural_language" must never appear).
+    mode_part = db_entry.split("mode(", 1)[1].split(")", 1)[0] if "mode(" in db_entry else ""
+    assert "nl" in mode_part and "sql" in mode_part
+    assert "natural_language" not in block  # never advertise the wrong value
 
