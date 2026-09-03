@@ -11,11 +11,10 @@ Priority pipeline (highest to lowest):
    → suppress ALL default handling
 3. **format_intent** – ``detect_file_intent`` finds an explicit format
    → auto-pick the built-in default for that format
-4. **soft_intent** – heuristic soft-intent detection
-5. **llm_catalog_pick** – nothing matches → return an empty chosen_skill
+4. **llm_catalog_pick** – nothing matches → return an empty chosen_skill
    so the LLM picks from the full skill catalog via the Skill meta-tool /
-   SkillPlannerHook. ``FALLBACK_SKILL`` ("docx") remains defined as the
-   absolute last resort for callers that need a guaranteed artifact type.
+   SkillPlannerHook. (Soft-intent heuristics and the ``docx`` fallback
+   were removed in Phase A/B — the model decides from the catalog.)
 """
 
 from __future__ import annotations
@@ -53,8 +52,6 @@ DEFAULT_SKILL_MAP: dict[str, str] = {
 # design-first step of the full-stack dashboard pipeline
 # (uiux_design_system --persist → design_system_ref → create_fullstack_dashboard).
 COMPANION_SKILLS: frozenset[str] = frozenset({"ui-ux-pro-max"})
-
-FALLBACK_SKILL = "docx"
 
 
 @dataclass
@@ -182,28 +179,17 @@ class SkillResolver:
                 bypassed_defaults=[],
             )
 
-        # ── Tier 4: soft-intent heuristic ─────────────────────────────
-        soft = self._detect_soft_intent(user_message)
-        if soft and soft in DEFAULT_SKILL_MAP:
-            skill_name = DEFAULT_SKILL_MAP[soft]
-            return RoutingDecision(
-                chosen_skill=skill_name,
-                namespace=f"builtin:{skill_name}",
-                source="builtin",
-                is_default=True,
-                exclusive=False,
-                allow_default_fallback=True,
-                reason="soft_intent",
-                bypassed_defaults=[],
-            )
+        # ── Tier 4: (removed in Phase A/B) soft-intent heuristic ────────
+        # The soft-intent fallback ("make a sales report" → docx) was
+        # deleted: it re-interpreted the user's wording and forced a file
+        # skill they never asked for. Unmatched requests now go straight
+        # to Tier 5 — the model picks from the skill catalog.
 
         # ── Tier 5: no deterministic match → let the LLM pick ─────────
         # Return an empty chosen_skill so downstream callers that check
         # ``if chosen_skill:`` skip the forced-default path. The LLM then
         # selects from the full skill catalog injected via the Skill
-        # meta-tool / SkillPlannerHook. FALLBACK_SKILL remains available
-        # as the absolute last resort for callers that require a
-        # guaranteed artifact type.
+        # meta-tool / SkillPlannerHook.
         return RoutingDecision(
             chosen_skill="",
             namespace="",
@@ -227,14 +213,4 @@ class SkillResolver:
             return detect_file_intent(user_message)
         except Exception:
             logger.warning("detect_file_intent unavailable", exc_info=True)
-            return None
-
-    @staticmethod
-    def _detect_soft_intent(user_message: str) -> Optional[str]:
-        """Reuse ``default_skills.detect_soft_intent``."""
-        try:
-            from app.services.synexia.default_skills import detect_soft_intent
-            return detect_soft_intent(user_message)
-        except Exception:
-            logger.warning("detect_soft_intent unavailable", exc_info=True)
             return None

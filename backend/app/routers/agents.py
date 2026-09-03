@@ -217,11 +217,6 @@ from app.services.query_purpose import (  # noqa: E402 — query-purpose classif
     TableRoleResolver,
     classify_query_purpose,
 )
-from app.services.answer_verification import (  # noqa: E402 — universal self-eval gate
-    build_gap_disclosure,
-    build_replan_nudge,
-    evaluate_answer,
-)
 
 logger = logging.getLogger(__name__)
 
@@ -644,7 +639,6 @@ def _fusion_build_progress_this_turn(tool_calls_for_frontend: list[dict]) -> boo
         if isinstance(r, dict) and r.get("success"):
             return True
     return False
-
 
 
 def _choose_fallback(
@@ -2061,7 +2055,7 @@ async def _stream_deep_research_frames(
 
     result = await run_deep_research(
         DeepResearchRequest(question=question, depth=depth, scope=scope),
-        planner=build_planner(endpoint=endpoint, timeout_s=timeout_s),
+        planner=build_planner(endpoint=endpoint, timeout_s=timeout_s, scope=scope),
         tool_executor=build_tool_executor(
             db=db, user_id=user_id, context=context,
         ),
@@ -3371,20 +3365,6 @@ def _effective_data_agent_budget_seconds(endpoint) -> float:
     return DATA_AGENT_BUDGET_SECONDS
 
 
-def _effective_self_eval_max_replans(endpoint) -> int:
-    """Return the effective SELF_EVAL_MAX_REPLANS for the user's model."""
-    if settings.AGENT_FAST_MODE_ENABLED:
-        return settings.AGENT_FAST_SELF_EVAL_MAX_REPLANS
-    return settings.SELF_EVAL_MAX_REPLANS
-
-
-def _effective_self_eval_timeout(endpoint) -> float:
-    """Return the effective SELF_EVAL_LLM_GATE_TIMEOUT_S for the user's model."""
-    if settings.AGENT_FAST_MODE_ENABLED:
-        return settings.AGENT_FAST_SELF_EVAL_LLM_GATE_TIMEOUT_S
-    return settings.SELF_EVAL_LLM_GATE_TIMEOUT_S
-
-
 def _effective_force_synthesis_max_retries(endpoint) -> int:
     """Return the effective max_retries for _force_llm_synthesis."""
     if settings.AGENT_FAST_MODE_ENABLED:
@@ -3753,10 +3733,18 @@ async def _guarantee_done(agen):
     Cancellation (client disconnect) and GeneratorExit (``aclose``) are
     re-raised untouched — the client is gone, emitting is pointless.
     """
+    _TERMINAL_TYPES = ("done", "error", "paused", "interrupted", "flow_saved")
+    _terminal_seen = False
     try:
         async for frame in agen:
+            if (
+                isinstance(frame, str)
+                and '"type":' in frame
+                and any(f'"type": "{t}"' in frame for t in _TERMINAL_TYPES)
+            ):
+                _terminal_seen = True
             yield frame
-    except (asyncio.CancelledError, GeneratorExit, StopAsyncIteration):
+    except (asyncio.CancelledError, GeneratorExit):
         raise
     except BaseException as exc:  # noqa: BLE001 — must never drop the client
         # exc_info=True (2026-08-21): the fully-empty-page failures left no
@@ -3774,6 +3762,28 @@ async def _guarantee_done(agen):
                     "content": _GENERIC_EMPTY_CONTENT_FALLBACK,
                     "trace": [],
                     "conversation": {},
+                }) + '\n\n'
+            )
+        except Exception:
+            pass
+        _terminal_seen = True
+
+    if not _terminal_seen:
+        # The inner generator ENDED without emitting any terminal frame —
+        # a silent early return from a mid-loop code path (observed
+        # 2026-09-03: a Data Analyst turn streamed its first tool call,
+        # saved the checkpoint, then the generator simply returned; the
+        # frontend stayed in "Running · Querying the bound data source"
+        # for 257s+ with the conversation frozen server-side). The client
+        # is (usually) still connected here, so emit a terminal error to
+        # unstick the UI and let it surface the failure instead of
+        # spinning forever.
+        try:
+            yield (
+                'data: ' + json.dumps({
+                    "type": "error",
+                    "message": "The agent stopped responding before finishing. Please try again.",
+                    "trace": [],
                 }) + '\n\n'
             )
         except Exception:
@@ -4343,6 +4353,49 @@ ACTIVITY_STEP_DESCRIPTIONS = {
     "fusion360_save":                "Saving the design",
     "fusion360_user_parameter":      "Setting a user parameter",
 }
+
+# ── Run-verdict semantics: recoverable read-only lookups ─────────────────
+# The FINALIZE verdict (verify_passed / verify_failed) must reflect whether
+# the DELIVERABLE was produced — never a mere lookup that failed and was
+# worked around. In offline deployments web_search/web_extract fail on
+# every call; the loop recovers via the bound data source and still ships a
+# complete, grounded answer. Treating that failed lookup as a run failure
+# produced the recurring "Verification failed — some steps did not complete"
+# header on fully-answered turns. Only tools in this set are exonerated:
+# pure information lookups that add context but never carry the answer
+# payload. Data-source (ask_data_agent/sql_query), sandbox, and build tools
+# stay critical — a failure there genuinely undermines the answer.
+_READONLY_LOOKUP_TOOL_NAMES = frozenset({
+    # external web lookups (offline-unreachable)
+    "web_search", "_web_search", "tavily_search", "web_extract", "_web_extract",
+    # RAG / document / skill / KB lookups
+    "ask_rag_research", "_ask_rag_research", "rag_research",
+    "search_documents", "_search_documents", "search_skills", "list_skills",
+    "list_default_skills", "list_knowledge_bases", "list_tools",
+    # conversation / memory recall
+    "session_search", "memory", "project_memory",
+    # data-source *listing* (non-authoritative; the agent re-lists or uses
+    # the pre-bound context), but NOT describe_schema / catalog of the
+    # answer source itself
+    "list_data_sources", "list_data_source_files", "list_mcp_servers",
+})
+
+
+def _is_readonly_lookup_tool(tool_name: str | None) -> bool:
+    """True when a failed tool call is a recoverable read-only lookup.
+
+    Mirrors ``_READONLY_LOOKUP_TOOL_NAMES`` plus the ``list_*``/``search_*``
+    families that only enumerate or look things up. ``ask_data_agent`` and
+    every build/sandbox tool are intentionally NOT included — their failure
+    means the data/deliverable was not produced.
+    """
+    if not tool_name:
+        return False
+    if tool_name in _READONLY_LOOKUP_TOOL_NAMES:
+        return True
+    return tool_name.startswith(("list_", "search_")) and not tool_name.startswith(
+        ("list_tables", "search_tables", "search_schema")
+    )
 
 # ── Helper: format an activity_step description with optional args ──────
 # Named placeholders like {skill} / {path} / {query} are resolved from the
@@ -5753,182 +5806,11 @@ class _OrchGuardSkipped(Exception):
     (marker fulfillment + ``ensure_artifact_for_doc_request``) is skipped on a
     dashboard-intent turn where the build tool was never called. Caught by a
     dedicated ``except _OrchGuardSkipped`` clause (no log noise)."""
-
-
-class _AnswerGateResult(NamedTuple):
-    action: str  # "none" | "nudge" | "disclose"
-    message: str
-
-
-def _gate_tool_results_from_frontend(tool_calls_for_frontend: list[dict]) -> list[dict]:
-    """Extract summarized tool payloads from frontend tool-call records.
-
-    Each record carries the tool result under ``results``; we forward the raw
-    payload (with the tool name attached) so ``summarize_tool_results`` inside
-    ``evaluate_answer`` can normalize it. Never dumps full payloads anywhere.
-    """
-    out: list[dict] = []
-    for tc in tool_calls_for_frontend or []:
-        if not isinstance(tc, dict):
-            continue
-        name = tc.get("name") or tc.get("tool_name") or ""
-        results = tc.get("results")
-        if isinstance(results, dict):
-            raw = dict(results)
-            raw.setdefault("tool", name)
-            out.append(raw)
-        elif isinstance(results, list) and results:
-            out.append({"tool": name, "rows": results})
-        elif isinstance(results, str) and results.strip():
-            # Text payloads (web search / RAG summaries) feed the dimension
-            # coverage detector; never dump full content.
-            out.append({"tool": name, "text": results[:1200]})
-        elif name:
-            out.append({"tool": name})
-    return out
-
-
-_DATA_GATE_DATA_TOOLS = frozenset({
-    "ask_data_agent", "execute_query", "answer_from_database",
-    "describe_schema", "nl2sql",
-})
-
-
-def _turn_ran_data_tool(tool_calls_for_frontend: list | None) -> bool:
-    """True when the turn executed a row-producing data tool.
-
-    The answer-verification gate is DATA-oriented (column-coverage,
-    part-whole, arithmetic detectors). Turns that never ran a data tool —
-    automation/agent/skill CRUD (AutomationTask.create, create_automation),
-    save_flow, file/env work — must be exempt: the dimension extractor pulls
-    ordinary request words out of the user message (e.g. "send", "updates")
-    and appends a bogus "[Gap disclosure]" to a valid deliverable. Same
-    misfire class as the workflow_builder exemption (2026-09-02), observed on
-    an automation-creation turn that ran only list_knowledge_bases +
-    AutomationTask.create.
-    """
-    if not tool_calls_for_frontend:
-        return False
-    for _tc in tool_calls_for_frontend:
-        _tn = (_tc.get("name") or _tc.get("tool_name") or "").split(".")[0]
-        if _tn in _DATA_GATE_DATA_TOOLS:
-            return True
-    return False
-
-
-async def _check_answer_verification_gate(
-    user_message: str,
-    tool_calls_for_frontend: list[dict],
-    assistant_content: str,
-    *,
-    attempts: int,
-    budget_remaining: int,
-    catalog_meta: dict | None = None,
-    agent_name: str | None = None,
-) -> _AnswerGateResult:
-    """Universal Self-Evaluation & Re-Planning gate.
-
-    Invoked at the synthesis boundaries (v2 / resume / v3) AFTER the
-    hallucination guardrail, only when tools were actually called. Runs the
-    hybrid evaluator off-thread with a timeout; ``nudge`` means the caller
-    should append the message and continue the loop, ``disclose`` means the
-    caller should append the gap disclosure to the final answer and break.
-    Flag-off returns ``none`` immediately (byte-identical behavior).
-
-    ``agent_name`` — workflow_builder turns are exempt (2026-09-02): the
-    gate is DATA-oriented (coverage / arithmetic / part-whole detectors) and
-    the builder's deliverable is the flow GRAPH. When a builder turn carries
-    stray tool records, the evaluator appended a bogus disclosure —
-    "requested dimensions not found in the data: called, classify, connect,
-    everyth, exactly" — to a valid save_flow delivery. Mirrors the
-    fusion360_* tool exemption above.
-    """
-    if agent_name == "workflow_builder":
-        return _AnswerGateResult("none", "")
-    if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
-        return _AnswerGateResult("none", "")
-    if not tool_calls_for_frontend:
-        return _AnswerGateResult("none", "")
-    # CAD turns (Fusion 360 tools) skip the DATA-oriented self-eval gate.
-    # The CAD loop has its own geometry verification (fusion360_verify_build);
-    # the data evaluator does not understand CAD payloads and produces false
-    # gaps — e.g. "requested dimensions not found in the data: taller, verify"
-    # appended to a build that verified PASS. Verify-before-build tools are
-    # the source of truth for these turns.
-    for _tc in tool_calls_for_frontend:
-        _tn = _tc.get("name") or _tc.get("tool_name") or ""
-        if _tn.startswith("fusion360_"):
-            return _AnswerGateResult("none", "")
-    # DATA gate only polices DATA turns (see _turn_ran_data_tool).
-    if not _turn_ran_data_tool(tool_calls_for_frontend):
-        return _AnswerGateResult("none", "")
-    tool_results = _gate_tool_results_from_frontend(tool_calls_for_frontend)
-    if not tool_results:
-        return _AnswerGateResult("none", "")
-    # Change 1 (2026-08-26): gate fast-path on the FIRST check. When the
-    # turn already produced substantive data rows, skip the self-eval LLM
-    # call entirely — rich answers are not second-guessed. This stops the
-    # gate's nudge → re-synthesis → content_replace chain from mutating
-    # content the user has already seen (the visual-collapse bug). The gate
-    # still runs when attempts > 0 (genuine re-plan) and when NO data rows
-    # were produced (the wrong/empty-table failure mode it exists to catch).
-    if attempts == 0:
-        from app.services.goal_contract import is_metadata_only_rows  # lazy
-        for _gr in tool_results:
-            _grows = _gr.get("rows")
-            if isinstance(_grows, list) and _grows and not is_metadata_only_rows(_grows):
-                logger.info(
-                    "answer-verification gate: fast-path pass "
-                    "(attempts=0, %d rows present)",
-                    len(_grows),
-                )
-                return _AnswerGateResult("none", "")
-    timeout_s = getattr(settings, "SELF_EVAL_LLM_GATE_TIMEOUT_S", 15.0)
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                evaluate_answer,
-                user_message,
-                tool_results,
-                assistant_content,
-                attempts=attempts,
-                budget_remaining=budget_remaining,
-                catalog_meta=catalog_meta,
-            ),
-            timeout=timeout_s,
-        )
-    except Exception as exc:
-        # Never block the stream on the gate: log and proceed.
-        logger.warning(
-            "answer-verification gate failed/timed out (non-fatal): %s", exc
-        )
-        return _AnswerGateResult("none", "")
-    if result.status == "COMPLETE":
-        logger.debug(
-            "answer-verification gate: action=none status=COMPLETE attempts=%s "
-            "budget=%s signals=%s",
-            attempts, budget_remaining, result.signals,
-        )
-        return _AnswerGateResult("none", "")
-    if result.status == "INCOMPLETE":
-        logger.info(
-            "answer-verification gate: action=nudge attempts=%s budget=%s "
-            "signals=%s gaps=%s",
-            attempts, budget_remaining, result.signals, result.gaps,
-        )
-        return _AnswerGateResult("nudge", build_replan_nudge(result))
-    logger.info(
-        "answer-verification gate: action=disclose attempts=%s budget=%s "
-        "signals=%s gaps=%s",
-        attempts, budget_remaining, result.signals, result.gaps,
-    )
-    return _AnswerGateResult("disclose", build_gap_disclosure(result))
-
-
 def _tool_names_from_schemas(tools: list | None) -> list[str]:
     """Extract the ``name`` field of each tool schema in OpenAI format.
 
-    Used at every chat-runtime call site to feed ``_compute_tool_choice``
+    Used by the hallucination guardrail (and historically by the removed
+    ``_compute_tool_choice`` tool-forcing path — Phase A/B).
     the list of tools the agent has been granted.  Pure, side-effect free
     — safe to call inside the hot loop.
     """
@@ -6007,74 +5889,6 @@ def _make_goal_contract_table_executor(
         return cov
 
     return _probe
-
-
-def _compute_tool_choice(
-    user_message: str,
-    data_ctx_extras: dict,
-    iteration: int,
-    tool_names: list[str] | None = None,
-    is_dashboard_followup: bool = False,
-) -> dict | None:
-    """Determine the tool_choice parameter for the LLM call.
-
-    This is the single server-side enforcement point that turns a
-    detected user intent (time-sensitive / URL / file-format / data
-    question) into a hard ``tool_choice`` on iteration 0.  Without this,
-    a weak function-calling model (e.g. ``deepseek-chat`` on
-    ``tool_choice=auto``) reliably prefers prose over ``tool_calls`` —
-    producing the "I'll create…" / hallucinated-news symptoms observed
-    in production.
-
-    Precedence (highest first) — see
-    :func:`app.services.turn_action.resolve_turn_action`:
-
-      1. ``ask_data_agent``  — bound KBs + data question (existing path)
-      2. ``create_artifact`` — file-format intent (``docx``/``pptx``/...)
-      3. ``web_extract``     — URL present in the message
-      4. ``web_search``      — time-sensitive keyword heuristic
-      5. ``None``            — general chitchat; ``tool_choice=auto``
-
-    Forcing only applies on ``iteration == 0`` so multi-step tool loops
-    are not interfered with.  Tool presence is required to force — we
-    never ask the LLM to call a tool the agent has not been granted.
-
-    Args:
-        user_message: The original user message.
-        data_ctx_extras: Context dict with ``bound_kb_ids`` and any
-                         other data-source runtime fields.
-        iteration: Current loop iteration (0-based).
-        tool_names: Names of tools granted to the agent. Optional for
-                    backward compatibility; when ``None``, no tool is
-                    forced (block is still injected as a soft nudge).
-
-    Returns:
-        - ``None`` for "auto" (default LLM behavior).
-        - ``{"type": "function", "function": {"name": "<tool>"}}`` to
-          force the named tool on this iteration.
-    """
-    # Lazy import to avoid a circular dependency at module load time
-    # (turn_action imports from agent_prompts, but agents.py is already
-    # importing from agent_prompts — a top-level import would still
-    # work, but lazy import makes the seam explicit and keeps
-    # ``_compute_tool_choice`` testable in isolation).
-    from app.services.turn_action import resolve_turn_action
-
-    action = resolve_turn_action(
-        user_message=user_message,
-        tool_names=tool_names or [],
-        data_ctx_extras=data_ctx_extras or {},
-        is_data_question=_is_data_question(user_message),
-        iteration=iteration,
-        is_dashboard_followup=is_dashboard_followup,
-    )
-    if not action.forced_tool:
-        return None
-    logger.info(
-        "tool_choice forcing: %s (iteration=%d)",
-        action.forced_tool, iteration,
-    )
-    return {"type": "function", "function": {"name": action.forced_tool}}
 
 
 def _prior_user_turn_was_live_dashboard(
@@ -7002,7 +6816,6 @@ async def add_message(
         _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
-        _gate_attempts = 0  # universal self-eval re-plan nudges this turn
         _pptx_nudge_attempts = 0  # pptx turn-guard nudges this turn
         # Fix 1b: one-shot "force create_artifact next iteration" signal set
         # by the LAST allowed pptx nudge (pptx_turn_guard.force_next). Read at
@@ -7071,15 +6884,10 @@ async def add_message(
                         "your final answer with what you have."
                     ),
                 })
-            # Compute tool_choice for this iteration.  On iteration 0 the
-            # server enforces the matching tool (ask_data_agent /
-            # create_artifact / web_extract / web_search) so a weak
-            # function-calling model cannot simply answer from training
-            # memory.  See ``_compute_tool_choice`` for the precedence.
-            tool_choice = _compute_tool_choice(
-                user_content, data_ctx_extras, iteration,
-                tool_names=_tool_names_from_schemas(tools),
-            )
+            # Compute tool_choice for this iteration.  Model-first
+            # harness (Phase A/B): the server no longer forces a tool on
+            # iteration 0 — the LLM picks from the full tool list.
+            tool_choice = None  # model-first: no server-side tool_choice forcing (Phase A/B); the LLM picks the tool
 
             # Dashboard guard: same logic as the v3 stream — if the user
             # asked for a live dashboard and we've already done the
@@ -7404,24 +7212,6 @@ async def add_message(
                             conversation_id, iteration, _file_guard.detected_format,
                         )
                         assistant_content = (assistant_content or "") + " " + _file_guard.message
-                # P2.2: Universal Self-Evaluation & Re-Planning gate (re-plan
-                # up to SELF_EVAL_MAX_REPLANS times before best-effort answer).
-                _gate_result = await _check_answer_verification_gate(
-                    user_content,
-                    tool_calls_for_frontend,
-                    assistant_content,
-                    attempts=_gate_attempts,
-                    budget_remaining=MAX_TOOL_ITERATIONS - iteration,
-                    catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
-                    agent_name=conv.agent_name,
-                )
-                if _gate_result.action == "nudge":
-                    llm_messages.append({"role": "assistant", "content": assistant_content})
-                    llm_messages.append({"role": "user", "content": _gate_result.message})
-                    _gate_attempts += 1
-                    continue
-                if _gate_result.action == "disclose":
-                    assistant_content = (assistant_content or "") + _gate_result.message
                 break
 
             # Parse all tool calls first so we can execute them in parallel
@@ -8341,28 +8131,6 @@ async def add_message(
     db.commit()
     db.refresh(conv)
 
-    # QUALITY_EVAL (Part 2 — Gap Analysis): run standalone quality
-    # evaluation in the ReAct (v2) path.  Only fires when
-    # QUALITY_EVAL_ALL_PATHS is True.  Non-fatal: any failure or
-    # heuristic-only result leaves assistant_content unchanged.
-    try:
-        if getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
-            from app.services.synexia.quality_eval import evaluate_response_quality
-            _qe = evaluate_response_quality(
-                user_message=user_content or prompt,
-                assistant_text=assistant_content,
-                response_prompt=system_prompt or "",
-            )
-            if _qe.final_text and _qe.final_text != assistant_content:
-                assistant_content = _qe.final_text
-                # Update the persisted message content
-                assistant_msg["content"] = assistant_content
-                conv.messages = messages  # messages already has assistant_msg appended
-                conv.updated_date = datetime.now(timezone.utc)
-                db.commit()
-                db.refresh(conv)
-    except Exception as _qe_err:
-        logger.warning("ReAct quality eval failed (non-fatal): %s", _qe_err)
 
     # Fire-and-forget: extract memories from this conversation.
     # Only triggers when there are enough messages (≥4, checked internally).
@@ -8424,6 +8192,7 @@ async def resume_conversation(
         agent_name=conv.agent_name,
         role=user.role,
     )
+
 
     # ── User-level LLM overrides ─────────────────────────────────────
     llm_overrides = get_user_llm_overrides(db, user.id)
@@ -8739,10 +8508,7 @@ async def resume_conversation(
             }
             _file_forced = True
             _file_force_next_iteration = False
-        tool_choice = _compute_tool_choice(
-            user_content, data_ctx_extras, iteration,
-            tool_names=_tool_names_from_schemas(tools),
-        )
+        tool_choice = None  # model-first: no server-side tool_choice forcing (Phase A/B); the LLM picks the tool
         # Finish line: force tool_choice="none" on the final iteration so the
         # LLM must answer in text. No dashboard guard in this loop.
         tool_choice = _finish_line_tool_choice(
@@ -8859,23 +8625,6 @@ async def resume_conversation(
                         conversation_id, iteration, _file_guard.detected_format,
                     )
                     assistant_content = (assistant_content or "") + " " + _file_guard.message
-            # P2.2: Universal Self-Evaluation & Re-Planning gate (resume loop)
-            _gate_result = await _check_answer_verification_gate(
-                user_content,
-                tool_calls_for_frontend,
-                assistant_content,
-                attempts=_gate_attempts,
-                budget_remaining=_final_iteration - iteration,
-                catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
-                agent_name=conv.agent_name,
-            )
-            if _gate_result.action == "nudge":
-                llm_messages.append({"role": "assistant", "content": assistant_content})
-                llm_messages.append({"role": "user", "content": _gate_result.message})
-                _gate_attempts += 1
-                continue
-            if _gate_result.action == "disclose":
-                assistant_content = (assistant_content or "") + _gate_result.message
             break
 
         # Parse + execute tool calls (reuse the parallel execution logic)
@@ -11858,24 +11607,6 @@ async def add_message_stream(
                 if not assistant_content:
                     assistant_content = fsm_result.assistant_content or ""
 
-                # QUALITY_EVAL (Tier 2 — Approach C): post-stream semantic
-                # quality critique + corrective re-generation.  Runs in a
-                # worker thread (call_llm is sync).  For automation
-                # (unattended), replacing the streamed text with a revised
-                # version is fine — no live user is watching tokens.  The
-                # final persisted Message gets the (possibly revised) text.
-                # Non-fatal: any failure leaves assistant_content unchanged.
-                try:
-                    _qer = await asyncio.to_thread(
-                        _fsm.run_quality_eval, _fsm_req, assistant_content,
-                    )
-                    if _qer is not None:
-                        if _qer.final_text and _qer.final_text != assistant_content:
-                            assistant_content = _qer.final_text
-                        yield f'data: {json.dumps({"type": "quality_eval", "quality_eval": _qer.to_dict()})}\n\n'
-                except Exception as _qe_err:  # noqa: BLE001 — observability only
-                    logger.warning("QUALITY_EVAL streaming hook failed (non-fatal): %s", _qe_err)
-
                 # Kimi/GPT-style citations: collect the data sources the
                 # FSM actually queried this turn (source_id/source_name
                 # from tool result_data). Attached to the persisted
@@ -11933,9 +11664,6 @@ async def add_message_stream(
                         "artifact_ids": fsm_result.artifact_ids or [],
                         "file_exports": (
                             fsm_result.file_exports if hasattr(fsm_result, "file_exports") else {}
-                        ),
-                        "quality_eval": (
-                            fsm_result.quality_eval if hasattr(fsm_result, "quality_eval") else None
                         ),
                         "sources": _fsm_citations,
                     }
@@ -12596,7 +12324,7 @@ async def add_message_stream(
     _orch_no_data = [False]
 
     async def event_stream():
-        nonlocal assistant_content, guardrail_retries, messages, conv
+        nonlocal assistant_content, guardrail_retries, messages, conv, agent_app, user
 
         # T18: mark this turn as dashboard-intent so the artifact persistence
         # layer can drop stray analytics-path artifacts (e.g. a static "Web
@@ -12627,6 +12355,35 @@ async def add_message_stream(
         if _fresh_conv is not None:
             conv = _fresh_conv
             messages = list(conv.messages or [])
+
+        # Same detachment hazard applies to ``agent_app``: it was loaded
+        # above from the request-scoped ``db`` (line ~11773), which FastAPI
+        # closes as soon as this endpoint returns the StreamingResponse.
+        # Re-fetch it from the shadow session so attribute touches inside
+        # the loop (e.g. ``_loop_guard_config_for(agent_app)``) never raise
+        # ``DetachedInstanceError`` — observed 2026-09-03: v3 stream died
+        # instantly with "Instance <AgentApp ...> is not bound to a Session"
+        # on the first guardrail setup of a fresh Data Analyst conversation.
+        if agent_name:
+            _fresh_agent_app = db.query(AgentApp).filter(
+                AgentApp.name == agent_name,
+                AgentApp.is_deleted == False,  # noqa: E712
+            ).first()
+            if _fresh_agent_app is not None:
+                agent_app = _fresh_agent_app
+
+        # Same detachment hazard for ``user``: the auth dependency's User is
+        # bound to the request session and can be expired by an early
+        # rollback/commit inside the loop. Re-fetch from the shadow session
+        # so the tool batch never hits "Instance <User ...> is not bound to
+        # a Session" (observed 2026-09-03 on the first tool batch of a Data
+        # Analyst v3 turn). NOTE: query by the scalar ``_wf_user_id``
+        # captured in the outer scope — touching ``user.id`` here would
+        # itself raise on an expired detached instance.
+        if user is not None and _wf_user_id:
+            _fresh_user = db.query(User).filter(User.id == _wf_user_id).first()
+            if _fresh_user is not None:
+                user = _fresh_user
 
         assistant_msg_id = str(uuid.uuid4())
         artifact_ids: list[str] = []
@@ -12693,6 +12450,16 @@ async def add_message_stream(
                         "agent_name": getattr(conv, "agent_name", None),
                         "org_id": getattr(conv, "org_id", None),
                         "app_id": getattr(conv, "app_id", None),
+                        # 2026-09-03: carry the bound data sources into the
+                        # deep-research tool context. Pre-fix the research
+                        # branch built a bare context WITHOUT bound_kb_ids, so
+                        # ask_data_agent could not resolve the warehouse and
+                        # scope=both silently degraded to web-only. This is
+                        # the same data_ctx_extras the normal v3 loop threads
+                        # into its tool context (bound_kb_ids, project ids,
+                        # schema hints) — deep research must see the same
+                        # warehouse the chat loop would.
+                        **dict(data_ctx_extras or {}),
                     },
                     endpoint=(
                         effective_llm.endpoint
@@ -12755,7 +12522,6 @@ async def add_message_stream(
         _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
         conv_budget = IterationBudget(max_total=_max_iters)
         _verify_attempts = 0
-        _gate_attempts = 0  # universal self-eval re-plan nudges this turn
         _cad_verify_nudges = 0  # CAD verify-on-stop nudges this turn (cap 1)
         _fusion_clear_count = 0  # fusion360_clear calls this turn (cap 1 — see _invoke_v3)
         _fusion_readonly_streak = 0  # consecutive read-only fusion calls (info/ping) — spin guard
@@ -12971,7 +12737,8 @@ async def add_message_stream(
                     # Step 1 (analyze/understand) is complete by definition:
                     # the request was read to build the plan.
                     _turn_plan_completed = {
-                        s.step_index for s in _turn_plan.steps if s.key == "analyze"
+                        s.step_index for s in _turn_plan.steps
+                        if s.key in ("analyze", "understand")
                     }
                     if "plan" not in _emitted_phases:
                         _emitted_phases.add("plan")
@@ -13318,13 +13085,7 @@ async def add_message_stream(
                         "your final answer with what you have."
                     ),
                 })
-            tool_choice = _compute_tool_choice(
-                user_content, data_ctx_extras, iteration,
-                tool_names=_tool_names_from_schemas(tools),
-                is_dashboard_followup=_prior_user_turn_was_live_dashboard(
-                    llm_messages, user_content
-                ),
-            )
+            tool_choice = None  # model-first: no server-side tool_choice forcing (Phase A/B); the LLM picks the tool
 
             # Dashboard guard: if the user asked for a live dashboard and
             # we've already done the schema/design pass, force the next LLM
@@ -14275,101 +14036,6 @@ async def add_message_stream(
                             conversation_id, iteration, _file_guard.detected_format,
                         )
                         assistant_content = (assistant_content or "") + " " + _file_guard.message
-                # P2.2: Universal Self-Evaluation & Re-Planning gate (v3 loop)
-                # 2026-08-25: data-sufficient fast-path. When the agent has
-                # usable data AND already produced substantive prose (>= N
-                # chars) AND the gate has already nudged once, skip further
-                # nudges and fall through to finalize. The 2nd/3rd nudges
-                # almost never improve quality and only cause the
-                # "collapse" UX where streamed text gets replaced. The
-                # `pending_action` post-loop strip (further down) will
-                # still clean up any trailing promise phrases.
-                _data_sufficient_skip = False
-                if (
-                    _gate_attempts >= 1
-                    and assistant_content
-                    and len(assistant_content.strip())
-                    >= int(
-                        getattr(
-                            settings,
-                            "SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE",
-                            200,
-                        )
-                    )
-                ):
-                    _has_usable_for_skip = (
-                        (_contract is not None and _contract._usable_results > 0)
-                        if settings.GOAL_CONTRACT_ENABLED
-                        else any(
-                            tc.get("status") == "completed"
-                            for tc in tool_calls_for_frontend
-                        )
-                    )
-                    if _has_usable_for_skip:
-                        _data_sufficient_skip = True
-                        logger.info(
-                            "v3 stream: data-sufficient fast-path — skipping "
-                            "self-eval nudge (conv=%s, iter=%d, prose=%d "
-                            "chars, gate_attempts=%d)",
-                            conversation_id,
-                            iteration,
-                            len(assistant_content.strip()),
-                            _gate_attempts,
-                        )
-                if _data_sufficient_skip:
-                    # Don't call the gate at all; fall through to finalize
-                    # block below. The post-loop promise-strip will clean
-                    # up any trailing "Let me..." sentence.
-                    _gate_result = None
-                else:
-                    _gate_result = await _check_answer_verification_gate(
-                        user_content,
-                        tool_calls_for_frontend,
-                        assistant_content,
-                        attempts=_gate_attempts,
-                        budget_remaining=MAX_TOOL_ITERATIONS - iteration,
-                        catalog_meta=(data_ctx_extras or {}).get("catalog_meta"),
-                        agent_name=conv.agent_name,
-                    )
-                if _gate_result is not None and _gate_result.action == "nudge":
-                    llm_messages.append({"role": "assistant", "content": assistant_content})
-                    llm_messages.append({"role": "user", "content": _gate_result.message})
-                    _gate_attempts += 1
-                    # Pop captured iter content: the gate nudged because it
-                    # thinks a dimension is missing; the next iter's prose
-                    # will replace this entry instead of duplicating it
-                    # (the user's repro: "Daily Sales Data Sync" produced
-                    # the report twice because markdown/outcome/running
-                    # triggered a re-iteration).
-                    # BUGFIX 2026-08-23: save popped good content for recovery.
-                    if _v3_iter_contents:
-                        _popped = _v3_iter_contents.pop()
-                        if len(_popped or "") > len(_v3_recovered_best[0] or ""):
-                            _v3_recovered_best[0] = _popped
-                    # D1/D2: gate nudge-reply prose must never be visible.
-                    # Clear it so the top-of-loop append skips it; the next
-                    # iteration's stream replaces the bubble instead of
-                    # appending (leakage fix).
-                    # 2026-08-25: emit a content_preserve event BEFORE the
-                    # content_replace so the frontend can keep the old
-                    # text visible (with a "Refining answer..." indicator)
-                    # while the next iteration streams its replacement.
-                    # This eliminates the "collapse" visual where text
-                    # disappears and reappears. The content_replace
-                    # immediately follows to swap the persisted message
-                    # content; the frontend preserves the visual bubble.
-                    # 2026-08-31: DROP the immediate content_replace — it
-                    # cleared the refining flag instantly (the indicator
-                    # never showed). preserve-only matches promise_strip:
-                    # the next iteration's first delta (via
-                    # _nudge_replacement_pending) performs the actual swap.
-                    if content_streamed and assistant_content and not _suppress_chat_deltas:
-                        yield f'data: {json.dumps({"type": "content_preserve", "content": assistant_content, "reason": "self_eval_nudge"})}\n\n'
-                    assistant_content = ""
-                    _nudge_replacement_pending = True
-                    continue
-                if _gate_result is not None and _gate_result.action == "disclose":
-                    assistant_content = (assistant_content or "") + _gate_result.message
                 # ── Fix 6: dashboard-narration nudge guard ─────────────
                 # The model exited with ONLY narration ("I'll build you an ERP
                 # dashboard...") and no tool call. None of the six guards above
@@ -18449,57 +18115,6 @@ async def add_message_stream(
                 _mc_hook_err,
             )
 
-        # QUALITY_EVAL (Part 2 — Gap Analysis): run standalone quality
-        # eval on the non-FSM v3 streaming path. Gated by
-        # QUALITY_EVAL_ALL_PATHS.  When the text is revised, the done
-        # event carries the updated assistant_content.
-        # (Fixed 2026-08-17): the previous version called
-        # evaluate_response_quality() synchronously INSIDE the async SSE
-        # generator.  That blocked the event loop for the whole LLM eval
-        # (up to 120s per call), so _sse_with_heartbeat couldn't emit its
-        # 5s pings and proxies/browsers timed out — the client saw
-        # "Sorry, the connection was interrupted."  Now offloaded to a
-        # worker thread with a 15s ceiling and eval-only (no re-gen).
-        try:
-            if getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
-                from app.services.synexia.quality_eval import evaluate_response_quality
-
-                async def _run_qe() -> object:
-                    def _sync_qe() -> object:
-                        return evaluate_response_quality(
-                            user_message=user_content or "",
-                            assistant_text=assistant_content,
-                            max_iterations=0,  # eval-only, never re-generate
-                        )
-                    return await asyncio.to_thread(_sync_qe)
-
-                _qe_result = await asyncio.wait_for(_run_qe(), timeout=15.0)
-                if _qe_result.final_text and _qe_result.final_text != assistant_content:
-                    assistant_content = _qe_result.final_text
-                    # Multi-iter content re-sync (2026-08-20):
-                    # Quality eval revised `assistant_content` POST-LOOP.
-                    # The accumulator's LAST entry holds the pre-revision
-                    # final-iter content — replace it so the revision is
-                    # preserved while earlier iterations stay intact.
-                    # Then re-compute `accumulated_content` and sync the
-                    # in-memory `assistant_msg["content"]` so the `done`
-                    # event's conversation payload reflects the revision
-                    # (DB commit at the final-write block already happened
-                    # with pre-revision content; this is a pre-existing
-                    # inconsistency, not introduced by this fix).
-                    if _v3_iter_contents:
-                        _v3_iter_contents[-1] = assistant_content
-                    else:
-                        _v3_iter_contents.append(assistant_content)
-                    accumulated_content = "\n\n".join(c for c in _v3_iter_contents if c).strip()
-                    if isinstance(assistant_msg, dict):
-                        assistant_msg["content"] = accumulated_content
-                # Emit quality eval verdict as SSE event
-                yield f'data: {json.dumps({"type": "quality_eval", "quality_eval": _qe_result.to_dict()})}\n\n'
-        except asyncio.TimeoutError:
-            logger.warning("v3 stream quality eval timed out after 15s (non-fatal)")
-        except Exception as _qe_err:
-            logger.warning("v3 stream quality eval failed (non-fatal): %s", _qe_err)
 
         # --- Experience layer (Phase A/B): recipe + profile + cache store ---
         # BUG FIX (post-tool offload, follows f435531): get_embedding() inside
@@ -18669,7 +18284,7 @@ async def add_message_stream(
                     started_at=_turn_started,
                     completed_at=_dt2.now(_tz2.utc),
                     duration_ms=max(0, int((_dt2.now(_tz2.utc) - _turn_started).total_seconds() * 1000)),
-                    trace_id=getattr(_qe_result, "trace_id", None) if "_qe_result" in locals() else None,
+                    trace_id=None,  # quality-eval trace removed (Phase A/B)
                     model_name=_inv_model,
                     tool_call_count=_tool_count,
                 )
@@ -18699,6 +18314,18 @@ async def add_message_stream(
                 reset_dashboard_intent(_dash_intent_token)
             except Exception as _reset_err:
                 logger.warning("v3 stream: reset dashboard intent failed (non-fatal): %s", _reset_err)
+            # Close the shadow session opened at event_stream entry (line
+            # ~12349). Session.close() rolls back any still-open read
+            # transaction and returns the connection to the pool cleanly.
+            # WITHOUT this the session is only released by GC after the
+            # generator is dropped, and the pooled connection keeps its
+            # final SELECT open as ``idle in transaction`` — observed
+            # 2026-09-03: one stuck agent_conversations snapshot per v3
+            # turn, lingering for minutes until pool reuse.
+            try:
+                stream_db.close()
+            except Exception as _close_err:
+                logger.debug("v3 stream: shadow session close failed (non-fatal): %s", _close_err)
 
     return StreamingResponse(
         _sse_with_heartbeat(_guarantee_done(_disconnect_safe_stream(event_stream))),

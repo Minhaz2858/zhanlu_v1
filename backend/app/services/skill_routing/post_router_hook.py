@@ -58,17 +58,6 @@ _STOPWORDS: frozenset[str] = frozenset({
 # many skill names ("doc", "x", etc.) and produce false positives.
 _MIN_NAME_TOKEN_LEN: int = 3
 
-_DASHBOARD_INTENT_RE = re.compile(r"\b(?:dashboard|dash-board|kpi\s*dashboard|仪表盘)\b", re.IGNORECASE)
-
-_WEEKLY_REPORT_INTENT_RE = re.compile(
-    # NOTE: `\b` only wraps the ASCII alternatives. CJK characters are word
-    # chars in Python re, so `\b周报\b` would fail when 周报 is adjacent to
-    # another CJK char (e.g. "本周的周报"). CJK alternatives match bare.
-    r"(?:\b(?:weekly\s*(?:market\s*)?report|weekly\s*summary|weekly\s*review|"
-    r"market\s*report)\b|周报|周度报告|本周报告)",
-    re.IGNORECASE,
-)
-
 
 # ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -216,29 +205,12 @@ def post_router_pick(
     if not candidates:
         return None
 
-    if _DASHBOARD_INTENT_RE.search(str(user_message or "")):
-        for cand in candidates:
-            if (cand.get("name") or "").strip().lower() == "dashboard-generation":
-                return {
-                    "skill_name": "dashboard-generation",
-                    "triggers": [],
-                    "format": "dashboard",
-                    "forced": True,
-                    "score": 1.0,
-                    "source": cand.get("source", "filesystem"),
-                }
-
-    if _WEEKLY_REPORT_INTENT_RE.search(str(user_message or "")):
-        for cand in candidates:
-            if (cand.get("name") or "").strip().lower() == "weekly-report-generation":
-                return {
-                    "skill_name": "weekly-report-generation",
-                    "triggers": [],
-                    "format": None,
-                    "forced": True,
-                    "score": 1.0,
-                    "source": cand.get("source", "filesystem"),
-                }
+    # NOTE (Phase A/B): the dashboard / weekly-report regex force branches
+    # were removed. Wide phrase patterns ("dashboard", "weekly summary")
+    # hijacked user verbs — e.g. "please list the weekly summary…" was
+    # auto-bound to weekly-report-generation even though the user only
+    # wanted a chat answer. The generic name/token scoring below remains
+    # for planner-side candidate ranking (model still makes the final call).
 
     best: Optional[dict[str, Any]] = None
     best_score: float = 0.0
@@ -253,6 +225,31 @@ def post_router_pick(
 
     skill_name = best.get("name")
     if not skill_name:
+        return None
+
+    # Force only on a genuine NAME reference, never on trigger words alone.
+    # A single generic name token ("report") plus trigger hits ("sales",
+    # "report") routinely crosses STRONG_MATCH_THRESHOLD and hijacks
+    # project-specific pipelines onto unrelated chats — observed 2026-09-03:
+    # "tell me about last month sales report" forced the Ecisco
+    # weekly-report-generation skill onto the generic Data Analyst agent
+    # (score 0.70, source=db), sending it down a C5/C9 petrochemical
+    # pipeline whose tables don't exist on the bound demo datasource.
+    # Requiring two name tokens (or the full normalized name) limits
+    # forcing to explicit skill references ("weekly report",
+    # "weekly report generation"); weaker matches still rank as ordinary
+    # candidates and the model makes the final call.
+    _msg_norm = _normalize(user_message or "")
+    _name_refs = sum(
+        1 for tok in _name_tokens(skill_name) if tok in set(re.findall(r"\b\w+\b", _msg_norm))
+    )
+    _norm_name = re.sub(r"[-_\s]+", " ", skill_name.lower().strip())
+    if _name_refs < 2 and (not _norm_name or _norm_name not in _msg_norm):
+        logger.info(
+            "post_router_pick: NOT forcing skill=%s score=%.2f source=%s "
+            "(name tokens=%d — trigger-only match)",
+            skill_name, best_score, best.get("source", "?"), _name_refs,
+        )
         return None
 
     logger.info(

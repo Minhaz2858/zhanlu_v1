@@ -274,31 +274,28 @@ class TestResolverSoftIntent(unittest.TestCase):
         self.resolver = SkillResolver()
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
-    @patch("app.services.skill_routing.resolver.SkillResolver._detect_soft_intent")
-    def test_soft_intent_docx(self, mock_soft, mock_file):
+    def test_soft_intent_docx(self, mock_file):
+        # Phase A/B: soft-intent heuristic removed → no explicit format means
+        # the resolver lets the LLM pick from the catalog.
         mock_file.return_value = None          # no explicit format
-        mock_soft.return_value = "docx"        # soft intent → docx
         decision = self.resolver.resolve(
             user_message="Make a sales report",
             picked_skill=None,
         )
-        self.assertEqual(decision.chosen_skill, "docx")
-        self.assertEqual(decision.reason, "soft_intent")
-        self.assertTrue(decision.is_default)
+        self.assertEqual(decision.chosen_skill, "")
+        self.assertEqual(decision.reason, "llm_catalog_pick")
+        self.assertFalse(decision.is_default)
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
-    @patch("app.services.skill_routing.resolver.SkillResolver._detect_soft_intent")
-    def test_format_intent_wins_over_soft_intent(self, mock_soft, mock_file):
-        """If both match, format_intent takes priority (checked first)."""
+    def test_format_intent_wins(self, mock_file):
+        """If the message names an explicit format, format_intent applies."""
         mock_file.return_value = "pptx"
-        mock_soft.return_value = "docx"
         decision = self.resolver.resolve(
             user_message="Make a sales report PPT",
             picked_skill=None,
         )
         self.assertEqual(decision.chosen_skill, "ppt-design")
         self.assertEqual(decision.reason, "format_intent")
-
 
 class TestResolverFallback(unittest.TestCase):
     """Tier 5: no signal → fallback to docx."""
@@ -308,10 +305,8 @@ class TestResolverFallback(unittest.TestCase):
         self.resolver = SkillResolver()
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
-    @patch("app.services.skill_routing.resolver.SkillResolver._detect_soft_intent")
-    def test_fallback_to_llm_catalog_pick(self, mock_soft, mock_file):
+    def test_fallback_to_llm_catalog_pick(self, mock_file):
         mock_file.return_value = None
-        mock_soft.return_value = None
         decision = self.resolver.resolve(
             user_message="hello",
             picked_skill=None,
@@ -320,7 +315,6 @@ class TestResolverFallback(unittest.TestCase):
         self.assertEqual(decision.reason, "llm_catalog_pick")
         self.assertFalse(decision.is_default)
         self.assertEqual(decision.namespace, "")
-
 
 # ==========================================================================
 # 3. RoutingDecision dataclass
@@ -500,11 +494,9 @@ class TestRoutingIntegration(unittest.TestCase):
         self.assertFalse(decision.exclusive)
 
     @patch("app.services.skill_routing.resolver.SkillResolver._detect_file_intent")
-    @patch("app.services.skill_routing.resolver.SkillResolver._detect_soft_intent")
-    def test_completely_generic_request_lets_llm_pick(self, mock_soft, mock_file):
-        """No format, no soft intent, no picked skill → LLM picks from catalog."""
+    def test_completely_generic_request_lets_llm_pick(self, mock_file):
+        """No format, no picked skill → LLM picks from catalog."""
         mock_file.return_value = None
-        mock_soft.return_value = None
         decision = self.resolver.resolve(
             user_message="help me with something",
             picked_skill=None,

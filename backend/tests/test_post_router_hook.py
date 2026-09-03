@@ -174,47 +174,85 @@ class TestPostRouterPick(unittest.TestCase):
             self.assertIn("score", result)
             self.assertGreaterEqual(result["score"], 0.6)
 
-    def test_dashboard_intent_prefers_dashboard_generation_over_uiux_companion(self):
-        """Dashboard requests may mention UI UX Pro Max, but the owning
-        skill must remain dashboard-generation; ui-ux-pro-max is a companion
-        tool/skill used inside that workflow, not the turn owner."""
+    def test_wide_dashboard_phrase_does_not_force_unrelated_skill(self):
+        """Phase A/B: the dashboard/weekly regex force branches were removed.
+        A dashboard-phrased message no longer auto-forces dashboard-generation;
+        if no candidate is a strong name/trigger match the picker returns None
+        and the model decides from the catalog."""
         from app.services.skill_routing.post_router_hook import post_router_pick
 
         result = post_router_pick(
-            "Build a live sales dashboard. Use UI UX Pro Max design guidance.",
+            "Build a live sales dashboard. Use UI UX design guidance.",
             candidates=[
                 {
-                    "name": "ui-ux-pro-max",
-                    "description": "Design intelligence",
-                    "trigger": "ui ux design dashboard chart",
-                    "source": "filesystem",
-                },
-                {
-                    "name": "dashboard-generation",
-                    "description": "Build live database dashboards",
-                    "trigger": "dashboard kpi metrics chart",
+                    "name": "resume-writer",
+                    "description": "Writes resumes",
+                    "trigger": "cv resume career",
                     "source": "filesystem",
                 },
             ],
         )
+        self.assertIsNone(result)
 
+    def test_weekly_summary_phrase_does_not_force_skill_without_strong_match(self):
+        """The C5C9 regression: 'list the weekly summary…' must not be forced
+        onto weekly-report-generation purely because of the phrase."""
+        from app.services.skill_routing.post_router_hook import post_router_pick
+
+        result = post_router_pick(
+            "Please list the weekly summary and forecast for C5C9 from Dec 24-30 2025",
+            candidates=[
+                {"name": "resume-writer", "trigger": "cv resume", "source": "filesystem"},
+            ],
+        )
+        self.assertIsNone(result)
+
+    def test_trigger_only_strong_match_does_not_force(self):
+        """2026-09-03 regression: 'tell me about last month sales report'
+        scored 0.70 against weekly-report-generation via trigger keywords
+        ('sales', 'report') and forced the Ecisco C5/C9 pipeline onto the
+        generic Data Analyst — which then ground for minutes against a demo
+        datasource that has none of the skill's tables. A trigger-only match
+        (fewer than two skill-NAME tokens) must never force; the model makes
+        the final call from the ranked catalog instead."""
+        from app.services.skill_routing.post_router_hook import post_router_pick
+
+        result = post_router_pick(
+            "tell me about last month sales report",
+            candidates=[
+                {
+                    "name": "weekly-report-generation",
+                    "description": "Ecisco C5/C9 petrochemical weekly market report",
+                    "trigger": "report sales weekly market",
+                    "source": "db",
+                },
+            ],
+        )
+        self.assertIsNone(result)
+
+    def test_explicit_two_name_tokens_still_force(self):
+        """An explicit skill-name reference ('weekly report …') still forces:
+        two name tokens present means the user named the skill, not just a
+        generic topic word."""
+        from app.services.skill_routing.post_router_hook import post_router_pick
+
+        result = post_router_pick(
+            "generate the weekly report for C5C9",
+            candidates=[
+                {
+                    "name": "weekly-report-generation",
+                    "description": "Ecisco C5/C9 petrochemical weekly market report",
+                    "trigger": "report sales weekly market",
+                    "source": "db",
+                },
+            ],
+        )
         self.assertIsNotNone(result)
-        self.assertEqual(result["skill_name"], "dashboard-generation")
+        assert result is not None  # type narrowing for pyright
+        self.assertEqual(result["skill_name"], "weekly-report-generation")
         self.assertTrue(result["forced"])
 
-    def test_dashboard_intent_prefers_dashboard_generation_even_when_message_negates_html(self):
-        from app.services.skill_routing.post_router_hook import post_router_pick
 
-        result = post_router_pick(
-            "Build a live sales dashboard with UI UX design guidance. Use create_dashboard, not HTML.",
-            candidates=[
-                {"name": "ui-ux-pro-max", "trigger": "ui ux design dashboard chart", "source": "filesystem"},
-                {"name": "dashboard-generation", "trigger": "dashboard kpi metrics chart", "source": "filesystem"},
-            ],
-        )
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result["skill_name"], "dashboard-generation")
 
 
 

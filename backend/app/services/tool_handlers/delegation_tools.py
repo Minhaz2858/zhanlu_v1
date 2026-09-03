@@ -35,11 +35,6 @@ import httpx
 from sqlalchemy.orm import Session
 
 from app.config import settings
-from app.services.answer_verification import (  # universal self-eval gate
-    build_gap_disclosure,
-    build_replan_nudge,
-    evaluate_answer,
-)
 from app.services.goal_contract import is_metadata_only_rows
 from app.services.tool_handlers import db_tools  # ensure DB tools registered
 from app.services.tool_registry import registry
@@ -344,7 +339,6 @@ async def _ask_data_agent(
     sub_context["schema_graph_enabled"] = True
 
     iterations = 0
-    _gate_attempts = 0  # universal self-eval re-plan nudges this sub-loop turn
     # Default 2 iterations. The Data Agent's loop is now optimized so a
     # schema-discover -> execute_query pair is the common case: the calling
     # agent embeds a compact [schema: ...] hint in the question when it can,
@@ -440,25 +434,6 @@ async def _ask_data_agent(
 
         if not raw_tool_calls:
             final_text = content
-            # P2.2: Universal Self-Evaluation gate (sub-loop) — verify the
-            # draft answer against the question before accepting it. On
-            # INCOMPLETE (e.g. metadata-only answer), inject the gap nudge
-            # and continue so the agent re-plans with a real data query.
-            _g_action, _g_msg = await _sub_loop_answer_gate(
-                question,
-                state,
-                final_text,
-                attempts=_gate_attempts,
-                budget_remaining=max_iterations - iteration,
-                endpoint=endpoint,
-            )
-            if _g_action == "nudge":
-                messages.append({"role": "assistant", "content": final_text})
-                messages.append({"role": "user", "content": _g_msg})
-                _gate_attempts += 1
-                continue
-            if _g_action == "disclose":
-                final_text = (final_text or "") + _g_msg
             break
 
         # Append assistant message
@@ -1247,104 +1222,8 @@ def _maybe_capture_execute_result(tool_name: str, result: dict, state: dict) -> 
             state["source_name"] = result["source_name"]
 
 
-def _rows_all_null(rows: list) -> bool:
-    """True when every returned row is an all-NULL dict (aggregate query that
-    matched nothing — e.g. wrong column name + English filter literal). Such
-    rows are schema-shaped evidence of "no data", not real business data."""
-    if not rows:
-        return False
-    for row in rows:
-        if not isinstance(row, dict):
-            return False
-        if any(v is not None for v in row.values()):
-            return False
-    return True
 
 
-async def _sub_loop_answer_gate(
-    question: str,
-    state: dict,
-    final_text: str,
-    *,
-    attempts: int,
-    budget_remaining: int,
-    endpoint: Optional[str] = None,
-) -> tuple[str, str]:
-    """Universal Self-Evaluation gate for the Data Agent sub-loop.
-
-    Runs the hybrid evaluator (deterministic-only unless both flags on) on
-    the draft answer plus the accumulated query state. Returns ``(action,
-    message)``:
-
-    - ``("", "")`` — skipped (flag off / no tool evidence) or COMPLETE
-    - ``("nudge", msg)`` — re-plan and continue the loop
-    - ``("disclose", msg)`` — append the gap disclosure and break
-
-    TOTAL: never raises and never blocks the loop on failure. Metadata-only
-    evidence (no business rows ever captured) is represented as a
-    schema-shaped payload so the metadata detector fires and the agent is
-    nudged to run a real data query.
-    """
-    if not getattr(settings, "SELF_EVAL_REPLAN_ENABLED", False):
-        return "", ""
-    tool_results: list[dict] = []
-    rows = state.get("last_rows")
-    if rows is not None:
-        if _rows_all_null(rows):
-            # All-NULL aggregate rows (wrong column name + filter that
-            # matched nothing) mean "no business data" — represent them as
-            # columns + zero rows so the metadata-only detector fires and the
-            # agent is nudged to re-probe instead of answering "no data".
-            first = rows[0] if rows and isinstance(rows[0], dict) else {}
-            tool_results.append({
-                "tool": "execute_query",
-                "columns": list(first.keys()),
-                "row_count": 0,
-                "rows": [],
-            })
-        else:
-            tool_results.append({
-                "tool": "execute_query",
-                "rows": rows,
-                "sql": state.get("last_sql"),
-            })
-    else:
-        meta_rows = state.get("last_metadata_rows")
-        if meta_rows is not None:
-            # Schema-shaped payload: columns known but ZERO business rows,
-            # so the metadata-only detector fires and nudges a real query.
-            first = meta_rows[0] if meta_rows and isinstance(meta_rows[0], dict) else {}
-            tool_results.append({
-                "tool": "execute_query",
-                "columns": list(first.keys()),
-                "row_count": 0,
-                "rows": [],
-            })
-    if not tool_results:
-        # No tool evidence accumulated — nothing to verify against.
-        return "", ""
-    timeout_s = getattr(settings, "SELF_EVAL_LLM_GATE_TIMEOUT_S", 15.0)
-    try:
-        result = await asyncio.wait_for(
-            asyncio.to_thread(
-                evaluate_answer,
-                question,
-                tool_results,
-                final_text,
-                attempts=attempts,
-                budget_remaining=budget_remaining,
-                endpoint=endpoint,
-            ),
-            timeout=timeout_s,
-        )
-    except Exception as exc:
-        logger.warning("sub-loop answer-verification failed (non-fatal): %s", exc)
-        return "", ""
-    if result.status == "COMPLETE":
-        return "", ""
-    if result.status == "INCOMPLETE":
-        return "nudge", build_replan_nudge(result)
-    return "disclose", build_gap_disclosure(result)
 
 
 async def _call_llm(

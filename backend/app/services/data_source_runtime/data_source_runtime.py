@@ -1007,6 +1007,31 @@ def _normalize_project_name(project_name: str | None) -> str | None:
     return name
 
 
+def _end_read_txn(db) -> None:
+    """End any read-only transaction this module opened on ``db``.
+
+    The context-assembly helpers query KnowledgeBase / catalog tables on a
+    caller-supplied session that the caller then holds across a long agent
+    turn (LLM calls, SSE streaming). Without ending the transaction here
+    the connection sits ``idle in transaction`` for the whole turn —
+    observed 2026-09-03: 7 leaked backend connections stuck on the
+    KB-scoping SELECT (oldest 400s+), one per conversation start, heading
+    toward pool exhaustion and multi-minute turns.
+
+    Safe ONLY when the session carries no pending writes: rollback would
+    discard the caller's uncommitted INSERTs/UPDATEs, so skip when
+    ``db.new`` / ``db.dirty`` are non-empty. Loaded (persistent) objects
+    are merely expired and refresh lazily — harmless for read assembly.
+    """
+    if db is None:
+        return
+    try:
+        if not db.new and not db.dirty:
+            db.rollback()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
 def _extend_with_project_kbs(
     db: Session,
     agent_app: AgentApp | None,
@@ -1055,6 +1080,7 @@ def _extend_with_project_kbs(
     bound_set = set(bound_ids)
     extra_ids = [kb.id for kb in rows if kb.id not in bound_set]
     if not extra_ids:
+        _end_read_txn(db)
         return bound_ids
     logger.info(
         "project_context_scoping: extending agent %s with %d KBs from "
@@ -1063,6 +1089,7 @@ def _extend_with_project_kbs(
         len(extra_ids),
         project_id,
     )
+    _end_read_txn(db)
     return list(bound_ids) + extra_ids
 
 
@@ -1296,18 +1323,41 @@ def prepare_data_source_runtime(
     `context` dict passed to `execute_tool` — it carries `bound_kb_ids`
     so the tool handlers can scope queries correctly.
     """
-    bound_ids = get_bound_data_source_ids(agent_app)
-    bound_ids = _maybe_extend_with_workspace_auto_bind(db, agent_app, bound_ids)
-    # Contextual project scoping: the agent only inherits a project's data
-    # sources when the user explicitly selected that project for THIS
-    # conversation. No project selected → agent's own data sources only.
-    # Dual-column parity with the UI: KBs bound via the legacy ``project``
-    # name column count too (see _extend_with_project_kbs).
-    if selected_project_id or _normalize_project_name(selected_project_name):
+    bound_ids: list[str] = []
+    _is_general_assistant = bool(
+        agent_app and getattr(agent_app, "name", None) == "general_assistant"
+    )
+    # general_assistant is the workspace DEFAULT agent: an agent-level
+    # `knowledge_bases` / workspace auto-bind on it is treated as STALE —
+    # a project-scoped chat defines the data scope EXCLUSIVELY by the
+    # selected project's KBs (REPLACE, never union). Mirrors the
+    # message-resolution branch below; keeps cross-project leakage
+    # impossible in project chats (observed: general_assistant carrying a
+    # company-warehouse KB owned by project C5_C9 answered a Data
+    # Analysis chat whose only bound data was a project PDF). Every other
+    # agent keeps its own explicit bindings and UNIONS the selected
+    # project's KBs.
+    if _is_general_assistant and (
+        selected_project_id or _normalize_project_name(selected_project_name)
+    ):
         bound_ids = _extend_with_project_kbs(
-            db, agent_app, bound_ids, selected_project_id,
+            db, agent_app, [], selected_project_id,
             project_name=selected_project_name,
         )
+    else:
+        bound_ids = get_bound_data_source_ids(agent_app)
+        bound_ids = _maybe_extend_with_workspace_auto_bind(db, agent_app, bound_ids)
+        # Contextual project scoping: the agent only inherits a project's
+        # data sources when the user explicitly selected that project for
+        # THIS conversation. No project selected → agent's own data
+        # sources only. Dual-column parity with the UI: KBs bound via the
+        # legacy ``project`` name column count too (see
+        # _extend_with_project_kbs).
+        if selected_project_id or _normalize_project_name(selected_project_name):
+            bound_ids = _extend_with_project_kbs(
+                db, agent_app, bound_ids, selected_project_id,
+                project_name=selected_project_name,
+            )
     if pinned_data_source_id and pinned_data_source_id not in bound_ids:
         pinned = db.get(KnowledgeBase, pinned_data_source_id)
         if pinned is not None and not pinned.is_deleted:
@@ -1323,7 +1373,7 @@ def prepare_data_source_runtime(
     # and the resolved project's KBs REPLACE any stale own/auto-bindings
     # (cross-project leakage must stay impossible).
     if not selected_project_id and not _normalize_project_name(selected_project_name):
-        if agent_app and getattr(agent_app, "name", None) == "general_assistant":
+        if _is_general_assistant:
             _msg_pid, _msg_pname = _resolve_project_from_message(
                 db, user_message,
                 getattr(agent_app, "org_id", "default-org"),
@@ -1394,6 +1444,7 @@ def prepare_data_source_runtime(
         new_prompt = base_system_prompt + (
             "\n\n" + project_block if project_block else ""
         ) + ("\n\n" + entity_block if entity_block else "")
+        _end_read_txn(db)
         return base_tools, new_prompt, {}
 
     # Idempotent injection: don't add `ask_data_agent` if it's already in
@@ -1518,5 +1569,8 @@ def prepare_data_source_runtime(
         "resource_id": resource_id,
         "catalog_meta": _load_catalog_meta(db, bound_ids),
     }
+    # Context assembly is pure read work — never carry its transaction into
+    # the caller's long-running turn (see _end_read_txn docstring).
+    _end_read_txn(db)
 
     return augmented_tools, new_prompt, ctx_extras

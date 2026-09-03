@@ -1974,6 +1974,19 @@ def _list_knowledge_bases(args: dict, db: Session, user_id: str | None) -> dict:
         q = q.filter(or_(KnowledgeBase.project_id == project_id, *name_clauses))
     kbs = q.order_by(KnowledgeBase.name.asc()).all()
 
+    # End the read-only transaction on the tool session. Without this the
+    # connection sits ``idle in transaction`` until the session is reused or
+    # closed (observed 2026-09-03: a Data Analyst turn issued several
+    # parallel ``list_knowledge_bases`` calls and leaked one backend
+    # connection per call — 6+ stuck on the identical KB SELECT, oldest
+    # 400s+). Guarded: only when no pending writes, so a caller that
+    # accumulated uncommitted work is never rolled back.
+    try:
+        if not db.new and not db.dirty:
+            db.rollback()
+    except Exception:  # pragma: no cover - defensive
+        pass
+
     return {
         "success": True,
         "knowledge_bases": [

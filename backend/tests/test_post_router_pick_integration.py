@@ -50,29 +50,14 @@ class TestPickDefaultSkillHook(unittest.TestCase):
         ):
             self.assertIsNone(pick_default_skill("explain kubernetes to me"))
 
-    def test_returns_forced_dict_on_strong_match(self):
-        """When ``post_router_pick`` finds a strong match, the dict returned
-        by ``pick_default_skill`` carries ``forced: True`` so downstream
-        code can build a HARD directive (not just a soft hint)."""
+    def test_ambiguous_request_no_longer_returns_forced_skill(self):
+        """Phase A/B: pick_default_skill no longer consults the post-router.
+        An ambiguous request (no explicit format word) returns None and the
+        LLM picks from the full skill catalog."""
         from app.services.synexia.default_skills import pick_default_skill
 
-        fake_results = [
-            {
-                "name": "slack-gif-creator",
-                "description": "Make animated GIFs for Slack",
-                "trigger": "gif slack animated",
-                "source": "filesystem",
-            },
-        ]
-        with patch(
-            "app.services.skill_routing.post_router_hook.unified_search",
-            return_value=fake_results,
-        ):
-            result = pick_default_skill("make a slack gif for me")
-            self.assertIsNotNone(result)
-            self.assertEqual(result["skill_name"], "slack-gif-creator")
-            self.assertTrue(result["forced"])
-            self.assertGreaterEqual(result["score"], 0.6)
+        result = pick_default_skill("make a slack gif for me")
+        self.assertIsNone(result)
 
     def test_explicit_format_intent_unaffected(self):
         """An explicit .docx keyword must still take format-intent priority
@@ -107,50 +92,17 @@ class TestForcedSkillInTaskSpec(unittest.TestCase):
     whenever the post-router hook fired (so plan_dag / agents.py can build
     a hard directive)."""
 
-    def test_forced_skill_appears_on_task_spec(self):
-        """When pick_default_skill returns a forced dict, ``task_spec_parser``
-        sets ``task_spec["forced_skill"]`` (and ``forced_skill_score``)."""
+    def test_generic_message_leaves_no_forced_skill(self):
+        """Without a deterministic forced skill, TaskSpec carries no
+        forced_skill — the planner lets the LLM choose."""
         from app.services.synexia import task_spec_parser
 
-        forced_dict = {
-            "skill_name": "canvas-design",
-            "triggers": [],
-            "format": None,
-            "forced": True,
-            "score": 0.85,
-            "source": "filesystem",
-        }
-
-        # Patch the post-router hook at its consumer location so the call
-        # inside pick_default_skill returns our forced dict.
-        with patch(
-            "app.services.synexia.default_skills.post_router_pick",
-            return_value=forced_dict,
-        ):
-            task_spec = task_spec_parser.parse_task_spec(
-                user_message="help me with canvas design mockups",
-                agent_name="general_assistant",
-                conversation_context=None,
-            )
-
-        self.assertIsNotNone(task_spec)
-        self.assertTrue(task_spec.get("forced_skill"))
-        self.assertEqual(task_spec.get("forced_skill_name"), "canvas-design")
-        self.assertGreaterEqual(task_spec.get("forced_skill_score", 0), 0.6)
-
-    def test_no_forced_skill_when_no_strong_match(self):
-        """Generic messages leave ``forced_skill`` falsy on the TaskSpec."""
-        from app.services.synexia import task_spec_parser
-
-        with patch(
-            "app.services.synexia.default_skills.post_router_pick",
-            return_value=None,
-        ):
-            task_spec = task_spec_parser.parse_task_spec(
-                user_message="explain something",
-                agent_name="general_assistant",
-                conversation_context=None,
-            )
+        task_spec = task_spec_parser.parse_task_spec(
+            user_message="explain something",
+            agent_name="general_assistant",
+            conversation_context=None,
+        )
 
         self.assertIsNotNone(task_spec)
         self.assertFalse(task_spec.get("forced_skill"))
+
