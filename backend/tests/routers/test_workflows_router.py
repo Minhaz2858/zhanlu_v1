@@ -471,3 +471,48 @@ def test_test_node_failure_returns_failed_status(db, monkeypatch):
     assert out["node_type"] == "llm"
     assert out["output"] is None
     assert "provider down" in out["error"]
+
+
+# ---------------------------------------------------------------------------
+# Runs-list rerun provenance (iterate-loop Task 8): GET /{workflow_id}/runs
+# serializes rerun_of / rerun_from_node on every run row so NDV/RunDrawer can
+# read the rerun relationship off the run history (rerun row points at its
+# reference run + start node; plain full runs carry both keys as null).
+# ---------------------------------------------------------------------------
+
+
+def test_list_runs_serializes_rerun_provenance(db, monkeypatch):
+    """Full round-trip: one plain full run, then a partial rerun from n2 off
+    it. list_runs must serialize BOTH markers on the rerun row (rerun_of ==
+    reference run id, rerun_from_node == start node) and both keys present
+    but null on the original full run — the run drawer reads provenance
+    straight off the list payload."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "answer")
+    # The rerun endpoint's background thread opens its OWN SessionLocal — point
+    # app.database.SessionLocal at the in-memory test engine (Task 6 pattern).
+    monkeypatch.setattr("app.database.SessionLocal", _TestSession)
+
+    wf = _mk_workflow(db, flow=_flow())
+    ref = wf_mod.run_workflow(wf.id, wf_mod.RunBody(input="hello"), "app-1", db=db, user=_user())
+    assert ref["status"] == "completed"
+
+    out = wf_mod.rerun_workflow(
+        wf.id, wf_mod.RerunBody(run_id=ref["run_id"], start_node_id="n2", input="again"),
+        "app-1", db=db, user=_user(),
+    )
+    _wait_run(out["run_id"])
+
+    rows = wf_mod.list_runs(wf.id, "app-1", db=db, user=_user())
+    by_id = {r["id"]: r for r in rows}
+    assert set(by_id) == {ref["run_id"], out["run_id"]}
+
+    # Every run row carries both keys (contract, not incidental absence).
+    assert all("rerun_of" in r and "rerun_from_node" in r for r in rows)
+
+    rerun_row = by_id[out["run_id"]]
+    assert rerun_row["rerun_of"] == ref["run_id"]
+    assert rerun_row["rerun_from_node"] == "n2"
+
+    orig_row = by_id[ref["run_id"]]
+    assert orig_row["rerun_of"] is None
+    assert orig_row["rerun_from_node"] is None

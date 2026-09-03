@@ -570,6 +570,12 @@ def list_runs(
         )
         out.append({
             **run.to_dict(),
+            # Rerun provenance — pinned explicitly (not just via to_dict) so
+            # NDV/RunDrawer can always read the rerun relationship off a run
+            # row: rerun_of = original run id, rerun_from_node = start node
+            # (None for a plain full run).
+            "rerun_of": run.rerun_of,
+            "rerun_from_node": run.rerun_from_node,
             "steps": [s.to_dict() for s in steps],
         })
     return out
