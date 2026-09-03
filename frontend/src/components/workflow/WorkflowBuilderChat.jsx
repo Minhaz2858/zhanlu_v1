@@ -8,6 +8,7 @@ import {
 import { Button } from '@/components/ui/button';
 import {
   Send,
+  Square,
   X,
   Loader2,
   RotateCcw,
@@ -193,6 +194,15 @@ function renderBlocks(content) {
   return out;
 }
 
+// Autosize helper for the composer textarea (Task 4): grow the box with the
+// draft up to 96px (matches max-h-24) so long prompts scroll inside the box
+// instead of pushing the composer off the panel.
+function autosizeTextarea(el) {
+  if (!el) return;
+  el.style.height = 'auto';
+  el.style.height = `${Math.min(el.scrollHeight, 96)}px`;
+}
+
 /**
  * WorkflowBuilderChat — right slide-over chat panel for the workflow canvas.
  *
@@ -229,6 +239,7 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
   const convIdRef = useRef(null);
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
+  const inputRef = useRef(null);
 
   // Start-or-resume the workflow builder session on first open — mirrors
   // createAgentConversation in Chat.jsx (agent_name 'workflow_builder',
@@ -354,6 +365,13 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, streaming]);
+
+  // When the draft is cleared (send / new session / starter click), collapse
+  // the composer textarea back to its single-row height — onChange already
+  // handles keystroke-driven growth, but programmatic clears skip onChange.
+  useEffect(() => {
+    if (!input) autosizeTextarea(inputRef.current);
+  }, [input]);
 
   async function handleSend(prefill) {
     const text = (prefill ?? input).trim();
@@ -613,24 +631,57 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
         )}
       </div>
 
-      {/* Input row */}
-      <div className="flex items-center gap-2 border-t px-4 py-3">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
-          }}
-          disabled={streaming}
-          placeholder={isEn ? 'Describe your workflow…' : '描述你的工作流…'}
-          className="h-9 flex-1 rounded-md border bg-background px-3 text-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
-        />
-        <Button size="icon" onClick={() => handleSend()} disabled={streaming} title={isEn ? 'Send' : '发送'}>
-          {streaming ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-        </Button>
+      {/* Composer — autosize textarea (Enter sends, Shift+Enter inserts a
+          new line), Send affordance that becomes Stop while a stream is in
+          flight (aborts the in-flight request), plus a keyboard-hint row. */}
+      <div className="border-t">
+        <div className="flex items-end gap-2 px-4 py-3">
+          <textarea
+            ref={inputRef}
+            rows={1}
+            value={input}
+            onChange={(e) => {
+              setInput(e.target.value);
+              autosizeTextarea(e.target);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                handleSend();
+              }
+            }}
+            disabled={streaming}
+            aria-label={isEn ? 'Describe your workflow' : '描述你的工作流'}
+            placeholder={isEn ? 'Describe your workflow…' : '描述你的工作流…'}
+            className="max-h-24 min-h-9 flex-1 resize-none rounded-md border bg-background px-3 py-2 text-sm outline-none focus:ring-1 focus:ring-ring disabled:opacity-50"
+          />
+          {streaming ? (
+            <Button
+              variant="outline"
+              size="icon"
+              onClick={() => abortRef.current?.abort()}
+              title={isEn ? 'Stop' : '停止'}
+              aria-label={isEn ? 'Stop' : '停止'}
+            >
+              <Square className="h-3.5 w-3.5 fill-current" />
+            </Button>
+          ) : (
+            <Button
+              size="icon"
+              onClick={() => handleSend()}
+              title={isEn ? 'Send' : '发送'}
+              aria-label={isEn ? 'Send' : '发送'}
+            >
+              <Send className="h-4 w-4" />
+            </Button>
+          )}
+        </div>
+        <div className="flex items-center justify-between px-4 pb-2 text-[10px] text-muted-foreground">
+          <span>
+            {isEn ? 'Enter ↵ to send · Shift+Enter for a new line' : 'Enter ↵ 发送 · Shift+Enter 换行'}
+          </span>
+          <span>{isEn ? 'Esc closes' : 'Esc 关闭'}</span>
+        </div>
       </div>
     </div>
   );

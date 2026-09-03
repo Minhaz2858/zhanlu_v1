@@ -152,4 +152,12 @@ describe('WorkflowBuilderChat.jsx workflow_builder streaming panel', () => {
     expect(SOURCE).toMatch(/animate-pulse/);
     expect(SOURCE).toMatch(/text-\[1em\]|caret|▍|▪/);
   });
+
+  it('composer: autosize textarea, Stop affordance and keyboard hints (copilot redesign)', () => {
+    expect(SOURCE).toMatch(/<textarea/);
+    expect(SOURCE).toMatch(/stop/i);
+    expect(SOURCE).toMatch(/Shift\+Enter/);
+    expect(SOURCE).toMatch(/aria-label/);
+    expect(SOURCE).toMatch(/abortRef\.current\?\.abort|stopStreaming/);
+  });
 });
