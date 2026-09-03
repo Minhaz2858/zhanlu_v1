@@ -10,7 +10,6 @@ import {
   Send,
   X,
   Loader2,
-  Sparkles,
   RotateCcw,
   Workflow,
   BarChart3,
@@ -464,13 +463,26 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
   if (!open) return null;
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 flex w-[380px] flex-col border-l bg-background shadow-xl">
-      {/* Header */}
-      <div className="flex items-center gap-2 border-b px-4 py-3">
-        <Sparkles className="h-4 w-4 text-primary" />
-        <h2 className="flex-1 text-sm font-semibold">
-          {isEn ? 'Build with AI' : 'AI 构建'}
-        </h2>
+    <div className="fixed inset-y-0 right-0 z-50 flex w-[400px] flex-col border-l bg-background shadow-xl">
+      {/* Header — Workflow mark tile + title column + session status line. */}
+      <div className="flex items-center gap-2.5 border-b px-4 py-3">
+        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-primary/90 to-primary/60 text-primary-foreground">
+          <Workflow className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <h2 className="text-sm font-semibold leading-tight">
+            {isEn ? 'Build with AI' : 'AI 构建'}
+          </h2>
+          <p className="truncate text-[10px] leading-tight text-muted-foreground">
+            {resumed
+              ? isEn
+                ? 'Resumed session'
+                : '已恢复会话'
+              : isEn
+                ? 'AI workflow builder'
+                : 'AI 工作流构建'}
+          </p>
+        </div>
         {resumed && !streaming && (
           <Button
             variant="ghost"

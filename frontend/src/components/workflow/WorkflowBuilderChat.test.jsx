@@ -50,17 +50,17 @@ describe('WorkflowBuilderChat.jsx workflow_builder streaming panel', () => {
     expect(props[1]).toMatch(/onFlowSaved/);
   });
 
-  it('renders a right slide-over panel w-[380px] with message list, input row and close button', () => {
-    expect(SOURCE).toMatch(/w-\[380px\]/);
+  it('renders a right slide-over panel w-[400px] with message list, input row and close button', () => {
+    expect(SOURCE).toMatch(/w-\[400px\]/);
     expect(SOURCE).toMatch(/fixed/);
     expect(SOURCE).toMatch(/right-0/);
-    // X close button + Sparkles header icon + Send button come from lucide-react.
+    // X close button + Send button come from lucide-react; the header now
+    // leads with a Workflow mark tile (Task 3), so Sparkles must be gone
+    // entirely — not imported, not rendered.
     expect(SOURCE).toMatch(
       /import\s*\{[^}]*\bX\b[^}]*\}[^}]*from\s*['"`]lucide-react['"`]/,
     );
-    expect(SOURCE).toMatch(
-      /import\s*\{[^}]*\bSparkles\b[^}]*\}[^}]*from\s*['"`]lucide-react['"`]/,
-    );
+    expect(SOURCE).not.toMatch(/Sparkles/);
     expect(SOURCE).toMatch(
       /import\s*\{[^}]*\bSend\b[^}]*\}[^}]*from\s*['"`]lucide-react['"`]/,
     );
