@@ -294,7 +294,16 @@ def _sync_text_completion(prompt: str, model: str | None = None) -> str:
 
 
 class WorkflowExecutionContext:
-    """Binds node-handler dependencies to real services and persists runs."""
+    """Binds node-handler dependencies to real services and persists runs.
+
+    ``ephemeral=True`` (single-node test / dry-run contexts): every handler
+    dependency binding is available exactly as in a persisted run, but no
+    WorkflowRun/WorkflowRunStep row is ever created or committed and no run
+    events (run_started / step / run_finished) are emitted — record_step and
+    finish_run become no-ops and ``run`` stays None (``run_id`` is still set
+    to a fresh uuid4 so downstream code that only needs an identifier keeps
+    working).
+    """
 
     def __init__(
         self,
@@ -308,6 +317,7 @@ class WorkflowExecutionContext:
         run_id: str | None = None,
         trigger: str = "chat",
         history: list | None = None,
+        ephemeral: bool = False,
     ):
         self.db = db
         self.org_id = org_id
@@ -320,6 +330,11 @@ class WorkflowExecutionContext:
         self.on_event = on_event or (lambda ev: None)
         self.outputs: dict[str, Any] = {}
         self.run_id = run_id or str(uuid.uuid4())
+        self.ephemeral = ephemeral
+        if ephemeral:
+            # No row persistence and no run lifecycle events at all.
+            self.run = None
+            return
         self.run = WorkflowRun(
             id=self.run_id,
             agent_app_id=agent.id,
@@ -338,6 +353,8 @@ class WorkflowExecutionContext:
 
     def record_step(self, node_id: str, status: str, output: dict | None = None,
                     error: str | None = None) -> None:
+        if self.ephemeral:
+            return
         node_type = ""
         for n in (self.agent.flow or {}).get("nodes", []) if isinstance(self.agent.flow, dict) else []:
             if n.get("id") == node_id:
@@ -367,6 +384,8 @@ class WorkflowExecutionContext:
 
     def finish_run(self, status: str, error: str | None = None, output: Any = None,
                    extra: dict | None = None) -> None:
+        if self.ephemeral or self.run is None:
+            return
         self.run.status = status
         self.run.error = error
         self.run.finished_at = datetime.now(timezone.utc)

@@ -217,3 +217,55 @@ def test_kb_datasource_config_maps_dialects():
     assert cfg["dialect"] == "postgres" and cfg["database"] == "d"
     assert wfr._kb_datasource_config(KnowledgeBase(db_type="oracle")) is None
     assert wfr._kb_datasource_config(KnowledgeBase(db_type="sqlite")) is None  # no path
+
+
+def test_ephemeral_context_no_rows_no_events(monkeypatch):
+    """Ephemeral ctx reuses ALL handler bindings but never persists a
+    WorkflowRun/WorkflowRunStep row and never emits run events."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "llm-answer")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-agent-ephemeral-1")
+    before_runs = db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).count()
+
+    events = []
+    ctx = wfr.WorkflowExecutionContext(
+        db, "default-org", "default-app", agent, "hello",
+        created_by_id="u1", on_event=events.append, ephemeral=True,
+    )
+    # construction must not persist a run row
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).count() == before_runs
+
+    # run the full graph through the real executor + handlers — bindings work
+    result = wfr.execute_flow_graph(_flow(), ctx, wfr.NODE_HANDLERS)
+    assert result["status"] == "completed"
+    assert result["output"] == "llm-answer"
+
+    # record_step / finish_run are no-ops
+    ctx.record_step("n2", "running", output={"partial": True})
+    ctx.record_step("n2", "completed", output={"text": "llm-answer"})
+    ctx.finish_run("completed", output="llm-answer")
+
+    assert ctx.run is None
+    assert len(ctx.run_id) == 36  # still a usable run identifier
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).count() == before_runs
+    assert db.query(WorkflowRunStep).filter(WorkflowRunStep.run_id == ctx.run_id).count() == 0
+    assert events == []  # no run_started / step / run_finished
+
+
+def test_ephemeral_context_run_id_collision_with_existing_run(monkeypatch):
+    """An explicit run_id in ephemeral mode must NOT touch the existing run
+    row (record_step/finish_run never write through to it)."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "llm-answer")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-agent-ephemeral-2")
+    ctx = wfr.WorkflowExecutionContext(db, "default-org", "default-app", agent, "hello", ephemeral=True)
+    existing_run_id = ctx.run_id
+
+    wfr.WorkflowExecutionContext(
+        db, "default-org", "default-app", agent, "hello",
+        run_id=existing_run_id, ephemeral=True,
+    ).record_step("n9", "completed", output={"x": 1})
+
+    assert db.query(WorkflowRun).filter(WorkflowRun.id == existing_run_id).count() == 0
+    assert db.query(WorkflowRunStep).filter(WorkflowRunStep.run_id == existing_run_id).count() == 0
+
