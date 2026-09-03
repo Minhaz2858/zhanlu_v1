@@ -82,6 +82,7 @@ from app.services.dashboard_turn_guard import (
     dashboard_antitools_should_block,
     DASHBOARD_EXPLORATION_TOOLS,
     dashboard_exploration_cap_reached,
+    dashboard_stall_freeze_blocked,
     parse_artifact_title,
     dashboard_narration_needs_nudge,
     build_dashboard_narration_nudge_message,
@@ -6013,6 +6014,7 @@ def _compute_tool_choice(
     data_ctx_extras: dict,
     iteration: int,
     tool_names: list[str] | None = None,
+    is_dashboard_followup: bool = False,
 ) -> dict | None:
     """Determine the tool_choice parameter for the LLM call.
 
@@ -6064,6 +6066,7 @@ def _compute_tool_choice(
         data_ctx_extras=data_ctx_extras or {},
         is_data_question=_is_data_question(user_message),
         iteration=iteration,
+        is_dashboard_followup=is_dashboard_followup,
     )
     if not action.forced_tool:
         return None
@@ -6072,6 +6075,79 @@ def _compute_tool_choice(
         action.forced_tool, iteration,
     )
     return {"type": "function", "function": {"name": action.forced_tool}}
+
+
+def _prior_user_turn_was_live_dashboard(
+    llm_messages: list[dict] | None,
+    current_content: str | None,
+) -> bool:
+    """True when the last USER message BEFORE this one was a live-dashboard
+    request (i.e. this turn is a follow-up on a pending dashboard build).
+
+    2026-09-02 regression (conv 8b4d1968): the user replied "i have data
+    source recheck please" to a dashboard-build turn that had stalled on a
+    missing data source. turn_action classified the short follow-up as a
+    data question and FORCED ask_data_agent on iteration 0, burning the whole
+    tool budget on schema exploration — the dashboard was never built and the
+    turn fell into the generic empty fallback. With this flag the tool choice
+    stays auto so the model can continue the build
+    (create_fullstack_dashboard / update_fullstack_dashboard).
+    """
+    if not llm_messages or not current_content:
+        return False
+    cur = (current_content or "").strip().lower()
+    for m in reversed(llm_messages):
+        if m.get("role") != "user":
+            continue
+        content = (m.get("content") or "").strip()
+        if not content:
+            continue
+        if content.lower() == cur:
+            # The current user message — keep scanning for the PREVIOUS one.
+            continue
+        return is_live_dashboard_request(content)
+    return False
+
+
+def _dashboard_success_confirmation(
+    tool_calls_for_frontend: list[dict] | None,
+) -> str | None:
+    """Deterministic success text when the full-stack build tool RAN this turn.
+
+    2026-09-02 regression (conv 8b4d1968): the model called
+    create_fullstack_dashboard / update_fullstack_dashboard, the generator
+    regenerated the app successfully, but the model then returned EMPTY
+    prose — so the empty-bubble fallback replaced the bubble with "the
+    dashboard build did not complete", which was FALSE. When a build tool
+    result is present, always confirm the running dashboard instead.
+    """
+    build_tools = {"create_fullstack_dashboard", "update_fullstack_dashboard"}
+    for tc in (tool_calls_for_frontend or []):
+        if (tc or {}).get("name") not in build_tools:
+            continue
+        if (tc or {}).get("status") not in (None, "completed", "success"):
+            continue
+        res = (tc or {}).get("results") or {}
+        if not isinstance(res, dict):
+            continue
+        if res.get("success") is False:
+            continue
+        if isinstance(res.get("dashboard"), dict):
+            name = (
+                res.get("dashboard_name")
+                or res.get("name")
+                or res.get("slug")
+                or res["dashboard"].get("name")
+            )
+        else:
+            name = res.get("dashboard_name") or res.get("name") or res.get("slug")
+        if name:
+            return (
+                f"✅ Dashboard「{name}」has been built and is now running — "
+                "live refresh with WebSocket real-time updates. It renders "
+                "inline in this chat and in the dashboard list."
+            )
+    return None
 
 
 def _finish_line_tool_choice(
@@ -6181,8 +6257,15 @@ async def list_conversations(
         #    never match; ``.astext`` is not implemented for this column type.
         _dialect = (db.bind.dialect.name if db.bind is not None else "postgresql")
         if _dialect == "postgresql":
+            # NOTE: ``cast(metadata -> 'workflow_id', String)`` KEEPS the JSON
+            # quotes (``"wf-1"`` != ``wf-1``) — the ``->`` operator returns a
+            # json value whose cast-to-text preserves JSON quoting, so the
+            # filter silently matched NOTHING on PostgreSQL and the
+            # Build-with-AI panel's resume always fell through to a brand-new
+            # conversation. ``json_extract_path_text`` returns plain text.
             query = query.filter(
-                cast(AgentConversation.metadata_["workflow_id"], String) == workflow_id
+                func.json_extract_path_text(AgentConversation.metadata_, "workflow_id")
+                == workflow_id
             )
         else:
             query = query.filter(
@@ -12305,6 +12388,36 @@ async def add_message_stream(
         logger.debug("Data source runtime prep failed (non-fatal): %s", e)
     data_ctx_extras = _v3_data_ctx_extras or {}
 
+    # Dashboard preflight: a live-dashboard request with ZERO bound data
+    # sources must not run an open-ended prepare loop. Deepseek-class models
+    # responded to an empty Bound Data Sources section by researching
+    # (skills_hub), writing memory, and repeating schema calls instead of
+    # telling the user there is no database (observed conv 0e8c004e attempt
+    # #1 — the tool-call loop guard tripped on `memory`, then the turn died
+    # into an empty fallback). Tell the model up-front so it stops instead
+    # of flailing.
+    if (
+        is_live_dashboard_request(user_content)
+        and not (locals().get("_v3_bound") or [])
+        and not locals().get("_v3_pinned_dsr_id")
+    ):
+        system_prompt += (
+            "\n\n## NO DATA SOURCE BOUND (this turn)\n"
+            "No database or file data source is bound to this chat or its "
+            "project, so a real-time dashboard CANNOT be built yet. Do NOT "
+            "call uiux_design_system, describe_schema, execute_query, "
+            "delegate_task, skills_hub, memory, or any build tool. Stop and "
+            "tell the user in their language: bind a data source to the "
+            "project first (Project -> Data Sources), then resend the "
+            "dashboard request. If the user believes a source is already "
+            "bound, ask them to reopen the chat from the project page."
+        )
+        logger.info(
+            "v3 stream: dashboard request with zero bound data sources — "
+            "preflight directive injected (conv=%s)",
+            conversation_id,
+        )
+
     # Dynamic tool loading (2026-08-31): keep the always-on core + the
     # intent-relevant periphery tools for THIS turn. Cuts ~10-20k tokens of
     # tool schemas per turn. Fail-open: any error returns the full list.
@@ -13208,6 +13321,9 @@ async def add_message_stream(
             tool_choice = _compute_tool_choice(
                 user_content, data_ctx_extras, iteration,
                 tool_names=_tool_names_from_schemas(tools),
+                is_dashboard_followup=_prior_user_turn_was_live_dashboard(
+                    llm_messages, user_content
+                ),
             )
 
             # Dashboard guard: if the user asked for a live dashboard and
@@ -13237,6 +13353,40 @@ async def add_message_stream(
                     "pass (conv=%s, iter=%d, prior_tool_count=%d, dash_project=%s)",
                     _dash_build_tool, conversation_id, iteration,
                     len(tool_calls_for_frontend), _is_dash_project,
+                )
+                tool_choice = {
+                    "type": "function",
+                    "function": {"name": _dash_build_tool},
+                }
+                dashboard_forced = True
+            # Dashboard follow-up forcing (2026-09-02): a SHORT follow-up on a
+            # previous dashboard-build turn ("recheck please" / "继续" /
+            # "绑定好了，重试") that is itself NOT a dashboard/file/url request
+            # would otherwise be misrouted as a data question (turn_action
+            # forcing ask_data_agent) and burn the whole tool budget on schema
+            # exploration — conv 8b4d1968 ended in the empty fallback that
+            # way. When a data source is bound and the build tool has not run
+            # yet in this conversation, force the build tool so the pending
+            # dashboard is actually created/updated.
+            _dash_followup = _prior_user_turn_was_live_dashboard(
+                llm_messages, user_content
+            )
+            if (
+                not dashboard_forced
+                and iteration == 0
+                and _dash_build_tool in _tool_names
+                and (data_ctx_extras or {}).get("bound_kb_ids")
+                and _dash_followup
+                and len((user_content or "").strip()) <= 120
+                and not any(
+                    (tc or {}).get("name") == _dash_build_tool
+                    for tc in (tool_calls_for_frontend or [])
+                )
+            ):
+                logger.info(
+                    "v3 stream: forcing %s on dashboard follow-up turn "
+                    "(conv=%s, msg=%.40s)",
+                    _dash_build_tool, conversation_id, user_content,
                 )
                 tool_choice = {
                     "type": "function",
@@ -14791,6 +14941,93 @@ async def add_message_stream(
                     yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_exploration_cap", "args": {"blocked": "exploration"}})}\n\n')
                     continue
 
+            # ── Fix 7: post-cap stall freeze (dashboard turns) ────────────
+            # The describe_schema / exploration caps above only strip
+            # exploration tools. A weak model that already spent the schema
+            # budget can still burn the remaining iterations on NON-data
+            # stall tools (uiux_design_system again, list_fullstack_dashboards,
+            # delegate_task, skills_hub, memory …) instead of calling the
+            # build tool — observed on conv 0e8c004e: after the cap fired the
+            # model re-ran uiux_design_system + list_fullstack_dashboards,
+            # never called create_fullstack_dashboard, and the turn died into
+            # an empty fallback. Once the budget is frozen, only the build
+            # tool (plus the FIRST uiux_design_system, which the design-first
+            # rule needs) is allowed until the model builds.
+            if (
+                _schema_budget_frozen
+                and _dash_build_tool not in (_v3_executed_tool_names or [])
+                and parsed_calls
+            ):
+                _stall_names = dashboard_stall_freeze_blocked(
+                    _schema_budget_frozen,
+                    _v3_executed_tool_names,
+                    [p["tool_name"] for p in parsed_calls],
+                    _dash_build_tool,
+                )
+                _stall_blocked = [
+                    p for p in parsed_calls if p["tool_name"] in _stall_names
+                ]
+                if _stall_blocked:
+                    logger.warning(
+                        "v3 stream: post-cap stall freeze blocked %d non-build "
+                        "call(s) %s on dashboard turn (conv=%s, iter=%d); "
+                        "steering to %s.",
+                        len(_stall_blocked),
+                        sorted({p["tool_name"] for p in _stall_blocked}),
+                        conversation_id, iteration, _dash_build_tool,
+                    )
+                    for _blk in _stall_blocked:
+                        llm_messages.append({
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [{
+                                "id": _blk["tool_call_id"],
+                                "type": "function",
+                                "function": {
+                                    "name": _blk["tool_name"],
+                                    "arguments": _blk["args_str"],
+                                },
+                            }],
+                        })
+                        llm_messages.append({
+                            "role": "tool",
+                            "tool_call_id": _blk["tool_call_id"],
+                            "content": (
+                                "BLOCKED: the schema/exploration budget for this "
+                                "dashboard turn is exhausted and the build tool "
+                                "has NOT been called. Stop preparing — do not "
+                                f"re-run this tool. Call {_dash_build_tool} NOW "
+                                "with the design system and schema you already "
+                                "gathered (at least 1-2 widgets are enough to "
+                                "start); the dashboard renders inline in the chat."
+                            ),
+                        })
+                        tool_calls_for_frontend.append({
+                            "id": f"stall_freeze_{uuid.uuid4()}",
+                            "name": "dashboard_stall_freeze",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": _blk["tool_name"],
+                                "reason": "post-cap stall; build tool not called yet",
+                            },
+                        })
+                    _stall_ids = {id(p) for p in _stall_blocked}
+                    parsed_calls = [
+                        p for p in parsed_calls if id(p) not in _stall_ids
+                    ]
+                    if not parsed_calls:
+                        tool_calls_for_frontend.append({
+                            "id": f"stall_freeze_redirect_{uuid.uuid4()}",
+                            "name": "dashboard_stall_freeze",
+                            "status": "blocked",
+                            "results": {
+                                "blocked": "all_calls",
+                                "reason": "build tool required now",
+                            },
+                        })
+                        yield (f'data: {json.dumps({"type": "tool_call", "name": "dashboard_stall_freeze", "args": {"blocked": "non_build"}})}\\n\\n')
+                        continue
+
             # ── Fix 4: duplicate create_artifact titles (all turns) ───────
             # A second create_artifact call with the same title in one turn is
             # always waste (duplicate static pages). Applies to ALL turns.
@@ -15443,6 +15680,20 @@ async def add_message_stream(
                             _dash_quality_worst = "A"
                 if tool_name == "update_fullstack_dashboard" and isinstance(result, dict) and result.get("success"):
                     _dash_refined = True
+                # 2026-09-02 review #6: once ANY dashboard build tool succeeds,
+                # clear dashboard_forced so dashboard_guard_should_block_queries
+                # stops intercepting legitimate post-build execute_query calls
+                # for the rest of the turn.
+                if (
+                    dashboard_forced
+                    and tool_name in {
+                        "create_fullstack_dashboard", "update_fullstack_dashboard",
+                        "create_dashboard", "update_dashboard",
+                    }
+                    and isinstance(result, dict)
+                    and result.get("success")
+                ):
+                    dashboard_forced = False
                 # Turn-plan evidence (2026-08-27): mark plan steps complete
                 # when a tool that evidences them SUCCEEDS, and emit
                 # plan_step_completed so the UI checklist ticks off as the
@@ -17038,13 +17289,31 @@ async def add_message_stream(
                         # Dashboard-specific fallback message (flag-aware tool
                         # name so the check matches what the agent actually had
                         # available this turn).
-                        if _is_dashboard_request(user_content) and not _tool_was_called(
-                            tool_calls_for_frontend,
-                            locals().get("_rescue_build_tool") or "create_dashboard",
-                        ):
+                        # 2026-09-02 review #5: an UPDATE-only turn where
+                        # update_fullstack_dashboard SUCCEEDED must never show
+                        # the false failure text below — the success
+                        # confirmation (which knows create AND update tools)
+                        # wins whenever a build tool result is present.
+                        _dash_ok_text = _dashboard_success_confirmation(
+                            tool_calls_for_frontend
+                        )
+                        _any_build_called = any(
+                            (tc or {}).get("name") in {
+                                "create_fullstack_dashboard",
+                                "update_fullstack_dashboard",
+                                "create_dashboard",
+                                "update_dashboard",
+                            }
+                            for tc in (tool_calls_for_frontend or [])
+                        )
+                        if _dash_ok_text:
+                            assistant_content = _dash_ok_text
+                        elif _is_dashboard_request(user_content) and not _any_build_called:
                             assistant_content = (
-                                "I ran out of steps while exploring the data for your dashboard. "
-                                "Please try again — I'll create the dashboard more quickly this time."
+                                "The dashboard build did not complete: the agent "
+                                "ran out of steps before calling the build tool "
+                                "this turn. Reply \"continue building\" to retry, "
+                                "or open a new chat and send the request again."
                             )
                         else:
                             # Context-aware fallback: choose the best message
@@ -17859,6 +18128,15 @@ async def add_message_stream(
                         tool_calls_for_frontend, user_content=user_content,
                     )
             if not (accumulated_content or "").strip():
+                # 2026-09-02: if the full-stack build tool actually RAN and
+                # returned a dashboard this turn, never fall back to failure /
+                # apology wording — deterministically confirm the running
+                # dashboard (the model often returns empty prose after a
+                # successful build; conv 8b4d1968).
+                _dash_ok = _dashboard_success_confirmation(tool_calls_for_frontend)
+                if _dash_ok:
+                    accumulated_content = _dash_ok
+            if not (accumulated_content or "").strip():
                 try:
                     accumulated_content = _choose_fallback(
                         tool_calls_for_frontend, _orch_created,
@@ -17912,6 +18190,59 @@ async def add_message_stream(
                     "v3 empty-bubble guarantee yield failed (client gone?): %s",
                     _yield_err,
                 )
+
+        # ── Persist the guarantee text to the DB row (reload safety) ─────
+        # The live content_replace above updates the open bubble, but on
+        # resume/checkpoint paths the final assistant row can stay empty
+        # (observed conv 8b4d1968: dashboard updated successfully yet the
+        # stored bubble was ''). Best-effort: if the LATEST assistant row for
+        # this conversation is still empty, fill it with the final text so a
+        # page reload shows the same bubble the user saw live. When the
+        # normal final-write later appends a real row, this is a no-op (the
+        # latest row is then non-empty).
+        if accumulated_content and (accumulated_content or "").strip():
+            try:
+                from app.models.chat_message import ChatMessage as _GCM
+                from app.models.chat_session import ChatSession as _GCS
+
+                _sess = (
+                    db.query(_GCS)
+                    .filter(_GCS.conversation_id == conversation_id)
+                    .order_by(_GCS.created_date.desc())
+                    .first()
+                )
+                if _sess is not None:
+                    _last_asst = (
+                        db.query(_GCM)
+                        .filter(
+                            _GCM.session_id == _sess.id,
+                            _GCM.role == "assistant",
+                            _GCM.is_deleted == False,  # noqa: E712
+                        )
+                        .order_by(_GCM.order.desc())
+                        .first()
+                    )
+                    if (
+                        _last_asst is not None
+                        and not (_last_asst.content or "").strip()
+                    ):
+                        _last_asst.content = accumulated_content
+                        db.commit()
+                        logger.info(
+                            "v3 empty-bubble guarantee: persisted %d chars to "
+                            "assistant row %s (conv=%s)",
+                            len(accumulated_content), _last_asst.id,
+                            conversation_id,
+                        )
+            except Exception as _gpersist_err:
+                logger.warning(
+                    "v3 empty-bubble guarantee DB persist failed (non-fatal): %s",
+                    _gpersist_err,
+                )
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
         # ── Apology-guard (post-loop, deterministic) ──────────────────────
         # The in-loop check above should have caught an apology accompanied by
