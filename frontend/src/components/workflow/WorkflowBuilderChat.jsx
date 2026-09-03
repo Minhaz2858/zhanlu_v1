@@ -68,6 +68,133 @@ const STARTERS = [
 ];
 
 /**
+ * Task 2 — safe block renderer for the assistant's streamed content.
+ *
+ * The workflow_builder agent emits structured text (section titles, bullets,
+ * ```-fenced JSON/config graph snippets, **bold** / `inline code` spans), so
+ * the plain whitespace-pre-wrap bubble is replaced by this tiny line-based
+ * parser. Everything is returned as plain JSX children — React escapes all
+ * text, and there is NO dangerouslySetInnerHTML anywhere in this file.
+ */
+
+// True when a trimmed line should be treated as monospace content: a ```
+// fence, a bare JSON-ish payload ('{'), a ':::' admonition (e.g. the
+// ':::decision-summary' blocks), or a '['-prefixed section the agent labels
+// with json/config (e.g. '[json] workflow draft').
+function isMonoLine(line) {
+  const t = String(line ?? '').trim();
+  return (
+    t.startsWith('```') ||
+    t.startsWith('{') ||
+    t.startsWith(':::') ||
+    (t.startsWith('[') && /json|config/i.test(t))
+  );
+}
+
+// Split on **bold** and `code` tokens; plain runs are returned untouched
+// (so React renders them as escaped text). No HTML strings are produced.
+function renderInline(text) {
+  const parts = String(text ?? '').split(/(\*\*[^*]+\*\*|`[^`]+`)/g);
+  return parts.map((part, idx) => {
+    if (!part) return null;
+    if (part.startsWith('**') && part.endsWith('**') && part.length > 4) {
+      return <strong key={idx}>{part.slice(2, -2)}</strong>;
+    }
+    if (part.startsWith('`') && part.endsWith('`') && part.length > 2) {
+      return (
+        <code
+          key={idx}
+          className="rounded bg-foreground/10 px-1 py-0.5 font-mono text-[0.85em]"
+        >
+          {part.slice(1, -1)}
+        </code>
+      );
+    }
+    return part;
+  });
+}
+
+// One monospace panel: keeps code runs readable without a horizontal-scroll
+// trap, tinted with a translucent foreground wash (bg-foreground/5 compiles
+// to hsl(var(--foreground) / .05) because the theme vars are raw channels).
+function monoPanel(code, key) {
+  return (
+    <pre
+      key={key}
+      className="overflow-x-auto whitespace-pre-wrap rounded-md bg-foreground/5 p-2 font-mono text-[11px] leading-relaxed"
+    >
+      {code}
+    </pre>
+  );
+}
+
+// Line-based block parser for an assistant bubble. Handles ``` fenced runs
+// (and lone mono lines), '#/##/### ' titles, '- '/'* ' bullets, blank-line
+// spacers and plain paragraphs (with renderInline for inline tokens).
+function renderBlocks(content) {
+  const lines = String(content ?? '').split('\n');
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    const line = raw.trim();
+    if (!line) {
+      // Blank line -> tiny spacer so paragraphs/panels breathe.
+      out.push(<div key={`spacer-${i}`} aria-hidden="true" className="h-1" />);
+      i += 1;
+    } else if (line.startsWith('```')) {
+      // Fenced run: collect everything up to the closing ``` fence.
+      const buf = [];
+      i += 1;
+      while (i < lines.length && lines[i].trim() !== '```') {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      if (i < lines.length) i += 1; // skip the closing fence
+      out.push(monoPanel(buf.join('\n'), `fence-${i}`));
+    } else if (/^#{1,3}\s+/.test(line)) {
+      out.push(
+        <div key={`title-${i}`} className="text-xs font-semibold">
+          {renderInline(line.replace(/^#{1,3}\s+/, ''))}
+        </div>,
+      );
+      i += 1;
+    } else if (/^[-*]\s+/.test(line)) {
+      out.push(
+        <div
+          key={`bullet-${i}`}
+          className="flex gap-1.5 text-[13px] leading-relaxed"
+        >
+          <span aria-hidden="true">•</span>
+          <span className="min-w-0 flex-1">
+            {renderInline(line.replace(/^[-*]\s+/, ''))}
+          </span>
+        </div>,
+      );
+      i += 1;
+    } else if (isMonoLine(raw)) {
+      // Lone mono line(s): group consecutive mono lines so multi-line
+      // {json} payloads that were not fenced still read as one block.
+      const buf = [raw];
+      i += 1;
+      while (i < lines.length && isMonoLine(lines[i])) {
+        buf.push(lines[i]);
+        i += 1;
+      }
+      out.push(monoPanel(buf.join('\n'), `mono-${i}`));
+    } else {
+      out.push(
+        <div key={`para-${i}`} className="text-[13px] leading-relaxed">
+          {renderInline(raw)}
+        </div>,
+      );
+      i += 1;
+    }
+  }
+  return out;
+}
+
+/**
  * WorkflowBuilderChat — right slide-over chat panel for the workflow canvas.
  *
  * The user describes a workflow in plain language; the `workflow_builder`
@@ -423,18 +550,49 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
             </p>
           </div>
         )}
-        {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`max-w-[85%] whitespace-pre-wrap rounded-lg px-3 py-2 text-sm ${
-              m.role === 'user'
-                ? 'ml-auto bg-primary text-primary-foreground'
-                : 'bg-muted text-foreground'
-            }`}
-          >
-            {m.content || (streaming && i === messages.length - 1 ? '…' : '')}
-          </div>
-        ))}
+        {messages.map((m, i) => {
+          // While the first delta is still in flight the placeholder bubble
+          // has no content yet — show a pulsing caret inside the assistant
+          // card so the panel reads as "thinking", not broken.
+          const showCaret = streaming && i === messages.length - 1 && !m.content;
+          if (m._sessionError) {
+            // Session-start failures stay plain text but get a destructive
+            // tone (border-destructive/30 + bg-destructive/5 compile to
+            // hsl(var(--destructive) / .3 / .05) — see index.css channels).
+            return (
+              <div
+                key={i}
+                className="max-w-[85%] whitespace-pre-wrap rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive"
+              >
+                {m.content}
+              </div>
+            );
+          }
+          if (m.role === 'user') {
+            return (
+              <div
+                key={i}
+                className="ml-auto max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary px-3 py-2 text-sm text-primary-foreground"
+              >
+                {m.content}
+              </div>
+            );
+          }
+          return (
+            <div
+              key={i}
+              className="w-full max-w-[85%] space-y-1 rounded-lg bg-muted px-3 py-2 text-foreground"
+            >
+              {m.content ? (
+                renderBlocks(m.content)
+              ) : showCaret ? (
+                <span aria-hidden="true" className="inline-block animate-pulse text-[1em] leading-none">
+                  ▍
+                </span>
+              ) : null}
+            </div>
+          );
+        })}
         {streaming && (
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
             <Loader2 className="h-3 w-3 animate-spin" />

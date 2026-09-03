@@ -145,4 +145,11 @@ describe('WorkflowBuilderChat.jsx workflow_builder streaming panel', () => {
     expect(SOURCE).toMatch(/handleSend\s*\(/);
     expect(SOURCE).toMatch(/STARTERS/);
   });
+
+  it('renders assistant stream content through a safe block renderer (copilot redesign)', () => {
+    expect(SOURCE).toMatch(/function\s+renderBlocks|const\s+renderBlocks\s*=/);
+    expect(SOURCE).toMatch(/isMonoLine|```|:::decision-summary/);
+    expect(SOURCE).toMatch(/animate-pulse/);
+    expect(SOURCE).toMatch(/text-\[1em\]|caret|▍|▪/);
+  });
 });
