@@ -269,3 +269,107 @@ def test_ephemeral_context_run_id_collision_with_existing_run(monkeypatch):
     assert db.query(WorkflowRun).filter(WorkflowRun.id == existing_run_id).count() == 0
     assert db.query(WorkflowRunStep).filter(WorkflowRunStep.run_id == existing_run_id).count() == 0
 
+
+# ---- test_node: single-node orchestrator (iterate-loop Task 4) -------------
+
+
+def test_test_node_executes_handler_with_upstream_payload(monkeypatch):
+    """The llm handler runs with caller-supplied upstreams — the template
+    renderer sees them via ctx.outputs and the completion prompt carries the
+    payload; the handler's real (monkeypatched-completion) binding runs."""
+    captured = {}
+
+    def fake_completion(prompt, model=None):
+        captured["prompt"] = prompt
+        return "llm-answer"
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", fake_completion)
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-testnode-1")
+    result = wfr.test_node(
+        db, "default-org", "default-app", agent, "n2",
+        upstreams={"n1": {"text": "hi"}},
+    )
+    assert result["status"] == "completed"
+    assert result["node_id"] == "n2"
+    assert result["node_type"] == "llm"
+    assert result["error"] is None
+    assert result["output"]["text"] == "llm-answer"
+    assert "hi" in captured["prompt"]
+
+
+def test_test_node_no_run_rows_created(monkeypatch):
+    """Single-node execution is ephemeral — no WorkflowRun/WorkflowRunStep
+    rows are created (same guarantee as the ephemeral ctx)."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "llm-answer")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-testnode-2")
+    before_runs = db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).count()
+    before_steps = db.query(WorkflowRunStep).count()
+
+    result = wfr.test_node(
+        db, "default-org", "default-app", agent, "n2",
+        upstreams={"n1": {"text": "hi"}},
+    )
+    assert result["status"] == "completed"
+    assert db.query(WorkflowRun).filter(WorkflowRun.agent_app_id == agent.id).count() == before_runs
+    assert db.query(WorkflowRunStep).count() == before_steps
+
+
+def test_test_node_unknown_node_raises(monkeypatch):
+    """A node_id that is not in the workflow graph is a caller bug — raise
+    ValueError instead of returning a failed result."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "x")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-testnode-3")
+    try:
+        wfr.test_node(db, "default-org", "default-app", agent, "does-not-exist")
+        raised = False
+    except ValueError:
+        raised = True
+    assert raised
+
+
+def test_test_node_passes_retryless_single_attempt(monkeypatch):
+    """A raising handler yields a failed result (no crash) and is NOT retried
+    — even when the node config declares retryOnFail, test_node makes exactly
+    one attempt."""
+    calls = {"n": 0}
+
+    def failing(prompt, model=None):
+        calls["n"] += 1
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(wfr, "_sync_text_completion", failing)
+    db = SessionLocal()
+    flow = _flow()
+    for n in flow["nodes"]:
+        if n["id"] == "n2":
+            n["data"]["config"]["retryOnFail"] = 2
+    agent = _agent(db, flow, aid="wf-testnode-4")
+
+    result = wfr.test_node(
+        db, "default-org", "default-app", agent, "n2",
+        upstreams={"n1": {"text": "hi"}},
+    )
+    assert result["status"] == "failed"
+    assert result["error"] == "boom"
+    assert result["output"] is None
+    assert calls["n"] == 1  # retryless — exactly one attempt
+
+
+def test_test_node_trigger_uses_trigger_input(monkeypatch):
+    """A trigger node executed via test_node receives trigger_input as its
+    chat message (same binding a persisted run would give it)."""
+    monkeypatch.setattr(wfr, "_sync_text_completion", lambda prompt, model=None: "x")
+    db = SessionLocal()
+    agent = _agent(db, _flow(), aid="wf-testnode-5")
+    result = wfr.test_node(
+        db, "default-org", "default-app", agent, "n1",
+        trigger_input="hello",
+    )
+    assert result["status"] == "completed"
+    out = result["output"]
+    assert out["text"] == "hello"
+    assert out["items"] == [{"text": "hello"}]
+

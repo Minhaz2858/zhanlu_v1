@@ -731,3 +731,72 @@ def run_workflow_agent(
     except Exception as exc:  # noqa: BLE001
         ctx.finish_run("failed", error=str(exc))
         return {"status": "failed", "error": str(exc), "output": None, "run_id": ctx.run_id}
+
+
+def test_node(
+    db,
+    org_id: str,
+    app_id: str,
+    agent: AgentApp,
+    node_id: str,
+    *,
+    trigger_input: str = "",
+    upstreams: dict[str, dict] | None = None,
+    created_by_id: str | None = None,
+) -> dict[str, Any]:
+    """Execute ONE node's handler in isolation inside an ephemeral context.
+
+    Iterate-loop primitive (fast workflow iteration): the caller supplies
+    the node to test plus the exact upstream payloads that node would
+    receive in a real run (``upstreams`` maps upstream node_id -> its
+    output dict). The node's handler runs against the REAL service
+    bindings (llm_complete/run_agent/run_tool/kb_search/db_query/...) with
+    those outputs pre-loaded into the context — no WorkflowRun or
+    WorkflowRunStep row is created, no run events are emitted, and no
+    retry/continue-on-fail policy applies (exactly one attempt).
+
+    Returns {status: "completed"|"failed", node_id, node_type, output,
+    error}. Raises ValueError when ``node_id`` is not in the workflow
+    graph (caller bug); an unknown node TYPE is not a caller bug and
+    returns a failed result.
+    """
+    flow = _flow_dict(agent.flow)
+    node = next(
+        (n for n in (flow.get("nodes") or []) if n.get("id") == node_id),
+        None,
+    )
+    if node is None:
+        raise ValueError(f"node {node_id!r} not found in workflow")
+    upstreams = upstreams or {}
+    ctx: Any = WorkflowExecutionContext(
+        db, org_id, app_id, agent, trigger_input,
+        created_by_id=created_by_id, ephemeral=True,
+    )
+    ctx.outputs.update(upstreams)
+    ctx.current_upstream = dict(upstreams)
+    handler = NODE_HANDLERS.get(node["type"])
+    if handler is None:
+        return {
+            "status": "failed",
+            "node_id": node_id,
+            "node_type": node["type"],
+            "output": None,
+            "error": f"no handler for type {node['type']!r}",
+        }
+    try:
+        out = handler(ctx, node)
+        return {
+            "status": "completed",
+            "node_id": node_id,
+            "node_type": node["type"],
+            "output": out,
+            "error": None,
+        }
+    except Exception as exc:  # noqa: BLE001 — report, never crash the caller
+        return {
+            "status": "failed",
+            "node_id": node_id,
+            "node_type": node["type"],
+            "output": None,
+            "error": str(exc),
+        }
