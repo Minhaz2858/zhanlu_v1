@@ -63,10 +63,25 @@ def execute_flow_graph(
     flow: dict,
     ctx: Any,
     handlers: dict[str, Callable],
+    *,
+    partial_from: str | None = None,
+    seed_outputs: dict[str, dict] | None = None,
 ) -> dict[str, Any]:
     """Run a flow graph.
 
     Returns {"status": "completed"|"failed", "error": str|None, "output": Any}.
+
+    Partial re-run mode (iterate-loop / rerun-from-node): when ``partial_from``
+    is a node id, only that node and everything downstream of it (via main
+    edges) executes again. Outputs for every other node must be supplied in
+    ``seed_outputs`` — they act as reference values captured from a prior
+    completed run (the caller of a rerun is expected to pass the full output
+    map of the original execution). Seeded nodes are NOT re-executed; their
+    stored outputs are pre-loaded into ``ctx.outputs`` and their edges are
+    activated exactly as in the original run (router ``_route`` honored), so
+    the rerun subgraph sees identical upstream items. Seeding a node that IS
+    inside the rerun subgraph is ignored (it runs live). With no ``partial_from``
+    the behavior is byte-identical to a plain full run.
     """
     nodes = flow.get("nodes") or []
     edges = flow.get("edges") or []
@@ -105,8 +120,56 @@ def execute_flow_graph(
             if chosen is None or index in chosen:
                 active.setdefault(tgt, set()).add(nid)
 
+    # Partial re-run mode: build the rerun subgraph (partial_from + all
+    # downstream via main edges), pre-load reference outputs for everything
+    # outside it, and reconstruct edge activation from those stored outputs.
+    rerun_set: set[str] | None = None
+    if partial_from is not None:
+        if partial_from not in node_by_id:
+            err = f"rerun from {partial_from}: node not in flow"
+            return {
+                "status": "failed", "error": err, "output": None,
+                "failed_node_id": partial_from, "failed_node_type": None,
+            }
+        rerun_set = {partial_from}
+        queue = [partial_from]
+        while queue:
+            cur = queue.pop(0)
+            for tgt, _idx in main_outgoing.get(cur, []):
+                if tgt not in rerun_set:
+                    rerun_set.add(tgt)
+                    queue.append(tgt)
+        # Seeds = outputs of nodes that are NOT re-run. A seed for a node
+        # inside the rerun subgraph is ignored — it executes live anyway.
+        seeds = {
+            nid: out
+            for nid, out in (seed_outputs or {}).items()
+            if nid in node_by_id and nid not in rerun_set
+        }
+        ctx.outputs.update(seeds)
+        for nid, out in seeds.items():
+            _activate(nid, node_by_id[nid]["type"], out)
+        # Every re-run node needs all its upstreams: either they are re-run
+        # too, or their reference output was seeded from a completed run.
+        for node in ordered:
+            nid = node["id"]
+            if nid not in rerun_set:
+                continue
+            for src, _idx in main_upstream_map.get(nid, []):
+                if src not in rerun_set and src not in seeds:
+                    err = (
+                        f"rerun from {partial_from} requires upstream {src} output "
+                        "from a completed run — run the full workflow first"
+                    )
+                    return {
+                        "status": "failed", "error": err, "output": None,
+                        "failed_node_id": nid, "failed_node_type": node["type"],
+                    }
+
     for node in ordered:
         nid = node["id"]
+        if partial_from is not None and nid not in rerun_set:
+            continue  # seeded reference node — do not re-execute
         ntype = node["type"]
         upstreams = main_upstream_map.get(nid, [])
         active_in = {src for src, _idx in upstreams if src in active.get(nid, set())}

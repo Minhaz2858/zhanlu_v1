@@ -334,3 +334,166 @@ def test_merge_combines_parallel_branches():
     # Merge concatenated the branch items in edge order (n2 then n3).
     assert ctx.outputs["m1"]["items"] == [{"branch": "A"}, {"branch": "B"}]
     assert "A" in result["output"] and "B" in result["output"]
+
+
+# ---------------------------------------------------------------------------
+# Partial re-run mode (iterate-loop): partial_from + seed_outputs re-execute
+# a node-and-downstream subgraph using outputs captured by a prior completed
+# run as reference values for every upstream outside the rerun subgraph.
+# ---------------------------------------------------------------------------
+
+def test_partial_rerun_reuses_seeded_upstreams():
+    """partial_from='n2' with n1's prior output seeded -> n1 is NOT re-run;
+    n2/n3 re-execute against the seeded reference output."""
+    flow = _linear_flow()
+    called = []
+
+    def rec_trigger(ctx, node):
+        called.append("n1")
+        return fake_trigger_handler(ctx, node)
+
+    def rec_llm(ctx, node):
+        called.append("n2")
+        return fake_llm_handler(ctx, node)
+
+    def rec_output(ctx, node):
+        called.append("n3")
+        return fake_output_handler(ctx, node)
+
+    handlers = {"trigger_chat": rec_trigger, "llm": rec_llm, "output": rec_output}
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(
+        flow, ctx, handlers,
+        partial_from="n2",
+        seed_outputs={"n1": {"text": "seeded-from-full-run"}},
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "llm(seeded-from-full-run)"
+    assert called == ["n2", "n3"]  # n1 re-used from seed, not re-executed
+    assert ctx.outputs["n1"] == {"text": "seeded-from-full-run"}
+
+
+def test_partial_rerun_live_node_overwrites_own_seed():
+    """A seed entry for a node INSIDE the rerun subgraph must be ignored —
+    the live node executes again and its fresh output overwrites the seed."""
+    flow = _linear_flow()
+    called = []
+
+    def rec_llm(ctx, node):
+        called.append("n2")
+        return fake_llm_handler(ctx, node)
+
+    def rec_output(ctx, node):
+        called.append("n3")
+        return fake_output_handler(ctx, node)
+
+    handlers = {
+        "trigger_chat": fake_trigger_handler,
+        "llm": rec_llm,
+        "output": rec_output,
+    }
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(
+        flow, ctx, handlers,
+        partial_from="n2",
+        seed_outputs={
+            "n1": {"text": "seeded"},
+            "n2": {"text": "STALE-seed-must-be-ignored"},
+        },
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "llm(seeded)"  # fresh run, not the stale seed
+    assert called == ["n2", "n3"]
+    assert ctx.outputs["n2"] == {"text": "llm(seeded)"}
+
+
+def make_rerun_router_flow():
+    """Trigger -> condition(router) with the false branch (port 1) leading to
+    the output node; the true branch (port 0) is a dead end for this test."""
+    return {
+        "nodes": [
+            {"id": "n1", "type": "trigger_chat", "position": {"x": 0, "y": 0}, "data": {"label": "T", "config": {}}},
+            {"id": "n2", "type": "condition", "position": {"x": 1, "y": 0}, "data": {"label": "C", "config": {}}},
+            {"id": "n3", "type": "llm", "position": {"x": 2, "y": 0}, "data": {"label": "TrueBranch", "config": {"prompt": "x"}}},
+            {"id": "n4", "type": "llm", "position": {"x": 2, "y": 2}, "data": {"label": "FalseBranch", "config": {"prompt": "x"}}},
+            {"id": "n5", "type": "output", "position": {"x": 3, "y": 2}, "data": {"label": "O", "config": {}}},
+        ],
+        "edges": [
+            {"id": "e1", "source": "n1", "target": "n2"},
+            {"id": "e2", "source": "n2", "sourceHandle": "source-main", "target": "n3"},
+            {"id": "e3", "source": "n2", "sourceHandle": "source-main-1", "target": "n4"},
+            {"id": "e4", "source": "n4", "target": "n5"},
+        ],
+    }
+
+
+def test_partial_rerun_seeded_router_keeps_reference_route():
+    """Seeded router output carries its stored _route: re-running the branch
+    the router originally took (port 1) must keep working, and the branch the
+    reference run did NOT take (port 0) must stay dead."""
+    flow = make_rerun_router_flow()
+    called = []
+
+    def rec_trigger(ctx, node):
+        called.append("n1")
+        return fake_trigger_handler(ctx, node)
+
+    def router_must_not_run(ctx, node):
+        raise AssertionError("router n2 must be re-used from seed, not re-executed")
+
+    def rec_llm(ctx, node):
+        called.append(node["id"])
+        return fake_llm_handler(ctx, node)
+
+    def rec_output(ctx, node):
+        called.append("n5")
+        return fake_output_handler(ctx, node)
+
+    handlers = {
+        "trigger_chat": rec_trigger,
+        "condition": router_must_not_run,
+        "llm": rec_llm,
+        "output": rec_output,
+    }
+    ctx = FakeContext("stop")
+    result = execute_flow_graph(
+        flow, ctx, handlers,
+        partial_from="n4",
+        seed_outputs={
+            "n1": {"text": "stop"},
+            "n2": {"text": "stop", "branch": "false", "_route": [1]},
+        },
+    )
+    assert result["status"] == "completed"
+    assert result["output"] == "llm(stop)"
+    assert called == ["n4", "n5"]  # only the port-1 branch re-ran
+    assert "n3" not in called
+    assert ctx.outputs["n2"]["_route"] == [1]
+
+
+def test_partial_rerun_missing_upstream_seed_fails_clearly():
+    """Re-running from n2 without n1's prior output is a caller error: fail
+    loudly with an actionable message instead of silently producing garbage."""
+    flow = _linear_flow()
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, NODE_HANDLERS, partial_from="n2", seed_outputs={})
+    assert result["status"] == "failed"
+    assert "requires upstream" in result["error"]
+    assert "n1" in result["error"]
+    assert result["failed_node_id"] == "n2"
+    assert result["failed_node_type"] == "llm"
+
+
+def test_partial_no_args_keeps_full_run_behavior():
+    """partial_from=None (default) must be byte-identical to the legacy
+    3-arg call — including when the kwargs are passed explicitly as None."""
+    flow = _linear_flow()
+    ctx = FakeContext("hello")
+    result = execute_flow_graph(flow, ctx, NODE_HANDLERS)
+    assert result["status"] == "completed"
+    assert result["output"] == "llm(hello)"
+
+    ctx2 = FakeContext("hello")
+    result2 = execute_flow_graph(flow, ctx2, NODE_HANDLERS, partial_from=None, seed_outputs=None)
+    assert result2 == result
+    assert ctx2.step_events == ctx.step_events
