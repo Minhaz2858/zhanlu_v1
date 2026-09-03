@@ -135,4 +135,14 @@ describe('WorkflowBuilderChat.jsx workflow_builder streaming panel', () => {
     expect(SOURCE).toMatch(/setResumed\(false\)/);
     expect(SOURCE).toMatch(/setMessages\(\[\]\)/);
   });
+
+  it('ships a blueprint empty state with starter prompts (copilot redesign)', () => {
+    expect(SOURCE).toMatch(/import\s*\{[^}]*\bWorkflow\b[^}]*\}\s*from\s*['"`]lucide-react['"`]/);
+    // At least one starter card EN title + the send-on-click intent.
+    expect(SOURCE).toMatch(/Sales report pipeline/);
+    expect(SOURCE).toMatch(/or describe your own workflow below/i);
+    // Clicking a card must send the prompt through the existing send path.
+    expect(SOURCE).toMatch(/handleSend\s*\(/);
+    expect(SOURCE).toMatch(/STARTERS/);
+  });
 });

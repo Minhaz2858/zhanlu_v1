@@ -6,7 +6,66 @@ import {
   streamAgentResponse,
 } from '@/api/agentEnhanced';
 import { Button } from '@/components/ui/button';
-import { Send, X, Loader2, Sparkles, RotateCcw } from 'lucide-react';
+import {
+  Send,
+  X,
+  Loader2,
+  Sparkles,
+  RotateCcw,
+  Workflow,
+  BarChart3,
+  Inbox,
+  Search,
+  Zap,
+  Bot,
+  PanelTop,
+} from 'lucide-react';
+
+// Starter prompts shown in the blueprint empty state (Task 1). Each entry
+// carries a lucide icon name (resolved via starterIcon below) and fully
+// localized en/zh copy; clicking a card sends the prompt through the SAME
+// handleSend path as typing (handleSend(prefill)).
+const STARTERS = [
+  {
+    id: 'sales',
+    icon: 'BarChart3',
+    en: {
+      title: 'Sales report pipeline',
+      prompt:
+        'A weekly sales report workflow: pull sales from the database, summarize top products and customers, and output a markdown brief.',
+    },
+    zh: {
+      title: '销售报告流水线',
+      prompt:
+        '创建一个每周销售报告工作流：从数据库拉取销售数据，汇总重点产品和客户，并输出 Markdown 简报。',
+    },
+  },
+  {
+    id: 'triage',
+    icon: 'Inbox',
+    en: {
+      title: 'Feedback triage',
+      prompt:
+        'Classify incoming customer feedback by topic and route urgent complaints to a separate alert branch.',
+    },
+    zh: {
+      title: '反馈分流',
+      prompt: '将客户反馈按主题分类，并把紧急投诉路由到单独的告警分支。',
+    },
+  },
+  {
+    id: 'research',
+    icon: 'Search',
+    en: {
+      title: 'Research assistant',
+      prompt: 'Research a topic with web search, summarize the findings, and save a short brief.',
+    },
+    zh: {
+      title: '研究助手',
+      prompt: '用联网搜索研究一个主题，总结发现，并保存一份简短简报。',
+    },
+  },
+];
 
 /**
  * WorkflowBuilderChat — right slide-over chat panel for the workflow canvas.
@@ -170,8 +229,8 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, streaming]);
 
-  async function handleSend() {
-    const text = input.trim();
+  async function handleSend(prefill) {
+    const text = (prefill ?? input).trim();
     if (!text || streaming) return;
     const conv = convIdRef.current || convId;
     if (!conv) return;
@@ -270,6 +329,9 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
     }
   }
 
+  // Resolve the icon-name strings in STARTERS to lucide components.
+  const starterIcon = { BarChart3, Inbox, Search };
+
   // Gate rendering on `open` so an unconditional mount (Task 8) does not
   // permanently cover the canvas. All hooks run above, so this is safe.
   if (!open) return null;
@@ -303,11 +365,63 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
       {/* Message list */}
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {messages.length === 0 && (
-          <p className="text-xs text-muted-foreground">
-            {isEn
-              ? 'Describe the workflow you want and the AI will draft it on this canvas.'
-              : '描述你想要的工作流，AI 会在此画布上生成草稿。'}
-          </p>
+          <div className="flex flex-col gap-3">
+            {/* Blueprint mark + mini-pipeline: trigger → agent → output, the
+                last node pulsing to signal "waiting for your idea". */}
+            <div className="flex flex-col items-center gap-2 rounded-lg border bg-background px-3 py-4">
+              <span className="flex h-8 w-8 items-center justify-center rounded-full border bg-muted text-primary">
+                <Workflow className="h-4 w-4" />
+              </span>
+              <div className="flex items-center gap-1.5">
+                <span className="flex h-7 w-7 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+                  <Zap className="h-3.5 w-3.5" />
+                </span>
+                <span aria-hidden="true" className="h-px w-4 bg-border" />
+                <span className="flex h-7 w-7 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+                  <Bot className="h-3.5 w-3.5" />
+                </span>
+                <span aria-hidden="true" className="h-px w-4 bg-border" />
+                <span className="relative flex h-7 w-7 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+                  <PanelTop className="h-3.5 w-3.5" />
+                  <span
+                    aria-hidden="true"
+                    className="absolute -right-1 -top-1 h-2 w-2 animate-pulse rounded-full bg-primary"
+                  />
+                </span>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                {isEn ? "Describe it — I'll draft the workflow" : '描述它，我来起草工作流'}
+              </p>
+            </div>
+
+            {/* Starter prompt cards — same send path as typing. */}
+            <div className="flex flex-col gap-2">
+              {STARTERS.map((s) => {
+                const Icon = starterIcon[s.icon];
+                const t = isEn ? s.en : s.zh;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => handleSend(t.prompt)}
+                    className="flex w-full items-start gap-2.5 rounded-md border bg-background p-2.5 text-left transition-colors hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  >
+                    <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border bg-muted text-muted-foreground">
+                      <Icon className="h-3.5 w-3.5" />
+                    </span>
+                    <span className="flex min-w-0 flex-col gap-0.5">
+                      <span className="text-xs font-semibold text-foreground">{t.title}</span>
+                      <span className="truncate text-xs text-muted-foreground">{t.prompt}</span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <p className="text-center text-xs text-muted-foreground">
+              {isEn ? '…or describe your own workflow below.' : '…或在下方向我描述你的工作流。'}
+            </p>
+          </div>
         )}
         {messages.map((m, i) => (
           <div
