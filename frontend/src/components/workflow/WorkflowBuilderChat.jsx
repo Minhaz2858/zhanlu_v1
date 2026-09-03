@@ -230,6 +230,13 @@ function autosizeTextarea(el) {
 export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowSaved }) {
   const { lang } = useLanguage();
   const isEn = lang === 'en';
+  // Task 5 — motion + a11y: the panel slides in from the right on mount,
+  // but only when the user has NOT requested reduced motion. Resolved once
+  // at first render (state snapshot), so the animation class never changes
+  // mid-flight. Guarded for SSR/node where window is undefined.
+  const [reducedMotion] = useState(
+    () => typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches,
+  );
   const [messages, setMessages] = useState([]); // { role, content, _sessionError? }
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
@@ -481,7 +488,11 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
   if (!open) return null;
 
   return (
-    <div className="fixed inset-y-0 right-0 z-50 flex w-[400px] flex-col border-l bg-background shadow-xl">
+    <div
+      className={`fixed inset-y-0 right-0 z-50 flex w-[400px] flex-col border-l bg-background shadow-xl ${
+        reducedMotion ? '' : 'animate-slide-in-right'
+      }`}
+    >
       {/* Header — Workflow mark tile + title column + session status line. */}
       <div className="flex items-center gap-2.5 border-b px-4 py-3">
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-gradient-to-br from-primary/90 to-primary/60 text-primary-foreground">
@@ -508,13 +519,14 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
             onClick={startNewSession}
             disabled={startingSession}
             title={isEn ? 'Start a new session' : '新建会话'}
+            aria-label={isEn ? 'Start a new session' : '新建会话'}
             className="mr-1"
           >
             <RotateCcw className="h-3.5 w-3.5" />
             {isEn ? 'New' : '新建'}
           </Button>
         )}
-        <Button variant="ghost" size="icon" onClick={onClose} title={isEn ? 'Close (Esc)' : '关闭 (Esc)'}>
+        <Button variant="ghost" size="icon" onClick={onClose} title={isEn ? 'Close (Esc)' : '关闭 (Esc)'} aria-label={isEn ? 'Close (Esc)' : '关闭 (Esc)'}>
           <X className="h-4 w-4" />
         </Button>
       </div>
