@@ -23,6 +23,10 @@ class WorkflowRun(TimestampedBase):
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
     finished_at: Mapped[object | None] = mapped_column(DateTime, nullable=True)
+    # For rerun runs: id of the original run this is a rerun of.
+    rerun_of: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    # For rerun runs: node id the rerun started from (None = full rerun).
+    rerun_from_node: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
 
 class WorkflowRunStep(TimestampedBase):
