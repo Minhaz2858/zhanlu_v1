@@ -43,13 +43,22 @@ def upgrade() -> None:
             ["resource_type"],
         )
 
-    # Backfill projects: is_system=true OR created_by_id IS NULL → 'company'
+    # NOTE: projects.is_system is created at RUNTIME by ensure_system_agents()
+    # (see app/models/project.py), NOT by an Alembic migration, so it may not
+    # exist yet during `alembic upgrade head`. Guard on its presence so this
+    # migration stays chain-clean on a fresh database.
     bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    projects_cols = {c["name"] for c in inspector.get_columns("projects")}
+    projects_where = (
+        "(is_system = TRUE OR created_by_id IS NULL)"
+        if "is_system" in projects_cols
+        else "created_by_id IS NULL"
+    )
     bind.execute(
         sa.text(
-            "UPDATE projects SET resource_type = 'company' "
-            "WHERE (is_system = TRUE OR created_by_id IS NULL) "
-            "AND is_deleted = FALSE"
+            f"UPDATE projects SET resource_type = 'company' "
+            f"WHERE {projects_where} AND is_deleted = FALSE"
         )
     )
 

@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
+import { authFetch } from '@/api/authFetch';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useTranslate } from '@/lib/useTranslate';
 import { Button } from '@/components/ui/button';
@@ -55,9 +56,34 @@ export default function AutomationTasks() {
       setLoading(false);
     }
   }
+  // Toggle pause/resume through the dedicated REST endpoint (canonical
+  // active/paused vocabulary). The old code PATCHed the entity with
+  // 'running' — a legacy UI status the dispatcher never fires — so pausing
+  // an ACTIVE task showed a "Start" button and resuming wrote an invalid
+  // status that left scheduled tasks dead. /toggle also recomputes
+  // next_run_at on resume (parsing cron from the raw schedule when the row
+  // has no cron_expression yet).
   async function toggle(item) {
-    await base44.entities.AutomationTask.update(item.id, { status: item.status === 'running' ? 'paused' : 'running' });
-    load();
+    const next = item.status === 'active' ? 'paused' : 'active';
+    try {
+      const res = await authFetch(`/api/automations/${item.id}/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: next }),
+      });
+      if (!res.ok) {
+        let detail = `HTTP ${res.status}`;
+        try {
+          const j = await res.json();
+          if (j && j.detail) detail = j.detail;
+        } catch { /* keep status fallback */ }
+        toast({ title: 'Error', description: detail, variant: 'destructive' });
+        return;
+      }
+      load();
+    } catch (e) {
+      toast({ title: 'Error', description: e?.message || String(e), variant: 'destructive' });
+    }
   }
   // "Run now" — adopt a dedicated chat session for this task
   // (Manus UX: one task = one chat), then hand the run off to the
@@ -125,7 +151,11 @@ export default function AutomationTasks() {
     : tasks.filter((t) => (t.project || 'global') === selectedProject);
 
   const statusStyle = (s) => ({
-    running: 'bg-green-100 text-green-700', paused: 'bg-amber-100 text-amber-700',
+    // Canonical task statuses (AutomationTask.VALID_STATUSES). 'running' is a
+    // legacy pre-migration value kept styled for rows created before the
+    // active/paused vocabulary landed.
+    active: 'bg-green-100 text-green-700', running: 'bg-green-100 text-green-700',
+    paused: 'bg-amber-100 text-amber-700',
     completed: 'bg-blue-100 text-blue-700', failed: 'bg-red-100 text-red-700',
   }[s] || '');
 
@@ -167,6 +197,12 @@ export default function AutomationTasks() {
               <div className="mb-4 space-y-1 text-xs text-muted-foreground">
                 <div className="flex items-center gap-1.5"><FolderOpen className="h-3 w-3" /> {item.project && item.project !== 'global' ? item.project : t.automation.ungrouped}</div>
                 <div className="flex items-center gap-1.5"><Clock className="h-3 w-3" /> {item.schedule ? translate(item.schedule) : t.automation.manual}</div>
+                {item.next_run_at ? (
+                  <div className="flex items-center gap-1.5 text-primary/80">
+                    <Calendar className="h-3 w-3" />
+                    {t.automation.nextRun}：{formatShortDateTime(item.next_run_at)}
+                  </div>
+                ) : null}
                 <div>{t.automation.lastRun}：{formatShortDateTime(item.last_run)}</div>
               </div>
               <div className="flex flex-wrap gap-2">
@@ -184,7 +220,7 @@ export default function AutomationTasks() {
                   onClick={() => toggle(item)}
                   className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-foreground hover:bg-secondary"
                 >
-                  {item.status === 'running' ? <><Pause className="h-3 w-3" /> {t.automation.pause}</> : <><Play className="h-3 w-3" /> {t.automation.start}</>}
+                  {item.status === 'active' ? <><Pause className="h-3 w-3" /> {t.automation.pause}</> : <><Play className="h-3 w-3" /> {t.automation.start}</>}
                 </button>
                 <button
                   type="button"
@@ -214,6 +250,7 @@ export default function AutomationTasks() {
                 <th className="px-4 py-3 text-left font-medium">{t.automation.cols.type}</th>
                 <th className="px-4 py-3 text-left font-medium">{t.automation.cols.status}</th>
                 <th className="px-4 py-3 text-left font-medium">{t.automation.cols.schedule}</th>
+                <th className="px-4 py-3 text-left font-medium">{t.automation.cols.nextRun || t.automation.nextRun}</th>
                 <th className="px-4 py-3 text-left font-medium">{t.automation.cols.lastRun}</th>
                 <th className="px-4 py-3 text-right font-medium">{t.automation.cols.actions}</th>
               </tr>
@@ -226,6 +263,7 @@ export default function AutomationTasks() {
                   <td className="break-words px-4 py-3 text-muted-foreground">{t.automation.types[item.type]}</td>
                   <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs ${statusStyle(item.status)}`}>{t.automation.statuses[item.status]}</span></td>
                   <td className="break-words px-4 py-3 text-muted-foreground">{item.schedule ? translate(item.schedule) : t.automation.manualShort}</td>
+                  <td className="px-4 py-3 text-muted-foreground">{item.next_run_at ? formatShortDateTime(item.next_run_at) : '—'}</td>
                   <td className="px-4 py-3 text-muted-foreground">{formatShortDateTime(item.last_run)}</td>
                   <td className="px-4 py-3 text-right">
                     <button
@@ -236,7 +274,7 @@ export default function AutomationTasks() {
                     >
                       {lang === 'en' ? 'Run' : '运行'}
                     </button>
-                    <button type="button" onClick={() => toggle(item)} className="ml-3 text-xs text-primary hover:underline">{item.status === 'running' ? t.automation.pause : t.automation.start}</button>
+                    <button type="button" onClick={() => toggle(item)} className="ml-3 text-xs text-primary hover:underline">{item.status === 'active' ? t.automation.pause : t.automation.start}</button>
                     <button type="button" onClick={() => setDeletingTask(item)} className="ml-3 text-xs text-red-600 hover:underline">{t.automation.delete}</button>
                   </td>
                 </tr>

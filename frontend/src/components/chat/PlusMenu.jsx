@@ -7,6 +7,25 @@ import { filterUserAgents } from '@/lib/systemAgents';
 import { Plus, Upload, Wrench, Bot, Search, ChevronLeft, Check, Folder, Workflow } from 'lucide-react';
 import { toast } from 'sonner';
 
+/**
+ * Dedupe the catalog by (lowercased) name. The Tool table carries legacy
+ * duplicates — the same skill exists as an unowned marketplace row AND an
+ * owned/custom copy (e.g. pdf-summarizer). Prefer the row the user owns,
+ * then the custom-authored copy, so the picker shows exactly one entry per
+ * skill (owning the row is what makes it usable/editable).
+ */
+function dedupeSkills(rows) {
+  const best = new Map();
+  const score = (x) => (x.created_by_id ? 2 : 0) + (x.source === 'custom' ? 1 : 0);
+  for (const r of rows || []) {
+    const key = (r.name || '').trim().toLowerCase();
+    if (!key) continue;
+    const cur = best.get(key);
+    if (!cur || score(r) > score(cur)) best.set(key, r);
+  }
+  return [...best.values()];
+}
+
 export default function PlusMenu({
   onUpload, onSelectSkill, onSelectAgent, onSelectWorkflow, onSelectProject,
   activeSkill, activeAgent, activeProject, disabled,
@@ -52,12 +71,18 @@ export default function PlusMenu({
 
   useEffect(() => {
     if (!open) return;
-    Promise.all([
-      base44.entities.Tool.list('-updated_date', 100),
-      base44.auth.me().catch(() => null),
-    ]).then(([tools, u]) => {
-      setSkills(u ? tools.filter((x) => x.created_by_id === u.id) : tools);
-    }).catch(() => {});
+    // Skills = the FULL catalog (marketplace + builtin + the user's own),
+    // not just rows the current user created. The catalog is global — the
+    // same list /toolkit shows. A sparse ``fields`` fetch keeps the payload
+    // small: the Tool table ships ~14KB of skill_md body per row, so an
+    // unbounded full-row fetch of a 900+ skill catalog would pull several
+    // MB just to render a dropdown. ``dedupeSkills`` collapses the legacy
+    // marketplace/custom name duplicates.
+    base44.entities.Tool.list('-updated_date', 2000, 0, [
+      'id', 'name', 'description', 'trigger', 'created_by_id', 'source', 'updated_date',
+    ])
+      .then((tools) => setSkills(dedupeSkills(tools)))
+      .catch(() => {});
     base44.entities.AgentApp.list('-updated_date', 100).then((rows) => setAgents(filterUserAgents(rows))).catch(() => {});
     // Agent Workflows (flow_mode agents) — only those with a Chat Trigger
     // can be used from chat; the backend v2/v3 endpoints run them on every
@@ -91,11 +116,19 @@ export default function PlusMenu({
   }, [open]);
 
   function skillToken(s) {
-    if (s.trigger) {
-      const parts = s.trigger.split('/').filter(Boolean);
-      return parts.length ? parts[parts.length - 1] : s.trigger;
+    const name = (s.name || '').trim();
+    const trig = (s.trigger || '').trim();
+    if (trig) {
+      const parts = trig.split('/').filter(Boolean);
+      const last = parts.length ? parts[parts.length - 1].trim() : trig;
+      // Same hygiene as InvokePicker: phrase-list triggers are semantic
+      // match hints for the agent, not slash commands. Only render a
+      // real command token; otherwise fall back to the clean name.
+      if (last && last.length <= 48 && !last.includes(',') && !last.includes(' ')) {
+        return last;
+      }
     }
-    return s.name;
+    return name || 'skill';
   }
 
   async function handleFileChange(e) {
@@ -128,7 +161,11 @@ export default function PlusMenu({
   }
 
   const ql = q.toLowerCase();
-  const filteredSkills = skills.filter((s) => (s.name || '').toLowerCase().includes(ql) || (s.trigger || '').toLowerCase().includes(ql));
+  const filteredSkills = skills.filter(
+    (s) => (s.name || '').toLowerCase().includes(ql)
+      || (s.description || '').toLowerCase().includes(ql)
+      || (s.trigger || '').toLowerCase().includes(ql),
+  );
   // Workflows are NOT regular agents — exclude flow_mode rows so they only
   // appear in the dedicated "Agent Workflow" section below.
   const filteredAgents = agents.filter((a) => !a.flow_mode && (a.name || '').toLowerCase().includes(ql));

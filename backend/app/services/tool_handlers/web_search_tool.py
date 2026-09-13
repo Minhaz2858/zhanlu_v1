@@ -21,6 +21,18 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
+# Web provider chain — timeout
+# ---------------------------------------------------------------------------
+
+# httpx timeout per provider attempt. Was 30s: in an offline deployment a
+# single web_search call could blackhole for minutes (5 providers x 30s
+# sequential timeouts) and burn the entire turn budget before the loop ever
+# reached the bound data source. 10s keeps legit slow engines working while
+# bounding the offline worst case (~50s across the full chain).
+_SEARCH_TIMEOUT_S: float = 10.0
+
+
+# ---------------------------------------------------------------------------
 # Search Provider Abstraction
 # ---------------------------------------------------------------------------
 
@@ -37,7 +49,7 @@ class TavilyProvider(SearchProvider):
     """Tavily AI-optimized search API."""
 
     async def search(self, query: str, limit: int = 5) -> list[dict]:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT_S) as client:
             resp = await client.post(
                 "https://api.tavily.com/search",
                 json={
@@ -64,7 +76,7 @@ class SerperProvider(SearchProvider):
     """Serper.dev Google search API."""
 
     async def search(self, query: str, limit: int = 5) -> list[dict]:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT_S) as client:
             resp = await client.post(
                 "https://google.serper.dev/search",
                 headers={"X-API-KEY": settings.SEARCH_API_KEY, "Content-Type": "application/json"},
@@ -90,7 +102,7 @@ class DuckDuckGoProvider(SearchProvider):
         from urllib.parse import quote_plus
         url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
 
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT_S, follow_redirects=True) as client:
             resp = await client.get(
                 url,
                 headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36"},
@@ -153,7 +165,7 @@ class BingProvider(SearchProvider):
         else:
             url += "&setlang=zh-hans&mkt=zh-CN"
 
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT_S, follow_redirects=True) as client:
             resp = await client.get(
                 url,
                 headers={
@@ -205,7 +217,7 @@ class BochaProvider(SearchProvider):
     """
 
     async def search(self, query: str, limit: int = 5) -> list[dict]:
-        async with httpx.AsyncClient(timeout=30) as client:
+        async with httpx.AsyncClient(timeout=_SEARCH_TIMEOUT_S) as client:
             resp = await client.post(
                 "https://api.bochaai.com/v1/web-search",
                 headers={

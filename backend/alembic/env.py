@@ -1,7 +1,7 @@
 """Alembic environment configuration for migrations."""
 
 from logging.config import fileConfig
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 from alembic import context
 
 from app.config import settings
@@ -53,6 +53,41 @@ def run_migrations_online() -> None:
             render_as_batch=settings.is_sqlite,
         )
         with context.begin_transaction():
+            # Several revision ids in this chain exceed the 32 chars Alembic's
+            # default version_num column allows (e.g.
+            # 044_agent_run_steps_and_reasoning,
+            # 056_add_llm_models_bypass_hallucination_guardrail). SQLite does
+            # not enforce VARCHAR length, but PostgreSQL does — so ensure the
+            # version table is VARCHAR(128) in every DB state:
+            #   * fresh DB — no table yet: create it wide (Alembic skips its
+            #     own VARCHAR(32) create when the table already exists);
+            #   * existing DB — narrow table left by an earlier Alembic run:
+            #     widen it in place.
+            if not settings.is_sqlite:
+                connection.execute(
+                    text(
+                        "DO $$ BEGIN "
+                        "IF EXISTS (SELECT FROM pg_catalog.pg_tables "
+                        "           WHERE schemaname = current_schema() "
+                        "             AND tablename = 'alembic_version') THEN "
+                        "  ALTER TABLE alembic_version "
+                        "    ALTER COLUMN version_num TYPE VARCHAR(128); "
+                        "ELSE "
+                        "  CREATE TABLE alembic_version ("
+                        "    version_num VARCHAR(128) NOT NULL, "
+                        "    CONSTRAINT alembic_version_pkc "
+                        "      PRIMARY KEY (version_num)); "
+                        "END IF; END $$;"
+                    )
+                )
+            else:
+                connection.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS alembic_version ("
+                        "version_num VARCHAR(128) NOT NULL, "
+                        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+                    )
+                )
             context.run_migrations()
 
 

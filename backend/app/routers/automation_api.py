@@ -424,6 +424,7 @@ def list_executions(
     task_id: str,
     limit: int = Query(20, ge=1, le=100),
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
 ):
     task = db.query(AutomationTask).filter(
         AutomationTask.id == task_id,
@@ -431,6 +432,7 @@ def list_executions(
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
 
     rows = db.query(AutomationExecution).filter(
         AutomationExecution.automation_task_id == task_id,
@@ -470,12 +472,17 @@ def list_executions(
 
 
 @router.get("/executions/{execution_id}")
-def get_execution(execution_id: str, db: Session = Depends(get_db)):
+def get_execution(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     row = db.query(AutomationExecution).filter(
         AutomationExecution.id == execution_id,
     ).first()
     if not row:
         raise HTTPException(status_code=404, detail="Execution not found")
+    _assert_tenant(row, user)
     d = row.to_dict()
     files = db.query(AutomationFile).filter(
         AutomationFile.execution_id == execution_id,
@@ -486,7 +493,11 @@ def get_execution(execution_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/executions/{execution_id}/status")
-def get_execution_status(execution_id: str, db: Session = Depends(get_db)):
+def get_execution_status(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     """Lightweight poll payload for the in-progress execution drawer.
 
     Returns a compact snapshot — status, activity steps, current phase,
@@ -510,6 +521,7 @@ def get_execution_status(execution_id: str, db: Session = Depends(get_db)):
             "steps": [],
             "skill_calls": [],
         }
+    _assert_tenant(row, user)
 
     # Skill invocations recorded against this run (via SkillExecutionRecorder,
     # which stamps SkillRun.execution_id using the executor's contextvar).
@@ -569,7 +581,19 @@ def get_execution_status(execution_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/executions/{execution_id}/files")
-def list_execution_files(execution_id: str, db: Session = Depends(get_db)):
+def list_execution_files(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    # Tenant-scope through the parent execution (files inherit its org). An
+    # unknown execution id returns an empty list — same shape as the no-files
+    # case so the early-race poller isn't broken by a 404.
+    parent = db.query(AutomationExecution).filter(
+        AutomationExecution.id == execution_id,
+    ).first()
+    if parent is not None:
+        _assert_tenant(parent, user)
     files = db.query(AutomationFile).filter(
         AutomationFile.execution_id == execution_id,
         AutomationFile.is_deleted == False,
@@ -640,6 +664,21 @@ def get_execution_details(
 # hold a threadpool worker for the stream's entire lifetime (up to 1h).
 SSE_POLL_INTERVAL = 1.5
 
+# Single terminal-status vocabulary for execution rows, shared by the SSE
+# stream, the cancel endpoint, and the frontend's status bus:
+#   completed/succeeded  — success (succeeded is legacy pre-migration wording)
+#   failed               — executor/janitor failure (incl. timeouts)
+#   cancelled            — user cancel (CAS'd from queued/running)
+#   skipped              — run not executed (confirmation-skip paths)
+# Prior drift: the SSE stream watched ("completed","failed","skipped") and
+# omitted "cancelled", so a cancelled run kept the EventSource polling until
+# the 1h hard cap; the cancel endpoint's terminal check was
+# ("succeeded","failed","cancelled") and missed "completed", reporting an
+# already-finished run as non-terminal.
+_TERMINAL_EXECUTION_STATUSES = frozenset(
+    {"completed", "succeeded", "failed", "cancelled", "skipped"}
+)
+
 
 def _sse(obj: dict) -> str:
     """Format one SSE data frame."""
@@ -680,17 +719,23 @@ async def _execution_event_stream(execution_id: str):
                 if phase:
                     yield _sse({"type": "phase", "state": phase})
             status = ex.status
-            if status in ("completed", "failed", "skipped"):
-                if status == "completed":
+            if status in _TERMINAL_EXECUTION_STATUSES:
+                if status in ("completed", "succeeded"):
                     yield _sse({
                         "type": "done",
                         "content": (ex.output_text or "")[:4000],
                         "execution_id": execution_id,
                     })
                 else:
+                    if status == "cancelled":
+                        _msg = (ex.error or "Run cancelled")[:500]
+                    elif status == "skipped":
+                        _msg = (ex.error or "Run skipped")[:500]
+                    else:
+                        _msg = (ex.error or "Run failed")[:500]
                     yield _sse({
                         "type": "error",
-                        "message": (ex.error or "Run failed")[:500],
+                        "message": _msg,
                         "status": status,
                         "execution_id": execution_id,
                     })
@@ -706,14 +751,54 @@ async def _execution_event_stream(execution_id: str):
         await asyncio.sleep(SSE_POLL_INTERVAL)
 
 
+@router.post("/executions/{execution_id}/stream-token")
+def mint_execution_stream_token(
+    execution_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
+    """Mint a short-lived signed token for the SSE execution stream.
+
+    EventSource cannot send Authorization headers, so the live-stream URL is
+    authenticated via ``?token=`` minted here (same pattern as file preview
+    tokens). The token is bound to (execution_id, user_id) and expires in 15
+    minutes; the stream endpoint still runs the tenant check against the
+    resolved user.
+    """
+    from app.services.preview_tokens import mint_stream_token
+
+    row = db.query(AutomationExecution).filter(
+        AutomationExecution.id == execution_id,
+        AutomationExecution.is_deleted == False,  # noqa: E712
+    ).first()
+    if not row:
+        raise HTTPException(status_code=404, detail="Execution not found")
+    _assert_tenant(row, user)
+    token = mint_stream_token(execution_id=execution_id, user_id=str(user.id))
+    return {
+        "token": token,
+        "url": f"/api/automations/executions/{execution_id}/events/stream?token={token}",
+    }
+
+
 @router.get("/executions/{execution_id}/events/stream")
-async def stream_execution_events(execution_id: str):
+async def stream_execution_events(
+    execution_id: str,
+    token: Optional[str] = Query(None),
+    db: Session = Depends(get_db),
+    user: Optional[User] = Depends(get_current_user_optional),
+):
     """Server-Sent Events stream of one execution's live progress.
 
     Mirrors the sandbox job-events stream. The Scheduled panel consumes this
     with ``EventSource`` while a run is queued/running and falls back to 30s
     polling when SSE fails. See ``_execution_event_stream`` for the event
     format.
+
+    Auth: EventSource can't send headers, so the caller must either present a
+    Bearer token (fetch/XHR) or a signed ``?token=`` minted by
+    ``POST /executions/{id}/stream-token``. The tenant check runs against the
+    resolved user so one tenant's run can't be streamed by another.
     """
     # Existence check so a missing id 404s immediately (cleaner for the
     # client than an empty/error stream).
@@ -729,6 +814,19 @@ async def stream_execution_events(execution_id: str):
             pass
     if not found:
         raise HTTPException(status_code=404, detail="Execution not found")
+
+    # Resolve identity from the signed token when no Bearer header is present
+    # (EventSource path), mirroring the file-preview route.
+    if user is None and token:
+        from app.services.preview_tokens import verify_stream_token
+        uid = verify_stream_token(token, execution_id)
+        if uid:
+            candidate = db.get(User, uid)
+            if candidate is not None and not getattr(candidate, "is_anonymous", False):
+                user = candidate
+    if user is None:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    _assert_tenant(found, user)
 
     return StreamingResponse(
         _execution_event_stream(execution_id),
@@ -747,7 +845,10 @@ class SkipConfirmationRequest(BaseModel):
 
 @router.post("/{task_id}/skip-confirmation")
 def set_skip_confirmation(
-    task_id: str, req: SkipConfirmationRequest, db: Session = Depends(get_db)
+    task_id: str,
+    req: SkipConfirmationRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
 ):
     """Toggle the Manus-style "Always skip" confirmations flag on a task."""
     task = db.query(AutomationTask).filter(
@@ -756,6 +857,7 @@ def set_skip_confirmation(
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
     task.skip_confirmation = "true" if req.skip else "false"
     task.updated_date = datetime.now(timezone.utc)
     db.commit()
@@ -774,7 +876,11 @@ class RunRequest(BaseModel):
 
 
 @router.post("/{task_id}/run")
-async def run_now(task_id: str, db: Session = Depends(get_db)):
+async def run_now(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     """Manually trigger an immediate run. Returns the new execution id."""
     task = db.query(AutomationTask).filter(
         AutomationTask.id == task_id,
@@ -782,6 +888,7 @@ async def run_now(task_id: str, db: Session = Depends(get_db)):
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
     from app.services.automation_dispatcher import trigger_now
     exec_id = await trigger_now(task_id)
     if not exec_id:
@@ -808,7 +915,11 @@ def _ensure_task_chat_session(db: Session, task: AutomationTask) -> tuple[str, b
 
 
 @router.post("/{task_id}/ensure-session")
-def ensure_session(task_id: str, db: Session = Depends(get_db)):
+def ensure_session(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     """Adopt (or create) a dedicated chat session for an automation.
 
     The Manus-style UX expects every automation to live in its own
@@ -830,13 +941,25 @@ def ensure_session(task_id: str, db: Session = Depends(get_db)):
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
     session_id, created = _ensure_task_chat_session(db, task)
     return {"success": True, "session_id": session_id, "created": created}
 
 
 @router.post("/{task_id}/recompute")
-def recompute_next_run_endpoint(task_id: str, db: Session = Depends(get_db)):
+def recompute_next_run_endpoint(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     """Recompute and persist the next_run_at for a task."""
+    task = db.query(AutomationTask).filter(
+        AutomationTask.id == task_id,
+        AutomationTask.is_deleted == False,
+    ).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
     from app.services.automation_dispatcher import recompute_next_run
     nxt = recompute_next_run(task_id)
     if not nxt:
@@ -851,6 +974,7 @@ def recompute_next_run_endpoint(task_id: str, db: Session = Depends(get_db)):
 def cancel_execution_endpoint(
     execution_id: str,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
 ):
     """Stop a queued or running execution.
 
@@ -878,7 +1002,8 @@ def cancel_execution_endpoint(
     )
     if ex is None:
         raise HTTPException(status_code=404, detail="Execution not found")
-    if ex.status in ("succeeded", "failed", "cancelled"):
+    _assert_tenant(ex, user)
+    if ex.status in _TERMINAL_EXECUTION_STATUSES:
         return {
             "id": ex.id,
             "status": ex.status,
@@ -1137,7 +1262,12 @@ class ToggleRequest(BaseModel):
 
 
 @router.post("/{task_id}/toggle")
-def toggle_status(task_id: str, req: ToggleRequest, db: Session = Depends(get_db)):
+def toggle_status(
+    task_id: str,
+    req: ToggleRequest,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     """Pause/resume an automation. If resuming, recompute next_run_at."""
     task = db.query(AutomationTask).filter(
         AutomationTask.id == task_id,
@@ -1145,13 +1275,22 @@ def toggle_status(task_id: str, req: ToggleRequest, db: Session = Depends(get_db
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
     new_status = req.status
     if new_status not in ("active", "paused", "failed", "completed"):
         raise HTTPException(status_code=400, detail=f"Invalid status: {new_status}")
     task.status = new_status
     task.updated_date = datetime.now(timezone.utc)
     db.commit()
-    if new_status == "active" and task.cron_expression:
+    # Resume path: recompute next_run_at whenever the task has ANY schedule
+    # (cron_expression OR raw schedule string). The old ``and task.cron_expression``
+    # gate meant a task created with a cron-looking schedule but no parsed
+    # cron_expression (generic-entity API / seed / pre-fix rows) resumed to
+    # status=active with next_run_at=NULL — the dispatcher only fires tasks
+    # with next_run_at, so it NEVER ran again. recompute_next_run parses from
+    # the raw schedule when cron_expression is empty (LLM fallback acceptable —
+    # user-initiated action, not the hot tick).
+    if new_status == "active" and (task.cron_expression or (task.schedule or "").strip()):
         from app.services.automation_dispatcher import recompute_next_run
         nxt = recompute_next_run(task_id)
         if nxt:
@@ -1160,6 +1299,15 @@ def toggle_status(task_id: str, req: ToggleRequest, db: Session = Depends(get_db
                 "status": new_status,
                 "next_run_at": nxt.isoformat(),
             }
+        # Task exists with a schedule but recompute could not parse it (e.g. a
+        # one-shot datetime like "2026-08-15 14:30" or garbage). Fail loudly —
+        # silently resuming to the never-fires dead state is the bug we're fixing.
+        raise HTTPException(
+            status_code=400,
+            detail="Cannot resume: the schedule could not be parsed. "
+                   "Edit the schedule (e.g. 'daily at 09:00' or a cron like '0 9 * * *') "
+                   "and try again.",
+        )
     return {
         "success": True,
         "status": new_status,
@@ -1168,7 +1316,11 @@ def toggle_status(task_id: str, req: ToggleRequest, db: Session = Depends(get_db
 
 
 @router.delete("/{task_id}")
-def delete_automation(task_id: str, db: Session = Depends(get_db)):
+def delete_automation(
+    task_id: str,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
+):
     """Soft-delete an automation task. Used by the Manus-style
     'Delete schedule' action in the Scheduled side panel.
 
@@ -1182,6 +1334,7 @@ def delete_automation(task_id: str, db: Session = Depends(get_db)):
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
     task.is_deleted = True
     task.status = "deleted"
     task.updated_date = datetime.now(timezone.utc)
@@ -1282,6 +1435,7 @@ def update_notification_settings(
     task_id: str,
     req: NotificationSettingsRequest,
     db: Session = Depends(get_db),
+    user: User = Depends(get_current_user_required),
 ):
     """Persist per-task email notification settings with server-side validation.
 
@@ -1296,6 +1450,7 @@ def update_notification_settings(
     ).first()
     if not task:
         raise HTTPException(status_code=404, detail="Automation task not found")
+    _assert_tenant(task, user)
 
     emails = [e.strip().lower() for e in req.notify_emails if e and e.strip()]
     invalid = [e for e in emails if not is_valid_email(e)]

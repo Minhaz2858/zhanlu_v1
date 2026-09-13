@@ -14,6 +14,7 @@ import AppLayout from '@/components/AppLayout';
 import Chat from '@/pages/Chat';
 import Login from '@/pages/Login';
 import Register from '@/pages/Register';
+import SsoCallback from '@/pages/SsoCallback';
 import ForgotPassword from '@/pages/ForgotPassword';
 import ResetPassword from '@/pages/ResetPassword';
 import { LanguageProvider } from '@/lib/LanguageProvider';
@@ -49,6 +50,7 @@ const AdminUsers = lazy(() => import('@/pages/AdminUsers'));
 const AdminObservability = lazy(() => import('@/pages/AdminObservability'));
 const ResourceDetail = lazy(() => import('@/pages/ResourceDetail'));
 const AgentConfig = lazy(() => import('@/pages/AgentConfig'));
+const WorkflowCanvas = lazy(() => import('@/pages/WorkflowCanvas'));
 const DashboardView = lazy(() => import('@/pages/DashboardView'));
 const UITest = lazy(() => import('@/pages/UITest'));
 
@@ -94,6 +96,7 @@ const AuthenticatedApp = () => {
     <>
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/sso/callback" element={<SsoCallback />} />
       <Route path="/forgot-password" element={<ForgotPassword />} />
       <Route path="/reset-password" element={<ResetPassword />} />
     </>
@@ -152,6 +155,7 @@ const AuthenticatedApp = () => {
         <Route path="/my-space" element={<MySpace />} />
         <Route path="/my-space/project/:id" element={<ProjectDetail />} />
         <Route path="/my-space/agent/:id" element={<AgentConfig />} />
+        <Route path="/my-space/workflow/:id" element={<WorkflowCanvas />} />
         <Route path="/my-space/:type/:id" element={<ResourceDetail />} />
         <Route path="/market" element={<Market />} />
         <Route path="/market/:id" element={<MarketAgentDetail />} />

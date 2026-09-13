@@ -21,7 +21,7 @@ services:
     container_name: zhanlu-backend
     env_file: .env
     ports:
-      - "${BACKEND_PORT:-5002}:5002"
+      - "${BACKEND_PORT:-5002}:${BACKEND_PORT:-5002}"
     volumes:
       - ./backend:/app:cached
       - ./scripts:/app/scripts:cached

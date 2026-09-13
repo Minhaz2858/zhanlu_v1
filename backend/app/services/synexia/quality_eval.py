@@ -152,27 +152,6 @@ when the reply is on-topic but incomplete or a section could be improved.
 Accept when the reply satisfies the request without serious issues.
 """
 
-_REGEN_TEMPLATE = """\
-You are revising your earlier reply to better satisfy the user's request.
-
-User request:
-{user_message}
-
-Your earlier reply:
-{original_text}
-
-Issues found in the earlier reply:
-{issues}
-
-Suggestions for improvement:
-{suggestions}
-
-Original response instructions:
-{response_prompt}
-
-Write a revised reply that addresses every issue and incorporates the
-suggestions.  Output ONLY the revised reply text — no preamble, no JSON.
-"""
 
 # ── Document-specific rubric ───────────────────────────────────────────
 # Added Phase 3: evaluates generated document payloads against template
@@ -412,180 +391,11 @@ def evaluate_quality(
     )
 
 
-def regenerate_with_feedback(
-    *,
-    user_message: str,
-    original_text: str,
-    critique: QualityEvalResult,
-    response_prompt: str,
-    llm_call: Optional[Callable] = None,
-) -> str:
-    """Re-generate the response with the critique as feedback (1 LLM call).
-
-    Never raises.  When ``llm_call`` is None or fails, ``original_text`` is
-    returned unchanged.
-    """
-    if llm_call is None:
-        return original_text
-
-    prompt = _REGEN_TEMPLATE.format(
-        user_message=(user_message or "")[:4000],
-        original_text=(original_text or "")[:4000],
-        issues="\n".join(f"- {i}" for i in critique.issues) or "(none)",
-        suggestions="\n".join(f"- {s}" for s in critique.suggestions) or "(none)",
-        response_prompt=(response_prompt or "")[:4000],
-    )
-    messages = [{"role": "user", "content": prompt}]
-    try:
-        result = llm_call(prompt=prompt, messages=messages, temperature=0.7)
-    except Exception as exc:
-        logger.warning("quality_eval: regenerate llm_call raised (non-fatal): %s", exc)
-        return original_text
-
-    if isinstance(result, dict):
-        text = result.get("response", "")
-    elif isinstance(result, str):
-        text = result
-    else:
-        text = ""
-    return text.strip() or original_text
-
-
-def run_quality_loop(
-    *,
-    user_message: str,
-    initial_text: str,
-    task_spec: dict,
-    response_prompt: str,
-    max_iterations: int = 2,
-    llm_call: Optional[Callable] = None,
-) -> QualityEvalResult:
-    """Orchestrate the bounded corrective re-generation loop.
-
-    1. Evaluate the initial text (1 LLM call).
-    2. If accept → return immediately (0 corrective iterations).
-    3. If revise/reject and iterations remain → regenerate with feedback
-       (1 call), re-evaluate (1 call).  Repeat up to ``max_iterations``.
-
-    Returns a ``QualityEvalResult`` with ``final_text`` set to the best
-    version and ``iterations`` counting corrective cycles actually run.
-    Never raises.
-
-    Cost bound: 0 extra calls on a clean accept; up to
-    ``1 + max_iterations * 2`` calls otherwise (1 initial eval + per
-    iteration: 1 regenerate + 1 re-eval).
-    """
-    current_text = initial_text
-    result = evaluate_quality(
-        user_message=user_message,
-        assistant_text=current_text,
-        task_spec=task_spec,
-        llm_call=llm_call,
-    )
-    iterations = 0
-    while not result.is_ok and iterations < max_iterations:
-        # Without an LLM the heuristic can't improve the text — stop.
-        if llm_call is None:
-            break
-        current_text = regenerate_with_feedback(
-            user_message=user_message,
-            original_text=current_text,
-            critique=result,
-            response_prompt=response_prompt,
-            llm_call=llm_call,
-        )
-        iterations += 1
-        result = evaluate_quality(
-            user_message=user_message,
-            assistant_text=current_text,
-            task_spec=task_spec,
-            llm_call=llm_call,
-        )
-    result.final_text = current_text
-    result.iterations = iterations
-    return result
 
 
 # ── Standalone quality eval (non-FSM paths) ──────────────────────────
 
 
-def evaluate_response_quality(
-    user_message: str,
-    assistant_text: str,
-    task_spec: dict | None = None,
-    response_prompt: str = "",
-    max_iterations: int = 2,
-) -> QualityEvalResult:
-    """Standalone quality evaluation for non-FSM code paths.
-
-    This is the entry point for ReAct (v2) and v3 non-FSM streaming
-    paths that don't have an ``SynexiaFSM`` instance. It builds an
-    ``llm_call`` bridge from ``llm_service.call_llm`` and delegates to
-    ``run_quality_loop``.
-
-    Feature-gated by ``QUALITY_EVAL_ALL_PATHS`` (default True when
-    ``SYNEXIA_QUALITY_EVAL_ENABLED`` is True). Never raises — returns
-    ``QualityEvalResult(verdict="accept")`` with ``final_text`` unchanged
-    when quality eval is disabled or LLM unavailable.
-    """
-    from app.config import settings
-
-    # Feature gate
-    if not getattr(settings, "SYNEXIA_QUALITY_EVAL_ENABLED", True):
-        return QualityEvalResult(
-            verdict="accept",
-            final_text=assistant_text,
-            raw="quality_eval_disabled",
-        )
-    if not getattr(settings, "QUALITY_EVAL_ALL_PATHS", True):
-        return QualityEvalResult(
-            verdict="accept",
-            final_text=assistant_text,
-            raw="quality_eval_all_paths_disabled",
-        )
-
-    spec = task_spec or {}
-
-    # Build an async→sync llm_call bridge via asyncio.
-    # Always spin a NEW event loop: this bridge is invoked from worker
-    # threads (via asyncio.to_thread in the v3 streaming paths), never
-    # from the running loop itself.  Using get_running_loop() here would
-    # raise "RuntimeError: This event loop is already running" whenever a
-    # loop IS running (the old bug), or create an unclosed loop otherwise.
-    # (Fixed 2026-08-17.)
-    def _sync_llm_bridge(prompt="", messages=None, temperature=0.0):
-        """Sync bridge for quality eval's `llm_call` parameter."""
-        import asyncio
-        from app.services.llm_service import call_llm
-
-        result = call_llm(
-            prompt=prompt,
-            messages=messages,
-            temperature=temperature,
-            task_type="simple_chat",
-        )
-        # Production call_llm is async → run it in a fresh loop (we are in a
-        # worker thread via asyncio.to_thread).  Tests may inject a plain
-        # sync stub returning a dict → pass it through untouched.
-        if not asyncio.iscoroutine(result):
-            return result
-        loop = asyncio.new_event_loop()
-        try:
-            return loop.run_until_complete(result)
-        finally:
-            try:
-                loop.close()
-            except Exception:  # pragma: no cover — loop teardown best-effort
-                pass
-
-    return run_quality_loop(
-        user_message=user_message,
-        initial_text=assistant_text,
-        task_spec=spec,
-        response_prompt=response_prompt,
-        max_iterations=max_iterations,
-        llm_call=_sync_llm_bridge,
-    )
 
 
 # ── Document quality evaluation ────────────────────────────────────────
@@ -875,6 +685,4 @@ __all__ = [
     "evaluate_quality",
     "evaluate_document_quality",
     "validate_selected_skill_payload",
-    "regenerate_with_feedback",
-    "run_quality_loop",
 ]

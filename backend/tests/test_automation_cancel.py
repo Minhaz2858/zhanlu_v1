@@ -42,11 +42,18 @@ os.environ.setdefault("DATABASE_URL", "sqlite:///:memory:")
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+from types import SimpleNamespace
 
 from app.database import Base
 from app.models.automation_execution import AutomationExecution
 from app.models.automation_task import AutomationTask
 from app.models.chat_message import ChatMessage
+
+
+# Router endpoints now require an authenticated user + tenant check. Direct
+# calls pass a fake user; org_id=None skips the tenant assert so fixtures stay
+# org-agnostic (the row fixtures default to "default-org" via the base model).
+_FAKE_USER = SimpleNamespace(id="test-user", org_id=None)
 
 
 # --- Fixtures ---------------------------------------------------------------
@@ -274,7 +281,7 @@ def test_cancel_endpoint_flips_running_execution(db):
     try:
         from fastapi import HTTPException
         from app.routers.automation_api import cancel_execution_endpoint
-        resp = cancel_execution_endpoint(execution_id=ex.id, db=db)
+        resp = cancel_execution_endpoint(execution_id=ex.id, db=db, user=_FAKE_USER)
         assert resp["status"] == "cancelled"
         assert resp["already_terminal"] is False
         # request_cancel returns False because no executor is registered
@@ -291,8 +298,8 @@ def test_cancel_endpoint_is_idempotent(db):
     ex = _make_execution(db, task, status="running")
     try:
         from app.routers.automation_api import cancel_execution_endpoint
-        r1 = cancel_execution_endpoint(execution_id=ex.id, db=db)
-        r2 = cancel_execution_endpoint(execution_id=ex.id, db=db)
+        r1 = cancel_execution_endpoint(execution_id=ex.id, db=db, user=_FAKE_USER)
+        r2 = cancel_execution_endpoint(execution_id=ex.id, db=db, user=_FAKE_USER)
         assert r1["status"] == "cancelled"
         # Second call sees the row already in "cancelled" → short-circuit
         # before the CAS, return already_terminal=True.
@@ -306,7 +313,7 @@ def test_cancel_endpoint_404_for_unknown_execution(db):
     from fastapi import HTTPException
     from app.routers.automation_api import cancel_execution_endpoint
     try:
-        cancel_execution_endpoint(execution_id="nope-does-not-exist", db=db)
+        cancel_execution_endpoint(execution_id="nope-does-not-exist", db=db, user=_FAKE_USER)
     except HTTPException as e:
         assert e.status_code == 404
         return

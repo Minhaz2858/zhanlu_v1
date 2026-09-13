@@ -76,7 +76,12 @@ def test_bounce_back_pattern_matches_invitations():
 
 
 def test_dashboard_redirect_keeps_action_hint():
-    assert "create dashboard" in _DASHBOARD_REDIRECT_FALLBACK
+    # 2026-09-02: the dashboard redirect is now honest — it names the failure
+    # (build tool never called) and the remediation, instead of reusing the
+    # generic apology wording with a trailing hint.
+    assert "did not complete" in _DASHBOARD_REDIRECT_FALLBACK
+    assert "continue building" in _DASHBOARD_REDIRECT_FALLBACK
+    assert "had trouble putting it all together" not in _DASHBOARD_REDIRECT_FALLBACK
 
 
 def test_artifact_aware_fallback_mentions_titles():

@@ -208,22 +208,6 @@ class TestHallucinationGuardrail(unittest.TestCase):
 
     # -- Per-model bypass flag (weak local model opt-out) -------------------
 
-    def test_bypass_flag_skips_guardrail(self):
-        """When bypass_guardrail=True, the guardrail must return action="none"
-        even for a data question with bound KBs and no tool call."""
-        from app.routers.agents import _check_hallucination_guardrail
-        result = _check_hallucination_guardrail(
-            user_message="who are my top 5 customers?",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
-            tool_calls_made=[],
-            iteration=0,
-            guardrail_retries=0,
-            model_id="qwen3.5-27b-tools",
-            bypass_guardrail=True,
-        )
-        self.assertEqual(result.action, "none")
-        self.assertEqual(result.message, "")
-
     def test_bypass_flag_default_false_keeps_guardrail(self):
         """When bypass_guardrail is omitted (default False), the guardrail
         behaves exactly as before (nudge on data question + bound KBs)."""
@@ -237,162 +221,54 @@ class TestHallucinationGuardrail(unittest.TestCase):
         )
         self.assertEqual(result.action, "nudge")
 
-    def test_bypass_flag_explicit_false_keeps_guardrail(self):
-        """bypass_guardrail=False explicitly should behave identically to
-        the default (guardrail still triggers)."""
-        from app.routers.agents import _check_hallucination_guardrail
-        result = _check_hallucination_guardrail(
-            user_message="who are my top 5 customers?",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
-            tool_calls_made=[],
-            iteration=0,
-            guardrail_retries=0,
-            model_id="deepseek-chat",
-            bypass_guardrail=False,
-        )
-        self.assertEqual(result.action, "nudge")
-
-    def test_bypass_flag_skips_even_when_retries_exhausted(self):
-        """bypass takes precedence over the fallback branch: even when
-        guardrail_retries >= max, bypass_guardrail=True returns action="none"."""
-        from app.routers.agents import _check_hallucination_guardrail
-        result = _check_hallucination_guardrail(
-            user_message="who are my top 5 customers?",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
-            tool_calls_made=[],
-            iteration=0,
-            guardrail_retries=2,
-            model_id="llama3.2",
-            bypass_guardrail=True,
-        )
-        self.assertEqual(result.action, "none")
-
-
 # ---------------------------------------------------------------------------
 # Fix 2: tool_choice forcing
 # ---------------------------------------------------------------------------
 
 class TestToolChoiceForcing(unittest.TestCase):
-    """Tests for _compute_tool_choice() — determines when to force
-    ask_data_agent via tool_choice."""
+    """Phase A/B: server-side tool_choice forcing was removed.
 
-    def test_force_on_first_iteration_data_question_bound_kbs(self):
-        """On iteration 0, with a data question and bound KBs,
-        tool_choice should force ask_data_agent (when the tool is
-        granted — server-side enforcement is gated on tool presence)."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="top 5 customers",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
+    The former _compute_tool_choice() seam is gone. resolve_turn_action
+    always returns forced_tool=None; the LLM picks the tool from the full
+    list. Guardrail nudge/fallback behavior is unchanged and covered above.
+    """
+
+    def test_compute_tool_choice_seam_removed(self):
+        import app.routers.agents as agents_mod
+        self.assertFalse(hasattr(agents_mod, "_compute_tool_choice"))
+
+    def test_data_question_not_forced(self):
+        from app.services.turn_action import resolve_turn_action
+        action = resolve_turn_action(
+            "top 5 customers",
+            ["ask_data_agent", "web_search"],
+            {"bound_kb_ids": ["kb-1"]},
+            is_data_question=True,
             iteration=0,
-            tool_names=["ask_data_agent", "web_search"],
         )
-        self.assertIsNotNone(result)
-        self.assertEqual(result["type"], "function")
-        self.assertEqual(result["function"]["name"], "ask_data_agent")
+        self.assertIsNone(action.forced_tool)
 
-    def test_auto_on_non_data_question(self):
-        """For non-data questions, tool_choice should be auto (None)."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="hello",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
+    def test_doc_intent_not_forced(self):
+        from app.services.turn_action import resolve_turn_action
+        action = resolve_turn_action(
+            "create a docx report from the sales table",
+            ["ask_data_agent", "create_artifact", "web_search"],
+            {"bound_kb_ids": ["kb-1"]},
+            is_data_question=False,
             iteration=0,
-            tool_names=["ask_data_agent"],
         )
-        self.assertIsNone(result)
+        self.assertIsNone(action.forced_tool)
 
-    def test_auto_without_bound_kbs(self):
-        """Without bound KBs, tool_choice should be auto (None)."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="top 5 customers",
-            data_ctx_extras={},
-            iteration=0,
-            tool_names=["ask_data_agent"],
-        )
-        self.assertIsNone(result)
-
-    def test_auto_on_subsequent_iterations(self):
-        """On iteration > 0, tool_choice should be auto (None) —
-        the LLM has already had its chance to call the tool."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="top 5 customers",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
-            iteration=1,
-            tool_names=["ask_data_agent"],
-        )
-        self.assertIsNone(result)
-
-    def test_auto_on_create_agent_question(self):
-        """Even with bound KBs, 'create an agent' should NOT force
-        ask_data_agent — it's not a data question."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="create an agent for customer support",
-            data_ctx_extras={"bound_kb_ids": ["kb-1"]},
-            iteration=0,
-            tool_names=["ask_data_agent"],
-        )
-        self.assertIsNone(result)
-
-    def test_force_create_artifact_on_doc_intent(self):
-        """When the message asks for a pptx/docx and create_artifact is
-        in the tool list, server forces create_artifact on iteration 0."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="Make me a PowerPoint on Q3 sales",
-            data_ctx_extras={},
-            iteration=0,
-            tool_names=["create_artifact", "web_search"],
-        )
-        self.assertIsNotNone(result)
-        self.assertEqual(result["function"]["name"], "create_artifact")
-
-    def test_force_web_extract_on_url(self):
-        """When the message contains a URL and web_extract is in the
-        tool list, server forces web_extract on iteration 0."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="summarize https://example.com",
-            data_ctx_extras={},
-            iteration=0,
-            tool_names=["web_extract", "web_search"],
-        )
-        self.assertIsNotNone(result)
-        self.assertEqual(result["function"]["name"], "web_extract")
-
-    def test_force_web_search_on_time_sensitive(self):
-        """When the message is time-sensitive and web_search is in the
-        tool list, server forces web_search on iteration 0."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="latest news on AI",
-            data_ctx_extras={},
-            iteration=0,
-            tool_names=["web_search", "create_artifact"],
-        )
-        self.assertIsNotNone(result)
-        self.assertEqual(result["function"]["name"], "web_search")
-
-    def test_no_force_when_tool_absent(self):
-        """If the matching tool is not in the agent's tool list, the
-        server must NOT force a missing tool (would break the LLM
-        contract)."""
-        from app.routers.agents import _compute_tool_choice
-        result = _compute_tool_choice(
-            user_message="latest news on AI",
-            data_ctx_extras={},
-            iteration=0,
-            tool_names=["create_artifact"],
-        )
-        self.assertIsNone(result)
-
-
-# ---------------------------------------------------------------------------
-# Fix 3: Prominent anti-hallucination prompt directive
-# ---------------------------------------------------------------------------
+    def test_url_and_time_sensitive_not_forced(self):
+        from app.services.turn_action import resolve_turn_action
+        for msg in (
+            "what is the latest news on https://example.com/feed",
+            "what is the latest news about AI chips",
+        ):
+            action = resolve_turn_action(
+                msg, ["web_extract", "web_search"], {}, False, 0,
+            )
+            self.assertIsNone(action.forced_tool)
 
 class TestPromptDirectivePrepend(unittest.TestCase):
     """Tests that the CRITICAL RULE is prepended to the system prompt

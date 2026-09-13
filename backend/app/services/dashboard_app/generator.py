@@ -101,6 +101,16 @@ class DashboardAppGenerator:
         (app_dir / "config.json").write_text(
             json.dumps(config, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        # Full authored spec (raw SQL + all options), written as a DOTFILE at
+        # the app root. config.json is the sanitized public subset and cannot
+        # rebuild the DB row's spec column after an undo; .spec.json is the
+        # authoritative authored spec so manager.revert() can re-sync the
+        # DashboardApp.spec JSONB to the restored snapshot. It is never served:
+        # serve_dashboard_app only serves config.json from the app root and
+        # resolves everything else under dist/.
+        (app_dir / ".spec.json").write_text(
+            json.dumps(spec, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
         self._scaffold_gitignore(app_dir)
         self._copy_frontend(app_dir)
         logger.info("dashboard app generated at %s", app_dir)
@@ -133,7 +143,22 @@ class DashboardAppGenerator:
         # the backend's :dim_<key> tokens — only declared keys are accepted.
         dim_filters: Dict[str, dict] = {}
         for m in spec.get("metrics", []):
+            # 2026-09-02: tolerate malformed filter entries. The LLM
+            # occasionally emits options.filters as bare strings
+            # (e.g. [":dim_org"]) instead of dicts {key,label,column} —
+            # previously the .get() on a str crashed regeneration with
+            # "AttributeError: 'str' object has no attribute 'get'" and the
+            # whole update_fullstack_dashboard turn died (reliability
+            # exhausted 2 attempts → empty fallback). Skip the malformed
+            # entry instead: the metric still renders unfiltered.
             for f in (m.get("options") or {}).get("filters") or []:
+                if not isinstance(f, dict):
+                    logger.warning(
+                        "generator: skipping malformed filter entry %r on "
+                        "metric %s (expected dict with key/label/column)",
+                        f, (m or {}).get("id"),
+                    )
+                    continue
                 key = f.get("key")
                 if not key:
                     continue

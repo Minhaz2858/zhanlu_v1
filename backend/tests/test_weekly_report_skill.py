@@ -128,18 +128,19 @@ def test_post_router_pick_forces_weekly_report_skill():
     assert result["score"] == 1.0
 
 
-def test_post_router_pick_weekly_intent_chinese():
-    """Chinese weekly-report phrasing must also force the skill."""
+def test_post_router_pick_weekly_intent_chinese_no_longer_auto_forces():
+    """Phase A/B: Chinese weekly-report phrasing no longer auto-forces the
+    skill via the removed regex branch. Without a strong candidate match the
+    picker returns None and the LLM decides from the catalog."""
     from app.services.skill_routing.post_router_hook import post_router_pick
 
     candidates = [
         {
-            "name": "weekly-report-generation",
-            "description": "Generates a CEO-level weekly market report",
-            "trigger": "weekly report, 周报",
+            "name": "resume-writer",
+            "description": "Writes resumes",
+            "trigger": "cv resume career",
             "source": "filesystem",
         },
     ]
     result = post_router_pick("帮我生成一份本周的周报", candidates=candidates)
-    assert result is not None
-    assert result["skill_name"] == "weekly-report-generation"
+    assert result is None

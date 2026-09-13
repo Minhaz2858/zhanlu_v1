@@ -257,7 +257,12 @@ async def test_internal_scope_skips_web_tools():
         emit=EventCollector(),
     )
     names = [n for n, _ in tools.calls]
-    assert names == ["sql_query"]
+    # 2026-09-03: internal-family tools funnel through the NL data agent —
+    # a research step only has a *question*, not SQL, so sql_query is
+    # invoked as ask_data_agent (the gateway that resolves the question
+    # against the bound warehouse). Web tools stay filtered out.
+    assert names == ["ask_data_agent"]
+    assert "web_search" not in names
 
 
 @pytest.mark.asyncio
@@ -274,7 +279,10 @@ async def test_both_scope_runs_all_plan_tools():
         emit=EventCollector(),
     )
     names = sorted(n for n, _ in tools.calls)
-    assert names == ["sql_query", "web_search"]
+    # 2026-09-03: sql_query funnels through the NL data agent (research steps
+    # carry a question, not SQL), so both families still run but internal is
+    # invoked as ask_data_agent.
+    assert names == ["ask_data_agent", "web_search"]
 
 
 # ── Plan fallback ─────────────────────────────────────────────────────
@@ -320,5 +328,151 @@ async def test_result_citations_parsed_from_report():
 # ── Flag default ──────────────────────────────────────────────────────
 
 def test_deep_research_flag_defaults_off():
-    from app.config import settings
-    assert getattr(settings, "DEEP_RESEARCH_ENABLED", False) is False
+    # Class-level default is OFF even if an operator has enabled it via env
+    # (root .env / compose) in this deployment.
+    from app.config import Settings
+    assert Settings.model_fields["DEEP_RESEARCH_ENABLED"].default is False
+
+
+# ── Hybrid scope=both regression (2026-09-03) ─────────────────────────
+# User-visible bug: scope=both silently degraded to web-only; a web-only
+# plan for an internal product question (C5C9 sales/forecast) never touched
+# the bound warehouse and produced a "no data exists" report. These tests
+# pin the three fixes:
+#   B1: failure dicts are NOT evidence (they became "findings" pre-fix)
+#   B2: internal tools are called with {"question": ...}, web with {"query": ...}
+#   B3: scope=both supplements the missing family before synthesis
+
+class FailingWebToolExecutor:
+    """web_search returns permanent failure; ask_data_agent returns rows."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    async def __call__(self, name, args):
+        self.calls.append((name, args))
+        if name == "web_search":
+            return {
+                "success": False,
+                "failure_kind": "permanent",
+                "error": "web_search failed across providers: provider returned no results",
+            }
+        if name == "ask_data_agent":
+            return {
+                "success": True,
+                "answer": "C5C9 sales for Aug 24-30: 7 date rows, 73.47M CNY.",
+                "rows": [{"date": "2026-08-24"}],
+                "sql": "SELECT ... FROM erp_v_sale_orderentry ...",
+            }
+        return {"success": False, "error": "unsupported tool"}
+
+
+class WebOnlyToolExecutor:
+    """web_search SUCCEEDS; used to prove no internal supplement is forced
+    when web already produced evidence (web-only scope stays web-only)."""
+
+    def __init__(self):
+        self.calls: list[tuple[str, dict]] = []
+
+    async def __call__(self, name, args):
+        self.calls.append((name, args))
+        if name == "web_search":
+            return {"rows": [{"title": "public result"}], "url": "https://x.io"}
+        return {"success": False, "error": "unsupported"}
+
+
+@pytest.mark.asyncio
+async def test_scope_both_supplements_internal_when_web_fails():
+    """The C5C9 repro: web-only plan, web fails permanently → the internal
+    data agent MUST still be consulted before finalize."""
+    tools = FailingWebToolExecutor()
+    planner = FakePlanner(_plan([_step(q="C5C9 weekly summary?", tools=["web_search"])]))
+    events = EventCollector()
+
+    result = await run_deep_research(
+        DeepResearchRequest(question="C5C9 weekly summary and forecast Aug 24-30?",
+                            depth="quick", scope="both"),
+        planner=planner,
+        tool_executor=tools,
+        synthesizer=FakeSynthesizer("Hybrid report."),
+        critic=FakeCritic(),
+        emit=events,
+    )
+
+    names = [n for n, _ in tools.calls]
+    # web_search attempted by the plan step; internal supplement MUST run
+    assert "web_search" in names
+    assert "ask_data_agent" in names
+    # ask_data_agent received the REAL arg schema (question), not {"query": ...}
+    ask_args = [a for n, a in tools.calls if n == "ask_data_agent"]
+    assert ask_args and "question" in ask_args[0]
+    assert result.report == "Hybrid report."
+
+
+@pytest.mark.asyncio
+async def test_failure_dicts_are_not_evidence():
+    """A permanent web failure must not reach the synthesizer as a finding."""
+    tools = FailingWebToolExecutor()
+    synthesizer = FakeSynthesizer("Report.")
+    await run_deep_research(
+        DeepResearchRequest(question="C5C9?", depth="quick", scope="both"),
+        planner=FakePlanner(_plan([_step(tools=["web_search"])])),
+        tool_executor=tools,
+        synthesizer=synthesizer,
+        critic=FakeCritic(),
+        emit=EventCollector(),
+    )
+    user_msgs = [m for m in synthesizer.last_messages if m["role"] == "user"]
+    evidence_text = user_msgs[0]["content"] if user_msgs else ""
+    # the failure text must NOT appear as evidence content
+    assert "failed across providers" not in evidence_text
+    # the successful internal answer IS present
+    assert "C5C9 sales" in evidence_text
+
+
+@pytest.mark.asyncio
+async def test_scope_web_with_success_stays_web_only():
+    """scope=web: successful web evidence means NO internal supplement —
+    scope isolation is preserved (web scope must not touch the warehouse)."""
+    tools = WebOnlyToolExecutor()
+    await run_deep_research(
+        DeepResearchRequest(question="Market context?", depth="quick", scope="web"),
+        planner=FakePlanner(_plan([_step(tools=["web_search"])])),
+        tool_executor=tools,
+        synthesizer=FakeSynthesizer("Report."),
+        critic=FakeCritic(),
+        emit=EventCollector(),
+    )
+    names = [n for n, _ in tools.calls]
+    assert "ask_data_agent" not in names
+
+
+@pytest.mark.asyncio
+async def test_scope_both_supplements_web_when_internal_only_plan():
+    """Mirror case: DB-only plan for a market question → web supplement runs."""
+    tools = WebOnlyToolExecutor()
+
+    class InternalOnlyToolExecutor:
+        def __init__(self):
+            self.calls: list[tuple[str, dict]] = []
+
+        async def __call__(self, name, args):
+            self.calls.append((name, args))
+            if name == "ask_data_agent":
+                return {"success": True, "answer": "warehouse rows", "rows": [{"k": 1}]}
+            if name == "web_search":
+                return {"rows": [{"title": "public"}], "url": "https://x.io"}
+            return {"success": False, "error": "unsupported"}
+
+    tools = InternalOnlyToolExecutor()
+    await run_deep_research(
+        DeepResearchRequest(question="Hybrid question?", depth="quick", scope="both"),
+        planner=FakePlanner(_plan([_step(tools=["ask_data_agent"])])),
+        tool_executor=tools,
+        synthesizer=FakeSynthesizer("Report."),
+        critic=FakeCritic(),
+        emit=EventCollector(),
+    )
+    names = [n for n, _ in tools.calls]
+    assert "ask_data_agent" in names
+    assert "web_search" in names  # supplement added the missing web family

@@ -191,22 +191,27 @@ export function ChatSessionProvider({ children }) {
         }
         if (s.project_id) {
           url.searchParams.set('project', s.project_id);
-        } else {
-          // (2026-08-31) PRESERVE any pre-existing ?project= — the
-          // session row may lack the FK (legacy rows, or a conv whose
-          // project context lives in the URL already). The previous
-          // delete() here wiped ?project= / ?projectName= on every
-          // sidebar click of a session without an FK, so a reload
-          // ended up as ``?conv=...&agentName=...`` with no project
-          // context — exactly the bug the user reported. Keep the
-          // URL's project context unless the session explicitly
-          // carries a different project.
+        } else if (!s.conversation_id) {
+          // (2026-08-31) PRESERVE any pre-existing ?project= for
+          // conv-linked sessions — the session row may lack the FK
+          // (legacy rows, or a conv whose project context lives in
+          // the URL already). The previous delete() here wiped
+          // ?project= / ?projectName= on every sidebar click of a
+          // session without an FK, so a reload ended up as
+          // ``?conv=...&agentName=...`` with no project context —
+          // exactly the bug the user reported. Only clear project
+          // params for BRAND-NEW sessions (no conversation_id yet)
+          // so a fresh global chat never inherits a stale project.
+          url.searchParams.delete('project');
         }
         if (projectName) {
           url.searchParams.set('projectName', projectName);
+        } else if (!s.conversation_id) {
+          url.searchParams.delete('projectName');
         }
         // Same preservation rule for ?projectName= — only overwrite
-        // when the session has its own project name.
+        // when the session has its own project name, and only clear
+        // for brand-new sessions.
         if (s.agent_name) {
           url.searchParams.set('agentName', s.agent_name);
         } else {

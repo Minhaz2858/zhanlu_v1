@@ -213,8 +213,10 @@ async def test_generated_listen_loop_refreshes_on_notify(tmp_path):
             assert "zhanlu_dashboard_sales-overview" in fake_pg.conn.listeners
 
             # Fire a NOTIFY → the loop must refresh without waiting the interval.
+            # asyncpg invokes listeners with FOUR args (conn, pid, channel,
+            # payload) — the callback must accept the channel arg (2026-09-02).
             cb = fake_pg.conn.listeners["zhanlu_dashboard_sales-overview"]
-            cb(fake_pg.conn, 0, "wake")
+            cb(fake_pg.conn, 0, "zhanlu_dashboard_sales-overview", "wake")
             for _ in range(40):
                 if refresh_calls:
                     break

@@ -12,6 +12,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.config import settings
 from app.deps import get_current_user_required
 from app.models.dashboard import Dashboard
 from app.models.agent_conversation import AgentConversation
@@ -24,6 +25,7 @@ from app.services.dashboard_query import (
 from app.services.dashboard_app.manager import dashboard_app_manager
 from app.services.dashboard_app.generator import module_name
 from app.models.dashboard_app import DashboardApp
+from app.models.user import User
 
 logger = logging.getLogger(__name__)
 
@@ -357,13 +359,70 @@ def _media_type_for(name: str) -> str:
     return mt or "application/octet-stream"
 
 
+_STATIC_ASSET_EXTENSIONS = (
+    ".js", ".mjs", ".css", ".png", ".svg", ".woff", ".woff2",
+    ".ico", ".jpg", ".jpeg", ".gif", ".webp", ".map",
+)
+
+
+def _is_static_asset(path: str) -> bool:
+    """True when ``path`` names a hashed/static bundle file.
+
+    Only these file-extension assets are served anonymously — the iframe must
+    be able to load its JS/CSS/font bundle before any authenticated fetch
+    happens. ``.json`` is deliberately NOT in the list: config.json is
+    data-bearing (metric ids/columns/labels + dimension mapping) and is gated
+    alongside the metrics/API endpoints.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if "." not in name:
+        return False
+    _, ext = name.rsplit(".", 1)
+    return f".{ext.lower()}" in _STATIC_ASSET_EXTENSIONS
+
+
+def _dashboard_viewer_auth(request: Request, db: Session = Depends(get_db)):
+    """Require a logged-in user for dashboard-app data endpoints.
+
+    Mirrors ``get_current_user_required`` for ``Authorization: Bearer``
+    headers (non-iframe callers) and falls back to the ``?token=`` query
+    parameter — the same credential the ``/apps/{slug}/ws`` handshake below
+    verifies — because dashboard apps run in a same-origin iframe whose
+    subresource fetches cannot attach an Authorization header. Raises 401
+    when neither credential is present or valid.
+    """
+    # 2026-09-02: enforced via DASHBOARD_ENDPOINT_AUTH_ENABLED (default False
+    # = public dashboards; the .env sets True now that the generated frontend
+    # token flow ships: _template/frontend App.jsx appends ?token= to its
+    # config.json/metrics fetches and useDashboardStream does the same for WS).
+    if not getattr(settings, "DASHBOARD_ENDPOINT_AUTH_ENABLED", False):
+        return None
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:]
+    else:
+        token = request.query_params.get("token")
+    if not token:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    user_id = auth_service.verify_token(token, db)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    user = db.query(User).filter(
+        User.id == user_id, User.is_deleted == False  # noqa: E712
+    ).first()
+    if user is None or getattr(user, "is_anonymous", False):
+        raise HTTPException(status_code=401, detail="Authentication required")
+    return user
+
+
 @router.get("/apps/{slug}/metrics")
-def app_metrics(slug: str):
+def app_metrics(slug: str, user=Depends(_dashboard_viewer_auth)):
     """List the metrics exposed by a generated dashboard app.
 
     Resolves the generated module per-request (any worker, post-startup apps).
     Restores the `/config`+`/metrics` REST surface the old mount used to
     provide; the frontend app calls `./metrics/{id}` for the initial snapshot.
+    Requires a logged-in user (Bearer header or ``?token=`` query param).
     """
     try:
         mod = _resolve_module(slug)
@@ -376,7 +435,8 @@ def app_metrics(slug: str):
 
 
 @router.get("/apps/{slug}/metrics/{metric_id}")
-async def app_metric(slug: str, metric_id: str, request: Request, db: Session = Depends(get_db)):
+async def app_metric(slug: str, metric_id: str, request: Request, db: Session = Depends(get_db),
+                     user=Depends(_dashboard_viewer_auth)):
     """Return the live payload for one metric of a generated dashboard app.
 
     Async endpoint: ``run_metric`` is a coroutine that must be awaited on the
@@ -385,6 +445,8 @@ async def app_metric(slug: str, metric_id: str, request: Request, db: Session = 
     thread — where no event loop exists — so every widget 500'd and the
     frontend rendered "No data" on all cards. ``db`` is required because
     ``QueryService`` resolves the datasource KB through the SQLAlchemy session.
+    Executes metric SQL against the datasource → requires a logged-in user
+    (Bearer header or ``?token=`` query param).
     """
     try:
         mod = _resolve_module(slug)
@@ -402,7 +464,7 @@ async def app_metric(slug: str, metric_id: str, request: Request, db: Session = 
 
 
 @router.get("/apps/{slug}/{path:path}")
-def serve_dashboard_app(slug: str, path: str):
+def serve_dashboard_app(slug: str, path: str, request: Request, db: Session = Depends(get_db)):
     """Serve a generated dashboard app's static `dist/` files.
 
     Resolves the on-disk app directory on every request (works on any worker,
@@ -410,7 +472,22 @@ def serve_dashboard_app(slug: str, path: str):
     `index.html` for client-side routes (SPA).  Missing app/slug → 404 JSON;
     traversal → 400 JSON; missing file → 404 JSON.  Never raises 5xx for a
     benign bad request.
+
+    Auth: hashed/static bundle files and the SPA shell (root/index.html) are
+    served anonymously so the iframe can boot; ``config.json``, metric/API
+    paths and other extension-less requests are data-bearing and require a
+    logged-in user via ``_dashboard_viewer_auth`` (Bearer header, or ``?token=``
+    query param — the same credential the app's WebSocket handshake verifies).
     """
+    # Auth: the SPA shell (root / index.html) and hashed/static bundle files
+    # are served anonymously so the iframe can boot; config.json, metric/API
+    # paths and extension-less non-shell requests are data-bearing and require
+    # a logged-in user via ``_dashboard_viewer_auth`` (Bearer header, or
+    # ``?token=`` query param — the same credential the app's WebSocket
+    # handshake verifies and the template frontend appends to its fetches).
+    if path not in ("", "index.html") and not _is_static_asset(path):
+        _dashboard_viewer_auth(request, db)
+
     record = dashboard_app_manager.get_app(slug)
     if record is None:
         raise HTTPException(status_code=404, detail="Dashboard app not found")

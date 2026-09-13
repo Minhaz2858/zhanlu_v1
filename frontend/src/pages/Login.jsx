@@ -9,6 +9,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { LogIn, Mail, Lock, Loader2, KeyRound } from "lucide-react";
 import AuthLayout from "@/components/AuthLayout";
+import SsoButtons from "@/components/auth/SsoButtons";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import { toast } from "@/components/ui/use-toast";
 
@@ -169,6 +170,7 @@ export default function Login() {
       }
     >
       {errorBanner}
+      <SsoButtons />
       {ModeToggle}
 
       {mode === "password" ? (

@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.skill_routing.resolver import SkillResolver, FALLBACK_SKILL
+from app.services.skill_routing.resolver import SkillResolver
 from app.services.synexia.default_skills import pick_default_skill
 
 
@@ -232,11 +232,11 @@ class TestDefaultSkillFallback:
         assert result is not None
         assert result["skill_name"] == "pptx"
 
-    def test_soft_intent_still_works(self):
-        """Soft-intent keywords (e.g. 'report') still map to docx."""
+    def test_soft_intent_removed_returns_none(self):
+        """Phase A/B: the soft-intent fallback ('report' → docx) was removed.
+        An ambiguous request returns None so the LLM picks from the catalog."""
         result = pick_default_skill("make a sales report")
-        assert result is not None
-        assert result["skill_name"] == "docx"
+        assert result is None
 
     def test_override_path_still_returns_none(self):
         """When active_skill is set, defaults are skipped (returns None)."""
@@ -267,9 +267,19 @@ class TestResolverLlmCatalogPick:
         assert decision.is_default is False
         assert decision.namespace == ""
 
-    def test_fallback_skill_constant_still_defined(self):
-        """FALLBACK_SKILL should still exist as the absolute last resort."""
-        assert FALLBACK_SKILL == "docx"
+    def test_docx_fallback_constant_removed(self):
+        """Phase A/B: the FALLBACK_SKILL='docx' last resort was removed —
+        ambiguous requests go to the LLM catalog, never silently to docx."""
+        import app.services.skill_routing.resolver as resolver_mod
+
+        assert not hasattr(resolver_mod, "FALLBACK_SKILL")
+        resolver = resolver_mod.SkillResolver()
+        decision = resolver.resolve(
+            user_message="organize this into something useful",
+            picked_skill=None,
+        )
+        assert decision.chosen_skill == ""
+        assert decision.reason == "llm_catalog_pick"
 
     def test_format_intent_tier_unchanged(self):
         """Explicit format requests still route via format_intent."""
@@ -281,4 +291,5 @@ class TestResolverLlmCatalogPick:
             picked_skill=None,
         )
         assert decision.reason == "format_intent"
-        assert decision.chosen_skill == "pptx"
+        # pptx maps to the professional design skill (FIX 2026-08-23), not bare python-pptx
+        assert decision.chosen_skill == "ppt-design"

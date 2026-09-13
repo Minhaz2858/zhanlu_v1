@@ -186,9 +186,6 @@ vi.mock('@/components/chat/ChatFilesModal', () => ({
 vi.mock('@/components/chat/ScheduledPanel', () => ({
   default: () => React.createElement('div', { 'data-testid': 'scheduled-panel' }),
 }));
-vi.mock('@/components/chat/ChatThinkingIndicator', () => ({
-  default: () => React.createElement('div', { 'data-testid': 'chat-thinking' }),
-}));
 vi.mock('react-resizable-panels', () => {
   const Panel = ({ children, ...props }) =>
     React.createElement('div', { 'data-testid': `panel-${props.id || 'unknown'}`, ...props }, children);

@@ -96,9 +96,13 @@ describe('runAutomationTask — automation:run-started event', () => {
       executionId: 'exec-uuid-bbbb',
       taskId: 'task-uuid-1234',
     });
+    // (2026-08-31) Navigation carries the automation context so a
+    // refresh re-binds the automation_agent + keeps the automation id.
     expect(deps.navigate).toHaveBeenCalledWith(
-      '/chat?session=sess-uuid-aaaa',
+      expect.stringContaining('/chat?session=sess-uuid-aaaa'),
     );
+    expect(deps.navigate.mock.calls[0][0]).toContain('automationId=task-uuid-1234');
+    expect(deps.navigate.mock.calls[0][0]).toContain('agentName=automation_agent');
 
     window.dispatchEvent = originalDispatchEvent;
   });
@@ -126,7 +130,7 @@ describe('runAutomationTask — automation:run-started event', () => {
     // fallback and must still run — the listener on Chat.jsx is a
     // best-effort accelerator, not a hard requirement.
     expect(deps.navigate).toHaveBeenCalledWith(
-      '/chat?session=sess-uuid-aaaa',
+      expect.stringContaining('/chat?session=sess-uuid-aaaa'),
     );
     expect(deps.toast).toHaveBeenCalled();
 

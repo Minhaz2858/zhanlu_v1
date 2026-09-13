@@ -73,7 +73,7 @@ _EVIDENCE_BUILD = (
     "create_fullstack", "create_report", "generate_report",
     "run_sandbox_skill", "create_automation", "create_cad", "build_", "generate_artifact",
 )
-_EVIDENCE_VERIFY = ("verify", "self_eval", "evaluate", "run_verification", "check_", "validate_")
+_EVIDENCE_VERIFY = ("verify", "evaluate", "run_verification", "check_", "validate_")
 
 
 @dataclass

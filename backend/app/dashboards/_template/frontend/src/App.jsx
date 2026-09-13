@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { deriveSlug, useDashboardStream } from './hooks/useDashboardStream.js';
+import { deriveSlug, useDashboardStream, tokenQuery } from './hooks/useDashboardStream.js';
 import { applyDesignTokens } from './hooks/useDesignTokens.js';
 import { Widget } from './widgets/index.jsx';
 import { Panel, panelsForPage } from './panels/index.jsx';
@@ -45,6 +45,16 @@ export default function App() {
     return q ? `?${q}` : '';
   }, [filterState]);
   const hasFilters = useMemo(() => filterQuery.length > 1, [filterQuery]);
+  // Auth credential merged into every DATA fetch. Same-origin iframe shares
+  // localStorage with the host app, so the session access token rides here as
+  // ?token= (subresource fetches cannot set an Authorization header) — the
+  // same credential the WebSocket handshake verifies. When the host has no
+  // token (auth flag OFF / anonymous) this stays empty and calls are public.
+  const dataQuery = useMemo(() => {
+    const tq = tokenQuery();
+    if (!tq) return filterQuery;
+    return filterQuery ? `${filterQuery}&${tq.slice(1)}` : tq;
+  }, [filterQuery]);
   // Declared dimension filters from config (label + column) for the filter bar.
   const declaredDims = useMemo(() => (config?.filters || []).filter((d) => d.key), [config]);
   // Distinct values per declared dim column, harvested from whatever metric
@@ -77,7 +87,7 @@ export default function App() {
 
   useEffect(() => {
     let cancelled = false;
-    fetch('./config.json', { headers: { Accept: 'application/json' } })
+    fetch(`./config.json${tokenQuery()}`, { headers: { Accept: 'application/json' } })
       .then((r) => {
         if (!r.ok) throw new Error(`config fetch ${r.status}`);
         return r.json();
@@ -146,7 +156,7 @@ export default function App() {
     if (!config) return undefined;
     let cancelled = false;
     config.metrics.forEach((m) => {
-      fetch(`./metrics/${encodeURIComponent(m.id)}${filterQuery}`, {
+      fetch(`./metrics/${encodeURIComponent(m.id)}${dataQuery}`, {
         headers: { Accept: 'application/json' },
       })
         .then((r) => r.json())
@@ -161,12 +171,12 @@ export default function App() {
     return () => {
       cancelled = true;
     };
-  }, [config, filterQuery]);
+  }, [config, dataQuery]);
 
   // Refetch a metric through the URL filters (used to keep filtered views live).
   const refetchMetric = useCallback(
     (metricId) => {
-      fetch(`./metrics/${encodeURIComponent(metricId)}${filterQuery}`, {
+      fetch(`./metrics/${encodeURIComponent(metricId)}${dataQuery}`, {
         headers: { Accept: 'application/json' },
       })
         .then((r) => r.json())
@@ -177,7 +187,7 @@ export default function App() {
         })
         .catch(() => {});
     },
-    [filterQuery],
+    [dataQuery],
   );
 
   const onFrame = useCallback(

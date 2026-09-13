@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { getNodeTypeRegistry } from '@/lib/nodeTypeRegistry';
+import { nodeLabel } from '@/lib/workflowGraph';
 
 /**
  * Node palette — n8n-style node picker, schema-driven.
@@ -66,7 +67,7 @@ export default function NodePalette({ collapsed, onToggle, registry }) {
                     className="flex cursor-grab items-center gap-2 rounded-lg border border-border bg-card px-2.5 py-2 text-xs transition-colors hover:border-primary/50 hover:bg-secondary active:cursor-grabbing"
                   >
                     <span style={{ color: def.color }}>{def.icon}</span>
-                    <span className="truncate font-medium text-foreground">{def.displayName}</span>
+                    <span className="truncate font-medium text-foreground">{nodeLabel(def.name, lang) || def.displayName}</span>
                   </div>
                 ))}
               </div>

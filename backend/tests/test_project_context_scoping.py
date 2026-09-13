@@ -14,6 +14,15 @@ These pin the user-requested behavior:
    project context is still injected (the agent is project-aware even for
    non-data questions), and ``ask_data_agent`` is NOT injected.
 
+**general_assistant exception (project chats):** ``general_assistant`` is
+the workspace DEFAULT agent. Its agent-level ``knowledge_bases`` /
+workspace auto-bind are treated as STALE: whenever a project scope is
+selected (router/conv row OR a project named in the message) its bound
+set is the selected project's KBs ONLY (REPLACE, never union) — so a
+stale company-warehouse KB owned by another project can never leak into a
+project chat whose bound data is a single PDF. Every other agent keeps
+its own bindings and unions the selected project's KBs.
+
 Tests use SQLite in-memory + real models (no mocks) and exercise
 ``prepare_data_source_runtime`` directly — no network, LLM, or live DB.
 """
@@ -309,3 +318,107 @@ def test_project_selected_but_deleted_project_yields_no_context(db_session):
     )
     assert "## Project Context" not in prompt
     assert not ctx.get("bound_kb_ids")
+
+
+# ---------------------------------------------------------------------------
+# Contract 4: general_assistant + selected project → REPLACE stale own
+# bindings with the project's KBs (cross-project leakage regression,
+# conv 1769bf33: Data Analysis project's PDF-only chat answered from the
+# C5_C9 company warehouse KB that general_assistant carried agent-level).
+# ---------------------------------------------------------------------------
+
+
+def test_general_assistant_project_selected_replaces_stale_own_bindings(db_session):
+    """general_assistant with an agent-level KB owned by ANOTHER project
+    must NOT carry it into a project-scoped chat: the selected project's
+    KBs REPLACE the stale own binding (no union)."""
+    selected = _make_project("Data Analysis")
+    other = _make_project("C5_C9")
+    db_session.add_all([selected, other])
+    db_session.commit()
+
+    # The stale agent-level KB lives in the OTHER project (company
+    # warehouse) — must never leak into the selected project's chat.
+    stale_kb = _make_kb("aipdp_data_warehouse_prod", project_id=other.id)
+    pdf_kb = _make_kb("C5C9 PDF", project_id=selected.id)
+    db_session.add_all([stale_kb, pdf_kb])
+    db_session.commit()
+
+    agent = _make_agent("general_assistant", [stale_kb.id])
+    db_session.add(agent)
+    db_session.commit()
+
+    _tools, prompt, ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=[],
+        base_system_prompt="base",
+        selected_project_id=selected.id,
+    )
+    bound_ids = ctx.get("bound_kb_ids") or []
+    assert bound_ids == [pdf_kb.id], (
+        f"general_assistant project chat must bind ONLY the selected "
+        f"project's KBs; got: {bound_ids}"
+    )
+    assert stale_kb.id not in bound_ids, (
+        "stale agent-level KB owned by another project leaked into a "
+        "project-scoped chat"
+    )
+
+
+def test_general_assistant_project_selected_no_project_kbs_yields_zero(db_session):
+    """general_assistant with stale own bindings + a selected project that
+    has NO KBs → zero bound data sources (no fallback to own bindings)."""
+    selected = _make_project("Empty Project")
+    other = _make_project("Other")
+    db_session.add_all([selected, other])
+    db_session.commit()
+
+    stale_kb = _make_kb("stale_warehouse", project_id=other.id)
+    db_session.add(stale_kb)
+    db_session.commit()
+
+    agent = _make_agent("general_assistant", [stale_kb.id])
+    db_session.add(agent)
+    db_session.commit()
+
+    tools, prompt, ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=[],
+        base_system_prompt="base",
+        selected_project_id=selected.id,
+    )
+    assert not ctx.get("bound_kb_ids")
+    tool_names = {t.get("function", {}).get("name") for t in tools}
+    assert "ask_data_agent" not in tool_names
+    assert "## Project Context" in prompt
+
+
+def test_nongeneral_agent_project_selected_still_unions_own_kbs(db_session):
+    """Non-default agents keep their own explicit bindings when a project
+    is selected (union) — the replace rule is general_assistant-only."""
+    selected = _make_project("Acme")
+    other = _make_project("Other")
+    db_session.add_all([selected, other])
+    db_session.commit()
+
+    own_kb = _make_kb("own_sales_db", project_id=other.id)
+    project_kb = _make_kb("project_kb", project_id=selected.id)
+    db_session.add_all([own_kb, project_kb])
+    db_session.commit()
+
+    agent = _make_agent("Data Analyst", [own_kb.id])
+    db_session.add(agent)
+    db_session.commit()
+
+    _tools, _prompt, ctx = prepare_data_source_runtime(
+        db=db_session,
+        agent_app=agent,
+        base_tools=[],
+        base_system_prompt="base",
+        selected_project_id=selected.id,
+    )
+    bound_ids = ctx.get("bound_kb_ids") or []
+    assert own_kb.id in bound_ids
+    assert project_kb.id in bound_ids

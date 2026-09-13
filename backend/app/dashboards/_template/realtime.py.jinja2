@@ -86,7 +86,10 @@ async def _listen_poll_loop(mgr, last_hashes: dict[str, str]) -> None:
     channel = pg_listen_channel(SLUG)
     notified = asyncio.Event()
 
-    def _on_notify(conn, pid, payload):  # asyncpg notification callback
+    def _on_notify(conn, pid, channel, payload):  # asyncpg notification callback
+        # asyncpg calls listeners with (connection, pid, channel, payload);
+        # a 3-arg callback here raised TypeError on every NOTIFY and the T11
+        # push silently degraded to interval polling (2026-09-02 review).
         notified.set()
 
     try:

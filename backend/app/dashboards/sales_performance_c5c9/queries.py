@@ -15,16 +15,15 @@ from app.services.dashboard_query import (
 DATASOURCE_KB_ID = 'b1b9145d-5b6b-4c0e-ba82-919dde4620d7'
 
 METRICS = [
-    {"id": 'total_revenue', "title": 'Total Revenue (Aug MTD)', "type": 'kpi', "sql": "SELECT SUM(FALLAMOUNT) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01'", "options": {}},
-    {"id": 'total_orders', "title": 'Order Volume (Aug MTD)', "type": 'kpi', "sql": "SELECT COUNT(DISTINCT FID) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01'", "options": {}},
-    {"id": 'avg_order_value', "title": 'Avg Order Value (¥)', "type": 'kpi', "sql": "SELECT ROUND(SUM(FALLAMOUNT)/COUNT(DISTINCT FID), 2) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01'", "options": {}},
-    {"id": 'delivery_rate', "title": 'Delivery Completion %', "type": 'kpi', "sql": "SELECT ROUND(SUM(FDELIQTY)/SUM(FQTY_ORIGIN)*100, 1) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01'", "options": {}},
-    {"id": 'mom_growth', "title": 'Revenue MoM Growth %', "type": 'kpi', "sql": "SELECT ROUND(((SELECT SUM(FALLAMOUNT) FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01' AND PLANDATE < '2026-08-29') - (SELECT SUM(FALLAMOUNT) FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-07-01' AND PLANDATE < '2026-07-29')) / (SELECT SUM(FALLAMOUNT) FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-07-01' AND PLANDATE < '2026-07-29') * 100, 1) AS value", "options": {}},
-    {"id": 'revenue_trend', "title": 'Daily Revenue Trend', "type": 'area', "sql": "SELECT DATE(PLANDATE) AS d, SUM(FALLAMOUNT) AS revenue FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01' GROUP BY DATE(PLANDATE) ORDER BY d", "options": {'delta': 8572.57, 'deltaLabel': 'vs prev. period', '_locked': {'current': 21716800.0, 'previous': 250407.824}}},
-    {"id": 'delivery_trend', "title": 'Daily Delivery Quantity', "type": 'line', "sql": "SELECT DATE(PLANDATE) AS d, SUM(FDELIQTY) AS delivered FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01' GROUP BY DATE(PLANDATE) ORDER BY d", "options": {'delta': 1077.29, 'deltaLabel': 'vs prev. period', '_locked': {'current': 329.64, 'previous': 28.0}}},
-    {"id": 'order_trend', "title": 'Daily Order Volume', "type": 'bar', "sql": "SELECT DATE(PLANDATE) AS d, COUNT(DISTINCT FID) AS orders FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01' GROUP BY DATE(PLANDATE) ORDER BY d", "options": {'topItem': {'label': '2026-08-13', 'value': 19.0, 'share_pct': 11.6}}},
-    {"id": 'regional_split', "title": 'Regional Revenue Split', "type": 'pie', "sql": "SELECT org_name AS label, SUM(FALLAMOUNT) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01' GROUP BY org_name ORDER BY value DESC", "options": {'topItem': {'label': '惠州伊斯科', 'value': 270624538.4828, 'share_pct': 83.6}}},
-    {"id": 'top_products', "title": 'Top Products by Revenue', "type": 'bar', "sql": "SELECT material_name AS label, SUM(FALLAMOUNT) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= '2026-08-01' GROUP BY material_name ORDER BY value DESC LIMIT 8", "options": {'topItem': {'label': '抽余碳五', 'value': 68360034.51, 'share_pct': 21.3}}},
+    {"id": 'kpi_revenue', "title": '销售额（含税）', "type": 'kpi', "sql": 'SELECT IFNULL(SUM(FALLAMOUNT),0) AS value FROM erp_v_sale_orderentry', "options": {'accent': '#2563EB', 'unit': '元'}},
+    {"id": 'kpi_qty', "title": '订单量', "type": 'kpi', "sql": 'SELECT COUNT(*) AS value FROM erp_v_sale_orderentry', "options": {'accent': '#10B981', 'unit': '单'}},
+    {"id": 'kpi_customers', "title": '客户数', "type": 'kpi', "sql": 'SELECT COUNT(DISTINCT CUST_NAME) AS value FROM erp_v_sale_orderentry', "options": {'accent': '#F59E0B', 'unit': '家'}},
+    {"id": 'trend_revenue', "title": '销售趋势（按月）', "type": 'line', "sql": "SELECT DATE_FORMAT(PLANDATE,'%Y-%m') AS period, SUM(FALLAMOUNT) AS value FROM erp_v_sale_orderentry GROUP BY DATE_FORMAT(PLANDATE,'%Y-%m') ORDER BY period", "options": {'x': 'period', 'y': 'value', 'delta': -3.1, 'deltaLabel': 'vs prev. period', '_locked': {'current': 340109291.9228, 'previous': 350996881.5073}}},
+    {"id": 'trend_qty', "title": '订单量趋势（按月）', "type": 'bar', "sql": "SELECT DATE_FORMAT(PLANDATE,'%Y-%m') AS period, COUNT(*) AS value FROM erp_v_sale_orderentry GROUP BY DATE_FORMAT(PLANDATE,'%Y-%m') ORDER BY period", "options": {'x': 'period', 'y': 'value', 'topItem': {'label': '2023-03', 'value': 305.0, 'share_pct': 2.1}}},
+    {"id": 'area_revenue', "title": '区域销售额分布', "type": 'pie', "sql": 'SELECT org_name AS name, SUM(FALLAMOUNT) AS value FROM erp_v_sale_orderentry GROUP BY org_name ORDER BY value DESC', "options": {'x': 'name', 'y': 'value', 'topItem': {'label': '惠州伊斯科', 'value': 17713689986.378975, 'share_pct': 96.2}}},
+    {"id": 'area_qty', "title": '区域订单量', "type": 'bar', "sql": 'SELECT org_name AS name, COUNT(*) AS value FROM erp_v_sale_orderentry GROUP BY org_name ORDER BY value DESC', "options": {'x': 'name', 'y': 'value', 'topItem': {'label': '惠州伊斯科', 'value': 14111.0, 'share_pct': 97.7}}},
+    {"id": 'top_products', "title": 'TOP 产品销售额', "type": 'bar', "sql": 'SELECT material_name AS name, SUM(FALLAMOUNT) AS value FROM erp_v_sale_orderentry GROUP BY material_name ORDER BY value DESC LIMIT 10', "options": {'x': 'name', 'y': 'value', 'topItem': {'label': '戊烷发泡剂', 'value': 4009750065.7, 'share_pct': 22.3}}},
+    {"id": 'top_products_qty', "title": 'TOP 产品明细', "type": 'table', "sql": 'SELECT material_name AS 产品, SUM(FQTY_ORIGIN) AS 数量, SUM(FALLAMOUNT) AS 销售额 FROM erp_v_sale_orderentry GROUP BY material_name ORDER BY 销售额 DESC LIMIT 10', "options": {'pills': {'销售额': 'up'}, 'topItem': {'label': '戊烷发泡剂', 'value': 702780.47, 'share_pct': 25.9}}},
 ]
 
 
@@ -40,10 +39,24 @@ def metric_dimensions(m: dict) -> list[dict]:
     out of the generated SQL.
     """
     filters = (m.get("options") or {}).get("filters") or []
+    # ``options.filters`` may be a LIST of URL-keyed dimension specs
+    # ([{"key": "product", "column": "FNAME"}]) OR a DICT of object filters
+    # ({"date": {"column": "shipment_date", "op": ">=", "value": ":dim_date"}})
+    # emitted by the dashboard generator. Iterating a dict yields bare string
+    # keys and crashed with ``AttributeError: 'str' object has no attribute
+    # 'get'`` — observed 2026-09-03: every daily-sales-data-sync metric poll
+    # logged a traceback on each 30 s refresh. Normalize dict filters: the
+    # dict key IS the declared token name (e.g. "date" -> :dim_date).
+    if isinstance(filters, dict):
+        filters = [
+            {"key": name, "column": spec.get("column") or ""}
+            for name, spec in filters.items()
+            if isinstance(spec, dict)
+        ]
     return [
         {"token": f["key"], "column": f["column"]}
         for f in filters
-        if f.get("key") and f.get("column")
+        if isinstance(f, dict) and f.get("key") and f.get("column")
     ]
 
 

@@ -1,0 +1,164 @@
+{
+  "name": "Daily Sales Data Sync",
+  "slug": "daily-sales-data-sync",
+  "pages": [],
+  "scope": "personal",
+  "style": "standard",
+  "theme": "light",
+  "footer": null,
+  "header": null,
+  "layout": [
+    {
+      "title": "Latest Sync Snapshot",
+      "widgets": [
+        "kpi_latest_volume",
+        "kpi_latest_orders",
+        "kpi_latest_customers"
+      ]
+    },
+    {
+      "title": "Volume & Activity Trend",
+      "widgets": [
+        "trend_volume",
+        "bar_order_activity"
+      ]
+    },
+    {
+      "title": "Breakdown & Detail",
+      "widgets": [
+        "pie_customers",
+        "table_recent"
+      ]
+    }
+  ],
+  "panels": [],
+  "metrics": [
+    {
+      "id": "kpi_latest_volume",
+      "type": "kpi",
+      "title": "Latest Day Volume",
+      "sql": "SELECT COALESCE(SUM(shipment_quantity),0) AS value FROM erp_product_sales_details WHERE shipment_date = (SELECT MAX(shipment_date) FROM erp_product_sales_details) AND (:dim_date IS NULL OR shipment_date >= :dim_date)",
+      "options": {
+        "delta": "vs prior day",
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        },
+        "unit": "t"
+      }
+    },
+    {
+      "id": "kpi_latest_orders",
+      "type": "kpi",
+      "title": "Latest Day Order Lines",
+      "sql": "SELECT COUNT(*) AS value FROM erp_product_sales_details WHERE shipment_date = (SELECT MAX(shipment_date) FROM erp_product_sales_details) AND (:dim_date IS NULL OR shipment_date >= :dim_date)",
+      "options": {
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        }
+      }
+    },
+    {
+      "id": "kpi_latest_customers",
+      "type": "kpi",
+      "title": "Active Customers",
+      "sql": "SELECT COUNT(DISTINCT partner_name) AS value FROM erp_product_sales_details WHERE shipment_date = (SELECT MAX(shipment_date) FROM erp_product_sales_details) AND (:dim_date IS NULL OR shipment_date >= :dim_date)",
+      "options": {
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        }
+      }
+    },
+    {
+      "id": "trend_volume",
+      "type": "line",
+      "title": "Daily Shipment Volume",
+      "sql": "SELECT shipment_date AS label, COALESCE(SUM(shipment_quantity),0) AS value FROM erp_product_sales_details WHERE shipment_date >= DATE_SUB((SELECT MAX(shipment_date) FROM erp_product_sales_details), INTERVAL 14 DAY) AND (:dim_date IS NULL OR shipment_date >= :dim_date) GROUP BY shipment_date ORDER BY shipment_date",
+      "options": {
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        },
+        "span": "wide",
+        "unit": "t"
+      }
+    },
+    {
+      "id": "bar_order_activity",
+      "type": "bar",
+      "title": "Daily Order-Line Activity",
+      "sql": "SELECT shipment_date AS label, COUNT(*) AS value FROM erp_product_sales_details WHERE shipment_date >= DATE_SUB((SELECT MAX(shipment_date) FROM erp_product_sales_details), INTERVAL 14 DAY) AND (:dim_date IS NULL OR shipment_date >= :dim_date) GROUP BY shipment_date ORDER BY shipment_date",
+      "options": {
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        }
+      }
+    },
+    {
+      "id": "pie_customers",
+      "type": "pie",
+      "title": "Customer Share (Latest Day)",
+      "sql": "SELECT partner_name AS label, COALESCE(SUM(shipment_quantity),0) AS value FROM erp_product_sales_details WHERE shipment_date = (SELECT MAX(shipment_date) FROM erp_product_sales_details) AND (:dim_date IS NULL OR shipment_date >= :dim_date) GROUP BY partner_name ORDER BY value DESC LIMIT 6",
+      "options": {
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        }
+      }
+    },
+    {
+      "id": "table_recent",
+      "type": "table",
+      "title": "Recent Shipment Days",
+      "sql": "SELECT shipment_date AS 'Shipment Date', COUNT(*) AS 'Order Lines', COALESCE(SUM(shipment_quantity),0) AS 'Volume (t)', COUNT(DISTINCT partner_name) AS 'Customers' FROM erp_product_sales_details WHERE shipment_date >= DATE_SUB((SELECT MAX(shipment_date) FROM erp_product_sales_details), INTERVAL 14 DAY) AND (:dim_date IS NULL OR shipment_date >= :dim_date) GROUP BY shipment_date ORDER BY shipment_date DESC",
+      "options": {
+        "filters": {
+          "date": {
+            "column": "shipment_date",
+            "op": ">=",
+            "value": ":dim_date"
+          }
+        }
+      }
+    }
+  ],
+  "insights": [
+    {
+      "body": "3,957.5 t shipped on the most recent day versus 13,299.4 t the day before — a sharp single-day contraction consistent with a quiet year-end order book.",
+      "title": "Latest volume −70% vs prior day"
+    },
+    {
+      "body": "客户C alone carried ~79% of latest-day volume (3,131 t of 3,958 t), leaving the book exposed to single-account swings.",
+      "title": "Customer concentration high"
+    },
+    {
+      "body": "Latest day sits ~67% under the trailing 8-day average (~11,852 t), flagging an anomaly worth watching in the next sync.",
+      "title": "Volume below 8-day norm"
+    }
+  ],
+  "description": "Real-time view of ERP sales sync activity: daily shipment volume, order-line activity, customer concentration, and anomaly flags across recent shipment windows.",
+  "datasource_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+  "design_system_ref": "design-system/default-org/MASTER.md",
+  "refresh_interval_seconds": 30
+}

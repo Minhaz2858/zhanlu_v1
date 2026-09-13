@@ -28,6 +28,21 @@ export default function SkillPreviewPopover({ skill, onRemove }) {
   if (!skill) return null;
 
   const name = skill.name || skill.trigger || 'Skill';
+  // Command token shown under the name. Only a real slash-shaped trigger
+  // is shown; phrase-list triggers ("summarize pdf, pdf summary, ...")
+  // are semantic hints, not commands — fall back to the clean name so the
+  // popover never renders a giant blob.
+  function skillCommandToken(s) {
+    const trig = (s.trigger || '').trim();
+    if (trig) {
+      const parts = trig.split('/').filter(Boolean);
+      const last = parts.length ? parts[parts.length - 1].trim() : trig;
+      if (last && last.length <= 48 && !last.includes(',') && !last.includes(' ')) {
+        return last;
+      }
+    }
+    return name;
+  }
   const desc = skill.description || '';
   const body = skill.skill_md || '';
   // Show first 30 lines as preview
@@ -85,7 +100,7 @@ export default function SkillPreviewPopover({ skill, onRemove }) {
               <h4 className="text-sm font-semibold text-slate-800 truncate">{name}</h4>
               {skill.trigger && (
                 <p className="text-[10px] text-indigo-500 font-medium truncate">
-                  /{skill.trigger}
+                  /{skillCommandToken(skill)}
                 </p>
               )}
             </div>

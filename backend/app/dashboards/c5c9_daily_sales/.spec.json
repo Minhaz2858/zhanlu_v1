@@ -1,0 +1,131 @@
+{
+  "name": "C5/C9 Daily Sales Dashboard",
+  "slug": "c5c9-daily-sales",
+  "pages": [],
+  "scope": "personal",
+  "style": "ceo",
+  "theme": "dark",
+  "footer": null,
+  "header": null,
+  "layout": [
+    {
+      "title": "KPI Snapshot",
+      "widgets": [
+        "kpi_value",
+        "kpi_volume",
+        "kpi_lines"
+      ]
+    },
+    {
+      "title": "Trend",
+      "widgets": [
+        "trend_value"
+      ]
+    },
+    {
+      "title": "Breakdown",
+      "widgets": [
+        "top_products",
+        "top_customers",
+        "composition"
+      ]
+    },
+    {
+      "title": "Detail",
+      "widgets": [
+        "detail_table"
+      ]
+    }
+  ],
+  "panels": [],
+  "metrics": [
+    {
+      "id": "kpi_value",
+      "sql": "SELECT ROUND(SUM(FAMOUNT),2) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY",
+      "type": "kpi",
+      "title": "Order Value (Last 30d)",
+      "options": {}
+    },
+    {
+      "id": "kpi_volume",
+      "sql": "SELECT ROUND(SUM(FQTY_ORIGIN),1) AS volume FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY",
+      "type": "kpi",
+      "title": "Order Volume (t)",
+      "options": {}
+    },
+    {
+      "id": "kpi_lines",
+      "sql": "SELECT COUNT(*) AS lines FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY",
+      "type": "kpi",
+      "title": "Order Lines",
+      "options": {}
+    },
+    {
+      "id": "trend_value",
+      "sql": "SELECT DATE(PLANDATE) AS day, ROUND(SUM(FQTY_ORIGIN),1) AS qty, ROUND(SUM(FAMOUNT),0) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY GROUP BY DATE(PLANDATE) ORDER BY day",
+      "type": "combo",
+      "title": "Daily Order Value & Volume",
+      "options": {
+        "bars": [
+          "qty"
+        ],
+        "span": "wide",
+        "delta": -85.73,
+        "lines": [
+          "amount"
+        ],
+        "_locked": {
+          "current": 52.8,
+          "previous": 370.0
+        },
+        "deltaLabel": "vs prev. period"
+      }
+    },
+    {
+      "id": "top_products",
+      "sql": "SELECT FNAME AS material, ROUND(SUM(FAMOUNT),0) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY GROUP BY FNAME ORDER BY amount DESC LIMIT 8",
+      "type": "bar",
+      "title": "Top Materials by Value",
+      "options": {}
+    },
+    {
+      "id": "top_customers",
+      "sql": "SELECT partner_name AS customer, ROUND(SUM(FAMOUNT),0) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY GROUP BY partner_name ORDER BY amount DESC LIMIT 8",
+      "type": "bar",
+      "title": "Top Customers by Value",
+      "options": {}
+    },
+    {
+      "id": "composition",
+      "sql": "SELECT FNAME AS material, ROUND(SUM(FAMOUNT),0) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 30 DAY GROUP BY FNAME ORDER BY amount DESC LIMIT 6",
+      "type": "pie",
+      "title": "Value Share by Material",
+      "options": {}
+    },
+    {
+      "id": "detail_table",
+      "sql": "SELECT DATE(PLANDATE) AS order_date, FNAME AS material, partner_name AS customer, FQTY_ORIGIN AS qty, ROUND(FAMOUNT,0) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= CURDATE() - INTERVAL 14 DAY ORDER BY PLANDATE DESC LIMIT 100",
+      "type": "table",
+      "title": "Recent Order Detail",
+      "options": {}
+    }
+  ],
+  "insights": [
+    {
+      "body": "The last 30 days of order value are dominated by a single large booking on Aug 28 (≈59% of the week's value). Daily trend is spiky, not smooth — worth confirming whether this is a genuine bulk contract or a data-loading artifact.",
+      "title": "Heavy Aug 28 concentration"
+    },
+    {
+      "body": "Newest order record is 2026-08-31; no orders ingested for Sep 1–3. If upstream activity exists, the ERP-to-warehouse sync may be delayed.",
+      "title": "Data lag since Aug 31"
+    },
+    {
+      "body": "Daily Order Value & Volume moved 85.7% down vs the previous period (locked server-side from the live datasource at build time).",
+      "title": "📉 Daily Order Value & Volume"
+    }
+  ],
+  "description": "Real-time daily sales view for C5/C9: order volume, order value, product and customer breakdowns from the ERP warehouse.",
+  "datasource_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+  "design_system_ref": "design-system/default-org/MASTER.md",
+  "refresh_interval_seconds": 30
+}

@@ -142,21 +142,34 @@ export default function AutomationTaskDetail() {
   async function saveEdit() {
     setSaving(true);
     try {
-      // Use the new parse-schedule endpoint to validate before saving.
+      // Use the new parse-schedule endpoint to validate before saving. If the
+      // schedule is unparseable (e.g. a one-shot datetime like "2026-08-15
+      // 14:30" or garbage), abort the save with the backend's message — the
+      // old code toasted success, persisted the raw string, and left
+      // cron_expression/next_run_at stale so the task never fired on the new
+      // schedule. The generic-entity write path now re-parses too (backend
+      // hook), so this pre-check is the first line of defense, not the last.
       if (editForm.schedule && editForm.schedule.trim() && editForm.schedule.trim().toLowerCase() !== 'manual') {
         const res = await authFetch('/api/automations/parse-schedule', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ schedule: editForm.schedule, timezone: editForm.timezone }),
         });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.success && data.next_run_at) {
-            toast({
-              title: lang === 'en' ? 'Schedule parsed' : '计划已解析',
-              description: `${lang === 'en' ? 'Next run:' : '下次运行:'} ${formatShortDateTime(data.next_run_at)} (${data.description})`,
-            });
-          }
+        let data = null;
+        try { data = await res.json(); } catch { /* non-JSON error */ }
+        if (!res.ok || !data || data.success !== true) {
+          toast({
+            title: 'Error',
+            description: (data && data.error) || (data && data.detail) || `HTTP ${res.status}`,
+            variant: 'destructive',
+          });
+          return; // keep the edit form open — nothing was persisted
+        }
+        if (data.next_run_at) {
+          toast({
+            title: lang === 'en' ? 'Schedule parsed' : '计划已解析',
+            description: `${lang === 'en' ? 'Next run:' : '下次运行:'} ${formatShortDateTime(data.next_run_at)} (${data.description})`,
+          });
         }
       }
       await base44.entities.AutomationTask.update(id, editForm);

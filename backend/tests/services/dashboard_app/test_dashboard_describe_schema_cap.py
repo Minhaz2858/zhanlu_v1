@@ -136,3 +136,60 @@ def test_exploration_cap_inert_after_build_with_fetch(fullstack_on):
 
     executed = ["fetch_data_batch"] * 5 + ["create_fullstack_dashboard"]
     assert dashboard_exploration_cap_reached("build me a dashboard", executed, 8) is False
+
+
+# ── Fix 7: post-cap stall freeze (2026-09-02) ───────────────────────────────
+# Regression (conv 0e8c004e): after the describe_schema cap fired, the model
+# re-ran uiux_design_system + list_fullstack_dashboards instead of calling
+# create_fullstack_dashboard, then the turn died into an empty fallback. The
+# stall freeze blocks every non-build tool once the schema budget is frozen.
+
+
+def _freeze(*, frozen=True, executed=None, parsed=None, build="create_fullstack_dashboard"):
+    from app.services.dashboard_turn_guard import dashboard_stall_freeze_blocked
+    return dashboard_stall_freeze_blocked(frozen, executed, parsed, build)
+
+
+def test_stall_freeze_blocks_non_build_tools_when_frozen(fullstack_on):
+    executed = ["describe_schema", "describe_schema", "uiux_design_system"]
+    blocked = _freeze(
+        executed=executed,
+        parsed=["uiux_design_system", "list_fullstack_dashboards", "delegate_task"],
+    )
+    assert blocked == ["uiux_design_system", "list_fullstack_dashboards", "delegate_task"]
+
+
+def test_stall_freeze_always_allows_build_tool(fullstack_on):
+    executed = ["describe_schema", "describe_schema"]
+    blocked = _freeze(executed=executed, parsed=["create_fullstack_dashboard"])
+    assert blocked == []
+
+
+def test_stall_freeze_allows_first_uiux_design_call(fullstack_on):
+    # Budget froze after schema exploration that ran BEFORE the design step —
+    # the design-first HARD RULE still needs its first uiux_design_system call.
+    executed = ["describe_schema", "describe_schema"]
+    blocked = _freeze(executed=executed, parsed=["uiux_design_system"])
+    assert blocked == []
+
+
+def test_stall_freeze_blocks_repeated_uiux_design_call(fullstack_on):
+    executed = ["describe_schema", "describe_schema", "uiux_design_system"]
+    blocked = _freeze(executed=executed, parsed=["uiux_design_system"])
+    assert blocked == ["uiux_design_system"]
+
+
+def test_stall_freeze_inert_when_budget_not_frozen(fullstack_on):
+    blocked = _freeze(frozen=False, executed=["describe_schema"], parsed=["skills_hub"])
+    assert blocked == []
+
+
+def test_stall_freeze_inert_after_build_ran(fullstack_on):
+    executed = ["describe_schema", "create_fullstack_dashboard"]
+    blocked = _freeze(executed=executed, parsed=["describe_schema"])
+    assert blocked == []
+
+
+def test_stall_freeze_inert_without_executed_or_parsed(fullstack_on):
+    assert _freeze(executed=None, parsed=None) == []
+    assert _freeze(executed=[], parsed=[]) == []

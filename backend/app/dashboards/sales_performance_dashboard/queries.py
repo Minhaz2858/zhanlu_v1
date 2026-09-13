@@ -15,20 +15,15 @@ from app.services.dashboard_query import (
 DATASOURCE_KB_ID = 'b1b9145d-5b6b-4c0e-ba82-919dde4620d7'
 
 METRICS = [
-    {"id": 'total_revenue', "title": 'Total Revenue (Incl. Tax)', "type": 'kpi', "sql": 'SELECT COALESCE(SUM(FALLAMOUNT),0) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)', "options": {'prefix': '¥', 'format': 'compact'}},
-    {"id": 'order_volume', "title": 'Order Volume (Tons)', "type": 'kpi', "sql": 'SELECT COALESCE(SUM(FQTY_ORIGIN),0) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)', "options": {'suffix': ' t'}},
-    {"id": 'order_count', "title": 'Distinct Orders', "type": 'kpi', "sql": 'SELECT COUNT(DISTINCT FID) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)', "options": {}},
-    {"id": 'avg_price', "title": 'Avg Unit Price', "type": 'kpi', "sql": 'SELECT COALESCE(AVG(FPRICE),0) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND FPRICE > 0', "options": {'prefix': '¥'}},
-    {"id": 'delivery_rate', "title": 'Delivery Fulfillment Rate', "type": 'kpi', "sql": 'SELECT COALESCE(SUM(FDELIQTY)/NULLIF(SUM(FQTY_ORIGIN),0),0)*100 AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)', "options": {'suffix': '%'}},
-    {"id": 'tax_amount', "title": 'Tax Amount', "type": 'kpi', "sql": 'SELECT COALESCE(SUM(FTAXAMOUNT),0) AS value FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)', "options": {'prefix': '¥'}},
-    {"id": 'revenue_trend', "title": 'Revenue Trend (30d)', "type": 'area', "sql": 'SELECT DATE(PLANDATE) AS x, SUM(FALLAMOUNT) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY DATE(PLANDATE) ORDER BY x', "options": {}},
-    {"id": 'volume_trend', "title": 'Order Volume Trend (30d)', "type": 'line', "sql": 'SELECT DATE(PLANDATE) AS x, SUM(FQTY_ORIGIN) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) GROUP BY DATE(PLANDATE) ORDER BY x', "options": {}},
-    {"id": 'top_products', "title": 'Top Products by Revenue', "type": 'bar', "sql": 'SELECT material_name AS x, SUM(FALLAMOUNT) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND material_name IS NOT NULL GROUP BY material_name ORDER BY y DESC LIMIT 10', "options": {}},
-    {"id": 'product_mix', "title": 'Revenue by Material Group', "type": 'pie', "sql": 'SELECT material_group AS x, SUM(FALLAMOUNT) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND material_group IS NOT NULL GROUP BY material_group ORDER BY y DESC LIMIT 8', "options": {}},
-    {"id": 'customer_split', "title": 'Top Customers by Revenue', "type": 'bar', "sql": 'SELECT CUST_NAME AS x, SUM(FALLAMOUNT) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND CUST_NAME IS NOT NULL GROUP BY CUST_NAME ORDER BY y DESC LIMIT 10', "options": {}},
-    {"id": 'org_split', "title": 'Revenue by Organization', "type": 'pie', "sql": 'SELECT org_name AS x, SUM(FALLAMOUNT) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND org_name IS NOT NULL GROUP BY org_name ORDER BY y DESC LIMIT 8', "options": {}},
-    {"id": 'unit_split', "title": 'Revenue by Unit of Measure', "type": 'bar', "sql": 'SELECT material_unit AS x, SUM(FALLAMOUNT) AS y FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) AND material_unit IS NOT NULL GROUP BY material_unit ORDER BY y DESC LIMIT 5', "options": {}},
-    {"id": 'recent_orders', "title": 'Recent Orders', "type": 'table', "sql": 'SELECT FBILLNO AS bill_no, material_name AS product, CUST_NAME AS customer, FQTY_ORIGIN AS qty, FPRICE AS price, FALLAMOUNT AS amount, FDELIQTY AS delivered, DATE(PLANDATE) AS date FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) ORDER BY PLANDATE DESC LIMIT 50', "options": {}},
+    {"id": 'kpi_revenue', "title": '总营收 (¥)', "type": 'kpi', "sql": "SELECT ROUND(SUM(order_amount),2) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category)", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'kpi_orders', "title": '订单笔数', "type": 'kpi', "sql": "SELECT COUNT(*) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category)", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'kpi_qty', "title": '总销量 (吨)', "type": 'kpi', "sql": "SELECT ROUND(SUM(order_quantity),2) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category)", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'kpi_customers', "title": '客户数 (家)', "type": 'kpi', "sql": "SELECT COUNT(DISTINCT customer_id) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category)", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'trend_revenue', "title": '营收日趋势 (¥)', "type": 'line', "sql": "SELECT DATE(order_date) AS label, ROUND(SUM(order_amount),2) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category) GROUP BY DATE(order_date) ORDER BY label", "options": {'span': 'wide', 'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'orders_trend', "title": '订单量日趋势', "type": 'line', "sql": "SELECT DATE(order_date) AS label, COUNT(*) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category) GROUP BY DATE(order_date) ORDER BY label", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'region_pie', "title": '区域营收分布', "type": 'pie', "sql": "SELECT organization AS label, ROUND(SUM(order_amount),2) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category) GROUP BY organization ORDER BY value DESC", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'category_pie', "title": '品类营收分布', "type": 'pie', "sql": "SELECT product_group AS label, ROUND(SUM(order_amount),2) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category) GROUP BY product_group ORDER BY value DESC", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
+    {"id": 'top_products', "title": '热销产品 Top 10', "type": 'bar', "sql": "SELECT product_name AS label, ROUND(SUM(order_amount),2) AS value FROM erp_v_sale_orderentry WHERE (:dim_org = '' OR organization = :dim_org) AND (:dim_category = '' OR product_group = :dim_category) GROUP BY product_name ORDER BY value DESC LIMIT 10", "options": {'filters': [{'key': 'dim_org', 'label': '销售组织', 'column': 'organization', 'values': ['惠州伊斯科', '广东伊斯科']}, {'key': 'dim_category', 'label': '产品品类', 'column': 'product_group', 'values': ['石油树脂', '液体', 'C5原料', 'C5产品']}]}},
 ]
 
 
@@ -44,10 +39,24 @@ def metric_dimensions(m: dict) -> list[dict]:
     out of the generated SQL.
     """
     filters = (m.get("options") or {}).get("filters") or []
+    # ``options.filters`` may be a LIST of URL-keyed dimension specs
+    # ([{"key": "product", "column": "FNAME"}]) OR a DICT of object filters
+    # ({"date": {"column": "shipment_date", "op": ">=", "value": ":dim_date"}})
+    # emitted by the dashboard generator. Iterating a dict yields bare string
+    # keys and crashed with ``AttributeError: 'str' object has no attribute
+    # 'get'`` — observed 2026-09-03: every daily-sales-data-sync metric poll
+    # logged a traceback on each 30 s refresh. Normalize dict filters: the
+    # dict key IS the declared token name (e.g. "date" -> :dim_date).
+    if isinstance(filters, dict):
+        filters = [
+            {"key": name, "column": spec.get("column") or ""}
+            for name, spec in filters.items()
+            if isinstance(spec, dict)
+        ]
     return [
         {"token": f["key"], "column": f["column"]}
         for f in filters
-        if f.get("key") and f.get("column")
+        if isinstance(f, dict) and f.get("key") and f.get("column")
     ]
 
 

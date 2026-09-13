@@ -86,7 +86,7 @@ async def _listen_poll_loop(mgr, last_hashes: dict[str, str]) -> None:
     channel = pg_listen_channel(SLUG)
     notified = asyncio.Event()
 
-    def _on_notify(conn, pid, payload):  # asyncpg notification callback
+    def _on_notify(conn, pid, channel, payload):  # asyncpg notification callback
         notified.set()
 
     try:

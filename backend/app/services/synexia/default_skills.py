@@ -18,11 +18,10 @@ from typing import Optional
 
 from app.config import settings
 from app.services.synexia.intent_router import (
+    FileFormat,
     detect_deck_edit_intent,
     detect_file_intent,
-    FileFormat,
 )
-from app.services.skill_routing.post_router_hook import post_router_pick
 
 # The six deck-edit tools registered by ``tool_handlers.deck_edit_tool``.
 # Surfaced to the agent only when ``DECK_EDIT_ROUTING_ENABLED`` is on.
@@ -189,20 +188,13 @@ def pick_default_skill(
      2. **Explicit format**: If ``detect_file_intent`` returns a format whose
          key exists in ``DEFAULT_SKILLS``, return that default skill.
 
-     3. **Strong skill match**: Consult the full skill catalog. If a custom or
-         marketplace skill strongly matches the request, return it as a forced
-         skill before applying generic soft-intent defaults.
-
-     4. **Soft intent**: Run the heuristic over the message text. If a soft
-       signal maps to a default-skill key, return that default.
-
-     5. **No signal**: Return ``None`` — no deterministic default applies.
+     3. **No signal**: Return ``None`` — no deterministic default applies.
        The caller (task_spec_parser / plan_dag) interprets ``None`` as
        "let the LLM pick from the full skill catalog via the Skill
-       meta-tool". This replaces the former forced-``docx`` fallback,
-       which incorrectly turned every ambiguous request into a Word
-       document. ``FALLBACK_SKILL`` in ``resolver.py`` remains as the
-       absolute last resort if the LLM also finds nothing relevant.
+       meta-tool". Forced post-router skill picks and the soft-intent
+       heuristic (``report`` → docx) were removed in Phase A/B — the
+       model decides from the catalog, so an ambiguous request like
+       "list the weekly summary" is never auto-bound to a file skill.
 
     Args:
         user_message: The raw user message text.
@@ -234,28 +226,12 @@ def pick_default_skill(
     if detect_deck_edit_routing(user_message):
         return None
 
-    # 3. Strong skill match. This must run before generic report/docx soft
-    # intent so enabled custom skills like weekly-report-generation can win
-    # over the broad "report" → docx default, while explicit .docx/.pptx
-    # requests still keep deterministic format priority.
-    try:
-        forced = post_router_pick(user_message)
-    except Exception:
-        # Never let the post-router hook crash the router; fall through.
-        forced = None
-    if forced:
-        return forced
-
-    # 4. Soft-intent heuristic (e.g. "make a sales report" → docx)
-    soft_key = detect_soft_intent(user_message)
-    if soft_key and soft_key in DEFAULT_SKILLS:
-        return DEFAULT_SKILLS[soft_key]
-
-    # 5. No deterministic signal AND no strong skill match — let the LLM
-    #    pick from the catalog. Returning ``None`` signals task_spec_parser
-    #    / plan_dag to NOT inject a forced default-skill hint, so the
-    #    planner chooses from the full skill catalog injected via
-    #    SkillPlannerHook.build_plan_prompt_extra().
+    # 3. No deterministic signal — let the LLM pick from the catalog.
+    #    Returning ``None`` signals task_spec_parser / plan_dag to NOT
+    #    inject a forced default-skill hint, so the planner chooses from
+    #    the full skill catalog injected via
+    #    SkillPlannerHook.build_plan_prompt_extra(). (Forced post-router
+    #    picks and soft-intent defaults were removed in Phase A/B.)
     return None
 
 

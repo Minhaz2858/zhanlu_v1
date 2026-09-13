@@ -58,11 +58,23 @@ export default function InvokePicker({ activeSkill, activeAgent, onSelectSkill, 
   const filteredAgents = filterUserAgents(agents).filter((a) => (a.name || '').toLowerCase().includes(ql));
 
   function skillToken(s) {
-    if (s.trigger) {
-      const parts = s.trigger.split('/').filter(Boolean);
-      return parts.length ? parts[parts.length - 1] : s.trigger;
+    const name = (s.name || '').trim();
+    const trig = (s.trigger || '').trim();
+    if (trig) {
+      const parts = trig.split('/').filter(Boolean);
+      const last = parts.length ? parts[parts.length - 1].trim() : trig;
+      // Only a real command token is shown in the picker gutter. Long
+      // comma/phrase triggers are SEMANTIC match hints for the agent
+      // (e.g. "summarize pdf, pdf summary, digest pdf, ..."), not slash
+      // commands — rendering them as /{token} exploded the picker into a
+      // giant blob (observed: pdf-summarizer showed its entire trigger
+      // list under the name). Fall back to the clean skill name whenever
+      // the trigger isn't actually slash-shaped and short.
+      if (last && last.length <= 48 && !last.includes(',') && !last.includes(' ')) {
+        return last;
+      }
     }
-    return s.name;
+    return name || 'skill';
   }  return (
     <div className="flex items-center gap-1.5" ref={wrapRef}>
       <div className="relative">

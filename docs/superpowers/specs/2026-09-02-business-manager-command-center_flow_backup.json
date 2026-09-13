@@ -1,0 +1,552 @@
+{
+ "version": 1,
+ "settings": {},
+ "nodes": [
+  {
+   "id": "n1",
+   "type": "trigger_chat",
+   "position": {
+    "x": 0,
+    "y": 460
+   },
+   "data": {
+    "label": "Manager Question",
+    "config": {}
+   }
+  },
+  {
+   "id": "n2",
+   "type": "llm",
+   "position": {
+    "x": 320,
+    "y": 460
+   },
+   "data": {
+    "label": "Intent Classifier",
+    "config": {
+     "prompt": "You classify a manager's question into one category. Reply with ONLY the category token.\n\nScan the question for keywords in this exact order and pick the FIRST match:\n0. If the question asks for rankings or breakdowns of MORE THAN ONE dimension (e.g. \"by product and by customer\", \"products and customers\", \"top products and top customers\"), reply REPORT.\n1. customer, client, account, who buys -> CUSTOMERS\n2. product, sku, item, catalog, volume -> PRODUCTS\n3. margin, profit, financial, cost, expense -> FINANCIAL\n4. report, brief, overview, summary, everything, full picture, docx, word file -> REPORT\n5. sales, revenue, order, deal, region, selling, bookings -> SALES\n6. nothing matched, or greeting/chitchat -> GENERAL\n\nExamples:\n\"top customers by revenue?\" -> CUSTOMERS   (customer found at step 1)\n\"top 5 revenue by product and by customer\" -> REPORT  (two dimensions at step 0)\n\"which products sell the most?\" -> PRODUCTS\n\"average margin last month?\" -> FINANCIAL\n\"write a full overview\" -> REPORT\n\"our sales by region?\" -> SALES\n\"good morning!\" -> GENERAL\n\nReply with ONLY the token.\n\nQuestion: {{inputs.n1.text}}\nReply:",
+     "temperature": 0
+    }
+   }
+  },
+  {
+   "id": "n12",
+   "type": "db_query",
+   "position": {
+    "x": 320,
+    "y": 40
+   },
+   "data": {
+    "label": "KPI Snapshot",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "sql",
+     "sql": "SELECT (SELECT COUNT(DISTINCT FID) FROM erp_v_sale_orderentry) AS total_orders, (SELECT COUNT(DISTINCT FCUSTID) FROM erp_v_sale_orderentry) AS total_customers, (SELECT COUNT(DISTINCT material_name) FROM erp_v_sale_orderentry) AS total_materials, (SELECT ROUND(SUM(FQTY_ORIGIN),2) FROM erp_v_sale_orderentry) AS total_qty, (SELECT ROUND(SUM(FALLAMOUNT),2) FROM erp_v_sale_orderentry) AS total_amount, (SELECT ROUND(SUM(FAMOUNT),2) FROM erp_v_sale_orderentry) AS pretax_amount, (SELECT ROUND(SUM(FTAXAMOUNT),2) FROM erp_v_sale_orderentry) AS tax_amount, (SELECT ROUND(SUM(FREMAINOUTQTY),2) FROM erp_v_sale_orderentry) AS undelivered_qty, (SELECT ROUND(SUM(FALLAMOUNT)/COUNT(DISTINCT FID),2) FROM erp_v_sale_orderentry) AS avg_order_value",
+     "limit": 50,
+     "continueOnFail": false,
+     "question": ""
+    }
+   }
+  },
+  {
+   "id": "n3",
+   "type": "switch",
+   "position": {
+    "x": 640,
+    "y": 460
+   },
+   "data": {
+    "label": "Route Intent I",
+    "config": {
+     "cases": [
+      {
+       "field": "{{inputs.n2.text}}",
+       "op": "contains",
+       "value": "SALES"
+      },
+      {
+       "field": "{{inputs.n2.text}}",
+       "op": "contains",
+       "value": "CUSTOMERS"
+      },
+      {
+       "field": "{{inputs.n2.text}}",
+       "op": "contains",
+       "value": "PRODUCTS"
+      }
+     ],
+     "fallback_label": "more intents"
+    }
+   }
+  },
+  {
+   "id": "n6",
+   "type": "switch",
+   "position": {
+    "x": 640,
+    "y": 820
+   },
+   "data": {
+    "label": "Route Intent II",
+    "config": {
+     "cases": [
+      {
+       "field": "{{inputs.n2.text}}",
+       "op": "contains",
+       "value": "FINANCIAL"
+      },
+      {
+       "field": "{{inputs.n2.text}}",
+       "op": "contains",
+       "value": "REPORT"
+      }
+     ],
+     "fallback_label": "general"
+    }
+   }
+  },
+  {
+   "id": "n4",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 40
+   },
+   "data": {
+    "label": "Sales Detail",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "nl",
+     "sql": "",
+     "limit": 50,
+     "continueOnFail": true,
+     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request (last week / last month / this quarter / this year) with a WHERE filter on PLANDATE. Group by org_name; report sales amount (FALLAMOUNT), quantity (FQTY_ORIGIN) and distinct order count (FID). Order by amount descending. If no time window is given, use the full dataset."
+    }
+   }
+  },
+  {
+   "id": "n7",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 240
+   },
+   "data": {
+    "label": "Customer Detail",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "nl",
+     "sql": "",
+     "limit": 50,
+     "continueOnFail": true,
+     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request (last week / last month / this quarter) with a WHERE filter on PLANDATE. Report the top customers by sales amount: group by CUST_NAME, sum FALLAMOUNT, count distinct FID. Order by amount descending, limit to the number requested (default 5-10). If no time window is given, use the full dataset."
+    }
+   }
+  },
+  {
+   "id": "n9",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 440
+   },
+   "data": {
+    "label": "Product Detail",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "nl",
+     "sql": "",
+     "limit": 50,
+     "continueOnFail": true,
+     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request (last week / last month / this quarter) with a WHERE filter on PLANDATE. Report the top products by sales amount: group by material_name, sum FALLAMOUNT, sum FQTY_ORIGIN, count distinct FID. Order by amount descending, limit to the number requested (default 5-10). If no time window is given, use the full dataset."
+    }
+   }
+  },
+  {
+   "id": "n13",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 640
+   },
+   "data": {
+    "label": "Financial Detail",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "nl",
+     "sql": "",
+     "limit": 50,
+     "continueOnFail": true,
+     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request with a WHERE filter on PLANDATE. Report financial KPIs by org_name: pretax FAMOUNT, tax FTAXAMOUNT, total FALLAMOUNT, avg order value FALLAMOUNT/count distinct FID. If a metric is not derivable, say so — never invent."
+    }
+   }
+  },
+  {
+   "id": "n15",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 840
+   },
+   "data": {
+    "label": "Report Data",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "sql",
+     "sql": "SELECT DATE_FORMAT(PLANDATE, '%Y-%m') AS month, COUNT(DISTINCT FID) AS orders, ROUND(SUM(FQTY_ORIGIN),2) AS qty, ROUND(SUM(FALLAMOUNT),2) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 12 MONTH), '%Y-%m-01') GROUP BY DATE_FORMAT(PLANDATE, '%Y-%m') ORDER BY month",
+     "limit": 50,
+     "continueOnFail": true,
+     "question": ""
+    }
+   }
+  },
+  {
+   "id": "n5",
+   "type": "agent",
+   "position": {
+    "x": 1280,
+    "y": 40
+   },
+   "data": {
+    "label": "Sales Manager",
+    "config": {
+     "agent_id": "e4d0ba0e-bb4c-464d-97c0-11fbd1c1c935",
+     "input_template": "User request: {{inputs.n1.text}}\n\nERP sales by organisation (orders, qty, amount in currency units):\n{{inputs.n4.text}}\n\nAnswer the manager's SALES question using ONLY this data. Never invent numbers — if data is missing say so."
+    }
+   }
+  },
+  {
+   "id": "n8",
+   "type": "agent",
+   "position": {
+    "x": 1280,
+    "y": 240
+   },
+   "data": {
+    "label": "Customer Specialist",
+    "config": {
+     "agent_id": "862c8afc-2738-4938-806c-8bef3424b0b5",
+     "input_template": "User request: {{inputs.n1.text}}\n\nTop ERP customers by sales amount:\n{{inputs.n7.text}}\n\nAnswer the manager's CUSTOMER question using ONLY this data. Never invent numbers."
+    }
+   }
+  },
+  {
+   "id": "n10",
+   "type": "agent",
+   "position": {
+    "x": 1280,
+    "y": 440
+   },
+   "data": {
+    "label": "Product Specialist",
+    "config": {
+     "agent_id": "cebb33aa-23e9-4d00-bfaa-8f3d3f9daefc",
+     "input_template": "User request: {{inputs.n1.text}}\n\nERP product/material sales ranking:\n{{inputs.n9.text}}\n\nAnswer the manager's PRODUCT question using ONLY this data. Never invent numbers."
+    }
+   }
+  },
+  {
+   "id": "n14",
+   "type": "agent",
+   "position": {
+    "x": 1280,
+    "y": 640
+   },
+   "data": {
+    "label": "Finance Specialist",
+    "config": {
+     "agent_id": "ecd92353-ffdd-4d6c-a85c-579086e3dfd4",
+     "input_template": "User request: {{inputs.n1.text}}\n\nERP financial data by organisation (pretax, tax, total, avg order value):\n{{inputs.n13.text}}\n\nAnswer the manager's FINANCIAL question using ONLY this data. Never invent numbers — if a metric is not derivable, say so explicitly."
+    }
+   }
+  },
+  {
+   "id": "n16",
+   "type": "agent",
+   "position": {
+    "x": 1280,
+    "y": 840
+   },
+   "data": {
+    "label": "Report Writer",
+    "config": {
+     "agent_id": "ae8b9b1e-caa5-4548-bd0f-c03c5a28b977",
+     "input_template": "User request: {{inputs.n1.text}}\n\nMonthly trend (last 12 months, authoritative totals by month):\n{{inputs.n15.text}}\n\nTop products by revenue for the requested window:\n{{inputs.n15b.text}}\n\nTop customers by revenue for the requested window:\n{{inputs.n15c.text}}\n\nWrite the manager's report using ONLY this data. Structure it with: 1) an executive summary, 2) the requested product ranking table, 3) the requested customer ranking table, 4) trend observations. Never invent figures — if a metric is not available say so explicitly. Amounts are plain numbers with no currency."
+    }
+   }
+  },
+  {
+   "id": "n11",
+   "type": "agent",
+   "position": {
+    "x": 1280,
+    "y": 1040
+   },
+   "data": {
+    "label": "General Assistant",
+    "config": {
+     "agent_id": "81dcaadb-ff96-427a-9ffc-1d4466b39789",
+     "input_template": "{{inputs.n1.text}}"
+    }
+   }
+  },
+  {
+   "id": "n17",
+   "type": "llm",
+   "position": {
+    "x": 1600,
+    "y": 460
+   },
+   "data": {
+    "label": "Manager Synthesis",
+    "config": {
+     "prompt": "You are the Business Manager's chief of staff. Merge the relevant sections into ONE crisp executive brief written for a business manager.\nAUTHORITATIVE RULE: The KPI snapshot section is the single source of truth for company-wide totals. Specialist sections add detail only and must NEVER contradict the KPI snapshot.\nCURRENCY RULE: The source data has NO currency symbol. Report amounts as plain numbers with thousands separators — NEVER prefix $, ¥, €, IDR, RMB or any currency. If the user asks, say the source does not record currency.\nIf a section is empty or absent, skip it — do not invent content.\n\nKPI SNAPSHOT:\n{{inputs.n12.text}}\n\nSALES:\n{{inputs.n5.text}}\n\nCUSTOMERS:\n{{inputs.n8.text}}\n\nPRODUCTS:\n{{inputs.n10.text}}\n\nFINANCIAL:\n{{inputs.n14.text}}\n\nREPORT:\n{{inputs.n16.text}}\n\nGENERAL:\n{{inputs.n11.text}}\n\nWrite the final brief in markdown with short sections and bullet points.",
+     "temperature": 0.3
+    }
+   }
+  },
+  {
+   "id": "n18",
+   "type": "output",
+   "position": {
+    "x": 1920,
+    "y": 460
+   },
+   "data": {
+    "label": "Manager Brief",
+    "config": {
+     "format": "markdown"
+    }
+   }
+  },
+  {
+   "id": "n15b",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 1040
+   },
+   "data": {
+    "label": "Top Products (window)",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "nl",
+     "question": "Top 5 products by sales amount — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor the time window in this request ({{inputs.n1.text}} — e.g. last week / last month / this quarter) with a WHERE filter on PLANDATE. Group by material_name, sum FALLAMOUNT as amount, sum FQTY_ORIGIN as qty. Order by amount DESC, LIMIT 5. If no window given, use the full dataset.",
+     "sql": "",
+     "limit": 5,
+     "continueOnFail": true
+    }
+   }
+  },
+  {
+   "id": "n15c",
+   "type": "db_query",
+   "position": {
+    "x": 960,
+    "y": 1240
+   },
+   "data": {
+    "label": "Top Customers (window)",
+    "config": {
+     "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
+     "mode": "nl",
+     "question": "Top 5 customers by sales amount — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor the time window in this request ({{inputs.n1.text}} — e.g. last week / last month / this quarter) with a WHERE filter on PLANDATE. Group by CUST_NAME, sum FALLAMOUNT as amount, count distinct FID as orders. Order by amount DESC, LIMIT 5. If no window given, use the full dataset.",
+     "sql": "",
+     "limit": 5,
+     "continueOnFail": true
+    }
+   }
+  }
+ ],
+ "edges": [
+  {
+   "id": "e1",
+   "source": "n1",
+   "sourceHandle": "source-main",
+   "target": "n2",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e2",
+   "source": "n1",
+   "sourceHandle": "source-main",
+   "target": "n12",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e3",
+   "source": "n2",
+   "sourceHandle": "source-main",
+   "target": "n3",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e4",
+   "source": "n3",
+   "sourceHandle": "source-main",
+   "target": "n4",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e5",
+   "source": "n3",
+   "sourceHandle": "source-main-1",
+   "target": "n7",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e6",
+   "source": "n3",
+   "sourceHandle": "source-main-2",
+   "target": "n9",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e7",
+   "source": "n3",
+   "sourceHandle": "source-main-3",
+   "target": "n6",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e8",
+   "source": "n6",
+   "sourceHandle": "source-main",
+   "target": "n13",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e9",
+   "source": "n6",
+   "sourceHandle": "source-main-1",
+   "target": "n15",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e10",
+   "source": "n6",
+   "sourceHandle": "source-main-3",
+   "target": "n11",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e11",
+   "source": "n4",
+   "sourceHandle": "source-main",
+   "target": "n5",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e12",
+   "source": "n7",
+   "sourceHandle": "source-main",
+   "target": "n8",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e13",
+   "source": "n9",
+   "sourceHandle": "source-main",
+   "target": "n10",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e14",
+   "source": "n13",
+   "sourceHandle": "source-main",
+   "target": "n14",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e15",
+   "source": "n15",
+   "sourceHandle": "source-main",
+   "target": "n16",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e16",
+   "source": "n5",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e17",
+   "source": "n8",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e18",
+   "source": "n10",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e19",
+   "source": "n14",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e20",
+   "source": "n16",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e21",
+   "source": "n11",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e22",
+   "source": "n12",
+   "sourceHandle": "source-main",
+   "target": "n17",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e23",
+   "source": "n17",
+   "sourceHandle": "source-main",
+   "target": "n18",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e24",
+   "source": "n6",
+   "sourceHandle": "source-main-1",
+   "target": "n15b",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e25",
+   "source": "n6",
+   "sourceHandle": "source-main-1",
+   "target": "n15c",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e26",
+   "source": "n15b",
+   "sourceHandle": "source-main",
+   "target": "n16",
+   "targetHandle": "target-main"
+  },
+  {
+   "id": "e27",
+   "source": "n15c",
+   "sourceHandle": "source-main",
+   "target": "n16",
+   "targetHandle": "target-main"
+  }
+ ]
+}

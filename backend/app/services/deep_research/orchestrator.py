@@ -40,9 +40,32 @@ SCOPE_TOOLS: dict[str, tuple[str, ...]] = {
     "internal": ("sql_query", "ask_data_agent", "comprehensive_data"),
 }
 
+# Internal-family tools all funnel through the NL data agent at gather time:
+# the orchestrator only has a research *question* per step — it cannot
+# synthesize SQL. ask_data_agent is the gateway that resolves the question
+# against the bound warehouse (same handler the normal chat loop uses).
+_INTERNAL_GATEWAY_TOOL = "ask_data_agent"
+_WEB_GATEWAY_TOOL = "web_search"
+
 _ALL_TOOLS: tuple[str, ...] = tuple(
     sorted(set(SCOPE_TOOLS["web"]) | set(SCOPE_TOOLS["internal"]))
 )
+
+
+def _gather_args_for(tool: str, question: str) -> dict:
+    """Map a research step question onto each tool's REAL arg schema.
+
+    The pre-fix loop called every tool with ``{"query": ...}``; the internal
+    data agent requires ``question`` (delegation_tools._ask_data_agent), so
+    internal steps silently failed even when the planner chose them.
+    """
+    if tool == _INTERNAL_GATEWAY_TOOL:
+        return {"question": question}
+    if tool in ("sql_query", "comprehensive_data"):
+        # No SQL is available from a research step — funnel through the NL
+        # data agent so the bound warehouse is actually consulted.
+        return {"question": question}
+    return {"query": question}
 
 EmitFn = Callable[[str, Optional[str], Optional[dict]], Awaitable[None]]
 
@@ -114,6 +137,57 @@ async def run_deep_research(
 
     # ── 2. Gather rounds (critique/refine between rounds) ──────────────
     evidence: list[dict[str, Any]] = []
+    # Families that produced at least one SUCCESSFUL evidence record.
+    # scope=``both`` MUST end with both families represented; the
+    # supplement pass below forces the missing family instead of letting
+    # the run finalize on web-only (or DB-only) evidence.
+    families_with_evidence: set[str] = set()
+
+    async def _gather_step(step: dict) -> None:
+        """Run ONE plan step across its tools; failures never become evidence.
+
+        Pre-fix: every tool result was appended as evidence, so a web_search
+        that returned ``{"success": False, ...}`` was fed to the synthesizer
+        as a "finding" — that is how a 9× all-failed web run produced a
+        confident "no data exists for C5C9" report instead of a hybrid
+        answer. Only success-shaped results (rows / summary / answer /
+        content) are evidence now.
+        """
+        nonlocal evidence, families_with_evidence
+        for tool in step["tools"]:
+            if tool not in scope_tools:
+                continue  # out-of-scope tool — never invoked
+            # sql_query / comprehensive_data cannot run from a research step
+            # (no SQL, no schema) — funnel every internal-family call through
+            # the NL data agent, which resolves the question against the
+            # bound warehouse (same handler the normal chat loop uses).
+            invoke_tool = (
+                _INTERNAL_GATEWAY_TOOL if tool in SCOPE_TOOLS["internal"]
+                else tool
+            )
+            try:
+                result = await tool_executor(
+                    invoke_tool, _gather_args_for(invoke_tool, step["question"])
+                )
+            except Exception as e:
+                logger.warning(
+                    "deep research tool %s failed (non-fatal): %s", invoke_tool, e
+                )
+                continue
+            if not _is_success_evidence(result):
+                logger.info(
+                    "deep research tool %s returned no usable evidence "
+                    "(skipped): %s",
+                    invoke_tool,
+                    str(result)[:160],
+                )
+                continue
+            evidence.append(_evidence_from(tool, step["question"], result))
+            if tool in SCOPE_TOOLS["web"]:
+                families_with_evidence.add("web")
+            if tool in SCOPE_TOOLS["internal"]:
+                families_with_evidence.add("internal")
+
     for round_no in range(1, preset["gather_rounds"] + 1):
         await emit(
             "phase_enter",
@@ -121,17 +195,7 @@ async def run_deep_research(
             {"round": round_no},
         )
         for step in steps:
-            for tool in step["tools"]:
-                if tool not in scope_tools:
-                    continue  # out-of-scope tool — never invoked
-                try:
-                    result = await tool_executor(tool, {"query": step["question"]})
-                except Exception as e:
-                    logger.warning(
-                        "deep research tool %s failed (non-fatal): %s", tool, e
-                    )
-                    continue
-                evidence.append(_evidence_from(tool, step["question"], result))
+            await _gather_step(step)
         await emit("plan_step_completed", "plan_step_completed", {"round": round_no})
 
         # Critique pass → gap step targeted in the next gather round.
@@ -157,6 +221,39 @@ async def run_deep_research(
                     "rationale": "gap identified by critique pass",
                 }
             ]
+
+    # ── 2b. Hybrid supplement (scope=both) ─────────────────────────────
+    # Even with an honest planner prompt, a weak model may still emit a
+    # web-only plan for a data question (or DB-only for a market question).
+    # The orchestrator guarantees the missing family is consulted BEFORE
+    # synthesis — this is the fix that makes "both" actually mean both.
+    if request.scope == "both":
+        missing_families = [
+            fam for fam in ("web", "internal")
+            if fam not in families_with_evidence
+        ]
+        for fam in missing_families:
+            await emit(
+                "phase_enter",
+                "phase_enter.research_gather",
+                {"round": "supplement", "family": fam},
+            )
+            gateway = (
+                _WEB_GATEWAY_TOOL if fam == "web" else _INTERNAL_GATEWAY_TOOL
+            )
+            logger.info(
+                "deep research hybrid supplement: scope=both, %s family "
+                "missing — running %s for question %.80s",
+                fam, gateway, request.question,
+            )
+            await _gather_step(
+                {
+                    "id": f"supplement-{fam}",
+                    "question": request.question,
+                    "tools": [gateway],
+                    "rationale": f"hybrid supplement: {fam} family missing",
+                }
+            )
 
     # ── 3. Finalize — cited synthesis ──────────────────────────────────
     await emit("phase_enter", "phase_enter.research_finalize")
@@ -221,16 +318,52 @@ def _normalize_plan(
     return normalized
 
 
+def _is_success_evidence(result: Any) -> bool:
+    """True only when a tool result carries USABLE content.
+
+    Failure dicts (``success: False`` / ``error`` keys), empty web results,
+    and error-shaped text must NOT become evidence — feeding them to the
+    synthesizer is what turned a 9× all-failed web run into a confident
+    "no data exists" report. Success shapes:
+      - dict with ``success is True`` (and content), OR
+      - dict carrying rows/summary/answer/text/content that is non-empty
+        and has no ``error``/``failure_kind`` marker.
+    """
+    if isinstance(result, dict):
+        if result.get("success") is False:
+            return False
+        if result.get("failure_kind") or result.get("error_kind"):
+            return False
+        if result.get("error"):
+            return False
+        for key in ("rows", "summary", "answer", "text", "content"):
+            val = result.get(key)
+            if val not in (None, [], "", {}):
+                return True
+        return bool(result.get("success") is True)
+    text = str(result)
+    return bool(text and text.strip() and "error" not in text.lower()[:200])
+
+
 def _evidence_from(tool: str, question: str, result: Any) -> dict[str, Any]:
     """Normalize a tool result into a compact evidence record for synthesis."""
     if isinstance(result, dict):
-        snippet = str(
-            result.get("rows")
+        # Merge the NL summary (answer/summary) with structured rows when
+        # both exist — the synthesizer needs the data agent's interpretation
+        # AND the raw rows for tables.
+        _lead = (
+            result.get("answer")
             or result.get("summary")
             or result.get("text")
             or result.get("content")
-            or result
-        )[:500]
+            or ""
+        )
+        _rows = result.get("rows")
+        if _rows not in (None, [], ""):
+            snippet = f"{_lead} ROWS={_rows}" if _lead else str(_rows)
+        else:
+            snippet = str(_lead or result)
+        snippet = snippet[:500]
         url = result.get("url") or ""
         source_name = (
             result.get("title")

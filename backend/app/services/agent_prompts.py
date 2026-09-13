@@ -164,6 +164,12 @@ def _build_default_skills_block() -> str:
             "content ALREADY delivered in this conversation (\\\"the same\\\", "
             "\\\"it\\\", \\\"that report\\\", \\\"the one you just made\\\" + a "
             "format).\n\n",
+            'VERB-FIRST OUTPUT RULE (HARD — beats every skill, template, intent router, and format default):\n',
+            'Answer EXACTLY what the user asked for — nothing extra, no auto-added format or file.\n',
+            "1. The user's VERB decides the output. LIST / SHOW / TELL / SUMMARIZE / WHAT IS / READ / EXPLAIN / 列出 / 汇总 / 说明 / 读取 / 总结 / 介绍一下 means a plain chat answer (markdown lists/tables as needed). Do NOT create files, do NOT emit markers, do NOT call create_artifact, do NOT rebuild content that already exists.\n",
+            '2. Only produce a file artifact (docx/pptx/xlsx/pdf/html) when the user EXPLICITLY asks for a downloadable file (\\"as docx\\", \\"Word file\\", \\"export to pdf\\", \\"make a ppt\\", \\"生成/制作/导出 word/excel/ppt/pdf 文件\\", \\"download\\"). No format/file request in the user message = NO file, even if a skill or plan template suggests one.\n',
+            '3. If the content the user wants is ALREADY available (their uploaded document, a file in this conversation, an earlier answer), answer from it directly in chat — NEVER re-generate it into a NEW file, and do not run data-source queries to reproduce it.\n',
+            "4. When a skill, plan step, or template says to build a report/artifact but the user's verb was only list/summarize/ask, the USER's verb wins: deliver the content in chat. The user can request the file version afterwards (re-export is supported).\n",
             "Dashboard workflow (HARD RULE): When the user asks for a dashboard, you build a "
             "DEPLOYABLE FULL-STACK REAL-TIME dashboard application backed by real database data "
             "with live updates — NEVER a static page, NEVER fabricated data. Use this exact order:\n"
@@ -2401,35 +2407,24 @@ def resolve_grounding(
     user_message: Optional[str],
     tool_names: Optional[list[str]] = None,
 ) -> tuple[str, Optional[str]]:
-    """Pair the grounding block with the forced tool name.
+    """Pair the advisory grounding block with a (now always None) forced tool.
 
-    Returns a ``(grounding_block, forced_tool)`` tuple:
+    Model-first harness: the forced-tool half of this API was removed in
+    Phase A/B. Returns ``(grounding_block, None)`` so existing callers that
+    used to read ``forced_tool`` keep working — they now receive ``None``
+    and must leave ``tool_choice`` on ``auto`` (the model picks the tool).
 
     * ``grounding_block`` is the prompt block to inject (or ``""``). The
       block is a soft nudge, so it is returned regardless of whether
       the matching tool is in ``tool_names`` — the model still gets the
-      rule just before ``tool_choice`` is computed, and gracefully says
-      "I cannot fetch URLs / files" if the tool is missing.
-    * ``forced_tool`` is the name of the tool the chat runtime should
-      force via ``tool_choice`` (or ``None``). This is gated on tool
-      presence; never force a tool the agent hasn't been granted.
-
-    The implementation composes the two thin facades in
-    :mod:`app.services.turn_action` so all routing decisions live in
-    one module. ``tool_names`` is accepted as ``Optional`` for backward
-    compatibility with existing callers that pass ``None``; when
-    ``None``, the block is still returned but no tool is forced.
+      rule just before it chooses, and gracefully says "I cannot fetch
+      URLs / files" if the tool is missing.
+    * ``forced_tool`` is always ``None`` — never force a tool the model
+      has not chosen.
     """
-    from app.services.turn_action import grounding_block_for_message, resolve_turn_action
+    from app.services.turn_action import grounding_block_for_message
     block = grounding_block_for_message(user_message)
-    action = resolve_turn_action(
-        user_message=user_message,
-        tool_names=tool_names or [],
-        data_ctx_extras={},
-        is_data_question=False,
-        iteration=0,
-    )
-    return block, action.forced_tool
+    return block, None
 
 
 # ---------------------------------------------------------------------------

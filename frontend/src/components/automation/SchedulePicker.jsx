@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Label } from '@/components/ui/label';
 import { Input } from '@/components/ui/input';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
-import { Clock, CalendarDays, Repeat, Hash, AlertCircle, ListOrdered } from 'lucide-react';
+import { Clock, Repeat, Hash, AlertCircle, ListOrdered } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { nextRuns, formatRun } from '@/lib/nextRuns';
 
@@ -82,7 +82,11 @@ export default function SchedulePicker({ value, onChange }) {
           <Select value={frequency} onValueChange={setFrequency}>
             <SelectTrigger><SelectValue /></SelectTrigger>
             <SelectContent>
-              <SelectItem value="once">{s.once}</SelectItem>
+              {/* 'once' was removed: a one-shot absolute datetime ("2026-08-15
+                  14:30") is NOT expressible in the cron runtime — the backend
+                  LLM parser used to fabricate a yearly cron, silently running
+                  the task every year. Use a recurring frequency (or a cron
+                  string) instead. */}
               <SelectItem value="hourly">{s.hourly}</SelectItem>
               <SelectItem value="daily">{s.daily}</SelectItem>
               <SelectItem value="weekly">{s.weekly}</SelectItem>
@@ -100,16 +104,6 @@ export default function SchedulePicker({ value, onChange }) {
           </div>
         )}
       </div>
-
-      {/* Once: date picker */}
-      {frequency === 'once' && (
-        <div>
-          <Label className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CalendarDays className="h-3 w-3" /> {isEn ? 'Date' : '日期'}
-          </Label>
-          <Input type="date" value={date} onChange={(e) => setDate(e.target.value)} />
-        </div>
-      )}
 
       {/* Weekly: day-of-week pills */}
       {frequency === 'weekly' && (

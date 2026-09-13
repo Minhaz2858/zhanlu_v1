@@ -16,6 +16,16 @@ page, never fabricated data.
 
 ## Hard rules
 
+0. **ONE dashboard per chat session (HARD)** — a conversation owns at most ONE
+   dashboard. Before calling `create_fullstack_dashboard`, check the
+   DASHBOARD STATE block in your system prompt: if it names a dashboard for
+   this conversation, EVERY follow-up (restyle, re-theme, re-layout, rebuild,
+   "widgets/data missing", white-and-blue, side-by-side sections…) refers to
+   THAT dashboard → call `update_fullstack_dashboard(slug=<listed slug>, ...)`,
+   never `create_fullstack_dashboard`. The create tool refuses (success:false,
+   naming the existing slug) when this conversation already owns a dashboard
+   with the same name/slug — on refusal, switch to update with the slug from
+   the error. Only call create when the conversation has no dashboard yet.
 1. **Design FIRST** — ALWAYS call `uiux_design_system(query=..., persist=True)`
    before building. Pass the returned `design_system_ref` to the build tool.
    (Use `uiux_search(domain="chart")` when the chart choice is unclear.)
@@ -152,7 +162,8 @@ Domain design skills (load when the project industry matches):
    "Dashboard" artifact. Invite iteration ("tell me what to change — layout,
    metrics, theme, filters, or data").
 9. **Iterate** — user requests → `update_fullstack_dashboard(slug=..., ...)`.
-   The app regenerates and hot-reloads.
+   The slug comes from the DASHBOARD STATE block / this conversation's last
+   create result — never create a second dashboard for an existing one.
 
 ## Anti-fake-data guarantee
 

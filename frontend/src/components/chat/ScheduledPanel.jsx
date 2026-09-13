@@ -212,50 +212,70 @@ export default function ScheduledPanel({ sessionId, focusExecutionId, onClose })
   useEffect(() => {
     if (!liveTargetId) return undefined;
     const targetId = liveTargetId;
-    const url = `/api/automations/executions/${targetId}/events/stream`;
     let closed = false;
-    const source = new EventSource(url);
-    source.onmessage = (e) => {
+    let source = null;
+    // The stream endpoint is user-gated, but EventSource cannot send
+    // Authorization headers — mint a short-lived signed ?token= first
+    // (same pattern as file preview tokens). If minting fails (network /
+    // 401 / 404), fall back to the 15s polling below — never leave a
+    // dangling stream.
+    (async () => {
       try {
-        const data = JSON.parse(e.data);
-        if (data.type === 'phase') {
-          // Backend emits friendly verb + title; store both plus the raw state.
-          setLiveByExec((prev) => ({
-            ...prev,
-            [targetId]: {
-              ...(prev[targetId] || {}),
-              phaseState: data.state,
-              phaseVerb: data.verb,
-              phaseTitle: data.title,
-            },
-          }));
-        } else if (data.type === 'activity_steps') {
-          setLiveByExec((prev) => ({
-            ...prev,
-            [targetId]: { ...(prev[targetId] || {}), steps: data.steps },
-          }));
-        } else if (data.type === 'done' || data.type === 'error') {
-          // Run reached a terminal state — close the stream and refresh the
-          // list so the final status + files appear immediately.
+        const res = await authFetch(
+          `/api/automations/executions/${targetId}/stream-token`,
+          { method: 'POST' },
+        );
+        if (closed || !res.ok) return;
+        const { token } = await res.json();
+        if (closed || !token) return;
+        const url = `/api/automations/executions/${targetId}/events/stream?token=${encodeURIComponent(token)}`;
+        source = new EventSource(url);
+        source.onmessage = (e) => {
+          try {
+            const data = JSON.parse(e.data);
+            if (data.type === 'phase') {
+              // Backend emits friendly verb + title; store both plus the raw state.
+              setLiveByExec((prev) => ({
+                ...prev,
+                [targetId]: {
+                  ...(prev[targetId] || {}),
+                  phaseState: data.state,
+                  phaseVerb: data.verb,
+                  phaseTitle: data.title,
+                },
+              }));
+            } else if (data.type === 'activity_steps') {
+              setLiveByExec((prev) => ({
+                ...prev,
+                [targetId]: { ...(prev[targetId] || {}), steps: data.steps },
+              }));
+            } else if (data.type === 'done' || data.type === 'error') {
+              // Run reached a terminal state — close the stream and refresh the
+              // list so the final status + files appear immediately.
+              if (!closed) { closed = true; source.close(); }
+              setLiveByExec((prev) => {
+                if (!prev[targetId]) return prev;
+                const next = { ...prev };
+                delete next[targetId];
+                return next;
+              });
+              refreshRef.current?.(false);
+            }
+          } catch {
+            /* ignore malformed frames — SSE is best-effort */
+          }
+        };
+        source.onerror = () => {
+          // SSE failed (network/proxy/reconnect limit) — close and rely on polling.
           if (!closed) { closed = true; source.close(); }
-          setLiveByExec((prev) => {
-            if (!prev[targetId]) return prev;
-            const next = { ...prev };
-            delete next[targetId];
-            return next;
-          });
-          refreshRef.current?.(false);
-        }
+        };
       } catch {
-        /* ignore malformed frames — SSE is best-effort */
+        /* mint failed — fall back to polling */
       }
-    };
-    source.onerror = () => {
-      // SSE failed (network/proxy/reconnect limit) — close and rely on polling.
-      if (!closed) { closed = true; source.close(); }
-    };
+    })();
     return () => {
-      if (!closed) { closed = true; source.close(); }
+      closed = true;
+      if (source) source.close();
     };
   }, [liveTargetId]);
 

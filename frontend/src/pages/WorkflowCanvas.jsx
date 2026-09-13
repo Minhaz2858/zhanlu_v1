@@ -4,7 +4,7 @@ import { applyNodeChanges, applyEdgeChanges } from '@xyflow/react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { getWorkflow, saveWorkflow, validateWorkflow, publishWorkflow, deleteWorkflow, listWorkflows } from '@/api/workflows';
 import { NodeRegistryProvider, getNodeTypeRegistry } from '@/lib/nodeTypeRegistry';
-import { flowToXY, xyToFlow } from '@/lib/workflowGraph';
+import { flowToXY, xyToFlow, buildPasteGraph } from '@/lib/workflowGraph';
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas';
 import NodePalette from '@/components/workflow/NodePalette';
 import NodeDetailView from '@/components/workflow/NodeDetailView';
@@ -12,7 +12,7 @@ import RunDrawer from '@/components/workflow/RunDrawer';
 import WorkflowBuilderChat from '@/components/workflow/WorkflowBuilderChat';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
-import { ArrowLeft, Check, Loader2, MessageSquare, Play, Redo2, Rocket, Save, Trash2, Undo2 } from 'lucide-react';
+import { ArrowLeft, Check, ClipboardPaste, Copy, Loader2, MessageSquare, Play, Redo2, Rocket, Save, Trash2, Undo2 } from 'lucide-react';
 
 /**
  * Workflow canvas page — CONTROLLED canvas architecture (n8n canvas.store
@@ -30,6 +30,7 @@ export default function WorkflowCanvasPage() {
   const [xyEdges, setXyEdges] = useState(null); // xyflow edge state
   const [dirty, setDirty] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [selectedIds, setSelectedIds] = useState([]); // multi-select (shift/meta-click)
   const [paletteCollapsed, setPaletteCollapsed] = useState(false);
   const [runOpen, setRunOpen] = useState(false);
   const [builderOpen, setBuilderOpen] = useState(false);
@@ -179,24 +180,57 @@ export default function WorkflowCanvasPage() {
     setDirty(true);
   }
 
-  function deleteSelectedNode() {
-    if (!selectedNodeId) return;
+  // n8n-style copy/paste: clipboard snapshot of selected nodes + internal edges.
+  const clipboard = useRef(null);
+
+  function copySelection() {
+    const ids = selectedIds.length ? selectedIds : (selectedNodeId ? [selectedNodeId] : []);
+    if (!ids.length) return;
+    const idSet = new Set(ids);
+    clipboard.current = {
+      nodes: (xyNodes || []).filter((n) => idSet.has(n.id)).map((n) => ({ ...n, selected: false })),
+      edges: (xyEdges || []).filter((e) => idSet.has(e.source) && idSet.has(e.target)).map((e) => ({ ...e, selected: false })),
+    };
+  }
+
+  function pasteClipboard() {
+    if (!clipboard.current) return;
+    const pasted = buildPasteGraph(clipboard.current);
     setXyNodes((nds) => {
-      const next = (nds || []).filter((n) => n.id !== selectedNodeId);
+      const next = [...(nds || []), ...pasted.nodes];
       commitStructural(nds || [], xyEdges, next, xyEdges);
       return next;
     });
     setXyEdges((eds) => {
-      const next = (eds || []).filter((e) => e.source !== selectedNodeId && e.target !== selectedNodeId);
+      const next = [...(eds || []), ...pasted.edges];
+      commitStructural(xyNodes, eds || [], xyNodes, next);
+      return next;
+    });
+    setSelectedIds(pasted.nodes.map((n) => n.id));
+    setDirty(true);
+  }
+
+  function deleteSelectedNodes() {
+    const ids = selectedIds.length ? selectedIds : (selectedNodeId ? [selectedNodeId] : []);
+    if (!ids.length) return;
+    const idSet = new Set(ids);
+    setXyNodes((nds) => {
+      const next = (nds || []).filter((n) => !idSet.has(n.id));
+      commitStructural(nds || [], xyEdges, next, xyEdges);
+      return next;
+    });
+    setXyEdges((eds) => {
+      const next = (eds || []).filter((e) => !idSet.has(e.source) && !idSet.has(e.target));
       commitStructural(xyNodes, eds || [], xyNodes, next);
       return next;
     });
     setSelectedNodeId(null);
+    setSelectedIds([]);
     setDirty(true);
   }
 
   // Keyboard shortcuts (n8n-style): ⌘/Ctrl+Z undo, ⌘/Ctrl+Shift+Z / ⌘+Y redo,
-  // Delete/Backspace removes the selected node, Escape deselects.
+  // Delete/Backspace removes the selected node(s), Escape deselects.
   useEffect(() => {
     function onKey(e) {
       const target = e.target;
@@ -210,11 +244,18 @@ export default function WorkflowCanvasPage() {
         if (typing) return;
         e.preventDefault();
         redo();
-      } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedNodeId && !typing) {
+      } else if (mod && e.key.toLowerCase() === 'c' && !typing) {
         e.preventDefault();
-        deleteSelectedNode();
+        copySelection();
+      } else if (mod && e.key.toLowerCase() === 'v' && !typing) {
+        e.preventDefault();
+        pasteClipboard();
+      } else if ((e.key === 'Delete' || e.key === 'Backspace') && (selectedIds.length || selectedNodeId) && !typing) {
+        e.preventDefault();
+        deleteSelectedNodes();
       } else if (e.key === 'Escape' && !typing) {
         setSelectedNodeId(null);
+        setSelectedIds([]);
       }
     }
     window.addEventListener('keydown', onKey);
@@ -304,6 +345,12 @@ export default function WorkflowCanvasPage() {
           <Button size="sm" variant="ghost" onClick={redo} disabled={redoStack.current.length === 0} title="⇧⌘Z">
             <Redo2 className="h-3.5 w-3.5" />
           </Button>
+          <Button size="sm" variant="ghost" onClick={copySelection} disabled={!selectedIds.length && !selectedNodeId} title="⌘C">
+            <Copy className="h-3.5 w-3.5" />
+          </Button>
+          <Button size="sm" variant="ghost" onClick={pasteClipboard} disabled={!clipboard.current} title="⌘V">
+            <ClipboardPaste className="h-3.5 w-3.5" />
+          </Button>
           <Button size="sm" variant="outline" onClick={doValidate} disabled={validating}>
             {validating ? <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" /> : <Check className="mr-1 h-3.5 w-3.5" />}
             {lang === 'zh' ? '校验' : 'Validate'}
@@ -352,6 +399,7 @@ export default function WorkflowCanvasPage() {
                 onConnect={onConnect}
                 onNodeAdd={onNodeAdd}
                 onSelectNode={setSelectedNodeId}
+                onSelectChange={setSelectedIds}
               />
             </NodeRegistryProvider>
           ) : (

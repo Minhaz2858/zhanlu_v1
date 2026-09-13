@@ -68,6 +68,25 @@ ALLOWED_WIDGET_TYPES = {
     "area", "stacked-bar", "scatter", "gauge", "radar",
 }
 
+
+def _fullstack_app_write_allowed(record, user_id, ctx=None) -> bool:
+    """T10 write gate for the agent tools (mirrors dashboards.py delete rules).
+
+    ``personal`` apps → creator only; ``company`` apps → creator or an org
+    admin. Before 2026-09-02 the update/revert/list tools skipped this
+    entirely: any org user could list and overwrite another user's personal
+    dashboard (the REST layer enforced scope, the tools did not).
+    """
+    try:
+        if str(getattr(record, "created_by_id", "") or "") == str(user_id):
+            return True
+        if (getattr(record, "scope", None) or "personal") == "company":
+            role = (ctx or {}).get("role") or (ctx or {}).get("user_role")
+            return role == "admin"
+        return False
+    except Exception:  # noqa: BLE001 — fail-closed on any introspection error
+        return False
+
 MAX_VERSIONS = 20
 
 
@@ -981,6 +1000,58 @@ async def _create_fullstack_dashboard(
         return {"success": False, "error": "Datasource not accessible in this project/org."}
 
     from app.models.dashboard_app import DashboardApp
+    # ONE-DASHBOARD-PER-CONVERSATION GUARD (2026-09-02): the product plan is
+    # ONE full-stack dashboard per chat session — every follow-up (restyle,
+    # relayout, re-theme, rebuild, "widgets missing", data fix) must go through
+    # update_fullstack_dashboard(slug=<existing>), NEVER a second
+    # create_fullstack_dashboard. Before 2026-09-02 a repeated create with a
+    # taken slug was silently auto-uniquified (sales-performance-dashboard →
+    # -2 → -5 → -5-2) so each "update my dashboard" spawned a NEW clone in the
+    # same conversation (conv 056d8c83, 2026-09-02). Deterministically refuse
+    # when this conversation already owns a dashboard with the same name or
+    # slug, and redirect the agent to the update tool. Deliberately different
+    # boards (different name/slug) in the same session are still allowed.
+    conv_id = (ctx.get("conversation_id") or "").strip() or None
+    if conv_id:
+        try:
+            owned_rows = (
+                db.query(DashboardApp)
+                .filter(DashboardApp.chat_thread_id == conv_id)
+                .order_by(DashboardApp.created_date.desc())
+                .all()
+            )
+            for owned in owned_rows:
+                if getattr(owned, "is_deleted", False):
+                    continue
+                same_identity = (
+                    (owned.slug or "").strip() == (parsed.slug or "").strip()
+                    or (owned.name or "").strip() == (parsed.name or "").strip()
+                )
+                if same_identity:
+                    owned_url = getattr(owned, "app_url", None) or (
+                        f"/api/dashboards/apps/{owned.slug}/"
+                    )
+                    return {
+                        "success": False,
+                        "error": (
+                            f"This conversation already owns dashboard "
+                            f"'{owned.name}' (slug={owned.slug}). "
+                            "ONE dashboard per chat session — do NOT call "
+                            "create_fullstack_dashboard again for it. Apply this "
+                            "change by calling update_fullstack_dashboard("
+                            f"slug='{owned.slug}', ...) instead; the app "
+                            "regenerates and hot-reloads in place."
+                        ),
+                        "existing_slug": owned.slug,
+                        "existing_app_url": owned_url,
+                        "action": "update_fullstack_dashboard",
+                    }
+        except Exception as _guard_exc:  # noqa: BLE001 — fail-open, never block a build
+            logger.warning(
+                "create_fullstack_dashboard: one-per-conversation guard skipped (non-fatal): %s",
+                _guard_exc,
+            )
+
     # Slug-collision auto-recovery (2026-08-28): the LLM frequently reuses a
     # slug from an earlier build ("sales-performance-dashboard-v2" twice), and
     # failing hard made the whole dashboard turn die with "Sorry, I hit an
@@ -1138,6 +1209,15 @@ async def _update_fullstack_dashboard(
     )
     if record is None:
         return {"success": False, "error": f"No dashboard app with slug '{parsed.slug}'."}
+    # T10 write gate: personal → creator only; company → creator or admin.
+    if not _fullstack_app_write_allowed(record, user_id, ctx):
+        return {
+            "success": False,
+            "error": (
+                f"No dashboard app with slug '{parsed.slug}' — or you do not "
+                "have permission to edit it."
+            ),
+        }
 
     current = dict(record.spec or {})
     if parsed.name is not None:
@@ -1188,19 +1268,43 @@ async def _update_fullstack_dashboard(
     record.spec = current
     record.status = "running"
     record.refresh_interval_seconds = int(current.get("refresh_interval_seconds", 30))
-    # T5: keep the chat link fresh when iterating from a conversation (e.g. the
-    # user re-opens an old dashboard in a new chat and edits it there).
+    # T5: keep the chat link fresh when iterating — BUT never steal the app
+    # away from the conversation that created it (ONE dashboard per chat
+    # session). Before 2026-09-02 every edit from another chat rebind the
+    # DashboardApp.chat_thread_id to the EDITING conversation, so the creator
+    # chat silently lost its DASHBOARD STATE and its one-per-conversation
+    # guard stopped firing — the duplicate-dashboard bug could return through
+    # the reopen-and-edit flow. Rebind only when the app has no owner thread
+    # yet, or its owner conversation no longer exists (deleted / reopen).
     conv_id = (ctx.get("conversation_id") or "").strip() or None
+    is_owner_chat = bool(conv_id) and record.chat_thread_id == conv_id
     if conv_id and record.chat_thread_id != conv_id:
-        record.chat_thread_id = conv_id
+        try:
+            if not record.chat_thread_id:
+                record.chat_thread_id = conv_id
+                is_owner_chat = True
+            else:
+                from app.models.agent_conversation import AgentConversation
+                owner_alive = (
+                    db.query(AgentConversation)
+                    .filter(AgentConversation.id == record.chat_thread_id)
+                    .first()
+                    is not None
+                )
+                if not owner_alive:
+                    record.chat_thread_id = conv_id
+                    is_owner_chat = True
+        except Exception as _owner_exc:  # noqa: BLE001 — best effort
+            logger.debug("update_fullstack_dashboard: owner-preservation probe failed: %s", _owner_exc)
     db.commit()
-    # Stamp the editing conversation as dashboard-dedicated too — so the
-    # sidebar shows the dashboard icon and the header badge on this session.
-    _stamp_dashboard_conversation(
-        db, conv_id,
-        dashboard_slug=parsed.slug,
-        dashboard_name=current.get("name") or parsed.slug,
-    )
+    # Stamp ONLY the owning conversation (or a freshly claimed one). Stamping a
+    # foreign chat would clobber its metadata if it owns a different dashboard.
+    if is_owner_chat:
+        _stamp_dashboard_conversation(
+            db, conv_id,
+            dashboard_slug=parsed.slug,
+            dashboard_name=current.get("name") or parsed.slug,
+        )
     logger.info("full-stack dashboard updated: %s", parsed.slug)
     # Professional quality gate (2026-08-28): same verdict as create so an
     # edit that regresses the widget mix (e.g. a layout-only update that
@@ -1225,7 +1329,7 @@ async def _list_fullstack_dashboards(
     ctx = context or {}
     org_id = ctx.get("org_id") or "default-org"
     from app.services.dashboard_app.manager import dashboard_app_manager
-    apps = dashboard_app_manager.list_apps(org_id=org_id)
+    apps = dashboard_app_manager.list_apps(org_id=org_id, user_id=user_id)
     return {
         "success": True,
         "dashboards": [
@@ -1257,6 +1361,12 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
             "should be scope='personal' (only they can see it) or "
             "scope='company' (whole org can see it) — then submit this spec "
             "with real read-only SELECT queries. "
+            "ONE DASHBOARD PER CHAT SESSION: this tool REFUSES (success:false) "
+            "when the current conversation already owns a dashboard with this "
+            "name/slug — the error names the existing slug. When you see that "
+            "refusal, apply the user's change by calling "
+            "update_fullstack_dashboard(slug=<existing>, ...), NEVER create a "
+            "second dashboard for it. "
             "Responds with slug + app_url. Iterate later via "
             "update_fullstack_dashboard(slug=...)."
         ),
@@ -1498,6 +1608,15 @@ async def _revert_fullstack_dashboard(
     )
     if record is None:
         return {"success": False, "error": f"No dashboard app with slug '{parsed.slug}'."}
+    # T10 write gate: personal → creator only; company → creator or admin.
+    if not _fullstack_app_write_allowed(record, user_id, ctx):
+        return {
+            "success": False,
+            "error": (
+                f"No dashboard app with slug '{parsed.slug}' — or you do not "
+                "have permission to undo changes on it."
+            ),
+        }
 
     from app.services.dashboard_app.manager import dashboard_app_manager
 

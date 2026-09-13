@@ -31,6 +31,7 @@ from app.models import (
 import app.services.tool_handlers  # noqa: F401
 from app.routers.entities import register_entity_router, register_project_kb_router
 from app.routers.auth import router as auth_router
+from app.routers.auth_sso import router as auth_sso_router
 from app.routers.public import router as public_router
 from app.routers.diagnostics import router as diagnostics_router
 from app.routers.functions import router as functions_router
@@ -808,6 +809,7 @@ def create_app() -> FastAPI:
     # All SDK requests go through /api/* (baseURL = serverUrl + "/api")
     # Auth router FIRST so User/me routes match before User/{record_id} in entity router
     app.include_router(auth_router, prefix="/api")
+    app.include_router(auth_sso_router, prefix="/api")
     app.include_router(public_router, prefix="/api")
     app.include_router(diagnostics_router, prefix="/api")  # /api/_db-info etc.
 

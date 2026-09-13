@@ -5,7 +5,6 @@ import { useChatSession } from '@/lib/ChatSessionContext';
 import { toast } from 'sonner';
 import ChatInput from '@/components/chat/ChatInput';
 import MessageBubble from '@/components/chat/MessageBubble';
-import ChatThinkingIndicator from '@/components/chat/ChatThinkingIndicator';
 import MobileTopBar from '@/components/mobile/MobileTopBar';
 import useStreamState from '@/hooks/useStreamState';
 import { streamAgentResponse, createAgentConversation } from '@/api/agentEnhanced';
@@ -406,7 +405,9 @@ export default function MobileChatPage() {
               />
             ))
           )}
-          {loading && <ChatThinkingIndicator />}
+          {/* 2026-08-31: removed ChatThinkingIndicator; MessageBubble renders
+              LiveActivityStream (with a rich placeholder while no events have
+              arrived) so the mobile chat matches the desktop Fabricating card. */}
         </div>
       </div>
 

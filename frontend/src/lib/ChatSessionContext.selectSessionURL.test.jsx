@@ -37,8 +37,14 @@ describe('ChatSessionContext.jsx selectSession / newChat URL sync', () => {
     expect(body).toMatch(/searchParams\.set\(['"]project['"]/);
     expect(body).toMatch(/searchParams\.set\(['"]projectName['"]/);
     expect(body).toMatch(/searchParams\.set\(['"]agentName['"]/);
-    // And it must clear them on the null branch — otherwise a
-    // legacy conv with no project would keep a stale ?project=.
+    // (2026-08-31) The null branch must only clear project params for
+    // BRAND-NEW sessions (no conversation_id yet) — a conv-linked
+    // session whose row lacks the FK (legacy backfill) must PRESERVE
+    // the URL's existing project context, otherwise a reload loses
+    // ?project= / ?projectName= (the user-reported bug). A brand-new
+    // session still clears them so a fresh global chat never inherits
+    // a stale project.
+    expect(body).toMatch(/!s\.conversation_id/);
     expect(body).toMatch(/searchParams\.delete\(['"]project['"]/);
     expect(body).toMatch(/searchParams\.delete\(['"]projectName['"]/);
   });

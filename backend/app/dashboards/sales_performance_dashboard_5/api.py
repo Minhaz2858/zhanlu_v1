@@ -1,0 +1,72 @@
+"""Generated dashboard app router for `sales-performance-dashboard-5`. DO NOT EDIT.
+
+Exposes:
+- GET  /config            — the frontend config (metrics, design tokens, theme)
+- GET  /metrics           — metric list (id/title/type)
+- GET  /metrics/{id}      — live metric payload (columns/rows/error)
+- WS   /ws                — WebSocket channel; the shared ConnectionManager
+                            broadcasts rows when the poller detects a change
+
+Mounted by ``DashboardAppManager`` as a sub-router on the main FastAPI app.
+"""
+import asyncio
+
+from fastapi import APIRouter, Depends, Request, WebSocket
+from sqlalchemy.orm import Session
+
+from app.database import get_db
+from app.services.auth_service import auth_service
+from app.services.dashboard_app.realtime import get_connection_manager
+
+from .queries import METRICS, run_metric
+
+SLUG = 'sales-performance-dashboard-5'
+CONFIG = {'name': '销售业绩仪表盘', 'slug': 'sales-performance-dashboard-5', 'description': '实时监控关键业务指标，涵盖总营收、订单量及核心数据变动趋势。动态分析不同区域的销售表现，清晰呈现市场地域分布全貌。精确追踪热销产品动态，实时掌握爆款商品与品类的销售走势。深度链接底层业务数据库，确保底层数据的真实性与高频同步更新。自动化更新与交互式分析相结合，助您快速精准制定高价值商业决策。', 'theme': 'light', 'style': 'chinese_bi', 'refresh_interval_seconds': 300, 'design_system_ref': 'design-system/default-org/MASTER.md', 'design': {'colors': {'primary': '#7C3AED', 'on_primary': '#FFFFFF', 'secondary': '#EC4899', 'accent': '#2563EB', 'background': '#FAF5FF', 'foreground': '#0F172A', 'muted': '#F7F3FD', 'border': '#EFE7FC', 'destructive': '#DC2626', 'ring': '#7C3AED', 'chart_palette': ['#7C3AED', '#2563EB', '#EC4899', '#DC2626', '#2563eb', '#10b981'], 'dark': {'background': '#020617', 'foreground': '#f8fafc', 'muted': '#1e293b', 'border': '#334155'}}, 'typography': {'heading': 'Fira Code', 'body': 'Fira Sans', 'google_fonts_url': 'https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap', 'css_import': "@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');"}, 'spacing': {'xs': '2px', 'sm': '4px', 'md': '8px', 'lg': '12px', 'xl': '16px', '2xl': '24px', '3xl': '32px'}, 'style': {'name': 'Sales Intelligence Dashboard', 'keywords': 'Deal pipeline, sales metrics, territory performance, sales rep leaderboard, win-loss analysis, quota tracking, forecast accuracy', 'card_radius': '8px'}}, 'metrics': [{'id': 'kpi_customers', 'title': '客户数', 'type': 'kpi', 'options': {'delta': False}}], 'filters': [], 'insights': [{'body': '惠州伊斯科贡献营收26.06亿元，占近一年总营收33.0亿元的79%，广东伊斯科贡献6.69亿元占20%，区域高度集中。', 'title': '营收主力：惠州伊斯科'}, {'body': '异戊二烯以6.60亿元营收居首（占20%），碳五石油树脂4.16亿元次之；前5大产品贡献超60%营收，单品价值极高。', 'title': '爆款：异戊二烯'}, {'title': '📈 客户数', 'body': '客户数 moved 0.0% up vs the previous period (locked server-side from the live datasource at build time).'}], 'layout': [{'title': '核心经营指标', 'widgets': ['kpi_revenue', 'kpi_orders', 'kpi_customers', 'kpi_avg_order']}, {'title': '营收趋势与区域业绩', 'widgets': ['trend_revenue_monthly', 'region_sales']}, {'title': '热销产品与重点客户', 'widgets': ['top_products', 'top_customers']}], 'pages': [], 'panels': [], 'header': {'period': '2025-09 ~ 2026-08', 'greeting': '销售业绩实时监控 · 数据更新至 2026-08-31', 'snapshot': [{'delta': '↑ 实时', 'label': '近一年营收', 'value': '33.0亿', 'delta_tone': 'up'}, {'delta': '↑ 实时', 'label': '订单量', 'value': '1,735笔', 'delta_tone': 'up'}, {'delta': '', 'label': '活跃客户', 'value': '229家', 'delta_tone': 'neutral'}, {'delta': '↓ 3.1% vs 7月', 'label': '8月营收', 'value': '3.40亿', 'delta_tone': 'down'}]}, 'footer': {'sources': '数据来源：aipdp_data_warehouse_prod · ERP销售订单 erp_v_sale_orderentry · 近一年(2025-09 ~ 2026-08)'}}
+
+router = APIRouter(prefix=f"/api/dashboards/apps/{SLUG}")
+
+
+@router.get("/config")
+async def get_config() -> dict:
+    return CONFIG
+
+
+@router.get("/metrics")
+async def list_metrics() -> dict:
+    return {"metrics": [
+        {"id": m["id"], "title": m["title"], "type": m["type"]} for m in METRICS
+    ]}
+
+
+@router.get("/metrics/{metric_id}")
+async def get_metric(metric_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    # Deep-linked filtered views: every query-string key/value on the URL
+    # (e.g. /metrics/sales?product=%E4%B9%99%E4%BA%8C%E9%86%87) is forwarded to
+    # run_metric, which only substitutes DECLARED :dim_* tokens and SQL-escapes
+    # every value. Undeclared keys are inert — see queries.metric_dimensions.
+    filters = dict(request.query_params)
+    return {"metric_id": metric_id, "data": await run_metric(db, metric_id, filters)}
+
+
+def _authorize_ws_token(token: str | None) -> bool:
+    """T9: only valid session access tokens may open the live WebSocket."""
+    return bool(token) and bool(auth_service.verify_token(token))
+
+
+@router.websocket("/ws")
+async def ws_endpoint(websocket: WebSocket, token: str | None = None) -> None:
+    # T9: WebSocket auth — the client sends the session access token as a
+    # query param (?token=…) because browser WebSockets cannot set headers.
+    # Anonymous or invalid connections are rejected with close code 1008.
+    if not _authorize_ws_token(token):
+        await websocket.close(code=1008)
+        return
+    mgr = get_connection_manager()
+    await mgr.connect(SLUG, websocket)
+    try:
+        while True:
+            await websocket.receive_text()  # keepalive / disconnect detect
+    except Exception:
+        pass
+    finally:
+        mgr.disconnect(SLUG, websocket)

@@ -7,6 +7,37 @@ export function deriveSlug() {
 }
 
 /**
+ * Session access token for dashboard data calls (REST + WS).
+ *
+ * Same-origin iframe ⇒ localStorage is shared with the main app, whose
+ * AuthContext stores the access token under 'base44_access_token' (legacy
+ * fallback: 'token'). The backend's dashboard endpoints accept this token as
+ * a ?token= query param (Authorization headers cannot be set on subresource
+ * fetches from a plain iframe, and WS can't set headers at all).
+ *
+ * 2026-09-02: extracted to a shared helper so the config.json / metrics REST
+ * fetches carry the SAME credential the WS handshake already used — this is
+ * what unlocks DASHBOARD_ENDPOINT_AUTH_ENABLED (#7).
+ */
+export function dashboardAccessToken() {
+  try {
+    return (
+      window.localStorage.getItem('base44_access_token') ||
+      window.localStorage.getItem('token') ||
+      ''
+    );
+  } catch {
+    return ''; // storage disabled (private mode / sandbox) → anonymous calls
+  }
+}
+
+/** Query-string suffix ('' or '?token=…') for dashboard data fetches. */
+export function tokenQuery() {
+  const token = dashboardAccessToken();
+  return token ? `?token=${encodeURIComponent(token)}` : '';
+}
+
+/**
  * Live-data WebSocket hook.
  * Reconnects with exponential backoff. Each frame is {metric_id, title, data}
  * where data = {columns, rows, error, truncated}.
@@ -34,10 +65,7 @@ export function useDashboardStream(slug, onFrame, onReconnect) {
     const connect = () => {
       if (closed) return;
       const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const token =
-        window.localStorage.getItem('base44_access_token') ||
-        window.localStorage.getItem('token') ||
-        '';
+      const token = dashboardAccessToken();
       const q = token ? `?token=${encodeURIComponent(token)}` : '';
       ws = new WebSocket(`${proto}://${window.location.host}/api/dashboards/apps/${slug}/ws${q}`);
       ws.onopen = () => {

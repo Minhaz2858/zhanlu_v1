@@ -7,10 +7,27 @@ Generate a CEO-level weekly market report for C5/C9 petrochemical products
 pipeline. The report must be data-grounded, structured markdown with tables
 and explicit risk flags — ready to read in chat, no file generation overhead.
 
+## Boundary — read/list requests win (HARD)
+
+The user's verb decides what to do. If the user asks to LIST / SHOW /
+SUMMARIZE / EXTRACT / READ the content of an EXISTING uploaded weekly
+document (e.g. a file named like "C5C9周度总结及预测…" already in the
+conversation), do NOT run this pipeline:
+
+- Answer directly from the document in chat (markdown list/table).
+- Do NOT call the ask_* / ask_data_agent sub-agents to reproduce content
+  that is already in the file.
+- Do NOT call `create_artifact` and do NOT generate any file — unless the
+  user explicitly asks for a downloadable file (docx/pdf/ppt/导出/生成文件).
+- Only requests to GENERATE / PRODUCE / 生成 / 制作 a new weekly report
+  trigger the pipeline below — and even then the output is chat markdown
+  unless the user names a file format.
+
 ## Use when
 
 - The user asks for a "weekly report", "market report", "weekly summary",
-  "weekly review", or "周报 / 本周报告".
+  "weekly review", or "周报 / 本周报告" AND wants it generated (not just
+  listed from an existing file).
 - The project is Ecisco BI (C5/C9 products).
 
 ## Critical rules

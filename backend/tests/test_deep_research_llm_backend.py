@@ -88,3 +88,65 @@ async def test_critic_returns_response_text():
     ):
         out = await build_critic()([{"role": "user", "content": "hi"}])
     assert out == "Need newer data."
+
+
+# ── Scope-aware planner system prompt (2026-09-03) ────────────────────
+# Pre-fix the planner received ONLY the user question — it never knew which
+# tools existed or what scope meant, so deepseek defaulted every step to
+# web_search and internal questions never reached the bound warehouse.
+
+@pytest.mark.asyncio
+async def test_planner_system_prompt_names_tools_for_both_scope():
+    """scope=both: system prompt must name BOTH tool families and mandate
+    hybrid coverage (internal-data steps for product/sales questions)."""
+    with patch(
+        "app.services.deep_research.llm_backend.call_llm",
+        new=AsyncMock(return_value={"data": {"steps": []}}),
+    ) as mock_llm:
+        await build_planner(scope="both")([{"role": "user", "content": "C5C9 sales?"}])
+    sent = mock_llm.await_args.kwargs["messages"]
+    assert sent[0]["role"] == "system"
+    sys_text = sent[0]["content"]
+    assert "ask_data_agent" in sys_text
+    assert "web_search" in sys_text
+    assert "hybrid" in sys_text.lower() or "both" in sys_text.lower()
+    assert "C5C9" in sys_text  # example internal product code in the prompt
+    assert sent[1] == {"role": "user", "content": "C5C9 sales?"}
+
+
+@pytest.mark.asyncio
+async def test_planner_system_prompt_web_scope_excludes_internal_tools():
+    with patch(
+        "app.services.deep_research.llm_backend.call_llm",
+        new=AsyncMock(return_value={"data": {"steps": []}}),
+    ) as mock_llm:
+        await build_planner(scope="web")([{"role": "user", "content": "market?"}])
+    sys_text = mock_llm.await_args.kwargs["messages"][0]["content"]
+    assert "WEB scope" in sys_text
+    assert "Do NOT call web tools" not in sys_text
+
+
+@pytest.mark.asyncio
+async def test_planner_system_prompt_internal_scope_forbids_web():
+    with patch(
+        "app.services.deep_research.llm_backend.call_llm",
+        new=AsyncMock(return_value={"data": {"steps": []}}),
+    ) as mock_llm:
+        await build_planner(scope="internal")([{"role": "user", "content": "sales?"}])
+    sys_text = mock_llm.await_args.kwargs["messages"][0]["content"]
+    assert "INTERNAL DATA scope" in sys_text
+    assert "Do NOT call web tools" in sys_text
+
+
+@pytest.mark.asyncio
+async def test_planner_default_scope_is_both():
+    """Backward-compat: build_planner() with no scope still sends a system
+    prompt (defaults to both) rather than the old prompt-less message."""
+    with patch(
+        "app.services.deep_research.llm_backend.call_llm",
+        new=AsyncMock(return_value={"data": {"steps": []}}),
+    ) as mock_llm:
+        await build_planner()([{"role": "user", "content": "Q"}])
+    sent = mock_llm.await_args.kwargs["messages"]
+    assert sent[0]["role"] == "system"
+    assert "Tools available" in sent[0]["content"]

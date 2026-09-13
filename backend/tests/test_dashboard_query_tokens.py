@@ -82,3 +82,83 @@ def test_render_revalidates_rejects_injection_via_drill():
             "SELECT * FROM t WHERE x = :drill_value",
             {"drill_value": "a'; DROP TABLE t; --"}, [],
         )
+
+
+# ── Quote-aware token scanning (2026-09-02) ─────────────────────────────
+# Colons inside string literals / identifiers / comments are NOT tokens.
+# Previously to_char(ts, 'HH24:MI:SS') raised "Unknown token :MI" because the
+# regex scanned inside the literal — a real dashboard SQL pattern that bricked.
+
+
+def test_postgres_format_string_with_colons_is_not_a_token():
+    sql = "SELECT to_char(ts, 'HH24:MI:SS') AS clock FROM t"
+    out = render_widget_sql(sql, {}, [])
+    assert out == sql  # untouched, no unknown-token error
+
+
+def test_format_string_with_datetime_colons_is_not_a_token():
+    sql = "SELECT to_char(ts, 'YYYY-MM-DD\"T\"HH24:MI:SS') AS iso FROM t"
+    assert render_widget_sql(sql, {}, []) == sql
+
+
+def test_free_text_literal_with_colon_is_not_a_token():
+    sql = "SELECT * FROM t WHERE note = 'ratio:alpha' AND id > 0"
+    assert render_widget_sql(sql, {}, []) == sql
+
+
+def test_double_quoted_identifier_with_colon_is_not_a_token():
+    sql = 'SELECT "my:col" FROM t WHERE 1 = 1'
+    assert render_widget_sql(sql, {}, []) == sql
+
+
+def test_backtick_identifier_with_colon_is_not_a_token():
+    sql = "SELECT `my:col` FROM t WHERE 1 = 1"
+    assert render_widget_sql(sql, {}, []) == sql
+
+
+def test_line_comment_with_colon_is_not_a_token():
+    sql = "SELECT 1 AS one FROM t -- note:foobar\nWHERE 1 = 1"
+    out = render_widget_sql(sql, {}, [])
+    assert ":foobar" in out  # comment text preserved, not scanned
+
+
+def test_block_comment_with_colon_is_not_a_token():
+    sql = "SELECT 1 AS one /* ratio:alpha */ FROM t"
+    out = render_widget_sql(sql, {}, [])
+    assert out == sql
+
+
+def test_dollar_quoted_body_with_colon_is_not_a_token():
+    sql = "SELECT $tag$ body:value $tag$ AS x FROM t"
+    assert render_widget_sql(sql, {}, []) == sql
+
+
+def test_real_tokens_inside_literals_are_not_substituted():
+    # A literal that happens to contain ':from' is data, not a date window.
+    sql = "SELECT * FROM t WHERE label = 'code:from'"
+    out = render_widget_sql(sql, {"from": "2026-01-01T00:00:00"}, [])
+    assert out == sql
+
+
+def test_escaped_quote_inside_literal_does_not_end_the_literal():
+    # O'Brien-style escaping: the scanner must stay inside the literal across
+    # '' and not treat the later :word as a token (it IS inside the literal).
+    sql = "SELECT * FROM t WHERE name = 'O''Brien:novel'"
+    assert render_widget_sql(sql, {}, []) == sql
+
+
+def test_code_token_still_substituted_next_to_a_literal():
+    sql = "SELECT to_char(ts, 'HH24:MI:SS') AS clock FROM t WHERE ts >= :from"
+    out = render_widget_sql(sql, {"from": "2026-07-01T00:00:00"}, [])
+    assert "'2026-07-01 00:00:00'" in out
+    assert "to_char(ts, 'HH24:MI:SS')" in out  # literal preserved verbatim
+
+
+def test_unknown_code_token_still_raises():
+    with pytest.raises(ValueError, match="Unknown token"):
+        render_widget_sql("SELECT * FROM t WHERE x = :foobar", {}, [])
+
+
+def test_double_colon_cast_still_ignored():
+    sql = "SELECT (total::numeric / NULLIF(denom, 0)) AS ratio FROM t"
+    assert render_widget_sql(sql, {}, []) == sql

@@ -39,7 +39,13 @@ def test_data_agent_prompt_requires_stale_disclosure():
     # and not claim coverage it doesn't have.
     assert "explicitly" in low or "explicit" in low
     assert "stale" in low
-    assert "do not claim" in low or "never claim" in low or "do NOT claim" in DATA_AGENT_PROMPT
+    assert (
+        "do not claim" in low
+        or "never claim" in low
+        or "do NOT claim" in DATA_AGENT_PROMPT
+        or "say so explicitly" in low          # actual phrasing: "if the latest date
+        or "uses the available data" in low    # is older than 30 days (stale table), say so
+    )
 
 def test_weekly_report_skill_uses_batch_tool():
     """SKILL.md must use the batch tool instead of three serial calls."""

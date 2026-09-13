@@ -9,6 +9,7 @@ import { Label } from "@/components/ui/label";
 import { UserPlus, Mail, Lock, Loader2, Check, X } from "lucide-react";
 import { InputOTP, InputOTPGroup, InputOTPSlot } from "@/components/ui/input-otp";
 import AuthLayout from "@/components/AuthLayout";
+import SsoButtons from "@/components/auth/SsoButtons";
 import { toast } from "@/components/ui/use-toast";
 
 export default function Register() {
@@ -56,6 +57,7 @@ export default function Register() {
         <p className="text-sm text-muted-foreground text-center">
           {t.auth.registrationDisabledNote}
         </p>
+        <SsoButtons />
       </AuthLayout>
     );
   }
@@ -215,6 +217,7 @@ export default function Register() {
           {error}
         </div>
       )}
+      <SsoButtons />
 
       <form onSubmit={handleSubmit} className="space-y-4">
         <div className="space-y-2">

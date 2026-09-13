@@ -51,6 +51,42 @@ def _looks_like_cron(s: str) -> bool:
     return True
 
 
+# One-shot absolute datetimes (e.g. "2026-08-15 14:30") are NOT expressible in
+# cron. The SchedulePicker's "once" mode emits exactly this shape; without an
+# explicit rule the LLM fallback invents a recurring (typically yearly) cron —
+# a silent semantic bug. Recognize the shape so the parser can reject it loudly
+# instead of fabricating recurrence. Optional natural-language prefixes
+# ("once at ...", "run once on ...") are accepted so every variant is caught.
+_ONCE_DATETIME_RE = re.compile(
+    r"^(?:(?:once|one[- ]time|run once|single run)[ ,:]*)?"
+    r"(?:on |at )?"
+    r"(\d{4}-\d{2}-\d{2})"
+    r"(?:[ T]| at |, )?"
+    r"(\d{1,2}:\d{2}(?::\d{2})?)$",
+    re.IGNORECASE,
+)
+
+# SchedulePicker "custom" mode emits "Custom: 0 8 * * *". The rule table has no
+# "Custom:" rule, so the string used to fall through to the LLM for a cron the
+# user already wrote precisely. Strip the label and parse the remainder.
+_SCHEDULE_LABEL_RE = re.compile(r"^(?:custom|cron)\s*:\s*", re.IGNORECASE)
+
+
+def _looks_like_once_datetime(s: str) -> bool:
+    """True when ``s`` is an absolute one-shot datetime (not cron-expressible)."""
+    if not s:
+        return False
+    return _ONCE_DATETIME_RE.match(s.strip()) is not None
+
+
+def _strip_schedule_label(s: str) -> str:
+    """Strip a leading ``Custom:`` / ``Cron:`` label so a user-typed cron is
+    parsed deterministically by the direct-cron path instead of the LLM."""
+    if s is None:
+        return s
+    return _SCHEDULE_LABEL_RE.sub("", s.strip(), count=1).strip()
+
+
 # ---------------------------------------------------------------------------
 # 2. Rule-based natural language patterns
 # ---------------------------------------------------------------------------
@@ -316,7 +352,19 @@ def parse_schedule(s: str) -> str:
     if s is None or not s.strip():
         raise ScheduleParseError("Empty schedule")
 
-    s = s.strip()
+    s = _strip_schedule_label(s)
+    if not s:
+        raise ScheduleParseError("Empty schedule")
+
+    # Absolute one-shot datetimes can't be expressed as cron — reject loudly
+    # instead of letting the LLM fabricate a recurring (yearly) schedule.
+    if _looks_like_once_datetime(s):
+        raise ScheduleParseError(
+            f"One-shot date schedules are not supported: {s!r}. "
+            "Cron can only express recurring runs — use a recurring schedule "
+            "like 'daily at 09:00', 'every Monday at 9 AM', or a 5-field cron "
+            "expression like '0 9 * * 1'."
+        )
 
     # 1. Direct cron
     if _looks_like_cron(s):
@@ -367,7 +415,12 @@ def parse_schedule_rules_only(s: str) -> Optional[str]:
     """
     if s is None or not s.strip():
         return None
-    s = s.strip()
+    s = _strip_schedule_label(s)
+    if not s:
+        return None
+    # One-shot datetimes have no recurring semantics — do not invent any.
+    if _looks_like_once_datetime(s):
+        return None
     if _looks_like_cron(s):
         return s
     return _rule_based_parse(s)

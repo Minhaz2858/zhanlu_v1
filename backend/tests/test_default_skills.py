@@ -106,21 +106,14 @@ class TestOverridePrecedence(unittest.TestCase):
         self.assertEqual(result["skill_name"], "docx")
         self.assertEqual(result["format"], "docx")
 
-    def test_strong_custom_skill_beats_generic_report_default(self):
-        """A strong weekly-report skill match must beat broad report→docx routing."""
-        forced = {
-            "skill_name": "weekly-report-generation",
-            "triggers": [],
-            "format": None,
-            "forced": True,
-            "score": 0.92,
-            "source": "db",
-        }
-        with patch("app.services.synexia.default_skills.post_router_pick", return_value=forced):
-            result = pick_default_skill("make a weekly sales report", active_skill=None)
-        self.assertEqual(result["skill_name"], "weekly-report-generation")
-        self.assertTrue(result["forced"])
+    def test_weekly_phrasing_no_longer_auto_forces_custom_skill(self):
+        """Phase A/B: pick_default_skill no longer consults the post-router,
+        so 'weekly sales report' phrasing is NOT auto-bound to a skill —
+        the LLM picks from the catalog."""
+        from app.services.synexia.default_skills import pick_default_skill
 
+        result = pick_default_skill("make a weekly sales report", active_skill=None)
+        self.assertIsNone(result)
 
 # ---------------------------------------------------------------------------
 # 3. Format-hint detection
@@ -200,11 +193,13 @@ class TestFallbackToDocx(unittest.TestCase):
     """Ambiguous requests: soft-intent still maps to docx; truly generic
     requests return None so the LLM picks from the catalog."""
 
-    def test_ambiguous_request_falls_back_to_docx(self):
-        """'make a sales report' has no explicit format → fallback via soft-intent to docx."""
+    def test_ambiguous_request_no_longer_falls_back_to_docx(self):
+        """'make a sales report' has no explicit format; the soft-intent →
+        docx fallback was removed in Phase A/B → None (LLM picks)."""
+        from app.services.synexia.default_skills import pick_default_skill
+
         result = pick_default_skill("make a sales report")
-        # "sales report" contains "report" → soft intent maps to docx
-        self.assertEqual(result["skill_name"], "docx")
+        self.assertIsNone(result)
 
     def test_totally_ambiguous_returns_none(self):
         """Totally ambiguous requests return None → LLM picks from catalog."""

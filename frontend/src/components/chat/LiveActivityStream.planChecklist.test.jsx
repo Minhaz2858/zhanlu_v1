@@ -72,4 +72,48 @@ describe('PlanChecklist', () => {
     expect(items[1].textContent).toContain('Inspect the bound data source');
     expect(items[2].textContent).toContain('Gather datasets');
   });
+
+  it('rebuilds the checklist from persisted plan_step events after reload', () => {
+    // 2026-08-31: the backend now persists plan_step_added / plan_step_completed
+    // as typed live events. A reloaded message (no streamingPlanSteps) must show
+    // the same plan the user saw live — not degrade to a generic event chip.
+    renderStream({
+      streamingPlanSteps: undefined,
+      events: [
+        { type: 'phase_enter', label_key: 'phase_enter.plan', params: {}, ts: '2026-08-31T00:00:00Z' },
+        { type: 'plan_step_added', label_key: 'plan_step_added', params: { step_index: 1, title: 'Analyze the request' }, ts: '2026-08-31T00:00:01Z' },
+        { type: 'plan_step_added', label_key: 'plan_step_added', params: { step_index: 2, title: 'Inspect the bound data source' }, ts: '2026-08-31T00:00:02Z' },
+        { type: 'plan_step_completed', label_key: 'plan_step_completed', params: { step_index: 1 }, ts: '2026-08-31T00:00:03Z' },
+        { type: 'verify_passed', label_key: 'verify_passed', params: {}, ts: '2026-08-31T00:00:04Z' },
+        { type: 'finalize_started', label_key: 'finalize_started', params: {}, ts: '2026-08-31T00:00:05Z' },
+        { type: 'phase_enter', label_key: 'phase_enter.finalize', params: {}, ts: '2026-08-31T00:00:06Z' },
+      ],
+    });
+    const checklist = screen.getByTestId('plan-checklist');
+    expect(checklist.textContent).toContain('1/2');
+    expect(screen.getByTestId('plan-step-1').textContent).toContain('Analyze the request');
+    expect(screen.getByTestId('plan-step-1').querySelector('svg')).toBeTruthy(); // done tick
+    expect(screen.getByTestId('plan-step-2').textContent).toContain('Inspect the bound data source');
+    expect(screen.getByTestId('plan-step-2').querySelector('svg')).toBeNull(); // pending
+  });
+
+  it('does not render plan_step events as generic feed rows', () => {
+    // Plan checklist metadata must not double-render inside the event list.
+    renderStream({
+      streamingPlanSteps: undefined,
+      events: [
+        { type: 'plan_step_added', label_key: 'plan_step_added', params: { step_index: 1, title: 'Analyze' }, ts: '2026-08-31T00:00:00Z' },
+        { type: 'verify_passed', label_key: 'verify_passed', params: {}, ts: '2026-08-31T00:00:01Z' },
+        { type: 'finalize_started', label_key: 'finalize_started', params: {}, ts: '2026-08-31T00:00:02Z' },
+        { type: 'phase_enter', label_key: 'phase_enter.finalize', params: {}, ts: '2026-08-31T00:00:03Z' },
+      ],
+    });
+    // The checklist renders the single step…
+    expect(screen.getByTestId('plan-step-1').textContent).toContain('Analyze');
+    // …and the feed shows only the non-plan rows (verify + finalize = 2),
+    // never raw "plan_step_added" labels.
+    const list = screen.getByTestId('live-activity-list');
+    expect(list.textContent).not.toContain('plan_step_added');
+    expect(list.textContent).not.toContain('plan_step_completed');
+  });
 });

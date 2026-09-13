@@ -116,6 +116,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "trigger_chat": {
         "name": "trigger_chat",
         "displayName": "Chat Trigger",
+        "displayName_zh": "聊天触发器",
         "category": "Triggers",
         "icon": "⚡",
         "color": "#8b5cf6",
@@ -130,6 +131,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "trigger_manual": {
         "name": "trigger_manual",
         "displayName": "Manual Trigger",
+        "displayName_zh": "手动触发器",
         "category": "Triggers",
         "icon": "▶",
         "color": "#8b5cf6",
@@ -144,6 +146,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "trigger_schedule": {
         "name": "trigger_schedule",
         "displayName": "Schedule Trigger",
+        "displayName_zh": "定时触发器",
         "category": "Triggers",
         "icon": "⏰",
         "color": "#8b5cf6",
@@ -163,6 +166,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "trigger_webhook": {
         "name": "trigger_webhook",
         "displayName": "Webhook Trigger",
+        "displayName_zh": "Webhook 触发器",
         "category": "Triggers",
         "icon": "🔗",
         "color": "#8b5cf6",
@@ -184,6 +188,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "llm": {
         "name": "llm",
         "displayName": "LLM",
+        "displayName_zh": "大模型",
         "category": "AI",
         "icon": "◈",
         "color": "#10b981",
@@ -204,6 +209,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "agent": {
         "name": "agent",
         "displayName": "Agent",
+        "displayName_zh": "智能体",
         "category": "AI",
         "icon": "🤖",
         "color": "#f59e0b",
@@ -223,6 +229,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "tool": {
         "name": "tool",
         "displayName": "Tool",
+        "displayName_zh": "工具",
         "category": "AI",
         "icon": "🔧",
         "color": "#f59e0b",
@@ -241,6 +248,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "kb_search": {
         "name": "kb_search",
         "displayName": "KB Search",
+        "displayName_zh": "知识库检索",
         "category": "AI",
         "icon": "📚",
         "color": "#06b6d4",
@@ -261,6 +269,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "db_query": {
         "name": "db_query",
         "displayName": "Database Query",
+        "displayName_zh": "数据库查询",
         "category": "Data",
         "icon": "🗄️",
         "color": "#3b82f6",
@@ -294,6 +303,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "mcp_tool": {
         "name": "mcp_tool",
         "displayName": "MCP Tool",
+        "displayName_zh": "MCP 工具",
         "category": "Data",
         "icon": "🔌",
         "color": "#8b5cf6",
@@ -316,6 +326,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "http_request": {
         "name": "http_request",
         "displayName": "HTTP Request",
+        "displayName_zh": "HTTP 请求",
         "category": "Data",
         "icon": "🌐",
         "color": "#0ea5e9",
@@ -345,6 +356,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "code": {
         "name": "code",
         "displayName": "Code",
+        "displayName_zh": "代码",
         "category": "Data",
         "icon": "⌨️",
         "color": "#10b981",
@@ -363,6 +375,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "set_fields": {
         "name": "set_fields",
         "displayName": "Set Fields",
+        "displayName_zh": "设置字段",
         "category": "Data",
         "icon": "✏️",
         "color": "#f59e0b",
@@ -379,6 +392,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "split_out": {
         "name": "split_out",
         "displayName": "Split Out",
+        "displayName_zh": "拆分",
         "category": "Data",
         "icon": "✂️",
         "color": "#f59e0b",
@@ -395,6 +409,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "remove_duplicates": {
         "name": "remove_duplicates",
         "displayName": "Remove Duplicates",
+        "displayName_zh": "去重",
         "category": "Data",
         "icon": "🧹",
         "color": "#f59e0b",
@@ -409,6 +424,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "merge": {
         "name": "merge",
         "displayName": "Merge",
+        "displayName_zh": "合并",
         "category": "Data",
         "icon": "🔗",
         "color": "#f59e0b",
@@ -423,6 +439,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "condition": {
         "name": "condition",
         "displayName": "Condition",
+        "displayName_zh": "条件分支",
         "category": "Logic",
         "icon": "🔀",
         "color": "#f43f5e",
@@ -454,6 +471,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "switch": {
         "name": "switch",
         "displayName": "Switch",
+        "displayName_zh": "多分支",
         "category": "Logic",
         "icon": "🔀",
         "color": "#f43f5e",
@@ -490,6 +508,7 @@ NODE_TYPES: dict[str, dict[str, Any]] = {
     "output": {
         "name": "output",
         "displayName": "Output",
+        "displayName_zh": "输出",
         "category": "Output",
         "icon": "➤",
         "color": "#64748b",

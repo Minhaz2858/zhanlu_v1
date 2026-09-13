@@ -20,6 +20,7 @@ Status transitions on the DashboardApp row:
 
 import asyncio
 import importlib
+import json
 import logging
 import sys
 from functools import lru_cache
@@ -37,6 +38,23 @@ logger = logging.getLogger(__name__)
 
 APP_PACKAGE = "app.dashboards"
 MODULE_NAMES = ("api", "queries", "realtime")
+
+
+def restored_spec_from_dir(app_dir: Path) -> Optional[Dict[str, Any]]:
+    """Read the authored spec persisted with a restored snapshot (.spec.json).
+
+    Returns None when the snapshot predates .spec.json persistence — the
+    caller then falls back to leaving the DB spec untouched (logged).
+    """
+    try:
+        spec_file = app_dir / ".spec.json"
+        if not spec_file.exists():
+            return None
+        data = json.loads(spec_file.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else None
+    except Exception:  # noqa: BLE001 — never block an undo on a bad spec file
+        logger.exception("restored_spec_from_dir(%s): unreadable .spec.json", app_dir)
+        return None
 
 
 class DashboardAppManager:
@@ -138,6 +156,15 @@ class DashboardAppManager:
 
         "Undo" semantics: each accepted change created a snapshot, and the
         most recent one is restored + consumed. Returns a JSON-safe result.
+
+        2026-09-02 (#9): the DB ``DashboardApp.spec`` JSONB is re-synced from
+        the restored snapshot's authored spec (``.spec.json``, written by the
+        generator) so the row and the on-disk app can never diverge — before
+        this, undo rewound files but left the NEW spec in the DB, so /config,
+        agent context and the next edit all operated on the reverted-away
+        spec. The viewer bundle (dist/) is ALSO refreshed from the template:
+        dist is chrome, not user data — a reverted app keeps the latest
+        dashboard UI instead of resurrecting a stale bundle.
         """
         from app.services.dashboard_app.generator import get_generator
 
@@ -155,9 +182,56 @@ class DashboardAppManager:
             logger.exception("revert(%s): remount failed", slug)
             return {"success": False, "slug": slug,
                     "message": f"Snapshot restored, but remount failed: {exc}"}
+        # Keep the DB spec column in lock-step with the restored files. The
+        # .spec.json dotfile rides inside every snapshot (copytree copies it)
+        # so even an undo of an undo sees the correct authored spec.
+        spec = restored_spec_from_dir(app_dir)
+        if spec is not None:
+            try:
+                self._sync_spec_record(slug, spec)
+            except Exception as exc:  # noqa: BLE001 — revert already succeeded
+                logger.warning("revert(%s): spec sync failed (non-fatal): %s", slug, exc)
+        else:
+            logger.warning(
+                "revert(%s): restored snapshot has no .spec.json (pre-2026-09-02 "
+                "snapshot) — DashboardApp.spec left untouched", slug,
+            )
+        # Refresh the viewer chrome from the template so reverted apps keep the
+        # current dashboard UI (snapshot dist may predate the last template
+        # rebuild — data logic below is restored, only the static bundle swaps).
+        try:
+            self._refresh_viewer_bundle(app_dir)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("revert(%s): viewer refresh failed (non-fatal): %s", slug, exc)
         self.set_status(slug, "running")
         return {"success": True, "slug": slug, "restored_snapshot": restored.name,
                 "message": f"Reverted to the previous version ({restored.name})."}
+
+    def _sync_spec_record(self, slug: str, spec: Dict[str, Any]) -> None:
+        """Persist a restored authored spec onto the DashboardApp row."""
+        db = SessionLocal()
+        try:
+            record = db.query(DashboardApp).filter(DashboardApp.slug == slug).first()
+            if record is None:
+                return
+            record.spec = spec
+            record.name = spec.get("name") or record.name
+            record.description = spec.get("description")
+            record.datasource_kb_id = spec.get("datasource_id") or record.datasource_kb_id
+            record.design_system_ref = spec.get("design_system_ref")
+            record.refresh_interval_seconds = int(spec.get("refresh_interval_seconds", 30))
+            record.status = "running"
+            db.commit()
+            db.refresh(record)
+            logger.info("revert(%s): DashboardApp.spec re-synced from restored snapshot", slug)
+        finally:
+            db.close()
+
+    def _refresh_viewer_bundle(self, app_dir: Path) -> None:
+        """Recopy the template's built dist/ over the app dir (viewer chrome only)."""
+        from app.services.dashboard_app.generator import get_generator
+
+        get_generator()._copy_frontend(app_dir)
 
     # ── pollers ──
     def start_poller(self, slug: str) -> None:

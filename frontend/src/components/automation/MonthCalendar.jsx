@@ -39,13 +39,31 @@ export default function MonthCalendar({ tasks, onNew }) {
     return cells;
   }, [cursor]);
 
-  const tasksByDay = useMemo(() => {
+  // Day → entries map. Each entry is {task, kind} where kind='run' (past
+  // execution on task.last_run) or kind='next' (scheduled firing on
+  // task.next_run_at). Before this change the calendar keyed ONLY off
+  // last_run, so scheduled future tasks were invisible — it was a history
+  // chart, not a schedule view.
+  const dayEntries = useMemo(() => {
     const map = {};
     tasks.forEach((task) => {
-      if (!task.last_run) return;
-      const idx = grid.findIndex((d) => d && sameDay(d, task.last_run));
-      if (idx === -1) return;
-      (map[idx] = map[idx] || []).push(task);
+      if (task.last_run) {
+        const idx = grid.findIndex((d) => d && sameDay(d, task.last_run));
+        if (idx !== -1) (map[idx] = map[idx] || []).push({ task, kind: 'run' });
+      }
+      if (task.next_run_at) {
+        const idx = grid.findIndex((d) => d && sameDay(d, task.next_run_at));
+        if (idx !== -1) (map[idx] = map[idx] || []).push({ task, kind: 'next' });
+      }
+    });
+    // Sort each day's chips chronologically: upcoming next_run first, then
+    // past runs by their last_run time.
+    Object.keys(map).forEach((k) => {
+      map[k].sort((a, b) => {
+        const ta = a.kind === 'next' ? new Date(a.task.next_run_at) : new Date(a.task.last_run);
+        const tb = b.kind === 'next' ? new Date(b.task.next_run_at) : new Date(b.task.last_run);
+        return ta - tb;
+      });
     });
     return map;
   }, [tasks, grid]);
@@ -79,7 +97,7 @@ export default function MonthCalendar({ tasks, onNew }) {
         <div className="grid grid-cols-7">
           {grid.map((date, idx) => {
             if (!date) return <div key={idx} className="min-h-[120px] border-b border-r border-border bg-secondary/30" />;
-            const dayTasks = tasksByDay[idx] || [];
+            const entries = dayEntries[idx] || [];
             const isToday = sameDay(date, today);
             return (
               <div key={idx} className="min-h-[120px] border-b border-r border-border p-2">
@@ -87,22 +105,33 @@ export default function MonthCalendar({ tasks, onNew }) {
                   <span className={`inline-flex h-6 w-6 items-center justify-center text-xs ${isToday ? 'rounded-full bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>{date.getDate()}</span>
                 </div>
                 <div className="space-y-1">
-                  {dayTasks.slice(0, 3).map((task) => {
-                    const isDark = task.status === 'running';
+                  {entries.slice(0, 4).map(({ task, kind }) => {
+                    const isActive = task.status === 'active' || task.status === 'running';
+                    const isNext = kind === 'next';
+                    const stamp = isNext ? task.next_run_at : task.last_run;
+                    // Solid dark chip for an active task's past run; outline
+                    // primary chip for a scheduled (upcoming) firing so the
+                    // calendar reads as schedule + history.
                     return (
                       <button
-                        key={task.id}
+                        key={`${kind}-${task.id}`}
                         onClick={() => navigate(`/automation/${task.id}`)}
-                        className={`block w-full rounded-md border px-1.5 py-1 text-left text-[11px] leading-tight transition-colors ${isDark ? 'border-transparent bg-foreground text-background' : 'border-border bg-secondary/60 text-foreground hover:bg-accent'}`}
+                        className={`block w-full rounded-md border px-1.5 py-1 text-left text-[11px] leading-tight transition-colors ${
+                          isNext
+                            ? 'border-primary/40 bg-primary/5 text-primary hover:bg-primary/10'
+                            : isActive
+                              ? 'border-transparent bg-foreground text-background'
+                              : 'border-border bg-secondary/60 text-foreground hover:bg-accent'
+                        }`}
                         title={translate(task.name)}
                       >
-                        <div className={`text-[10px] font-light ${isDark ? 'text-background/70' : 'text-muted-foreground'}`}>{fmtHM(task.last_run)}</div>
+                        <div className={`text-[10px] font-light ${isNext ? 'text-primary/70' : isActive ? 'text-background/70' : 'text-muted-foreground'}`}>{fmtHM(stamp)}</div>
                         <div className="truncate font-medium">{translate(task.name)}</div>
                       </button>
                     );
                   })}
-                  {dayTasks.length > 3 && (
-                    <div className="inline-block rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">{t.automation.moreTasks.replace('{n}', dayTasks.length - 3)}</div>
+                  {entries.length > 4 && (
+                    <div className="inline-block rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground">{t.automation.moreTasks.replace('{n}', String(entries.length - 4))}</div>
                   )}
                 </div>
               </div>

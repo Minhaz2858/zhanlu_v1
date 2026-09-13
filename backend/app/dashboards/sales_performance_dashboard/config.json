@@ -1,29 +1,30 @@
 {
   "name": "Sales Performance Dashboard",
   "slug": "sales-performance-dashboard",
-  "description": "Live revenue, order volume, delivery progress, tax, product mix, customer and organization splits from the bound business ERP — professional executive view.",
-  "theme": "dark",
+  "description": "实时监控关键业务指标，涵盖总营收、订单量及核心数据变动趋势。动态分析不同区域的销售表现，清晰呈现市场地域分布全貌。精确追踪热销产品动态，实时掌握爆款商品与品类的销售走势。深度链接底层业务数据库，确保底层数据的真实性与高频同步更新。自动化更新与交互式分析相结合，助您快速精准制定高价值商业决策。",
+  "theme": "light",
+  "style": "standard",
   "refresh_interval_seconds": 30,
   "design_system_ref": "design-system/default-org/MASTER.md",
   "design": {
     "colors": {
-      "primary": "#059669",
+      "primary": "#1E3A8A",
       "on_primary": "#FFFFFF",
-      "secondary": "#10B981",
-      "accent": "#DC2626",
+      "secondary": "#3B82F6",
+      "accent": "#7C3AED",
       "background": "#F8FAFC",
-      "foreground": "#0F172A",
-      "muted": "#F0F8F6",
-      "border": "#E1F2ED",
+      "foreground": "#1E40AF",
+      "muted": "#E9EEF5",
+      "border": "#BFDBFE",
       "destructive": "#DC2626",
-      "ring": "#059669",
+      "ring": "#1E3A8A",
       "chart_palette": [
-        "#059669",
+        "#1E3A8A",
+        "#7C3AED",
+        "#3B82F6",
         "#DC2626",
-        "#10B981",
         "#2563eb",
-        "#10b981",
-        "#f59e0b"
+        "#10b981"
       ],
       "dark": {
         "background": "#020617",
@@ -55,118 +56,322 @@
   },
   "metrics": [
     {
-      "id": "total_revenue",
-      "title": "Total Revenue (Incl. Tax)",
+      "id": "kpi_revenue",
+      "title": "总营收 (¥)",
       "type": "kpi",
       "options": {
-        "prefix": "¥",
-        "format": "compact"
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
       }
     },
     {
-      "id": "order_volume",
-      "title": "Order Volume (Tons)",
+      "id": "kpi_orders",
+      "title": "订单笔数",
       "type": "kpi",
       "options": {
-        "suffix": " t"
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
       }
     },
     {
-      "id": "order_count",
-      "title": "Distinct Orders",
-      "type": "kpi",
-      "options": {}
-    },
-    {
-      "id": "avg_price",
-      "title": "Avg Unit Price",
+      "id": "kpi_qty",
+      "title": "总销量 (吨)",
       "type": "kpi",
       "options": {
-        "prefix": "¥"
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
       }
     },
     {
-      "id": "delivery_rate",
-      "title": "Delivery Fulfillment Rate",
+      "id": "kpi_customers",
+      "title": "客户数 (家)",
       "type": "kpi",
       "options": {
-        "suffix": "%"
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
       }
     },
     {
-      "id": "tax_amount",
-      "title": "Tax Amount",
-      "type": "kpi",
-      "options": {
-        "prefix": "¥"
-      }
-    },
-    {
-      "id": "revenue_trend",
-      "title": "Revenue Trend (30d)",
-      "type": "area",
-      "options": {}
-    },
-    {
-      "id": "volume_trend",
-      "title": "Order Volume Trend (30d)",
+      "id": "trend_revenue",
+      "title": "营收日趋势 (¥)",
       "type": "line",
-      "options": {}
+      "options": {
+        "span": "wide",
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "orders_trend",
+      "title": "订单量日趋势",
+      "type": "line",
+      "options": {
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "region_pie",
+      "title": "区域营收分布",
+      "type": "pie",
+      "options": {
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "id": "category_pie",
+      "title": "品类营收分布",
+      "type": "pie",
+      "options": {
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
+      }
     },
     {
       "id": "top_products",
-      "title": "Top Products by Revenue",
+      "title": "热销产品 Top 10",
       "type": "bar",
-      "options": {}
-    },
-    {
-      "id": "product_mix",
-      "title": "Revenue by Material Group",
-      "type": "pie",
-      "options": {}
-    },
-    {
-      "id": "customer_split",
-      "title": "Top Customers by Revenue",
-      "type": "bar",
-      "options": {}
-    },
-    {
-      "id": "org_split",
-      "title": "Revenue by Organization",
-      "type": "pie",
-      "options": {}
-    },
-    {
-      "id": "unit_split",
-      "title": "Revenue by Unit of Measure",
-      "type": "bar",
-      "options": {}
-    },
-    {
-      "id": "recent_orders",
-      "title": "Recent Orders",
-      "type": "table",
-      "options": {}
+      "options": {
+        "filters": [
+          {
+            "key": "dim_org",
+            "label": "销售组织",
+            "column": "organization",
+            "values": [
+              "惠州伊斯科",
+              "广东伊斯科"
+            ]
+          },
+          {
+            "key": "dim_category",
+            "label": "产品品类",
+            "column": "product_group",
+            "values": [
+              "石油树脂",
+              "液体",
+              "C5原料",
+              "C5产品"
+            ]
+          }
+        ]
+      }
     }
   ],
-  "filters": [],
+  "filters": [
+    {
+      "key": "dim_org",
+      "label": "销售组织",
+      "column": "organization"
+    },
+    {
+      "key": "dim_category",
+      "label": "产品品类",
+      "column": "product_group"
+    }
+  ],
   "insights": [
     {
-      "body": "Total revenue (incl. tax) of ¥386.5M across 188 orders in the trailing 30 days, with 47,804 tons booked at ¥7,502 avg unit price. Delivery fulfillment runs near the top of the book.",
-      "title": "Revenue & Volume Pulse"
+      "body": "惠州伊斯科与广东伊斯科双主体贡献全部销售，覆盖石油树脂、液体、C5原料及C5产品四大品类，营收结构多元，可切换组织与品类维度下钻分析。",
+      "title": "双组织驱动营收"
     },
     {
-      "body": "The 液体 (liquid) material group drives ¥266.3M (69% of revenue). Top products 异戊二烯 (¥88.5M), 戊烷发泡剂 (¥77.3M) and 抽余碳五 (¥68.4M) concentrate ~60% of sales.",
-      "title": "Product Concentration"
+      "body": "石油树脂为第一大品类主线，C5原料与C5产品构成上下游协同，品类间联动紧密，需关注单品价格波动传导。",
+      "title": "品类集中度高"
     },
     {
-      "body": "Chinese petrochemical majors dominate: Sinopec Central China (¥70.2M) and CNOOC & Shell (¥68.4M) together approach 36% of revenue. 惠州伊斯科 org leads at ¥310.4M.",
-      "title": "Customer & Org Split"
-    },
-    {
-      "body": "Daily revenue is lumpy — peaking at ¥50.3M on Aug 21 and ¥48.4M on Aug 11 versus a ~¥14M daily average, indicating order-booking concentration worth monitoring.",
-      "title": "Daily Volatility"
+      "body": "本看板以30秒为刷新周期，WebSocket推送底层订单数据变更，支持按区域/品类交叉筛选，支撑销售决策的实时响应。",
+      "title": "实时监控窗口"
     }
-  ]
+  ],
+  "layout": [
+    {
+      "title": "核心指标总览",
+      "widgets": [
+        "kpi_revenue",
+        "kpi_orders",
+        "kpi_qty",
+        "kpi_customers"
+      ]
+    },
+    {
+      "title": "销售趋势分析",
+      "widgets": [
+        "trend_revenue",
+        "orders_trend"
+      ]
+    },
+    {
+      "title": "区域与品类分布",
+      "widgets": [
+        "region_pie",
+        "category_pie",
+        "top_products"
+      ]
+    }
+  ],
+  "pages": [],
+  "panels": [],
+  "header": null,
+  "footer": null
 }

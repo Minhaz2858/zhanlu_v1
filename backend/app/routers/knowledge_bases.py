@@ -218,7 +218,9 @@ async def upload_query_file(
         item_count=parsed["total_rows"],
         status="active",
         created_by_id=getattr(user, "id", None),
-        app_id=app_id or "default-app",
+        # NOTE: app_id is NOT taken from the URL — the platform treats it as
+        # cosmetics (entities router create ignores it; rows carry the model
+        # default 'default-app') so lists scoped to the real app still see it.
     )
     db.add(kb)
     db.commit()

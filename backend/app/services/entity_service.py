@@ -319,6 +319,7 @@ def list_records(
     owner_id: str | None = None,
     include_shared: bool = False,
     is_admin: bool = False,
+    fields: list[str] | None = None,
 ) -> list:
     """List non-deleted records with optional sorting and pagination.
 
@@ -327,6 +328,11 @@ def list_records(
 
     ``include_shared`` (optional) adds rows shared with the owner via
     ResourceShare — only for shareable models (Project, AgentApp) on reads.
+
+    ``fields`` (optional) trims each returned row to the requested column
+    subset (plus ``id``). List views that only need a few columns — e.g. a
+    chat skill picker rendering the full catalog — use this to avoid
+    shipping heavy body columns (Tool.skill_md is ~14KB/row) over the wire.
     """
     query = db.query(model).filter(model.is_deleted == False)
     query = _apply_tenant(model, query)
@@ -338,7 +344,8 @@ def list_records(
     if limit:
         query = query.limit(limit)
     records = [r.to_dict() for r in query.all()]
-    return _annotate_access(model, records, owner_id, db, is_admin=is_admin)
+    records = _annotate_access(model, records, owner_id, db, is_admin=is_admin)
+    return _project_fields(records, fields)
 
 
 def filter_records(
@@ -347,6 +354,7 @@ def filter_records(
     skip: int | None = None, owner_id: str | None = None,
     include_shared: bool = False,
     is_admin: bool = False,
+    fields: list[str] | None = None,
 ) -> list:
     """Filter non-deleted records by MongoDB-style query with sorting and pagination.
 
@@ -368,7 +376,23 @@ def filter_records(
     if limit:
         query = query.limit(limit)
     records = [r.to_dict() for r in query.all()]
-    return _annotate_access(model, records, owner_id, db, is_admin=is_admin)
+    records = _annotate_access(model, records, owner_id, db, is_admin=is_admin)
+    return _project_fields(records, fields)
+
+
+def _project_fields(records: list, fields: list[str] | None) -> list:
+    """Trim serialized records to a requested column subset (list view).
+
+    Mirrors the Base44 SDK's ``list(sort, limit, skip, fields)`` argument:
+    callers that only need a few columns (e.g. a chat picker rendering the
+    full skill catalog) avoid shipping heavy body columns over the wire.
+    ``id`` is always kept so row identity stays intact; unknown field names
+    are ignored (they simply won't appear).
+    """
+    if not fields:
+        return records
+    keep = set(fields) | {"id"}
+    return [{k: v for k, v in r.items() if k in keep} for r in records]
 
 
 def get_record(model, record_id: str, db: Session, owner_id: str | None = None,

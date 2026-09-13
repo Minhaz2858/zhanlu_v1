@@ -55,6 +55,47 @@ def mint_preview_token(
     return f"{payload_b64}.{_sign(payload_b64)}"
 
 
+# The SSE execution stream has the same constraint as iframes: EventSource
+# cannot send Authorization headers. Mint a short-lived token bound to
+# (execution_id, user_id) that the client appends as ``?token=``; the stream
+# endpoint resolves the user from it and still runs the tenant check.
+def mint_stream_token(
+    *, execution_id: str, user_id: str, ttl_seconds: int = _DEFAULT_TTL_SECONDS
+) -> str:
+    payload = {
+        "eid": str(execution_id),
+        "uid": str(user_id),
+        "exp": int(time.time()) + int(ttl_seconds),
+    }
+    payload_b64 = _b64url_encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    )
+    return f"{payload_b64}.{_sign(payload_b64)}"
+
+
+def verify_stream_token(token: str, execution_id: str) -> Optional[str]:
+    """Return the user_id bound to ``token`` for ``execution_id``, else None."""
+    if not token or token.count(".") != 1:
+        return None
+    payload_b64, sig = token.split(".", 1)
+    if not hmac.compare_digest(_sign(payload_b64), sig):
+        return None
+    try:
+        payload = json.loads(_b64url_decode(payload_b64))
+    except Exception:
+        return None
+    if payload.get("eid") != str(execution_id):
+        return None
+    try:
+        exp = int(payload.get("exp", 0))
+    except (TypeError, ValueError):
+        return None
+    if exp < int(time.time()):
+        return None
+    uid = payload.get("uid")
+    return str(uid) if uid else None
+
+
 def verify_preview_token(token: str, file_id: str) -> Optional[str]:
     """Return the user_id bound to ``token`` for ``file_id``, else None."""
     if not token or token.count(".") != 1:

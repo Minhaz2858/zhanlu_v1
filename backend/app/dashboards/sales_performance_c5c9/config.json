@@ -1,27 +1,27 @@
 {
-  "name": "Sales Performance Dashboard",
+  "name": "销售业绩看板",
   "slug": "sales-performance-c5c9",
-  "description": "Live revenue, order volume, regional split and top-product trends from the bound business database",
+  "description": "实时展示销售额、订单量、区域分布与TOP产品趋势，数据来源于已绑定的业务数据库 (aipdp_data_warehouse_prod, 主表 erp_v_sale_orderentry)",
   "theme": "dark",
-  "style": "standard",
+  "style": "chinese_bi",
   "refresh_interval_seconds": 30,
   "design_system_ref": "design-system/default-org/MASTER.md",
   "design": {
     "colors": {
-      "primary": "#059669",
-      "on_primary": "#FFFFFF",
-      "secondary": "#10B981",
-      "accent": "#DC2626",
+      "primary": "#2563EB",
+      "on_primary": "#ffffff",
+      "secondary": "#3B82F6",
+      "accent": "#F97316",
       "background": "#F8FAFC",
-      "foreground": "#0F172A",
-      "muted": "#F0F8F6",
-      "border": "#E1F2ED",
-      "destructive": "#DC2626",
-      "ring": "#059669",
+      "foreground": "#1E293B",
+      "muted": "#f1f5f9",
+      "border": "#e2e8f0",
+      "destructive": "#ef4444",
+      "ring": "#2563eb",
       "chart_palette": [
-        "#059669",
-        "#DC2626",
-        "#10B981",
+        "#2563EB",
+        "#F97316",
+        "#3B82F6",
         "#2563eb",
         "#10b981",
         "#f59e0b"
@@ -34,10 +34,10 @@
       }
     },
     "typography": {
-      "heading": "Fira Code",
-      "body": "Fira Sans",
-      "google_fonts_url": "https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap",
-      "css_import": "@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');"
+      "heading": "Inter",
+      "body": "Inter",
+      "google_fonts_url": "",
+      "css_import": ""
     },
     "spacing": {
       "xs": "2px",
@@ -49,101 +49,122 @@
       "3xl": "32px"
     },
     "style": {
-      "name": "Dark Mode (OLED)",
-      "keywords": "Dark theme, low light, high contrast, deep black, midnight blue, eye-friendly, OLED, night mode, power efficient",
+      "name": "Glassmorphism",
+      "keywords": "Frosted glass, transparent, blurred background, layered, vibrant background, light source, depth, multi-layer",
       "card_radius": "8px"
     }
   },
   "metrics": [
     {
-      "id": "total_revenue",
-      "title": "Total Revenue (Aug MTD)",
+      "id": "kpi_revenue",
+      "title": "销售额（含税）",
       "type": "kpi",
-      "options": {}
-    },
-    {
-      "id": "total_orders",
-      "title": "Order Volume (Aug MTD)",
-      "type": "kpi",
-      "options": {}
-    },
-    {
-      "id": "avg_order_value",
-      "title": "Avg Order Value (¥)",
-      "type": "kpi",
-      "options": {}
-    },
-    {
-      "id": "delivery_rate",
-      "title": "Delivery Completion %",
-      "type": "kpi",
-      "options": {}
-    },
-    {
-      "id": "mom_growth",
-      "title": "Revenue MoM Growth %",
-      "type": "kpi",
-      "options": {}
-    },
-    {
-      "id": "revenue_trend",
-      "title": "Daily Revenue Trend",
-      "type": "area",
       "options": {
-        "delta": 8572.57,
-        "deltaLabel": "vs prev. period",
-        "_locked": {
-          "current": 21716800.0,
-          "previous": 250407.824
-        }
+        "accent": "#2563EB",
+        "unit": "元"
       }
     },
     {
-      "id": "delivery_trend",
-      "title": "Daily Delivery Quantity",
+      "id": "kpi_qty",
+      "title": "订单量",
+      "type": "kpi",
+      "options": {
+        "accent": "#10B981",
+        "unit": "单"
+      }
+    },
+    {
+      "id": "kpi_customers",
+      "title": "客户数",
+      "type": "kpi",
+      "options": {
+        "accent": "#F59E0B",
+        "unit": "家"
+      }
+    },
+    {
+      "id": "trend_revenue",
+      "title": "销售趋势（按月）",
       "type": "line",
       "options": {
-        "delta": 1077.29,
+        "x": "period",
+        "y": "value",
+        "delta": -3.1,
         "deltaLabel": "vs prev. period",
         "_locked": {
-          "current": 329.64,
-          "previous": 28.0
+          "current": 340109291.9228,
+          "previous": 350996881.5073
         }
       }
     },
     {
-      "id": "order_trend",
-      "title": "Daily Order Volume",
+      "id": "trend_qty",
+      "title": "订单量趋势（按月）",
       "type": "bar",
       "options": {
+        "x": "period",
+        "y": "value",
         "topItem": {
-          "label": "2026-08-13",
-          "value": 19.0,
-          "share_pct": 11.6
+          "label": "2023-03",
+          "value": 305.0,
+          "share_pct": 2.1
         }
       }
     },
     {
-      "id": "regional_split",
-      "title": "Regional Revenue Split",
+      "id": "area_revenue",
+      "title": "区域销售额分布",
       "type": "pie",
       "options": {
+        "x": "name",
+        "y": "value",
         "topItem": {
           "label": "惠州伊斯科",
-          "value": 270624538.4828,
-          "share_pct": 83.6
+          "value": 17713689986.378975,
+          "share_pct": 96.2
+        }
+      }
+    },
+    {
+      "id": "area_qty",
+      "title": "区域订单量",
+      "type": "bar",
+      "options": {
+        "x": "name",
+        "y": "value",
+        "topItem": {
+          "label": "惠州伊斯科",
+          "value": 14111.0,
+          "share_pct": 97.7
         }
       }
     },
     {
       "id": "top_products",
-      "title": "Top Products by Revenue",
+      "title": "TOP 产品销售额",
       "type": "bar",
       "options": {
+        "x": "name",
+        "y": "value",
         "topItem": {
-          "label": "抽余碳五",
-          "value": 68360034.51,
-          "share_pct": 21.3
+          "label": "戊烷发泡剂",
+          "value": 4009750065.7,
+          "share_pct": 22.3
+        }
+      }
+    },
+    {
+      "id": "top_products_qty",
+      "title": "TOP 产品明细",
+      "type": "table",
+      "options": {
+        "pills": {
+          "销售额": "up"
+        },
+        "topItem": {
+          "label": "戊烷发泡剂",
+          "value": 702780.47,
+          "share_pct": 25.9
         }
       }
     }
@@ -151,17 +172,51 @@
   "filters": [],
   "insights": [
     {
-      "title": "Strong MoM Growth",
-      "body": "August revenue (¥288.3M MTD through 08-28) is up +22.4% vs the same July period (¥235.5M) — a +¥52.8M gain, driven mainly by Huizhou Isco."
+      "title": "销售规模",
+      "body": "实时聚合 erp_v_sale_orderentry 的含税金额 FALLAMOUNT 与订单行数，展示当前累计销售额与订单量，数据最新更新至 2026-08。"
     },
     {
-      "title": "Top Customer",
-      "body": "中海壳牌石油化工 is the largest account at ¥60.5M (~21% of August revenue); 北京万邦达新材料 leads order count with 15 orders."
+      "title": "区域集中度",
+      "body": "按 org_name 拆分销售额与订单量，识别主导销售组织（如惠州伊斯科）与其余组织占比，辅助判断区域依赖风险。"
     },
     {
-      "title": "Delivery Backlog",
-      "body": "Delivery completion sits at 62.1% (24,706 t of 39,769 t contracted). Deliveries peaked Aug 5 (5,901 t) and Aug 13 (3,285 t), tapering late month."
+      "title": "产品结构",
+      "body": "TOP 产品表列出各 material_name 的销量与销售额，直观呈现核心产品贡献与长尾分布。"
     }
   ],
-  "layout": []
+  "layout": [
+    {
+      "title": "核心指标",
+      "widgets": [
+        "kpi_revenue",
+        "kpi_qty",
+        "kpi_customers"
+      ]
+    },
+    {
+      "title": "销售趋势",
+      "widgets": [
+        "trend_revenue",
+        "trend_qty"
+      ]
+    },
+    {
+      "title": "区域分布",
+      "widgets": [
+        "area_revenue",
+        "area_qty"
+      ]
+    },
+    {
+      "title": "TOP 产品",
+      "widgets": [
+        "top_products",
+        "top_products_qty"
+      ]
+    }
+  ],
+  "pages": [],
+  "panels": [],
+  "header": null,
+  "footer": null
 }

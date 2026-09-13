@@ -176,6 +176,25 @@ def dashboard_build_tool() -> str | None:
     return None
 
 
+# Every tool that counts as "the dashboard was built" evidence — the active
+# create tool (flag-aware), its update/refinement sibling, and the two legacy
+# rollback-pipeline tools. Guards that previously recognized ONLY the single
+# create tool as build evidence must accept any member of this set, otherwise
+# a turn where e.g. update_fullstack_dashboard succeeded is misreported as a
+# failed/unbuilt dashboard.
+DASHBOARD_BUILD_TOOLS = frozenset({
+    "create_fullstack_dashboard",
+    "update_fullstack_dashboard",
+    "create_dashboard",
+    "update_dashboard",
+})
+
+
+def is_dashboard_build_tool(name: str) -> bool:
+    """True when ``name`` is one of the dashboard build tools."""
+    return name in DASHBOARD_BUILD_TOOLS
+
+
 def should_force_create_dashboard(
     user_content: str | None,
     tool_calls_for_frontend: list[dict],
@@ -317,7 +336,7 @@ def describe_schema_cap_reached(
     if not build_tool:
         return False
     names = list(executed_names or [])
-    if build_tool in names:
+    if set(names) & DASHBOARD_BUILD_TOOLS:
         return False  # already built this turn — further schema calls are iteration
     count = sum(1 for n in names if n in DASHBOARD_SCHEMA_CAP_TOOLS)
     return count >= max_cap
@@ -352,7 +371,7 @@ def dashboard_antitools_should_block(
     if not build_tool:
         return False
     names = set(executed_names or [])
-    if build_tool in names:
+    if names & DASHBOARD_BUILD_TOOLS:
         return False  # already built this turn — anti-tools are allowed
     return True
 
@@ -395,10 +414,14 @@ def dashboard_orchestrator_should_block(
         return False
     names = set(executed_names or [])
     failed = set(failed_names or [])
-    if build_tool in names:
-        if build_tool in failed:
-            return True  # build tool CRASHED — orchestrator must not fabricate
-        return False  # build succeeded — orchestrator is allowed
+    built = names & DASHBOARD_BUILD_TOOLS
+    if built:
+        # A build tool (create/update, fullstack/legacy) was executed. Only a
+        # turn where ALL build attempts crashed/failed may fall through to
+        # True — the orchestrator must not fabricate a static artifact on top
+        # of a crashed build. Any successful build tool (incl. update) is
+        # build evidence and unlocks the orchestrator.
+        return bool(built & failed)
     return True
 
 
@@ -444,19 +467,61 @@ def dashboard_exploration_cap_reached(
     if not build_tool:
         return False
     names = list(executed_names or [])
-    if build_tool in names:
-        return False  # already built this turn — further queries are iteration
+    if set(names) & DASHBOARD_BUILD_TOOLS:
+        return False  # a build tool (create OR update) already ran — further queries are iteration
     count = sum(1 for n in names if n in DASHBOARD_EXPLORATION_TOOLS)
     return count >= max_cap
+
+
+# ── Fix 7: post-cap stall freeze (dashboard turns) ──────────────────────────
+# The T12 / exploration caps strip exploration tools only. A weak model that
+# already spent the schema budget can still burn the remaining iterations on
+# NON-data stall tools (uiux_design_system again, list_fullstack_dashboards,
+# delegate_task, skills_hub, memory …) instead of calling the build tool —
+# observed on conv 0e8c004e (2026-09-02): after the cap fired the model
+# re-ran uiux_design_system + list_fullstack_dashboards, never called
+# create_fullstack_dashboard, and the turn died into an empty fallback.
+
+
+def dashboard_stall_freeze_blocked(
+    budget_frozen: bool,
+    executed_names: list[str] | None,
+    parsed_names: list[str] | None,
+    build_tool: str | None,
+) -> list[str]:
+    """Return the parsed tool names that must be blocked once the budget is frozen.
+
+    Only applies on a dashboard turn BEFORE the build tool has run. When
+    ``budget_frozen`` is True, everything except the build tool is a stall —
+    except the FIRST ``uiux_design_system`` of the turn, which the
+    design-first HARD RULE still needs (the budget can only freeze after
+    schema exploration, which may legitimately precede the design call).
+
+    Pure and unit-testable; the v3 stream loop maps this over ``parsed_calls``.
+    """
+    if not budget_frozen:
+        return []
+    build_tool = build_tool or dashboard_build_tool()
+    names = list(executed_names or [])
+    if set(names) & DASHBOARD_BUILD_TOOLS:
+        return []  # a build tool (create OR update) already ran — no freeze
+    blocked: list[str] = []
+    for name in (parsed_names or []):
+        if name in DASHBOARD_BUILD_TOOLS:
+            continue  # any build tool is always allowed
+        if name == "uiux_design_system" and "uiux_design_system" not in names:
+            continue  # first design-system call is legitimate
+        blocked.append(name)
+    return blocked
 
 
 # ── Fix 6: dashboard-narration nudge guard ─────────────────────────────────
 # The model sometimes exits the v3 loop with ONLY narration ("I'll build you
 # an ERP dashboard...") and no tool call. None of the existing exit-chain
-# guards fire because narration IS content (empty-answer net skips), no data
-# was retrieved (promise-strip skips), and no tools ran (self-eval returns
-# "none"). This nudge injects the EXACT next workflow step and continues the
-# loop so the model takes its first real action.
+# guards fire because narration IS content (empty-answer net skips) and no
+# data was retrieved (promise-strip skips). This nudge injects the EXACT next
+# workflow step and continues the loop so the model takes its first real
+# action.
 #
 # Tools that count as "workflow progress" on a dashboard turn — the adaptive
 # nudge uses these to decide which step is next.
@@ -524,8 +589,8 @@ def dashboard_narration_needs_nudge(
     if not build_tool:
         return False
     names = set(executed_names or [])
-    if build_tool in names:
-        return False  # already built — narration is legit wrap-up
+    if names & DASHBOARD_BUILD_TOOLS:
+        return False  # already built (create OR update) — narration is legit wrap-up
     if _narration_is_confirmation_question(executed_names, narration):
         return False
     return True
@@ -661,8 +726,8 @@ def contract_confirmation_needed(
         tc.get("name") or tc.get("tool_name")
         for tc in (tool_calls_for_frontend or [])
     }
-    if build_tool in names:
-        return False  # already built this turn
+    if set(names) & DASHBOARD_BUILD_TOOLS:
+        return False  # a build tool (create OR update) already ran this turn
     if names & _SCHEMA_INSPECTION_TOOLS:
         return False  # grounded in the real schema
     if _has_user_approval(user_content):

@@ -38,7 +38,9 @@ const zhLiveEvent = {
 };
 
 const zhPhase = {
+  init: { verb: '正在理解', title: '正在读取你的请求' },
   goal: { verb: '正在理解', title: '正在弄清你的需求' },
+  plan: { verb: '正在编排', title: '正在制定执行方案' },
   act: { verb: '正在构建', title: '正在产出交付物' },
 };
 
@@ -65,7 +67,9 @@ const enLiveEvent = {
 };
 
 const enPhase = {
+  init: { verb: 'Fathoming', title: 'Reading your request' },
   goal: { verb: 'Fathoming', title: 'Understanding your request' },
+  plan: { verb: 'Orchestrating', title: 'Laying out the plan' },
   act: { verb: 'Building', title: 'Producing the deliverable' },
 };
 
@@ -133,9 +137,48 @@ describe('LiveActivityStream — empty state', () => {
     expect(container.firstChild).toBeNull();
   });
 
-  it('returns null when events is an empty array', () => {
+  it('returns null when events is an empty array and stream has finished', () => {
     const { container } = render(<LiveActivityStream events={[]} />);
     expect(container.firstChild).toBeNull();
+  });
+
+  it('renders a rich placeholder while streaming with no events yet', () => {
+    render(<LiveActivityStream events={[]} isStreaming />);
+    expect(getStream()).toBeInTheDocument();
+    expect(getHeadline()).toHaveTextContent('正在理解');
+    expect(getHeadline()).toHaveTextContent('正在读取你的请求');
+    expect(screen.getByText('计划')).toBeInTheDocument();
+    expect(screen.getByText('正在准备计划…')).toBeInTheDocument();
+  });
+
+  it('renders streamed plan steps in the placeholder before any events arrive', () => {
+    const steps = [
+      { step_index: 0, title: 'Analyze request', status: 'pending' },
+      { step_index: 1, title: 'Search the web', status: 'done' },
+    ];
+    render(
+      <LiveActivityStream
+        events={[]}
+        isStreaming
+        streamingPlanSteps={steps}
+      />
+    );
+    expect(getStream()).toBeInTheDocument();
+    expect(screen.getByTestId('plan-checklist')).toHaveTextContent('Analyze request');
+    expect(screen.getByTestId('plan-checklist')).toHaveTextContent('Search the web');
+  });
+
+  it('renders placeholder in English when lang is en', () => {
+    useLanguageMock.mockReturnValue({
+      lang: 'en',
+      setLang: () => {},
+      t: { chat: { phase: enPhase, liveEvent: enLiveEvent } },
+    });
+    render(<LiveActivityStream events={[]} isStreaming />);
+    expect(getHeadline()).toHaveTextContent('Fathoming');
+    expect(getHeadline()).toHaveTextContent('Reading your request');
+    expect(screen.getByText('Plan')).toBeInTheDocument();
+    expect(screen.getByText('Preparing plan…')).toBeInTheDocument();
   });
 });
 

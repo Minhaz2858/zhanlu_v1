@@ -1119,6 +1119,20 @@ async def _create_artifact_tool(
         )
 
         # 2. Create an initial version
+        if artifact is None:
+            # 2026-09-02 review #2: ArtifactService.create_artifact() returns
+            # None when the T18 dashboard-turn guard suppresses an
+            # analytics-path artifact (source != "dashboard_app" on a
+            # dashboard-intent turn). Dereferencing artifact.id below crashed
+            # with AttributeError ('NoneType' object has no attribute 'id')
+            # on EVERY post-build create_artifact during dashboard turns.
+            # Return a clean, typed result instead of crashing the loop.
+            return {
+                "success": False,
+                "suppressed": True,
+                "reason": "artifact suppressed by dashboard-turn guard",
+                "error": "artifact suppressed by dashboard-turn guard",
+            }
         version = service.create_version(
             artifact_id=artifact.id,
             changelog=f"Generated via create_artifact ({artifact_type})",

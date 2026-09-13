@@ -69,9 +69,9 @@ _BOUNCE_BACK_PATTERN_RE = re.compile(
 )
 
 _DASHBOARD_REDIRECT_FALLBACK = (
-    "I gathered some information but had trouble putting it all together. "
-    "Could you try again with a more specific request? "
-    "If you asked me to build a dashboard, please say 'create dashboard' and I'll try again."
+    "The dashboard build did not complete this turn — the agent ran out of "
+    "steps before calling the build tool. Please reply \u201ccontinue "
+    "building\u201d to retry, or open a new chat and send the request again."
 )
 
 

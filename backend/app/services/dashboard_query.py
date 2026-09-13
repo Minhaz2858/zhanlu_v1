@@ -52,10 +52,101 @@ def clamp_refresh_interval(seconds: int | None) -> int:
 # Substitutes :from/:to/:date (date window), :dim_<token> (cross-widget filter),
 # :drill_value (drill-down) in widget SQL. Unknown tokens raise ValueError.
 # The rendered SQL is re-validated by validate_widget_sql before returning
-# (defense in depth — stored SQL is never trusted).
+# (defense in depth — stored SQL is never trusted). Tokens are only recognized
+# in CODE positions — string literals ('HH24:MI:SS'), quoted identifiers,
+# comments, and dollar-quoted bodies are skipped, so format strings and
+# free-text values containing ":word" never trip the unknown-token guard.
 
 _TOKEN_RE = re.compile(r"(?<!:):([a-zA-Z_][a-zA-Z0-9_]*)")
 _ALLOWED_TOKENS = {"from", "to", "date", "drill_value"}
+
+# Matches an opening $tag$ (Postgres dollar-quoting) where tag is optional.
+_DOLLAR_QUOTE_RE = re.compile(r"\$(?:[A-Za-z_][A-Za-z0-9_]*)?\$")
+
+
+def _mask_non_code(sql: str) -> str:
+    """Return ``sql`` with every char OUTSIDE code regions blanked to a space.
+
+    Skips (leaves original chars untouched): single-quoted string literals
+    (handles ``''`` and MySQL ``\\'`` escapes), double-quoted / backtick
+    identifiers, ``--`` line comments, ``/* */`` block comments, and
+    ``$tag$...$tag$`` dollar-quoted strings. Indices stay aligned with the
+    input, so callers can run ``_TOKEN_RE`` over the mask and substitute only
+    genuine code-position tokens while literals/comments pass through verbatim.
+    """
+    out = list(sql)
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        if ch == "-" and i + 1 < n and sql[i + 1] == "-":
+            j = sql.find("\n", i)
+            if j == -1:
+                j = n
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if ch == "/" and i + 1 < n and sql[i + 1] == "*":
+            j = sql.find("*/", i + 2)
+            if j == -1:
+                for k in range(i, n):
+                    out[k] = " "
+                break
+            for k in range(i, j + 2):
+                out[k] = " "
+            i = j + 2
+            continue
+        if ch == "$":
+            m = _DOLLAR_QUOTE_RE.match(sql, i)
+            if m:
+                tag = m.group(0)
+                j = sql.find(tag, i + len(tag))
+                if j == -1:  # unterminated → treat the rest as quoted text
+                    for k in range(i, n):
+                        out[k] = " "
+                    break
+                for k in range(i, j + len(tag)):
+                    out[k] = " "
+                i = j + len(tag)
+                continue
+        if ch == "'":
+            j = i + 1
+            while j < n:
+                if sql[j] == "'":
+                    if j + 1 < n and sql[j + 1] == "'":
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                if sql[j] == "\\" and j + 1 < n:  # MySQL backslash escape
+                    j += 2
+                    continue
+                j += 1
+            if j >= n:
+                j = n
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        if ch in ('"', "`"):
+            q = ch
+            j = i + 1
+            while j < n:
+                if sql[j] == q:
+                    if j + 1 < n and sql[j + 1] == q:
+                        j += 2
+                        continue
+                    j += 1
+                    break
+                j += 1
+            if j >= n:
+                j = n
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+            continue
+        i += 1
+    return "".join(out)
 
 
 def _literal(s) -> str:
@@ -88,7 +179,11 @@ def render_widget_sql(sql: str, params: dict | None, dimensions: list[dict] | No
     :drill_value (drill-down). Unknown tokens raise ValueError. The rendered
     SQL is passed through validate_widget_sql again before returning (defense
     in depth — stored SQL is never trusted). The negative lookbehind avoids
-    matching Postgres ``::`` casts.
+    matching Postgres ``::`` casts. Token recognition is quote-aware: colons
+    inside string literals ('HH24:MI:SS' format strings, free text), quoted
+    identifiers, comments, and dollar-quoted bodies are NOT tokens — they pass
+    through untouched and never trip the unknown-token guard (2026-09-02 fix:
+    ``to_char(ts, 'HH24:MI:SS')`` used to raise "Unknown token :MI").
     """
     params = params or {}
     dimensions = dimensions or []
@@ -101,8 +196,11 @@ def render_widget_sql(sql: str, params: dict | None, dimensions: list[dict] | No
     dim_map = {d["token"]: d["column"] for d in dimensions}
     active_dims = params.get("filters") or {}
 
-    # Reject any :token that isn't whitelisted BEFORE substituting.
-    for m in _TOKEN_RE.finditer(sql):
+    # Reject any :token that isn't whitelisted BEFORE substituting. Run the
+    # scan over the code-only mask so colons inside literals/comments are
+    # never mistaken for tokens (e.g. to_char(ts, 'HH24:MI:SS')).
+    masked = _mask_non_code(sql)
+    for m in _TOKEN_RE.finditer(masked):
         tok = m.group(1)
         if tok in _ALLOWED_TOKENS:
             continue
@@ -129,7 +227,16 @@ def render_widget_sql(sql: str, params: dict | None, dimensions: list[dict] | No
             return "1=1"
         return f"{dim_map[name]} = {_literal(val)}"
 
-    rendered = _TOKEN_RE.sub(_sub, sql)
+    # Substitute only code-position matches (the mask aligns 1:1 with the
+    # original), splicing original literal/comment text through untouched.
+    parts = []
+    last = 0
+    for m in _TOKEN_RE.finditer(masked):
+        parts.append(sql[last:m.start()])
+        parts.append(_sub(m))
+        last = m.end()
+    parts.append(sql[last:])
+    rendered = "".join(parts)
     validate_widget_sql(rendered)  # defense in depth
     return rendered
 

@@ -78,6 +78,79 @@ def _maybe_fire_catalog_index_on_update(prev, payload: dict, record) -> None:
         logger.warning("catalog auto-index on update failed", exc_info=True)
 
 
+# ── AutomationTask schedule normalization ────────────────────────────────────
+# AutomationTask rows store cron_expression + next_run_at *derived from* the
+# free-form ``schedule`` string. Only the chat create tool (_create_automation)
+# and the /toggle resume path ever parsed; generic entity CRUD and seed.py
+# wrote the raw schedule and left cron_expression='' / next_run_at=NULL, so the
+# dispatcher (which fires ONLY status=="active" AND next_run_at IS NOT NULL)
+# never ran those tasks — silently. Mirror the chat tool's semantics here on
+# every generic create/update so NO entry point can persist a dead task.
+_AUTOMATION_MANUAL_LIKE = {"manual", "none", "on-demand", "on demand", "run manually", "run-on-demand"}
+
+
+def _normalize_automation_schedule_payload(
+    data: dict, current=None, *, creating: bool
+) -> None:
+    """Merge normalized schedule fields into an AutomationTask payload in place.
+
+    Semantics (parity with ``agent_tools._create_automation``):
+
+    * A ``schedule`` that is present and not manual-like is parsed to cron.
+      Unparseable schedules raise HTTP 400 — a task with a broken schedule is
+      exactly the silent-never-fires state this hook exists to prevent, and an
+      update that would persist it is rejected loudly instead.
+    * ``cron_expression`` is set from the parse; ``timezone`` falls back to the
+      existing row's value or UTC; ``next_run_at`` is computed when a cron
+      exists (the dispatcher only fires tasks with next_run_at).
+    * On create with a parseable schedule and no explicit status, status
+      defaults to ``active`` so the new task actually runs (tool parity).
+    * On update, the schedule is only re-parsed when it changed OR the row has
+      no cron_expression yet (dead-task repair). Touching name/description on
+      an already-scheduled task must not rewrite its next_run_at.
+    """
+    from app.models.automation_task import AutomationTask
+    from app.services.schedule_parser import (
+        ScheduleParseError,
+        next_run_at as _next_run,
+        parse_schedule,
+    )
+
+    schedule = (data.get("schedule") or "").strip()
+    is_manual = (schedule.lower() in _AUTOMATION_MANUAL_LIKE) or not schedule
+    if is_manual:
+        # Manual/absent schedule → nothing to schedule. On create, force the
+        # canonical paused default so the row can't sit "active" with no cron
+        # (active-without-next_run_at is the dead state the dispatcher skips).
+        if creating and not data.get("status"):
+            data["status"] = "paused"
+        return
+
+    current_schedule = ((current or {}).get("schedule") or "").strip()
+    current_cron = (current or {}).get("cron_expression") or ""
+    if (not creating) and schedule == current_schedule and current_cron:
+        return  # schedule unchanged and already normalized — nothing to do
+
+    try:
+        cron = parse_schedule(schedule)
+    except ScheduleParseError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:  # noqa: BLE001 — never persist a half-parsed schedule
+        logger.warning("AutomationTask schedule parse failed (%r): %s", schedule, e)
+        raise HTTPException(status_code=400, detail=f"Could not parse schedule: {e}")
+
+    tz_name = (data.get("timezone") or "").strip() or (current or {}).get("timezone") or "UTC"
+    data["cron_expression"] = cron
+    data["timezone"] = tz_name
+    data["next_run_at"] = _next_run(cron, tz_name=tz_name).isoformat()
+    if creating and not data.get("status"):
+        data["status"] = "active"
+    # Invalid/legacy statuses ('running' etc.) must not be persisted — coerce to
+    # the canonical default, exactly like the chat tool (see VALID_STATUSES).
+    if data.get("status") and data["status"] not in AutomationTask.VALID_STATUSES:
+        data["status"] = "active" if cron else "paused"
+
+
 # Entities whose rows are owned by a single user and must be isolated per
 # identity ("real software" data isolation). For these, list/get/update/
 # delete are scoped to ``created_by_id == current identity`` — a real
@@ -212,6 +285,12 @@ def register_entity_router(
         sort: str | None = Query(None, description="Sort field, - prefix for desc"),
         limit: int | None = Query(None, description="Max records to return"),
         skip: int | None = Query(None, description="Records to skip"),
+        fields: str | None = Query(
+            None,
+            description="Comma-separated column subset to return (list view), "
+                        "e.g. fields=id,name,description. Heavy body columns "
+                        "(e.g. Tool.skill_md) are excluded unless requested.",
+        ),
         db: Session = Depends(get_db),
         # Accept anonymous identities so unauthenticated browsing still works.
         # Write endpoints below still require real auth (get_current_user_required).
@@ -224,17 +303,21 @@ def register_entity_router(
         # memory in one shot. Explicit limits are clamped to a hard max.
         effective_limit = limit if limit is not None else DEFAULT_LIST_LIMIT
         effective_limit = min(effective_limit, MAX_LIST_LIMIT)
+        field_list = (
+            [f.strip() for f in fields.split(",") if f.strip()]
+            if fields else None
+        )
         inc_shared = _include_shared(entity_name)
         if q:
             return entity_service.filter_records(
                 model_class, db, q, sort, effective_limit, skip,
                 owner_id=owner, include_shared=inc_shared,
-                is_admin=is_admin,
+                is_admin=is_admin, fields=field_list,
             )
         return entity_service.list_records(
             model_class, db, sort, effective_limit, skip,
             owner_id=owner, include_shared=inc_shared,
-            is_admin=is_admin,
+            is_admin=is_admin, fields=field_list,
         )
 
     # --- POST / (create) ---
@@ -249,6 +332,11 @@ def register_entity_router(
         extra = {}
         if _include_shared(entity_name) and user:
             extra["resource_type"] = _resource_type_for_creator(user)
+        if entity_name == "AutomationTask":
+            # Parse schedule → cron_expression/next_run_at BEFORE insert so a
+            # dead (never-firing) task can't be persisted through the generic
+            # API. Raises 400 on an unparseable schedule.
+            _normalize_automation_schedule_payload(data, creating=True)
         result = entity_service.create_record(
             model_class, data, db, created_by,
             extra_fields=extra if extra else None,
@@ -346,10 +434,21 @@ def register_entity_router(
         user=Depends(get_current_user_required),
     ):
         _check_shareable_write(model_class, entity_name, record_id, user, db)
-        # Snapshot pre-update record for connection-field diff (KnowledgeBase only)
+        # Snapshot pre-update record for diff-driven hooks (KnowledgeBase
+        # catalog reindex; AutomationTask schedule re-parse). Owner-scoped so a
+        # caller can't probe another user's row through the hook.
         prev = None
-        if entity_name == "KnowledgeBase":
-            prev = entity_service.get_record(model_class, record_id, db)
+        if entity_name in ("KnowledgeBase", "AutomationTask"):
+            prev = entity_service.get_record(
+                model_class, record_id, db,
+                owner_id=_owner_id(entity_name, user),
+            )
+        if entity_name == "AutomationTask" and prev is not None:
+            # Re-parse when schedule/timezone changed or cron_expression is
+            # still empty (dead-task repair). This is what makes detail-page
+            # schedule edits actually take effect — the generic PUT is the only
+            # write path that page uses (it never hit the chat tool's parser).
+            _normalize_automation_schedule_payload(data, current=prev, creating=False)
         # Tool supports "claim" semantics — the Skills tab UI sends
         # ``{ created_by_id: <user.id> }`` to mark a tool as added to
         # My Skills. Tool is not in USER_SCOPED_ENTITIES so owner_id is

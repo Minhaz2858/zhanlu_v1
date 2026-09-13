@@ -1,6 +1,6 @@
 import { memo, useContext } from 'react';
 import { Handle, Position } from '@xyflow/react';
-import { nodeConfigError, nodeTypeDef } from '@/lib/workflowGraph';
+import { nodeConfigError, nodeTypeDef, nodeLabel } from '@/lib/workflowGraph';
 import { connectionMeta, nodeTypeOf, useNodeRegistry } from '@/lib/nodeTypeRegistry';
 import { useLanguage } from '@/lib/LanguageProvider';
 
@@ -94,7 +94,7 @@ function NodeShell({ type, config, selected, registry, children }) {
       >
         <span className="text-sm" style={{ color }}>{def?.icon || '•'}</span>
         <span className="min-w-0 flex-1 truncate text-xs font-semibold text-foreground">
-          {def?.displayName || type}
+          {nodeLabel(type, lang) || def?.displayName || type}
         </span>
         {selected && <span className="text-[9px] uppercase tracking-wide text-muted-foreground">{lang === 'zh' ? '已选' : 'sel'}</span>}
       </div>

@@ -47,6 +47,34 @@ def _schema_description(schema: dict) -> str:
     return str((schema.get("function") or {}).get("description") or "")
 
 
+# Tools that are only usable when the deployment has internet egress and a
+# reachable search provider. In offline deployments they must never reach
+# the planner or the loop (see WEB_TOOLS_ENABLED in config.py).
+_WEB_FAMILY_TOOL_NAMES = {
+    "web_search", "web_extract", "_web_search", "_web_extract", "tavily_search",
+}
+
+
+def apply_env_tool_gate(schemas: list[dict]) -> list[dict]:
+    """Remove environment-disabled tool schemas (e.g. web tools offline).
+
+    No-op when ``WEB_TOOLS_ENABLED`` is True (default). Schemas missing a
+    ``function.name`` are always kept (defensive). Never raises.
+    """
+    if not schemas:
+        return schemas
+    if getattr(settings, "WEB_TOOLS_ENABLED", True):
+        return list(schemas)
+    try:
+        return [
+            s for s in schemas
+            if not _schema_name(s) or _schema_name(s) not in _WEB_FAMILY_TOOL_NAMES
+        ]
+    except Exception as exc:  # noqa: BLE001 — gate must never break tool loading
+        logger.warning("apply_env_tool_gate failed (no-op): %s", exc)
+        return list(schemas)
+
+
 def _embed_or_none(texts: list[str]):
     """Embed ``texts`` with the shared local embedder; None on failure."""
     try:
@@ -144,6 +172,12 @@ def select_tools_for_turn(
 
     Schemas missing a ``function.name`` are always kept (defensive).
     """
+    if not schemas:
+        return schemas
+    # Environment gate FIRST (covers every return path below, including the
+    # fail-open full-list returns): offline deployments drop web tools before
+    # the planner/loop can ever see them.
+    schemas = apply_env_tool_gate(schemas)
     if not schemas:
         return schemas
     if _mode() != "dynamic":

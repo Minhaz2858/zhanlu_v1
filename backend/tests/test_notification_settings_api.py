@@ -19,14 +19,20 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import delete
+from types import SimpleNamespace
 
 from app.database import SessionLocal, engine
+from app.deps import get_current_user_optional
 from app.models.automation_execution import AutomationExecution
 from app.models.automation_file import AutomationFile
 from app.models.automation_task import AutomationTask
 from app.models.base import Base
 from app.routers import automation_api
 from app.services.notification_gateway import generate_download_token
+
+
+# notification-settings PATCH is user-gated (tenant check against the task).
+_FAKE_USER = SimpleNamespace(id="notify-test-user", org_id="org1", role="user")
 
 
 @pytest.fixture(autouse=True)
@@ -58,6 +64,7 @@ def _make_app(db):
         yield db
 
     app.dependency_overrides[automation_api.get_db] = _override_db
+    app.dependency_overrides[get_current_user_optional] = lambda: _FAKE_USER
     return app
 
 

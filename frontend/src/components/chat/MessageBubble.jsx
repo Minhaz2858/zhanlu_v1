@@ -2,7 +2,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import StreamingMarkdown from './StreamingMarkdown';
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, Database, Table2 } from 'lucide-react';
+import { Bot, User, Eye, Copy, Check, Play, Settings, ArrowRight, ChevronDown, ChevronUp, Pencil, Database, Table2, FileText, FileSpreadsheet, Image as ImageIcon, File, ExternalLink } from 'lucide-react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import ClarifyOptions from './ClarifyOptions';
 import ClarifyBatchForm from './ClarifyBatchForm';
@@ -41,6 +41,20 @@ function preProcessContent(text) {
   result = result.replace(
     /^([^\n|]+?)(\s*\|\s*[^\n|]+\s*(?:\|\s*[^\n|]+\s*){2,}\|[^\n]*)$/gm,
     (_match, prefix, tablePart) => `${prefix.trimEnd()}\n${tablePart.trimStart()}`,
+  );
+
+  // --- Heading-unglue fix (2026-09-03) ---
+  // When the LLM glues a markdown heading (##, ###, …) to the end of a
+  // prose line — e.g. "...text. ## Product Breakdown" — remark-gfm will
+  // NOT recognise it as a heading because `#` must start a line (or be
+  // preceded only by whitespace). Worse, the table that follows then
+  // parses as raw text too. Split a newline before the `#` so the
+  // heading AND the following table/section are recognised correctly.
+  // We require 2+ hashes so single-hash tokens like "#todo" / "#anchor"
+  // / "C#" are left untouched (those are never ATX headings anyway).
+  result = result.replace(
+    /(\S)([ \t]+)(#{2,6}[ \t]+[^\n]+)$/gm,
+    (_match, before, _ws, heading) => `${before}\n${heading}`,
   );
 
   // --- Pipe-reflow: detect inline tables on a single line ---
@@ -90,6 +104,19 @@ function preProcessContent(text) {
   result = result.replace(/\n{3,}/g, '\n\n');
 
   return result;
+}
+
+/**
+ * Pick an icon for an attachment chip based on its file name/extension.
+ * Mirrors ChatInput's attachmentIcon so history cards look identical to
+ * the draft chips shown before send.
+ */
+function attachmentIcon(name) {
+  const ext = (name || '').split('.').pop().toLowerCase();
+  if (['png', 'jpg', 'jpeg', 'webp', 'gif', 'bmp', 'tiff', 'tif'].includes(ext)) return ImageIcon;
+  if (['xlsx', 'xls', 'csv', 'tsv'].includes(ext)) return FileSpreadsheet;
+  if (['pdf', 'docx', 'pptx', 'ppt', 'txt', 'md', 'json', 'html', 'htm'].includes(ext)) return FileText;
+  return File;
 }
 
 /** Inline code copy button hook */
@@ -231,7 +258,7 @@ function parseContent(content) {
   return parts;
 }
 
-export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onArtifactEdit, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating, onRegenerate }) {
+export default function MessageBubble({ message, isStreaming, onSelectOption, onSelectOther, onPreview, onArtifactPreview, onArtifactEdit, onBatchClarifySubmit, onAgentPreview, onAgentRun, onOpenRun, userRequestedFormat, onEditMessage, onFeedback, feedbackRating, showRoleRating, onRoleRelevance, roleRelevanceRating, onRegenerate, onPreviewFile }) {
   const { lang } = useLanguage();
   const isUser = message.role === 'user';
   const parts = isUser ? null : parseContent(message.content || '');
@@ -365,6 +392,44 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
               className="max-w-full rounded-2xl rounded-tr-sm bg-secondary px-4 py-2.5 text-sm text-foreground"
               title={needsTruncation ? rawContent : undefined}
             >
+              {/* Attached files (Kimi/ChatGPT-style): the upload chip shown
+                  in the input becomes a clickable card in chat history so
+                  the user can see which file the message carried and open
+                  it. Rendered above the text, like ChatGPT/Kimi. */}
+              {attachmentList.length > 0 && (
+                <div className="mb-1.5 flex flex-col items-start gap-1">
+                  {attachmentList.map((att, i) => {
+                    const attName = att?.name || att?.file_url || '';
+                    const Icon = attachmentIcon(attName);
+                    return (
+                      <a
+                        key={i}
+                        href={att?.file_url}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => {
+                          // Kimi/ChatGPT-style: open the file in the right
+                          // preview pane when the parent provides the
+                          // callback; otherwise fall back to the default
+                          // new-tab navigation (e.g. mobile has no pane).
+                          if (onPreviewFile && att?.file_url) {
+                            e.preventDefault();
+                            onPreviewFile(att);
+                          }
+                          e.stopPropagation();
+                        }}
+                        className="inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-card/70 px-2.5 py-1.5 text-xs text-foreground transition-colors hover:bg-secondary"
+                        title={att?.file_url}
+                        data-testid="msg-attachment-chip"
+                      >
+                        <Icon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" />
+                        <span className="truncate">{attName}</span>
+                        <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+                      </a>
+                    );
+                  })}
+                </div>
+              )}
               {userExpanded ? (
                 <div className="whitespace-pre-wrap break-words">{rawContent}</div>
               ) : (
@@ -538,26 +603,53 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
             )}
             {/* Kimi/GPT-style data-source citations: rendered as small chips
                 under the assistant answer when the turn queried datasources.
-                Each chip shows the source name + row count. */}
+                Each chip shows the source name + row count; web/file sources
+                carrying a `url` render as clickable links (live sources). */}
             {!isUser && !isStreaming && Array.isArray(message.sources) && message.sources.length > 0 && (
               <div className="mt-2 flex flex-wrap items-center gap-1.5">
                 <span className="inline-flex items-center gap-1 text-[11px] font-medium uppercase tracking-wide text-muted-foreground/70">
                   <Database className="h-3 w-3" />
                   {lang === 'en' ? 'Sources' : '数据来源'}
                 </span>
-                {message.sources.slice(0, 6).map((src, i) => (
-                  <span
-                    key={`${src.source_id || src.source_name || ''}-${i}`}
-                    className="inline-flex max-w-[220px] items-center gap-1 rounded-full border border-border bg-secondary/50 px-2 py-0.5 text-[11px] text-muted-foreground"
-                    title={src.source_name || src.source_id || ''}
-                  >
-                    <Table2 className="h-3 w-3 shrink-0" />
-                    <span className="truncate">{src.source_name || src.source_id || 'data source'}</span>
-                    {typeof src.rows === 'number' && (
-                      <span className="shrink-0 text-muted-foreground/60">{src.rows} rows</span>
-                    )}
-                  </span>
-                ))}
+                {message.sources.slice(0, 6).map((src, i) => {
+                  const srcUrl = typeof src.url === 'string' && /^https?:\/\//.test(src.url) ? src.url : null;
+                  const chipInner = (
+                    <>
+                      {srcUrl
+                        ? <ExternalLink className="h-3 w-3 shrink-0 text-muted-foreground/70" />
+                        : <Table2 className="h-3 w-3 shrink-0" />}
+                      <span className="truncate">{src.source_name || src.source_id || 'data source'}</span>
+                      {typeof src.rows === 'number' && (
+                        <span className="shrink-0 text-muted-foreground/60">{src.rows} rows</span>
+                      )}
+                    </>
+                  );
+                  const chipCls = 'inline-flex max-w-[220px] items-center gap-1 rounded-full border border-border bg-secondary/50 px-2 py-0.5 text-[11px] text-muted-foreground';
+                  if (srcUrl) {
+                    return (
+                      <a
+                        key={`${src.source_id || src.source_name || ''}-${i}`}
+                        href={srcUrl}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        data-testid="source-chip-link"
+                        className={`${chipCls} hover:bg-secondary hover:text-foreground`}
+                        title={src.source_name || srcUrl}
+                      >
+                        {chipInner}
+                      </a>
+                    );
+                  }
+                  return (
+                    <span
+                      key={`${src.source_id || src.source_name || ''}-${i}`}
+                      className={chipCls}
+                      title={src.source_name || src.source_id || ''}
+                    >
+                      {chipInner}
+                    </span>
+                  );
+                })}
               </div>
             )}
             {/* Message actions: copy, share, like, dislike */}

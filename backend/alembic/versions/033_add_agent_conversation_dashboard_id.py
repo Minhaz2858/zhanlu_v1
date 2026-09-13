@@ -14,7 +14,7 @@ import sqlalchemy as sa
 
 
 revision = "033"
-down_revision = "032"
+down_revision = "032b_dashboard_tables"
 branch_labels = None
 depends_on = None
 

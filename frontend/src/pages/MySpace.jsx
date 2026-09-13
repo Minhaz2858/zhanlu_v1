@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
@@ -10,13 +10,14 @@ import KbSetupDialog from '@/components/kb/KbSetupDialog';
 import KbCard from '@/components/kb/KbCard';
 import ProjectsView from '@/components/project/ProjectsView';
 import StepsAgentBuilder from '@/components/agentbuilder/StepsAgentBuilder';
-import ProjectCreateDialog from '@/components/project/ProjectCreateDialog';
 import { Button } from '@/components/ui/button';
-import { Plus, Bot, Database, Trash2, Play, Loader2, Folder, FileEdit, FolderKanban, Archive, LayoutDashboard } from 'lucide-react';
+import { Plus, Bot, Database, Trash2, Play, Loader2, FileEdit, FolderKanban, LayoutDashboard, Workflow as WorkflowIcon, PlugZap } from 'lucide-react';
 import { hasDraft as hasDraftData, clearDraft, flushDraft, loadDraft } from '@/lib/draftManager';
 import { filterUserAgents } from '@/lib/systemAgents';
 import AgentsView from '@/components/agent/AgentsView';
+import McpServersView from '@/components/McpServersView';
 import { listDashboards, listDashboardApps, deleteDashboard, deleteDashboardApp } from '@/api/dashboards';
+import { listWorkflows, createWorkflow } from '@/api/workflows';
 import { toast } from 'sonner';
 
 const AGENT_DRAFT_KEYS = {
@@ -45,11 +46,21 @@ export default function MySpace() {
   const [initialProjectId, setInitialProjectId] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+  // Monotonic token so a slower response from a previous tab can never
+  // overwrite the current tab's items (mount races tab switches).
+  const loadToken = useRef(0);
 
   // When arriving from /my-space/project/:id → "New Agent", open the embedded
   // builder pre-selecting the project. We read ?initialProjectId once and
   // strip it from the URL so a refresh doesn't reopen the builder.
   useEffect(() => {
+    const tabParam = searchParams.get('tab');
+    if (tabParam && ['project', 'agent', 'kb', 'dashboard', 'workflow'].includes(tabParam)) {
+      setTab(tabParam);
+      const next = new URLSearchParams(searchParams);
+      next.delete('tab');
+      setSearchParams(next, { replace: true });
+    }
     const pid = searchParams.get('initialProjectId');
     if (pid) {
       setInitialProjectId(pid);
@@ -72,10 +83,12 @@ export default function MySpace() {
     { key: 'agent', label: t.mySpace.tabs.agent, icon: Bot, entity: 'AgentApp' },
     { key: 'kb', label: t.mySpace.tabs.kb, icon: Database, entity: 'KnowledgeBase' },
     { key: 'dashboard', label: t.mySpace.tabs.dashboard, icon: LayoutDashboard, entity: 'Dashboard' },
+    { key: 'workflow', label: t.mySpace.tabs.workflow || (lang === 'en' ? 'Agent Workflow' : '智能体工作流'), icon: WorkflowIcon, entity: 'AgentApp' },
+    { key: 'mcp', label: (lang === 'en' ? 'MCP Servers' : 'MCP 服务器'), icon: PlugZap, entity: null },
   ];
   const current = TABS.find((x) => x.key === tab);
 
-  useEffect(() => { load(); /* eslint-disable-next-line */ }, [tab]);
+  useEffect(() => { const token = ++loadToken.current; load(token); /* eslint-disable-next-line */ }, [tab]);
 
   // Detect existing Agent-builder drafts so the user can see the location
   // of unfinished creations on the Agent tab (and from any tab via the
@@ -121,9 +134,13 @@ export default function MySpace() {
   function continueAgentDraft() {
     setBuilderOpen(true);
   }
-  async function load() {
+  async function load(token) {
     setLoading(true);
     try {
+      if (tab === 'mcp') {
+        // McpServersView fetches connected servers + marketplace itself.
+        return;
+      }
       if (tab === 'dashboard') {
         // Merge BOTH dashboard kinds: legacy SQL-widget dashboards
         // (GET /api/dashboards) + full-stack realtime apps
@@ -133,13 +150,22 @@ export default function MySpace() {
           listDashboards().catch(() => []),
           listDashboardApps().catch(() => []),
         ]);
+        if (token !== loadToken.current) return; // stale response (tab switched mid-flight)
         setItems([
           ...(Array.isArray(apps) ? apps : []).map((a) => ({ ...a, kind: 'app', id: a.slug })),
           ...(Array.isArray(legacy) ? legacy : []).map((d) => ({ ...d, kind: 'legacy' })),
         ]);
         return;
       }
+      if (tab === 'workflow') {
+        // Flow-mode agents via the workflows API (canvas CRUD surface).
+        const wfs = await listWorkflows().catch(() => []);
+        if (token !== loadToken.current) return; // stale response (tab switched mid-flight)
+        setItems(Array.isArray(wfs) ? wfs : []);
+        return;
+      }
       const raw = await base44.entities[current.entity].list('-updated_date', 200);
+      if (token !== loadToken.current) return; // stale response (tab switched mid-flight)
       // My Space → Agents shows the USER's own agents only. Platform
       // system agents (general_assistant, agent_builder, skill_agent,
       // automation_agent, power_user, data_agent) are seeded on
@@ -153,7 +179,7 @@ export default function MySpace() {
   }
   async function remove(id) {
     await base44.entities[current.entity].delete(id);
-    load();
+    load(++loadToken.current);
   }
   async function removeDashboard(item) {
     // Full-stack apps delete via DELETE /api/dashboards/app-records/{slug};
@@ -169,10 +195,18 @@ export default function MySpace() {
     } catch (e) {
       toast.error(lang === 'en' ? 'Failed to delete dashboard' : '删除仪表盘失败');
     } finally {
-      load();
+      load(++loadToken.current);
     }
   }
   function openNewKb() { setKbEdit(null); setKbOpen(true); }
+  async function createAndOpenWorkflow() {
+    try {
+      const wf = await createWorkflow();
+      navigate(`/my-space/workflow/${wf.id}`);
+    } catch (e) {
+      toast.error(lang === 'en' ? 'Failed to create workflow' : '创建工作流失败');
+    }
+  }
   function openEditKb(item) { setKbEdit(item); setKbOpen(true); }
   async function togglePauseKb(item) {
     const updated = await base44.entities.KnowledgeBase.update(item.id, { status: item.status === 'paused' ? 'active' : 'paused' });
@@ -206,7 +240,7 @@ export default function MySpace() {
       <div className="h-full">
         <StepsAgentBuilder
           initialProjectId={initialProjectId}
-          onClose={() => { setBuilderOpen(false); setInitialProjectId(null); load(); }}
+          onClose={() => { setBuilderOpen(false); setInitialProjectId(null); load(++loadToken.current); }}
         />
       </div>
     );
@@ -224,8 +258,8 @@ export default function MySpace() {
             </button>
           ))}
         </div>
-        {tab !== 'project' && (
-          <Button onClick={() => (tab === 'kb' ? openNewKb() : tab === 'agent' ? setBuilderOpen(true) : setDialogOpen(true))} size="sm" variant="outline" className="mb-1 shrink-0 relative">
+        {tab !== 'project' && tab !== 'mcp' && (
+          <Button onClick={() => (tab === 'kb' ? openNewKb() : tab === 'agent' ? setBuilderOpen(true) : tab === 'workflow' ? createAndOpenWorkflow() : setDialogOpen(true))} size="sm" variant="outline" className="mb-1 shrink-0 relative">
             <Plus className="h-4 w-4" /> {t.common.new} {t.createDialog.resourceLabels[tab]}
             {tab === 'agent' && draftInfo && (
               <span className="ml-1.5 inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-300" title={lang === 'en' ? 'You have an unfinished draft' : '有未完成的草稿'}>
@@ -241,6 +275,8 @@ export default function MySpace() {
         <ProjectsView />
       ) : tab === 'agent' ? (
         <AgentsView />
+      ) : tab === 'mcp' ? (
+        <McpServersView />
       ) : loading ? (
         <div className="flex justify-center py-20"><Loader2 className="h-6 w-6 animate-spin text-muted-foreground" /></div>
       ) : items.length === 0 ? (
@@ -288,6 +324,45 @@ export default function MySpace() {
                 </button>
                 <button
                   onClick={() => removeDashboard(d)}
+                  className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
+                >
+                  <Trash2 className="h-3 w-3" /> {t.common.delete}
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : tab === 'workflow' ? (
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+          {items.map((wf) => (
+            <div
+              key={wf.id}
+              className="group flex cursor-pointer flex-col rounded-xl border border-border bg-card p-4 shadow-sm transition-colors hover:border-primary/40"
+              onClick={() => navigate(`/my-space/workflow/${wf.id}`)}
+            >
+              <div className="mb-1.5 flex items-center gap-2">
+                <WorkflowIcon className="h-4 w-4 shrink-0 text-primary" />
+                <h3 className="min-w-0 flex-1 truncate font-display text-sm text-foreground">{translate(wf.name)}</h3>
+                <span className={`inline-flex shrink-0 items-center rounded-full px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide ${
+                  wf.status === 'published'
+                    ? 'bg-[hsl(var(--chart-2))]/10 text-[hsl(var(--chart-2))]'
+                    : 'bg-muted text-muted-foreground'
+                }`}>
+                  {wf.status === 'published' ? (lang === 'en' ? 'Published' : '已发布') : (lang === 'en' ? 'Draft' : '草稿')}
+                </span>
+              </div>
+              <p className="mb-3 line-clamp-2 min-h-[2rem] text-xs text-muted-foreground">
+                {translate(wf.description) || (lang === 'en' ? 'AI agent workflow' : 'AI 智能体工作流')}
+              </p>
+              <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <button
+                  onClick={() => navigate(`/my-space/workflow/${wf.id}`)}
+                  className="inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs transition-colors hover:bg-secondary"
+                >
+                  <Play className="h-3 w-3" /> {lang === 'en' ? 'Open Canvas' : '打开画布'}
+                </button>
+                <button
+                  onClick={() => remove(wf.id)}
                   className="ml-auto inline-flex items-center gap-1 rounded-md border border-border px-2.5 py-1 text-xs text-muted-foreground transition-colors hover:text-destructive"
                 >
                   <Trash2 className="h-3 w-3" /> {t.common.delete}

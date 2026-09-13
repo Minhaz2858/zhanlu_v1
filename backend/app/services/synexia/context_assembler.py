@@ -11,6 +11,8 @@ Token budget is enforced BEFORE the LLM call, not after.
 """
 
 import logging
+
+from app.config import settings
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -716,10 +718,20 @@ def _get_agent_memories(db: Session, agent_name: str, user_message: str) -> list
 
 
 def _get_available_tools(db: Session, agent_name: str) -> list:
-    """Get available tool names for the agent."""
+    """Get available tool names for the agent.
+
+    Environment gate: when ``WEB_TOOLS_ENABLED`` is False (offline
+    deployment), the web tool family is removed here too so the FSM context
+    / planner can never advertise a tool that cannot succeed. Mirrors
+    ``dynamic_tools.apply_env_tool_gate``.
+    """
     try:
         from app.services.agent_tools import tool_registry
-        return list(tool_registry.keys()) if hasattr(tool_registry, 'keys') else []
+        names = list(tool_registry.keys()) if hasattr(tool_registry, 'keys') else []
+        if not getattr(settings, "WEB_TOOLS_ENABLED", True):
+            _web = {"web_search", "web_extract", "_web_search", "_web_extract", "tavily_search"}
+            names = [n for n in names if n not in _web]
+        return names
     except Exception:
         return []
 

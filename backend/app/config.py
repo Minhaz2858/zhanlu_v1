@@ -281,6 +281,15 @@ class Settings(BaseSettings):
     # Supported: "tavily", "serper", "bocha", "duckduckgo", "bing"
     SEARCH_PROVIDER: str = "duckduckgo"
     SEARCH_API_KEY: str = ""  # Not needed for duckduckgo / bing; required for tavily / serper / bocha
+    # Offline deployments (no internet egress / no SEARCH_API_KEY): when
+    # False, web_search / web_extract schemas are removed from every agent
+    # toolset BEFORE the planner and the agent loop see them — no phantom
+    # "Search the web" plan step, no turn budget burned on unreachable
+    # providers (each httpx attempt can hang up to the provider timeout),
+    # and no failed-lookup row that poisons the run verdict. The agent then
+    # answers purely from bound data sources. Default True — flag-off only
+    # where the deployment genuinely has no usable web access.
+    WEB_TOOLS_ENABLED: bool = True
 
     # Image Generation — provider selected via IMAGE_API_PROVIDER
     # Supported: "openai" (reuses OPENAI_API_KEY), "fal"
@@ -765,47 +774,6 @@ class Settings(BaseSettings):
     DELIVERABLE_PHASE_LOCK_ENABLED: bool = False
     QUERY_PURPOSE_TAGGING_ENABLED: bool = False
 
-    # ── QUALITY_EVAL (Tier 2 — Approach C) ───────────────────────────────
-    # Post-FINALIZE semantic quality layer: a combined completeness +
-    # reflexion LLM critique on the generated response, with a bounded
-    # corrective re-generation loop.  See
-    # app.services.synexia.quality_eval.  Disable to skip the extra LLM
-    # calls entirely (heuristic-only reflexion remains via _run_reflexion).
-    SYNEXIA_QUALITY_EVAL_ENABLED: bool = True
-    # Max corrective iterations.  Each iteration = 1 regenerate + 1 re-eval
-    # LLM call.  0 extra calls on a clean accept; up to
-    # 1 + max_iterations*2 calls on a bad output.
-    SYNEXIA_QUALITY_EVAL_MAX_ITERATIONS: int = 2
-    # Enable quality eval in non-FSM paths (ReAct v2, v3 non-FSM streaming).
-    # When True (default), both ReAct (v2) and v3 streaming non-FSM paths
-    # run the standalone evaluate_response_quality() after the response is
-    # generated.  Set False to restrict quality eval to FSM-only.
-    QUALITY_EVAL_ALL_PATHS: bool = True
-
-    # Universal Self-Evaluation & Re-Planning loop (all agents, all data
-    # sources). When enabled, the agent loop verifies its draft answer against
-    # the user's request at the synthesis boundary (deterministic detectors +
-    # one optional LLM strict-inspector call) and re-plans up to
-    # SELF_EVAL_MAX_REPLANS times before answering with a gap disclosure.
-    # Default OFF: flag-off keeps behavior byte-identical.
-    SELF_EVAL_REPLAN_ENABLED: bool = False
-    # Sub-flag: run the single LLM strict-inspector call at the synthesis
-    # boundary. When False, only deterministic detectors run.
-    SELF_EVAL_LLM_GATE_ENABLED: bool = True
-    # Max re-plan nudges per user turn before escalating to IMPOSSIBLE/disclose.
-    # 2026-08-25: reduced default from 3 to 1 to prevent the 3-cycle "collapse"
-    # pattern where each nudge causes a content_replace SSE that visually
-    # replaces the user's streamed text. With MAX_REPLANS=1, the gate can fire
-    # at most one nudge per turn before falling through to finalize.
-    SELF_EVAL_MAX_REPLANS: int = 1
-    # Timeout for the synchronous LLM evaluator call (mirrors quality_eval).
-    SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 15.0
-    # 2026-08-25: data-sufficient fast-path. When the agent has usable data
-    # AND already produced substantive prose (>= N chars) AND self-eval has
-    # already nudged once, skip further nudges and finalize. Set to 0 to
-    # disable (legacy behavior).
-    SELF_EVAL_DATA_SUFFICIENT_MIN_PROSE: int = 200
-
     # ── Multi-Domain Enrichment (2026-08-25) ──────────────────────────────
     # Default per-turn cap for ask_data_agent calls. The dynamic estimator
     # (_estimate_ask_data_agent_cap) raises the cap above this for queries
@@ -872,9 +840,6 @@ class Settings(BaseSettings):
     AGENT_FAST_VERIFY_NUDGE_MAX: int = 0                     # was 2
     AGENT_FAST_DATA_AGENT_BUDGET_SECONDS: float = 30.0        # was 60
     AGENT_FAST_FORCE_SYNTHESIS_MAX_RETRIES: int = 0          # was 1
-    # Self-eval KEPT per user decision (safety net), but tightened:
-    AGENT_FAST_SELF_EVAL_MAX_REPLANS: int = 1                 # was 3
-    AGENT_FAST_SELF_EVAL_LLM_GATE_TIMEOUT_S: float = 5.0      # was 15.0
     # Synthesis quality knobs:
     AGENT_FAST_SYNTHESIS_MAX_TOKENS: int = 3072              # was 1536
     AGENT_FAST_SYNTHESIS_TEMPERATURE: float = 0.3            # was default
@@ -1097,6 +1062,13 @@ class Settings(BaseSettings):
     # fallback (catches external writers that never NOTIFY). Non-Postgres
     # backends always use interval polling. Default False.
     DASHBOARD_PG_LISTEN_ENABLED: bool = False
+    # #7: require a logged-in user on generated dashboard-app DATA endpoints
+    # (metrics REST, config.json, WS, non-shell SPA paths). The SPA shell and
+    # hashed static bundles stay anonymous so the iframe can boot; the shell
+    # then fetches config/metrics WITH the session token (?token=) that the
+    # template frontend reads from localStorage (2026-09-02 token flow).
+    # Default False (public dashboards); flip True to enforce.
+    DASHBOARD_ENDPOINT_AUTH_ENABLED: bool = False
     # T12: per-turn cap on describe_schema calls when the user request is
     # dashboard-shaped. Prevents the agent from exhausting its tool-loop
     # budget on redundant schema exploration instead of calling

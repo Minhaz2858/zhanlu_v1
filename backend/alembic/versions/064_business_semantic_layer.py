@@ -19,7 +19,7 @@ import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
 revision = "064_business_semantic_layer"
-down_revision = "063_add_weekly_digest_summaries"
+down_revision = "063b_ensure_kb_catalog_tables"
 branch_labels = None
 depends_on = None
 

@@ -64,7 +64,6 @@ class FSMState(str, Enum):
     OBSERVE = "observe"
     VERIFY = "verify"
     FINALIZE = "finalize"
-    QUALITY_EVAL = "quality_eval"
     DONE = "done"
     FAIL = "fail"
 
@@ -105,7 +104,7 @@ class ExecutionRequest(BaseModel):
     # Resolved hierarchical LLM endpoint (project/agent → llm_models pin).
     # When set, EVERY LLM call inside the FSM (GOAL task-spec parse, PLAN
     # generation, ACT tool/nl2sql/synthesize nodes, VERIFY rubric,
-    # QUALITY_EVAL, FINALIZE response + streaming) targets this exact
+    # FINALIZE response + streaming) targets this exact
     # provider+model instead of the legacy .env defaults.  The chat-loop
     # routers resolve it via ``resolve_effective_llm`` and attach it here.
     endpoint: Optional[Any] = None
@@ -143,15 +142,6 @@ class ExecutionResult(BaseModel):
             "Phase B quality-gate outcome. Present when artifacts were "
             "produced; passed=False means they were held back (low "
             "confidence) and are listed in held_artifact_ids."
-        ),
-    )
-    quality_eval: Optional[dict] = Field(
-        default=None,
-        description=(
-            "QUALITY_EVAL (Tier 2) outcome — combined completeness + "
-            "reflexion verdict on the generated response, with the "
-            "corrective-loop iteration count. Present when the QUALITY_EVAL "
-            "phase ran (SYNEXIA_QUALITY_EVAL_ENABLED)."
         ),
     )
 
@@ -652,113 +642,6 @@ class SynexiaFSM:
         except Exception as e:
             logger.warning("Reflexion failed (non-fatal): %s", e)
 
-    def run_quality_eval(
-        self,
-        request: ExecutionRequest,
-        assistant_text: str,
-        *,
-        on_state_change=None,
-    ):
-        """Run the QUALITY_EVAL phase (Tier 2 — Approach C).
-
-        A combined completeness + reflexion LLM critique on the generated
-        response, with a bounded corrective re-generation loop.  Re-generates
-        the response **text only** (no tool re-execution) — mirroring how
-        Claude Code / Manus revise the writing instead of re-running the
-        investigation.
-
-        Args:
-            request: The execution request (for user_message + task_spec).
-            assistant_text: The generated response to critique.
-            on_state_change: Optional SSE callback.  When supplied (blocking
-                path), transitions through the QUALITY_EVAL state so a
-                watcher sees the phase.  When None (streaming post-stream
-                path), no transition is emitted (run() already returned).
-
-        Returns:
-            A ``QualityEvalResult`` (with ``final_text`` possibly revised),
-            or ``None`` when QUALITY_EVAL is disabled or failed (non-fatal —
-            the caller falls back to the heuristic ``_run_reflexion``).
-
-        Cost: 0 extra LLM calls on a clean accept; up to
-        ``1 + max_iterations*2`` calls on a bad output.
-        """
-        from app.services.synexia.quality_eval import run_quality_loop
-
-        if not getattr(settings, "SYNEXIA_QUALITY_EVAL_ENABLED", True):
-            return None
-
-        if on_state_change is not None:
-            self._transition(FSMState.QUALITY_EVAL, on_state_change=on_state_change)
-
-        task_spec = self.execution.task_spec or {}
-        response_prompt = self._build_response_prompt(request)
-        max_iter = getattr(settings, "SYNEXIA_QUALITY_EVAL_MAX_ITERATIONS", 2)
-
-        # Bridge to the sync call_llm (which already has retry/backoff/
-        # failover — P0 DONE 2026-07-29).  run_quality_loop injects this.
-        # run_quality_eval is invoked via asyncio.to_thread() in the
-        # streaming path (agents.py), so we are in a worker thread: a
-        # fresh event loop is always safe.  (Fixed 2026-08-17 — the
-        # previous version returned the coroutine object without awaiting,
-        # so every FSM quality eval silently fell back to the heuristic.)
-        def _llm_call(prompt, messages, **kwargs):
-            import asyncio
-            from app.services.llm_service import call_llm
-
-            result = call_llm(
-                prompt=prompt,
-                messages=messages,
-                temperature=kwargs.get("temperature", 0),
-                endpoint=request.endpoint,
-            )
-            # Production call_llm is async → run it in a fresh loop (we are
-            # in a worker thread via asyncio.to_thread).  Tests may inject a
-            # plain sync stub returning a dict → pass it through untouched.
-            if not asyncio.iscoroutine(result):
-                return result
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(result)
-            finally:
-                try:
-                    loop.close()
-                except Exception:  # pragma: no cover — loop teardown best-effort
-                    pass
-
-        try:
-            qer = run_quality_loop(
-                user_message=request.user_message,
-                initial_text=assistant_text,
-                task_spec=task_spec,
-                response_prompt=response_prompt,
-                max_iterations=max_iter,
-                llm_call=_llm_call,
-            )
-        except Exception as e:
-            logger.warning("QUALITY_EVAL failed (non-fatal): %s", e)
-            return None
-
-        # Persist the verdict (parity with _run_reflexion's storage pattern).
-        factors = dict(self.execution.confidence_factors or {})
-        factors["quality_eval"] = qer.to_dict()
-        self.execution.confidence_factors = factors
-
-        # Penalize confidence for non-accept verdicts so the downstream
-        # quality gate can catch low-quality outputs (same convention as
-        # _run_reflexion).
-        if not qer.is_ok:
-            penalty = 0.15 if qer.verdict == "reject" else 0.08
-            self.execution.confidence_score = max(
-                0.0, (self.execution.confidence_score or 0.5) - penalty
-            )
-
-        self.db.commit()
-        logger.info(
-            "QUALITY_EVAL: verdict=%s completeness=%.2f iterations=%d",
-            qer.verdict, qer.completeness_score, qer.iterations,
-        )
-        return qer
 
     def _run_finalize(
         self, request: ExecutionRequest, *, generate_response: bool = True,
@@ -794,21 +677,11 @@ class SynexiaFSM:
         # here — it is filled in by the streaming path after FINALIZE returns.
         if generate_response:
             assistant_content = self._generate_response(request)
-            # QUALITY_EVAL (Tier 2 — Approach C): combined completeness +
-            # reflexion LLM critique with a bounded corrective
-            # re-generation loop.  Supersedes the heuristic-only
-            # _run_reflexion when enabled; falls back to it when disabled.
-            _qer = self.run_quality_eval(
-                request, assistant_content, on_state_change=on_state_change,
-            )
-            if _qer is not None:
-                # The corrective loop may have revised the response text.
-                if _qer.final_text:
-                    assistant_content = _qer.final_text
-            else:
-                # Disabled — heuristic reflexion only (existing behaviour).
-                self._run_reflexion(request, assistant_content)
-            # Re-read confidence after reflexion / QUALITY_EVAL penalty.
+            # Heuristic reflexion only — the QUALITY_EVAL corrective
+            # re-generation loop was removed (2026-09-03, user decision:
+            # no post-stream content replacement).
+            self._run_reflexion(request, assistant_content)
+            # Re-read confidence after reflexion penalty.
             confidence = self.execution.confidence_score or confidence
         else:
             self._deferred_response_prompt = self._build_response_prompt(request)
@@ -1016,13 +889,6 @@ class SynexiaFSM:
 
         logger.info("Execution %s finalized (confidence=%.2f)", self.execution.id, confidence)
 
-        # Surface the QUALITY_EVAL verdict on the result (None when disabled
-        # or when the streaming path defers it to post-stream).
-        _quality_eval_out = None
-        _cf = self.execution.confidence_factors or {}
-        if isinstance(_cf, dict) and isinstance(_cf.get("quality_eval"), dict):
-            _quality_eval_out = _cf["quality_eval"]
-
         return ExecutionResult(
             execution_id=self.execution.id,
             assistant_content=assistant_content,
@@ -1036,7 +902,6 @@ class SynexiaFSM:
             file_exports=file_exports,
             export_artifact_id=export_artifact_id,
             quality_gate=quality_gate,
-            quality_eval=_quality_eval_out,
         )
 
     def _build_response_prompt(self, request: ExecutionRequest) -> str:
@@ -1130,8 +995,7 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
             # every blocking FINALIZE silently fell back to the generic
             # "I've processed your request." (the LLM was NEVER called).
             # We are in a worker thread (run via asyncio.to_thread), so a
-            # fresh event loop is always safe — same bridge pattern as
-            # run_quality_eval (line ~694). Tests may inject a sync stub
+            # fresh event loop is always safe. Tests may inject a sync stub
             # returning a dict → pass it through untouched.
             import asyncio as _asyncio
 

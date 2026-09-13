@@ -392,6 +392,10 @@ function mergeEvents(events) {
       // The offer is metadata for the previous row; do not push a new row.
     } else if (ev.type === 'finalize_started' || ev.type === 'artifact_progress') {
       out.push({ ...ev, status: 'running' });
+    } else if (ev.type === 'plan_step_added' || ev.type === 'plan_step_completed') {
+      // Plan checklist metadata — rendered by PlanChecklist, not as a row.
+      // Skipped here so persisted live_events don't double-render the plan
+      // as both a checklist and a generic feed row.
     } else if (ev.type === 'finalize_done') {
       // Completion marker for the finalize phase: flip EVERY still-running
       // finalize_started / artifact_progress row to done (the backend can
@@ -788,6 +792,90 @@ function LiveStatusLine({ reasoning, action, isLive }) {
 }
 
 /**
+ * LoadingPlaceholder — 2026-08-31: rich initial state for the live activity card.
+ *
+ * Before the first SSE event arrives the component used to render nothing,
+ * so Chat.jsx fell back to the legacy ChatThinkingIndicator ("Understanding
+ * your request…"). This placeholder keeps the Fabricating/Orchestrating card
+ * visible from the first frame, matching the desired Kimi/Claude-style feed.
+ */
+function LoadingPlaceholder({
+  phase,
+  streamingPlanSteps,
+  streamingReasoning,
+  streamingAction,
+  isEn,
+  t,
+  isLive,
+  onCollapse,
+}) {
+  const fallbackState = 'init';
+  const state = phase?.state || fallbackState;
+  const verb = t.chat.phase?.[state]?.verb || t.chat.phase?.[fallbackState]?.verb || (isEn ? 'Orchestrating' : '正在编排');
+  const title = t.chat.phase?.[state]?.title || t.chat.phase?.[fallbackState]?.title || (isEn ? 'Laying out the plan' : '正在制定执行方案');
+  const hasPlan = Array.isArray(streamingPlanSteps) && streamingPlanSteps.length > 0;
+
+  return (
+    <>
+      <LiveStatusLine
+        reasoning={streamingReasoning}
+        action={streamingAction}
+        isLive={isLive}
+      />
+      <div
+        data-testid="live-activity-headline"
+        className="flex items-center gap-2 border-b border-border/60 px-3 py-2"
+      >
+        <Sparkles className="h-3.5 w-3.5 shrink-0 animate-pulse text-amber-500" />
+        <span className="text-xs font-medium text-foreground">{verb}</span>
+        <span className="truncate text-xs text-muted-foreground">{title}</span>
+      </div>
+
+      {hasPlan ? (
+        <PlanChecklist steps={streamingPlanSteps} isEn={isEn} />
+      ) : (
+        <div className="border-b border-border/60 px-3 py-2">
+          <div className="mb-1.5 flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+            <ListChecks className="h-3 w-3" />
+            <span>{isEn ? 'Plan' : '计划'}</span>
+          </div>
+          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+            <Loader2 className="h-3 w-3 shrink-0 animate-spin text-blue-500" />
+            <span>{isEn ? 'Preparing plan…' : '正在准备计划…'}</span>
+          </div>
+        </div>
+      )}
+
+      <div className="border-b border-border/60 px-3 py-2">
+        <div className="h-1 w-full overflow-hidden rounded-full bg-secondary/50">
+          <div className="h-full w-1/3 animate-pulse rounded-full bg-blue-400/60" />
+        </div>
+      </div>
+
+      <div className="flex items-center justify-between border-t border-border/60 px-3 py-1.5">
+        <span className="flex items-center gap-1.5 text-[10px] uppercase tracking-wide text-muted-foreground/70">
+          {isLive && (
+            <span
+              className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-500"
+              aria-hidden="true"
+            />
+          )}
+          {isLive ? (isEn ? 'live' : '实时') : (isEn ? 'Working' : '处理中')}
+        </span>
+        <button
+          type="button"
+          onClick={onCollapse}
+          className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+        >
+          <ChevronUp className="h-3 w-3" />
+          {isEn ? 'Collapse' : (t.chat.liveEvent?.collapse || '收起')}
+        </button>
+      </div>
+    </>
+  );
+}
+
+/**
  * PlanChecklist — 2026-08-27: the agent's live todo list.
  *
  * The backend derives a deterministic plan from the user's input BEFORE the
@@ -851,6 +939,33 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
   );
   const hasEvents = Array.isArray(effectiveEvents) && effectiveEvents.length > 0;
   const merged = useMemo(() => (hasEvents ? mergeEvents(effectiveEvents) : []), [effectiveEvents, hasEvents]);
+  // 2026-08-31: plan checklist from PERSISTED events. The backend now emits
+  // plan_step_added / plan_step_completed as typed live events (previously
+  // raw-SSE only), so a reloaded message can rebuild the exact checklist the
+  // user saw live — instead of degrading to a generic "N events" chip.
+  // streamingPlanSteps (live) wins when present; otherwise derive from events.
+  const persistedPlanSteps = useMemo(() => {
+    if (!hasEvents) return [];
+    const byIndex = new Map();
+    for (const ev of effectiveEvents) {
+      if (ev.type === 'plan_step_added' || ev.type === 'plan_step_completed') {
+        const idx = ev.params?.step_index;
+        if (idx == null) continue;
+        const cur = byIndex.get(idx) || {
+          step_index: idx,
+          title: ev.params?.title || '',
+          status: 'pending',
+        };
+        if (ev.type === 'plan_step_completed') cur.status = 'done';
+        byIndex.set(idx, cur);
+      }
+    }
+    return [...byIndex.values()].sort((a, b) => a.step_index - b.step_index);
+  }, [effectiveEvents, hasEvents]);
+  const planSteps = useMemo(() => {
+    if (Array.isArray(streamingPlanSteps) && streamingPlanSteps.length > 0) return streamingPlanSteps;
+    return persistedPlanSteps;
+  }, [streamingPlanSteps, persistedPlanSteps]);
   // 2026-08-25: activity-feed modernization pipeline
   // 1. attachSubagentParent: pair tool rows with their parent subagent
   // 2. nestRows: set indent=1 for child rows under a subagent
@@ -939,9 +1054,32 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
     streamingDataPreviews ? Object.keys(streamingDataPreviews).length : 0,
   ]);
 
-  if (!hasEvents) return null;
-
   const isLive = Boolean(isStreaming);
+
+  // 2026-08-31: show a rich placeholder while the stream is live but no events
+  // have arrived yet. This eliminates the legacy "Understanding your request"
+  // indicator and keeps the Fabricating/Orchestrating card visible from t=0.
+  if (!hasEvents) {
+    if (!isLive) return null;
+    return (
+      <div
+        data-testid="live-activity-stream"
+        className="mb-3 animate-slide-up overflow-hidden rounded-xl border border-border/80 bg-gradient-to-b from-slate-50 to-white text-foreground dark:from-slate-900 dark:to-slate-800"
+      >
+        <LoadingPlaceholder
+          phase={phase}
+          streamingPlanSteps={streamingPlanSteps}
+          streamingReasoning={streamingReasoning}
+          streamingAction={streamingAction}
+          isEn={isEn}
+          t={t}
+          isLive={isLive}
+          onCollapse={() => { setExpanded(false); setUserToggled(true); }}
+        />
+      </div>
+    );
+  }
+
   // A row is terminal once done/failed — or when the turn itself has ended
   // (collapsed summary implies finalize completed). Orphan running rows from
   // an interrupted turn are still excluded from the completed count.
@@ -992,8 +1130,10 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
 
           {/* Plan checklist — 2026-08-27: the agent's live todo list
               (deterministic plan derived from the user's input, ticked off
-              by tool evidence as the loop executes it). */}
-          <PlanChecklist steps={streamingPlanSteps} isEn={isEn} />
+              by tool evidence as the loop executes it). Live steps win;
+              persisted plan_step events rebuild the same checklist after
+              reload (2026-08-31). */}
+          <PlanChecklist steps={planSteps} isEn={isEn} />
 
           {/* Progress bar — 2026-08-25 activity-feed modernization. */}
           <ProgressBar

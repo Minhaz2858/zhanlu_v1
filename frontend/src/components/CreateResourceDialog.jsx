@@ -301,6 +301,18 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
     const params = new URLSearchParams({ prefill, newTask: '1' });
     if (effectiveName) params.set('projectName', effectiveName);
     if (effectiveId) params.set('projectId', effectiveId);
+    // Pin the automation creation flow to the dedicated ``automation_agent``
+    // (which owns the create_automation / list_knowledge_bases /
+    // list_data_sources tools) for the FIRST turn. Without this the chat
+    // resolves ``effectiveAgent`` from whatever project agent is bound
+    // (e.g. ecisco_bi_assistant), which has ask_data_agent but NOT
+    // create_automation — the LLM then misreads the description as a
+    // data-analysis request and emits a generic HTML deliverable instead
+    // of actually creating the task. The downstream ``isAutomationOrigin``
+    // rebind in Chat.jsx would catch this for messages that match the
+    // header regex, but pinning here is deterministic and survives any
+    // future drift in either side's regex.
+    if (resourceType === 'automation') params.set('agentName', 'automation_agent');
     navigate(`/?${params.toString()}`);
   }
 

@@ -753,8 +753,8 @@ async def _execute_query(
         return {"success": False, "error": f"Query failed: {e}", "sql": sql}
 
 
-# Name-role / id-role structural detection — mirrors answer_verification +
-# catalog_indexer conventions (boundary + suffix-anchored, zero hardcoded names).
+# Name-role / id-role structural detection — mirrors catalog_indexer
+# conventions (boundary + suffix-anchored, zero hardcoded names).
 _NAME_ROLE_RE = re.compile(
     r"(^|_)(name|fname|title|label)(_|$)|(name|title|label)$",
     re.IGNORECASE,

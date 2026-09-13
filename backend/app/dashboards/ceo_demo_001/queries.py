@@ -38,10 +38,24 @@ def metric_dimensions(m: dict) -> list[dict]:
     out of the generated SQL.
     """
     filters = (m.get("options") or {}).get("filters") or []
+    # ``options.filters`` may be a LIST of URL-keyed dimension specs
+    # ([{"key": "product", "column": "FNAME"}]) OR a DICT of object filters
+    # ({"date": {"column": "shipment_date", "op": ">=", "value": ":dim_date"}})
+    # emitted by the dashboard generator. Iterating a dict yields bare string
+    # keys and crashed with ``AttributeError: 'str' object has no attribute
+    # 'get'`` — observed 2026-09-03: every daily-sales-data-sync metric poll
+    # logged a traceback on each 30 s refresh. Normalize dict filters: the
+    # dict key IS the declared token name (e.g. "date" -> :dim_date).
+    if isinstance(filters, dict):
+        filters = [
+            {"key": name, "column": spec.get("column") or ""}
+            for name, spec in filters.items()
+            if isinstance(spec, dict)
+        ]
     return [
         {"token": f["key"], "column": f["column"]}
         for f in filters
-        if f.get("key") and f.get("column")
+        if isinstance(f, dict) and f.get("key") and f.get("column")
     ]
 
 

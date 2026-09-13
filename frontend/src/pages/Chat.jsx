@@ -551,8 +551,19 @@ export default function Chat() {
         const wantedName = convAgentName || conv.agent_name;
         if (wantedName) {
           try {
+            // Workflow agents (flow_mode) are AgentApp rows too, but the
+            // entity router's tenant wall may hide them from
+            // AgentApp.list() if they were created under a different
+            // app_id. Fall back to the workflows API so a workflow-bound
+            // conversation still restores its chip on deep-link open.
+            let agent = null;
             const agents = await base44.entities.AgentApp.list();
-            const agent = agents.find((a) => a.name === wantedName);
+            agent = agents.find((a) => a.name === wantedName) || null;
+            if (!agent) {
+              const { listWorkflows } = await import('@/api/workflows');
+              const wfs = await listWorkflows();
+              agent = (wfs || []).find((w) => w.name === wantedName) || null;
+            }
             if (agent) setActiveAgent(agent);
           } catch { /* best-effort */ }
         }
@@ -729,6 +740,14 @@ export default function Chat() {
     // safe because the separate effect below re-resolves the agent
     // from the conversation's ``agent_name`` (or leaves it null for
     // agent-less general chats).
+    //
+    // ActiveId-null guard: ``handlePickWorkflow`` (chat "+ → Agent
+    // Workflow") calls ``handleNewChat()`` which bumps
+    // ``chatGeneration`` while ``activeId`` is still null; if we
+    // cleared the agent here the workflow chip the user just picked
+    // would vanish before the session row exists. The caller
+    // (handlePickWorkflow) sets the agent itself, so only clear when
+    // we are actually switching BETWEEN sessions.
     const _s = activeId ? getSession(activeId) : null;
     const _isNewSession = activeId && (!_s || !_s.conversation_id);
     setOpenArtifact(null);
@@ -736,7 +755,7 @@ export default function Chat() {
     setOpenFilePreview(null);
     setChips([]);
     setActiveSkill(null);
-    if (!_isNewSession) setActiveAgent(null);
+    if (activeId && !_isNewSession) setActiveAgent(null);
     // Only wipe draft attachments when switching to an EXISTING session
     // (one with a conversation_id). A brand-new session can be created
     // mid-upload by ensureSession() from the landing page (activeId was
@@ -841,8 +860,19 @@ export default function Chat() {
         if (cancelled || !conv) return;
         const wantedName = conv.agent_name;
         if (!wantedName) return;
+        // Same fallback as the ?conv= deep-link handler: workflow agents
+        // (flow_mode) may be hidden from AgentApp.list() by the entity
+        // tenant wall when they were created under a non-default app_id.
+        // Resolve from the workflows API so the chip survives session
+        // reopen for workflow-bound conversations.
+        let agent = null;
         const agents = await base44.entities.AgentApp.list();
-        const agent = agents.find((a) => a.name === wantedName);
+        agent = agents.find((a) => a.name === wantedName) || null;
+        if (!agent) {
+          const { listWorkflows } = await import('@/api/workflows');
+          const wfs = await listWorkflows();
+          agent = (wfs || []).find((w) => w.name === wantedName) || null;
+        }
         if (cancelled) return;
         if (agent) setActiveAgent(agent);
       } catch { /* best-effort — leave activeAgent null, the next
@@ -1365,7 +1395,16 @@ export default function Chat() {
     // current agent. We do NOT ``setActiveAgent`` here — the binding
     // persists via the conversation's ``agent_name`` field, which the
     // rehydration effect reads on reload.
+    // Header regex is the strong signal; the structural-only check is a
+    // weak fallback for templates the user pasted without a recognised
+    // header (e.g. "Set up a new automation" misses every alias we have,
+    // or the user typed in Chinese without the canonical 自动化任务
+    // token). False-positive risk is non-trivial — we still bind to
+    // automation_agent because that agent's prompt tells the LLM to
+    // redirect ("That's outside the automation agent's scope…") rather
+    // than silently producing a deliverable.
     const isAutomationOrigin = isCreateAutomationRequest(fullText)
+      || looksLikeAutomationSetupTemplate(fullText)
       || (activeAgent && activeAgent.name === 'automation_agent');
     if (isAutomationOrigin && (!effectiveAgent || effectiveAgent.name !== 'automation_agent')) {
       try {
@@ -1378,8 +1417,17 @@ export default function Chat() {
           // AgentApp by name, so name is sufficient for the v3 runtime
           // to load the correct system prompt + tools.
           effectiveAgent = { name: 'automation_agent' };
+          // (debug aid) The list call returned no rows; surface that so a
+          // missing seed is visible in the browser console instead of a
+          // silent fallback. (P0-7 hardening: 2026-09-02.)
+          if (typeof console !== 'undefined') console.warn('[chat] automation_agent rebind: AgentApp.list() returned no rows; using name-only stub', { preview: fullText.slice(0, 80) });
         }
-      } catch { /* keep whatever agent was resolved */ }
+      } catch (err) {
+        // (debug aid) Was previously silent — kept as a warn so the
+        // cause shows up in the browser console. The rebind still falls
+        // back to whatever ``effectiveAgent`` already was.
+        if (typeof console !== 'undefined') console.warn('[chat] automation_agent rebind failed; keeping prior agent', { error: err && err.message, preview: fullText.slice(0, 80) });
+      }
     }
     // --- P2 mid-turn steer: if a v3 agent stream is already in flight,
     // route the message through the steer endpoint instead of starting a
@@ -1453,6 +1501,12 @@ export default function Chat() {
           // Always drain the stream state when this generation finishes
           // its work, otherwise the Stop button stays visible.
           if (stream.isActive) stream.complete();
+        } else {
+          // A newer generation took over. Don't clobber its streaming id,
+          // but if THIS message is still flagged as streaming (e.g. the
+          // newer send was aborted / didn't reach the stream branch), drop
+          // the flag so its bubble's cursor doesn't pulse forever.
+          setStreamingId((cur) => (cur === aiMsg.id ? null : cur));
         }
       }
       return;
@@ -2514,6 +2568,14 @@ export default function Chat() {
           // stayed visible. Drain the state here so the input flips back
           // to Send.
           if (gen === genRef.current) stream.complete();
+          // 2026-09-03: also clear the message-level streaming flag here so
+          // the pulsing cursor at the bottom of MessageBubble disappears the
+          // moment the response is fully delivered. Previously the flag was
+          // only reset in the OUTER handleSend finally (after the stream
+          // closed + the message was persisted), which left a window where
+          // the bubble showed the final content with a still-pulsing cursor
+          // if anything between `done` and that finally stalled.
+          if (gen === genRef.current) setStreamingId(null);
           // Automation-bound chat: dismiss the editable draft card when
           // the agent successfully created the automation task via the
           // ``create_automation`` tool. The draft card is a pre-creation
@@ -3436,10 +3498,41 @@ fields 是 JSON 字符串，包含 type/description/schedule/project 等键值�
 // the schema → backend persists), which is incompatible with the agent
 // runtime's tool-calling loop. We force the non-agent route for create
 // requests and require ``create_resource`` in the response schema.
+//
+// Mirrors the backend `_AUTOMATION_SETUP_HEADER_RE` so a header pasted
+// directly into chat (instead of going through the structured dialog)
+// also routes to ``automation_agent`` instead of falling through to the
+// generic deliverable / artifact path that doesn't have ``create_automation``.
+// Header regex only — the structural-only signature (Name + Schedule +
+// Output format lines, no header) is handled by
+// ``looksLikeAutomationSetupTemplate`` below, kept separate because the
+// structural check is too aggressive on its own (matches other resource
+// templates that happen to use the same field names) and only acts as a
+// signal when no header matched.
 function isCreateAutomationRequest(text) {
   const t = (text || '').trim();
   if (!t) return false;
-  return /(?:create a new |帮我新建一个|新建)(?:automation task|自动化任务)/i.test(t);
+  // EN + ZH header alternates — keep parity with the backend regex so the
+  // front-end rebind fires on every pattern the router will rebind on.
+  const headerRe = /(create\s+a?\s*new\s+automation\s+task|set\s+up\s+(a\s+|an\s+)?(new\s+)?automation|schedule\s+(a\s+|an\s+)?(new\s+)?(daily|hourly|weekly|cron)\s+task|new\s+automation\s+task|帮我新建一个自动化任务|新建一个自动化任务|创建(.{0,6})?自动化任务|添加(一个)?自动化任务|设置(.{0,4})?定时任务|添加定时任务)/i;
+  return headerRe.test(t);
+}
+
+// Structural-only fallback: matches Name + Schedule + Output format lines
+// together (mirrors backend `_AUTOMATION_SETUP_STRUCTURE_RE`). Used when
+// no header matched but the body still looks like an automation-setup
+// template the user pasted. False-positive risk is real (other resource
+// templates use the same field names) so callers should treat this as a
+// weak signal: bind to automation_agent if the header regex missed, but
+// not block on it.
+function looksLikeAutomationSetupTemplate(text) {
+  const t = (text || '').trim();
+  if (!t) return false;
+  const lines = t.split(/\r?\n/);
+  const has = (re) => lines.some((l) => re.test(l));
+  return has(/^\s*[-\u2022\u2043\u204c\u204d]?\s*(name|名称)\s*[:：]/i)
+    && has(/^\s*[-\u2022\u2043\u204c\u204d]?\s*(schedule|调度(规则)?|频率)\s*[:：]/i)
+    && has(/^\s*[-\u2022\u2043\u204c\u204d]?\s*(output[\s_]*format|输出格式)\s*[:：]/i);
 }
 
 // P3: "Run my X now" / "Execute X" / "Trigger X" / "Fire X now" — these

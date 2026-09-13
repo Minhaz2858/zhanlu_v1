@@ -300,16 +300,18 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                     "execute_automation", "list_knowledge_bases",
                     "list_data_sources", "clarify",
                     "cronjob", "send_message",
-                    # Web collection + dynamic skill discovery
-                    "web_search", "web_extract", "Skill",
-                    "create_artifact",
+                    # Web collection (no Skill tool — automation_agent must
+                    # never RUN a skill to build a deliverable; it only sets
+                    # up the automation task. Skill catalog tools below are
+                    # read-only discovery only.)
+                    "web_search", "web_extract",
                     # General assistant surface (deduped — skip tools already above)
                     "url_safety", "x_search",
                     "agent_browser",
                     "memory", "todo", "kanban", "session_search",
-                    "read_file", "write_file", "image_generation",
-                    "execute_code", "delegate_task", "ask_data_agent",
-                    "run_sandbox_skill", "fuzzy_match", "patch_parser",
+                    "read_file", "write_file",
+                    "execute_code",
+                    "fuzzy_match", "patch_parser",
                     "process_registry_list", "process_registry_tail",
                     "process_registry_kill",
                     "slash_confirm", "approval",
@@ -332,7 +334,7 @@ def _build_system_agent_configs(registry=None) -> list[dict]:
                     "allowed": [
                         "create_automation", "update_automation", "execute_automation",
                         "list_knowledge_bases", "list_data_sources", "clarify",
-                        "cronjob", "create_artifact",
+                        "cronjob",
                     ],
                     "forbidden": ["delete_automation", "access_user_data", "report_generation", "data_analysis"],
                 },

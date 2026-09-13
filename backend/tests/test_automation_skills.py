@@ -184,12 +184,18 @@ class _FakeStatusDB:
         return _Query(model, self._results)
 
 
+# Status endpoint now requires an authenticated user; rows in these fixtures
+# carry no org_id so a None-org fake user makes the tenant assert a no-op.
+from types import SimpleNamespace  # noqa: E402
+_FAKE_USER = SimpleNamespace(id="status-test-user", org_id=None)
+
+
 def test_status_endpoint_pending_when_row_missing():
     from app.models.automation_execution import AutomationExecution
     from app.routers.automation_api import get_execution_status
 
     db = _FakeStatusDB({AutomationExecution: []})
-    payload = get_execution_status("exec-missing", db)
+    payload = get_execution_status("exec-missing", db, user=_FAKE_USER)
     assert payload["exists"] is False
     assert payload["status"] == "pending"
     assert payload["steps"] == []
@@ -229,7 +235,7 @@ def test_status_endpoint_maps_skill_calls():
         SkillRun: [skill_run],
     })
 
-    payload = get_execution_status("exec-1", db)
+    payload = get_execution_status("exec-1", db, user=_FAKE_USER)
     assert payload["exists"] is True
     assert payload["status"] == "running"
     assert payload["skill_calls"][0]["skill_name"] == "weekly_report"
@@ -259,7 +265,7 @@ def test_status_endpoint_running_with_naive_started_at():
     )
     db = _FakeStatusDB({AutomationExecution: [exec_row], SkillRun: []})
 
-    payload = get_execution_status("exec-1", db)
+    payload = get_execution_status("exec-1", db, user=_FAKE_USER)
     assert payload["exists"] is True
     assert payload["status"] == "running"
     assert isinstance(payload["elapsed_sec"], float)

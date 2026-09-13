@@ -35,7 +35,7 @@ describe('ChatInput.jsx inherited data sources badge', () => {
     // The destructured props list must include `inheritedKbCount`
     // (default 0) so the component is decoupled from the parent's
     // fetch logic and can be tested in isolation.
-    const propList = SOURCE.match(/function\s+ChatInput\s*\(\s*\{[\s\S]{0,800}?\}\s*\)/);
+    const propList = SOURCE.match(/function\s+ChatInput\s*\(\s*\{[\s\S]{0,1200}?\}\s*\)/);
     expect(propList, 'ChatInput props destructure not found').not.toBeNull();
     expect(propList[0]).toMatch(/inheritedKbCount/);
   });

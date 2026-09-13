@@ -1,41 +1,22 @@
-"""Server-side turn-action router.
+"""Server-side turn-action resolver (advisory only — no tool forcing).
 
-This module is the single source of truth for "what MUST the LLM do on this
-turn?" — independent of how the agent is configured. It composes the
-existing cheap detectors (``TIME_SENSITIVE_PATTERN``, ``detect_file_intent``)
-and one new detector (``URL_PATTERN``) into a :class:`TurnAction` plan that
-the chat runtime uses to:
+This module used to FORCE ``tool_choice`` on iteration 0 based on cheap
+detectors (data question / file format / URL / time-sensitive keywords).
+That deterministic override hijacked user prompts (e.g. a "please list…"
+request was forced into ``create_artifact`` because it mentioned a weekly
+summary). Per the model-first harness principle the LLM now decides which
+tool to call from the full tool list; this module only derives *advisory*
+grounding blocks (see ``grounding_block_for_message``) that are appended to
+the system prompt as soft guidance.
 
-1. Force ``tool_choice`` on iteration 0 (so a weak function-calling model
-   cannot "answer from memory" on the first hop), and
-2. Inject a corresponding ``[GROUNDING REQUIRED]`` / ``[FILE GENERATION
-   REQUIRED]`` prompt block so the model understands *why* it is forced,
-3. Optionally hand the result to the **generation orchestrator** as a
-   fallback — if the LLM still fails to produce a marker or a
-   ``create_artifact`` call after a doc request, the backend invokes the
-   proven ``_create_artifact_tool`` pipeline itself so the user always
-   receives an artifact or a clear error (never a bare "I'll create…").
+``resolve_turn_action`` is kept as a backward-compatible no-op seam: it
+always returns a plain :class:`TurnAction` (``forced_tool=None``) so the
+chat runtime's ``tool_choice`` stays on ``auto``. Callers that previously
+relied on a forced tool must let the model pick.
 
-Why a separate module?
-
-* Pure: no DB, no LLM, no network. Unit-testable, no I/O risk in the hot
-  path (cost is O(len(message)) regex).
-* Composable: reuses ``detect_file_intent`` (single source of truth for
-  docx / pptx / xlsx / pdf / md / html / dashboard) and
-  ``TIME_SENSITIVE_PATTERN`` (no detector is reinvented).
-* Universal: every agent that flows through the shared chat runtime
-  (v2 main + v3 SSE) gets the same forcing behavior, so newly-created
-  agents inherit the fix automatically.
-
-Precedence (highest first):
-    1. ``ask_data_agent``  — bound KBs + data question (existing behavior)
-    2. ``create_artifact`` — file-format intent (``detect_file_intent``)
-    3. ``web_extract``     — URL present in the message
-    4. ``web_search``      — time-sensitive keyword heuristic
-    5. ``None``            — general chitchat; fall back to ``auto``
-
-Tool presence is required to force — we never ask the LLM to call a tool
-the agent has not been granted.
+Grounding blocks (``GROUNDING_REQUIRED_BLOCK`` / ``GROUNDING_URL_BLOCK`` /
+``GROUNDING_DOC_BLOCK``) remain prompt-level nudges only — they never
+override the user's verb.
 """
 
 from __future__ import annotations
@@ -136,97 +117,27 @@ def resolve_turn_action(
     data_ctx_extras: Optional[dict],
     is_data_question: bool,
     iteration: int,
+    is_dashboard_followup: bool = False,
 ) -> TurnAction:
-    """Return the action plan for this turn.
+    """Return the advisory action plan for this turn.
 
-    The function is a *pure* reducer over the four cheap detectors. It
-    never mutates ``tool_names`` and never raises. Forcing only applies on
-    ``iteration == 0`` so multi-step tool loops are not interfered with.
+    Model-first harness (Phase A/B): the LLM decides which tool to call —
+    server-side ``tool_choice`` forcing is removed. This resolver is kept as
+    a backward-compatible seam and always returns a plain ``TurnAction``
+    (``forced_tool=None``, no grounding block, no doc_format), leaving the
+    runtime's ``tool_choice`` on ``auto``. Soft grounding nudges are still
+    derived separately by ``grounding_block_for_message`` and appended to
+    the system prompt — prompt text only, never a hard override.
 
-    Args:
-        user_message: Latest user message (may be ``None``).
-        tool_names:   Names of tools granted to the agent (may be
-                      ``None``). Forcing a tool that is *not* in this
-                      list is silently skipped — that would break the
-                      LLM contract.
-        data_ctx_extras: Data-source runtime context dict (must expose
-                         ``bound_kb_ids`` if relevant). May be ``None``.
-        is_data_question: Pre-computed result of the
-                          ``_is_data_question`` heuristic in
-                          ``app.routers.agents``. We accept it as a
-                          parameter to avoid a circular import.
-        iteration:    Current loop iteration (0-based).
-
-    Returns:
-        A :class:`TurnAction` describing the forced tool (or ``None``),
-        the grounding block, and the doc format (or ``None``).
+    Args are retained for signature compatibility with existing callers;
+    none of them influence the result anymore.
     """
-    # Iteration guard: forcing only on the first hop of a multi-step loop.
-    # On subsequent iterations the LLM is already in a tool-calling
-    # state and forcing would just corrupt the conversation flow.
-    if iteration != 0:
-        return TurnAction()
-
-    tool_set = set(tool_names or [])
-    ctx = data_ctx_extras or {}
-
-    if user_message and (
-        LIVE_DASHBOARD_PATTERN.search(user_message)
-        or fuzzy_dashboard_request(user_message)
-    ):
-        logger.info("turn_action: live dashboard intent detected; leaving tool_choice on auto")
-        return TurnAction()
-
-    # 1) Bound KB + data question → ask_data_agent
-    bound_kb_ids = ctx.get("bound_kb_ids") or []
-    if bound_kb_ids and is_data_question and "ask_data_agent" in tool_set:
-        logger.info(
-            "turn_action: forcing ask_data_agent (bound_kb_ids=%d, is_data_question=True)",
-            len(bound_kb_ids),
-        )
-        return TurnAction(forced_tool="ask_data_agent")
-
-    if not user_message:
-        return TurnAction()
-
-    # 2) File-format intent → create_artifact
-    #    detect_file_intent is the single source of truth for docx / pptx /
-    #    xlsx / pdf / md / html / dashboard. Reuse it; do not add a second
-    #    detector.
-    doc_format = detect_file_intent(user_message)
-    if doc_format and "create_artifact" in tool_set:
-        logger.info(
-            "turn_action: forcing create_artifact (doc_format=%s)", doc_format,
-        )
-        return TurnAction(
-            forced_tool="create_artifact",
-            grounding_block=GROUNDING_DOC_BLOCK,
-            doc_format=doc_format,
-        )
-
-    # 3) URL → web_extract
-    if URL_PATTERN.search(user_message) and "web_extract" in tool_set:
-        logger.info("turn_action: forcing web_extract (URL detected)")
-        return TurnAction(
-            forced_tool="web_extract",
-            grounding_block=GROUNDING_URL_BLOCK,
-        )
-
-    # 4) Time-sensitive → web_search
-    if "web_search" in tool_set and TIME_SENSITIVE_PATTERN.search(user_message):
-        logger.info("turn_action: forcing web_search (time-sensitive)")
-        return TurnAction(
-            forced_tool="web_search",
-            grounding_block=GROUNDING_REQUIRED_BLOCK,
-        )
-
-    # 5) No forcing — general chitchat / LLM decides
+    logger.debug(
+        "turn_action: advisory resolver (no tool forcing) msg=%r iter=%d",
+        (user_message or "")[:80], iteration,
+    )
     return TurnAction()
 
-
-# ---------------------------------------------------------------------------
-# Prompt-block helper (no tool-presence guard)
-# ---------------------------------------------------------------------------
 
 
 def grounding_block_for_message(user_message: Optional[str]) -> str:

@@ -27,8 +27,64 @@ from app.services.auth_service import auth_service
 import app.services.tool_handlers  # noqa: F401
 
 
+def _ensure_model_columns(engine) -> None:
+    """Fresh-DB safeguard: add any ORM-model columns missing from the DB.
+
+    This repo's alembic migrations have drifted from the SQLAlchemy models —
+    several columns are only ever created by the app's runtime auto-migrate
+    pass, which runs AFTER seed.py. A brand-new database therefore lacks those
+    columns and seed.py's inserts fail with "column X does not exist".
+
+    Instead of maintaining a per-column allow-list, mirror the model
+    definitions directly: for every table, ALTER TABLE ADD COLUMN for any
+    model column that is not yet present in the live schema. Safe to re-run
+    (skips existing columns) and makes a clean DB seed correctly.
+    """
+    from sqlalchemy import inspect, text
+
+    insp = inspect(engine)
+    existing_tables = set(insp.get_table_names())
+    for table in Base.metadata.tables.values():
+        if table.name not in existing_tables:
+            continue
+        existing_cols = {c["name"] for c in insp.get_columns(table.name)}
+        alters = []
+        for col in table.columns:
+            if col.name in existing_cols:
+                continue
+            try:
+                col_type = col.type.compile(dialect=engine.dialect)
+            except Exception:
+                continue
+            stmt = 'ALTER TABLE {} ADD COLUMN "{}" {}'.format(
+                table.name, col.name, col_type
+            )
+            stmt += " NULL" if col.nullable else " NOT NULL"
+            if col.server_default is not None:
+                try:
+                    sd = col.server_default.compile(dialect=engine.dialect)
+                    stmt += " DEFAULT {}".format(sd)
+                except Exception:
+                    pass
+            alters.append(stmt)
+        if not alters:
+            continue
+        with engine.begin() as conn:
+            for stmt in alters:
+                try:
+                    conn.execute(text(stmt))
+                except Exception as _e:
+                    print("  ensure-columns: skipped [{}]: {}".format(stmt[:70], _e))
+        print("seed: ensured {} missing column(s) on {}".format(len(alters), table.name))
+
+
 def seed():
     Base.metadata.create_all(bind=engine)
+
+    # Fresh-DB drift fix: add any model columns alembic never created before
+    # we insert rows (the app's own runtime pass runs only after seed).
+    _ensure_model_columns(engine)
+
     db = SessionLocal()
 
     if db.query(User).count() > 0:
@@ -37,6 +93,44 @@ def seed():
         return
 
     print("Seeding database...")
+
+    # Runtime-only schema columns: `projects.is_system` is added by
+    # ensure_system_agents() at app startup (see app/services/system_agents.py),
+    # NOT by an alembic migration. The ORM inserts below carry is_system on the
+    # Project model, so a fresh DB (tables created by alembic, create_all never
+    # alters existing tables) fails with "column projects.is_system does not
+    # exist". Ensure the column first — same guarded ALTER as the runtime path.
+    try:
+        from sqlalchemy import inspect as sa_inspect, text as sa_text
+        inspector = sa_inspect(db.bind)
+        if "is_system" not in {c["name"] for c in inspector.get_columns("projects")}:
+            db.execute(sa_text(
+                "ALTER TABLE projects ADD COLUMN is_system BOOLEAN "
+                "NOT NULL DEFAULT FALSE"
+            ))
+            db.commit()
+            print("seed: added projects.is_system (runtime-only column)")
+    except Exception as _schema_err:
+        db.rollback()
+        print(f"seed: projects.is_system ensure skipped (non-fatal): {_schema_err}")
+
+    # Runtime-only schema column: `agent_apps.role` is added by
+    # ensure_system_agents() at app startup (see app/services/system_agents.py),
+    # NOT by an alembic migration. The ORM inserts below carry role on the
+    # AgentApp model, so a fresh DB (tables created by alembic, create_all never
+    # alters existing tables) fails with "column agent_apps.role does not
+    # exist". Ensure the column first — same guarded ALTER as the runtime path
+    # and the projects.is_system guard above.
+    try:
+        if "role" not in {c["name"] for c in inspector.get_columns("agent_apps")}:
+            db.execute(sa_text(
+                "ALTER TABLE agent_apps ADD COLUMN role VARCHAR(64)"
+            ))
+            db.commit()
+            print("seed: added agent_apps.role (runtime-only column)")
+    except Exception as _schema_err:
+        db.rollback()
+        print(f"seed: agent_apps.role ensure skipped (non-fatal): {_schema_err}")
 
     # --- Admin User ---
     admin = User(
@@ -154,12 +248,25 @@ def seed():
     db.add_all(kbs)
 
     # --- AutomationTasks ---
-    tasks = [
-        AutomationTask(name="Daily Sales Report", project="Marketing Team", type="report_generation", description="Generates a daily sales report at 9 AM", schedule="0 9 * * *", status="paused", created_by_id=admin.id),
-        AutomationTask(name="Weekly Data Sync", project="Data Analysis", type="data_sync", description="Syncs data from external sources weekly", schedule="0 0 * * 0", status="paused", created_by_id=admin.id),
-        AutomationTask(name="Monthly Compliance Audit", project="global", type="agent_inspection", description="Runs compliance audit agents monthly", schedule="0 0 1 * *", status="paused", created_by_id=admin.id),
-        AutomationTask(name="Data Quality Check", project="Data Analysis", type="data_cleaning", description="Checks data quality and cleans invalid records", schedule="0 2 * * *", status="paused", created_by_id=admin.id),
+    # cron_expression + next_run_at are normalized per task so seeded rows are
+    # dispatcher-ready (the dispatcher fires ONLY active tasks with a
+    # next_run_at; leaving these NULL made seeded tasks dead on arrival).
+    from app.services.schedule_parser import next_run_at as _next_run_at
+    _task_specs = [
+        ("Daily Sales Report", "Marketing Team", "report_generation", "Generates a daily sales report at 9 AM", "0 9 * * *"),
+        ("Weekly Data Sync", "Data Analysis", "data_sync", "Syncs data from external sources weekly", "0 0 * * 0"),
+        ("Monthly Compliance Audit", "global", "agent_inspection", "Runs compliance audit agents monthly", "0 0 1 * *"),
+        ("Data Quality Check", "Data Analysis", "data_cleaning", "Checks data quality and cleans invalid records", "0 2 * * *"),
     ]
+    tasks = []
+    for _name, _proj, _type, _desc, _cron in _task_specs:
+        tasks.append(AutomationTask(
+            name=_name, project=_proj, type=_type, description=_desc,
+            schedule=_cron, cron_expression=_cron,
+            timezone="UTC",
+            next_run_at=_next_run_at(_cron, tz_name="UTC"),
+            status="paused", created_by_id=admin.id,
+        ))
     db.add_all(tasks)
 
     # --- ChatSessions + Messages ---
