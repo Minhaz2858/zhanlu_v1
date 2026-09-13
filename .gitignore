@@ -12,6 +12,12 @@ __pycache__/
 *.egg-info/
 .pytest_cache/
 
+# Virtualenvs — host-side only. The container installs requirements.txt at
+# build time and must never see /app/venv (stale-venv hijack scar, see .env).
+backend/venv/
+backend/venv.*/
+.venv/
+
 # SQLite databases
 *.db
 *.sqlite
@@ -36,6 +42,19 @@ Thumbs.db
 
 # Node
 node_modules
+
+# Frontend build output — only frontend/dist is served by the nginx container
+frontend/dist-new/
+frontend/dist_old/
+frontend/dist.*/
+frontend/reload*.yaml
+frontend/snap*.yaml
+
+# Build / installer / snapshot junk (never source)
+*.dmg
+/*.zip
+.git.corrupt/
+logs/
 
 # dev-copy isolation override (local only)
 docker-compose.copy.yml
