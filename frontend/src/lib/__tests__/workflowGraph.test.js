@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { flowToXY, xyToFlow, buildPasteGraph } from '@/lib/workflowGraph';
+import { flowToXY, xyToFlow, buildPasteGraph, isWorkflowFlow, isAgentArchFlow, editorForRow } from '@/lib/workflowGraph';
 
 const nodes = [
   { id: 'n1', type: 'trigger_chat', position: { x: 0, y: 0 }, data: { label: 'Chat', config: {} } },
@@ -114,5 +114,107 @@ describe('buildPasteGraph', () => {
     };
     const { nodes: pasted } = buildPasteGraph(clip);
     expect(pasted[0].data.config.fields[0].value).toContain(`{{inputs.${pasted[0].id}.text}}`);
+  });
+});
+
+// Two shapes share `agent_apps.flow` + the `flow_mode` flag: the n8n canvas
+// workflow object and the agent-architecture step array. Routing/rendering
+// must branch on the SHAPE, so these helpers are the contract that keeps a
+// workflow row out of the agent editor and an agent row out of the canvas.
+// Regression: `/my-space/agent/<workflow-id>` crashed with
+// "a.flow.forEach is not a function" because AgentConfig rendered FlowTree
+// over the canvas object.
+describe('flow shape detection', () => {
+  it('detects the canvas workflow shape (and its empty form)', () => {
+    expect(isWorkflowFlow({ version: 1, nodes: [], edges: [] })).toBe(true);
+    expect(isWorkflowFlow({ version: 1, nodes: [{ id: 'n1' }], edges: [{ id: 'e1' }] })).toBe(true);
+    expect(isWorkflowFlow({ nodes: [{ id: 'n1' }] })).toBe(true); // nodes alone is enough
+  });
+
+  it('rejects the agent-architecture step array', () => {
+    expect(isWorkflowFlow([])).toBe(false);
+    expect(isWorkflowFlow([{ kind: 'agent', name: 'A' }])).toBe(false);
+    expect(isWorkflowFlow([{ kind: 'loop', flow: [] }])).toBe(false);
+  });
+
+  it('rejects nullish / malformed values without throwing', () => {
+    expect(isWorkflowFlow(null)).toBe(false);
+    expect(isWorkflowFlow(undefined)).toBe(false);
+    expect(isWorkflowFlow('not a flow')).toBe(false);
+    expect(isWorkflowFlow(42)).toBe(false);
+    expect(isWorkflowFlow({})).toBe(false);
+    expect(isWorkflowFlow({ nodes: 'nope' })).toBe(false);
+  });
+
+  it('isAgentArchFlow is the exact mirror used to bounce agent rows off the canvas', () => {
+    expect(isAgentArchFlow([])).toBe(true);
+    expect(isAgentArchFlow([{ kind: 'agent' }])).toBe(true);
+    expect(isAgentArchFlow({ version: 1, nodes: [], edges: [] })).toBe(false);
+    expect(isAgentArchFlow(null)).toBe(false);
+    expect(isAgentArchFlow(undefined)).toBe(false);
+  });
+
+  it('the two predicates are mutually exclusive for every real row shape', () => {
+    const rows = [
+      { version: 1, nodes: [], edges: [] },
+      [{ kind: 'agent' }],
+      [],
+      null,
+      undefined,
+    ];
+    for (const flow of rows) {
+      expect(isWorkflowFlow(flow) && isAgentArchFlow(flow)).toBe(false);
+    }
+  });
+});
+
+// The two pages (AgentConfig, WorkflowCanvas) BOTH route through editorForRow.
+// If they ever diverge, a row gets bounced from one to the other forever —
+// so the mapping and the termination property are the contract under test.
+describe('editorForRow — which editor owns an agent_apps row', () => {
+  it('routes canvas-shaped rows to the workflow canvas, whatever flow_mode says', () => {
+    expect(editorForRow({ flow_mode: true, flow: { version: 1, nodes: [], edges: [] } })).toBe('workflow');
+    expect(editorForRow({ flow_mode: true, flow: { version: 1, nodes: [{ id: 'n1' }], edges: [] } })).toBe('workflow');
+    // legacy row: real graph but the flag was never set
+    expect(editorForRow({ flow_mode: false, flow: { nodes: [], edges: [] } })).toBe('workflow');
+  });
+
+  it('routes composable-flow agents to the agent page even though flow_mode is true', () => {
+    expect(editorForRow({ flow_mode: true, flow: [{ kind: 'agent', name: 'A' }] })).toBe('agent');
+    expect(editorForRow({ flow_mode: true, flow: [] })).toBe('agent');
+  });
+
+  it('routes plain chat agents (no flow) to the agent page', () => {
+    expect(editorForRow({ flow_mode: false, flow: null })).toBe('agent');
+    expect(editorForRow({ flow_mode: false })).toBe('agent');
+    expect(editorForRow({ name: 'Report Writer' })).toBe('agent');
+  });
+
+  it('treats a flow_mode row with no graph yet as a workflow (fresh "Untitled Workflow")', () => {
+    expect(editorForRow({ flow_mode: true, flow: null })).toBe('workflow');
+    expect(editorForRow({ flow_mode: true })).toBe('workflow');
+  });
+
+  it('never bounces a row back: an "agent" verdict can never be isWorkflowFlow', () => {
+    // This is what guarantees the two redirects terminate instead of looping.
+    const rows = [
+      { flow_mode: true, flow: { version: 1, nodes: [], edges: [] } },
+      { flow_mode: true, flow: [{ kind: 'agent' }] },
+      { flow_mode: true, flow: [] },
+      { flow_mode: true, flow: null },
+      { flow_mode: false, flow: null },
+      null,
+      undefined,
+    ];
+    for (const row of rows) {
+      if (editorForRow(row) !== 'workflow') {
+        expect(isWorkflowFlow(row?.flow)).toBe(false);
+      }
+    }
+  });
+
+  it('handles nullish rows without throwing', () => {
+    expect(editorForRow(null)).toBe('agent');
+    expect(editorForRow(undefined)).toBe('agent');
   });
 });

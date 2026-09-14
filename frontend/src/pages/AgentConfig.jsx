@@ -21,6 +21,7 @@ import DataSourcesSection from '@/components/agent/DataSourcesSection';
 import HarnessAgentSections from '@/components/agent/HarnessAgentSections';
 import FusionBridgeSection from '@/components/agent/FusionBridgeSection';
 import { normalizeTopology } from '@/lib/agentArchitecture';
+import { editorForRow } from '@/lib/workflowGraph';
 import {
   getFlowStep, updateFlowStep, removeFlowStep,
   addToFlow, addToBranch, addBranch, removeBranch,
@@ -122,6 +123,17 @@ export default function AgentConfig() {
   async function load() {
     try {
       const a = await base44.entities.AgentApp.get(id);
+      // Agent Workflows live in `agent_apps` too (flow_mode=true) but store
+      // the n8n canvas shape { version, nodes, edges } — this page's
+      // composable-flow editor expects `flow` to be an ARRAY of steps, so
+      // rendering a workflow row here threw "flow.forEach is not a function"
+      // and dropped the user on the error boundary. Their real editor is the
+      // canvas; send the row there instead. Every entry point that can hand
+      // us a workflow id (Agents list, share links, chat preview, pasted
+      // URL) is covered by this one check because they all land on this page.
+      // The same predicate is what keeps WorkflowCanvas from claiming an
+      // agent row, so the two can never disagree and loop.
+      if (editorForRow(a) === 'workflow') { navigate(`/my-space/workflow/${id}`, { replace: true }); return; }
       setAgent(a);
       // The capabilities/skills/knowledge_bases JSON columns are
       // string[] in the model, but legacy rows could have serialized any
@@ -141,7 +153,10 @@ export default function AgentConfig() {
         // sub_agents is an array of sub-agent OBJECTS, not strings; if
         // the API hands us anything weird, fall back to an empty list.
         sub_agents: Array.isArray(a.sub_agents) ? a.sub_agents : [],
-        flow_mode: a.flow_mode || false, flow: a.flow || [],
+        // `flow` here is the composable-flow STEP ARRAY. Anything else
+        // (null, a bare string, or a canvas object that slipped past the
+        // redirect above) becomes an empty tree rather than a crash.
+        flow_mode: !!a.flow_mode, flow: Array.isArray(a.flow) ? a.flow : [],
         capabilities: normalizeCapabilities(a.capabilities),
       });
     } catch { setAgent(null); }

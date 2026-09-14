@@ -4,6 +4,7 @@ import { base44 } from '@/api/base44Client';
 import { listWorkflows } from '@/api/workflows';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { filterUserAgents } from '@/lib/systemAgents';
+import { isWorkflowFlow } from '@/lib/workflowGraph';
 import { Plus, Upload, Wrench, Bot, Search, ChevronLeft, Check, Folder, Workflow } from 'lucide-react';
 import { toast } from 'sonner';
 
@@ -166,9 +167,11 @@ export default function PlusMenu({
       || (s.description || '').toLowerCase().includes(ql)
       || (s.trigger || '').toLowerCase().includes(ql),
   );
-  // Workflows are NOT regular agents — exclude flow_mode rows so they only
-  // appear in the dedicated "Agent Workflow" section below.
-  const filteredAgents = agents.filter((a) => !a.flow_mode && (a.name || '').toLowerCase().includes(ql));
+  // Agent Workflows are NOT regular agents — exclude the canvas-shaped rows
+  // (isWorkflowFlow) so they only appear in the dedicated "Agent Workflow"
+  // section below. Test the SHAPE, not `flow_mode`: agents that use the
+  // composable-flow mode also set flow_mode=true and must stay listed here.
+  const filteredAgents = agents.filter((a) => !isWorkflowFlow(a?.flow) && (a.name || '').toLowerCase().includes(ql));
   const hasChatTrigger = (w) => Array.isArray(w?.flow?.nodes) && w.flow.nodes.some((n) => n?.type === 'trigger_chat');
   const filteredWorkflows = workflows.filter((w) => hasChatTrigger(w) && (w.name || '').toLowerCase().includes(ql));
   const filteredProjects = projects.filter((p) => p.name.toLowerCase().includes(ql));
@@ -206,11 +209,11 @@ export default function PlusMenu({
           </button>
           <button onClick={() => setView('agent')} className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
             <Bot className="h-3.5 w-3.5 text-muted-foreground" /> {t.chat.plus.agent}
-            {activeAgent && !activeAgent.flow_mode && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
+            {activeAgent && !isWorkflowFlow(activeAgent?.flow) && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
           </button>
           <button onClick={() => setView('workflow')} className="flex w-full items-center gap-2.5 rounded-md px-2.5 py-2 text-left text-xs text-foreground transition-colors hover:bg-secondary/70">
             <Workflow className="h-3.5 w-3.5 text-muted-foreground" /> Agent Workflow
-            {activeAgent?.flow_mode && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
+            {isWorkflowFlow(activeAgent?.flow) && <span className="ml-auto max-w-[6rem] truncate text-[10px] text-primary">{activeAgent.name}</span>}
           </button>
         </div>
       ) : (

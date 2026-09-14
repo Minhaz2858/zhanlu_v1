@@ -16,6 +16,10 @@
 // the database. Keeping both checks makes the UI robust to
 // stale data.
 
+// Imported for filterUserAgents below: workflows and agents share the
+// `agent_apps` table, so the agents filter must also drop workflow rows.
+import { isWorkflowFlow } from '@/lib/workflowGraph';
+
 export const SYSTEM_AGENT_NAMES = Object.freeze([
   'agent_builder',
   'skill_agent',
@@ -49,8 +53,18 @@ export function isSystemAgent(agent) {
 }
 
 /**
- * Filter a list of agents, dropping system agents.
+ * Filter a list of agents, dropping system agents AND Agent Workflow rows.
  * Returns a new array; does not mutate the input.
+ *
+ * Agent Workflows are ordinary `agent_apps` rows with `flow_mode=true` and a
+ * canvas-shaped `flow` ({ version, nodes, edges }) — the backend
+ * `GET /workflows` list is their real home (My Space → Agent Workflow tab).
+ * They used to leak into every Agents list because this filter only dropped
+ * system agents, and following such a row to `/my-space/agent/:id` rendered
+ * the agent flow tree over a canvas object → page crash
+ * ("flow.forEach is not a function"). Agents that use the composable-flow
+ * mode store an ARRAY in `flow`, so the shape test (not the flag) is what
+ * distinguishes them.
  *
  * @template T
  * @param {T[]} agents
@@ -58,5 +72,5 @@ export function isSystemAgent(agent) {
  */
 export function filterUserAgents(agents) {
   if (!Array.isArray(agents)) return [];
-  return agents.filter((a) => !isSystemAgent(a));
+  return agents.filter((a) => !isSystemAgent(a) && !isWorkflowFlow(a?.flow));
 }

@@ -39,7 +39,10 @@ describe('PlusMenu.jsx Agent Workflow section', () => {
     expect(SOURCE).toMatch(/activeAgent\?\.id === w\.id/);
   });
 
-  it('excludes flow_mode rows from the regular Agent view', () => {
-    expect(SOURCE).toMatch(/filteredAgents\s*=\s*agents\.filter\(\(a\)\s*=>\s*!a\.flow_mode/);
+  it('excludes workflow-shaped rows from the regular Agent view (and keeps flow agents)', () => {
+    // Shape-based, not flag-based: composable-flow AGENTS also set
+    // flow_mode=true and must NOT be hidden from the agent picker.
+    expect(SOURCE).toMatch(/filteredAgents\s*=\s*agents\.filter\(\s*\(a\)\s*=>\s*!isWorkflowFlow\(a\?\.flow\)/);
+    expect(SOURCE).toMatch(/import \{ isWorkflowFlow \} from '@\/lib\/workflowGraph'/);
   });
 });

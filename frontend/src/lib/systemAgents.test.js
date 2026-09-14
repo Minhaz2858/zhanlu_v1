@@ -76,4 +76,31 @@ describe('filterUserAgents', () => {
   it('returns an empty array when the input is empty', () => {
     expect(filterUserAgents([])).toEqual([]);
   });
+
+  // Regression: Agent Workflows are `agent_apps` rows with flow_mode=true and
+  // a canvas-shaped flow. They leaked into the Agents list, and following one
+  // to /my-space/agent/:id rendered the agent flow tree over a canvas object
+  // → "a.flow.forEach is not a function" page crash.
+  it('drops Agent Workflow rows (canvas flow shape)', () => {
+    const list = [
+      { id: '1', name: 'Untitled Workflow', flow_mode: true, flow: { version: 1, nodes: [], edges: [] } },
+      { id: '2', name: 'My Agent' },
+      { id: '3', name: 'Report Writer', flow_mode: true, flow: { version: 1, nodes: [{ id: 'n1' }], edges: [] } },
+      { id: '4', name: 'Another User Agent' },
+    ];
+    expect(filterUserAgents(list).map((a) => a.id)).toEqual(['2', '4']);
+  });
+
+  it('KEEPS an agent that uses composable-flow mode (flow is a step array)', () => {
+    const list = [
+      { id: '1', name: 'Flow Agent', flow_mode: true, flow: [{ kind: 'agent', name: 'A' }, { kind: 'loop', flow: [] }] },
+      { id: '2', name: 'Untitled Workflow', flow_mode: true, flow: { version: 1, nodes: [], edges: [] } },
+    ];
+    expect(filterUserAgents(list).map((a) => a.id)).toEqual(['1']);
+  });
+
+  it('tolerates rows with a missing / nullish flow without throwing', () => {
+    const list = [{ id: '1' }, { id: '2', flow: null }, { id: '3', flow: undefined }];
+    expect(filterUserAgents(list).map((a) => a.id)).toEqual(['1', '2', '3']);
+  });
 });

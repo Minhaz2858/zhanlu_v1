@@ -3,6 +3,7 @@ import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { getAnonymousId } from '@/lib/anonymousId';
 import { filterUserAgents } from '@/lib/systemAgents';
+import { isWorkflowFlow } from '@/lib/workflowGraph';
 import { Wrench, Bot, ChevronDown, Search, Check, X } from 'lucide-react';
 
 export default function InvokePicker({ activeSkill, activeAgent, onSelectSkill, onSelectAgent, onRemoveSkill, onRemoveAgent }) {
@@ -31,10 +32,12 @@ export default function InvokePicker({ activeSkill, activeAgent, onSelectSkill, 
         setSkills(ownerId ? tools.filter((x) => x.created_by_id === ownerId) : []);
       })
       .catch(() => {});
-    // Workflows (flow_mode agents) are not regular agents — they have
-    // their own entry point in the + menu's "Agent Workflow" section.
+    // Agent Workflows (canvas-shaped flow) are not regular agents — they
+    // have their own entry point in the + menu's "Agent Workflow" section.
+    // Filter on the SHAPE, not `flow_mode`: agents using the composable-flow
+    // mode also set flow_mode=true and must remain invocable from chat.
     base44.entities.AgentApp.list('-updated_date', 100)
-      .then((rows) => setAgents((rows || []).filter((a) => !a.flow_mode)))
+      .then((rows) => setAgents((rows || []).filter((a) => !isWorkflowFlow(a?.flow))))
       .catch(() => {});
   }, []);
 

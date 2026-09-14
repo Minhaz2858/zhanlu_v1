@@ -1,5 +1,68 @@
 // Workflow graph <-> xyflow conversion + node catalog metadata.
 
+/**
+ * TWO different shapes share the same `agent_apps.flow` JSON column and the
+ * same `flow_mode=true` flag, and they are NOT interchangeable:
+ *
+ *   n8n canvas workflow   → { version, nodes: [], edges: [] }   (WorkflowCanvas)
+ *   agent-architecture    → [ { kind: 'agent'|'loop'|'parallel', ... } ]
+ *                           (AgentConfig "composable flow" mode)
+ *
+ * `flow_mode` alone cannot tell them apart, so every entry point must branch
+ * on the SHAPE. Rendering one shape in the other's editor throws at render
+ * time ("flow.forEach is not a function" — AgentConfig/FlowTree over a
+ * canvas object) and would persist the wrong shape on save.
+ *
+ * @param {object | null | undefined} flow raw `agent_apps.flow` value
+ * @returns {boolean} true when the value is the n8n canvas workflow shape
+ */
+export function isWorkflowFlow(flow) {
+  return !!flow && typeof flow === 'object' && !Array.isArray(flow) && Array.isArray(flow.nodes);
+}
+
+/**
+ * The mirror of {@link isWorkflowFlow}: the composable-flow STEP ARRAY shape
+ * written by AgentConfig (`[ { kind: 'agent'|'loop'|'parallel', ... } ]`).
+ * The canvas must refuse to load one of these — `flowToXY` expects
+ * `{ nodes, edges }`, so an agent row opened on `/my-space/workflow/:id`
+ * renders an empty/broken canvas and could overwrite the agent's flow on
+ * save. Route those rows back to the agent editor.
+ *
+ * @param {object | null | undefined} flow raw `agent_apps.flow` value
+ * @returns {boolean} true when the value is the agent-architecture step array
+ */
+export function isAgentArchFlow(flow) {
+  return Array.isArray(flow);
+}
+
+/**
+ * Which editor owns this `agent_apps` row — the n8n workflow canvas
+ * (`/my-space/workflow/:id`) or the agent config page (`/my-space/agent/:id`)?
+ *
+ * `agent_apps` is shared by chat agents and Agent Workflows, and the
+ * `flow_mode` flag ALONE does not identify a workflow: agents that use the
+ * composable-flow mode also set `flow_mode=true`. The `flow` SHAPE is the
+ * only reliable signal, so both pages route through this one function:
+ *
+ *   { version, nodes, edges }  → 'workflow'
+ *   [ { kind, ... }, ... ]     → 'agent'    (composable-flow agent)
+ *   null / undefined           → falls back to flow_mode (a flow_mode row
+ *                                with no graph yet is a fresh workflow)
+ *
+ * Both pages must use it, or the two guards can disagree and bounce a row
+ * back and forth forever. Because the shape branches are mutually exclusive
+ * (`isWorkflowFlow` XOR `isAgentArchFlow`) and AgentConfig only ever bounces
+ * on 'workflow', the redirect is guaranteed to terminate.
+ *
+ * @param {{ flow?: unknown, flow_mode?: unknown } | null | undefined} row
+ * @returns {'workflow' | 'agent'}
+ */
+export function editorForRow(row) {
+  if (isWorkflowFlow(row?.flow)) return 'workflow';
+  if (isAgentArchFlow(row?.flow)) return 'agent';
+  return row?.flow_mode ? 'workflow' : 'agent';
+}
+
 export const NODE_GROUPS = {
   triggers: { label: { en: 'Triggers', zh: '触发器' }, color: '#10b981' },
   ai: { label: { en: 'AI', zh: 'AI' }, color: '#8b5cf6' },

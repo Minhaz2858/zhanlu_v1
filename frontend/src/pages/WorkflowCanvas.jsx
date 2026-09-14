@@ -4,7 +4,7 @@ import { applyNodeChanges, applyEdgeChanges } from '@xyflow/react';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { getWorkflow, saveWorkflow, validateWorkflow, publishWorkflow, deleteWorkflow, listWorkflows } from '@/api/workflows';
 import { NodeRegistryProvider, getNodeTypeRegistry } from '@/lib/nodeTypeRegistry';
-import { flowToXY, xyToFlow, buildPasteGraph } from '@/lib/workflowGraph';
+import { flowToXY, xyToFlow, buildPasteGraph, editorForRow } from '@/lib/workflowGraph';
 import WorkflowCanvas from '@/components/workflow/WorkflowCanvas';
 import NodePalette from '@/components/workflow/NodePalette';
 import NodeDetailView from '@/components/workflow/NodeDetailView';
@@ -79,6 +79,15 @@ export default function WorkflowCanvasPage() {
       .then((row) => {
         setWf(row);
         setName(row.name || 'Untitled Workflow');
+        // `agent_apps` holds BOTH canvas workflows ({ nodes, edges }) and
+        // chat/composable-flow AGENTS. Opening an agent row here would show
+        // an empty canvas for it and persist an empty `{version,nodes,edges}`
+        // on the next save — silently converting the agent into a workflow.
+        // Hand any non-workflow row back to the agent editor. Uses the SAME
+        // predicate as AgentConfig (editorForRow) so the two redirects can
+        // never disagree and bounce a row back and forth forever; the shape
+        // tests are mutually exclusive, so this terminates.
+        if (editorForRow(row) !== 'workflow') { navigate(`/my-space/agent/${id}`, { replace: true }); return; }
         const loaded = row.flow || { version: 1, nodes: [], edges: [] };
         setSettings((loaded.settings) || {});
         const xy = flowToXY(loaded);

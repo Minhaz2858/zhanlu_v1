@@ -130,8 +130,13 @@ export function flowStats(root) {
   let agents = 0, loops = 0, parallels = 0;
   function walk(node) {
     if (!node) return;
-    if (node.flow) node.flow.forEach(walk);
-    if (node.branches) node.branches.forEach((br) => br.forEach(walk));
+    // `flow` must be an ARRAY of steps here. A workflow row (canvas shape
+    // { version, nodes, edges }) reaching this walker is truthy but has no
+    // .forEach — that is the "a.flow.forEach is not a function" page crash
+    // (AgentConfig rendering a workflow row). Guard the shape so a stray
+    // row degrades to an empty tree instead of taking down the page.
+    if (Array.isArray(node.flow)) node.flow.forEach(walk);
+    if (Array.isArray(node.branches)) node.branches.forEach((br) => Array.isArray(br) && br.forEach(walk));
     if (node.kind === 'agent') agents++;
     else if (node.kind === 'loop') loops++;
     else if (node.kind === 'parallel') parallels++;
