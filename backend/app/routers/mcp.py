@@ -81,19 +81,27 @@ class McpGrantsRequest(BaseModel):
 
 # ─── Authorization ──────────────────────────────────────────────────────
 
-def _require_mcp_access(resource_id: str, action: str = "use") -> None:
+def _require_mcp_access(resource_id: str, user=None, action: str = "use") -> None:
     """Deny MCP server use when the caller's role holds no grant (fail-closed).
 
     2026-09-17: none of these endpoints checked authorization at all. A stdio
     MCP server's ``server_url`` is an arbitrary shell command, so the connect
     endpoint was an unauthenticated role-escalation path: any logged-in role
     could persist a command that the backend later spawns as its own user.
+
+    2026-09-17 (second pass): the first version took the role from
+    ``TraceContext.current_role()`` — but NOTHING sets that outside the agents
+    router's chat endpoints (there is no middleware at all), so every /mcp
+    endpoint fell through to the "user" default and the gate denied nothing.
+    Measured, not assumed: a real ``viewer`` account got HTTP 200 on connect.
+    The role now comes from the authenticated user object, with TraceContext
+    kept only as a fallback for callers that do populate it.
     """
     from app.services.authz import get_authorizer
     from app.services.authz.base import ResourceType
     from app.services.tracing import TraceContext
 
-    role = TraceContext.current_role() or "user"
+    role = getattr(user, "role", None) or TraceContext.current_role() or "user"
     decision = get_authorizer().can_access(
         role=role,
         resource_type=ResourceType.MCP_SERVER,
@@ -168,7 +176,7 @@ def connect_mcp_server(
     """
     from app.models.mcp_server import McpServer
 
-    _require_mcp_access(req.name, action="create")
+    _require_mcp_access(req.name, user, action="create")
 
     transport = (req.transport or "stdio").lower()
     if transport == "http":
@@ -234,7 +242,7 @@ def disconnect_mcp_server(server_id: str, db: Session = Depends(get_db)):
     if not server:
         raise HTTPException(status_code=404, detail="MCP server not found")
 
-    _require_mcp_access(server.name, action="delete")
+    _require_mcp_access(server.name, user, action="delete")
 
     # Withdraw the server's tools from the agent registry first: a dangling
     # registry entry would keep the tool in every agent's tool list and answer
@@ -390,7 +398,7 @@ async def probe_server(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    _require_mcp_access(server.name)
+    _require_mcp_access(server.name, user)
     return await _probe_server(db, server)
 
 
@@ -409,7 +417,7 @@ async def oauth_start(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    _require_mcp_access(server.name)
+    _require_mcp_access(server.name, user)
     base = (server.base_url or server.server_url).rstrip("/")
     metadata = await oauth_mod.fetch_metadata(base)
     if not metadata.get("authorization_endpoint"):
@@ -460,7 +468,7 @@ async def oauth_callback(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    _require_mcp_access(server.name)
+    _require_mcp_access(server.name, user)
     try:
         tokens = await oauth_mod.exchange_code(
             pending["metadata"],
@@ -495,7 +503,7 @@ async def call_server_tool(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    _require_mcp_access(server.name)
+    _require_mcp_access(server.name, user)
     manager = get_session_manager()
     try:
         conn = await manager.get(server.id, _connect_from_row, db, server)
@@ -519,7 +527,7 @@ async def refresh_server_tools(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    _require_mcp_access(server.name)
+    _require_mcp_access(server.name, user)
     result = await _probe_server(db, server)
     if result.get("status") == "error":
         raise HTTPException(status_code=502, detail=result.get("error", "probe failed"))
@@ -547,7 +555,7 @@ async def update_mcp_grants(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
-    _require_mcp_access(server.name, action="grant")
+    _require_mcp_access(server.name, user, action="grant")
 
     server.granted_agents = list(req.granted_agents or [])
     db.commit()

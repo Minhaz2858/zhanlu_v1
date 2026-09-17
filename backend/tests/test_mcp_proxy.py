@@ -500,12 +500,29 @@ def test_viewer_role_is_denied_mcp_servers():
 
 
 def test_connect_endpoint_rejects_a_viewer():
+    """The gate must fire from the AUTHENTICATED USER's role, not from context.
+
+    TraceContext-based resolution silently defaults to "user" on every endpoint
+    outside the agents router (no middleware sets it), which let a real viewer
+    account connect a stdio server — an arbitrary command the backend spawns
+    as itself. Measured live before the fix: HTTP 200.
+    """
     from fastapi import HTTPException
 
     from app.routers.mcp import _require_mcp_access
     from app.services.tracing import TraceContext
 
+    class _User:
+        def __init__(self, role):
+            self.role = role
+
+    # The path that matters: role travels on the user object.
     TraceContext.clear()
+    with pytest.raises(HTTPException) as exc:
+        _require_mcp_access("remote-shell", _User("viewer"))
+    assert exc.value.status_code == 403
+
+    # TraceContext alone still works for callers that do populate it.
     TraceContext.set(role="viewer")
     try:
         with pytest.raises(HTTPException) as exc:
@@ -515,8 +532,5 @@ def test_connect_endpoint_rejects_a_viewer():
         TraceContext.clear()
 
     # A normal user passes — the gate must not break the working path.
-    TraceContext.set(role="user")
-    try:
-        _require_mcp_access("remote-shell")
-    finally:
-        TraceContext.clear()
+    _require_mcp_access("remote-shell", _User("user"))
+    _require_mcp_access("remote-shell", _User("admin"))
