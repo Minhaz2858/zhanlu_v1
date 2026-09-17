@@ -106,12 +106,22 @@ echo "=== 4. cleanup ==="
 if [[ "${KEEP:-0}" == "1" ]]; then
   echo "  KEEP=1 — left server $SID and conversation $CONV in place"
 else
-  curl -s -X DELETE "$BASE/api/mcp/servers/$SID" -H "Authorization: Bearer $TOKEN" >/dev/null
+  # Check the status: a non-2xx here (e.g. a 500 from an endpoint whose auth
+  # wiring broke) used to be discarded with `>/dev/null`, so the run reported
+  # "tools still published" and pointed at the wrong component.
+  DEL_CODE=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/mcp/servers/$SID" \
+    -H "Authorization: Bearer $TOKEN")
+  [[ "$DEL_CODE" == "200" ]] && pass "disconnect (HTTP 200)" \
+                             || fail "disconnect returned HTTP $DEL_CODE"
   # Withdrawn from the registry on delete, so no dangling tools.
   still=$(curl -s "$BASE/api/mcp/tools" \
     | python3 -c "import sys,json;print(','.join(t['name'] for t in json.load(sys.stdin)['tools'] if t['name'].startswith('mcp__e2e_demo__')) or 'none')")
   [[ "$still" == "none" ]] && pass "disconnect withdrew its tools from the registry" \
                            || fail "tools still published after disconnect: $still"
+  LEFT=$(curl -s "$BASE/api/mcp/servers" -H "Authorization: Bearer $TOKEN" \
+    | python3 -c "import sys,json;print(sum(1 for s in json.load(sys.stdin) if s['name']=='$SERVER_NAME'))")
+  [[ "$LEFT" == "0" ]] && pass "server row is gone from the list endpoint" \
+                       || fail "server row still listed after delete ($LEFT)"
   echo "  (conversation $CONV left for inspection)"
 fi
 

@@ -231,8 +231,20 @@ def list_mcp_servers(db: Session = Depends(get_db)):
 
 
 @router.delete("/mcp/servers/{server_id}")
-def disconnect_mcp_server(server_id: str, db: Session = Depends(get_db)):
-    """Disconnect an MCP server."""
+def disconnect_mcp_server(
+    server_id: str,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
+):
+    """Disconnect an MCP server.
+
+    Requiring the user here is new (2026-09-17): this endpoint previously took no
+    auth dependency at all, so it was reachable unauthenticated — and its
+    authorization check needs the caller's role, which only exists once the user
+    is resolved. (Measured the hard way: passing `user` into the check without
+    adding it to the signature raises NameError -> HTTP 500, and the delete
+    silently never happens.)
+    """
     from app.models.mcp_server import McpServer
     server = (
         db.query(McpServer)

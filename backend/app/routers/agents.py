@@ -2382,7 +2382,7 @@ async def _force_llm_synthesis(
         prompt = _build_ceo_synthesis_prompt(
             user_question=user_msg,
             data_rows=rows,
-            columns=_columns,
+            columns=list(rows[0].keys()) if rows else [],
             table_name="query_result",
         )
         prompt += (
@@ -7092,6 +7092,12 @@ async def add_message(
 
             assistant_content = llm_response.get("content", "")
             raw_tool_calls = llm_response.get("tool_calls", [])
+            # Provider reasoning for THIS iteration, echoed back below on the
+            # assistant message that carries the tool calls — DeepSeek rejects
+            # the follow-up request without it (see the contract note in
+            # _call_llm_with_tools). _call_llm_with_tools has always returned
+            # this; the v2 loop used to drop it on the floor.
+            _v2_reasoning = llm_response.get("reasoning") or ""
 
             # ── Clarification hard-stop (:::options) ──────────────────
             # An options block is a question to the user — the turn is DONE.
@@ -7717,6 +7723,8 @@ async def add_message(
                 llm_messages.append({
                     "role": "assistant",
                     "content": None,
+                    # Echo the iteration's real reasoning (DeepSeek contract).
+                    "reasoning_content": _v2_reasoning,
                     "tool_calls": [
                         {
                             "id": tool_call_id,
@@ -8030,8 +8038,8 @@ async def add_message(
                             followup_msgs,
                             tools=tools,
                             tool_choice="auto",
-                            temperature=temperature,
-                            max_tokens=max_tokens,
+                            temperature=llm_overrides.get("temperature"),
+                            max_tokens=llm_overrides.get("max_tokens"),
                         )
                     except Exception:
                         return None
@@ -8392,6 +8400,21 @@ async def resume_conversation(
     conv.status = "active"
 
     assistant_content = ""
+    # `agent_app` was referenced below but never bound in this function scope
+    # (NameError on every resume). Resolve it from the conversation's agent,
+    # same lookup as add_message / add_message_stream.
+    agent_app = None
+    try:
+        if conv.agent_name:
+            agent_app = db.query(AgentApp).filter(
+                AgentApp.name == conv.agent_name,
+                AgentApp.is_deleted == False,
+            ).first()
+    except Exception as _aa_err:
+        logger.warning(
+            "resume: agent_app lookup failed (conv=%s): %s",
+            conversation_id, _aa_err,
+        )
     # P0 reliability: per-turn guardrail controller + per-conversation iteration budget
     guard_ctrl = ToolLoopGuardController(_loop_guard_config_for(agent_app))
     _max_iters = getattr(agent_app, "max_call_count", None) or settings.AGENT_MAX_ITERATIONS
@@ -9372,6 +9395,21 @@ async def _call_llm_with_tools(
             cache_ttl=getattr(settings, "PROMPT_CACHE_TTL", "5m"),
         ),
     }
+    # DeepSeek thinking-mode contract — the SAME rule `_stream_llm_with_tools`
+    # applies (see the long note above its base_payload), which this
+    # non-streaming sibling never did. DeepSeek reasons natively, and a request
+    # that follows an assistant tool-call turn is rejected with
+    #   400 "The `reasoning_content` in the thinking mode must be passed back
+    #        to the API."
+    # unless that assistant message carries `reasoning_content`. The tool loop
+    # builds it as {role, content, tool_calls}, so the key is absent and EVERY
+    # tool turn failed on its second LLM call — the tool executed, then the call
+    # that was supposed to read its result was refused, and the user saw
+    # "Sorry, I encountered an error: Bad request (400). Check request format."
+    # An assistant message that already carries the key (the caller echoed the
+    # real reasoning) is left untouched; anything else gets "" to satisfy the
+    # contract. Shallow copies — the caller's messages list is not mutated.
+    payload["messages"] = apply_reasoning_content_contract(payload["messages"])
     if not model_has_fixed_temperature(_model):
         payload["temperature"] = temperature if temperature is not None else 0.7
     # Per-model context-aware clamp (replaces the old global hard-cap hack).
@@ -9449,6 +9487,42 @@ async def _call_llm_with_tools(
         "tool_calls": raw_tool_calls,
         "reasoning": reasoning or "",
     }
+
+
+def apply_reasoning_content_contract(messages: list[dict]) -> list[dict]:
+    """Satisfy DeepSeek's thinking-mode contract. Returns a new list.
+
+    DeepSeek reasons natively — `reasoning_content` comes back on almost every
+    response, including plain "say ok" — and any request that follows an
+    assistant turn MUST echo that field back, or the API refuses it with
+    ``400 "The `reasoning_content` in the thinking mode must be passed back to
+    the API."``. Note this cannot be switched off from the client:
+    ``LLM_ENABLE_THINKING=false`` does not suppress it (verified — the field and
+    the rejection both persist).
+
+    Our tool loop composes the assistant message itself as
+    ``{role, content, tool_calls}``, so the key is missing from exactly the
+    message the API insists on — and every tool-calling turn died on its second
+    LLM call: the tool executed, then the call that was meant to read the result
+    was refused, surfacing to the user as *"Sorry, I encountered an error: Bad
+    request (400). Check request format."*
+
+    Messages that already carry the key (the caller echoed the real reasoning)
+    are passed through untouched; anything else gets ``""``.
+
+    This lived only in the streaming path, so the non-streaming path (the v2
+    loop's `_call_llm_with_tools`) never applied it. Keep it a single shared
+    helper: two copies is how one of them came to be missing. Mutates nothing —
+    shallow copies per message.
+    """
+    return [
+        (
+            {**m, "reasoning_content": m.get("reasoning_content") or ""}
+            if m.get("role") == "assistant" and "reasoning_content" not in m
+            else m
+        )
+        for m in messages
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -10027,8 +10101,16 @@ async def _stream_llm_with_tools(
     endpoint: "LLMEndpoint | None" = None,
     temperature: float | None = None,
     max_tokens: int | None = None,
+    reasoning_effort: str | None = None,
 ):
     """Stream the LLM response, yielding incremental events.
+
+    ``reasoning_effort`` (optional) is forwarded to the provider to bound the
+    chain-of-thought budget ('minimal' | 'low' | 'medium' | 'high'). Reasoning
+    models emit ``reasoning_content`` that COUNTS AGAINST ``max_tokens``, so an
+    unbounded reasoning block can consume the whole output budget and truncate
+    the response before any tool call is emitted. Callers use 'minimal' when
+    retrying a truncated turn (see the truncation rescue in event_stream).
 
     This is the streaming-with-tools counterpart to ``_call_llm_with_tools``.
     It uses ``stream: True`` so tokens arrive as they are generated,
@@ -10078,6 +10160,13 @@ async def _stream_llm_with_tools(
     # enable_thinking is explicitly requested.
     if getattr(settings, "LLM_ENABLE_THINKING", False):
         base_payload["chat_template_kwargs"] = {"enable_thinking": True}
+    # Bound the reasoning budget when the caller asks for it. Verified against
+    # the DeepSeek API: `reasoning_effort` is accepted and (unlike
+    # tool_choice="required", which the provider rejects with
+    # "Thinking mode does not support this tool_choice") it is the supported
+    # lever for keeping a tool call inside the output budget.
+    if reasoning_effort:
+        base_payload["reasoning_effort"] = reasoning_effort
     # P1-5: apply per-model tool-output cap to the messages being sent
     # in the streaming path.  Without this, the v3 FSM (which streams
     # multiple LLM calls per turn) can carry forward 50k+ tokens of
@@ -10115,7 +10204,7 @@ async def _stream_llm_with_tools(
     if tool_choice and not _skip_tool_choice:
         base_payload["tool_choice"] = tool_choice
 
-    # DeepSeek thinking-mode quirk: when the configured model returns
+    # DeepSeek thinking-mode contract: when the configured model returns
     # `reasoning_content` (e.g. `deepseek-v4-flash`), the NEXT request
     # must echo that reasoning_content back on the prior assistant
     # message. We don't persist reasoning_content in chat_messages
@@ -10126,14 +10215,11 @@ async def _stream_llm_with_tools(
     # one to satisfy the contract; models that don't use thinking
     # mode ignore the field. Mutates a shallow copy so the caller's
     # messages list is untouched.
-    base_payload["messages"] = [
-        (
-            {**m, "reasoning_content": m.get("reasoning_content") or ""}
-            if m.get("role") == "assistant" and "reasoning_content" not in m
-            else m
-        )
-        for m in _prepared_messages
-    ]
+    #
+    # 2026-09-17: the non-streaming path had no copy of this rule, so every
+    # tool turn on the v2 loop 400'd. Both paths now call the shared
+    # `apply_reasoning_content_contract` — do not re-inline it here.
+    base_payload["messages"] = apply_reasoning_content_contract(_prepared_messages)
 
     full_content = ""
     reasoning_acc = ""
@@ -10305,6 +10391,13 @@ async def _stream_llm_with_tools(
         yield ("error", f"LLM request failed: {str(e)}")
         return
 
+    # Surface the provider finish_reason BEFORE the terminal event so the
+    # caller can tell a clean stop apart from a TRUNCATED iteration
+    # (finish_reason == "length"). Without it a caller sees only "no tool
+    # calls, no content" and cannot distinguish "model chose to say nothing"
+    # from "model ran out of budget mid-thought".
+    yield ("finish_reason", last_finish_reason)
+
     if tc_buffer:
         assembled = [tc_buffer[i] for i in sorted(tc_buffer)]
         yield ("tool_calls", assembled)
@@ -10319,9 +10412,16 @@ async def _stream_llm_with_tools(
                 yield ("tool_calls", extracted)
                 return
         if not full_content:
+            # `conversation_id` is NOT in scope here: this is a module-level
+            # helper, while `conversation_id` is a path param of the callers.
+            # Referencing it raised NameError and killed the SSE stream on
+            # every empty LLM response (surfaced to the user as
+            # "Sorry, I hit an error while responding"). Resolve the id from
+            # the request-scoped trace context instead.
             logger.warning(
                 "LLM returned empty content (finish_reason=%s, conv=%s)",
-                last_finish_reason or "unknown", conversation_id,
+                last_finish_reason or "unknown",
+                TraceContext.current_session_id() or "-",
             )
         yield ("done", full_content)
 
@@ -12309,6 +12409,11 @@ async def add_message_stream(
     # UnboundLocalError and killing the SSE stream (same trap as
     # llm_messages, guardrail_retries, etc.).
     _stream_compaction_attempted = [False]
+    # Max truncation rescues per turn. Bounded (not once-per-turn, not
+    # unbounded): the CAD run showed 5+ truncations in a single build turn,
+    # and a once-per-turn latch let the later ones through -> the build
+    # thrashed (6x fusion360_clear, work thrown away each cycle).
+    _TRUNCATION_RESCUE_MAX = 3
     assistant_content = ""
     # Fix 2a: assistant_content length at the last ask_data_agent result, so
     # the text BETWEEN two ask_data_agent calls can be checked for retry
@@ -12325,6 +12430,12 @@ async def add_message_stream(
 
     async def event_stream():
         nonlocal assistant_content, guardrail_retries, messages, conv, agent_app, user
+
+        # Truncated-turn rescue state. MUST be bound inside this generator:
+        # binding it in the enclosing function and assigning it here would make
+        # every earlier read an UnboundLocalError (see the nonlocal note above).
+        _truncation_rescue_done = 0   # bounded rescues per turn (see _TRUNCATION_RESCUE_MAX)
+        _it_finish_reason: str | None = None  # provider finish_reason of the last LLM call
 
         # T18: mark this turn as dashboard-intent so the artifact persistence
         # layer can drop stray analytics-path artifacts (e.g. a static "Web
@@ -12525,6 +12636,7 @@ async def add_message_stream(
         _cad_verify_nudges = 0  # CAD verify-on-stop nudges this turn (cap 1)
         _fusion_clear_count = 0  # fusion360_clear calls this turn (cap 1 — see _invoke_v3)
         _fusion_readonly_streak = 0  # consecutive read-only fusion calls (info/ping) — spin guard
+        _fusion_lookup_streak = 0  # consecutive fusion360_lookup_api calls — doc-read runaway guard
         # Clarify handoff (2026-08-28): when the model issues a clarify
         # question, the turn must END — the user's next message is the
         # answer (CLARIFY_SUSPENDS_TURN_ENABLED). Without this, the loop
@@ -12904,9 +13016,18 @@ async def add_message_stream(
             settings.DASHBOARD_BUILD_WALL_CLOCK_CAP_S
             if _is_dashboard_build
             else (
-                180.0
-                if (_orch_doc_format or _is_fusion_agent or _is_plan_report_or_data)
-                else 60.0
+                # CAD builds get the long cap for the same reason dashboard
+                # builds do: a multi-step geometry build cannot finish in 180s,
+                # and the cap fired mid-build, truncating the part. Verified:
+                # with 180s the agent built the hex-head sketch and was killed
+                # before extruding it (0 bodies, 3 sketches left behind).
+                settings.FUSION_BUILD_WALL_CLOCK_CAP_S
+                if _is_fusion_agent
+                else (
+                    180.0
+                    if (_orch_doc_format or _is_plan_report_or_data)
+                    else 60.0
+                )
             )
         )
         for iteration in range(_v3_max_iterations):
@@ -13336,6 +13457,7 @@ async def add_message_stream(
                     # first client-visible chunk (content_streamed) — after
                     # that, a restart would duplicate emitted content, so we
                     # raise into the outer handler as before.
+                    _it_finish_reason = None
                     _stream_attempt = 1
                     while True:
                         try:
@@ -13421,8 +13543,97 @@ async def add_message_stream(
                                     # practice assistant_content already matches).
                                     if ev_data and not assistant_content:
                                         assistant_content = ev_data
+                                elif ev_type == "finish_reason":
+                                    _it_finish_reason = ev_data
                                 elif ev_type == "error":
                                     raise RuntimeError(ev_data)
+                            # ── Truncation rescue (reasoning-budget starvation) ──
+                            # A reasoning model emits reasoning_content that
+                            # COUNTS AGAINST max_tokens. On a spec it finds
+                            # contradictory it can spend the ENTIRE output
+                            # budget inside the reasoning block and be cut off
+                            # (finish_reason='length') before emitting any tool
+                            # call. The iteration then yields no tool calls and
+                            # (usually) no content, and the turn dies with a
+                            # "could you try again" stump. Retry ONCE with the
+                            # model told to stop deliberating and with the
+                            # reasoning budget constrained so the tool call
+                            # fits. Safe only before anything streamed.
+                            if (
+                                not raw_tool_calls
+                                and not content_streamed
+                                and _it_finish_reason == "length"
+                                and _truncation_rescue_done < _TRUNCATION_RESCUE_MAX
+                            ):
+                                _truncation_rescue_done += 1
+                                logger.warning(
+                                    "stream: iteration truncated by output limit "
+                                    "with no tool calls (conv=%s); retrying with "
+                                    "constrained reasoning",
+                                    conversation_id,
+                                )
+                                _already_ran = len(tool_calls_for_frontend or [])
+                                _rescue_messages = list(llm_messages) + [{
+                                    "role": "user",
+                                    "content": (
+                                        "Your previous attempt was cut off by the "
+                                        "output limit while deliberating. Do NOT "
+                                        "re-analyse and do NOT restate the request. "
+                                        "If the inputs conflict, build to the "
+                                        "numbers AS WRITTEN and report the "
+                                        "discrepancy AFTER the build. "
+                                        + (
+                                            "You have ALREADY executed %d tool "
+                                            "call(s) this turn. CONTINUE from that "
+                                            "state: do NOT restart, do NOT redo "
+                                            "completed work, and do NOT clear or "
+                                            "recreate what already exists. "
+                                            % _already_ran if _already_ran else ""
+                                        )
+                                        + "Emit the next concrete tool call now."
+                                    ),
+                                }]
+                                try:
+                                    async for _r_type, _r_data in _stream_llm_with_tools(
+                                        _rescue_messages, tools, tool_choice=tool_choice,
+                                        model_override=user_model,
+                                        endpoint=effective_llm.endpoint,
+                                        temperature=llm_overrides.get("temperature"),
+                                        # Give the rescue the FULL hard cap: the
+                                        # normal per-user budget is what the
+                                        # deliberation just exhausted.
+                                        max_tokens=max(
+                                            int(llm_overrides.get("max_tokens") or 0),
+                                            int(getattr(settings, "LLM_MAX_TOKENS_HARD_CAP", 8192) or 8192),
+                                        ),
+                                        reasoning_effort="minimal",
+                                    ):
+                                        if _r_type == "delta":
+                                            assistant_content += _r_data
+                                            content_streamed = True
+                                            if not _suppress_chat_deltas:
+                                                yield f'data: {json.dumps({"type": "delta", "content": _r_data})}\n\n'
+                                        elif _r_type == "reasoning":
+                                            final_reasoning += _r_data
+                                            yield f'data: {json.dumps({"type": "reasoning_delta", "content": _r_data})}\n\n'
+                                        elif _r_type == "tool_calls":
+                                            raw_tool_calls = _r_data or []
+                                        elif _r_type == "done":
+                                            if _r_data and not assistant_content:
+                                                assistant_content = _r_data
+                                        elif _r_type == "error":
+                                            raise RuntimeError(_r_data)
+                                except Exception as _rescue_err:
+                                    logger.warning(
+                                        "stream: truncation rescue failed (conv=%s): %s",
+                                        conversation_id, _rescue_err,
+                                    )
+                                if raw_tool_calls:
+                                    logger.info(
+                                        "stream: truncation rescue recovered %d tool "
+                                        "call(s) (conv=%s)",
+                                        len(raw_tool_calls), conversation_id,
+                                    )
                             break  # stream completed cleanly
                         except Exception as stream_err:
                             ce_stream = classify_api_error(stream_err)
@@ -15217,31 +15428,52 @@ async def add_message_stream(
                     # Local models occasionally loop on re-sync: "I'll re-read
                     # the live scene" → fusion360_info, forever (observed 10×
                     # in one turn). Count CONSECUTIVE read-only calls (any
-                    # modeling tool resets the streak) and hard-block after 5
+                    # modeling tool resets the streak) and hard-block after 3
                     # so the model is forced to either modify geometry or
                     # answer. Legit info-after-modify is unaffected.
-                    _FUSION_READONLY = {"fusion360_info", "fusion360_ping",
-                                        "fusion360_project", "fusion360_lookup_api"}
-                    if _is_fusion_agent and tool_name in _FUSION_READONLY:
+                    #
+                    # 2026-09-16: fusion360_lookup_api is NOT a scene read. It
+                    # introspects the Fusion API object model offline and never
+                    # touches the document. Counting it as a scene re-read
+                    # killed a correct run mid-build: the model called
+                    # lookup_api 3× in a row (ChamferEdgeSets →
+                    # ThreadFeatureInput → createThreadInfo) while learning the
+                    # chamfer/thread APIs and was told "you have re-read the
+                    # scene 3 times WITHOUT changing any geometry" — false, it
+                    # had just extruded two bodies, and the block denied it the
+                    # API knowledge the part required. Doc lookups are cheap,
+                    # offline and legitimately bursty, so they keep a much
+                    # higher consecutive cap purely as runaway protection; the
+                    # iteration budget remains the real backstop.
+                    _FUSION_SCENE_READS = {"fusion360_info", "fusion360_ping",
+                                           "fusion360_project"}
+                    _FUSION_LOOKUP = "fusion360_lookup_api"
+                    _FUSION_SCENE_SPIN_LIMIT = 3
+                    _FUSION_LOOKUP_LIMIT = 6
+                    if _is_fusion_agent and tool_name in _FUSION_SCENE_READS:
                         _fusion_readonly_streak += 1
+                    elif _is_fusion_agent and tool_name == _FUSION_LOOKUP:
+                        _fusion_lookup_streak += 1
                     elif (
                         _is_fusion_agent
                         and tool_name.startswith("fusion360_")
-                        and tool_name not in _FUSION_READONLY
+                        and tool_name not in _FUSION_SCENE_READS
+                        and tool_name != _FUSION_LOOKUP
                     ):
-                        # A real modeling tool changes geometry — the streak
-                        # resets so info-after-modify stays legal. todo/plan
-                        # calls do NOT reset it (they don't touch geometry).
+                        # A real modeling tool changes geometry — both streaks
+                        # reset so info-after-modify stays legal. todo/plan
+                        # calls do NOT reset them (they don't touch geometry).
                         _fusion_readonly_streak = 0
+                        _fusion_lookup_streak = 0
                     if (
                         _is_fusion_agent
-                        and tool_name in _FUSION_READONLY
+                        and tool_name in _FUSION_SCENE_READS
                         # 2026-08-28: 5 → 3. deepseek re-reads info 3-5x at
                         # turn start before acting; each wasted re-read costs a
                         # full LLM round trip (~5-15s on api.deepseek.com).
                         # Blocking at 3 saves ~2 calls per turn while still
                         # allowing one legit re-sync after a modeling change.
-                        and _fusion_readonly_streak >= 3
+                        and _fusion_readonly_streak >= _FUSION_SCENE_SPIN_LIMIT
                     ):
                         logger.warning(
                             "v3 stream: blocked read-only spin (conv=%s, iter=%d, "
@@ -15262,6 +15494,30 @@ async def add_message_stream(
                                 "answer. Do NOT call fusion360_info again."
                             ) % _fusion_readonly_streak,
                             "guardrail": {"code": "fusion_readonly_spin_block"},
+                        }
+                    if (
+                        _is_fusion_agent
+                        and tool_name == _FUSION_LOOKUP
+                        and _fusion_lookup_streak >= _FUSION_LOOKUP_LIMIT
+                    ):
+                        logger.warning(
+                            "v3 stream: blocked lookup_api spin (conv=%s, iter=%d, "
+                            "tool=%s, streak=%d)",
+                            conversation_id, iteration, tool_name,
+                            _fusion_lookup_streak,
+                        )
+                        return {
+                            "success": False,
+                            "error": (
+                                "BLOCKED: %d consecutive fusion360_lookup_api "
+                                "calls. You have enough API detail to proceed — "
+                                "stop reading documentation and call a MODELING "
+                                "tool now (fusion360_sketch_create / "
+                                "fusion360_extrude / fusion360_fillet / "
+                                "fusion360_thread / fusion360_chamfer ...), or "
+                                "give your final answer."
+                            ) % _fusion_lookup_streak,
+                            "guardrail": {"code": "fusion_lookup_spin_block"},
                         }
                     if tool_name == "fusion360_clear":
                         _fusion_clear_count += 1
@@ -16912,7 +17168,8 @@ async def add_message_stream(
                                             _targs = {}
                                     _tool_result = await execute_tool(
                                         _tname, _targs, db,
-                                        user_id,
+                                        TraceContext.current_user_id()
+                                        or (user.id if user else None),
                                         context={
                                             "conversation_id": conversation_id,
                                             "agent_app_id": agent_app_id,
