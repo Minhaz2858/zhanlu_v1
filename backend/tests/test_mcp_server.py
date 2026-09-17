@@ -178,22 +178,33 @@ class TestMcpProxy:
         assert "no mcp_server" in result["error"].lower()
 
     @pytest.mark.asyncio
-    async def test_proxy_not_implemented_returns_placeholder(self):
+    async def test_proxy_unknown_server_returns_error(self):
+        """2026-09-16: this handler was a stub that always answered 'not yet
+        implemented', so any agent given an MCP tool got a guaranteed failure.
+        It now forwards, so an unknown server is a genuine error."""
         from app.services.tool_handlers.mcp_proxy import _mcp_proxy_handler
         result = await _mcp_proxy_handler(
             {},
             context={"tool_name": "github_search", "mcp_server": "github"},
         )
         assert result["success"] is False
-        assert "not yet implemented" in result["error"].lower()
+        assert "not connected" in result["error"].lower()
 
-    def test_probe_mcp_server_graceful_failure(self):
-        """Probe of nonexistent command returns None gracefully."""
-        from app.services.tool_handlers.mcp_proxy import probe_mcp_server
-        result = probe_mcp_server(
-            "nonexistent_command_xyz_123", [], {}
-        )
-        assert result is None
+    def test_sync_bridge_fails_gracefully_on_bad_command(self):
+        """A nonexistent stdio command returns an error dict, never raises."""
+        from app.services.tool_handlers.mcp_proxy import call_mcp_tool
+
+        class _Row:
+            id = "bad"
+            name = "bad"
+            server_url = "nonexistent_command_xyz_123"
+            base_url = None
+            transport = "stdio"
+            oauth_token_json = None
+
+        result = call_mcp_tool(_Row(), "anything", {})
+        assert result["success"] is False
+        assert result["error"]
 
     def test_register_and_get_mcp_tools(self):
         from app.services.tool_handlers.mcp_proxy import (

@@ -753,6 +753,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             startup_logger.warning("FastMCP transport shutdown error (non-fatal): %s", e)
 
+    # MCP *client* sessions (2026-09-16). McpSessionManager.close_all() existed
+    # but was never called from anywhere in the codebase, so every spawned
+    # stdio MCP server (npx / node subprocess) was orphaned whenever the
+    # backend stopped or restarted and kept running in the background.
+    try:
+        from app.services.mcp_client.session import get_session_manager
+
+        await get_session_manager().close_all()
+    except Exception as e:
+        startup_logger.warning("MCP client session teardown error (non-fatal): %s", e)
+
     # ── Shutdown ──
     try:
         from app.services.dashboard_app.manager import dashboard_app_manager

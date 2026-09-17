@@ -816,6 +816,14 @@ class Settings(BaseSettings):
     # connection alive).
     DASHBOARD_BUILD_MAX_TOOL_ITERATIONS: int = 40
     DASHBOARD_BUILD_WALL_CLOCK_CAP_S: float = 1800.0
+    # CAD/Fusion builds: same class of long-running, multi-step build pipeline
+    # as dashboard builds, and they hit the SAME wall. The agent loop's 180s cap
+    # fired mid-build (logger: "v3 stream: wall-clock cap 180s hit"); the model
+    # had built the hex-head sketch and was cut off before extruding, so the user
+    # got a partial model and a BUILDING preamble instead of a finished part.
+    # A reasoning model needs ~17k reasoning tokens and ~60s per LLM call, and a
+    # bolt build is 8+ calls (clear/sketch/extrude/thread/chamfer/verify).
+    FUSION_BUILD_WALL_CLOCK_CAP_S: float = 1800.0
     # Per-delegate wall-clock for ask_data_agent DURING dashboard turns.
     # The default delegate budget (60s) truncates data collection before all
     # metrics are gathered. Dashboard delegates get 10 minutes (no practical
@@ -1293,6 +1301,19 @@ class Settings(BaseSettings):
     SWARM_MAX_CONCURRENT: int = 8        # max simultaneous workers (0 = unlimited)
     SWARM_MAX_COST_USD: float = 0.0      # cost cap per orchestration (0 = unlimited)
     SWARM_MAX_WALL_S: float = 900.0      # wall-clock cap per orchestration (0 = unlimited)
+
+    # ── MCP client (2026-09-16) ─────────────────────────────────────────
+    # Per-call timeout for external MCP tool invocations. Without a bound, a
+    # hung MCP server blocked the ReAct loop until the turn's wall-clock
+    # budget killed the whole turn — the agent lost all its work instead of
+    # failing one tool call.
+    MCP_CALL_TIMEOUT_S: float = 60.0
+    # Liveness probe timeout used before handing a *cached* MCP session to an
+    # agent. A failed ping forces a reconnect rather than surfacing a dead
+    # connection as a tool error.
+    MCP_HEALTHCHECK_TIMEOUT_S: float = 5.0
+    # TTL for cached MCP connections (seconds).
+    MCP_SESSION_TTL_S: float = 600.0
 
     # ── P2 Durability & Observability ────────────────────────────────────
     # When AGENT_HARNESS_ENABLED + AGENT_TRACING_ENABLED are both True,

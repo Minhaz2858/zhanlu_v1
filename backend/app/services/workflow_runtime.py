@@ -566,14 +566,21 @@ class WorkflowExecutionContext:
         return sql
 
     def mcp_call(self, server_id: str, tool_name: str, arguments: dict) -> dict:
-        """Invoke a tool on a connected MCP server (stdio JSON-RPC)."""
+        """Invoke a tool on a connected MCP server.
+
+        2026-09-16: used to pass ``server.server_url`` into the hand-rolled
+        stdio client, which re-parsed it with ``shlex`` — so HTTP-transport
+        servers were dispatched as shell commands and always failed, and every
+        call re-spawned the process. ``call_mcp_tool`` now takes the row and
+        goes through the SDK client.
+        """
         from app.models.mcp_server import McpServer
         from app.services.tool_handlers.mcp_proxy import call_mcp_tool
 
         server = _resolve_entity(self.db, McpServer, server_id)
         if server is None:
             raise RuntimeError(f"MCP server {server_id!r} not found")
-        return call_mcp_tool(server.server_url, tool_name, arguments)
+        return call_mcp_tool(server, tool_name, arguments)
 
     def run_code(self, code: str, item: dict, timeout: int = 10) -> dict:
         """Run user Python in the Docker sandbox (agent-sandbox pattern).

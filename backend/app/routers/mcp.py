@@ -173,29 +173,6 @@ def connect_mcp_server(
     return mcp.to_dict()
 
 
-def _probe_mcp_tools_async(
-    server_id: str,
-    db: Session,
-    command: str,
-    args: list[str] | None,
-    env: dict[str, str] | None,
-):
-    """Probe an MCP server for its tools in a best-effort manner.
-
-    This runs synchronously on the import path; a production version
-    would use a background task or subprocess management.
-    """
-    try:
-        from app.services.tool_handlers.mcp_proxy import probe_mcp_server
-        result = probe_mcp_server(command, args or [], env or {})
-        if result:
-            mcp = db.query(db.bind.registry._class_registry.get("McpServer")).get(server_id) if False else None
-            # For now, just log the result
-            logger.info("MCP probe result for %s: %d tools", command, len(result.get("tools", [])))
-    except Exception as exc:
-        logger.debug("MCP probe skipped for %s: %s", command, exc)
-
-
 @router.get("/mcp/servers")
 def list_mcp_servers(db: Session = Depends(get_db)):
     """List all connected MCP servers."""
@@ -229,12 +206,11 @@ def disconnect_mcp_server(server_id: str, db: Session = Depends(get_db)):
 
 
 @router.get("/mcp/servers/{server_id}/tools")
-def list_mcp_server_tools(server_id: str, db: Session = Depends(get_db)):
+async def list_mcp_server_tools(server_id: str, db: Session = Depends(get_db)):
     """List tools available from a specific connected MCP server.
 
-    Serves from the in-process cache first; if empty, probes the server
-    live (spawns the process) so the workflow canvas tool picker always
-    has fresh options.
+    Serves from the in-process cache first; if empty, probes the server live
+    so the workflow canvas tool picker always has fresh options.
     """
     from app.models.mcp_server import McpServer
     server = (
@@ -245,20 +221,18 @@ def list_mcp_server_tools(server_id: str, db: Session = Depends(get_db)):
     if not server:
         raise HTTPException(status_code=404, detail="MCP server not found")
 
-    from app.services.tool_handlers.mcp_proxy import (
-        get_mcp_tools_for_server,
-        list_tools_for_server,
-        register_mcp_tools,
-    )
+    from app.services.tool_handlers.mcp_proxy import get_mcp_tools_for_server
+
     tools = get_mcp_tools_for_server(server.name)
     if not tools:
-        try:
-            tools = list_tools_for_server(server.server_url)
-            register_mcp_tools(server.name, tools)
-            server.tools_count = len(tools)
-            db.commit()
-        except Exception as exc:  # noqa: BLE001
-            return {"tools": [], "error": str(exc)}
+        # 2026-09-16: this used to call the hand-rolled probe, which skipped
+        # the MCP handshake and so never got an answer from a real server.
+        # Probe through the SDK client instead — it negotiates the protocol
+        # and refreshes the row's tool/resource counts as a side effect.
+        result = await _probe_server(db, server)
+        if result.get("status") != "connected":
+            return {"tools": [], "error": result.get("error", "MCP probe failed")}
+        tools = get_mcp_tools_for_server(server.name)
     return {"tools": tools}
 
 
@@ -270,7 +244,8 @@ from datetime import datetime, timezone
 
 from app.config import settings
 from app.services.mcp_client import McpConnection
-from app.services.mcp_client import connect_http, connect_stdio
+from app.services.mcp_client import connect_http, connect_stdio  # noqa: F401
+from app.services.mcp_client import connection_for_server
 from app.services.mcp_client import oauth as oauth_mod
 from app.services.mcp_client.registry import get_marketplace
 from app.services.mcp_client.session import get_session_manager
@@ -279,26 +254,16 @@ from app.services.mcp_client.session import get_session_manager
 _PENDING_OAUTH: dict[str, dict] = {}
 
 
-def _split_command(server_url: str) -> tuple[str, list[str]]:
-    import shlex
-
-    parts = shlex.split(server_url or "")
-    if not parts:
-        raise ValueError("MCP server has an empty command")
-    return parts[0], parts[1:]
-
-
 async def _connect_from_row(db: Session, server) -> McpConnection:
-    """Create a McpConnection from a McpServer row (stdio or http)."""
-    transport = (server.transport or "stdio").lower()
-    if transport == "http":
-        headers = oauth_mod.auth_headers(
-            oauth_mod.tokens_from_json(server.oauth_token_json)
-        )
-        base = (server.base_url or server.server_url).rstrip("/")
-        return await connect_http(server.name, base, headers=headers)
-    command, args = _split_command(server.server_url)
-    return await connect_stdio(server.name, command, args, env={})
+    """Create a McpConnection from a McpServer row (stdio or http).
+
+    2026-09-16: delegates to the shared factory in ``app.services.mcp_client``
+    so the router and the tool proxy can never drift on transport handling
+    (the local copy here previously handled only ``http`` exactly, and the
+    proxy handled it as a shell command — an HTTP URL passed through
+    ``shlex`` is nonsense).
+    """
+    return await connection_for_server(server)
 
 
 async def _probe_server(db: Session, server) -> dict:
