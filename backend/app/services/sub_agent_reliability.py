@@ -106,6 +106,18 @@ async def call_llm_with_reliability(
             cache_ttl=getattr(settings, "PROMPT_CACHE_TTL", "5m"),
         ),
     }
+    # DeepSeek thinking-mode contract. This wrapper — used by every SUB-AGENT,
+    # including ask_data_agent — never applied it, so the data path was dead:
+    # its FIRST request already replays the parent turn's assistant tool-call
+    # messages, and DeepSeek rejects any assistant message lacking
+    # reasoning_content with 400 "must be passed back to the API". Symptom: the
+    # data agent retries with rephrased queries and all attempts 400, so the
+    # user gets "the data layer is down" instead of an answer.
+    # Measured 2026-09-17 on the copy stack (see
+    # zhanlu-synexia-core-loop/references/deepseek-reasoning-content-400.md).
+    from app.services.message_sanitization import apply_reasoning_content_contract
+
+    payload["messages"] = apply_reasoning_content_contract(payload["messages"])
     if not model_has_fixed_temperature(_model):
         payload["temperature"] = temperature
     if tools:

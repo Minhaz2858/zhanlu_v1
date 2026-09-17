@@ -126,3 +126,66 @@ async def test_non_streaming_llm_call_applies_the_contract(monkeypatch):
             "assistant message sent without reasoning_content — DeepSeek will "
             "reject the follow-up request with 400"
         )
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_wrapper_applies_the_contract(monkeypatch):
+    """The DATA AGENT path — the one that was actually dead in production.
+
+    ``ask_data_agent`` calls ``sub_agent_reliability.call_llm_with_reliability``,
+    whose FIRST request already replays the parent turn's assistant tool-call
+    messages. That wrapper had no copy of the contract, so every data turn 400'd
+    on iteration 1 and the user was told "the data layer is down" / "the model
+    backend returned 400". Measured on the copy stack before and after the fix.
+    """
+    from app.services import sub_agent_reliability as sa_mod
+
+    captured: dict = {}
+
+    class _Resp:
+        status_code = 200
+        text = ""
+
+        def json(self):
+            return {
+                "choices": [{"message": {"content": "ok", "tool_calls": []}}],
+                "usage": {},
+            }
+
+        def raise_for_status(self):
+            return None
+
+    class _Client:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def post(self, url, json=None, headers=None, **kw):
+            captured["payload"] = json
+            return _Resp()
+
+    monkeypatch.setattr(sa_mod.httpx, "AsyncClient", _Client)
+
+    messages = [
+        {"role": "system", "content": "data agent"},
+        {"role": "user", "content": "top 3 customers by revenue"},
+        # Replayed from the parent turn — this is the message DeepSeek rejects
+        # when reasoning_content is absent.
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "1"}]},
+        {"role": "tool", "tool_call_id": "1", "content": "{}"},
+    ]
+    await sa_mod.call_llm_with_reliability(messages, None)
+
+    sent = captured["payload"]["messages"]
+    assistant_msgs = [m for m in sent if m.get("role") == "assistant"]
+    assert assistant_msgs, "no assistant message reached the provider"
+    for m in assistant_msgs:
+        assert "reasoning_content" in m, (
+            "sub-agent request sent an assistant message without "
+            "reasoning_content — the data agent path 400s on its first call"
+        )

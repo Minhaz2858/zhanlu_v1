@@ -22,6 +22,48 @@ import logging
 import re
 from typing import Any
 
+
+def apply_reasoning_content_contract(messages: list[dict]) -> list[dict]:
+    """Echo ``reasoning_content`` back on assistant messages. Returns a new list.
+
+    THE single implementation of this rule — do not re-inline it at a call site.
+
+    DeepSeek reasons natively: ``reasoning_content`` comes back on essentially
+    every response (even for ``"say ok"``), and any request that follows an
+    assistant turn must echo that field back or the API refuses the whole
+    request with:
+
+        400 {"error":{"message":"The `reasoning_content` in the thinking mode
+             must be passed back to the API.","code":"invalid_request_error"}}
+
+    There is no client-side switch: ``LLM_ENABLE_THINKING=false`` does not
+    suppress it (measured — the field and the rejection both persist).
+
+    Tool loops compose the assistant message themselves as
+    ``{role, content, tool_calls}``, so the key is absent from exactly the
+    message the API insists on, and the turn dies on its SECOND LLM call —
+    after the tool already ran, so the work is done and then thrown away.
+    Sub-agents that replay the parent's assistant tool-call messages hit it on
+    the FIRST call instead (the DATA AGENT path did, via
+    ``sub_agent_reliability``).
+
+    Messages that already carry the key are passed through untouched; anything
+    else gets ``""`` — the fallback for history we never persisted. Mutates
+    nothing (shallow copy per message).
+
+    Why this lives here: it used to be inlined separately in the streaming path
+    only, so the non-streaming path and every sub-agent silently lacked it. One
+    copy at one place is the fix; a second copy is how the bug happened.
+    """
+    return [
+        (
+            {**m, "reasoning_content": m.get("reasoning_content") or ""}
+            if m.get("role") == "assistant" and "reasoning_content" not in m
+            else m
+        )
+        for m in messages
+    ]
+
 logger = logging.getLogger(__name__)
 
 # Lone surrogate code points are invalid in UTF-8 and crash json.dumps.

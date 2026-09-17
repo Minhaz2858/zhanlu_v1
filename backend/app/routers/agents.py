@@ -9515,14 +9515,14 @@ def apply_reasoning_content_contract(messages: list[dict]) -> list[dict]:
     helper: two copies is how one of them came to be missing. Mutates nothing —
     shallow copies per message.
     """
-    return [
-        (
-            {**m, "reasoning_content": m.get("reasoning_content") or ""}
-            if m.get("role") == "assistant" and "reasoning_content" not in m
-            else m
-        )
-        for m in messages
-    ]
+    # Single implementation lives in app/services/message_sanitization.py so the
+    # sub-agent paths share it. Kept as a name here because this is the symbol
+    # the loop and its tests import.
+    from app.services.message_sanitization import (
+        apply_reasoning_content_contract as _shared_impl,
+    )
+
+    return _shared_impl(messages)
 
 
 # ---------------------------------------------------------------------------
