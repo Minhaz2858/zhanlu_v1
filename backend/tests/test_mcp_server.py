@@ -208,14 +208,19 @@ class TestMcpProxy:
 
     def test_register_and_get_mcp_tools(self):
         from app.services.tool_handlers.mcp_proxy import (
-            register_mcp_tools, get_mcp_tools_for_server,
+            register_mcp_tools, get_mcp_tools_for_server, unregister_mcp_server,
         )
         register_mcp_tools("test-server", [
             {"name": "tool_a", "description": "A tool"},
             {"name": "tool_b", "description": "B tool"},
         ])
-        tools = get_mcp_tools_for_server("test-server")
-        assert len(tools) == 2
+        try:
+            tools = get_mcp_tools_for_server("test-server")
+            assert len(tools) == 2
 
-        # Unknown server returns empty
-        assert get_mcp_tools_for_server("no-server") == []
+            # Unknown server returns empty
+            assert get_mcp_tools_for_server("no-server") == []
+        finally:
+            # Registration now publishes real registry entries — withdraw them so
+            # this test cannot leak tools into other tests' tool lists.
+            unregister_mcp_server("test-server")

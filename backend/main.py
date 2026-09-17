@@ -1,5 +1,6 @@
 """FastAPI application entry point — Zhanlu Backend (Phase 1)."""
 
+import asyncio
 import os
 import sys
 from contextlib import asynccontextmanager
@@ -745,7 +746,27 @@ async def lifespan(app: FastAPI):
         startup_logger.warning("FastMCP transport startup error (non-fatal): %s", e)
         _mcp_lifespan = None
 
+    # MCP client tool rehydration (2026-09-17). MCP tool registrations live in
+    # process memory, so a restart left every agent's tool list without the MCP
+    # tools its connected servers expose — while the DB still reported the
+    # servers as connected. Re-probe them in the background so the tools come
+    # back without the user reconnecting anything. Background on purpose: a slow
+    # or unreachable MCP server must not delay the app coming up.
+    _mcp_rehydrate_task: asyncio.Task | None = None
+    try:
+        from app.routers.mcp import rehydrate_registered_tools
+        _mcp_rehydrate_task = asyncio.create_task(rehydrate_registered_tools())
+    except Exception as e:
+        startup_logger.warning("MCP tool rehydration startup error (non-fatal): %s", e)
+
     yield
+
+    if _mcp_rehydrate_task is not None and not _mcp_rehydrate_task.done():
+        _mcp_rehydrate_task.cancel()
+        try:
+            await _mcp_rehydrate_task
+        except (asyncio.CancelledError, Exception):  # noqa: BLE001
+            pass
 
     if _mcp_lifespan is not None:
         try:

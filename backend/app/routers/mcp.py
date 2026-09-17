@@ -12,7 +12,7 @@ external clients (Claude Desktop, Cursor, etc.) to discover.
 
 import json
 import logging
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Query, Depends
 from pydantic import BaseModel
@@ -68,6 +68,40 @@ class McpServerResponse(BaseModel):
     status: str
     tools_count: int
     resources_count: int
+
+
+class McpGrantsRequest(BaseModel):
+    """Which agents may use this server's tools.
+
+    An empty list grants the server to every agent (the default). Names are
+    ``AgentConversation.agent_name`` values.
+    """
+    granted_agents: list[str] = []
+
+
+# ─── Authorization ──────────────────────────────────────────────────────
+
+def _require_mcp_access(resource_id: str, action: str = "use") -> None:
+    """Deny MCP server use when the caller's role holds no grant (fail-closed).
+
+    2026-09-17: none of these endpoints checked authorization at all. A stdio
+    MCP server's ``server_url`` is an arbitrary shell command, so the connect
+    endpoint was an unauthenticated role-escalation path: any logged-in role
+    could persist a command that the backend later spawns as its own user.
+    """
+    from app.services.authz import get_authorizer
+    from app.services.authz.base import ResourceType
+    from app.services.tracing import TraceContext
+
+    role = TraceContext.current_role() or "user"
+    decision = get_authorizer().can_access(
+        role=role,
+        resource_type=ResourceType.MCP_SERVER,
+        resource_id=resource_id,
+        action=action,
+    )
+    if not decision.allowed:
+        raise HTTPException(status_code=403, detail=decision.reason)
 
 
 # ─── Native MCP endpoint (for external clients) ─────────────────────────
@@ -134,6 +168,8 @@ def connect_mcp_server(
     """
     from app.models.mcp_server import McpServer
 
+    _require_mcp_access(req.name, action="create")
+
     transport = (req.transport or "stdio").lower()
     if transport == "http":
         if not req.base_url:
@@ -198,6 +234,15 @@ def disconnect_mcp_server(server_id: str, db: Session = Depends(get_db)):
     if not server:
         raise HTTPException(status_code=404, detail="MCP server not found")
 
+    _require_mcp_access(server.name, action="delete")
+
+    # Withdraw the server's tools from the agent registry first: a dangling
+    # registry entry would keep the tool in every agent's tool list and answer
+    # every call with "no longer connected".
+    from app.services.tool_handlers.mcp_proxy import unregister_mcp_server
+
+    unregister_mcp_server(server)
+
     server.status = "disconnected"
     server.is_deleted = True
     db.add(server)
@@ -223,7 +268,7 @@ async def list_mcp_server_tools(server_id: str, db: Session = Depends(get_db)):
 
     from app.services.tool_handlers.mcp_proxy import get_mcp_tools_for_server
 
-    tools = get_mcp_tools_for_server(server.name)
+    tools = get_mcp_tools_for_server(server.id)
     if not tools:
         # 2026-09-16: this used to call the hand-rolled probe, which skipped
         # the MCP handshake and so never got an answer from a real server.
@@ -232,7 +277,7 @@ async def list_mcp_server_tools(server_id: str, db: Session = Depends(get_db)):
         result = await _probe_server(db, server)
         if result.get("status") != "connected":
             return {"tools": [], "error": result.get("error", "MCP probe failed")}
-        tools = get_mcp_tools_for_server(server.name)
+        tools = get_mcp_tools_for_server(server.id)
     return {"tools": tools}
 
 
@@ -267,7 +312,13 @@ async def _connect_from_row(db: Session, server) -> McpConnection:
 
 
 async def _probe_server(db: Session, server) -> dict:
-    """Connect, negotiate, and capture capabilities + tool/resource counts."""
+    """Connect, negotiate, and capture capabilities + tool/resource counts.
+
+    As a side effect the server's tools are published to the agent tool
+    registry (one entry per tool, named ``mcp__<server>__<tool>``) so agents can
+    actually call them. This is the only place a server's tool list is captured,
+    so registration and the UI's cached list can never disagree.
+    """
     from app.services.tool_handlers.mcp_proxy import register_mcp_tools
 
     conn = await _connect_from_row(db, server)
@@ -278,7 +329,7 @@ async def _probe_server(db: Session, server) -> dict:
             resources = await conn.list_resources()
         except Exception:  # noqa: BLE001
             resources = []
-        register_mcp_tools(server.name, [t.to_dict() for t in tools])
+        record = register_mcp_tools(server, [t.to_dict() for t in tools])
         server.tools_count = len(tools)
         server.resources_count = len(resources)
         server.capabilities = conn.capabilities or {}
@@ -291,6 +342,7 @@ async def _probe_server(db: Session, server) -> dict:
             "resources_count": len(resources),
             "capabilities": conn.capabilities or {},
             "server_info": conn.server_info or {},
+            "registry_tools": list(record.registry_names),
             "tools": [t.to_dict() for t in tools][:50],
         }
     except Exception as exc:  # noqa: BLE001
@@ -338,6 +390,7 @@ async def probe_server(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    _require_mcp_access(server.name)
     return await _probe_server(db, server)
 
 
@@ -356,6 +409,7 @@ async def oauth_start(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    _require_mcp_access(server.name)
     base = (server.base_url or server.server_url).rstrip("/")
     metadata = await oauth_mod.fetch_metadata(base)
     if not metadata.get("authorization_endpoint"):
@@ -406,6 +460,7 @@ async def oauth_callback(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    _require_mcp_access(server.name)
     try:
         tokens = await oauth_mod.exchange_code(
             pending["metadata"],
@@ -440,6 +495,7 @@ async def call_server_tool(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    _require_mcp_access(server.name)
     manager = get_session_manager()
     try:
         conn = await manager.get(server.id, _connect_from_row, db, server)
@@ -463,7 +519,73 @@ async def refresh_server_tools(
     ).first()
     if server is None:
         raise HTTPException(status_code=404, detail="MCP server not found")
+    _require_mcp_access(server.name)
     result = await _probe_server(db, server)
     if result.get("status") == "error":
         raise HTTPException(status_code=502, detail=result.get("error", "probe failed"))
     return result
+
+
+@router.patch("/mcp/servers/{server_id}/grants")
+async def update_mcp_grants(
+    server_id: str,
+    req: McpGrantsRequest,
+    db: Session = Depends(get_db),
+    user=Depends(get_current_user_required),
+) -> dict:
+    """Set which agents may use this server's tools ([] = every agent).
+
+    Applied to the live registration immediately — waiting for the next probe
+    would leave the setting silently inert for as long as the server stayed
+    connected.
+    """
+    from app.models.mcp_server import McpServer
+    from app.services.tool_handlers.mcp_proxy import refresh_grants
+
+    server = db.query(McpServer).filter(
+        McpServer.id == server_id, McpServer.is_deleted == False
+    ).first()
+    if server is None:
+        raise HTTPException(status_code=404, detail="MCP server not found")
+    _require_mcp_access(server.name, action="grant")
+
+    server.granted_agents = list(req.granted_agents or [])
+    db.commit()
+    db.refresh(server)
+    refresh_grants(server, server.granted_agents)
+    return server.to_dict()
+
+
+async def rehydrate_registered_tools() -> dict:
+    """Re-probe connected servers so their tools survive a restart.
+
+    2026-09-17: registration lives in process memory, so every backend restart
+    silently emptied the agent tool lists of MCP tools while the DB still said
+    ``status: connected`` — the UI showed a healthy server whose tools no agent
+    could see. Runs in the background at startup; failures are per-server and
+    never block serving traffic.
+    """
+    from app.database import SessionLocal
+    from app.models.mcp_server import McpServer
+
+    db = SessionLocal()
+    restored: dict[str, Any] = {}
+    try:
+        rows = (
+            db.query(McpServer)
+            .filter(McpServer.is_deleted == False)  # noqa: E712
+            .all()
+        )
+        for server in rows:
+            if (server.status or "").lower() != "connected":
+                continue
+            try:
+                result = await _probe_server(db, server)
+                restored[server.name] = result.get("registry_tools") or []
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("MCP rehydrate failed for '%s': %s", server.name, exc)
+    finally:
+        db.close()
+    if restored:
+        logger.info("MCP tools rehydrated for %d server(s): %s", len(restored), restored)
+    return restored

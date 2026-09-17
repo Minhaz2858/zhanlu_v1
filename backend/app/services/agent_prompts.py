@@ -2137,7 +2137,8 @@ WORKFLOW_BUILDER_RULES = """RULES (HARD):
 :::
    - No other `:::decision-summary` blocks may appear. The block is the ONLY machine-readable part of your reply.
 2. Use ONLY node types from the registry list embedded below. Any node whose type is not in the registry will be rejected.
-3. Every workflow needs EXACTLY ONE `trigger_chat` node AND at least one `output` node (the terminal node — validation rejects flows without one). Connect the main ports of chained nodes with sourceHandle: "source-main" and targetHandle: "target-main". Edges are objects like {"source": "n1", "target": "n2", "sourceHandle": "source-main", "targetHandle": "target-main"}.
+3. Every workflow needs EXACTLY ONE trigger node AND at least one `output` node (the terminal node — validation rejects flows without one). The single trigger MUST be one of these four registered types: `trigger_chat` (user chats with the workflow), `trigger_manual` (run from the canvas), `trigger_schedule` (cron schedule; set config.cron, e.g. weekly Monday 09:00 = "0 9 * * 1"), or `trigger_webhook` (inbound HTTP). Connect the main ports of chained nodes with sourceHandle: "source-main" and targetHandle: "target-main". Edges are objects like {"source": "n1", "target": "n2", "sourceHandle": "source-main", "targetHandle": "target-main"}.
+   - TYPE ALIASES: you may write node types in plain language — the system normalises them. Accepted aliases: chat trigger / 聊天触发 → `trigger_chat`; manual trigger / 手动触发 → `trigger_manual`; schedule trigger / 定时触发 / timer / cron / 定时器 → `trigger_schedule`; webhook / webhook触发 → `trigger_webhook`; LLM / 大模型 → `llm`; agent / 智能体 → `agent`; KB search / 知识库检索 / 知识库 → `kb_search`; database query / 数据库查询 → `db_query`; MCP tool / MCP工具 → `mcp_tool`; HTTP request / HTTP请求 → `http_request`; code / 代码 → `code`; set fields / 设置字段 → `set_fields`; split / 拆分 → `split_out`; remove duplicates / 去重 → `remove_duplicates`; condition / 条件分支 → `condition`; switch / 多分支 → `switch`; merge / 合并 → `merge`; output / 输出 → `output`. PREFER the canonical `trigger_*` / registry name, but an alias is accepted.
 4. Node shape: {"id": "n1", "type": "<node_type>", "position": {"x": <num>, "y": <num>}, "data": {"label": "<display name>", "config": {<required config fields>}}}
    - `id` values must be unique strings (n1, n2, ...). `position` is any sane canvas coordinate. `data.label` is the human-readable display name.
    - `data.config` must include every REQUIRED config field listed for the node type (see registry). Optional fields may be omitted.
@@ -2892,7 +2893,8 @@ def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app
 
     Thin wrapper around :func:`_get_tools_base` that appends the deck-edit
     tools (``edit_slide`` / ``add_slide`` / ... ) when
-    ``DECK_EDIT_ROUTING_ENABLED`` is on, so agents can edit generated decks.
+    ``DECK_EDIT_ROUTING_ENABLED`` is on, so agents can edit generated decks,
+    and the tools of connected MCP servers granted to this agent.
     ``workflow_builder`` is exempt from that append (2026-09-02): its
     explicit ``enabled_tools: []`` is a hard no-tools contract — its system
     prompt says "You have NO tools available. Never attempt tool calls" —
@@ -2903,6 +2905,10 @@ def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app
     schemas = _get_tools_base(agent_name, tool_config, agent_app)
     if agent_name == "workflow_builder":
         return schemas
+    # An explicit empty enabled_tools is a deliberate no-tools contract for ANY
+    # agent — never widen it with dynamically registered tools.
+    if isinstance(tool_config, dict) and tool_config.get("enabled_tools") == []:
+        return schemas
     deck_edit = _get_deck_edit_schemas()
     if deck_edit:
         # Avoid duplicate injection (defensive, e.g. tool_config already
@@ -2910,7 +2916,31 @@ def get_tools(agent_name: str | None, tool_config: dict | None = None, agent_app
         existing = {s.get("function", {}).get("name") for s in schemas}
         schemas = schemas + [s for s in deck_edit
                              if s.get("function", {}).get("name") not in existing]
+    mcp_tools = _get_mcp_tool_schemas(agent_name)
+    if mcp_tools:
+        existing = {s.get("function", {}).get("name") for s in schemas}
+        schemas = schemas + [s for s in mcp_tools
+                             if s.get("function", {}).get("name") not in existing]
     return schemas
+
+
+def _get_mcp_tool_schemas(agent_name: str | None) -> list[dict]:
+    """Schemas for MCP server tools this agent is granted.
+
+    MCP tools are registered at probe time, one registry entry per server tool,
+    so they can never appear in an agent's static ``tool_config``. They are
+    appended here instead — the same shape as the deck-edit append above — and
+    filtered by each server's ``granted_agents``. Returns [] when no server is
+    granted to this agent, or when MCP tool publishing is switched off.
+    """
+    try:
+        from app.services.tool_handlers.mcp_proxy import mcp_tools_for_agent
+
+        return mcp_tools_for_agent(agent_name)
+    except Exception as exc:  # noqa: BLE001
+        # Never let a broken MCP registration strip the agent's built-in tools.
+        _logger.warning("MCP tool resolution failed for agent '%s': %s", agent_name, exc)
+        return []
 
 
 def _apply_agent_def_tool_filter(agent_name: str | None, schemas: list[dict]) -> list[dict]:

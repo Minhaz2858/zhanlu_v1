@@ -14,9 +14,16 @@ _VIEWER_ALLOWED_TOOLS: list[str] = [
 ]
 
 BUILTIN_ROLES: dict[str, dict[str, Any]] = {
-    "admin": {"tools": {"allow": None, "deny": []}},
-    "user": {"tools": {"allow": None, "deny": []}},
-    "viewer": {"tools": {"allow": _VIEWER_ALLOWED_TOOLS, "deny": []}},
+    "admin": {"tools": {"allow": None, "deny": []}, "mcp_servers": {"allow": None, "deny": []}},
+    "user": {"tools": {"allow": None, "deny": []}, "mcp_servers": {"allow": None, "deny": []}},
+    # 2026-09-17: viewers get NO MCP servers. Before this, roles without an
+    # ``mcp_servers`` section compiled to allow-all, so a read-only viewer could
+    # connect a stdio server — i.e. persist an arbitrary command that the
+    # backend then spawns under its own uid.
+    "viewer": {
+        "tools": {"allow": _VIEWER_ALLOWED_TOOLS, "deny": []},
+        "mcp_servers": {"allow": [], "deny": []},
+    },
 }
 
 _VALID_RESOURCE_KEYS = {"tools", "models", "skills", "sandbox", "mcp_servers", "routes"}

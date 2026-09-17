@@ -1314,6 +1314,10 @@ class Settings(BaseSettings):
     MCP_HEALTHCHECK_TIMEOUT_S: float = 5.0
     # TTL for cached MCP connections (seconds).
     MCP_SESSION_TTL_S: float = 600.0
+    # Publish each connected MCP server's tools to the agent tool registry
+    # (one entry per tool, named mcp__<server>__<tool>). Off means a connected
+    # server is probeable from the UI but no agent can call its tools.
+    MCP_TOOLS_ENABLED: bool = True
 
     # ── P2 Durability & Observability ────────────────────────────────────
     # When AGENT_HARNESS_ENABLED + AGENT_TRACING_ENABLED are both True,

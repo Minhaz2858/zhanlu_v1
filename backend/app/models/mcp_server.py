@@ -33,6 +33,9 @@ class McpServer(TimestampedBase):
     capabilities: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     last_probed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     oauth_token_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Which agents may see this server's tools. NULL or [] = every agent;
+    # a non-empty list of AgentConversation.agent_name values restricts them.
+    granted_agents: Mapped[list | None] = mapped_column(JSON, nullable=True)
 
     def to_dict(self) -> dict:
         """Public serialization — never includes OAuth tokens."""
@@ -48,6 +51,7 @@ class McpServer(TimestampedBase):
             "resources_count": self.resources_count or 0,
             "auth_type": self.auth_type or "none",
             "capabilities": self.capabilities or {},
+            "granted_agents": self.granted_agents or [],
             "last_probed_at": self.last_probed_at.isoformat() if self.last_probed_at else None,
             "created_date": self.created_date.isoformat() if self.created_date else None,
         }
