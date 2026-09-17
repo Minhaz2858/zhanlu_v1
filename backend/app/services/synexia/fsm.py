@@ -23,6 +23,31 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.execution import Execution, Plan, PlanNode, ObservationRecord, FSM_STATES
 from app.services.tracing.spans import fsm_run_span, fsm_state_span
+
+
+def _set_span_attribute(span: object, key: str, value: object) -> None:
+    """Set one span attribute, never raising.
+
+    Tracing is observability: it must never be able to fail a turn. Before this
+    guard, a span-shaped mistake crashed the FSM *after* it had already done all
+    the work (PLAN→ACT→OBSERVE→VERIFY→FINALIZE) and again inside the except
+    handler, so the run returned nothing at all.
+    """
+    try:
+        setter = getattr(span, "set_attribute", None)
+        if setter is not None:
+            setter(key, value)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("span attribute %r skipped (non-fatal): %s", key, exc)
+
+
+def _close_span(ctx: object) -> None:
+    """Exit a span context manager, never raising (same reasoning as above)."""
+    try:
+        ctx.__exit__(None, None, None)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("span close skipped (non-fatal): %s", exc)
+
 from app.services.planning_trigger import is_followup_refinement as _is_followup_refinement
 
 logger = logging.getLogger(__name__)
@@ -216,7 +241,14 @@ class SynexiaFSM:
         _run_span = fsm_run_span(
             self.execution.id, request.agent_name, request.mode,
         )
-        _run_span.__enter__()
+        # __enter__ returns the yielded Span. Discarding it left `_run_span` as
+        # the GeneratorContextManager itself, so the set_attribute() calls below
+        # raised AttributeError: '_GeneratorContextManager' object has no
+        # attribute 'set_attribute' — at the END of an otherwise successful run
+        # and again inside the except handler. Result: not one FSM run could
+        # return a result, which is why SYNEXIA_FSM_ENABLED was turned off.
+        _run_ctx = _run_span
+        _span = _run_ctx.__enter__()
         try:
             # GOAL — parse user message into TaskSpec
             self._transition(FSMState.GOAL, on_state_change=on_state_change)
@@ -267,18 +299,18 @@ class SynexiaFSM:
                 generate_response=generate_response,
                 on_state_change=on_state_change,
             )
-            _run_span.set_attribute("execution.state", _result.state)
-            _run_span.__exit__(None, None, None)
+            _set_span_attribute(_span, "execution.state", _result.state)
+            _close_span(_run_ctx)
             return _result
 
         except Exception as e:
             logger.error("FSM execution failed: %s", e)
-            _run_span.set_attribute("error", str(e)[:500])
+            _set_span_attribute(_span, "error", str(e)[:500])
             self._transition(FSMState.FAIL, on_state_change=on_state_change)
             self.execution.error_message = str(e)
             self.execution.current_state = FSMState.FAIL.value
             self.db.commit()
-            _run_span.__exit__(None, None, None)
+            _close_span(_run_ctx)
             return ExecutionResult(
                 execution_id=self.execution.id,
                 assistant_content=f"I encountered an error while processing your request: {e}",
