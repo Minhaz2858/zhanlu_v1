@@ -179,4 +179,7 @@ registry.register(
     description="Manage scheduled agent tasks (in-process).",
     emoji="⏰",
     max_result_size_chars=20_000,
+    risk="write",
+    # cronjob(action="delete") destroys a scheduled task irreversibly.
+    dangerous_actions=("delete",),
 )

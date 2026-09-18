@@ -489,10 +489,14 @@ async def execute_tool(
     agent_name = context.get("agent_name") if context else None
     conversation_metadata = context.get("conversation_metadata") if context else None
     try:
-        from app.services.permissions import check_permission
+        from app.services.permissions import check_permission, approval_context_from_context
         perm_result = check_permission(
             tool_name, arguments, agent_name,
             conversation_metadata=conversation_metadata,
+            # Phase 1b: proof that THIS exact call was already approved by the
+            # user. Server-built only — it arrives on the context dict, never
+            # from model arguments.
+            approval_context=approval_context_from_context(context),
         )
         if not perm_result.allowed:
             logger.warning("Tool '%s' blocked by permission check: %s", tool_name, perm_result.reason)
@@ -515,26 +519,48 @@ async def execute_tool(
             # pause, persisting resume state until the user responds.
             try:
                 from app.services.governance.approval_service import ApprovalService
+                from app.services.permissions import grant_for
                 approval_svc = ApprovalService(db)
-                # Build a human-readable description of the action
+                # Build a human-readable description of the action. Name the
+                # risk and the destructive action: "cronjob action delete" tells
+                # the user what they are approving; a 500-char args dump does not.
                 arg_preview = json.dumps(arguments, default=str)[:500]
-                description = f"Tool '{tool_name}' (agent: {agent_name or 'unknown'}) — args: {arg_preview}"
+                if perm_result.action:
+                    headline = (
+                        f"Destructive operation: {tool_name} \u2192 "
+                        f"action '{perm_result.action}'"
+                    )
+                else:
+                    headline = f"Tool '{tool_name}' ({perm_result.risk or 'write'})"
+                description = (
+                    f"{headline} (agent: {agent_name or 'unknown'}) \u2014 args: {arg_preview}"
+                )
+                # Destructive actions are high risk; ordinary writes stay medium.
+                risk_tier = "high" if perm_result.risk == "destructive" else "medium"
                 approval = approval_svc.create_request(
                     action_type="tool_call",
                     action_description=description,
-                    risk_tier="medium",
+                    risk_tier=risk_tier,
                     context_json={
                         "tool_name": tool_name,
                         "arguments": arguments,
                         "agent_name": agent_name,
                         "conversation_id": context.get("conversation_id") if context else None,
                         "agent_app_id": context.get("agent_app_id") if context else None,
+                        # The risk declaration that caused this prompt, so the
+                        # decision is auditable after the fact.
+                        "risk": perm_result.risk,
+                        "action": perm_result.action,
+                        # Phase 1b: the standing grant a client can persist when
+                        # the user picks "allow for this conversation" instead of
+                        # re-approving the same action every turn.
+                        "grant_on_allow": grant_for(tool_name, arguments),
                     },
                     ttl_hours=1,  # Short TTL for interactive chat
                 )
                 logger.info(
-                    "Tool '%s' requires confirmation — created approval %s (agent=%s)",
-                    tool_name, approval.id, agent_name,
+                    "Tool '%s' requires confirmation (risk=%s action=%s) — created approval %s (agent=%s)",
+                    tool_name, perm_result.risk, perm_result.action, approval.id, agent_name,
                 )
                 return {
                     "success": False,
@@ -543,6 +569,8 @@ async def execute_tool(
                     "reason": perm_result.reason,
                     "tool_name": tool_name,
                     "arguments": arguments,
+                    "risk": perm_result.risk,
+                    "action": perm_result.action,
                 }
             except Exception as ae:
                 # Fail-closed: if the approval gate itself is unavailable we

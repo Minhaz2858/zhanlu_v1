@@ -386,6 +386,10 @@ registry.register(
     description="Write/delete/read a key in /root/zhanlu/.env (admin-gated).",
     emoji="🔑",
     max_result_size_chars=8_000,
+    risk="destructive",
+    # Deleting a key from the deployment .env is not recoverable from the
+    # product; the admin gate is a hard deny, not user consent.
+    dangerous_actions=("delete",),
 )
 
 registry.register(

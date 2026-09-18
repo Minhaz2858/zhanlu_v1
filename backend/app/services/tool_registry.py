@@ -52,6 +52,12 @@ class ToolEntry:
     dynamic_schema_overrides: Optional[Callable[[], dict]] = None  # Phase 1: runtime schema overrides
     description: str = ""
     emoji: str = ""                       # Phase 1: UI display hint
+    risk: str = ""                        # Phase 1b: read | write | destructive | external
+    # Phase 1b: multiplexed actions of this tool that cannot be undone
+    # (e.g. ("delete",)). A call whose `action` matches is gated behind user
+    # confirmation even when the tool is otherwise read-only. See
+    # app/services/permissions/approval.py.
+    dangerous_actions: tuple[str, ...] = ()
 
 
 class ToolRegistry:
@@ -104,8 +110,16 @@ class ToolRegistry:
         dynamic_schema_overrides: Optional[Callable[[], dict]] = None,
         description: str = "",
         emoji: str = "",
+        risk: str = "",
+        dangerous_actions: "tuple[str, ...] | list[str] | None" = None,
     ) -> None:
-        """Register a tool. Overwrites if name already exists."""
+        """Register a tool. Overwrites if name already exists.
+
+        ``risk`` / ``dangerous_actions`` are the tool's OWN declaration of what
+        it can do.  They feed the approval gate in
+        :mod:`app.services.permissions.approval`; the gate is what decides
+        whether to ask the user, the tool only declares the fact.
+        """
         # Auto-detect async if not explicitly set
         if is_async is None:
             is_async = asyncio.iscoroutinefunction(handler)
@@ -124,6 +138,8 @@ class ToolRegistry:
             dynamic_schema_overrides=dynamic_schema_overrides,
             description=description or schema.get("function", {}).get("description", ""),
             emoji=emoji,
+            risk=risk if risk in ("read", "write", "destructive", "external") else "",
+            dangerous_actions=tuple(dangerous_actions or ()),
         )
         with self._lock:
             self._tools[name] = entry

@@ -20,6 +20,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from app.services.permissions.approval import (
+    APPROVAL_GRANTS_KEY,
+    ApprovalContext,
+    approval_context_from_context,
+    grant_for,
+    has_standing_grant,
+    make_approval_context,
+    make_grant,
+    parse_grants,
+    resolve_risk,
+)
+
 logger = logging.getLogger(__name__)
 
 PermissionMode = Literal["default", "plan", "full_auto"]
@@ -126,6 +138,11 @@ class PermissionCheckResult:
     allowed: bool
     reason: str = ""
     requires_confirmation: bool = False
+    # Phase 1b: the resolved risk for this concrete call, so callers (and the
+    # approval record) can say *what* is being approved, not just that
+    # something is. ``risk`` is the level, ``action`` the multiplexed action.
+    risk: str = ""
+    action: str = ""
 
 
 class PermissionChecker:
@@ -147,6 +164,7 @@ class PermissionChecker:
         args: dict[str, Any] | None = None,
         agent_name: str | None = None,
         conversation_metadata: dict[str, Any] | None = None,
+        approval_context: Any = None,
     ) -> PermissionCheckResult:
         """Check if a tool call is allowed.
 
@@ -157,7 +175,14 @@ class PermissionChecker:
             conversation_metadata: Optional conversation metadata dict.
                 If it contains ``permission_mode``, that mode overrides
                 the agent-level and default config modes (conversation-level
-                permission override).
+                permission override). If it contains standing approval
+                grants (``_approval_grants``), those suppress re-prompting
+                for the actions they cover.
+            approval_context: Optional
+                :class:`~app.services.permissions.approval.ApprovalContext`
+                proving that THIS tool call was already approved by the user.
+                It suppresses *confirmation* for that one call only — it never
+                overrides an authorization deny.
 
         Returns:
             PermissionCheckResult with allowed=True/False and reason.
@@ -166,7 +191,20 @@ class PermissionChecker:
 
         # Try to get permission config from AgentDefinition, with
         # conversation-level override taking highest priority.
-        config = self._get_effective_config(agent_name, conversation_metadata)
+        config, authz_ok = self._get_effective_config(agent_name, conversation_metadata)
+        if not authz_ok:
+            # Authorization could not be established (see _get_effective_config).
+            # Fail CLOSED: an agent-scoped ``allowed_tools`` posture we cannot
+            # read must not silently degrade into "every tool allowed".
+            return PermissionCheckResult(
+                allowed=False,
+                risk="unknown",
+                reason=(
+                    f"Authorization for agent '{agent_name}' could not be "
+                    "resolved; refusing to run tool "
+                    f"'{tool_name}' rather than running it unchecked"
+                ),
+            )
 
         # 1. Tool-level checks
         if tool_name in config.denied_tools:
@@ -204,27 +242,75 @@ class PermissionChecker:
                 if not path_check.allowed:
                     return path_check
 
-        # 5. Default mode requires confirmation for write operations
+        # 5. Confirmation gate. Risk is declared by the TOOL (registry
+        #    metadata), not inferred from the user's text — see
+        #    app/services/permissions/approval.py.
+        risk = resolve_risk(tool_name, args)
+
+        # 5a. Already approved, this exact call? Then no second prompt.
+        if risk.destructive and approval_context is not None:
+            if getattr(approval_context, "covers", None) and approval_context.covers(tool_name, args):
+                return PermissionCheckResult(
+                    allowed=True, risk=risk.level, action=risk.action,
+                    reason=f"Tool call already approved (risk: {risk.level})",
+                )
+
+        # 5b. A standing grant for this tool+action already exists in this
+        #     conversation ("allow for this conversation").
+        if risk.destructive and has_standing_grant(tool_name, args, conversation_metadata):
+            return PermissionCheckResult(
+                allowed=True, risk=risk.level, action=risk.action,
+                reason=f"Covered by an existing approval grant (risk: {risk.level})",
+            )
+
+        # 5c. Destructive action on a user-facing resource — always confirm,
+        #     even for tools the legacy WRITE_TOOLS list does not know.
+        if risk.destructive:
+            what = f"'{tool_name}' action '{risk.action}'" if risk.action else f"'{tool_name}'"
+            return PermissionCheckResult(
+                allowed=True,
+                requires_confirmation=True,
+                risk=risk.level,
+                action=risk.action,
+                reason=f"Destructive operation {what} requires user confirmation",
+            )
+
+        # 5d. Default mode requires confirmation for write operations
         if config.mode == "default" and tool_name in WRITE_TOOLS:
             return PermissionCheckResult(
                 allowed=True,
                 requires_confirmation=True,
+                risk=risk.level or "write",
                 reason=f"Write operation '{tool_name}' requires user confirmation in Default mode",
             )
 
-        return PermissionCheckResult(allowed=True)
+        if risk.source in ("registry", "fallback") and risk.level == "write":
+            # Tool declared itself as write-level but is not in WRITE_TOOLS.
+            # Do not change today's behaviour (that would be a silent
+            # tightening); record the level so follow-up phases can migrate.
+            return PermissionCheckResult(allowed=True, risk=risk.level, action=risk.action)
+
+        return PermissionCheckResult(allowed=True, risk=risk.level, action=risk.action)
 
     def _get_effective_config(
         self,
         agent_name: str | None,
         conversation_metadata: dict[str, Any] | None = None,
-    ) -> PermissionConfig:
+    ) -> tuple[PermissionConfig, bool]:
         """Get the effective permission config, merging AgentDefinition if available.
 
         Priority (highest wins):
         1. Conversation-level ``permission_mode`` from ``conversation_metadata``
         2. AgentDefinition ``permission_mode``
         3. ``self.config.mode`` (default)
+
+        Returns ``(config, authorization_resolved)``.  The second element is
+        False when the agent's definition could not be read at all, which the
+        caller must treat as a fail-CLOSED condition: ``allowed_tools`` is an
+        authorization posture (spec §2.2), so degrading it to ``None`` — "all
+        tools allowed" — on a transient lookup error would silently widen the
+        agent's reach.  ``agent_name=None`` is not a failure (there is simply no
+        agent-scoped posture to apply).
         """
         # Start with the base config
         base_mode = self.config.mode
@@ -233,11 +319,21 @@ class PermissionChecker:
         agent_mode = base_mode
         agent_denied_tools: list[str] = []
         agent_allowed_tools: list[str] | None = None
+        authorization_resolved = True
         if agent_name:
             try:
                 from app.services.agent_definitions import get_agent_definition
                 agent_def = get_agent_definition(agent_name)
-                if agent_def:
+            except Exception as err:
+                # Never silently swallow this: it is an authorization lookup.
+                logger.error(
+                    "Authorization lookup failed for agent '%s'; failing closed "
+                    "for this call: %s", agent_name, err,
+                )
+                agent_def = None
+                authorization_resolved = False
+            if agent_def is not None:
+                try:
                     agent_mode = (
                         agent_def.permission_mode
                         if agent_def.permission_mode in ("default", "plan", "full_auto")
@@ -245,8 +341,12 @@ class PermissionChecker:
                     )
                     agent_denied_tools = list(agent_def.denied_tools)
                     agent_allowed_tools = agent_def.tools
-            except Exception:
-                pass
+                except Exception as err:
+                    logger.error(
+                        "Authorization fields unreadable for agent '%s'; failing "
+                        "closed for this call: %s", agent_name, err,
+                    )
+                    authorization_resolved = False
 
         # Conversation-level override takes highest priority
         conv_mode = agent_mode
@@ -262,7 +362,7 @@ class PermissionChecker:
             denied_tools=list(set(self.config.denied_tools + agent_denied_tools)),
             allowed_tools=agent_allowed_tools if agent_allowed_tools is not None else self.config.allowed_tools,
         )
-        return merged
+        return merged, authorization_resolved
 
     def _check_command(self, code: str, config: PermissionConfig) -> PermissionCheckResult:
         """Check if a command contains dangerous patterns."""
@@ -349,10 +449,13 @@ def check_permission(
     args: dict[str, Any] | None = None,
     agent_name: str | None = None,
     conversation_metadata: dict[str, Any] | None = None,
+    approval_context: ApprovalContext | None = None,
 ) -> PermissionCheckResult:
     """Convenience function to check tool permissions."""
     return get_permission_checker().check_tool(
-        tool_name, args, agent_name, conversation_metadata=conversation_metadata,
+        tool_name, args, agent_name,
+        conversation_metadata=conversation_metadata,
+        approval_context=approval_context,
     )
 
 
@@ -368,4 +471,14 @@ __all__ = [
     "READ_TOOLS",
     "get_permission_checker",
     "check_permission",
+    # Phase 1b — approval primitive
+    "ApprovalContext",
+    "APPROVAL_GRANTS_KEY",
+    "approval_context_from_context",
+    "make_approval_context",
+    "has_standing_grant",
+    "make_grant",
+    "grant_for",
+    "parse_grants",
+    "resolve_risk",
 ]

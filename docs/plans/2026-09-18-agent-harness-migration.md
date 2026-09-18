@@ -89,7 +89,27 @@ Authorization is not judgment. Deleting these is a security regression:
   Overridable per field (`HARNESS_BUDGET_<FIELD>`) or per agent class
   (`HARNESS_BUDGETS_<CLASS>_JSON`); invalid/non-positive values are refused, so a
   bad env var can never produce an unbounded loop.
-- **Phase 1b/1c/1d — TODO.** Note 1c is smaller than first scoped: compaction is
+- **Phase 1b — DONE.** `app/services/permissions/approval.py` (new): tools
+  declare their own risk at registration (`risk=`, `dangerous_actions=`),
+  `resolve_risk()` resolves registry-first with a documented fallback table,
+  `NEVER_GATE` keeps agent scratch state out of the gate, standing grants
+  ("allow for this conversation") live in `conversation.metadata_`, and an
+  approval is bound to the exact call by tool name + argument digest.
+  Two security holes found and fixed while doing this:
+  (a) the resume path escalated the **singleton** permission checker to
+  `full_auto` for the duration of an `await` — a process-wide window in which
+  every concurrent turn (other users included) skipped confirmations and
+  plan-mode write blocks; replaced by the call-scoped approval context.
+  (b) `_get_effective_config` swallowed authorization-lookup exceptions
+  (`except Exception: pass`), degrading `allowed_tools` to "all allowed";
+  now fails CLOSED and logs at ERROR.
+  Also: `cronjob`/`kanban`/`update_env_config` deletions were ungated (none is
+  in `WRITE_TOOLS`), and approval records said nothing about what was being
+  approved. Correction to this document's earlier inventory: approval was
+  **not** absent — the 3 modes, `ApprovalService`, `approval_requests` and the
+  pause/resume path already existed; what was missing was the destructiveness
+  concept and the call-scoped binding.
+- **Phase 1c/1d — TODO.** Note 1c is smaller than first scoped: compaction is
   already built and wired, and the harness run spine exists — the work is joining
   the chat path to it, not writing compaction.
 - **Phase 2/3/4 — TODO.**

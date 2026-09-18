@@ -139,4 +139,7 @@ registry.register(
     description="In-process kanban board for tracking the agent's work.",
     emoji="📋",
     max_result_size_chars=20_000,
+    risk="write",
+    # kanban(action="delete") removes a card/column irreversibly.
+    dangerous_actions=("delete",),
 )

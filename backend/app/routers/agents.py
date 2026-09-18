@@ -8263,6 +8263,15 @@ async def add_message(
 async def resume_conversation(
     app_id: str,
     conversation_id: str,
+    grant_scope: str | None = Query(
+        None,
+        description=(
+            "None (or 'once') approves only this call. "
+            "'conversation' also records a standing approval grant for the "
+            "pending tool + action, so the same destructive action is not "
+            "re-prompted on every later turn of this conversation."
+        ),
+    ),
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
@@ -8313,6 +8322,36 @@ async def resume_conversation(
     pending_tool = resume_state.get("pending_tool")
     if not pending_tool:
         raise HTTPException(status_code=400, detail="No pending tool in resume state")
+
+    # Phase 1b: record a standing grant BEFORE the tool context is built, so the
+    # permission check on this very call sees it and does not re-prompt.
+    if grant_scope == "conversation":
+        try:
+            from app.services.permissions import grant_for, APPROVAL_GRANTS_KEY
+            _grant = grant_for(pending_tool.get("tool_name", ""), pending_tool.get("args") or {})
+            _meta = dict(conv.metadata_ or {})
+            _existing = [
+                g for g in (_meta.get(APPROVAL_GRANTS_KEY) or [])
+                if isinstance(g, dict)
+                and not (
+                    g.get("tool_name") == _grant["tool_name"]
+                    and (g.get("action") or "") == _grant["action"]
+                )
+            ]
+            _existing.append(_grant)
+            _meta[APPROVAL_GRANTS_KEY] = _existing
+            conv.metadata_ = _meta          # reassign so SQLAlchemy sees the change
+            db.add(conv)
+            db.commit()
+            logger.info(
+                "Approval grant recorded for tool '%s' action '%s' (conversation %s)",
+                _grant["tool_name"], _grant["action"] or "*", conversation_id,
+            )
+        except Exception as _grant_err:
+            # A grant is a convenience, never a security control. If it cannot be
+            # stored we still proceed — the user approved THIS call, and the next
+            # one simply prompts again.
+            logger.warning("Failed to record approval grant (continuing): %s", _grant_err)
 
     # Check the approval status from the ApprovalRequest record
     approval_id = pending_tool.get("approval_id")
@@ -8376,19 +8415,27 @@ async def resume_conversation(
     display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
 
     if approval_status == "approved":
-        # Re-execute the tool with _skip_permission_check to bypass confirmation
-        from app.services.permissions import get_permission_checker, PermissionConfig, PermissionMode
-        checker = get_permission_checker()
-        original_config = checker.config
-        checker.config = PermissionConfig(mode="full_auto")
-        try:
-            result = await execute_tool(
-                tool_name, args, db,
-                user.id if user else None,
-                context=ctx,
-            )
-        finally:
-            checker.config = original_config
+        # Re-execute the tool as already-approved. The approval is scoped to
+        # THIS call (tool name + argument digest) via the server-built context,
+        # NOT by switching the permission checker's global mode.
+        #
+        # This used to be ``checker.config = PermissionConfig(mode="full_auto")``
+        # for the duration of the call — a process-wide, thread-unsafe
+        # escalation on the singleton checker: ``await execute_tool(...)`` yields
+        # to the event loop, so any concurrent turn (other users included) that
+        # called check_permission inside that window saw full_auto and had its
+        # confirmations and plan-mode write blocks silently skipped. One user
+        # approving their own tool call must never widen anyone else's access.
+        from app.services.permissions import make_approval_context
+        approved_ctx = {
+            **ctx,
+            "approval_context": make_approval_context(tool_name, args),
+        }
+        result = await execute_tool(
+            tool_name, args, db,
+            user.id if user else None,
+            context=approved_ctx,
+        )
 
         # Update the tool call record from awaiting_approval to completed/failed
         for tc in tool_calls_for_frontend:
