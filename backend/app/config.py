@@ -301,6 +301,15 @@ class Settings(BaseSettings):
     CODE_EXECUTION_TIMEOUT: int = 30  # seconds
     CODE_EXECUTION_MAX_MEMORY: int = 128  # MB (informational; subprocess enforcement)
 
+    # Programmatic tool calling (PTC). When execute_code runs inside an agent
+    # turn it may call the agent's own tools from inside the code block; those
+    # blocks legitimately run longer than a plain computation because each
+    # sub-call can be a delegated data query.
+    PTC_ENABLED: bool = True
+    PTC_EXECUTION_TIMEOUT: int = 600  # seconds for a PTC code block
+    PTC_SUB_CALL_TIMEOUT: int = 300  # seconds per sub-call
+    PTC_SUB_CALL_LIMIT: int = 25  # sub-calls allowed in one code block
+
     # Agent Workspace — sandboxed directory for read_file/write_file operations
     AGENT_WORKSPACE_DIR: str = "agent_workspace"
 

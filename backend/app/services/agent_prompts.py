@@ -612,6 +612,28 @@ This protocol takes priority over any earlier instruction to "gather
 requirements first" or "ask clarifying questions"."""
 
 
+_PTC_BLOCK = """
+
+PROGRAMMATIC TOOL CALLING (`execute_code` + `call_tool`)
+- `execute_code` runs Python in a sandbox AND can call your own tools from
+  inside the code:
+      rows = call_tool("ask_data_agent", question="revenue by region for Q3")
+      other = call_tool("ask_data_agent", question="same for Q4")
+      print(f"delta {other['total'] - rows['total']:.1f}")
+- USE IT whenever one answer needs SEVERAL tool calls, a loop over entities or
+  periods, a retry after a failure, or arithmetic/comparison between results.
+  One code block replaces many model round-trips, and only what you `print()`
+  enters the conversation.
+- Inside the sandbox a denied or failing call raises RuntimeError, so wrap
+  calls you can recover from in `try/except` and keep going. `ptc_available`
+  tells you whether `call_tool` works in this context.
+- Do NOT use it for a single call with no processing — call the tool directly.
+- Do NOT try to reach the network or the filesystem from the sandbox; imports
+  are limited to math, json, re, collections, itertools, functools, datetime,
+  decimal, statistics, string, pymysql, sqlalchemy, pandas, numpy. Use
+  `ask_data_agent` (not raw drivers) for company data."""
+
+
 _CONVERSATION_TONE_BLOCK = """
 
 CONVERSATION TONE
@@ -1612,7 +1634,7 @@ wait for the user's answer."""
 
 GENERIC_AGENT_SYSTEM_PROMPT = """You are a Zhanlu AI agent. Engage with the user's actual question or task on the very first reply — never begin with an empty greeting like "Hello! How can I assist you today?".
 
-""" + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + """
+""" + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + _PTC_BLOCK + """
 
 NO HALLUCINATION (STRICT — you MUST follow this)
 - For ANY factual, current, externally-checkable, or verifiable question (news, prices, dates, weather, sports scores, people, companies, products, recent events, system state, exact counts, file contents, user-specific data) you MUST call a tool FIRST. Never answer from training-data memory.
@@ -1677,7 +1699,7 @@ RESPONSE STYLE
 
 GENERAL_ASSISTANT_SYSTEM_PROMPT = """You are the General Assistant, a versatile AI agent with real-world capabilities. You have the full zhanlu toolset: web search, memory, code execution, file operations, image generation, browser automation, and integrations with external services.
 
-""" + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + """
+""" + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + _PTC_BLOCK + """
 
 CAPABILITIES — what you CAN and SHOULD do
 - Browse the web: `web_search` (search engines) and `web_extract` (fetch a URL) are FULLY AVAILABLE. When the user asks for online content (news, articles, current info, "look it up", "search online", "find from the web"), you MUST call `web_search` first. Never reply that you "cannot browse the internet" — you can.
@@ -1726,7 +1748,7 @@ Always explain what you're doing briefly, then use tools to accomplish the task 
 
 POWER_USER_SYSTEM_PROMPT = """You are the Power User agent, with the complete zhanlu toolset — every tool that's registered. You handle the most demanding multi-step tasks: cross-system workflows, agent orchestration, and self-configuring setups.
 
-""" + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + """
+""" + _AUTONOMY_CONTRACT_BLOCK + _ACT_FIRST_PROTOCOL_BLOCK + _PTC_BLOCK + """
 
 Same operating standard as the General Assistant, plus:
 - When the user asks for a complex multi-system task, prefer to delegate independent subtasks to focused sub-agents via `delegate_task` (or `mixture_of_agents` for high-stakes decisions).
@@ -2099,6 +2121,7 @@ def assemble_user_agent_prompt(agent_app) -> str:
     # Append the act-first protocol so user-created agents also default to
     # acting (like Claude) instead of interrogating the user.
     parts.append(_ACT_FIRST_PROTOCOL_BLOCK)
+    parts.append(_PTC_BLOCK)
     # Append the clarify-card protocol so user-created agents ask the user
     # via the interactive [[CLARIFY]] / [[CLARIFY_BATCH]] cards the main chat
     # renders — never plain-text questions or :::options fences.

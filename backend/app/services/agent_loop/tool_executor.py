@@ -23,7 +23,39 @@ import asyncio
 import json
 import logging
 
+from .tool_pipeline import (
+    DEFAULT_SUB_CALL_LIMIT,
+    PipelineState,
+    activate_pipeline,
+    apply_post_transforms,
+)
+
 logger = logging.getLogger(__name__)
+
+
+# Tools whose execution MUST be serialized in call order.
+#
+# These drive ONE shared Fusion 360 document through a single-socket bridge
+# (host.docker.internal:9876). Running them concurrently makes the ORDER
+# nondeterministic, and their results carry POSITIONAL HANDLES (SKETCH_INDEX /
+# BODY_INDEX) that the calling model must map back to its own plan.
+#
+# Observed failure (2026-09-16, CAD Agent building a hex bolt): the model
+# batched three fusion360_sketch_create calls in order; the results came back
+# SKETCH_INDEX 1, 0, 2, and the next fusion360_info reported SKETCHES: 4. The
+# model could no longer tell which sketch held the hex-head profile, cleared
+# the design, and restarted -- five identical build-and-wipe cycles, each one
+# extruding a body and then discarding it. Serializing in call order is both
+# the fix for the index scramble and the correct semantics for a
+# single-document, single-socket backend.
+_SERIAL_TOOL_PREFIXES = ("fusion360_",)
+
+
+def _requires_serial(parsed_calls) -> bool:
+    for c in parsed_calls or []:
+        if str(c.get("tool_name") or "").startswith(_SERIAL_TOOL_PREFIXES):
+            return True
+    return False
 
 
 async def execute_tool_batch(
@@ -32,8 +64,18 @@ async def execute_tool_batch(
     before_call,
     invoke,
     blocked_result_factory=None,
+    db=None,
+    user_id=None,
+    context=None,
+    sub_call_limit: int = DEFAULT_SUB_CALL_LIMIT,
 ) -> list:
     """Run a batch of tool calls in parallel with guard + exception isolation.
+
+    The whole batch runs inside an *active pipeline*
+    (:mod:`app.services.agent_loop.tool_pipeline`), so nested callers — the
+    ``execute_code`` PTC bridge — dispatch their sub-calls through this same
+    guard + registry path instead of a second, weaker dispatcher. Every result
+    passes the registered post-execute transforms before it is returned.
 
     Args:
         parsed_calls: list of ``{"tool_name", "args", "tool_call_id",
@@ -45,24 +87,84 @@ async def execute_tool_batch(
             serialized synthetic result for blocked calls
             (``json.loads``-ed into the result list). Optional when every
             call passes the guard.
+        db: database session — exposed to sub-calls for permission checks.
+        user_id: acting user id — exposed to sub-calls.
+        context: runtime context (conversation_id, agent_name, progress
+            emitter) — exposed to sub-calls and used for UI activity steps.
+        sub_call_limit: max sub-calls a single code block may dispatch.
 
     Returns:
         Ordered list of result dicts, one per input call. Exceptions raised
         by ``invoke`` are converted to ``{"success": False, "error": ...}``.
     """
+    state = PipelineState(
+        invoke=invoke,
+        before_call=before_call,
+        blocked_result_factory=blocked_result_factory,
+        db=db,
+        user_id=user_id,
+        context=context,
+        sub_call_limit=sub_call_limit,
+    )
+    with activate_pipeline(state):
+        results = await _execute_batch(
+            parsed_calls,
+            before_call=before_call,
+            invoke=invoke,
+            blocked_result_factory=blocked_result_factory,
+        )
+    return results
+
+
+def _finish_result(call: dict, result: dict) -> dict:
+    """Apply the post-execute seam to one result (contained, never raises)."""
+    if not isinstance(result, dict):
+        return result
+    transformed, _contexts = apply_post_transforms(
+        call.get("tool_name", ""), call.get("args") or {}, result
+    )
+    return transformed
+
+
+async def _execute_batch(
+    parsed_calls: list,
+    *,
+    before_call,
+    invoke,
+    blocked_result_factory=None,
+) -> list:
+    """The pre-P2-13 batch mechanics (unchanged semantics)."""
     if len(parsed_calls) == 1:
         call = parsed_calls[0]
         gd = before_call(call["tool_name"], call["args"])
         if gd.allows_execution:
-            return [await invoke(call["tool_name"], call["args"])]
+            return [_finish_result(call, await invoke(call["tool_name"], call["args"]))]
         if blocked_result_factory is None:
             return [{"success": False, "error": "blocked by guardrail"}]
         return [json.loads(blocked_result_factory(gd))]
 
+    # A batch touching a serialized backend runs IN CALL ORDER, never
+    # concurrently -- see _SERIAL_TOOL_PREFIXES. Same guard + isolation as
+    # the parallel path, so failures still degrade to a per-call error dict
+    # instead of taking the batch down.
+    if _requires_serial(parsed_calls):
+        _serial_results: list = []
+        for _c in parsed_calls:
+            try:
+                _serial_results.append(await _exec_one_serial(_c, before_call, invoke, blocked_result_factory))
+            except Exception as _exc:
+                logger.warning(
+                    "Tool '%s' raised (serial): %s", _c.get("tool_name"), _exc
+                )
+                _serial_results.append(
+                    {"success": False, "error": f"{type(_exc).__name__}: {_exc}"}
+                )
+        return _serial_results
+
     async def _exec_one(call):
         gd = before_call(call["tool_name"], call["args"])
         if gd.allows_execution:
-            return await invoke(call["tool_name"], call["args"])
+            return _finish_result(call, await invoke(call["tool_name"], call["args"]))
         if blocked_result_factory is None:
             return {"success": False, "error": "blocked by guardrail"}
         return json.loads(blocked_result_factory(gd))
@@ -78,6 +180,20 @@ async def execute_tool_batch(
         else:
             results.append(r)
     return results
+
+
+async def _exec_one_serial(call, before_call, invoke, blocked_result_factory):
+    """Guard + invoke for ONE call — used by the serialized batch path.
+
+    Mirrors the ``_exec_one`` closure inside ``_execute_batch`` but lives at
+    module level so the serial branch can call it before that closure is bound.
+    """
+    gd = before_call(call["tool_name"], call["args"])
+    if gd.allows_execution:
+        return _finish_result(call, await invoke(call["tool_name"], call["args"]))
+    if blocked_result_factory is None:
+        return {"success": False, "error": "blocked by guardrail"}
+    return json.loads(blocked_result_factory(gd))
 
 
 async def emit_tool_progress_while_waiting(
