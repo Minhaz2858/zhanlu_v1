@@ -403,7 +403,18 @@ async def _describe_schema(
         settings.SCHEMA_GRAPH_ENABLED
         or _ctx.get("schema_graph_enabled")
     )
-    if not restricted and _linker_enabled:
+    # An explicit ``table`` means the caller wants THAT table's schema.  The
+    # linker — and the SchemaGraph built from its candidates — selects tables
+    # from a *question*, so running it here discarded the requested table
+    # entirely.  Captured from a live turn: three describe_schema calls naming
+    # three different tables returned byte-identical text (md5 d5ca98537ab1,
+    # 6825 chars, source=schema_graph) containing none of the three.  The
+    # agent could not learn the columns of the table it had named, guessed
+    # alternatives, and the Data Agent failed 6x in one turn before the run
+    # ended with no answer.
+    # With a named table the ``_do_work`` path below answers exactly, via
+    # SchemaService.describe_table.
+    if not restricted and _linker_enabled and not table:
         try:
             from app.services.knowledge_graph.schema_linker import link_schema
             question = args.get("question", "") or (context or {}).get("user_query", "") or ""
