@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import create_engine
@@ -99,13 +99,22 @@ class TestCatalogTriggerGuards:
         assert _should_index(kb) is False
 
     def test_should_index_unsupported_db_type(self, monkeypatch):
-        """_should_index returns False for sqlite, mongodb, etc."""
+        """_should_index returns False only for dialects we have no connector for.
+
+        NOTE: the definition of "supported" is the connector registry, not a
+        hardcoded list — so sqlite/mariadb/mssql/oracle are catalogable too.
+        """
         import app.config
         monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
         from app.services.knowledge_graph.catalog_triggers import _should_index
-        assert _should_index(KnowledgeBase(db_type="sqlite")) is False
+        assert _should_index(KnowledgeBase(db_type="mongodb")) is False
+        assert _should_index(KnowledgeBase(db_type="api")) is False
         assert _should_index(KnowledgeBase(db_type=None)) is False
         assert _should_index(KnowledgeBase(db_type="")) is False
+        # every registry dialect is catalogable (was a 3-dialect allowlist)
+        for dt in ("mysql", "postgres", "postgresql", "mariadb",
+                   "mssql", "sqlserver", "oracle", "sqlite"):
+            assert _should_index(KnowledgeBase(db_type=dt)) is True, dt
 
     def test_should_index_already_indexing(self, monkeypatch):
         """_should_index returns False when catalog_status == 'indexing'."""
@@ -134,11 +143,11 @@ class TestCatalogTriggerGuards:
             mock_thread.assert_not_called()
 
     def test_maybe_reindex_catalog_bg_wrong_type(self, monkeypatch):
-        """maybe_reindex_catalog_bg skips non-db KBs."""
+        """maybe_reindex_catalog_bg skips KBs whose dialect has no connector."""
         import app.config
         monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
         from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog_bg
-        kb = KnowledgeBase(db_type="sqlite")
+        kb = KnowledgeBase(db_type="mongodb")
         with patch("threading.Thread") as mock_thread:
             maybe_reindex_catalog_bg(kb)
             mock_thread.assert_not_called()
@@ -570,3 +579,271 @@ class TestCatalogTablesListNewFields:
         assert result["kb_name"] == kb.name
         assert "column_names" in result["tables"][0]
         assert sorted(result["tables"][0]["column_names"]) == ["amount", "created_at", "id", "name"]
+
+
+# ── dialect support is derived, not hardcoded ─────────────────────────
+# Regression cover for two real defects found by live E2E on 2026-09-18:
+#   (1) entity_service.create_record returns record.to_dict() — a DICT — so the
+#       create hook's getattr(record, "db_type", "") always read "" and the
+#       catalog auto-index silently never fired for ANY API-created KB.
+#       The UI hid it by calling /catalog/reindex itself.
+#   (2) the dialect allowlist ("mysql","postgres","postgresql") was duplicated
+#       in 5 places, so MariaDB / SQL Server / Oracle / SQLite users got no
+#       catalog, no auto-index and an HTTP 400 on Refresh.
+
+class TestSupportsCatalog:
+    """One predicate, derived from the connector registry."""
+
+    def test_registry_dialects_are_catalogable(self):
+        from app.services.knowledge_graph.catalog_triggers import supports_catalog
+        for dt in ("mysql", "postgres", "postgresql", "mariadb",
+                   "mssql", "sqlserver", "oracle", "sqlite"):
+            assert supports_catalog(dt) is True, dt
+
+    def test_case_and_whitespace_insensitive(self):
+        from app.services.knowledge_graph.catalog_triggers import supports_catalog
+        assert supports_catalog("MySQL") is True
+        assert supports_catalog("  PostgreSQL ") is True
+        assert supports_catalog("MariaDB") is True
+
+    def test_unknown_dialects_are_not_catalogable(self):
+        from app.services.knowledge_graph.catalog_triggers import supports_catalog
+        for dt in ("mongodb", "api", "snowflake", "", None, "   "):
+            assert supports_catalog(dt) is False, dt
+
+    def test_matches_connector_registry_exactly(self):
+        """supports_catalog must never drift from get_connector's registry."""
+        from app.services.db.connector_factory import supported_db_types
+        from app.services.knowledge_graph.catalog_triggers import catalog_db_types
+        assert catalog_db_types() == supported_db_types()
+
+    def test_catalog_db_types_superset_of_old_allowlist(self):
+        """The old allowlist must be a subset — no dialect lost capability."""
+        from app.services.knowledge_graph.catalog_triggers import catalog_db_types
+        assert set(catalog_db_types()) >= {"mysql", "postgres", "postgresql"}
+        assert "mariadb" in catalog_db_types()
+
+
+class TestKbField:
+    """Shape-agnostic field access — the root cause of defect (1)."""
+
+    def test_reads_dict_payload(self):
+        from app.services.knowledge_graph.catalog_triggers import kb_field
+        assert kb_field({"db_type": "postgresql"}, "db_type") == "postgresql"
+        assert kb_field({"id": "abc"}, "id") == "abc"
+
+    def test_reads_orm_row(self):
+        from app.services.knowledge_graph.catalog_triggers import kb_field
+        assert kb_field(KnowledgeBase(db_type="mysql"), "db_type") == "mysql"
+
+    def test_getattr_on_dict_would_have_failed(self):
+        """Documents the bug: getattr returns "" for a dict, hence no indexing."""
+        payload = {"db_type": "postgresql"}
+        assert getattr(payload, "db_type", "") == ""
+
+    def test_missing_field_returns_default(self):
+        from app.services.knowledge_graph.catalog_triggers import kb_field
+        assert kb_field({"a": 1}, "db_type") is None
+        assert kb_field({"a": 1}, "db_type", "zzz") == "zzz"
+
+
+class TestCreateHookDictPayload:
+    """The regression: the create hook must fire on the DICT the service returns."""
+
+    def _payload(self, **over):
+        payload = {
+            "id": str(uuid.uuid4()), "name": "DB", "source_kind": "database",
+            "db_type": "postgresql", "host": "10.0.0.1", "port": 5432,
+            "database_name": "db", "username": "u", "catalog_status": "pending",
+        }
+        payload.update(over)
+        return payload
+
+    def _fire(self, payload):
+        from app.routers.entities import _maybe_fire_catalog_index
+        with patch(
+            "app.services.knowledge_graph.catalog_triggers.maybe_reindex_catalog_bg"
+        ) as mock_bg:
+            _maybe_fire_catalog_index(payload)
+            return mock_bg
+
+    def test_dict_payload_fires_for_postgres(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        self._fire(self._payload(db_type="postgresql")).assert_called_once()
+
+    def test_dict_payload_fires_for_mariadb(self, monkeypatch):
+        """Previously: skipped — mariadb was not in the hardcoded allowlist."""
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        self._fire(self._payload(db_type="mariadb")).assert_called_once()
+
+    def test_dict_payload_fires_for_mssql(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        self._fire(self._payload(db_type="mssql")).assert_called_once()
+
+    def test_dict_payload_mixed_case_fires(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        self._fire(self._payload(db_type="MySQL")).assert_called_once()
+
+    def test_dict_payload_skips_unknown_dialect(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        self._fire(self._payload(db_type="mongodb")).assert_not_called()
+
+    def test_dict_payload_skips_when_flag_off(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", False)
+        self._fire(self._payload()).assert_not_called()
+
+    def test_dict_payload_without_id_does_not_crash(self, monkeypatch):
+        """A payload with no id must be a clean skip, not an exception."""
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        payload = self._payload()
+        payload.pop("id")
+        self._fire(payload).assert_not_called()
+
+    def test_orm_row_still_fires(self, monkeypatch):
+        """The ORM-row shape (background/non-API paths) must keep working."""
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        kb = KnowledgeBase(
+            id=str(uuid.uuid4()), name="DB", source_kind="database",
+            db_type="mariadb", host="10.0.0.1", port=3306, database_name="db",
+            username="root", org_id="default-org", app_id="default-app",
+        )
+        self._fire(kb).assert_called_once()
+
+
+class TestUpdateHookDictPayload:
+    """The update hook reads the same dict shape — same defect class."""
+
+    def test_dict_prev_and_dict_record_fire_on_host_change(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.entities import _maybe_fire_catalog_index_on_update
+        prev = {"id": "k1", "db_type": "mariadb", "host": "old", "port": 3306}
+        record = {"id": "k1", "db_type": "mariadb", "host": "new", "port": 3306}
+        with patch(
+            "app.services.knowledge_graph.catalog_triggers.maybe_reindex_catalog_bg"
+        ) as mock_bg:
+            _maybe_fire_catalog_index_on_update(prev, {"host": "new"}, record)
+            mock_bg.assert_called_once()
+
+    def test_dict_record_skips_when_no_connection_change(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.entities import _maybe_fire_catalog_index_on_update
+        prev = {"id": "k1", "db_type": "mariadb", "host": "a", "port": 3306}
+        record = {"id": "k1", "db_type": "mariadb", "host": "a", "port": 3306}
+        with patch(
+            "app.services.knowledge_graph.catalog_triggers.maybe_reindex_catalog_bg"
+        ) as mock_bg:
+            _maybe_fire_catalog_index_on_update(prev, {"name": "New"}, record)
+            mock_bg.assert_not_called()
+
+    def test_dict_record_skips_unknown_dialect(self, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.entities import _maybe_fire_catalog_index_on_update
+        prev = {"id": "k1", "db_type": "mongodb", "host": "old", "port": 1}
+        record = {"id": "k1", "db_type": "mongodb", "host": "new", "port": 1}
+        with patch(
+            "app.services.knowledge_graph.catalog_triggers.maybe_reindex_catalog_bg"
+        ) as mock_bg:
+            _maybe_fire_catalog_index_on_update(prev, {"host": "new"}, record)
+            mock_bg.assert_not_called()
+
+
+class TestCapabilitiesEndpoint:
+    """The manifest the frontend reads its dialect list from."""
+
+    @pytest.mark.asyncio
+    async def test_returns_manifest(self):
+        from app.routers.knowledge_bases import capabilities
+        result = await capabilities("default-app")
+        assert set(result) == {"db_types", "catalog_db_types", "catalog_enabled"}
+        assert isinstance(result["catalog_enabled"], bool)
+        for dt in ("mysql", "postgres", "postgresql", "mariadb", "mssql",
+                   "sqlserver", "oracle", "sqlite"):
+            assert dt in result["db_types"], dt
+
+    @pytest.mark.asyncio
+    async def test_catalog_list_is_subset_of_db_types(self):
+        from app.routers.knowledge_bases import capabilities
+        result = await capabilities("default-app")
+        assert set(result["catalog_db_types"]) <= set(result["db_types"])
+
+    @pytest.mark.asyncio
+    async def test_reflects_flag(self, monkeypatch):
+        import app.config
+        from app.routers.knowledge_bases import capabilities
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", False)
+        assert (await capabilities("default-app"))["catalog_enabled"] is False
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        assert (await capabilities("default-app"))["catalog_enabled"] is True
+
+
+class TestReindexCatalogDialectGate:
+    """POST /{kb_id}/catalog/reindex must accept every connector dialect."""
+
+    @pytest.mark.asyncio
+    async def test_mariadb_accepted(self, db, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.knowledge_bases import reindex_catalog
+        kb = _make_kb(db, db_type="mariadb")
+        with patch(
+            "app.services.knowledge_graph.catalog_triggers.maybe_reindex_catalog",
+            new_callable=AsyncMock,
+        ) as mock_reindex:
+            result = await reindex_catalog("default-app", kb.id, db)
+        assert result["status"] == "accepted"
+        mock_reindex.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_sqlite_accepted(self, db, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.knowledge_bases import reindex_catalog
+        kb = _make_kb(db, db_type="sqlite")
+        with patch(
+            "app.services.knowledge_graph.catalog_triggers.maybe_reindex_catalog",
+            new_callable=AsyncMock,
+        ):
+            result = await reindex_catalog("default-app", kb.id, db)
+        assert result["status"] == "accepted"
+
+    @pytest.mark.asyncio
+    async def test_unknown_dialect_400(self, db, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.knowledge_bases import reindex_catalog
+        kb = _make_kb(db, db_type="mongodb")
+        with pytest.raises(Exception) as exc:
+            await reindex_catalog("default-app", kb.id, db)
+        assert exc.value.status_code == 400
+        assert "mongodb" in exc.value.detail
+
+    @pytest.mark.asyncio
+    async def test_flag_off_is_honest_skip(self, db, monkeypatch):
+        """No silent 'accepted' when the catalog is disabled platform-wide."""
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", False)
+        from app.routers.knowledge_bases import reindex_catalog
+        kb = _make_kb(db, db_type="postgresql")
+        result = await reindex_catalog("default-app", kb.id, db)
+        assert result["status"] == "skipped"
+        assert result["reason"] == "catalog_disabled"
+
+    @pytest.mark.asyncio
+    async def test_missing_kb_404(self, db, monkeypatch):
+        import app.config
+        monkeypatch.setattr(app.config.settings, "SEMANTIC_CATALOG_ENABLED", True)
+        from app.routers.knowledge_bases import reindex_catalog
+        with pytest.raises(Exception) as exc:
+            await reindex_catalog("default-app", "nope", db)
+        assert exc.value.status_code == 404

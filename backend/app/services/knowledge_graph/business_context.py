@@ -259,6 +259,63 @@ def _ngrams(s: str, n: int):
     return [s[i:i + n] for i in range(len(s) - n + 1)]
 
 
+def _match_domains(db: Session, kb_id: str, question: str, limit: int = 4) -> list[dict]:
+    """Pick the KB's discovered domains that the question is about.
+
+    Cheap lexical match over domain names, descriptions and member table names —
+    no embedding call on the answering hot path. Falls back to the largest
+    domains so the model still sees the catalog's business vocabulary.
+    """
+    from app.models.knowledge_catalog import KBDomain, KBDomainMember
+
+    try:
+        domains = (
+            db.query(KBDomain)
+            .filter(KBDomain.kb_id == kb_id, KBDomain.is_deleted.is_(False))
+            .all()
+        )
+    except Exception:
+        return []
+    if not domains:
+        return []
+
+    members = (
+        db.query(KBDomainMember)
+        .filter(KBDomainMember.domain_id.in_([d.id for d in domains]))
+        .all()
+    )
+    by_domain: dict[str, list[str]] = {}
+    for m in members:
+        by_domain.setdefault(m.domain_id, []).append(m.table_name)
+
+    q_tokens = _word_tokens(question)
+    scored: list[tuple[int, int, str, dict]] = []
+    for d in domains:
+        tables = by_domain.get(d.id, [])
+        haystack = f"{d.name_en} {d.name_zh or ''} {d.description_en or ''} {d.description_zh or ''} {' '.join(tables)}"
+        overlap = len(q_tokens & _word_tokens(haystack))
+        scored.append(
+            (overlap, len(tables), d.name_en or "", {
+                "name_en": d.name_en,
+                "name_zh": d.name_zh,
+                "description": d.description_en or d.description_zh,
+                "tables": tables,
+            })
+        )
+    scored.sort(key=lambda item: (-item[0], -item[1], item[2]))
+    return [entry for _, _, _, entry in scored[:limit]]
+
+
+def _word_tokens(text: str) -> set[str]:
+    import re
+
+    return {
+        tok
+        for tok in re.split(r"[^0-9a-zA-Z\u4e00-\u9fff]+", (text or "").lower())
+        if len(tok) > 1
+    }
+
+
 def build_business_context(
     db: Session,
     project_id: str,
@@ -297,7 +354,24 @@ def build_business_context(
             lines.append("".join(seg))
         parts.append("\n".join(lines))
 
-    # 2. Coverage annotations.
+    # 2. Business domains (the semantic layer's vocabulary map).
+    domains = _match_domains(db, kb_id, question)
+    if domains:
+        lines = ["## Business domains"]
+        for d in domains:
+            label = d["name_en"]
+            if d.get("name_zh"):
+                label += f" / {d['name_zh']}"
+            line = f"- {label}"
+            if d.get("description"):
+                line += f": {d['description']}"
+            if d["tables"]:
+                tables = ", ".join(sorted(d["tables"])[:12])
+                line += f" [tables: {tables}]"
+            lines.append(line)
+        parts.append("\n".join(lines))
+
+    # 3. Coverage annotations.
     covs = _coverage_max_dates(db, kb_id)
     if covs:
         lines = ["## Data coverage"]

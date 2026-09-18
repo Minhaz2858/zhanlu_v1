@@ -51,6 +51,8 @@ _TABLE_DESCRIPTION_SYSTEM = (
     "请为每张表和每个字段输出中文和英文的业务含义说明。"
     "说明应该简洁、可被其他大模型理解，用于后续的自然语言查询 (NL2SQL) 场景。"
     "如果字段含义无法从名称判断，标注为 '未知'。"
+    "对数值型字段，如果能从字段名或样本值判断计量单位（如 元、吨、%、USD、件），"
+    "在 unit 字段填入单位；无法判断时留空字符串。"
     "输出严格的 JSON 对象，顶层必须是一个 `tables` 数组，每张表一个对象。"
     '格式: {"tables": [{"table_name": ..., "description_zh": ..., "description_en": ..., "columns": [...]}]}'
 )
@@ -74,6 +76,7 @@ _JSON_SCHEMA = {
                                 "column_name": {"type": "string"},
                                 "description_zh": {"type": "string"},
                                 "description_en": {"type": "string"},
+                                "unit": {"type": "string"},
                             },
                             "required": ["column_name", "description_zh", "description_en"],
                         },
@@ -99,6 +102,11 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
     import asyncio
 
     t0 = time.monotonic()
+    # Captured BEFORE any DB work: after a failed flush the ORM object is
+    # expired/poisoned, so touching ``kb.id`` from the error path raised
+    # PendingRollbackError and HID the original exception (cost a full
+    # diagnosis cycle when a duplicate domain name aborted an index).
+    kb_id = kb.id
     try:
         _set_status(db, kb, "indexing")
 
@@ -119,6 +127,31 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             await _bootstrap_metrics(db, kb, tables)
         await asyncio.to_thread(_embed_catalog, kb.id, tables)
 
+        # Business domains need the persisted rows (FK graph) and the fresh
+        # embeddings, so they run last. Flag-gated; failure is non-fatal.
+        if getattr(settings, "KG_DOMAIN_DISCOVERY_ENABLED", False):
+            try:
+                from app.services.knowledge_graph.domain_discovery import (
+                    discover_domains,
+                )
+
+                domains = (
+                    db.query(KBTableMeta)
+                    .filter(
+                        KBTableMeta.kb_id == kb.id,
+                        KBTableMeta.is_deleted.is_(False),
+                    )
+                    .all()
+                )
+                result = await discover_domains(db, kb.id, domains)
+                logger.info(
+                    "catalog_indexer: kb=%s domain discovery → %s", kb.id, result
+                )
+            except Exception:
+                logger.exception(
+                    "catalog_indexer: domain discovery failed (non-fatal) kb=%s", kb.id
+                )
+
         _set_status(db, kb, "ready")
         kb.item_count = len(tables)
         db.commit()
@@ -129,8 +162,22 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             kb.id, len(tables), kb.item_count, elapsed,
         )
     except Exception:
-        logger.exception("catalog_indexer: kb=%s failed", kb.id)
-        _set_status(db, kb, "error")
+        logger.exception("catalog_indexer: kb=%s failed", kb_id)
+        # Recover the session first — a poisoned transaction would make the
+        # status write below raise and leave the KB stuck on "indexing".
+        try:
+            db.rollback()
+        except Exception:
+            logger.exception("catalog_indexer: kb=%s rollback failed", kb_id)
+        try:
+            (
+                db.query(KnowledgeBase)
+                .filter(KnowledgeBase.id == kb_id)
+                .update({"catalog_status": "error"}, synchronize_session=False)
+            )
+            db.commit()
+        except Exception:
+            logger.exception("catalog_indexer: kb=%s could not set error status", kb_id)
 
 
 def _sync_registry(db: Session, kb: KnowledgeBase, table_count: int) -> None:
@@ -463,9 +510,73 @@ _SAMPLEABLE_RE = re.compile(
     r"supplier|customer|variety|item|material|type)",
     re.IGNORECASE,
 )
-_MAX_SAMPLE_COLS = 2
+_MAX_SAMPLE_COLS = 12
 _SAMPLE_LIMIT = 40
 _SAMPLE_VALUE_LEN = 20
+
+# A column whose sampled distinct values stop short of the query limit is
+# bounded — those values are a usable dictionary. Above it we know only that
+# the column is high-cardinality (free text, names, codes).
+_ENUM_MAX_VALUES = 25
+
+# Generic column-role patterns. These describe SHAPE, never a customer's
+# business vocabulary: an identifier is an identifier in any industry.
+_ID_HINT_RE = re.compile(
+    r"(^|_)(id|ids|code|no|num|number|key|uuid|guid|sk|pk)($|_)", re.IGNORECASE
+)
+_FLAG_HINT_RE = re.compile(
+    r"(^|_)(is|has|flag|yn|enable|enabled|active|deleted|valid|status_flag)($|_)",
+    re.IGNORECASE,
+)
+
+
+def classify_column_semantics(column: dict, table_role: str = "unknown") -> tuple[str, list | None]:
+    """Return ``(semantic_type, enum_values)`` for one introspected column.
+
+    ``semantic_type`` is one of ``identifier`` / ``temporal`` / ``flag`` /
+    ``measure`` / ``dimension`` / ``free_text`` / ``unknown`` — derived from the
+    column's declared type, key/role metadata and its *sampled* values, so it
+    works for any dialect and any industry without a vocabulary list.
+
+    ``enum_values`` is populated only when the sampled distinct values are few
+    and provably complete (the sample stopped before the query limit).
+    """
+    name = str(column.get("column_name") or "")
+    dtype = str(column.get("data_type") or "").lower()
+    samples = column.get("value_samples") or []
+
+    enum_values: list | None = None
+    if (
+        isinstance(samples, list)
+        and 1 < len(samples) < _SAMPLE_LIMIT
+        and len(samples) <= _ENUM_MAX_VALUES
+    ):
+        # Distinct (the SQL used DISTINCT), bounded, and human-sized.
+        enum_values = [str(v) for v in samples]
+
+    if column.get("is_primary_key"):
+        return "identifier", enum_values
+
+    if _is_date_type(dtype):
+        return "temporal", None
+
+    numeric = any(
+        tok in dtype
+        for tok in ("int", "decimal", "numeric", "float", "double", "real", "money", "number")
+    )
+    boolean = any(tok in dtype for tok in ("bool", "bit", "tinyint(1)"))
+
+    if boolean or (numeric and _FLAG_HINT_RE.search(name)):
+        return "flag", enum_values
+    if _ID_HINT_RE.search(name):
+        return "identifier", None
+    if numeric:
+        return "measure", None
+    if _is_string_type(dtype):
+        if enum_values:
+            return "dimension", enum_values
+        return "dimension" if len(name) <= 40 else "free_text", None
+    return "unknown", enum_values
 
 
 def _is_string_type(data_type: str) -> bool:
@@ -484,19 +595,24 @@ def _samples_text(columns: list[dict]) -> str:
 
 
 def _sample_column_values(conn: Any, table: str, columns: list[dict]) -> None:
-    """Attach ``value_samples`` (distinct values) to name-like string columns.
+    """Attach ``value_samples`` (distinct values) to string columns.
 
     These samples bridge the vocabulary gap between cryptic DDL names and
-    how users phrase questions; they feed the description prompt and the
-    embedded doc text only (never persisted, never shown raw in prompts).
+    how users phrase questions; they feed the description prompt, the
+    embedded doc text, and — for low-cardinality columns — the persisted
+    ``enum_values`` dictionary the answering path can filter on.
+
+    Every string column is sampled (name-like ones first), because which
+    column carries the business vocabulary is a property of the data, not of
+    its name.
     """
-    candidates = [
-        c
-        for c in columns
-        if _is_string_type(c.get("data_type", ""))
-        and _SAMPLEABLE_RE.search(c.get("column_name", ""))
+    string_cols = [
+        c for c in columns if _is_string_type(c.get("data_type", ""))
     ]
-    for c in candidates[:_MAX_SAMPLE_COLS]:
+    name_like = [c for c in string_cols if _SAMPLEABLE_RE.search(c.get("column_name", ""))]
+    others = [c for c in string_cols if c not in name_like]
+    candidates = (name_like + others)[:_MAX_SAMPLE_COLS]
+    for c in candidates:
         col = c.get("column_name", "")
         if not col:
             continue
@@ -771,6 +887,7 @@ def _apply_descriptions(batch: list[dict], llm_result: dict) -> None:
                 cd = col_map.get(c["column_name"], {})
                 c["description_zh"] = cd.get("description_zh", "")
                 c["description_en"] = cd.get("description_en", "")
+                c["unit"] = (cd.get("unit") or "").strip() or None
 
 
 # ── persistence ────────────────────────────────────────────────────────────
@@ -854,6 +971,12 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                     description_en=c.get("description_en", ""),
                 )
                 db.add(col)
+            # Semantic typing is recomputed on every index (it reads the fresh
+            # value samples), so a re-index repairs drift automatically.
+            semantic_type, enum_values = classify_column_semantics(c, role)
+            col.semantic_type = semantic_type
+            col.enum_values = enum_values
+            col.unit = c.get("unit") or None
     db.commit()
 
     # Store table_meta_id lookup on the table dict for relation persistence

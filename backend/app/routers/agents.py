@@ -258,6 +258,61 @@ MAX_TOOL_ITERATIONS = 40
 # MAX_TOOL_ITERATIONS so a single bad tool cannot eat the whole budget.
 TOOL_CALL_HARD_CAP = 10
 
+
+# ── Tool-call loop guard: user-facing copy + one final answer pass ─────────
+# The guard exists to stop a runaway repeat. It must never DISCARD the work
+# already done, and it must never speak in the wrong domain.
+#
+# Two real defects this replaces (both observed live 2026-09-18):
+#   1. Every loop-guard site hardcoded the agent-BUILDER copy
+#      ("I'm going to build the agent with sensible defaults now") for ALL
+#      agents, so a sales question that had already run four correct
+#      ask_data_agent queries answered with an agent-creation confirmation and
+#      zero data.
+#   2. The guard `break`ed immediately, throwing away the tool results instead
+#      of turning them into an answer. A data question decomposed into several
+#      ask_data_agent calls is NORMAL, not a runaway loop.
+# The guard now yields exactly ONE tool-free pass so the model answers from the
+# results it already has; only if it repeats again does it stop, with the
+# agent-appropriate message below.
+_LOOP_GUARD_AGENT_BUILDER_MSG = (
+    "I'm going to build the agent with sensible defaults now. "
+    "You can adjust anything after creation."
+)
+_LOOP_GUARD_GENERIC_MSG = (
+    "I wasn't able to finish that in one pass, and I've stopped to avoid "
+    "repeating myself. Tell me which part to continue and I'll pick it up "
+    "from where the data left off."
+)
+
+# Upper bound on a reply that retrieved data but looks like process/compliance
+# narration rather than an answer (see _empty_answer_needs_force). A genuine
+# data answer carries at least one figure, so the length cap only bounds how
+# much digit-free prose can pass as an answer.
+_NON_ANSWER_MAX_CHARS = 600
+
+
+def _loop_guard_message(agent_name: str | None) -> str:
+    """Agent-appropriate user-facing text when the loop guard stops a turn.
+
+    Single source of truth for all loop-guard call sites. Only
+    ``agent_builder`` may talk about building an agent; every other agent
+    (Sales, Research, general_assistant, …) gets domain-neutral copy, because
+    telling a data user we are "building the agent" is nonsense.
+    """
+    if (agent_name or "") == "agent_builder":
+        return _LOOP_GUARD_AGENT_BUILDER_MSG
+    return _LOOP_GUARD_GENERIC_MSG
+
+
+def _loop_guard_answer_nudge(looped_tool: str, looped_n: int) -> str:
+    """LLM-facing instruction for the single tool-free pass after a trip."""
+    return (
+        f"Tool '{looped_tool}' was already called {looped_n} times. "
+        "Use the results you already have and write your final answer for the "
+        "user now. Do not call any tools."
+    )
+
 # Canned final answer emitted when the LLM loop ends with NO content at
 # all (historically tuned for the Agent Builder flow). Single source of
 # truth: automation_executor compares run output against this constant to
@@ -3162,6 +3217,18 @@ def _empty_answer_needs_force(
     # (promises, "let me check…"), not a real answer. The user expects a
     # synthesized final response, not a collection of partial narrations.
     if not assistant_content:
+        return True
+    # Non-answer narration: the turn DID retrieve data, but the reply the user
+    # is about to receive is short and contains no figure at all — that is
+    # process / compliance / status talk ABOUT the request, not the answer to
+    # it. Observed live: five completed data tool calls returned the correct
+    # totals (17,772,540.00 / 15,727,911.50) and the user was delivered, in full,
+    # "没有创建文档，原因是 你明确要求了不要输出文档…".
+    # The test is deliberately domain- and database-neutral: if data came back
+    # and the reply contains no digit, it is not a data answer.
+    if len(assistant_content) < _NON_ANSWER_MAX_CHARS and not any(
+        ch.isdigit() for ch in assistant_content
+    ):
         return True
     return False
 
@@ -6830,6 +6897,10 @@ async def add_message(
         # ``_wrapup_nudged`` ensures the T-3 wrap-up message is injected once.
         dashboard_forced = False
         _wrapup_nudged = False
+        # Loop-guard state (see _loop_guard_message): False until the guard
+        # trips, then True so the guard grants exactly ONE tool-free answer
+        # pass and only stops if the model repeats anyway.
+        _loop_guard_synthesis_used = False
         for iteration in range(MAX_TOOL_ITERATIONS):
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
@@ -6848,30 +6919,37 @@ async def add_message(
                 # Internal LLM-facing nudge: tells the model to stop
                 # calling the same tool and wrap up. This text is
                 # scaffolding for the model, not for the user.
-                nudge = (
-                    f"Tool '{looped_tool}' was already called {looped_n} times. "
-                    "Use the result you have and produce your final answer. "
-                    "Do not call it again."
-                )
-                # User-facing assistant content: a short, friendly
-                # message that does NOT mention internal tool names or
-                # call counts. The previous implementation reused
-                # `nudge` for both, which leaked the internal scaffolding
-                # into the chat UI as a visible assistant message.
-                # After R4 we explicitly tell the user we are proceeding
-                # with sensible defaults so the loop guard stopping the
-                # agent before create_agent does not feel like a dead end.
-                assistant_content = (
-                    "I'm going to build the agent with sensible defaults now. "
-                    "You can adjust anything after creation."
-                )
+                nudge = _loop_guard_answer_nudge(looped_tool, looped_n)
+                # Agent-appropriate user-facing text (single source of truth:
+                # _loop_guard_message). Never assume the agent_builder flow.
+                assistant_content = _loop_guard_message(agent_name)
+                if _loop_guard_synthesis_used:
+                    # Second trip in the same turn: the model repeated even
+                    # after being told to answer with what it had. Stop.
+                    logger.warning(
+                        "Tool-call loop guard tripped in conversation %s: "
+                        "tool=%r count=%d (cap=%d). Already granted a "
+                        "synthesis pass — breaking loop.",
+                        conversation_id, looped_tool, looped_n,
+                        TOOL_CALL_HARD_CAP,
+                    )
+                    llm_messages.append({"role": "user", "content": nudge})
+                    break
+                # First trip: do NOT throw the work away. Grant exactly one
+                # tool-free pass so the results already gathered become the
+                # answer — a data question split across several
+                # ask_data_agent calls is normal, not a runaway loop.
+                _loop_guard_synthesis_used = True
                 logger.warning(
                     "Tool-call loop guard tripped in conversation %s: "
-                    "tool=%r count=%d (cap=%d). Breaking loop.",
-                    conversation_id, looped_tool, looped_n, TOOL_CALL_HARD_CAP,
+                    "tool=%r count=%d (cap=%d). Granting one tool-free "
+                    "synthesis pass before stopping.",
+                    conversation_id, looped_tool, looped_n,
+                    TOOL_CALL_HARD_CAP,
                 )
                 llm_messages.append({"role": "user", "content": nudge})
-                break
+                # Fall through (no break): the model answers on this
+                # iteration from the tool results it already has.
 
             # Finish line: with 3 iterations left, tell the model to stop
             # exploring and assemble its final answer (injected exactly once).
@@ -7494,6 +7572,9 @@ async def add_message(
                 before_call=guard_ctrl.before_call,
                 invoke=_invoke,
                 blocked_result_factory=_guardrail_synthetic_result,
+                db=db,
+                user_id=user.id if user else None,
+                context=ctx,
             )
 
             # Process results in original order, building frontend records + LLM messages.
@@ -8429,6 +8510,8 @@ async def resume_conversation(
     # BEFORE the loop rebinds it.
     _final_iteration = iteration + MAX_TOOL_ITERATIONS
     _wrapup_nudged = False
+    # See _loop_guard_message: one tool-free answer pass before the guard stops.
+    _loop_guard_synthesis_used = False
     # ── Dynamic per-turn budget (schema-aware soft cap) ────────────
     # Resumes are user-approval-driven (never unattended automation), so
     # the automation heuristic stays off here. MAX_TOOL_ITERATIONS remains
@@ -8463,27 +8546,29 @@ async def resume_conversation(
             looped_tool, looped_n = loop_info
             # Internal LLM-facing nudge: tells the model to stop
             # calling the same tool and wrap up.
-            nudge = (
-                f"Tool '{looped_tool}' was already called {looped_n} times. "
-                "Use the result you have and produce your final answer. "
-                "Do not call it again."
-            )
-            # User-facing assistant content: friendly text, no
-            # internal tool names or call counts. After R4 we tell
-            # the user we are proceeding with sensible defaults so
-            # the loop guard stopping the agent does not feel like a
-            # dead end.
-            assistant_content = (
-                "I'm going to build the agent with sensible defaults now. "
-                "You can adjust anything after creation."
-            )
+            nudge = _loop_guard_answer_nudge(looped_tool, looped_n)
+            # Agent-appropriate user-facing text (see _loop_guard_message).
+            assistant_content = _loop_guard_message(agent_name)
+            if _loop_guard_synthesis_used:
+                logger.warning(
+                    "Tool-call loop guard tripped in resumed conversation %s: "
+                    "tool=%r count=%d (cap=%d). Already granted a synthesis "
+                    "pass — breaking loop.",
+                    conversation_id, looped_tool, looped_n, TOOL_CALL_HARD_CAP,
+                )
+                llm_messages.append({"role": "user", "content": nudge})
+                break
+            # First trip: grant one tool-free pass so the gathered results
+            # become the answer instead of being discarded.
+            _loop_guard_synthesis_used = True
             logger.warning(
                 "Tool-call loop guard tripped in resumed conversation %s: "
-                "tool=%r count=%d (cap=%d). Breaking loop.",
+                "tool=%r count=%d (cap=%d). Granting one tool-free synthesis "
+                "pass before stopping.",
                 conversation_id, looped_tool, looped_n, TOOL_CALL_HARD_CAP,
             )
             llm_messages.append({"role": "user", "content": nudge})
-            break
+            # Fall through (no break): answer from the existing tool results.
         # Finish line: with 3 iterations left (per the DYNAMIC soft cap),
         # tell the model to stop exploring and assemble its final answer
         # (injected exactly once).
@@ -8761,6 +8846,9 @@ async def resume_conversation(
             before_call=guard_ctrl.before_call,
             invoke=_invoke_resume,
             blocked_result_factory=_guardrail_synthetic_result,
+            db=db,
+            user_id=user.id if user else None,
+            context=ctx,
         )
 
         # Check for approval pause again (a resumed conversation could hit another write tool)
@@ -12724,6 +12812,8 @@ async def add_message_stream(
         # the T-3 wrap-up message is injected exactly once.
         dashboard_forced = False
         _wrapup_nudged = False
+        # See _loop_guard_message: one tool-free answer pass before stopping.
+        _loop_guard_synthesis_used = False
         # ── Dynamic per-turn budget (schema-aware soft cap) ───────────
         # db-bound agents get a dynamic iteration budget that scales with
         # schema-graph join complexity (see calculate_agent_budget in
@@ -13179,23 +13269,10 @@ async def add_message_stream(
                 # normal question. Use an agent-aware message so the
                 # loop guard doesn't feel like a dead end regardless
                 # of which agent tripped it.
-                if agent_name == "agent_builder":
-                    user_facing = (
-                        "I'm going to build the agent with sensible defaults now. "
-                        "You can adjust anything after creation."
-                    )
-                else:
-                    user_facing = (
-                        "I noticed I was repeating the same tool call, so I'll "
-                        "stop here and answer based on what I've gathered so far."
-                    )
-                logger.warning(
-                    "Tool-call loop guard tripped in conversation %s: "
-                    "tool=%r count=%d (cap=%d). Breaking loop.",
-                    conversation_id, looped_tool, looped_n,
-                    _dynamic_tool_caps.get(looped_tool)
-                    or TOOL_CALL_CAPS.get(looped_tool, TOOL_CALL_HARD_CAP),
-                )
+                # Agent-appropriate user-facing text — single source of truth
+                # (_loop_guard_message). The agent_builder copy is not valid
+                # for Sales / Research / general_assistant / any data agent.
+                user_facing = _loop_guard_message(agent_name)
                 # Bug 2 fix: do NOT stream the reflexion text as the user's
                 # response. The previous code set assistant_content =
                 # user_facing and yielded it as a delta, which surfaced
@@ -13206,11 +13283,33 @@ async def add_message_stream(
                 # already accumulate one across the tool iterations.
                 llm_messages.append({"role": "user", "content": nudge})
                 # Mark that we tripped the loop guard so the post-loop
-                # fallback can pick an appropriate user-facing message
-                # (the agent_builder-specific copy above vs a generic
-                # "I gathered some information" message for other agents).
+                # fallback can pick an appropriate user-facing message.
                 _loop_guard_user_facing = user_facing
-                break
+                if _loop_guard_synthesis_used:
+                    logger.warning(
+                        "Tool-call loop guard tripped in conversation %s: "
+                        "tool=%r count=%d (cap=%d). Already granted a "
+                        "synthesis pass — breaking loop.",
+                        conversation_id, looped_tool, looped_n,
+                        _dynamic_tool_caps.get(looped_tool)
+                        or TOOL_CALL_CAPS.get(looped_tool, TOOL_CALL_HARD_CAP),
+                    )
+                    break
+                # First trip: grant exactly ONE tool-free pass so the results
+                # already gathered become the answer instead of being thrown
+                # away (a data question decomposed into several ask_data_agent
+                # calls is normal, not a runaway loop).
+                _loop_guard_synthesis_used = True
+                logger.warning(
+                    "Tool-call loop guard tripped in conversation %s: "
+                    "tool=%r count=%d (cap=%d). Granting one tool-free "
+                    "synthesis pass before stopping.",
+                    conversation_id, looped_tool, looped_n,
+                    _dynamic_tool_caps.get(looped_tool)
+                    or TOOL_CALL_CAPS.get(looped_tool, TOOL_CALL_HARD_CAP),
+                )
+                # Fall through (no break): the model answers on this iteration
+                # from the tool results it already has.
             # Finish line: with 3 iterations left (per the DYNAMIC soft cap),
             # tell the model to stop exploring and assemble its final answer
             # (injected exactly once).
@@ -15554,6 +15653,9 @@ async def add_message_stream(
                     before_call=guard_ctrl.before_call,
                     invoke=_invoke_v3,
                     blocked_result_factory=_guardrail_synthetic_result,
+                    db=db,
+                    user_id=user.id if user else None,
+                    context=ctx,
                 )
 
             if any(_is_long_running_tool(c["tool_name"]) for c in parsed_calls):

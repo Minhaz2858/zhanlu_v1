@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+from typing import Any
 
 from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
@@ -20,6 +21,72 @@ logger = logging.getLogger(__name__)
 _CONNECTION_FIELDS = frozenset({
     "db_type", "host", "port", "database_name", "username", "password", "api_url",
 })
+
+
+# ── dialect support — THE single source of truth ────────────────────────────
+# Catalog indexing is dialect-agnostic: the indexer drives everything through
+# get_connector(kb) (table list, describe_table, FKs, row counts), so any
+# dialect the connector factory can talk to can be catalogued.
+#
+# This used to be a hardcoded ("mysql","postgres","postgresql") tuple repeated
+# in FIVE places (this module, the entities create hook, the entities update
+# hook, the /catalog/reindex endpoint and the frontend), which meant a user
+# adding MariaDB / SQL Server / Oracle / SQLite got no auto-index, no UI index
+# call, and an HTTP 400 on Refresh — their database was never catalogued.
+# Everything now derives from the connector registry, so adding a dialect to
+# connector_factory. _REGISTRY automatically enables catalog indexing for it.
+
+def kb_field(kb, name: str, default=None) -> Any:
+    """Read a field from a KnowledgeBase ORM row OR its ``to_dict()`` payload.
+
+    Entity-CRUD hooks hand us the serialized **dict** (``create_record``
+    returns ``record.to_dict()``) while background jobs hand us the **ORM row**.
+    Both shapes must work: reading ``getattr(record, "db_type", "")`` off a dict
+    silently yields ``""``, which is what made the auto-index a no-op for every
+    KB created through the generic entity API (the UI masked it by calling
+    /catalog/reindex itself).
+    """
+    if isinstance(kb, dict):
+        return kb.get(name, default)
+    return getattr(kb, name, default)
+
+
+def supports_catalog(db_type: str | None) -> bool:
+    """True when the semantic catalog can index this dialect.
+
+    Derived from the connector registry — never a hardcoded tuple. Callers must
+    use this instead of comparing db_type themselves.
+    """
+    dt = (db_type or "").strip().lower()
+    if not dt:
+        return False
+    try:
+        from app.services.db.connector_factory import supported_db_types
+        return dt in supported_db_types()
+    except Exception:
+        logger.warning("supports_catalog: connector registry unavailable", exc_info=True)
+        return False
+
+
+def catalog_db_types() -> list[str]:
+    """Dialects the semantic catalog can index (exposed via /capabilities)."""
+    try:
+        from app.services.db.connector_factory import supported_db_types
+        return supported_db_types()
+    except Exception:
+        logger.warning("catalog_db_types: connector registry unavailable", exc_info=True)
+        return []
+
+
+def is_catalogable_record(record) -> bool:
+    """Feature flag on + supported dialect, for an ORM row OR a dict payload.
+
+    The one decision every entry point (entity create/update hooks, manual
+    reindex) should ask. Shape-agnostic on purpose — see ``kb_field``.
+    """
+    if not settings.SEMANTIC_CATALOG_ENABLED:
+        return False
+    return supports_catalog(kb_field(record, "db_type"))
 
 # Per-KB in-process locks — prevent overlapping indexing jobs when the user
 # clicks "Refresh" multiple times rapidly.  Maps kb_id → asyncio.Lock (for
@@ -57,14 +124,22 @@ def release_kb_lock(kb_id: str) -> None:
         _thread_locks.pop(kb_id, None)
 
 
-def _should_index(kb: KnowledgeBase) -> bool:
-    """Shared guard: feature flag on + supported db_type + not already indexing."""
+def _should_index(kb) -> bool:
+    """Shared guard: feature flag on + supported db_type + not already indexing.
+
+    Accepts a KnowledgeBase ORM row or its ``to_dict()`` dict (see ``kb_field``).
+    """
     if not settings.SEMANTIC_CATALOG_ENABLED:
         return False
-    if (kb.db_type or "").lower() not in ("mysql", "postgres", "postgresql"):
+    db_type = kb_field(kb, "db_type")
+    if not supports_catalog(db_type):
+        logger.info(
+            "catalog_triggers: kb=%s db_type=%r not catalogable — skipping",
+            kb_field(kb, "id"), db_type,
+        )
         return False
-    if kb.catalog_status == "indexing":
-        logger.info("catalog_triggers: kb=%s already indexing — skipping", kb.id)
+    if kb_field(kb, "catalog_status") == "indexing":
+        logger.info("catalog_triggers: kb=%s already indexing — skipping", kb_field(kb, "id"))
         return False
     return True
 
@@ -81,41 +156,53 @@ def connection_fields_changed(payload: dict, prev_record: dict | None) -> bool:
     return False
 
 
-async def maybe_reindex_catalog(kb: KnowledgeBase) -> None:
+async def maybe_reindex_catalog(kb) -> None:
     """Fire-and-forget catalog reindex for a database KB.
 
     Only spawns when the feature flag is on and kb.db_type is supported.
     Caller does NOT need to await — this is a background task.
+    Accepts an ORM row or its ``to_dict()`` dict.
     """
     if not _should_index(kb):
         return
 
-    lock = _get_async_lock(kb.id)
+    kb_id = kb_field(kb, "id")
+    if not kb_id:
+        logger.warning("catalog_triggers: record has no id — skipping")
+        return
+    kb_id = str(kb_id)
+    lock = _get_async_lock(kb_id)
     if lock.locked():
-        logger.info("catalog_triggers: kb=%s lock already held — skipping", kb.id)
+        logger.info("catalog_triggers: kb=%s lock already held — skipping", kb_id)
         return
 
-    logger.info("catalog_triggers: spawning catalog index for kb=%s", kb.id)
-    asyncio.create_task(_reindex_catalog_safe(kb.id))
+    logger.info("catalog_triggers: spawning catalog index for kb=%s", kb_id)
+    asyncio.create_task(_reindex_catalog_safe(kb_id))
 
 
-def maybe_reindex_catalog_bg(kb: KnowledgeBase) -> None:
+def maybe_reindex_catalog_bg(kb) -> None:
     """Sync-context variant: spawns a daemon thread running asyncio.run().
 
     Use from threadpool/sync endpoints (entities CRUD) where no event loop
     is available for asyncio.create_task.  Same guards as maybe_reindex_catalog.
+    Accepts an ORM row or its ``to_dict()`` dict.
     """
     if not _should_index(kb):
         return
 
-    lock = _get_thread_lock(kb.id)
+    kb_id = kb_field(kb, "id")
+    if not kb_id:
+        logger.warning("catalog_triggers: record has no id — skipping")
+        return
+    kb_id = str(kb_id)
+    lock = _get_thread_lock(kb_id)
     if lock.locked():
-        logger.info("catalog_triggers: kb=%s lock already held — skipping", kb.id)
+        logger.info("catalog_triggers: kb=%s lock already held — skipping", kb_id)
         return
 
-    logger.info("catalog_triggers: spawning catalog index (bg thread) for kb=%s", kb.id)
+    logger.info("catalog_triggers: spawning catalog index (bg thread) for kb=%s", kb_id)
     t = threading.Thread(
-        target=lambda: asyncio.run(_reindex_catalog_safe(kb.id)),
+        target=lambda: asyncio.run(_reindex_catalog_safe(kb_id)),
         daemon=True,
     )
     t.start()

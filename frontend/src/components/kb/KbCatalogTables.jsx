@@ -6,6 +6,7 @@ import {
 import { appParams } from '@/lib/app-params';
 import authFetch from '@/api/authFetch';
 import { useLanguage } from '@/lib/LanguageProvider';
+import KbCatalogDomains from '@/components/kb/KbCatalogDomains';
 
 const APP_ID = appParams.appId || 'local-zhanlu-app';
 const POLL_INTERVAL_MS = 5000;
@@ -243,6 +244,9 @@ export default function KbCatalogTables({ kbId, dbType, kbName }) {
           </button>
         </div>
       )}
+
+      {/* discovered business domains (semantic layer) */}
+      {!error && tableCount > 0 && <KbCatalogDomains kbId={kbId} />}
 
       {/* table list */}
       {!error && tableCount > 0 && (

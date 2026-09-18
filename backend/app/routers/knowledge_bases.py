@@ -277,15 +277,42 @@ async def reindex_kb(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     return {"success": ok, **status}
 
 
+@router.get("/capabilities")
+async def capabilities(app_id: str):
+    """DataSource capability manifest — the ONE place dialect support is declared.
+
+    ``db_types``          every dialect the connector factory can connect to.
+    ``catalog_db_types``  dialects the semantic catalog can index (a subset).
+    ``catalog_enabled``   whether the catalog feature flag is on.
+
+    The frontend calls this instead of carrying its own hardcoded
+    ['mysql','postgres','postgresql'] list, so adding a dialect to
+    connector_factory._REGISTRY lights it up end-to-end with no UI change.
+    """
+    from app.config import settings
+    from app.services.db.connector_factory import supported_db_types
+    from app.services.knowledge_graph.catalog_triggers import catalog_db_types
+    return {
+        "db_types": supported_db_types(),
+        "catalog_db_types": catalog_db_types(),
+        "catalog_enabled": bool(getattr(settings, "SEMANTIC_CATALOG_ENABLED", False)),
+    }
+
+
 @router.post("/{kb_id}/catalog/reindex")
 async def reindex_catalog(app_id: str, kb_id: str, db: Session = Depends(get_db)):
     """Manually trigger catalog (re)index for a database KnowledgeBase.
 
     Spawns the catalog indexer as a background task and returns 202 immediately.
-    Only meaningful when SEMANTIC_CATALOG_ENABLED=True and db_type in (mysql, postgres).
+    Meaningful for any dialect the connector factory supports — the gate is
+    ``catalog_triggers.supports_catalog``, derived from the connector registry,
+    NOT a hardcoded ('mysql','postgres') tuple (which used to 400 a MariaDB /
+    SQL Server / Oracle / SQLite user's Refresh click).
     Also drops the in-process schema cache so describe_schema picks up the
     rebuilt catalog immediately.
     """
+    from app.config import settings
+    from app.services.knowledge_graph.catalog_triggers import supports_catalog
     try:
         from app.services.db.schema_service import invalidate_schema_cache
         invalidate_schema_cache(kb_id)
@@ -298,10 +325,24 @@ async def reindex_catalog(app_id: str, kb_id: str, db: Session = Depends(get_db)
     )
     if kb is None:
         raise HTTPException(status_code=404, detail="KnowledgeBase not found")
-    if (kb.db_type or "").lower() not in ("mysql", "postgres", "postgresql"):
+    if not settings.SEMANTIC_CATALOG_ENABLED:
+        # Honest no-op: the UI would otherwise show "submitted" and the user
+        # would wait for a catalog that never arrives.
+        return {
+            "status": "skipped",
+            "reason": "catalog_disabled",
+            "catalog_status": kb.catalog_status,
+            "kb_id": kb_id,
+        }
+    if not supports_catalog(kb.db_type):
+        from app.services.knowledge_graph.catalog_triggers import catalog_db_types
+        supported = ", ".join(catalog_db_types()) or "none"
         raise HTTPException(
             status_code=400,
-            detail=f"Catalog index is only for db_type='mysql'/'postgres' (got {kb.db_type!r})",
+            detail=(
+                f"Catalog index is not available for db_type={kb.db_type!r} "
+                f"(catalogable dialects: {supported})"
+            ),
         )
 
     from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog
@@ -397,6 +438,107 @@ async def list_catalog_tables(app_id: str, kb_id: str, db: Session = Depends(get
                 "indexed_at": t.indexed_at.isoformat() if t.indexed_at else None,
             }
             for t in tables
+        ],
+    }
+
+
+@router.get("/{kb_id}/catalog/domains")
+async def list_catalog_domains(app_id: str, kb_id: str, db: Session = Depends(get_db)):
+    """Return the discovered business domains for a database KnowledgeBase.
+
+    This is the semantic layer's grouping output: each domain carries its
+    LLM-derived name (en/zh), description, how it was produced
+    (``method``: llm | derived) and its member tables with their per-column
+    semantic typing (measure / dimension / temporal / identifier / flag), enum
+    dictionaries and units.
+    """
+    from app.models.knowledge_catalog import (
+        KBDomain,
+        KBDomainMember,
+        KBColumnMeta,
+        KBTableMeta,
+    )
+
+    kb = (
+        db.query(KnowledgeBase)
+        .filter(KnowledgeBase.id == kb_id, KnowledgeBase.is_deleted == False)  # noqa: E712
+        .first()
+    )
+    if kb is None:
+        raise HTTPException(status_code=404, detail="KnowledgeBase not found")
+
+    domains = (
+        db.query(KBDomain)
+        .filter(KBDomain.kb_id == kb_id, KBDomain.is_deleted == False)  # noqa: E712
+        .order_by(KBDomain.member_count.desc(), KBDomain.name_en)
+        .all()
+    )
+    members = (
+        db.query(KBDomainMember)
+        .filter(KBDomainMember.kb_id == kb_id)
+        .all()
+    )
+    by_domain: dict[str, list[KBDomainMember]] = {}
+    for m in members:
+        by_domain.setdefault(m.domain_id, []).append(m)
+
+    # Column semantics for the member tables (one query, grouped in Python).
+    meta_ids = [m.table_meta_id for m in members]
+    col_index: dict[str, dict] = {}
+    if meta_ids:
+        cols = (
+            db.query(KBColumnMeta)
+            .filter(KBColumnMeta.table_meta_id.in_(meta_ids))
+            .all()
+        )
+        for c in cols:
+            entry = col_index.setdefault(c.table_meta_id, {"measures": [], "dimensions": [], "temporals": [], "enums": {}})
+            label = c.description_en or c.description_zh or c.column_name
+            if c.semantic_type == "measure":
+                entry["measures"].append({"column": c.column_name, "unit": c.unit, "description": label})
+            elif c.semantic_type == "temporal":
+                entry["temporals"].append(c.column_name)
+            elif c.semantic_type == "dimension":
+                entry["dimensions"].append(c.column_name)
+                if c.enum_values:
+                    entry["enums"][c.column_name] = c.enum_values
+
+    roles = {
+        t.id: t.table_role
+        for t in db.query(KBTableMeta)
+        .filter(KBTableMeta.id.in_(meta_ids or [""]))
+        .all()
+    }
+
+    return {
+        "kb_id": kb_id,
+        "kb_name": kb.name,
+        "catalog_status": kb.catalog_status,
+        "domain_count": len(domains),
+        "domains": [
+            {
+                "id": d.id,
+                "name_en": d.name_en,
+                "name_zh": d.name_zh,
+                "description_en": d.description_en,
+                "description_zh": d.description_zh,
+                "member_count": d.member_count,
+                "method": d.method,
+                "indexed_at": d.indexed_at.isoformat() if d.indexed_at else None,
+                "tables": [
+                    {
+                        "table_name": m.table_name,
+                        "table_meta_id": m.table_meta_id,
+                        "table_role": roles.get(m.table_meta_id),
+                        "measures": col_index.get(m.table_meta_id, {}).get("measures", []),
+                        "dimensions": col_index.get(m.table_meta_id, {}).get("dimensions", []),
+                        "date_columns": col_index.get(m.table_meta_id, {}).get("temporals", []),
+                        "value_dictionary": col_index.get(m.table_meta_id, {}).get("enums", {}),
+                    }
+                    for m in sorted(by_domain.get(d.id, []), key=lambda x: x.table_name)
+                ],
+            }
+            for d in domains
         ],
     }
 

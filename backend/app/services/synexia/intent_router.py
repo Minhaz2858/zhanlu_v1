@@ -181,6 +181,58 @@ def is_file_read_request(text: Optional[str]) -> bool:
     return False
 
 
+# ── NEGATION guard (2026-09-18) ────────────────────────────────────────────
+# A deliverable mention can FORBID, not just request. Live case: the user asked
+# "本周销售情况…直接输出，不要输出 文档" — the request names 文档 (document) and
+# forbids it. Every detector here is keyword-positive, so the prohibition read
+# as a request, the file-turn guard force-nudged create_artifact near the
+# iteration cap, and the turn ended with a docx the user had explicitly refused
+# (the model obeyed the platform and then apologised for it). Same family as the
+# READ guard above: a format noun inside a non-create speech act is not intent.
+#
+# The patterns bind the negation DIRECTLY to the deliverable noun —
+#   cue (optional creation verb) (optional filler) (optional measure word) noun
+# — so a negation of something else in the same sentence ("不要包括文档中未列出的列",
+# "don't include columns the document omits") does NOT suppress a genuine request.
+_DELIVERABLE_NOUNS = (
+    r"(?:文档|文件|表格文件|电子表格|幻灯片|演示文稿|公文|附件"
+    r"|docx?|document|word|excel|xlsx|xls|pdf|pptx?|powerpoint"
+    r"|slide\s*deck|spreadsheet|attachment|file)"
+)
+_CREATE_VERB = (
+    r"(?:输出|生成|创建|导出|做|写|提供|给|发|要|做成|转成|转为|转换为|另存为|保存为"
+    r"|create|generate|make|produce|export|write|build|send|give)"
+)
+_NEGATION_CUE = (
+    r"(?:不要|不用|不需要|无需|不必|别|甭|no\s+need|not\s+need"
+    r"|don'?t|do\s+not|doesn'?t|does\s+not|won'?t|will\s+not|without|avoid|never|no|not)"
+)
+_DELIVERABLE_NEGATED_RE = re.compile(
+    rf"(?:{_NEGATION_CUE})"
+    rf"\s*(?:再|直接)?\s*"
+    rf"(?:给我|带给|帮你|发我)?\s*"
+    rf"(?:{_CREATE_VERB})?\s*"
+    rf"(?:to|for|of)?\s*"
+    rf"(?:一份|一个|一张|a|an|the|any)?\s*"
+    rf"{_DELIVERABLE_NOUNS}",
+    re.IGNORECASE,
+)
+
+
+def is_deliverable_negated(text: Optional[str]) -> bool:
+    """True when the message explicitly REFUSES a file/document deliverable.
+
+    Only fires when the negation binds to a deliverable noun (see
+    ``_DELIVERABLE_NEGATED_RE``), so it never suppresses a request that merely
+    contains a negative word about something else. Used by every deterministic
+    intent layer as a hard constraint: an explicit user instruction not to
+    produce a file outranks any harness-level nudge to produce one.
+    """
+    if not text:
+        return False
+    return bool(_DELIVERABLE_NEGATED_RE.search(text))
+
+
 def detect_convert_target(text: Optional[str]) -> Optional[FileFormat]:
     """Return the TARGET format of a conversion request, or ``None``.
 
@@ -241,6 +293,13 @@ def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
     # reading the upload).  CREATE phrasing ("make me a DOCX report") has
     # no READ verb and falls through unchanged.
     if is_file_read_request(text):
+        return None
+    # ── NEGATION guard (2026-09-18) ─────────────────────────────────
+    # "不要输出文档" / "no document needed" REFUSES the deliverable. Without
+    # this, the positive keyword scan below reads the prohibition as a
+    # request and the file/dashboard/pptx turn guards force a file the user
+    # explicitly refused.
+    if is_deliverable_negated(text):
         return None
     # ── CONVERT: return the TARGET format ───────────────────────────
     # "convert this docx to pdf" produces a PDF — the pre-existing code

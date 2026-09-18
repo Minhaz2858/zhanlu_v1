@@ -28,6 +28,9 @@ class KBTableMeta(TimestampedBase):
     description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     coverage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Denormalised business-domain label written by domain_discovery; lets the
+    # TOC renderer and prompt builder group tables without a join.
+    domain_name: Mapped[str | None] = mapped_column(String(191), nullable=True, index=True)
     table_role: Mapped[str] = mapped_column(String(32), nullable=False, default="unknown")
     # entity_master | fact | dimension | bridge | unknown
     entity_master_hints: Mapped[dict | None] = mapped_column(JSON, nullable=True)
@@ -59,6 +62,14 @@ class KBColumnMeta(TimestampedBase):
     description_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # ── semantic typing (data-driven, dialect- and domain-agnostic) ──
+    # identifier | measure | dimension | temporal | flag | free_text | unknown
+    semantic_type: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")
+    # Distinct values seen for low-cardinality columns — a status/type/venue
+    # dictionary the model can filter on without guessing literals.
+    enum_values: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Unit read off the data by the description LLM (元, 吨, %, USD, ...).
+    unit: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     __table_args__ = (
         UniqueConstraint("table_meta_id", "column_name", name="uq_kb_column_meta"),
@@ -142,6 +153,63 @@ class ProjectEntityLink(TimestampedBase):
             "entity_id", "target_type", "target_id",
             name="uq_project_entity_link",
         ),
+    )
+
+
+class KBDomain(TimestampedBase):
+    """A discovered business domain inside one KnowledgeBase's catalog.
+
+    Produced by ``services/knowledge_graph/domain_discovery.py`` from structural
+    (Louvain over FK/join edges) and semantic (K-Means over table embeddings)
+    partitions merged by centroid cosine similarity. ``name_en`` / ``name_zh``
+    are LLM-proposed from the member tables' own names, descriptions and sample
+    values — nothing about a domain is hardcoded in the platform.
+    """
+
+    __tablename__ = "kb_domain"
+
+    kb_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("knowledge_bases.id"), nullable=False, index=True
+    )
+    name_en: Mapped[str] = mapped_column(String(191), nullable=False)
+    name_zh: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    slug: Mapped[str | None] = mapped_column(String(191), nullable=True)
+    description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+    description_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
+    member_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # llm | derived — whether the name came from the naming model or the
+    # deterministic token fallback.
+    method: Mapped[str] = mapped_column(String(16), nullable=False, default="derived")
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    indexed_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=False, default=lambda: datetime.utcnow()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("kb_id", "name_en", name="uq_kb_domain"),
+    )
+
+
+class KBDomainMember(TimestampedBase):
+    """Membership of one catalog table in a discovered business domain."""
+
+    __tablename__ = "kb_domain_member"
+
+    domain_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("kb_domain.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    kb_id: Mapped[str] = mapped_column(String(36), nullable=False, index=True)
+    table_meta_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("kb_table_meta.id", ondelete="CASCADE"),
+        nullable=False, index=True,
+    )
+    table_name: Mapped[str] = mapped_column(String(256), nullable=False, default="")
+    rank: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    weight: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("domain_id", "table_meta_id", name="uq_kb_domain_member"),
     )
 
 

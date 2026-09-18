@@ -118,6 +118,17 @@ def normalize_deliverable_intent(text: Optional[str]) -> Optional[str]:
             return None
     except Exception:
         pass
+    # ── NEGATION guard (2026-09-18) ───────────────────────────────────
+    # A deliverable mention can forbid, not just request: "直接输出，不要输出文档"
+    # names 文档 and refuses it. Treating the prohibition as intent made the turn
+    # guards force a docx the user had explicitly refused — the model produced
+    # it, then explained the conflict to the user. An explicit instruction wins.
+    try:
+        from app.services.synexia.intent_router import is_deliverable_negated
+        if is_deliverable_negated(text):
+            return None
+    except Exception:
+        pass
     low = re.sub(r"\s+", " ", text.lower()).strip()
     if not low:
         return None

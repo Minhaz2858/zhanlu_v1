@@ -379,6 +379,7 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
             "description_zh": meta.description_zh,
             "description_en": meta.description_en,
             "coverage_json": meta.coverage_json,
+            "domain_name": getattr(meta, "domain_name", None),
             "rrf_score": t.get("rrf_score", 0),
             "columns": [
                 {
@@ -388,6 +389,9 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
                     "is_primary_key": c.is_primary_key,
                     "description_zh": c.description_zh,
                     "description_en": c.description_en,
+                    "semantic_type": getattr(c, "semantic_type", None),
+                    "enum_values": getattr(c, "enum_values", None),
+                    "unit": getattr(c, "unit", None),
                 }
                 for c in cols
             ],
@@ -493,9 +497,24 @@ def _format_slice(
         for c in t.get("columns", []):
             nullable = "" if c.get("is_nullable") is False else " NULL"
             pk = " PRIMARY KEY" if c.get("is_primary_key") else ""
-            desc = f" -- {c.get('description_zh', '')}" if c.get("description_zh") else ""
+            annotations: list[str] = []
+            if c.get("description_zh"):
+                annotations.append(str(c["description_zh"]))
+            stype = c.get("semantic_type")
+            unit = c.get("unit")
+            if stype and stype not in ("unknown", "identifier"):
+                annotations.append(f"{stype}" + (f", unit={unit}" if unit else ""))
+            elif unit:
+                annotations.append(f"unit={unit}")
+            enums = c.get("enum_values")
+            if isinstance(enums, list) and enums:
+                shown = ", ".join(str(v) for v in enums[:12])
+                annotations.append(f"values: {shown[:80]}")
+            desc = f" -- {' | '.join(annotations)}" if annotations else ""
             chunk += f"  {c['name']} {c['data_type']}{nullable}{pk}{desc}\n"
         chunk += ");"
+        if t.get("domain_name"):
+            chunk += f"  -- domain: {t['domain_name']}"
         if t.get("description_zh"):
             chunk += f"  -- {t['description_zh']}"
         if t.get("row_count"):
@@ -593,6 +612,7 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
             "max_date": cov.get("max_date", ""),
             "min_date": cov.get("min_date", ""),
             "table_role": r.table_role,
+            "domain_name": getattr(r, "domain_name", None),
             "columns": [],  # filled below for freshness detection
         })
 
@@ -649,8 +669,11 @@ def format_toc_text(toc: list[dict], token_budget: int = 1200) -> str:
         max_d = t.get("max_date", "")
         min_d = t.get("min_date", "")
         role = t.get("table_role", "")
+        domain = t.get("domain_name", "")
 
         parts = [name]
+        if domain:
+            parts.append(f"domain={domain}")
         if rows_n is not None:
             parts.append(f"~{rows_n:,} rows")
         if desc:
@@ -723,6 +746,7 @@ def get_selected_tables_ddl(
             "description_zh": m.description_zh,
             "description_en": m.description_en,
             "coverage_json": m.coverage_json or {},
+            "domain_name": getattr(m, "domain_name", None),
             "rrf_score": 1.0,
             "columns": [
                 {
@@ -732,6 +756,9 @@ def get_selected_tables_ddl(
                     "is_primary_key": c.is_primary_key,
                     "description_zh": c.description_zh,
                     "description_en": c.description_en,
+                    "semantic_type": getattr(c, "semantic_type", None),
+                    "enum_values": getattr(c, "enum_values", None),
+                    "unit": getattr(c, "unit", None),
                 }
                 for c in cols
             ],

@@ -1244,6 +1244,29 @@ class Settings(BaseSettings):
     KG_BUSINESS_CONTEXT_ENABLED: bool = False
     KG_METRIC_BOOTSTRAP_ENABLED: bool = False
 
+    # ── Business domains (rich semantic layer) ─────────────────────────────
+    # KG_DOMAIN_DISCOVERY_ENABLED: at index time, group catalog tables into
+    #   named business domains — Louvain over the FK/join graph + K-Means over
+    #   the table embeddings, merged on centroid cosine similarity, named by
+    #   one batched LLM call over each cluster's own tables/descriptions/samples.
+    # KG_DOMAIN_SCOPING_ENABLED: at question time, restrict the table-selection
+    #   TOC to the domains that match the question (only for catalogs above
+    #   KG_DOMAIN_SCOPING_MIN_TABLES). Falls back to the full TOC whenever the
+    #   domain map is missing or the scope would be implausibly large.
+    # KG_DOMAIN_MERGE_THRESHOLD: centroid cosine at or above which a structural
+    #   and a semantic cluster are united (0.75 in the schema-discovery pattern).
+    # KG_DOMAIN_LOUVAIN_RESOLUTION / KG_DOMAIN_MAX_CLUSTERS: cluster granularity.
+    # KG_DOMAIN_MIN_TABLES: domains smaller than this fold into their nearest peer.
+    KG_DOMAIN_DISCOVERY_ENABLED: bool = False
+    KG_DOMAIN_SCOPING_ENABLED: bool = False
+    KG_DOMAIN_MERGE_THRESHOLD: float = 0.75
+    KG_DOMAIN_LOUVAIN_RESOLUTION: float = 1.0
+    KG_DOMAIN_MAX_CLUSTERS: int = 20
+    KG_DOMAIN_MIN_TABLES: int = 2
+    KG_DOMAIN_SCOPING_MIN_TABLES: int = 40
+    KG_DOMAIN_SCOPING_MIN_SCORE: float = 0.25
+    KG_DOMAIN_SCOPING_MAX_TABLES: int = 120
+
     # ── Data Agent latency optimizations ───────────────────────────────
     # DATA_AGENT_FASTPATH_ENABLED: when the call targets a single bound
     #   database source, ask_data_agent bypasses the iterative sub-agent

@@ -256,6 +256,46 @@ class NLAnswerService:
                 toc = build_full_toc(self._db, [kb_id])
                 if toc:
                     toc_text = format_toc_text(toc, token_budget=1200)
+                    # Domain scoping: when the catalog has a business-domain map
+                    # and is large enough to need one, narrow the TOC to the
+                    # domains the question points at BEFORE asking the model to
+                    # pick tables. Never destructive — an unusable scope simply
+                    # leaves the full TOC in place.
+                    if getattr(settings, "KG_DOMAIN_SCOPING_ENABLED", False):
+                        try:
+                            from app.services.knowledge_graph.domain_discovery import (
+                                scoped_tables_for_question,
+                            )
+
+                            scoped, matched = await asyncio.to_thread(
+                                scoped_tables_for_question,
+                                self._db,
+                                [kb_id],
+                                question,
+                            )
+                            if scoped:
+                                narrowed = [
+                                    t for t in toc if t["table_name"] in scoped
+                                ]
+                                if narrowed:
+                                    logger.info(
+                                        "NLAnswer: domain scoping %s → %d/%d tables",
+                                        [d.get("name_en") for d in matched],
+                                        len(narrowed),
+                                        len(toc),
+                                    )
+                                    toc = narrowed
+                                    domains_label = ", ".join(
+                                        f"{d.get('name_en')}"
+                                        + (f" / {d['name_zh']}" if d.get("name_zh") else "")
+                                        for d in matched
+                                    )
+                                    toc_text = (
+                                        f"Matched business domains: {domains_label}\n"
+                                        + toc_text
+                                    )
+                        except Exception as e:
+                            logger.warning("NLAnswer: domain scoping skipped: %s", e)
                     # Ask the LLM which tables are relevant
                     selected_names = await self._select_tables_from_toc(
                         question, toc_text, len(toc), endpoint=endpoint,
