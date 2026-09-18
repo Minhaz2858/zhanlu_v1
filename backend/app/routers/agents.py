@@ -6910,7 +6910,22 @@ async def add_message(
         # trips, then True so the guard grants exactly ONE tool-free answer
         # pass and only stops if the model repeats anyway.
         _loop_guard_synthesis_used = False
+        # Phase 1c: put this chat turn on the harness run spine. One AgentRun
+        # per turn + one AgentRunStep per model call / tool call, written by the
+        # existing CheckpointSink. Fail-open: recording never changes the turn,
+        # and with HARNESS_CHAT_RUNS_ENABLED=0 nothing is written at all.
+        from app.services.harness.turn_recorder import start_recorder, now_ms, preview_text
+        _turn_rec = start_recorder(
+            agent_name=agent_name,
+            conversation_id=conversation_id,
+            task=user_content,
+            user_id=str(getattr(user, "id", "") or "") or None,
+            org_id=getattr(conv, "org_id", None),
+            app_id=getattr(conv, "app_id", None) or agent_app_id,
+        )
         for iteration in range(MAX_TOOL_ITERATIONS):
+            # Phase 1c: start the clock for this iteration's model call.
+            _llm_started_ms = now_ms()
             # P0: consume one iteration from the conversation-level budget
             if not conv_budget.consume():
                 logger.info(
@@ -7179,6 +7194,17 @@ async def add_message(
 
             assistant_content = llm_response.get("content", "")
             raw_tool_calls = llm_response.get("tool_calls", [])
+            # Phase 1c: persist this model call — the request messages and the
+            # reply — as one AgentRunStep on the turn's run.
+            try:
+                _turn_rec.model_call(
+                    iteration=iteration,
+                    messages=llm_messages,
+                    response=llm_response,
+                    duration_ms=(now_ms() - _llm_started_ms) if _llm_started_ms else None,
+                )
+            except Exception:
+                pass
             # Provider reasoning for THIS iteration, echoed back below on the
             # assistant message that carries the tool calls — DeepSeek rejects
             # the follow-up request without it (see the contract note in
@@ -7598,6 +7624,23 @@ async def add_message(
                 tool_call_id = call["tool_call_id"]
                 display_name = TOOL_DISPLAY_NAMES.get(tool_name, tool_name)
 
+                # Phase 1c: persist this tool call on the turn's run.
+                try:
+                    _turn_rec.tool_call(
+                        iteration=iteration,
+                        tool_name=tool_name,
+                        tool_args=preview_text(call.get("args")),
+                        result_preview=preview_text(result),
+                        status=(
+                            "awaiting_approval"
+                            if isinstance(result, dict) and result.get("requires_approval")
+                            else ("error" if isinstance(result, dict) and result.get("success") is False
+                                  else "ok")
+                        ),
+                    )
+                except Exception:
+                    pass
+
                 if isinstance(result, dict) and result.get("requires_approval"):
                     # Pause: create an awaiting_approval tool call record and
                     # store resume state so the /resume endpoint can continue.
@@ -7911,6 +7954,19 @@ async def add_message(
                     "pending_tool": pending_tool,
                 }
                 conv.status = "awaiting_approval"
+                # Phase 1c: the turn is not finished, it is parked. Close the
+                # run as 'paused' and carry the run_id in the resume state so
+                # the resumed turn continues THIS run instead of starting a
+                # second one for the same turn.
+                try:
+                    _turn_rec.finish(
+                        status="paused",
+                        iterations=iteration + 1,
+                        tool_call_count=len(tool_calls_for_frontend),
+                    )
+                    conv.metadata_["_resume_state"]["run_id"] = _turn_rec.run_id
+                except Exception:
+                    pass
                 # Build a partial assistant message so the frontend can render
                 # the tool calls that are in progress.
                 assistant_msg = {
@@ -8229,8 +8285,19 @@ async def add_message(
     db.commit()
     db.refresh(conv)
 
+    # Phase 1c: the turn is complete — close its run on the harness spine.
+    # ``locals()`` because the run recorder is created inside the
+    # ``user_role == "user" and user_content`` block (line ~6539), which this
+    # tail is outside of.  When that block did not run there is no run either,
+    # so there is nothing to finish — an explicit lookup says that plainly
+    # instead of leaning on an UnboundLocalError being swallowed.
+    _turn_rec_final = locals().get("_turn_rec")
+    if _turn_rec_final is not None:
+        _turn_rec_final.finish(
+            status="completed",
+            tool_call_count=len(locals().get("tool_calls_for_frontend") or []),
+        )
 
-    # Fire-and-forget: extract memories from this conversation.
     # Only triggers when there are enough messages (≥4, checked internally).
     # Uses an independent DB session so it doesn't block or conflict.
     if agent_app_id and len(messages) >= 4:

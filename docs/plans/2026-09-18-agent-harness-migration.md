@@ -109,9 +109,23 @@ Authorization is not judgment. Deleting these is a security regression:
   **not** absent — the 3 modes, `ApprovalService`, `approval_requests` and the
   pause/resume path already existed; what was missing was the destructiveness
   concept and the call-scoped binding.
-- **Phase 1c/1d — TODO.** Note 1c is smaller than first scoped: compaction is
-  already built and wired, and the harness run spine exists — the work is joining
-  the chat path to it, not writing compaction.
+- **Phase 1c — DONE.** `app/services/harness/turn_recorder.py` (new): one
+  `AgentRun` per chat turn (`mode="chat"`, `caller_context.conversation_id` so
+  `GET /agent-runs/conversations/{id}` returns chat turns), one `AgentRunStep`
+  per model call / tool call via the existing `CheckpointSink`. Fail-open and
+  flag-gated (`HARNESS_CHAT_RUNS_ENABLED`) like Phase 0. An approval pause closes
+  the run as `paused` and stores the `run_id` in `_resume_state`; the resumed
+  turn is meant to continue that same run (the resume-path wiring itself is NOT
+  done yet — the run stays `paused` after a resume, which is consistent, just
+  not continued). `start_recorder()` / `now_ms()` / `preview_text()` are called
+  from `agents.py:add_message` at 4 points: run creation, per model call, per
+  tool call, and completion.
+  **Schema drift found and repaired:** the live `agent_run_steps.id` is an
+  integer PK (`nextval('agent_run_steps_id_seq')`) while the model declares
+  `VARCHAR(36)`. Every `AgentRunStep` insert therefore failed with
+  `InvalidTextRepresentation` — the ENTIRE run spine's per-call persistence was
+  dead on this database, not just the chat path. The table had 0 rows, so it was
+  dropped and recreated from the model metadata (no data lost).
 - **Phase 2/3/4 — TODO.**
 
 ### Phase 0 — instrument (this commit)
