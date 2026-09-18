@@ -632,6 +632,49 @@ async def _profile_data(
 # execute_query
 # ---------------------------------------------------------------------------
 
+def _post_execution_warnings(args: dict, result: dict, sql: str) -> list[str]:
+    """Deterministic warnings on a raw query result.
+
+    The same class of check the sealed NL path applies before it narrates: a
+    query that RAN is not a query that ANSWERED. Raw SQL used to return rows
+    with no faithfulness signal at all, so an unfiltered period or a truncated
+    read looked exactly like a correct answer. ``question`` is optional on the
+    tool; when the caller states its intent the full question↔SQL contract runs.
+    """
+    warnings: list[str] = []
+    rows = result.get("rows") or []
+    if not rows:
+        warnings.append(
+            "no rows returned — check that the filters are not too narrow before "
+            "reporting a zero"
+        )
+    if result.get("truncated"):
+        warnings.append(
+            f"result truncated at {len(rows)} rows — this is a prefix of the data, "
+            "not the full set"
+        )
+    try:
+        from app.services.db.answer_contract import check_answer_contract
+        from app.services.db.nl_answer_service import _is_degenerate_result
+
+        if _is_degenerate_result(rows):
+            warnings.append(
+                "rows look degenerate (metadata-only or all-null values) — not a "
+                "business answer"
+            )
+        intent = str(args.get("question") or "").strip()
+        if intent:
+            report = check_answer_contract(
+                intent, sql, rows, truncated=bool(result.get("truncated")),
+            )
+            if not report.ok:
+                warnings.append(report.feedback())
+                result["contract_violations"] = report.violations
+    except Exception as exc:  # never break a tool result over a guard
+        logger.debug("execute_query: post-execution guard skipped: %s", exc)
+    return warnings
+
+
 async def _execute_query(
     args: dict,
     db: Session,
@@ -743,6 +786,11 @@ async def _execute_query(
         hints = _build_validation_hints(db, kb_id, result)
         if hints:
             result["validation_hints"] = hints
+        # A query that ran is not a query that answered: attach the same
+        # deterministic warnings the sealed NL path applies before narrating.
+        warnings = _post_execution_warnings(args, result, sql)
+        if warnings:
+            result["warnings"] = warnings
         return {"success": True, **result}
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing", "sql": sql}
@@ -1163,10 +1211,16 @@ EXECUTE_QUERY_SCHEMA = {
     "function": {
         "name": "execute_query",
         "description": (
-            "Run a SQL statement against a bound data source and return the rows. "
-            "The query is read-only from this tool's perspective; the LLM is "
-            "trusted to write appropriate SQL. Use `describe_schema` first to "
-            "discover table/column names."
+            "Run a read-only SQL statement against a bound data source and return "
+            "the rows. The statement is checked against the data-access policy and "
+            "structured-validated against the catalog before it runs, and the result "
+            "carries deterministic warnings (empty read, truncation, degenerate rows, "
+            "and — when you pass `question` — whether the SQL contradicts the "
+            "question). Use `describe_schema` first to discover table/column names. "
+            "For a business question, prefer answer_from_database: it owns the "
+            "table-selection and self-repair pipeline. Use this tool for verified "
+            "follow-ups (drilling into rows you already asked about), not for "
+            "producing the final answer to an unseen question."
         ),
         "parameters": {
             "type": "object",
@@ -1178,6 +1232,15 @@ EXECUTE_QUERY_SCHEMA = {
                 "sql": {
                     "type": "string",
                     "description": "The SQL statement to execute (a single statement).",
+                },
+                "question": {
+                    "type": "string",
+                    "description": (
+                        "Optional but recommended: the business question this SQL is "
+                        "meant to answer. Enables the question↔SQL contract check, so "
+                        "an unfiltered period or a missing GROUP BY comes back as a "
+                        "warning instead of an authoritative-looking answer."
+                    ),
                 },
                 "max_rows": {
                     "type": "integer",

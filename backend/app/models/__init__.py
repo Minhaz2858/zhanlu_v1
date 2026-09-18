@@ -56,6 +56,7 @@ from app.models.artifact_build_manifest import ArtifactBuildManifest
 from app.models.datasource import Datasource
 from app.models.metric_definition import MetricDefinition
 from app.models.semantic_mapping import SemanticMapping
+from app.models.query_plan_memory import QueryPlanMemory
 from app.models.context_manifest import ContextManifest
 from app.models.experience_entry import ExperienceEntry
 from app.models.learning_proposal import LearningProposal
@@ -161,6 +162,7 @@ __all__ = [
     "Datasource",
     "MetricDefinition",
     "SemanticMapping",
+    "QueryPlanMemory",
     "ContextManifest",
     "ExperienceEntry",
     "LearningProposal",

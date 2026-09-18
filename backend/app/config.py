@@ -332,6 +332,12 @@ class Settings(BaseSettings):
     # column/table, syntax). The driver error + the real column list go back to
     # the model, which re-generates once per attempt. 0 disables the loop.
     NL2SQL_DB_ERROR_REPAIR_MAX: int = 2
+    # NL2SQL_PLAN_MEMORY_ENABLED: reuse the plan (tables + SQL shape) that
+    # verified-answered this same question before, so one business question
+    # cannot answer with a different column on each run. Rows are always read
+    # live; relative periods are re-resolved against today. Store:
+    # app/models/query_plan_memory.py, logic: app/services/db/plan_memory.py.
+    NL2SQL_PLAN_MEMORY_ENABLED: bool = True
 
     # P3: Prompt caching -- apply explicit cache_control markers for providers
     # that support them (Anthropic, OpenRouter). DeepSeek caches automatically.
@@ -1187,6 +1193,20 @@ class Settings(BaseSettings):
     # JOIN_EDGE_SAMPLE_LIMIT: max distinct values sampled per joinable column
     #   for value-overlap inference (kept low to bound index-time cost).
     JOIN_EDGE_SAMPLE_LIMIT: int = 200
+    # ── Catalog description completeness (index-time) ───────────────────
+    # The batched description call (8 tables x 60-100 ERP columns) routinely
+    # returns a PARTIAL column list, and blank was silently persisted as the
+    # column's description. Blank descriptions are what let the model pick
+    # between look-alike columns on name alone — e.g. FCLOSESTATUS vs
+    # FDOCUMENTSTATUS on erp_t_crm_contract, which two runs answered with two
+    # different columns. Backfill re-asks per table for the columns that came
+    # back empty, so the catalog ends up carrying the business meaning.
+    # CATALOG_DESC_BACKFILL_ENABLED: run the repair pass (one extra LLM call
+    #   per incomplete table, bounded below).
+    CATALOG_DESC_BACKFILL_ENABLED: bool = True
+    # CATALOG_DESC_BACKFILL_MAX_TABLES: cap on tables re-asked per index run
+    #   (0 disables). Index time only; nothing runs per user turn.
+    CATALOG_DESC_BACKFILL_MAX_TABLES: int = 60
     # ── Schema Graph (runtime presentation + join planning) ─────────────
     # SCHEMA_GRAPH_ENABLED: build a structural SchemaGraph over the catalog-
     #   selected candidate tables and render it through describe_schema /

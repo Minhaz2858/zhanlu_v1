@@ -423,10 +423,35 @@ class NLAnswerService:
             schema_text = _format_schema_for_prompt(schema_info)
 
         # 2. Text → SQL
+        # A verified plan for this same question on this same KB is injected as
+        # guidance: the tables, columns and grouping that answered it last time
+        # stay fixed, while any relative period is re-resolved against today.
+        # This is what stops one business question from answering with a
+        # different column (and a different number) on each run — see
+        # services/db/plan_memory.py.
+        _plan_guidance = ""
+        if getattr(settings, "NL2SQL_PLAN_MEMORY_ENABLED", True):
+            try:
+                from app.services.db.plan_memory import (
+                    format_plan_guidance,
+                    load_plan,
+                    mark_plan_used,
+                )
+
+                _plan = load_plan(self._db, kb_id, question)
+                if _plan:
+                    _plan_guidance = format_plan_guidance(_plan)
+                    mark_plan_used(self._db, _plan)
+                    logger.info(
+                        "NLAnswer: reusing verified plan for KB %s (tables=%s, hits=%s)",
+                        kb_id, _plan.get("tables"), _plan.get("hits"),
+                    )
+            except Exception as e:
+                logger.debug("NLAnswer: plan memory lookup skipped: %s", e)
         try:
             sql = await self._text_to_sql(
                 question, schema_info, schema_text=schema_text, project_id=project_id,
-                endpoint=endpoint,
+                endpoint=endpoint, extra_guidance=_plan_guidance or None,
             )
         except Exception as e:
             logger.warning("NLAnswer: text→SQL failed: %s", e)
@@ -670,6 +695,97 @@ class NLAnswerService:
                     "NLAnswer: zero-row correction failed (non-fatal): %s", e,
                 )
 
+        # ── 3c. Answer contract (deterministic, no LLM) ──────────────────
+        # Every guard above reacts to a FAILURE: 0 rows, degenerate rows, a
+        # driver error. Nothing checked the case that actually erodes trust —
+        # a query that succeeds and returns rows from the wrong period, or one
+        # scalar where the question asked for a trend, narrated as if it
+        # answered. See app/services/db/answer_contract.py.
+        from app.services.db.answer_contract import (
+            check_answer_contract,
+            dimension_candidates,
+        )
+
+        _contract = check_answer_contract(
+            question, sql, exec_rows, truncated=bool(exec_result.get("truncated")),
+        )
+        _dim_candidates = dimension_candidates(schema_info)
+        if not _contract.ok:
+            logger.info(
+                "NLAnswer: answer contract violated %s — asking the model to fix "
+                "the SQL for KB %s", _contract.violations, kb_id,
+            )
+            try:
+                # The fix instruction NAMES the dimensions to group by, and the
+                # verified plan (if any) is repeated so the retry cannot drift
+                # back to a different column.
+                _fix_guidance = f"[Constraint] {_contract.feedback(_dim_candidates)}"
+                if _plan_guidance:
+                    _fix_guidance += f"\n\n{_plan_guidance}"
+                sql_c = await self._text_to_sql(
+                    question, schema_info, schema_text=schema_text,
+                    project_id=project_id, endpoint=endpoint,
+                    extra_guidance=_fix_guidance,
+                )
+                if sql_c and sql_c.strip() and sql_c.strip() != sql.strip():
+                    res_c = await asyncio.to_thread(query_svc.execute, kb_id, sql_c)
+                    rows_c = (res_c or {}).get("rows") or []
+                    if rows_c:
+                        _contract2 = check_answer_contract(
+                            question, sql_c, rows_c,
+                            truncated=bool((res_c or {}).get("truncated")),
+                        )
+                        # Only adopt the rewrite when it is strictly closer to
+                        # the question — never trade a real answer for a
+                        # differently-wrong one.
+                        if len(_contract2.violations) < len(_contract.violations):
+                            logger.info(
+                                "NLAnswer: contract retry improved (%s → %s); using new SQL",
+                                _contract.violations, _contract2.violations,
+                            )
+                            exec_result, exec_rows, sql, _contract = res_c, rows_c, sql_c, _contract2
+                        else:
+                            logger.info(
+                                "NLAnswer: contract retry did not improve (%s); "
+                                "keeping the original rows", _contract2.violations,
+                            )
+            except Exception as e:
+                logger.warning(
+                    "NLAnswer: answer-contract retry failed (non-fatal): %s", e,
+                )
+
+        # ── 3d. Remember the plan that worked ────────────────────────────
+        # Only a VERIFIED answer becomes a plan. Learning from an unchecked one
+        # would make the platform consistently wrong instead of occasionally
+        # wrong. What is stored is the tables + SQL shape, never the rows.
+        if (
+            getattr(settings, "NL2SQL_PLAN_MEMORY_ENABLED", True)
+            and _contract.ok
+            and exec_rows
+            and not _degenerate
+        ):
+            try:
+                import re as _re
+
+                from app.services.db.plan_memory import save_plan
+
+                _gm = _re.search(
+                    r"\bgroup\s+by\s+(.+?)(?:\s+(?:having|order\s+by|limit)\b|$)",
+                    sql or "", _re.I | _re.S,
+                )
+                _dims_used = [d.strip() for d in _gm.group(1).split(",")] if _gm else []
+                _tables_used = _extract_table_names(sql) or []
+                if save_plan(
+                    self._db, kb_id, question,
+                    tables=_tables_used, sql=sql, dimensions=_dims_used,
+                ):
+                    logger.info(
+                        "NLAnswer: saved verified plan for KB %s (tables=%s, dims=%s)",
+                        kb_id, _tables_used, _dims_used,
+                    )
+            except Exception as e:
+                logger.debug("NLAnswer: plan memory save skipped: %s", e)
+
         # 4. Narrate
         # PERF 2026-08-24: skip_narrate lets deliverable-turn callers bypass
         # this LLM call — the main agent's post-loop synthesize_report writes
@@ -706,6 +822,10 @@ class NLAnswerService:
             # Present when the first query died and the model rebuilt it from
             # the driver's error — callers surface it as "recovered" evidence.
             "repaired_from_error": _repaired_from,
+            # Present only when the SQL that ran contradicted the question
+            # (wrong period / single scalar for a trend request). Callers can
+            # qualify the answer instead of presenting it as authoritative.
+            **({"contract_violations": _contract.violations} if not _contract.ok else {}),
         }
 
     # ------------------------------------------------------------------
@@ -719,6 +839,7 @@ class NLAnswerService:
         schema_text: str | None = None,
         project_id: str | None = None,
         endpoint: LLMEndpoint | None = None,
+        extra_guidance: str | None = None,
     ) -> str:
         """Ask the LLM to produce a single SQL statement.
 
@@ -728,6 +849,10 @@ class NLAnswerService:
         ``project_id`` (optional) enables Business Semantic Layer injection:
         matched approved ``project_metric`` definitions + coverage annotations
         are appended to the prompt (progressive disclosure, token-capped).
+
+        ``extra_guidance`` (optional) is turn-specific steering appended just
+        before the question — the answer contract's fix instruction, and the
+        verified plan for a repeat question (see services/db/plan_memory.py).
         """
         if schema_text is None:
             schema_text = _format_schema_for_prompt(schema_info)
@@ -752,6 +877,8 @@ class NLAnswerService:
         )
         if business_context:
             user_content += f"{business_context}\n\n"
+        if extra_guidance:
+            user_content += f"{extra_guidance}\n\n"
         user_content += (
             f"Question: {question}\n\n"
             "Return only the SQL — no explanation, no markdown."

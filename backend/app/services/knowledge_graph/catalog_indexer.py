@@ -847,6 +847,194 @@ async def _generate_descriptions(tables: list[dict]) -> None:
     # Fire all batches under the semaphore — gather runs them concurrently.
     await asyncio.gather(*[_run_one(i, b) for i, b in enumerate(batches)])
 
+    # A batch that fails, or a model that answers with only part of a wide
+    # table's columns, leaves those columns with a blank description — which is
+    # indistinguishable from "no meaning recorded" downstream. Repair it here.
+    await _backfill_missing_descriptions(tables)
+
+
+def _is_blank_description(value: Any) -> bool:
+    return not str(value or "").strip()
+
+
+# ── `column(业务含义)` labels that leaked into the column NAME ───────────────
+# 210 columns of the live catalog are stored as `tax_price(含税单价)` instead of
+# `tax_price`. Two consequences, both user visible: the DDL handed to the model
+# is unqueryable, and the description pass can never match the column it just
+# described (the model answers `tax_price`, the row says `tax_price(含税单价)`),
+# so those columns stayed blank across every index run. The parenthetical is a
+# comment; the name is the identifier.
+_LABEL_PATTERN = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\(([^()]{1,40})\)$")
+# A view column can legitimately BE a call expression (`count(*)`, `sum(amount)`).
+# Treating that as "name(label)" would corrupt a real column, so the base of a
+# known SQL function is never split.
+_SQL_FUNCTION_BASES = frozenset({
+    "count", "sum", "avg", "min", "max", "ifnull", "coalesce", "concat",
+    "cast", "convert", "round", "abs", "length", "char_length", "substring",
+    "substr", "trim", "upper", "lower", "date", "year", "month", "day",
+    "now", "left", "right", "replace", "group_concat", "json_extract",
+})
+_LABEL_OPERATOR_CHARS = frozenset("*'\"`,;=+/<>%")
+
+
+def _split_column_label(raw_name: Any) -> tuple[str, str]:
+    """``"tax_price(含税单价)"`` → ``("tax_price", "含税单价")``.
+
+    Returns the input unchanged (and an empty label) when the shape is not a
+    ``name(label)`` pair or the base looks like a SQL call expression.
+    """
+    raw = str(raw_name or "")
+    if "(" not in raw:
+        return raw, ""
+    m = _LABEL_PATTERN.match(raw.strip())
+    if not m:
+        return raw, ""
+    name, label = m.group(1), m.group(2).strip()
+    if not label or name.lower() in _SQL_FUNCTION_BASES:
+        return raw, ""
+    if any(ch in _LABEL_OPERATOR_CHARS for ch in label):
+        return raw, ""
+    return name, label
+
+
+def _label_description(label: str) -> tuple[str, str]:
+    """Route an extracted label to the description column that matches its script."""
+    if any("\u4e00" <= ch <= "\u9fff" for ch in label):
+        return label, ""
+    return "", label
+
+
+def _missing_description_targets(tables: list[dict]) -> list[tuple[dict, list[dict], bool]]:
+    """Tables whose description pass came back incomplete.
+
+    Returns ``(table, columns_without_description, table_description_missing)``.
+    A blank column description is NOT the same as an unknown meaning: the
+    prompt instructs the model to write ``未知`` when it cannot tell. Blank means
+    the model's JSON omitted the column — the normal outcome for an 8-table
+    batch of 60-100 column ERP tables, and exactly what leaves look-alike
+    columns (``FCLOSESTATUS`` / ``FDOCUMENTSTATUS``) to be picked on name alone.
+    """
+    hits: list[tuple[dict, list[dict], bool]] = []
+    for t in tables or []:
+        cols = [
+            c for c in (t.get("columns") or [])
+            if _is_blank_description(c.get("description_en"))
+            and _is_blank_description(c.get("description_zh"))
+        ]
+        table_blank = (
+            _is_blank_description(t.get("description_en"))
+            and _is_blank_description(t.get("description_zh"))
+        )
+        if cols or table_blank:
+            hits.append((t, cols, table_blank))
+    return hits
+
+
+async def _backfill_missing_descriptions(tables: list[dict]) -> None:
+    """Second, narrower description pass for whatever the batch pass missed.
+
+    One LLM call per incomplete table, asking only for the columns still
+    blank — a wide table's prompt is what caused the omission, so re-asking it
+    in a batch of eight would reproduce the same truncation. Bounded by
+    ``CATALOG_DESC_BACKFILL_MAX_TABLES``; failures are non-fatal (the column
+    simply stays blank, exactly as before).
+    """
+    if not getattr(settings, "CATALOG_DESC_BACKFILL_ENABLED", True):
+        return
+    budget = int(getattr(settings, "CATALOG_DESC_BACKFILL_MAX_TABLES", 60) or 0)
+    if budget <= 0:
+        return
+
+    targets = _missing_description_targets(tables)
+    if not targets:
+        return
+
+    import asyncio
+
+    from app.services.llm_service import call_llm
+
+    selected = targets[:budget]
+    blank_cols = sum(len(cols) for _, cols, _ in targets)
+    logger.info(
+        "catalog_indexer: %d table(s) returned blank descriptions (%d blank columns); "
+        "backfilling %d table(s), one call each",
+        len(targets), blank_cols, len(selected),
+    )
+    if len(targets) > len(selected):
+        logger.info(
+            "catalog_indexer: backfill cap reached (%d) — %d table(s) left blank this run",
+            budget, len(targets) - len(selected),
+        )
+
+    sem = asyncio.Semaphore(LLM_MAX_CONCURRENT)
+
+    async def _run_one(table: dict, cols: list[dict], table_blank: bool) -> None:
+        async with sem:
+            proxy = dict(table)
+            proxy["columns"] = cols
+            if cols:
+                user_prompt = _build_description_prompt([proxy])
+                prompt = user_prompt[0] if user_prompt else f"表名: {table.get('table_name')}"
+                prompt += (
+                    f"\n\n(该表未完成说明的字段如上，共 {len(cols)} 个，请补齐"
+                    "；已有说明的字段不必重复输出)"
+                )
+            else:
+                # Table-description-only repair. Passing an empty column list
+                # made the model answer with nothing, so give it the column
+                # names as context and ask for the table description alone —
+                # the column descriptions are already there and must not be
+                # overwritten.
+                names = ", ".join(
+                    str(c.get("column_name")) for c in (table.get("columns") or [])[:40]
+                )
+                prompt = (
+                    f"表名: {table.get('table_name')}\n"
+                    f"  类型: {table.get('table_type', 'TABLE')}\n"
+                    f"  字段: {names or '(无字段信息)'}\n\n"
+                    "(该表所有字段均已有说明，只缺表级说明。"
+                    "请只输出这张表的中英文业务含义，columns 返回空数组。)"
+                )
+            try:
+                result = await call_llm(
+                    messages=[
+                        {"role": "system", "content": _TABLE_DESCRIPTION_SYSTEM},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=LLM_TEMP,
+                    response_json_schema=_JSON_SCHEMA,
+                    task_type="catalog_description_backfill",
+                )
+                if cols:
+                    # Column dicts inside the proxy are the SAME objects as in
+                    # the original table, so their descriptions land where they
+                    # belong; the table-level fields need copying back.
+                    _apply_descriptions([proxy], result)
+                if table_blank:
+                    described = _table_description_from_result(result, table.get("table_name"))
+                    table["description_zh"] = (
+                        proxy.get("description_zh") if cols else described[0]
+                    ) or table.get("description_zh") or ""
+                    table["description_en"] = (
+                        proxy.get("description_en") if cols else described[1]
+                    ) or table.get("description_en") or ""
+            except Exception:
+                logger.exception(
+                    "catalog_indexer: description backfill failed for table %s "
+                    "(columns stay blank)",
+                    table.get("table_name"),
+                )
+
+    await asyncio.gather(*[_run_one(*t) for t in selected])
+
+    attempted = [t for t, _, _ in selected]
+    still_blank = sum(len(cols) for _, cols, _ in _missing_description_targets(attempted))
+    if still_blank:
+        logger.info(
+            "catalog_indexer: %d column description(s) still blank after backfill",
+            still_blank,
+        )
+
 
 def _build_description_prompt(batch: list[dict]) -> list[str]:
     parts: list[str] = []
@@ -867,6 +1055,26 @@ def _build_description_prompt(batch: list[dict]) -> list[str]:
     return parts
 
 
+def _table_description_from_result(llm_result: dict, table_name: str | None) -> tuple[str, str]:
+    """Pull just the table-level (zh, en) description out of an LLM reply."""
+    data = llm_result.get("data") if isinstance(llm_result, dict) else {}
+    if data is None:
+        data = {}
+    described = data if isinstance(data, list) else data.get("tables", [])
+    if not isinstance(described, list):
+        return "", ""
+    for d in described:
+        if not isinstance(d, dict):
+            continue
+        if table_name and d.get("table_name") and d.get("table_name") != table_name:
+            continue
+        return (
+            str(d.get("description_zh") or "").strip(),
+            str(d.get("description_en") or "").strip(),
+        )
+    return "", ""
+
+
 def _apply_descriptions(batch: list[dict], llm_result: dict) -> None:
     data = llm_result.get("data") if isinstance(llm_result, dict) else {}
     if data is None:
@@ -883,8 +1091,18 @@ def _apply_descriptions(batch: list[dict], llm_result: dict) -> None:
             t["description_zh"] = d.get("description_zh", "")
             t["description_en"] = d.get("description_en", "")
             col_map = {c.get("column_name", ""): c for c in d.get("columns", [])}
+            # A catalog row can still hold `tax_price(含税单价)` while the model
+            # answers `tax_price`; match on the clean identifier too, or the
+            # description is silently dropped.
+            base_map = {}
+            for key, val in col_map.items():
+                base, _ = _split_column_label(key)
+                base_map.setdefault(base, val)
             for c in t["columns"]:
                 cd = col_map.get(c["column_name"], {})
+                if not cd:
+                    base, _ = _split_column_label(c["column_name"])
+                    cd = base_map.get(base, {})
                 c["description_zh"] = cd.get("description_zh", "")
                 c["description_en"] = cd.get("description_en", "")
                 c["unit"] = (cd.get("unit") or "").strip() or None
@@ -940,11 +1158,22 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
 
         # Upsert columns
         for c in t.get("columns", []):
+            # A `column(业务含义)` label must never reach the catalog as the
+            # column NAME — see _split_column_label. Applied here because this
+            # is the only place that writes kb_column_meta.column_name.
+            col_name, label = _split_column_label(c["column_name"])
+            desc_zh = c.get("description_zh", "")
+            desc_en = c.get("description_en", "")
+            if label and not (_is_blank_description(desc_zh) and _is_blank_description(desc_en)):
+                label = ""            # a real description already exists — keep it
+            elif label:
+                label_zh, label_en = _label_description(label)
+                desc_zh, desc_en = label_zh or desc_zh, label_en or desc_en
             existing_col = (
                 db.query(KBColumnMeta)
                 .filter(
                     KBColumnMeta.table_meta_id == meta.id,
-                    KBColumnMeta.column_name == c["column_name"],
+                    KBColumnMeta.column_name == col_name,
                 )
                 .first()
             )
@@ -955,20 +1184,20 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                 col.is_nullable = c.get("is_nullable", True)
                 col.is_primary_key = c.get("is_primary_key", False)
                 col.default_value = c.get("default_value")
-                col.description_zh = c.get("description_zh", "")
-                col.description_en = c.get("description_en", "")
+                col.description_zh = desc_zh
+                col.description_en = desc_en
             else:
                 col = KBColumnMeta(
                     id=str(_uuid.uuid4()),
                     table_meta_id=meta.id,
-                    column_name=c["column_name"],
+                    column_name=col_name,
                     ordinal=c.get("ordinal", 0),
                     data_type=c.get("data_type", ""),
                     is_nullable=c.get("is_nullable", True),
                     is_primary_key=c.get("is_primary_key", False),
                     default_value=c.get("default_value"),
-                    description_zh=c.get("description_zh", ""),
-                    description_en=c.get("description_en", ""),
+                    description_zh=desc_zh,
+                    description_en=desc_en,
                 )
                 db.add(col)
             # Semantic typing is recomputed on every index (it reads the fresh
