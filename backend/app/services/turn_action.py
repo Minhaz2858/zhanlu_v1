@@ -28,6 +28,7 @@ from typing import Optional
 
 # Reuse existing detectors rather than reinventing them.
 from app.services.agent_prompts import GROUNDING_REQUIRED_BLOCK, TIME_SENSITIVE_PATTERN
+from app.services.harness.rule_events import observe_rule
 from app.services.dashboard_turn_guard import fuzzy_dashboard_request
 from app.services.synexia.intent_router import FileFormat, detect_file_intent
 
@@ -205,6 +206,7 @@ def _web_browse_refusal_pattern():
     return WEB_BROWSE_REFUSAL_PATTERN
 
 
+@observe_rule("turn_action.is_online_research_request")
 def is_online_research_request(user_message):
     """True when the user's message is an online research request.
 

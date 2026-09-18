@@ -30,6 +30,7 @@ from app.models.password_reset_token import PasswordResetToken
 from app.models.refresh_token import RefreshToken
 from app.models.revoked_token import RevokedToken
 from app.models.agent_memory import AgentMemory
+from app.models.harness_rule_event import HarnessRuleEvent
 from app.models.agent_todo import AgentTodo
 from app.models.artifact import (
     Artifact, ArtifactVersion, ArtifactBlob, MessageArtifact, ArtifactSourcePart,

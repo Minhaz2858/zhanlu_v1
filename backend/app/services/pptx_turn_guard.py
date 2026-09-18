@@ -25,6 +25,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.config import settings
+from app.services.harness.rule_events import observe_rule
 from app.services.synexia.intent_router import detect_file_intent
 
 # Tool names that can produce a pptx deliverable.  ``create_artifact`` is
@@ -45,6 +46,7 @@ PPTX_FORCE_WINDOW = 4
 _PPTX_NUDGE_CAP = 2
 
 
+@observe_rule("pptx_turn_guard.is_pptx_request")
 def is_pptx_request(user_content: str | None) -> bool:
     """True when the user asked for a PPT/PPTX deliverable.
 
@@ -81,6 +83,7 @@ def pptx_artifact_created(tool_calls_for_frontend: list[dict] | None) -> bool:
     return False
 
 
+@observe_rule("pptx_turn_guard.should_force_create_pptx", forced="pptx_deck")
 def should_force_create_pptx(
     user_content: str | None,
     tool_calls_for_frontend: list[dict] | None,

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+
+from app.services.harness.rule_events import observe_rule
 from typing import Callable, List, Optional, Sequence, Tuple
 
 
@@ -58,6 +60,7 @@ _REPORT_REQUEST_RE = re.compile(
 )
 
 
+@observe_rule("goal_contract.is_report_request")
 def is_report_request(user_message: str | None) -> bool:
     """True when the user is asking for a written report (not just data).
 

@@ -44,6 +44,8 @@ from __future__ import annotations
 import re
 from typing import Literal, Optional
 
+from app.services.harness.rule_events import observe_rule
+
 # Recognized file formats.  Order matters: the regex tries them in this
 # order, so we put the more specific multi-letter tokens first ("docx"
 # before "doc", "pptx" before "ppt").  This avoids "docx" matching as
@@ -156,6 +158,7 @@ _TARGET_TOKEN_MAP: dict[str, FileFormat] = {
 }
 
 
+@observe_rule("intent_router.is_file_read_request", forced="suppress_creation")
 def is_file_read_request(text: Optional[str]) -> bool:
     """True when the message asks to READ / ANALYZE an existing file.
 
@@ -263,6 +266,7 @@ def detect_convert_target(text: Optional[str]) -> Optional[FileFormat]:
     return None
 
 
+@observe_rule("intent_router.detect_file_intent")
 def detect_file_intent(text: Optional[str]) -> Optional[FileFormat]:
     """Return the file format the user asked for, or ``None``.
 
@@ -443,6 +447,7 @@ _DECK_EDIT_COMPILED: dict[DeckEditTool, re.Pattern[str]] = {
 }
 
 
+@observe_rule("intent_router.detect_deck_edit_intent", forced="deck_edit")
 def detect_deck_edit_intent(text: Optional[str]) -> Optional[str]:
     """Return the deck-edit tool name for a message, or ``None``.
 

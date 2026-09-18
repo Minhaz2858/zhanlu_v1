@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from app.services.harness.rule_events import observe_rule
+
 # English dashboard keywords — \b works fine here.
 _LIVE_DASHBOARD_EN_RE = re.compile(
     r"\b(?:dashboard|dash-board|kpi\s+view|metrics\s+board)\b",
@@ -139,6 +141,7 @@ def fuzzy_dashboard_request(user_content: str | None) -> bool:
     return False
 
 
+@observe_rule("dashboard_turn_guard.is_live_dashboard_request")
 def is_live_dashboard_request(user_content: str | None) -> bool:
     """True for ordinary live-dashboard requests.
 
@@ -195,6 +198,7 @@ def is_dashboard_build_tool(name: str) -> bool:
     return name in DASHBOARD_BUILD_TOOLS
 
 
+@observe_rule("dashboard_turn_guard.should_force_create_dashboard", forced="create_fullstack_dashboard")
 def should_force_create_dashboard(
     user_content: str | None,
     tool_calls_for_frontend: list[dict],

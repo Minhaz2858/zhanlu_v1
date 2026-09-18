@@ -45,6 +45,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 from app.config import settings
+from app.services.harness.rule_events import observe_rule
 from app.services.pptx_turn_guard import (
     build_pptx_disclosure,
     pptx_artifact_created,
@@ -135,6 +136,7 @@ FILE_FORCE_WINDOW = 4
 _FILE_NUDGE_CAP = 2
 
 
+@observe_rule("file_turn_guard.is_file_deliverable_request")
 def is_file_deliverable_request(
     user_content: str | None,
     output_format: str | None = None,
@@ -292,6 +294,7 @@ def file_artifact_created(
     return False
 
 
+@observe_rule("file_turn_guard.should_force_create_file", forced="create_artifact")
 def should_force_create_file(
     user_content: str | None,
     tool_calls_for_frontend: list[dict] | None,

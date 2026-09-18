@@ -17,6 +17,7 @@ import re
 from typing import Optional
 
 from app.config import settings
+from app.services.harness.rule_events import observe_rule
 from app.services.synexia.intent_router import (
     FileFormat,
     detect_deck_edit_intent,
@@ -130,6 +131,7 @@ _SOFT_INTENT_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 
 
+@observe_rule("default_skills.detect_soft_intent", forced="skill_injection")
 def detect_soft_intent(text: str) -> Optional[str]:
     """Return the default-skill format key implied by soft signals in ``text``.
 
