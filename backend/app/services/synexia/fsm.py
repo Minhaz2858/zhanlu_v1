@@ -1029,20 +1029,31 @@ Clarification policy: ask at most ONE clarifying question, and ONLY if the conve
             # We are in a worker thread (run via asyncio.to_thread), so a
             # fresh event loop is always safe. Tests may inject a sync stub
             # returning a dict → pass it through untouched.
+            #
+            # CORRECTION (2026-09-18): the "we are in a worker thread" assumption
+            # above is FALSE on the chat path. SynexiaFSM.run is a sync method and
+            # the chat router calls it directly from ``async def add_message``
+            # (agents.py:6676), so a loop IS running on this thread and
+            # ``new_event_loop().run_until_complete()`` raised
+            #   RuntimeError: Cannot run the event loop while another loop is running
+            # which the except below turned back into the same canned reply — the
+            # LLM was still never called. The bridge handles both contexts: no loop
+            # (worker thread) and a live loop (async caller).
             import asyncio as _asyncio
 
             if _asyncio.iscoroutine(result):
-                _loop = _asyncio.new_event_loop()
-                try:
-                    result = _loop.run_until_complete(result)
-                finally:
-                    try:
-                        _loop.close()
-                    except Exception:
-                        pass
+                from app.services.async_bridge import run_coro_blocking
+                result = run_coro_blocking(result)
             return result.get("response", "I've processed your request.")
         except Exception as e:
-            logger.warning("Response generation failed: %s", e)
+            # ERROR, not WARNING: this is the turn's answer failing to be written,
+            # and it used to be invisible at WARNING level while the user was told
+            # their request had been processed.
+            logger.error(
+                "Response generation failed for conversation %s (falling back to a "
+                "contentless reply): %s",
+                getattr(request, "conversation_id", None), e, exc_info=True,
+            )
             return "I've processed your request."
 
     async def stream_final_response(
