@@ -489,6 +489,16 @@ async def execute_tool(
     # before any permission/registry lookups. See TOOL_NAME_ALIASES.
     tool_name = TOOL_NAME_ALIASES.get(tool_name, tool_name)
 
+    # Phase 2: record what the MODEL asked for, before any gate below can turn
+    # the call into a proposal or an approval prompt. Shadow divergence compares
+    # rule decisions against the model's own judgment, and a call the harness
+    # blocked is still evidence of that judgment. Fail-open, in-process, no DB.
+    try:
+        from app.services.harness.shadow import note_tool_call
+        note_tool_call(tool_name, arguments)
+    except Exception:
+        pass
+
     # 0. Permission check — block tools that are not allowed, or pause for
     #    confirmation when requires_confirmation=True (default mode write tools).
     agent_name = context.get("agent_name") if context else None

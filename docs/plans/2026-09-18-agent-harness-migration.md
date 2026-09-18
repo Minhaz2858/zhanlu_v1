@@ -142,7 +142,44 @@ Authorization is not judgment. Deleting these is a security regression:
   `turn_planner` still runs alongside (Phase 2 is shadow, Phase 3 deletes it),
   and `mode_to_system_block()` is exposed but not injected, because the
   per-call proposal already teaches the mode.
-- **Phase 2/3/4 — TODO.**
+- **Phase 2 — DONE.** `app/services/harness/shadow.py` (new): compares what each
+  rule decided against what the model actually did, read from the turn's own
+  tool-call trace, and stamps `diverged: true` + both decisions into the Phase 0
+  row's `detail` (the field the model already reserved for it). One hook in
+  `rule_events.record_rule_event` computes it, so **none of the six rule modules
+  changed**. The trace is fed from `agent_tools.execute_tool` *before* any gate, so
+  a call the harness blocked still counts as the model's own judgment; it is a
+  contextvar, bounded at 200 entries, and never touches the DB on the caller's
+  thread.
+  `bind_turn` is now actually called (agents.py:7008, the one place a chat tool
+  loop starts). Phase 0's acceptance criterion — "a row with … conversation id" —
+  was never met in production: nothing called `bind_turn`, so every live row
+  carried `conversation_id = NULL`. Phase 2's evidence is grouped by turn, so this
+  had to be fixed, not worked around.
+  `turn_planner.build_turn_plan` is instrumented too (it was the one rule in the
+  Phase 3 deletion list with no Phase 0 coverage, so Phase 3 step 2 would have had
+  nothing to delete on).
+  **What the measurement can and cannot say.** The three force guards already
+  return `False` when the artifact exists (`if file_artifact_created(...)`), so for
+  them a fire proves only that nothing existed *at that moment* — `rule_redundant`
+  is unreachable by construction. `finish_turn()` (called after the tool loop)
+  resolves each such fire against the final trace:
+  `rule_preceded_delivery` (the deliverable appeared afterwards — consistent with
+  the rule working; causation is **not** observable and is not claimed) vs
+  `rule_fired_no_delivery` (the turn still shipped nothing — the rule did not
+  achieve its stated aim). No counterfactual replay is attempted anywhere: a trace
+  cannot prove what the model *would* have done with the rule silent, and the
+  labels are named so no unproven claim enters the evidence.
+  Verdicts: `keep_but_ineffective` (fires and nothing ever follows → Phase 4's
+  bounded evaluator, not a deletion), `keep_load_bearing`, `delete_candidate`
+  (≥ `MIN_SAMPLE=20` evaluations, never load-bearing), `insufficient_evidence`.
+  Drift guard: a test scans the source tree for `@observe_rule` and fails if any
+  instrumented rule has no declared primitive.
+  Live-probed in `zhanlu-copy-backend` on a real conversation: all four cases
+  (fire/no-deliver, fire/then-deliver, delivered-before-the-rule, turn_planner)
+  wrote rows to `harness_rule_events` with `conversation_id` populated.
+- **Phase 3/4 — TODO.** Phase 3 still needs `divergence_report()` rows to
+  accumulate over real turns; that is elapsed usage, not effort.
 
 ### Phase 0 — instrument (this commit)
 `app/services/harness/rule_events.py`: contextvar turn correlation, in-memory
@@ -164,9 +201,18 @@ conversation id; zero behaviour change; unit tests pin the fail-open contract.
 - 1d **Modes**: plan/execute as a provider, replacing `turn_planner`'s
   server-authored plan; expose `mode_get`/`mode_set`; reuse `AgentTodo`.
 
-### Phase 2 — shadow
-Primitive live, rule still live, divergence logged (`diverged: true` rows in
-`harness_rule_events` with both decisions). One full cycle before any deletion.
+### Phase 2 — shadow (this commit)
+`app/services/harness/shadow.py`: the turn's tool-call trace is the primitive the
+forcing rules are compared against. Rule firing and model action are recorded
+together on the Phase 0 row (`detail.diverged`, `detail.agreement`,
+`detail.primitive.model_acted`); `finish_turn()` resolves unresolved fires against
+the final trace; `divergence_report()` is the Phase 3 shortlist. Fail-open, cheap,
+flag-gated (`HARNESS_SHADOW_ENABLED`).
+
+Acceptance: every rule's row carries both decisions and a divergence label; the
+three force guards resolve to delivery/no-delivery at turn end; a rule that ever
+supplied an outcome the model had not reached is never a deletion candidate; zero
+behaviour change; no rule module edits.
 
 ### Phase 3 — delete, in this order (each needs ~0 divergence over N live turns)
 1. Force-nudges: file → dashboard → pptx (the family that produced the live bug).

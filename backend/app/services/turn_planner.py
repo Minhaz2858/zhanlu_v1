@@ -38,6 +38,9 @@ import re
 from dataclasses import dataclass, field
 
 from app.services.goal_contract import is_greeting  # noqa: E402
+# Phase 2: instrument the server-authored plan so Phase 3 (delete the turn_planner
+# heuristics) has divergence evidence — the same pattern as the other 12 rules.
+from app.services.harness.rule_events import observe_rule  # noqa: E402
 
 # Conversational smalltalk that the strict goal-contract greeting regex
 # misses ("Hello, how are you?", "What can you do?", …). These turns need no
@@ -145,6 +148,17 @@ def _steps(kind: str) -> list[TurnStep]:
     ]
 
 
+@observe_rule(
+    "turn_planner.build_turn_plan",
+    forced="turn_plan",
+    extract=lambda plan: {
+        "kind": getattr(plan, "kind", None),
+        "steps": len(getattr(plan, "steps", ()) or ()),
+        # A plan of kind "none" is a deliberate no-op (greeting/smalltalk), not a
+        # plan — recorded so "authored nothing" is distinguishable from "not run".
+        "empty": getattr(plan, "kind", None) in (None, KIND_NONE),
+    },
+)
 def build_turn_plan(
     user_content: str | None,
     *,

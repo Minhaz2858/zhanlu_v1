@@ -7005,6 +7005,22 @@ async def add_message(
             org_id=getattr(conv, "org_id", None),
             app_id=getattr(conv, "app_id", None) or agent_app_id,
         )
+        # Phase 2: turn identity + a fresh tool-call trace for the shadow layer.
+        # Phase 0's rows all carried conversation_id=None in production because
+        # nothing ever called bind_turn; the divergence evidence is grouped by
+        # turn, so it is bound here — the one place a chat tool loop starts.
+        try:
+            from app.services.harness.rule_events import bind_turn
+            from app.services.harness.shadow import start_trace
+            bind_turn(
+                conversation_id=conversation_id,
+                agent_name=agent_name,
+                surface="chat.v3",
+                user_id=str(getattr(user, "id", "") or "") or None,
+            )
+            start_trace()
+        except Exception:
+            logger.debug("harness turn bind failed", exc_info=True)
         for iteration in range(MAX_TOOL_ITERATIONS):
             # Phase 1c: start the clock for this iteration's model call.
             _llm_started_ms = now_ms()
@@ -8070,6 +8086,19 @@ async def add_message(
                     conversation_id, pending_tool["approval_id"], pending_tool["tool_name"],
                 )
                 return conv.to_dict()
+
+        # Phase 2: the tool loop is over, so the turn's trace is complete. Resolve
+        # every force-guard fire that was unresolved at fire time against what the
+        # turn actually delivered — the difference between "the rule fired and a
+        # deliverable followed" and "the rule fired and the turn still shipped
+        # nothing", which is the evidence Phase 3 deletes it on. Deliberately not
+        # called on the approval-pause path above: a paused turn has not delivered
+        # anything yet and must not be counted as a failure to deliver.
+        try:
+            from app.services.harness.shadow import finish_turn
+            finish_turn()
+        except Exception:
+            logger.debug("harness shadow turn resolution failed", exc_info=True)
 
         # Decision-summary pause (R4): if the assistant text contains a
         # `:::decision-summary` block, persist the pending payload to

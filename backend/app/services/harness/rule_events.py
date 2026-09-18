@@ -206,6 +206,18 @@ def record_rule_event(
     try:
         fired = is_fired(decision)
         ctx = turn if turn is not None else current_turn()
+        detail_row = _merge_detail(ctx, detail)
+        # Phase 2: compare this rule's decision against the model's own tool-call
+        # trace for the same turn. Fail-open — a shadow failure must leave the
+        # Phase 0 row exactly as it was.
+        try:
+            from app.services.harness.shadow import record_shadow
+            view = record_shadow(rule_name, fired)
+            if view:
+                detail_row = dict(detail_row or {})
+                detail_row.update(view)
+        except Exception:
+            pass
         row = {
             "id": str(uuid.uuid4()),
             "rule_name": rule_name,
@@ -216,7 +228,7 @@ def record_rule_event(
             "turn_id": ctx.get("turn_id"),
             "agent_name": ctx.get("agent_name"),
             "surface": ctx.get("surface"),
-            "detail": _merge_detail(ctx, detail),
+            "detail": detail_row,
         }
         with _LOCK:
             _COUNTS[rule_name] += 1
