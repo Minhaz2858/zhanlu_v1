@@ -339,6 +339,24 @@ class Settings(BaseSettings):
     # app/models/query_plan_memory.py, logic: app/services/db/plan_memory.py.
     NL2SQL_PLAN_MEMORY_ENABLED: bool = True
 
+    # ── Answer figure provenance (routers/agents.py guardrail) ───────────
+    # Every SQL-side guard stops at the rows. This checks the PROSE: each
+    # data figure in the final answer must exist in the turn's tool results
+    # (after scale/rounding normalisation, sums, and ratio derivation — see
+    # services/db/answer_grounding.py). A figure that survives one retry is
+    # logged, never silently accepted.
+    ANSWER_GROUNDING_ENABLED: bool = True
+    # Relative tolerance for a match (0.005 = 0.5%), which absorbs rounding
+    # ("≈3.46亿" for 345,678,912) without letting a wrong count through.
+    ANSWER_GROUNDING_TOLERANCE: float = 0.005
+
+    # ── Hard execution caps (non-bypassable) ─────────────────────────────
+    # The model supplies max_rows/timeout_s on the tool args; these clamp what
+    # the executor will honour. Applied in QueryService.execute so EVERY caller
+    # inherits them (tool args, NLAnswerService, FSM nodes, automations).
+    MAX_QUERY_ROWS_CAP: int = 5000
+    MAX_QUERY_TIMEOUT_S: int = 30
+
     # P3: Prompt caching -- apply explicit cache_control markers for providers
     # that support them (Anthropic, OpenRouter). DeepSeek caches automatically.
     PROMPT_CACHE_ENABLED: bool = False

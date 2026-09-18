@@ -5804,15 +5804,91 @@ class _GuardrailResult(NamedTuple):
     message: str
 
 
+# Tools whose results are the ground truth for the figures in an answer.
+_DATA_TOOL_NAMES = frozenset({
+    "ask_data_agent",
+    "answer_from_database",
+    "execute_query",
+    "describe_schema",
+    "list_data_sources",
+    "profile_data",
+    "inspect_data_source",
+})
+
+
+def _check_figure_grounding(
+    user_message: str,
+    assistant_text: str,
+    llm_messages: list | None,
+    guardrail_retries: int,
+) -> _GuardrailResult:
+    """Every data figure in the answer must exist in the turn's tool results.
+
+    The procedural check below catches only an answer produced with NO data tool
+    call at all. This covers what survives it: a real query ran, and the prose
+    then added a figure nobody computed — a comparison, a total, a unit swap, or
+    a figure carried over from an earlier turn. See
+    ``app/services/db/answer_grounding.py`` for what counts as grounded (sums,
+    min/max/means and ratio-derived percentages are accepted, because flagging a
+    correct answer is worse than not checking).
+
+    Never returns "fallback": a real data answer exists, so the only action is a
+    bounded retry. A figure that survives the retry is logged, not swallowed.
+    """
+    if not getattr(settings, "ANSWER_GROUNDING_ENABLED", True):
+        return _GuardrailResult("none", "")
+    if not (assistant_text or "").strip():
+        return _GuardrailResult("none", "")
+    try:
+        from app.services.db.answer_grounding import (
+            check_answer_grounding,
+            collect_tool_payloads,
+            log_ungrounded,
+        )
+
+        report = check_answer_grounding(
+            assistant_text,
+            collect_tool_payloads(llm_messages),
+            question=user_message,
+            tolerance=float(getattr(settings, "ANSWER_GROUNDING_TOLERANCE", 0.005)),
+        )
+    except Exception as e:
+        logger.debug("Figure grounding skipped: %s", e)
+        return _GuardrailResult("none", "")
+    if report.ok:
+        return _GuardrailResult("none", "")
+    if guardrail_retries >= MAX_GUARDRAIL_RETRIES:
+        log_ungrounded(report)
+        return _GuardrailResult("none", "")
+    logger.warning(
+        "Figure grounding: %d of %d figure(s) in the answer are not in the tool "
+        "results (%s) — nudging the model to correct them",
+        len(report.unverified), report.figures_checked,
+        ", ".join(f.raw for f in report.unverified[:6]),
+    )
+    return _GuardrailResult("nudge", report.feedback())
+
+
 def _check_hallucination_guardrail(
     user_message: str,
     data_ctx_extras: dict,
     tool_calls_made: list[dict],
     iteration: int,
     guardrail_retries: int,
+    llm_messages: list | None = None,
+    assistant_text: str | None = None,
 ) -> _GuardrailResult:
-    """Detect hallucination: LLM emitted text with no tool call when the
-    agent has bound data sources and the question is data-related.
+    """Detect data hallucination in a final text answer.
+
+    Two layers, in this order:
+
+    1. **Figure grounding** (``_check_figure_grounding``) — the agent DID call a
+       data tool this turn, so every figure it states must come from the results.
+       Triggered by BEHAVIOUR (a data tool ran), not by keywords, so a data
+       question phrased without a listed keyword still gets verified.
+    2. **No-query guard** — no data tool ran and the question looks data-related:
+       the answer was written from nothing, so nudge (retry) then fall back to a
+       safe message. This is the original, keyword-gated behaviour.
 
     Args:
         user_message: The original user message.
@@ -5821,6 +5897,8 @@ def _check_hallucination_guardrail(
         tool_calls_made: List of tool call records made so far (each has 'name').
         iteration: Current loop iteration (0-based).
         guardrail_retries: How many guardrail retries have already happened.
+        llm_messages: The live message list — tool results are read from it.
+        assistant_text: The candidate final answer.
 
     Returns:
         _GuardrailResult with:
@@ -5833,15 +5911,19 @@ def _check_hallucination_guardrail(
     if not bound_kb_ids:
         return _GuardrailResult("none", "")
 
-    # Only trigger for data-related questions
-    if not _is_data_question(user_message):
-        return _GuardrailResult("none", "")
-
-    # If ask_data_agent was already called, the agent did the right thing.
-    # Check both the raw tool name and the display name (which happens to be
-    # the same for ask_data_agent, but this is more robust).
+    # If a data tool ran, the answer's FIGURES must be grounded in its results
+    # (checks tool names, not keywords — behaviour is the intent signal).
     called_names = {tc.get("name", "") for tc in tool_calls_made}
-    if "ask_data_agent" in called_names:
+    if called_names & _DATA_TOOL_NAMES:
+        return _check_figure_grounding(
+            user_message,
+            assistant_text or "",
+            llm_messages,
+            guardrail_retries,
+        )
+
+    # No data tool ran: only a data-related question should have provoked a query.
+    if not _is_data_question(user_message):
         return _GuardrailResult("none", "")
 
     # Retries exhausted — return safe fallback (no fabricated data)
@@ -7240,6 +7322,8 @@ async def add_message(
                     tool_calls_for_frontend,
                     iteration,
                     guardrail_retries,
+                    llm_messages=llm_messages,
+                    assistant_text=assistant_content,
                 )
                 if guardrail_result.action == "nudge":
                     # Inject the guardrail nudge message and retry the LLM call.
@@ -8786,6 +8870,7 @@ async def resume_conversation(
             guardrail_result = _check_hallucination_guardrail(
                 user_content, data_ctx_extras, tool_calls_for_frontend,
                 iteration, guardrail_retries,
+                llm_messages=llm_messages, assistant_text=assistant_content,
             )
             if guardrail_result.action == "nudge":
                 llm_messages.append({"role": "assistant", "content": assistant_content})
@@ -14300,6 +14385,7 @@ async def add_message_stream(
                 guardrail_result = _check_hallucination_guardrail(
                     user_content, data_ctx_extras, tool_calls_for_frontend,
                     iteration, guardrail_retries,
+                    llm_messages=llm_messages, assistant_text=assistant_content,
                 )
                 if guardrail_result.action == "nudge":
                     llm_messages.append({"role": "assistant", "content": assistant_content})

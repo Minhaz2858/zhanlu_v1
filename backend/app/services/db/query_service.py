@@ -1,8 +1,8 @@
 """QueryService — wraps a connector for safe SQL execution.
 
-In v1 we trust the LLM (per product decision) but enforce two
-self-contained caps: `max_rows=1000` and `timeout_s=10` per statement.
-These are documented as safety nets, not security controls.
+The connector caps (`MAX_QUERY_ROWS_CAP` / `MAX_QUERY_TIMEOUT_S`) and the
+read-only session settings live here and in the connectors, so nothing above
+this layer can widen them: callers pass caps, this clamps them.
 """
 
 from __future__ import annotations
@@ -13,6 +13,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 from app.services.db.connector_factory import get_connector
 
@@ -51,13 +52,25 @@ class QueryService:
     ) -> dict:
         """Run `sql` against the KB and return rows + metadata.
 
+        Two things this deliberately does NOT trust:
+
+        * the caller's caps — `max_rows`/`timeout_s` arrive from model-authored
+          tool args, so they are clamped here (``MAX_QUERY_ROWS_CAP`` /
+          ``MAX_QUERY_TIMEOUT_S``). Callers below this line cannot raise them.
+        * the row count as a truncation proof — one extra row is fetched and
+          discarded, because ``len(rows) == cap`` cannot distinguish "the data
+          ends here" from "the cap bit". That false positive used to tell the
+          agent an exact-cap result was truncated.
+
         Returns:
             {
                 "source": {"id", "name", "db_type"},
                 "sql": str,
                 "rows": [...],
-                "row_count": int,
-                "truncated": bool,
+                "row_count": int,        # rows returned (== len(rows))
+                "rows_returned": int,    # explicit alias for the above
+                "row_cap": int,          # the cap actually applied
+                "truncated": bool,       # proven: more rows existed
                 "elapsed_ms": int,
             }
         """
@@ -67,13 +80,24 @@ class QueryService:
         # Strip trailing semicolons (some drivers reject multi-statements)
         sql = sql.strip().rstrip(";").strip()
 
+        try:
+            row_cap = max(1, min(int(max_rows), int(settings.MAX_QUERY_ROWS_CAP)))
+        except Exception:
+            row_cap = DEFAULT_MAX_ROWS
+        try:
+            timeout_cap = max(1, min(int(timeout_s), int(settings.MAX_QUERY_TIMEOUT_S)))
+        except Exception:
+            timeout_cap = DEFAULT_TIMEOUT_S
+
         kb = self._load_kb(kb_id)
         t0 = time.time()
         with get_connector(kb) as conn:
-            rows = conn.execute(sql, max_rows=max_rows, timeout_s=timeout_s)
+            # +1 to PROVE truncation (see docstring).
+            fetched = conn.execute(sql, max_rows=row_cap + 1, timeout_s=timeout_cap)
         elapsed_ms = int((time.time() - t0) * 1000)
 
-        truncated = len(rows) >= max_rows
+        truncated = len(fetched) > row_cap
+        rows = fetched[:row_cap] if truncated else fetched
         return {
             "source": {
                 "id": kb.id,
@@ -83,6 +107,8 @@ class QueryService:
             "sql": sql,
             "rows": rows,
             "row_count": len(rows),
+            "rows_returned": len(rows),
+            "row_cap": row_cap,
             "truncated": truncated,
             "elapsed_ms": elapsed_ms,
         }

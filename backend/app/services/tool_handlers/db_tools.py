@@ -690,6 +690,13 @@ async def _execute_query(
         return {"success": False, "error": "sql is required"}
     max_rows = int(args.get("max_rows", 1000))
     timeout_s = int(args.get("timeout_s", 10))
+    # The model authors these args, so clamp before they reach the executor.
+    # QueryService clamps again (non-bypassable), but a sane echo back in the
+    # tool result stops the model from assuming a 1-hour timeout was honoured.
+    from app.config import settings as _settings
+
+    max_rows = max(1, min(max_rows, int(_settings.MAX_QUERY_ROWS_CAP)))
+    timeout_s = max(1, min(timeout_s, int(_settings.MAX_QUERY_TIMEOUT_S)))
 
     # Read-only gate: this KB never accepts write/DDL statements. Runs before
     # the data-access-policy check so the rejection reason is unambiguous.

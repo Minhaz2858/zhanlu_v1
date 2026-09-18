@@ -13,6 +13,16 @@ from app.services.db.base import BaseConnector, row_to_dict
 logger = logging.getLogger(__name__)
 
 
+def _looks_like_select(sql: str) -> bool:
+    """True for statements that return a result set (so streaming is meaningful).
+
+    Mirrors the MySQL connector's helper: only these may be wrapped in a
+    server-side cursor.
+    """
+    head = (sql or "").lstrip().lower()
+    return head.startswith("select") or head.startswith("with")
+
+
 class PostgresConnector:
     """Connector for PostgreSQL."""
 
@@ -124,9 +134,38 @@ class PostgresConnector:
     ) -> list[dict]:
         assert self._engine is not None
         with self._engine.connect() as conn:
+            # Guards first, on the plain connection: a read-only session is the
+            # defense-in-depth layer under the SQL text gate (even a write that
+            # slipped past `check_read_only_sql` is refused by the server), and
+            # `SET LOCAL statement_timeout` bounds this transaction.
+            #
+            # TWO read-only statements are required: `default_transaction_read_only`
+            # only governs transactions started AFTER it, so the transaction this
+            # very statement opened would stay writable — and `SET LOCAL
+            # transaction_read_only` closes exactly that hole.
+            for _guard in (
+                "SET default_transaction_read_only = on",
+                "SET LOCAL transaction_read_only = on",
+            ):
+                try:
+                    conn.exec_driver_sql(_guard)
+                except Exception as e:
+                    logger.debug("postgres: session guard %r skipped: %s", _guard, e)
             if timeout_s > 0:
                 conn.execute(text(f"SET LOCAL statement_timeout = {int(timeout_s * 1000)}"))
-            result = conn.execute(text(sql), params or {})
+            # Stream ONLY a SELECT-shaped statement. `stream_results` must never
+            # be set on the connection itself: SQLAlchemy then wraps EVERY
+            # statement in `DECLARE <name> CURSOR WITHOUT HOLD FOR ...`, and
+            # `DECLARE ... FOR SET LOCAL ...` (or FOR CREATE) is a syntax error —
+            # which broke every Postgres query until the live probe caught it.
+            # Non-SELECT statements are rare here (reads are enforced upstream)
+            # and gain nothing from streaming.
+            _q = (
+                conn.execution_options(stream_results=True)
+                if _looks_like_select(sql)
+                else conn
+            )
+            result = _q.execute(text(sql), params or {})
             if result.returns_rows:
                 columns = list(result.keys())
                 rows = result.fetchmany(max_rows)

@@ -145,6 +145,72 @@ class SchemaService:
         _cache_put(key, result)
         return result
 
+    def _merge_catalog_meaning(self, kb_id: str, tables: list[dict]) -> int:
+        """Attach the catalog's business meaning to raw-introspected columns.
+
+        The connector can only report name/type/nullable/default/pk — the
+        business meaning lives in ``kb_column_meta`` (description_zh/en,
+        semantic_type, enum_values, unit). Without this merge, every path that
+        skips the schema linker hands the model NAMES ONLY, which is exactly how
+        look-alike columns on the same table (FCLOSESTATUS vs FDOCUMENTSTATUS)
+        get chosen on name plausibility. Merging here means the floor is lifted
+        for every consumer: describe_schema, the profile path, policy-filtered
+        KBs (which deliberately skip the catalog slice), and catalog-pending
+        sources.
+
+        Returns the number of annotated columns. Never raises.
+        """
+        try:
+            from app.models.knowledge_catalog import KBColumnMeta, KBTableMeta
+
+            rows = (
+                self._db.query(KBColumnMeta, KBTableMeta.table_name)
+                .join(KBTableMeta, KBColumnMeta.table_meta_id == KBTableMeta.id)
+                .filter(
+                    KBTableMeta.kb_id == kb_id,
+                    KBTableMeta.is_deleted.is_(False),
+                    KBColumnMeta.is_deleted.is_(False),
+                )
+                .all()
+            )
+        except Exception as e:
+            logger.debug("schema_service: catalog merge skipped: %s", e)
+            return 0
+        if not rows:
+            return 0
+        by_key: dict[tuple[str, str], Any] = {}
+        for col_row, table_name in rows:
+            by_key[
+                ((table_name or "").lower(), (col_row.column_name or "").lower())
+            ] = col_row
+        annotated = 0
+        for t in tables:
+            tname = (t.get("table") or t.get("table_name") or "").lower()
+            for col in (t.get("columns") or []):
+                if not isinstance(col, dict):
+                    continue
+                row = by_key.get((tname, (col.get("name") or "").lower()))
+                if row is None:
+                    continue
+                zh = (row.description_zh or "").strip()
+                en = (row.description_en or "").strip()
+                if zh:
+                    col["description"] = zh
+                elif en:
+                    col["description"] = en
+                for attr in ("description_en", "semantic_type", "enum_values", "unit"):
+                    val = getattr(row, attr, None)
+                    if val not in (None, "", [], {}):
+                        col[attr] = val
+                if col.get("description") or col.get("enum_values"):
+                    annotated += 1
+        if annotated:
+            logger.debug(
+                "schema_service: merged catalog meaning into %d column(s) on KB %s",
+                annotated, kb_id,
+            )
+        return annotated
+
     def describe_table(self, kb_id: str, table: str) -> dict:
         """Return full column metadata for one table."""
         fp = connection_fingerprint(self._db, kb_id)
@@ -164,6 +230,8 @@ class SchemaService:
             "table": table,
             "columns": columns,
         }
+        # Business meaning from the catalog (names alone are not enough).
+        self._merge_catalog_meaning(kb_id, [{"table": table, "columns": columns}])
         # Generic freshness: annotate the single table so the agent knows
         # whether it still receives data (works for any connected DB).
         try:
@@ -236,5 +304,7 @@ class SchemaService:
             "all_table_names": all_names,
             "truncated": len(tables) >= max_tables,
         }
+        # Business meaning from the catalog — merged for every table we detail.
+        self._merge_catalog_meaning(kb_id, out)
         _cache_put(key, result)
         return result

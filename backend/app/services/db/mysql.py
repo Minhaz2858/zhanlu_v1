@@ -97,6 +97,29 @@ class MySQLConnector:
             for r in rows
         ]
 
+    def _apply_session_guards(self, conn: Any, timeout_s: int) -> None:
+        """Read-only session + per-statement timeout, on every checkout.
+
+        Read-only is the defense-in-depth layer UNDER the SQL text gate: even if
+        a write slipped past ``check_read_only_sql``, the server itself refuses
+        it. The statement timeout matters most on MariaDB, which ignores the
+        ``MAX_EXECUTION_TIME`` hint (MariaDB spells it ``max_statement_time``).
+
+        Both statements are best-effort: an older server that rejects one must
+        not break the query.
+        """
+        stmts = ["SET SESSION TRANSACTION READ ONLY"]
+        if timeout_s > 0:
+            if (getattr(self.kb, "db_type", "") or "").lower() == "mariadb":
+                stmts.append(f"SET SESSION max_statement_time = {int(timeout_s)}")
+            else:
+                stmts.append(f"SET SESSION MAX_EXECUTION_TIME = {int(timeout_s * 1000)}")
+        for stmt in stmts:
+            try:
+                conn.exec_driver_sql(stmt)
+            except Exception as e:
+                logger.debug("mysql: session guard %r skipped: %s", stmt, e)
+
     def execute(
         self,
         sql: str,
@@ -105,17 +128,38 @@ class MySQLConnector:
         timeout_s: int = 10,
     ) -> list[dict]:
         assert self._engine is not None
+        # Decide the statement shape BEFORE the hint is prepended — the
+        # `/*+ ... */` prefix would otherwise defeat the SELECT check below and
+        # silently disable streaming.
+        _is_select = _looks_like_select(sql)
         # MySQL supports a per-statement timeout via MAX_EXECUTION_TIME hint
         # (in milliseconds) for SELECTs. We add it for any SELECT-like
         # statement; non-SELECTs ignore the hint safely.
-        if timeout_s > 0 and _looks_like_select(sql):
+        if timeout_s > 0 and _is_select:
             sql = f"/*+ MAX_EXECUTION_TIME({timeout_s * 1000}) */ " + sql
+        # Guards first, on the plain connection.
         with self._engine.connect() as conn:
-            result = conn.execute(text(sql), params or {})
+            self._apply_session_guards(conn, timeout_s)
+            # Stream ONLY a SELECT-shaped data statement — never set
+            # `stream_results` on the connection itself. Dialects that implement
+            # streaming with a server-side cursor (Postgres) wrap EVERY statement
+            # in `DECLARE <name> CURSOR WITHOUT HOLD FOR ...`, and
+            # `DECLARE ... FOR SET ...` / `... FOR CREATE ...` is a syntax error
+            # (live regression, caught by probing a real Postgres KB; pymysql
+            # hides it because it swaps in SSCursor at the DBAPI level). The
+            # memory bound only matters for result-returning queries anyway.
+            _q = (
+                conn.execution_options(stream_results=True)
+                if _is_select
+                else conn
+            )
+            result = _q.execute(text(sql), params or {})
             if result.returns_rows:
                 columns = list(result.keys())
                 rows = result.fetchmany(max_rows)
-                return [row_to_dict(columns, tuple(r)) for r in rows]
+                out = [row_to_dict(columns, tuple(r)) for r in rows]
+                result.close()
+                return out
             return [{"affected_rows": result.rowcount}]
 
     def get_foreign_keys(self, table: str) -> list[dict]:
