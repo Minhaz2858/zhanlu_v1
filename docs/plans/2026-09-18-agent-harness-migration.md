@@ -78,6 +78,22 @@ Authorization is not judgment. Deleting these is a security regression:
 
 ## 3. Phases
 
+### Status
+- **Phase 0 — DONE** (commit bfe2178b): `rule_events.py` + `harness_rule_events`
+  + 12 rules instrumented. Live rows confirm the refusal prompt records
+  `is_file_deliverable_request fired=0` while the genuine ask records `fired=1
+  forced=docx`, and the force rule records `iteration=9/10`.
+- **Phase 1a — DONE**: `app/services/harness/policy.py`; the 10 budget literals in
+  agents.py now resolve from policy. Defaults are byte-identical to the old
+  literals (pinned by test), so this is a refactor with zero behaviour change.
+  Overridable per field (`HARNESS_BUDGET_<FIELD>`) or per agent class
+  (`HARNESS_BUDGETS_<CLASS>_JSON`); invalid/non-positive values are refused, so a
+  bad env var can never produce an unbounded loop.
+- **Phase 1b/1c/1d — TODO.** Note 1c is smaller than first scoped: compaction is
+  already built and wired, and the harness run spine exists — the work is joining
+  the chat path to it, not writing compaction.
+- **Phase 2/3/4 — TODO.**
+
 ### Phase 0 — instrument (this commit)
 `app/services/harness/rule_events.py`: contextvar turn correlation, in-memory
 counters, durable `harness_rule_events` rows, `@observe_rule(...)` decorator that

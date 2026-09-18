@@ -247,7 +247,16 @@ def _run_db_sync(func, *args, **kwargs):
         return func(*args, **kwargs)
     return asyncio.to_thread(_wrapped, context=ctx)
 
-MAX_TOOL_ITERATIONS = 40
+# ── Harness budgets ────────────────────────────────────────────────────────
+# Single source of truth: app/services/harness/policy.py. These are policy, not
+# literals — overridable per agent class via HARNESS_BUDGETS_<CLASS>_JSON, or per
+# field via HARNESS_BUDGET_<FIELD>, without editing this router. Bounding an
+# autonomous loop is a harness primitive and stays; only the VALUE moved out of
+# the call site. See docs/plans/2026-09-18-agent-harness-migration.md (Phase 1a).
+from app.services.harness.policy import get_policy as _get_harness_policy
+
+_HARNESS_POLICY = _get_harness_policy()
+MAX_TOOL_ITERATIONS = _HARNESS_POLICY.budgets().max_tool_iterations
 
 # Per-tool-name hard cap for tool-call loops. If the LLM calls the same
 # tool N or more times within a single conversation (across all
@@ -256,7 +265,7 @@ MAX_TOOL_ITERATIONS = 40
 # `skills` / `skills_hub` lookups). Set conservatively above 2 to
 # tolerate legitimate "list → pick → retry" patterns but well below
 # MAX_TOOL_ITERATIONS so a single bad tool cannot eat the whole budget.
-TOOL_CALL_HARD_CAP = 10
+TOOL_CALL_HARD_CAP = _HARNESS_POLICY.budgets().tool_call_hard_cap
 
 
 # ── Tool-call loop guard: user-facing copy + one final answer pass ─────────
@@ -289,7 +298,7 @@ _LOOP_GUARD_GENERIC_MSG = (
 # narration rather than an answer (see _empty_answer_needs_force). A genuine
 # data answer carries at least one figure, so the length cap only bounds how
 # much digit-free prose can pass as an answer.
-_NON_ANSWER_MAX_CHARS = 600
+_NON_ANSWER_MAX_CHARS = _HARNESS_POLICY.budgets().non_answer_max_chars
 
 
 def _loop_guard_message(agent_name: str | None) -> str:
@@ -1123,8 +1132,8 @@ def _extract_data_rows_from_tool_call(tc: dict) -> tuple[list[dict], str] | None
 # A genuinely short answer (e.g. "¥165.03M, up 5.7%.") stays untouched:
 # the replacement rule below requires the synthesis candidate to be
 # substantially richer than the residue.
-_WEAK_CONTENT_MAX_CHARS = 160
-_WEAK_CONTENT_SYNTH_MIN_CHARS = 400
+_WEAK_CONTENT_MAX_CHARS = _HARNESS_POLICY.budgets().weak_content_max_chars
+_WEAK_CONTENT_SYNTH_MIN_CHARS = _HARNESS_POLICY.budgets().weak_content_synth_min_chars
 
 
 def _is_weak_strip_residue(acc_text: str, synth_text: str) -> bool:
@@ -3474,8 +3483,8 @@ DATA (use only this, do not invent numbers):
 {data_inline}
 """
 
-_MAX_INLINE_ROWS = 100
-_MAX_INLINE_CHARS = 4000
+_MAX_INLINE_ROWS = _HARNESS_POLICY.budgets().max_inline_rows
+_MAX_INLINE_CHARS = _HARNESS_POLICY.budgets().max_inline_chars
 
 
 def _build_ceo_synthesis_prompt(
@@ -4545,8 +4554,8 @@ _COMMAND_ARG_KEYS = ("code", "command", "path", "query", "url", "skill",
 # Result keys that best answer "what came back", in priority order.
 _OUTPUT_KEYS = ("output", "stdout", "text", "preview", "summary",
                 "message", "content")
-_MAX_COMMAND_CHARS = 600
-_MAX_OUTPUT_CHARS = 500
+_MAX_COMMAND_CHARS = _HARNESS_POLICY.budgets().max_command_chars
+_MAX_OUTPUT_CHARS = _HARNESS_POLICY.budgets().max_output_chars
 
 # Regex to strip raw SQL/DB internals from displayed command text.
 # Matches [Schema: ...] blocks and common ERP-style internal column IDs
@@ -5282,7 +5291,7 @@ TOOL_DISPLAY_NAMES = {
 
 # Max retries when the LLM fabricates data instead of calling ask_data_agent.
 # Total LLM calls for a data question = 1 (initial) + 2 (retries) = 3.
-MAX_GUARDRAIL_RETRIES = 2
+MAX_GUARDRAIL_RETRIES = _HARNESS_POLICY.budgets().guardrail_retries
 
 # Keywords that indicate the user is asking about data. Intentionally broad —
 # false positives just cause a harmless retry. Case-insensitive substring match.
