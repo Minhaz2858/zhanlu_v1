@@ -1319,6 +1319,30 @@ class Settings(BaseSettings):
     KG_DOMAIN_SCOPING_MIN_SCORE: float = 0.25
     KG_DOMAIN_SCOPING_MAX_TABLES: int = 120
 
+    # ── SemanticStore (one read-only facade over the semantic foundation) ──
+    # SEMANTIC_STORE_ENABLED: when on, callers may build a SemanticStore over
+    #   the KBs they are already authorised to read. The store is a facade —
+    #   it adds no tables and writes nothing — so this only gates the
+    #   consumption of existing catalog/glossary/workload rows.
+    # SEMANTIC_STORE_WORKLOAD_ENABLED: allow execution telemetry
+    #   (nl2sql_query_logs, query_plan_memory) to contribute a RANKING score.
+    #   It never grants access and never becomes verified truth; turn this off
+    #   to rank on meaning alone.
+    # SEMANTIC_STORE_LOG_SCAN_LIMIT: how many telemetry rows a workload scan
+    #   reads (bounded — never a full-table scan of the log).
+    # SEMANTIC_SOURCE_ROUTING_ENABLED: when an agent has MORE THAN ONE
+    #   database bound, rank them for the question and show the shortlist in
+    #   the "Bound Data Sources" prompt block. Narrows the choice; the agent
+    #   still owns the final pick.
+    # SEMANTIC_STORE_GLOSSARY_ENABLED: inject matched human-authored business
+    #   vocabulary (approved metrics, glossary terms, catalog aliases) into the
+    #   live SQL prompt.
+    SEMANTIC_STORE_ENABLED: bool = True
+    SEMANTIC_STORE_WORKLOAD_ENABLED: bool = True
+    SEMANTIC_STORE_LOG_SCAN_LIMIT: int = 2000
+    SEMANTIC_SOURCE_ROUTING_ENABLED: bool = True
+    SEMANTIC_STORE_GLOSSARY_ENABLED: bool = True
+
     # ── Data Agent latency optimizations ───────────────────────────────
     # DATA_AGENT_FASTPATH_ENABLED: when the call targets a single bound
     #   database source, ask_data_agent bypasses the iterative sub-agent

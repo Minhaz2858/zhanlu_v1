@@ -785,6 +785,7 @@ def _build_data_source_prompt_section(
     concept_catalogs: dict[str, str] | None = None,
     compact_mode: bool = False,
     compact_concept_max_lines: int = 20,
+    source_ranking: str = "",
 ) -> str:
     """Compose the 'Bound Data Sources' section appended to the system prompt.
 
@@ -821,6 +822,13 @@ def _build_data_source_prompt_section(
                 )
             lines.append(label)
         lines.append("")
+        # Cross-source retrieval: with more than one database bound, the agent
+        # used to pick one out of the list above. Show it the ranked match for
+        # THIS question (deterministic, evidence-backed). It narrows the choice;
+        # the agent still owns the final pick and the user's goal.
+        if source_ranking:
+            lines.append(source_ranking)
+            lines.append("")
         if schema_slices:
             for kb in db_meta:
                 sl = (schema_slices or {}).get(kb["id"])
@@ -1516,6 +1524,31 @@ def prepare_data_source_runtime(
     bound_meta = _load_bound_kb_meta(db, bound_ids)
     schema_slices = _build_schema_slice(db, bound_ids)
     concept_catalogs = _build_concept_catalog(db, bound_ids)
+
+    # Cross-source retrieval (SemanticStore). Only worth computing when the
+    # agent has MORE THAN ONE database bound and there is a question to match —
+    # with one source there is nothing to discriminate. Deterministic and
+    # in-process; a failure here must never break prompt assembly.
+    source_ranking = ""
+    if (
+        getattr(settings, "SEMANTIC_SOURCE_ROUTING_ENABLED", True)
+        and user_message
+        and len([k for k in bound_meta if k["source_kind"] == "database"]) > 1
+    ):
+        try:
+            from app.services.db.semantic_store import (
+                format_source_ranking,
+                get_semantic_store,
+            )
+
+            _store = get_semantic_store(
+                db, bound_ids, project_id=selected_project_id
+            )
+            source_ranking = format_source_ranking(
+                _store.rank_sources(user_message, k=3)
+            )
+        except Exception as e:
+            logger.warning("data_source_runtime: source ranking skipped: %s", e)
     # P1-5: when the target model has a small context window, compress the
     # "Bound Data Sources" block structurally.  Default compact threshold
     # is 70,000 (anything ≤ 70k → compact; bigger models keep full).
@@ -1529,6 +1562,7 @@ def prepare_data_source_runtime(
         bound_meta, has_weekly_report=False, schema_slices=schema_slices,
         concept_catalogs=concept_catalogs,
         compact_mode=_compact_mode,
+        source_ranking=source_ranking,
     )
 
     # PREPEND the critical anti-hallucination directive so it's the first

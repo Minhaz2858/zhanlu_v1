@@ -354,7 +354,41 @@ def build_business_context(
             lines.append("".join(seg))
         parts.append("\n".join(lines))
 
-    # 2. Business domains (the semantic layer's vocabulary map).
+    # 2. Business vocabulary (glossary / aliases / metric synonyms).
+    #    Human-authored only — this is the VERIFIED tier of the semantic
+    #    foundation. Matched to the question, never dumped.
+    #
+    #    ORDER MATTERS: this block is placed before the domain map because the
+    #    context is token-capped and truncated from the TAIL. Domains are long
+    #    and low-signal (four of them consumed 1,516 chars live), so a curated
+    #    term appended after them was cut off and never reached the model —
+    #    measured on the aipdp warehouse. Curated meaning gets the budget first.
+    try:
+        from app.services.db.semantic_store import get_semantic_store
+
+        if getattr(settings, "SEMANTIC_STORE_GLOSSARY_ENABLED", True):
+            store = get_semantic_store(db, [kb_id], project_id=project_id)
+            terms = store.glossary(question, limit=12)
+            if terms:
+                lines = ["## Business vocabulary (user-defined)"]
+                for t in terms:
+                    line = f"- {t.term}"
+                    if t.unit:
+                        line += f" ({t.unit})"
+                    if t.definition:
+                        line += f": {t.definition}"
+                    if t.sql_expression:
+                        line += f" [SQL: {t.sql_expression}]"
+                    if t.query_pattern:
+                        line += f" [pattern: {t.query_pattern}]"
+                    if t.aliases:
+                        line += f" [also called: {', '.join(t.aliases[:4])}]"
+                    lines.append(line)
+                parts.append("\n".join(lines))
+    except Exception as e:
+        logger.warning("business_context: vocabulary injection skipped: %s", e)
+
+    # 3. Business domains (the semantic layer's vocabulary map).
     domains = _match_domains(db, kb_id, question)
     if domains:
         lines = ["## Business domains"]
@@ -371,7 +405,7 @@ def build_business_context(
             lines.append(line)
         parts.append("\n".join(lines))
 
-    # 3. Coverage annotations.
+    # 4. Coverage annotations.
     covs = _coverage_max_dates(db, kb_id)
     if covs:
         lines = ["## Data coverage"]

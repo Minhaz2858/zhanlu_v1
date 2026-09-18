@@ -316,6 +316,33 @@ class NLAnswerService:
                                     )
                         except Exception as e:
                             logger.warning("NLAnswer: domain scoping skipped: %s", e)
+                    # SemanticStore retrieval: hand the selector the small
+                    # candidate set the semantic foundation already knows about
+                    # for THIS question (names + why they matched). Evidence,
+                    # not a verdict — the model still picks. Cheap and safe:
+                    # skipped for small catalogs where the whole TOC fits.
+                    if getattr(settings, "SEMANTIC_STORE_ENABLED", True) and len(toc) > 40:
+                        try:
+                            from app.services.db.semantic_store import (
+                                format_retrieval_hint,
+                                get_semantic_store,
+                            )
+
+                            _hits = await asyncio.to_thread(
+                                lambda: get_semantic_store(
+                                    self._db, [kb_id], project_id=project_id
+                                ).rank_relations(question, k=12)
+                            )
+                            _hint = format_retrieval_hint(_hits)
+                            if _hint:
+                                toc_text = f"{_hint}\n\n{toc_text}"
+                                logger.info(
+                                    "NLAnswer: semantic retrieval → %d candidate tables %s",
+                                    len(_hits),
+                                    [h.table_name for h in _hits[:5]],
+                                )
+                        except Exception as e:
+                            logger.warning("NLAnswer: semantic retrieval skipped: %s", e)
                     # Ask the LLM which tables are relevant
                     selected_names = await self._select_tables_from_toc(
                         question, toc_text, len(toc), endpoint=endpoint,
