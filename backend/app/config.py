@@ -1354,6 +1354,21 @@ class Settings(BaseSettings):
     DATA_AGENT_FASTPATH_ENABLED: bool = False
     SCHEMA_CACHE_TTL_SECONDS: int = 3600
 
+    # ── Schema-shape change detection ──────────────────────────────────────
+    # SCHEMA_SHAPE_ENABLED: add the live (table, column) digest to every schema
+    #   cache key, so a table/column added to a datasource the agent is already
+    #   pointed at is an automatic cache miss instead of staying invisible for
+    #   SCHEMA_CACHE_TTL_SECONDS (1h). Also enables catalog-drift reporting.
+    #   Off = exactly the pre-existing connection-identity-only behaviour.
+    # SCHEMA_SHAPE_TTL_SECONDS: how long one shape probe is reused. The probe is
+    #   ONE dialect query fetching every (table, column) pair — measured 0.9-3.6 s
+    #   on a 143-table / 2,643-column warehouse over a remote link, against ~24 s
+    #   to re-introspect every table. This TTL is therefore the upper bound on how
+    #   long a schema change can go unnoticed, and it is deliberately far below the
+    #   1 h schema TTL. 0 = probe on every lookup, negative = never probe.
+    SCHEMA_SHAPE_ENABLED: bool = True
+    SCHEMA_SHAPE_TTL_SECONDS: int = 300
+
     # ── Demo/test source guard ─────────────────────────────────────────────
     # Comma-separated substrings (case-insensitive) matched against bound
     # KnowledgeBase name + database_name. When a conversation has BOTH a

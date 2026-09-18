@@ -94,6 +94,19 @@ class PostgresConnector:
         with self._engine.connect() as conn:
             return [r[0] for r in conn.execute(sql, {"schema": self._schema}).fetchall()]
 
+    def shape(self) -> list[tuple[str, str]]:
+        """Every (table, column) in the current schema — ONE round trip."""
+        assert self._engine is not None
+        sql = text(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE table_schema = :schema"
+        )
+        with self._engine.connect() as conn:
+            return [
+                (str(r[0]), str(r[1]))
+                for r in conn.execute(sql, {"schema": self._schema}).fetchall()
+            ]
+
     def describe_table(self, table: str) -> list[dict]:
         assert self._engine is not None
         sql = text(

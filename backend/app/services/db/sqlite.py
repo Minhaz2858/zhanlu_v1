@@ -57,6 +57,21 @@ class SQLiteConnector:
         )
         return [r[0] for r in cur.fetchall()]
 
+    def shape(self) -> list[tuple[str, str]]:
+        """Every (table, column) in the file — ONE query.
+
+        SQLite has no information_schema; the table-valued ``pragma_table_info``
+        joined to ``sqlite_master`` gives the same (table, column) set in one trip.
+        Views are excluded to mirror this dialect's own ``list_tables``.
+        """
+        assert self._conn is not None
+        cur = self._conn.execute(
+            "SELECT m.name, p.name FROM sqlite_master m "
+            "JOIN pragma_table_info(m.name) p "
+            "WHERE m.type = 'table' AND m.name NOT LIKE 'sqlite_%'"
+        )
+        return [(str(r[0]), str(r[1])) for r in cur.fetchall()]
+
     def describe_table(self, table: str) -> list[dict]:
         assert self._conn is not None
         cur = self._conn.execute(f'PRAGMA table_info("{table}")')

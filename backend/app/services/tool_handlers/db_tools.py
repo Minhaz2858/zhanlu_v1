@@ -51,17 +51,24 @@ _SCHEMA_CACHE_TTL_SECONDS = 3600  # 1 hour — schema rarely changes mid-session
 
 
 def _schema_cache_key(
-    kb_id: str, table: str | None, full: bool, max_tables: int, fingerprint: str = ""
+    kb_id: str, table: str | None, full: bool, max_tables: int, fingerprint: str = "",
+    shape: str = "",
 ) -> str:
     # fingerprint = connection identity (host/port/db/dialect hash) so that
     # re-pointing a KB at a DIFFERENT database is an automatic cache miss.
-    return f"{kb_id}|{fingerprint}|{table or ''}|{int(full)}|{max_tables}"
+    # shape = digest of the live (table, column) set, so a schema CHANGE on the
+    # database we are already pointing at is one too — without it a new column
+    # stayed invisible for up to an hour (see app/services/db/schema_shape.py).
+    return (
+        f"{kb_id}|{fingerprint}|{shape}|{table or ''}|{int(full)}|{max_tables}"
+    )
 
 
 def _schema_cache_get(
-    kb_id: str, table: str | None, full: bool, max_tables: int, fingerprint: str = ""
+    kb_id: str, table: str | None, full: bool, max_tables: int, fingerprint: str = "",
+    shape: str = "",
 ) -> dict | None:
-    key = _schema_cache_key(kb_id, table, full, max_tables, fingerprint)
+    key = _schema_cache_key(kb_id, table, full, max_tables, fingerprint, shape)
     hit = _SCHEMA_CACHE.get(key)
     if not hit:
         return None
@@ -74,9 +81,10 @@ def _schema_cache_get(
 
 
 def _schema_cache_put(
-    kb_id: str, table: str | None, full: bool, max_tables: int, payload: dict, fingerprint: str = ""
+    kb_id: str, table: str | None, full: bool, max_tables: int, payload: dict, fingerprint: str = "",
+    shape: str = "",
 ) -> None:
-    key = _schema_cache_key(kb_id, table, full, max_tables, fingerprint)
+    key = _schema_cache_key(kb_id, table, full, max_tables, fingerprint, shape)
     _SCHEMA_CACHE[key] = (time.monotonic(), payload)
     # Opportunistic eviction: keep the cache bounded (~256 entries).
     if len(_SCHEMA_CACHE) > 256:
@@ -199,12 +207,67 @@ def _apply_schema_policy(
         allow_lower = {c.lower() for c in allowlist}
         return [c for c in columns if (c.get("name") or "").lower() in allow_lower]
 
+    def _filter_drift(container: dict) -> None:
+        """Drift names tables and columns — a restricted user must not see them.
+
+        The lists are the sensitive part (they are identifiers for tables this
+        user cannot query), so they are filtered like any other table/column list.
+        ``filtered_by_policy`` marks the view as scoped rather than complete, and
+        the counts match what is actually shown rather than the unfiltered total.
+        """
+        d = container.get("schema_drift")
+        if not isinstance(d, dict):
+            return
+
+        def _tbl_of(item: str) -> str:
+            return str(item).split(".", 1)[0]
+
+        def _keep_plain(table_name: str) -> bool:
+            return _table_visible(table_name)
+
+        def _keep_qualified(item: str) -> bool:
+            table_name = _tbl_of(item)
+            if not _table_visible(table_name):
+                return False
+            if isinstance(container.get("columns"), list) and str(
+                container.get("table") or ""
+            ).lower() == table_name.lower():
+                allowlist = policy.allowed_columns_for(kb_id, table_name)
+                if allowlist is not None:
+                    col = str(item).split(".", 1)[1].lower()
+                    return col in {c.lower() for c in allowlist}
+            return True
+
+        before = [
+            len(d.get(k) or [])
+            for k in ("tables_added", "tables_dropped", "columns_added", "columns_dropped")
+        ]
+        d["tables_added"] = [t for t in (d.get("tables_added") or []) if _keep_plain(t)]
+        d["tables_dropped"] = [t for t in (d.get("tables_dropped") or []) if _keep_plain(t)]
+        d["columns_added"] = [c for c in (d.get("columns_added") or []) if _keep_qualified(c)]
+        d["columns_dropped"] = [
+            c for c in (d.get("columns_dropped") or []) if _keep_qualified(c)
+        ]
+        d["counts"] = {
+            "tables_added": len(d["tables_added"]),
+            "tables_dropped": len(d["tables_dropped"]),
+            "columns_added": len(d["columns_added"]),
+            "columns_dropped": len(d["columns_dropped"]),
+        }
+        after = [
+            len(d.get(k) or [])
+            for k in ("tables_added", "tables_dropped", "columns_added", "columns_dropped")
+        ]
+        if after != before:
+            d["filtered_by_policy"] = True
+
     # describe_table shape: {"table": ..., "columns": [...]}
     if "table" in result and isinstance(result.get("columns"), list):
         tname = result.get("table")
         if not _table_visible(tname):
             raise ValueError("Access to this table is restricted.")
         result["columns"] = _filter_columns(tname, result.get("columns", []))
+        _filter_drift(result)
         return result
 
     # list_tables (list of strings) or describe_all (list of dicts)
@@ -227,9 +290,11 @@ def _apply_schema_policy(
             result["all_table_names"] = [
                 t for t in result["all_table_names"] if _table_visible(t)
             ]
+        _filter_drift(result)
         return result
 
     result["tables"] = [t for t in tables if _table_visible(t)]
+    _filter_drift(result)
     return result
 
 
@@ -385,8 +450,18 @@ async def _describe_schema(
     # Connection identity — re-pointing the KB at a different database must
     # invalidate the schema cache automatically (see _schema_cache_key).
     _fp = connection_fingerprint(db, kb_id)
+    # …and the live SHAPE — a table/column added to the database we are already
+    # pointing at must invalidate it too, otherwise a new column stays invisible
+    # for the full TTL. Fail-soft: "" keeps the identity-only key.
+    try:
+        from app.services.db.schema_shape import shape_state as _shape_state
+
+        _shape = _shape_state(db, kb_id).digest
+    except Exception as e:  # pragma: no cover - defensive
+        logger.debug("describe_schema: shape probe skipped: %s", e)
+        _shape = ""
     if not restricted:
-        cached = _schema_cache_get(kb_id, table, full, max_tables, _fp)
+        cached = _schema_cache_get(kb_id, table, full, max_tables, _fp, _shape)
         if cached is not None:
             return cached
 
@@ -462,7 +537,7 @@ async def _describe_schema(
                             "source": "schema_graph",
                         }
                         if not restricted:
-                            _schema_cache_put(kb_id, table, full, max_tables, _result, _fp)
+                            _schema_cache_put(kb_id, table, full, max_tables, _result, _fp, _shape)
                         return _result
                 except Exception as exc:
                     logger.warning("describe_schema: schema_graph failed: %s", exc)
@@ -496,7 +571,7 @@ async def _describe_schema(
                     "source": "catalog",
                 }
                 if not restricted:
-                    _schema_cache_put(kb_id, table, full, max_tables, _result, _fp)
+                    _schema_cache_put(kb_id, table, full, max_tables, _result, _fp, _shape)
                 return _result
         except Exception:
             pass  # fall through to describe_all
@@ -516,7 +591,7 @@ async def _describe_schema(
         result = _annotate_table_roles(result, db, kb_id)
         _result = {"success": True, **result}
         if not restricted:
-            _schema_cache_put(kb_id, table, full, max_tables, _result, _fp)
+            _schema_cache_put(kb_id, table, full, max_tables, _result, _fp, _shape)
         return _result
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}

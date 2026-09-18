@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 from app.services.db.connector_factory import get_connector
+from app.services.db.schema_shape import ShapeState, drift, shape_state
 
 logger = logging.getLogger(__name__)
 
@@ -123,10 +124,46 @@ class SchemaService:
             )
         return kb
 
+    def _shape(self, kb_id: str) -> ShapeState:
+        """Live shape state for this KB — for cache keys and for drift.
+
+        Deliberately fail-soft: any probe problem returns an EMPTY state, which
+        leaves callers on the connection-identity key they used before schema_shape
+        existed. A probe failure must never make a schema look smaller than it is.
+
+        A CHANGE invalidates every cached schema entry for the KB: the cached
+        ``describe_all`` (up to ~25 s of introspection on a large warehouse)
+        describes a schema that no longer exists, and the whole point of this
+        signature is that the agent sees the change without a restart or a 1 h wait.
+        """
+        try:
+            state = shape_state(self._db, kb_id)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("schema_service: shape probe skipped for %s: %s", kb_id, e)
+            return ShapeState()
+        if state.changed:
+            invalidate_schema_cache(kb_id)
+            logger.warning(
+                "schema_service: SHAPE CHANGED for KB %s (%s → %s) — schema caches "
+                "invalidated; the catalog needs a re-index before the new items have "
+                "business meaning",
+                kb_id, state.previous or "?", state.digest,
+            )
+        return state
+
+    def _drift(self, kb_id: str, live_pairs) -> dict | None:
+        """Catalog-vs-live drift, or None when in sync / not measurable."""
+        try:
+            return drift(self._db, kb_id, live_pairs)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("schema_service: drift check skipped for %s: %s", kb_id, e)
+            return None
+
     def list_tables(self, kb_id: str) -> dict:
         """Return {"source": {...}, "tables": [...]} for a KB."""
         fp = connection_fingerprint(self._db, kb_id)
-        key = (kb_id, fp, "list_tables")
+        state = self._shape(kb_id)
+        key = (kb_id, fp, state.digest, "list_tables")
         cached = _cache_get(key)
         if cached is not None:
             return cached
@@ -214,7 +251,8 @@ class SchemaService:
     def describe_table(self, kb_id: str, table: str) -> dict:
         """Return full column metadata for one table."""
         fp = connection_fingerprint(self._db, kb_id)
-        key = (kb_id, fp, "table", table)
+        state = self._shape(kb_id)
+        key = (kb_id, fp, state.digest, "table", table)
         cached = _cache_get(key)
         if cached is not None:
             return cached
@@ -248,6 +286,9 @@ class SchemaService:
                 }
         except Exception:
             pass
+        _d = self._drift(kb_id, state.pairs)
+        if _d:
+            result["schema_drift"] = _d
         _cache_put(key, result)
         return result
 
@@ -260,7 +301,12 @@ class SchemaService:
         alphabetical truncation hides business views past the cap and the LLM
         guesses table names instead of describing them.
         """
-        key = (kb_id, "all", max_tables)
+        # Connection identity AND shape: this key used to carry NEITHER, so
+        # re-pointing the KB at a different database — or changing the schema of
+        # the current one — served the old definition set for up to an hour.
+        fp = connection_fingerprint(self._db, kb_id)
+        state = self._shape(kb_id)
+        key = (kb_id, fp, state.digest, "all", max_tables)
         cached = _cache_get(key)
         if cached is not None:
             return cached
@@ -306,5 +352,8 @@ class SchemaService:
         }
         # Business meaning from the catalog — merged for every table we detail.
         self._merge_catalog_meaning(kb_id, out)
+        _d = self._drift(kb_id, state.pairs)
+        if _d:
+            result["schema_drift"] = _d
         _cache_put(key, result)
         return result

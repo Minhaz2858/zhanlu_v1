@@ -62,6 +62,19 @@ class OracleConnector:
         with self._engine.connect() as conn:
             return [r[0].lower() for r in conn.execute(sql).fetchall()]
 
+    def shape(self) -> list[tuple[str, str]]:
+        """Every (table, column) in this user's schema — ONE round trip.
+
+        ``user_tab_columns`` covers views as well as tables and is the same
+        dictionary ``list_tables``/``describe_table`` read. NOT live-verified
+        against an Oracle instance: no such datasource was available here.
+        """
+        assert self._engine is not None
+        sql = text("SELECT table_name, column_name FROM user_tab_columns")
+        with self._engine.connect() as conn:
+            return [(str(r[0]).lower(), str(r[1]).lower())
+                    for r in conn.execute(sql).fetchall()]
+
     def describe_table(self, table: str) -> list[dict]:
         assert self._engine is not None
         table_up = table.upper()

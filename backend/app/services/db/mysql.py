@@ -75,6 +75,20 @@ class MySQLConnector:
         with self._engine.connect() as conn:
             return [r[0] for r in conn.execute(text(sql)).fetchall()]
 
+    def shape(self) -> list[tuple[str, str]]:
+        """Every (table, column) in the current database — ONE round trip.
+
+        Measured on the 143-table / 2,643-column warehouse: ~0.9-1.1 s, the same
+        order as ``list_tables()`` and ~25x cheaper than describe_table per table.
+        """
+        assert self._engine is not None
+        sql = text(
+            "SELECT TABLE_NAME, COLUMN_NAME FROM information_schema.COLUMNS "
+            "WHERE TABLE_SCHEMA = DATABASE()"
+        )
+        with self._engine.connect() as conn:
+            return [(str(r[0]), str(r[1])) for r in conn.execute(sql).fetchall()]
+
     def describe_table(self, table: str) -> list[dict]:
         assert self._engine is not None
         sql = text(

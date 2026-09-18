@@ -72,6 +72,19 @@ class BaseConnector(Protocol):
         """
         ...
 
+    def shape(self) -> list[tuple[str, str]]:
+        """Return every visible (table, column) name pair in ONE query.
+
+        This is the cheap change-detector behind ``schema_shape``: it must not
+        degrade into a per-table loop (``describe_table`` N times is ~25 s on a
+        143-table warehouse, versus ~1 s for one information_schema scan).
+
+        Order and case do not matter — ``schema_shape.normalize_pairs`` folds both.
+        Implementations should include views when the dialect's own ``list_tables``
+        does not filter them out, and must stay read-only.
+        """
+        ...
+
     def execute(
         self,
         sql: str,

@@ -59,6 +59,18 @@ class MSSQLConnector:
         with self._engine.connect() as conn:
             return [r[0] for r in conn.execute(sql).fetchall()]
 
+    def shape(self) -> list[tuple[str, str]]:
+        """Every (table, column) visible to this login — ONE round trip.
+
+        INFORMATION_SCHEMA is scoped to the databases the login can see, which is
+        the set ``list_tables`` reports on this dialect. NOT live-verified against a
+        SQL Server instance: no such datasource was available here.
+        """
+        assert self._engine is not None
+        sql = text("SELECT TABLE_NAME, COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS")
+        with self._engine.connect() as conn:
+            return [(str(r[0]), str(r[1])) for r in conn.execute(sql).fetchall()]
+
     def describe_table(self, table: str) -> list[dict]:
         assert self._engine is not None
         cols_sql = text(
