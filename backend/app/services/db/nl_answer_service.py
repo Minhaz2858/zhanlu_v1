@@ -57,6 +57,26 @@ def _connection_context(schema_svc: SchemaService, kb_id: str) -> str:
 _MULTI_STMT_NL = re.compile(r";\s*(?=(?:SELECT|WITH)\b)", re.IGNORECASE)
 
 
+_MISSING_IDENTIFIER_PATTERNS = (
+    re.compile(r"Unknown column '([^']+)'", re.I),            # MySQL 1054
+    re.compile(r"Unknown table '([^']+)'", re.I),             # MySQL 1109
+    re.compile(r"Table '([^']+)' doesn't exist", re.I),       # MySQL 1146
+    re.compile(r"no such column: ?([^\s'\"]+)", re.I),        # SQLite
+    re.compile(r"no such table: ?([^\s'\"]+)", re.I),         # SQLite
+    re.compile(r"column \"?([\w.]+)\"? does not exist", re.I),   # Postgres 42703
+    re.compile(r"relation \"?([\w.]+)\"? does not exist", re.I),  # Postgres 42P01
+    re.compile(r"Invalid column name '([^']+)'", re.I),       # MSSQL 207
+    re.compile(r"ORA-00904[^:]*: ?\"?([\w$#]+)\"?", re.I),     # Oracle invalid identifier
+)
+
+# Malformed SQL is also the model's to fix, and the driver says so explicitly.
+_SQL_SYNTAX_ERROR_RE = re.compile(
+    r"\(1064,|You have an error in your SQL syntax|syntax error at or near|"
+    r"ORA-00933|Incorrect syntax near",
+    re.I,
+)
+
+
 def _sanitize_llm_sql(sql: str) -> str:
     """Hygiene pass for LLM-generated SQL before execution (2026-08-28).
 
@@ -460,20 +480,76 @@ class NLAnswerService:
         # BEFORE execution (see _sanitize_llm_sql).
         sql = _sanitize_llm_sql(sql)
 
-        # 3. Execute
-        try:
-            exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
-        except Exception as e:
-            logger.warning("NLAnswer: execute failed: %s", e)
+        # 3. Execute — with a bounded REPAIR loop on naming/syntax failures.
+        #
+        # A driver error is the only ground truth we get about the real schema,
+        # and "Unknown column 'x'" is the most common way a data answer dies:
+        # the model invents a plausible column, the database rejects it, and
+        # the turn used to end by asking the user to name the column. Instead:
+        # hand the model the error plus the real column list, regenerate, and
+        # re-run — the runtime reaction the request deserved. Bounded by
+        # NL2SQL_DB_ERROR_REPAIR_MAX; failures that are not naming problems
+        # (permissions, timeouts, connections) skip the loop entirely.
+        exec_result: dict | None = None
+        _exec_error: Exception | None = None
+        _repaired_from: str | None = None
+        _repair_budget = max(0, int(getattr(settings, "NL2SQL_DB_ERROR_REPAIR_MAX", 2) or 0))
+        for _attempt in range(_repair_budget + 1):
+            try:
+                exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
+                _exec_error = None
+                break
+            except Exception as e:  # noqa: BLE001
+                _exec_error = e
+                if _attempt >= _repair_budget or not _is_resolvable_db_error(e):
+                    break
+                repaired, why_not = await self._repair_sql_after_db_error(
+                    sql=sql,
+                    error=e,
+                    question=question,
+                    kb_id=kb_id,
+                    schema_info=schema_info,
+                    schema_text=schema_text,
+                    project_id=project_id,
+                    endpoint=endpoint,
+                )
+                if not repaired or repaired == sql:
+                    logger.warning(
+                        "NLAnswer: could not repair SQL for KB %s after %s (%s)",
+                        kb_id, e, why_not or "model returned the same query",
+                    )
+                    break
+                logger.info(
+                    "NLAnswer: repaired SQL after DB error %s (attempt %d/%d)",
+                    e, _attempt + 1, _repair_budget,
+                )
+                if _repaired_from is None:
+                    _repaired_from = str(e)
+                sql = repaired
+
+        if _exec_error is not None:
+            logger.warning("NLAnswer: execute failed: %s", _exec_error)
             _shadow_validate_and_log(
-                kb_id, question, sql, live_success=False, live_error=str(e)
+                kb_id, question, sql, live_success=False, live_error=str(_exec_error)
             )
             return {
                 "success": False,
-                "error": f"Query failed: {e}",
+                "error": f"Query failed: {_exec_error}",
                 "sql": sql,
                 "source_id": kb_id,
+                "sql_repaired": bool(_repaired_from),
             }
+
+        if _repaired_from:
+            logger.info(
+                "NLAnswer: served a REPAIRED query for KB %s (original failure: %s)",
+                kb_id, _repaired_from,
+            )
+            if isinstance(exec_result, dict):
+                exec_result["repaired_from_error"] = _repaired_from
+
+        if exec_result is None:  # unreachable: the loop either sets it or records an error
+            exec_result = {"rows": [], "sql": sql, "source_id": kb_id}
 
         _shadow_validate_and_log(kb_id, question, sql, live_success=True)
 
@@ -627,6 +703,9 @@ class NLAnswerService:
             "source_name": exec_result.get("source", {}).get("name"),
             "citations": _extract_citations(schema_info, exec_result),
             "iterations": 1,
+            # Present when the first query died and the model rebuilt it from
+            # the driver's error — callers surface it as "recovered" evidence.
+            "repaired_from_error": _repaired_from,
         }
 
     # ------------------------------------------------------------------
@@ -792,6 +871,86 @@ class NLAnswerService:
         except Exception as e:
             logger.debug("NLAnswer: correction retry failed: %s", e)
             return None
+
+    async def _repair_sql_after_db_error(
+        self,
+        *,
+        sql: str,
+        error,
+        question: str,
+        kb_id: str,
+        schema_info: dict,
+        schema_text: str | None,
+        project_id: str | None,
+        endpoint: LLMEndpoint | None,
+    ) -> tuple[str | None, str | None]:
+        """Re-generate SQL after the DATABASE rejected it.
+
+        This is the post-execution counterpart to
+        ``_correct_sql_with_validator_feedback``: that one validates SQL
+        *before* it runs, so it can only catch what the (flag-gated) validator
+        happens to know. A driver error is ground truth — the database itself
+        names the column or table that does not exist here.
+
+        Returns ``(repaired_sql, reason_if_unrepaired)``. Never raises: a
+        failed repair must leave the caller holding its original error.
+        """
+        driver_error = str(error or "").strip()
+        identifier = _missing_identifier_from_error(driver_error)
+
+        # Real columns for the tables this SQL touched. Reuse the schema we
+        # already fetched; introspect the live KB for anything missing.
+        columns = _columns_by_table(schema_info)
+        for table in _referenced_tables(sql):
+            match = next(
+                (known for known in columns if known.lower() == table.lower()), None
+            )
+            if match:
+                if match != table:
+                    columns[table] = columns.pop(match)
+                continue
+            try:
+                described = await asyncio.to_thread(
+                    SchemaService(self._db).describe_table, kb_id, table,
+                )
+                cols: list[str] = []
+                if isinstance(described, dict):
+                    for c in (described.get("columns") or []):
+                        if isinstance(c, dict) and c.get("name"):
+                            cols.append(str(c["name"]))
+                if cols:
+                    columns[table] = cols
+            except Exception as exc:  # noqa: BLE001 — context is best-effort
+                logger.debug("NLAnswer: describe_table(%s) failed: %s", table, exc)
+
+        errors = [f"The database rejected the previous query: {driver_error}"]
+        if identifier:
+            errors.append(
+                f"`{identifier}` does not exist in this database — it is not a "
+                f"column or table here, so never reference it again."
+            )
+        errors.append(
+            "Rewrite the query using ONLY the tables and columns listed below, "
+            "keeping the user's original intent and time window."
+        )
+        if not columns:
+            errors.append(
+                "No column list could be loaded for the referenced tables — "
+                "re-derive them from the schema above."
+            )
+
+        corrected = await self._text_to_sql_with_correction(
+            question,
+            schema_info,
+            schema_text=schema_text,
+            project_id=project_id,
+            errors=errors,
+            available_columns=columns or None,
+            endpoint=endpoint,
+        )
+        if not corrected:
+            return None, "the model produced no replacement SQL"
+        return _sanitize_llm_sql(corrected), None
 
     async def _correct_sql_with_validator_feedback(
         self,
@@ -964,6 +1123,71 @@ def _schema_info_from_linker(
 
 # ── C2/C3 helpers (2026-08-26): table-coverage probe + degenerate check ──
 _SAFE_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _missing_identifier_from_error(error: str) -> str | None:
+    """Extract the unknown column/table name from a driver error, if any.
+
+    Covers the dialects the KB adapters can be bound to. The identifier is the
+    whole point of the repair: it names what the model invented, so the next
+    attempt can be told what actually exists.
+    """
+    if not error:
+        return None
+    for pattern in _MISSING_IDENTIFIER_PATTERNS:
+        m = pattern.search(error)
+        if m and m.groups():
+            return (m.group(1) or "").strip() or None
+    return None
+
+
+def _is_resolvable_db_error(error) -> bool:
+    """True when a failed query failed over a NAME the model can fix.
+
+    Only naming/syntax failures qualify — the model can repair those once it
+    sees the real schema. Permission denials, timeouts, deadlocks and
+    connection errors are NOT naming problems: retrying them just burns
+    budget, so they keep their existing failure path.
+    """
+    text = str(error or "")
+    if not text:
+        return False
+    for pattern in _MISSING_IDENTIFIER_PATTERNS:
+        if pattern.search(text):
+            return True
+    return bool(_SQL_SYNTAX_ERROR_RE.search(text))
+
+
+def _columns_by_table(schema_info: dict | None) -> dict[str, list[str]]:
+    """Real column names per table from a describe_all-shaped schema dict."""
+    out: dict[str, list[str]] = {}
+    for entry in (schema_info or {}).get("tables", []) or []:
+        table = entry.get("table")
+        if not table:
+            continue
+        cols: list[str] = []
+        for c in (entry.get("columns") or []):
+            if isinstance(c, dict) and c.get("name"):
+                cols.append(str(c["name"]))
+        if cols:
+            out[table] = cols
+    return out
+
+
+def _referenced_tables(sql: str) -> list[str]:
+    """Table names the failing SQL mentions (best effort, never raises)."""
+    try:
+        names = _extract_table_names(sql)
+    except Exception:  # noqa: BLE001 — repair context is best-effort
+        return []
+    out: list[str] = []
+    for n in names or []:
+        base = str(n).strip().strip("`\"")
+        if "." in base:
+            base = base.split(".")[-1].strip("`\"")
+        if base and base not in out:
+            out.append(base)
+    return out
 
 
 def _extract_table_names(sql: str) -> list[str]:

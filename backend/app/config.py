@@ -328,6 +328,11 @@ class Settings(BaseSettings):
     # Tool result persistence (P0) -- Layer 2/3 of context overflow protection
     TOOL_RESULT_STORAGE_DIR: str = "tool_results"
 
+    # NL2SQL: bounded repair of a query the DATABASE rejected (unknown
+    # column/table, syntax). The driver error + the real column list go back to
+    # the model, which re-generates once per attempt. 0 disables the loop.
+    NL2SQL_DB_ERROR_REPAIR_MAX: int = 2
+
     # P3: Prompt caching -- apply explicit cache_control markers for providers
     # that support them (Anthropic, OpenRouter). DeepSeek caches automatically.
     PROMPT_CACHE_ENABLED: bool = False
