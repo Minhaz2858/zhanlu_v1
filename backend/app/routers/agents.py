@@ -6569,6 +6569,18 @@ async def add_message(
                 pass
     agent_app_id = agent_app.id if agent_app else agent_name
 
+    # Phase 2: turn identity + a fresh tool-call trace, bound ONCE here — before the
+    # workflow / FSM / v2-loop paths diverge. It used to live inside the v2 tool loop
+    # (~line 7013), so a turn routed to SynexiaFSM returned at ~6712 with no run, no
+    # trace and an empty conversation_id: Phase 2 was observing those turns blind.
+    from app.services.harness.turn_context import begin_turn, end_turn
+    begin_turn(
+        conversation_id=conversation_id,
+        agent_name=agent_name,
+        surface="chat.v3",
+        user_id=str(getattr(user, "id", "") or "") or None,
+    )
+
     # ── Agent Workflow chat path ─────────────────────────────────────
     # flow_mode agents (canvas workflows with a Chat Trigger) run through
     # the workflow runtime instead of the prompt-agent loop. The run is
@@ -6598,6 +6610,7 @@ async def add_message(
             db.refresh(conv)
         except Exception:
             pass
+        end_turn()  # Phase 2: this path completes the turn — resolve its shadow fires
         return conv.to_dict()
 
     # Resolve the chat session that owns this conversation, if any. We do a
@@ -6697,7 +6710,10 @@ async def add_message(
                     "created_date": datetime.now(timezone.utc).isoformat(),
                     "tool_calls": _fsm_result.tool_calls,
                 }
-                messages.append(_assistant_msg)
+                # Phase 2: the FSM path ends the turn here — resolve its shadow fires
+                # against the trace the FSM accumulated through execute_tool.
+                end_turn()
+                return conv.to_dict()
                 conv.messages = list(messages)
                 conv.updated_date = datetime.now(timezone.utc)
                 try:
@@ -7005,22 +7021,9 @@ async def add_message(
             org_id=getattr(conv, "org_id", None),
             app_id=getattr(conv, "app_id", None) or agent_app_id,
         )
-        # Phase 2: turn identity + a fresh tool-call trace for the shadow layer.
-        # Phase 0's rows all carried conversation_id=None in production because
-        # nothing ever called bind_turn; the divergence evidence is grouped by
-        # turn, so it is bound here — the one place a chat tool loop starts.
-        try:
-            from app.services.harness.rule_events import bind_turn
-            from app.services.harness.shadow import start_trace
-            bind_turn(
-                conversation_id=conversation_id,
-                agent_name=agent_name,
-                surface="chat.v3",
-                user_id=str(getattr(user, "id", "") or "") or None,
-            )
-            start_trace()
-        except Exception:
-            logger.debug("harness turn bind failed", exc_info=True)
+        # Phase 2 note: turn identity and the trace are bound at TURN ENTRY (~6570,
+        # before the paths diverge), not here. This loop is only one of three paths
+        # through add_message; the workflow and FSM paths return before reaching it.
         for iteration in range(MAX_TOOL_ITERATIONS):
             # Phase 1c: start the clock for this iteration's model call.
             _llm_started_ms = now_ms()
