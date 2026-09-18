@@ -61,6 +61,7 @@ from app.services.tool_handlers import process_registry_tool  # noqa: F401
 from app.services.tool_handlers import env_passthrough_tool  # noqa: F401
 from app.services.tool_handlers import credential_files_tool  # noqa: F401
 from app.services.tool_handlers import kanban_tool  # noqa: F401
+from app.services.tool_handlers import mode_tool  # noqa: F401
 from app.services.tool_handlers import cronjob_tool  # noqa: F401
 from app.services.tool_handlers import clarify_tool  # noqa: F401
 from app.services.tool_handlers import slash_confirm_tool  # noqa: F401

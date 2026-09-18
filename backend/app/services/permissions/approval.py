@@ -53,10 +53,16 @@ DESTRUCTIVE_ACTIONS: frozenset[str] = frozenset({
 # Tools that must never require confirmation, whatever they declare.  These
 # mutate agent-internal scratch state only; gating them pauses the turn with
 # nothing the user could sensibly approve.
+#
+# mode_get / mode_set are here for a sharper reason: they read and change the
+# agent's own operating mode, so gating them in plan mode would trap the model
+# in plan mode with no way to switch back to execute.
 NEVER_GATE: frozenset[str] = frozenset({
     "todo",
     "memory",
     "checkpoint_manager",
+    "mode_get",
+    "mode_set",
 })
 
 # Fallback declarations for handlers that perform a destructive action but have

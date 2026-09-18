@@ -335,6 +335,11 @@ def _is_retryable(result: dict) -> bool:
         return False
     if result.get("requires_approval"):
         return False
+    if result.get("plan_mode"):
+        # A plan-mode proposal is a deliberate non-execution, not a failure.
+        # Retrying it would burn the turn's iteration budget on a decision the
+        # model cannot change by calling again.
+        return False
     if result.get("retryable") is True:
         return True
     err = (result.get("error") or "").lower()
@@ -501,6 +506,35 @@ async def execute_tool(
         if not perm_result.allowed:
             logger.warning("Tool '%s' blocked by permission check: %s", tool_name, perm_result.reason)
             return {"success": False, "error": f"Permission denied: {perm_result.reason}"}
+        # Plan mode (Phase 1d) sits AFTER the authorization deny — a hard deny
+        # always wins — and BEFORE the approval gate, because there is no point
+        # asking the user to approve a call that will not run. Reads proceed;
+        # write / destructive / externally-visible calls come back as proposals
+        # so the model can fold them into the plan it is writing.
+        from app.services.permissions import resolve_risk
+        from app.services.permissions.approval import NEVER_GATE
+        from app.services.harness.modes import (
+            is_plan_mode,
+            plan_mode_proposal,
+            tool_needs_execution,
+        )
+        if is_plan_mode(conversation_metadata):
+            _pm_risk = resolve_risk(tool_name, arguments)
+            if not tool_needs_execution(
+                tool_name=tool_name,
+                risk=_pm_risk.level,
+                never_gate=tool_name in NEVER_GATE,
+            ):
+                logger.info(
+                    "Plan mode: tool '%s' (risk=%s) proposed instead of executed",
+                    tool_name, _pm_risk.level,
+                )
+                return plan_mode_proposal(
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    risk=_pm_risk.level,
+                    action=_pm_risk.action,
+                )
         # System meta-agents (agent_builder, skill_agent, automation_agent,
         # general_assistant, power_user) are orchestrators whose job is to
         # call create_*/update_* tools. Bypassing requires_confirmation for

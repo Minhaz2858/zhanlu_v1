@@ -126,6 +126,22 @@ Authorization is not judgment. Deleting these is a security regression:
   `InvalidTextRepresentation` — the ENTIRE run spine's per-call persistence was
   dead on this database, not just the chat path. The table had 0 rows, so it was
   dropped and recreated from the model metadata (no data lost).
+- **Phase 1d — DONE.** `app/services/harness/modes.py` (new): mode is
+  `execute | plan`, stored in `conversation.metadata_["agent_mode"]` — the same
+  convention as `permission_mode`, so there is one way to express "a setting for
+  this conversation". It **authors nothing**: the plan is the model's own
+  `AgentTodo` list (`plan_from_todos` reads it back for consumers of the old
+  `TurnPlan`). Enforcement lives in `execute_tool`, ordered deny → plan-mode
+  proposal → approval gate: reads run, while write / destructive / externally
+  visible calls come back as `plan_mode: true` proposals with a message telling
+  the model to record its plan via `todo`. A proposal is never retryable, or the
+  loop would burn the turn's iteration budget re-issuing it. `mode_get` /
+  `mode_set` tools (`tool_handlers/mode_tool.py`) give the model ownership of its
+  own mode, and both are in `NEVER_GATE` — gating them would trap the model in
+  plan mode with no way back to execute. Not yet done, deliberately:
+  `turn_planner` still runs alongside (Phase 2 is shadow, Phase 3 deletes it),
+  and `mode_to_system_block()` is exposed but not injected, because the
+  per-call proposal already teaches the mode.
 - **Phase 2/3/4 — TODO.**
 
 ### Phase 0 — instrument (this commit)
