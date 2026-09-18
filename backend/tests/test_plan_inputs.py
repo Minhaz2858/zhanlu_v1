@@ -130,3 +130,120 @@ class TestLlmPlannerGated:
         assert called["n"] == 1  # LLM called exactly once
         assert len(plan.nodes) == 1
         assert plan.nodes[0].inputs == {"question": "hello"}
+
+
+# ── Regression: the REAL provider shape for an array schema ───────────────
+class TestLlmPlannerArraySchema:
+    """``plan_dag`` is the only caller with a TOP-LEVEL array schema.
+
+    The tests above feed ``{"response": "<json string>"}`` (the plain-text
+    path), which is NOT what a provider in json_object mode returns.  The
+    real shape is the parsed list, and llm_service used to put it ONLY in
+    ``response`` while leaving ``data`` unset — so generate_plan read
+    ``data -> None``, hit its fallback, and called ``.strip()`` on a list.
+    The resulting AttributeError was swallowed into "using default plan".
+
+    These tests pin the exact production shapes.
+    """
+
+    _STEPS = [
+        {"node_type": "nl2sql", "name": "fetch_sales", "dependencies": [],
+         "inputs": {"question": "sales by month"}, "expected_output": "rows"},
+        {"node_type": "agent", "name": "summarise", "dependencies": [0],
+         "inputs": {}, "expected_output": "answer"},
+    ]
+
+    def _plan(self, monkeypatch, db_session, llm_result):
+        from app.services.synexia import plan_dag
+
+        called = {"n": 0}
+
+        async def fake_call_llm(**kw):
+            called["n"] += 1
+            return llm_result
+
+        monkeypatch.setattr("app.services.llm_service.call_llm", fake_call_llm)
+        monkeypatch.setattr("app.config.settings.SYNEXIA_LLM_PLANNER_ENABLED", True)
+        plan = plan_dag.generate_plan(
+            db=db_session, execution_id="exec-arr",
+            task_spec={"task_kind": "general", "requires_data": True, "user_signal": "default"},
+            context_manifest={}, agent_name="general_assistant",
+        )
+        return plan, called
+
+    def test_parsed_array_in_data_and_response(self, monkeypatch, db_session, caplog):
+        """Provider shape: parsed list under ``data`` (post-fix) — the LLM's
+        steps must be used and no fallback warning emitted."""
+        result = {"model": "m", "usage": {}, "data": self._STEPS, "response": self._STEPS}
+        plan, called = self._plan(monkeypatch, db_session, result)
+
+        assert called["n"] == 1
+        assert [n.name for n in plan.nodes] == ["fetch_sales", "summarise"]
+        assert plan.nodes[0].inputs == {"question": "sales by month"}
+        assert not [r for r in caplog.records if "LLM plan generation failed" in r.getMessage()]
+
+    def test_list_only_in_response_still_parses(self, monkeypatch, db_session, caplog):
+        """Legacy / cached shape: a list in ``response`` with no ``data``
+        (what the pre-release fix and any llm_cache entry for the broken
+        call both produced).  Must not raise, must not silently degrade."""
+        result = {"model": "m", "usage": {}, "response": self._STEPS}
+        plan, called = self._plan(monkeypatch, db_session, result)
+
+        assert called["n"] == 1
+        assert [n.name for n in plan.nodes] == ["fetch_sales", "summarise"]
+        assert not [r for r in caplog.records if "LLM plan generation failed" in r.getMessage()]
+
+    def test_fenced_array_text_still_parses(self, monkeypatch, db_session):
+        """A provider that ignores json mode and wraps the array in a code
+        fence must still plan correctly (the fence-stripping path)."""
+        import json
+
+        fenced = "```json\n" + json.dumps(self._STEPS) + "\n```"
+        result = {"model": "m", "usage": {}, "response": fenced}
+        plan, called = self._plan(monkeypatch, db_session, result)
+
+        assert called["n"] == 1
+        assert [n.name for n in plan.nodes] == ["fetch_sales", "summarise"]
+
+    def test_schema_echo_envelope_is_planned(self, monkeypatch, db_session, caplog):
+        """The shape DeepSeek returns LIVE for this schema: it echoes the
+        envelope, with the real steps inside ``items``.  Before the fix this
+        produced a dict under ``data`` (not a list), so the planner silently
+        ran the default plan with no error at all."""
+        envelope = {"type": "array", "items": self._STEPS}
+        result = {"model": "m", "usage": {}, "data": envelope, "response": envelope,
+                  "type": "array", "items": self._STEPS}
+        plan, called = self._plan(monkeypatch, db_session, result)
+
+        assert called["n"] == 1
+        assert [n.name for n in plan.nodes] == ["fetch_sales", "summarise"]
+        assert plan.nodes[0].inputs == {"question": "sales by month"}
+
+    def test_fenced_envelope_text_is_planned(self, monkeypatch, db_session):
+        """Envelope delivered as fenced TEXT (no parsed value at all) must
+        still be planned — the text path has to unwrap too."""
+        import json
+
+        fenced = "```json\n" + json.dumps({"type": "array", "items": self._STEPS}) + "\n```"
+        plan, called = self._plan(monkeypatch, db_session, {"model": "m", "usage": {}, "response": fenced})
+
+        assert called["n"] == 1
+        assert [n.name for n in plan.nodes] == ["fetch_sales", "summarise"]
+
+    def test_unusable_reply_falls_back_loudly(self, monkeypatch, db_session, caplog):
+        """A genuinely unusable reply must STILL fall back — but must say so.
+        The silent fallback is what hid the original defect: every enabled
+        planner turn ran the generic default plan while the only visible
+        symptom was a downstream "dependencies not met" warning."""
+        import logging
+
+        caplog.set_level(logging.WARNING, logger="app.services.synexia.plan_dag")
+        plan, called = self._plan(
+            monkeypatch, db_session, {"model": "m", "usage": {}, "response": "I can't do that."}
+        )
+
+        assert plan is not None
+        assert [n.name for n in plan.nodes] != ["fetch_sales", "summarise"]
+        assert any(
+            "no usable step list" in r.getMessage() for r in caplog.records
+        ), f"expected a fallback warning; got {[r.getMessage() for r in caplog.records]}"

@@ -357,6 +357,98 @@ def _provider_headers(provider: LLMProvider) -> dict:
     }
 
 
+_ARRAY_PAYLOAD_KEYS = ("items", "steps", "plan", "result")
+
+
+def _array_schema_payload(parsed):
+    """Extract the caller's array from a reply to an ARRAY schema.
+
+    ``response_format={"type": "json_object"}`` cannot express a bare
+    top-level array, and ``build_llm_payload`` additionally injects the raw
+    schema as a "respond with valid JSON matching this schema" hint — so
+    providers wrap the array in an envelope object instead.  Two live
+    variants have been observed from DeepSeek for plan_dag's step schema:
+
+      * ``{"type": "array", "items": [ ...steps... ]}`` — the model fills
+        the schema template literally (the schema's own keys), and
+      * ``{"type": "array", "plan": [ ...steps... ]}`` — the model keeps
+        ``type`` but names the payload key semantically.
+
+    The wrapper key is therefore not stable, so this accepts a conventional
+    key name, and otherwise any single list-of-objects value in the dict.
+
+    Returns the list, or ``None`` when the reply is not recognisable as an
+    array payload — callers must treat ``None`` as a failure, not as an
+    empty result.
+    """
+    if isinstance(parsed, list):
+        return parsed
+    if not isinstance(parsed, dict):
+        return None
+
+    # Conventional wrapper key (schema-echo "items" or a semantic name).
+    for key in _ARRAY_PAYLOAD_KEYS:
+        value = parsed.get(key)
+        if isinstance(value, list) and (not value or all(isinstance(v, dict) for v in value)):
+            return value
+
+    # Otherwise: exactly one list-of-objects value is unambiguous.
+    lists = [
+        v for v in parsed.values()
+        if isinstance(v, list) and v and all(isinstance(x, dict) for x in v)
+    ]
+    if len(lists) == 1:
+        return lists[0]
+    return None
+
+
+def _merge_schema_response(result: dict, choice: str, schema) -> dict:
+    """Merge a schema-constrained LLM reply into ``result`` in place.
+
+    Implements call_llm's documented contract:
+
+      - ``data`` holds the PARSED value whenever a JSON schema was
+        requested and the provider returned valid JSON.  For an array
+        schema, the provider's envelope is unwrapped so ``data`` is the
+        list the caller asked for (see :func:`_array_schema_payload`).
+      - ``response`` holds the raw text on the plain-text path, and the
+        parsed value as well when that value is not an object (kept for
+        backward compatibility with existing callers).
+      - A dict-shaped reply is additionally spread onto ``result`` itself
+        (legacy behavior — callers read ``result["headline"]`` etc.).
+
+    Top-level ARRAYS are handled explicitly.  They previously fell into the
+    non-dict branch, which set ``response`` but never ``data`` — so the one
+    array-schema caller (``plan_dag``, whose plan is a JSON array of steps)
+    always saw ``data is None``, and the schema-echo envelope produced a
+    dict that was silently not a list either way.  ``data`` is only unwrapped
+    to a list when the REQUESTED schema is an array, so object-schema callers
+    doing ``(result.get("data") or {}).get(...)`` can never receive a list.
+    """
+    try:
+        parsed = json.loads(choice)
+    except (json.JSONDecodeError, TypeError):
+        result["response"] = choice
+        return result
+
+    wants_array = isinstance(schema, dict) and schema.get("type") == "array"
+
+    if isinstance(parsed, dict):
+        result.update(parsed)
+        result["data"] = parsed
+        if wants_array:
+            items = _array_schema_payload(parsed)
+            if items is not None:
+                result["data"] = items
+                result["response"] = items
+    elif wants_array:
+        result["data"] = parsed
+        result["response"] = parsed
+    else:
+        result["response"] = parsed
+    return result
+
+
 @traced_llm_call()
 async def call_llm(
     prompt: str = "",
@@ -604,15 +696,7 @@ async def call_llm(
         }
 
         if has_schema:
-            try:
-                parsed = json.loads(choice)
-                if isinstance(parsed, dict):
-                    result.update(parsed)
-                    result["data"] = parsed
-                else:
-                    result["response"] = parsed
-            except (json.JSONDecodeError, TypeError):
-                result["response"] = choice
+            _merge_schema_response(result, choice, response_json_schema)
         else:
             result["response"] = choice
 

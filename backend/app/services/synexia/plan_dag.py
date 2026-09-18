@@ -7,6 +7,7 @@ The plan is visible to the user (via PlanEditor) and can be approved or
 modified before execution (at the GATE state).
 """
 
+import json
 import logging
 from datetime import datetime
 from typing import Optional
@@ -17,6 +18,70 @@ from sqlalchemy.orm import Session
 from app.models.execution import Plan, PlanNode
 
 logger = logging.getLogger(__name__)
+
+
+def _parse_plan_text(text: str) -> list[dict]:
+    """Parse a raw planner reply (possibly fenced) into a step list.
+
+    Returns ``[]`` when the text is not JSON — the caller decides whether
+    that is fatal or a fallback.
+    """
+    from app.services.llm_service import _array_schema_payload
+
+    cleaned = text.strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json")[1].split("```")[0]
+    elif "```" in cleaned:
+        cleaned = cleaned.split("```")[1].split("```")[0]
+    try:
+        return _array_schema_payload(json.loads(cleaned)) or []
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+
+def _extract_llm_plan_steps(result: dict, default_plan: list[dict]) -> list[dict]:
+    """Return the planner's steps from an ``llm_service`` result dict.
+
+    ``plan_dag`` is the only caller that asks for a TOP-LEVEL array schema.
+    Providers cannot emit a bare array under ``response_format=json_object``,
+    so the reply shows up in one of three shapes:
+
+      * ``data`` is already the step list (provider honoured the array), or
+      * ``data`` is the schema-echo envelope
+        ``{"type": "array", "items": [steps]}`` (what DeepSeek returns), or
+      * ``response`` is raw text — prose or a fenced JSON block.
+
+    ``llm_service._array_schema_payload`` normalises all of the structural
+    shapes; this function adds the text path and, crucially, LOGS the
+    fallback.  A silent fallback here is what let the planner run the
+    generic default plan indefinitely while the only visible symptom was a
+    downstream "dependencies not met" warning.
+    """
+    from app.services.llm_service import _array_schema_payload
+
+    if not isinstance(result, dict):
+        logger.warning(
+            "LLM planner returned %s instead of a result dict — using default plan",
+            type(result).__name__,
+        )
+        return default_plan
+
+    for key in ("data", "response"):
+        value = result.get(key)
+        steps = _array_schema_payload(value)
+        if steps:
+            return steps
+        if isinstance(value, str) and value.strip():
+            steps = _parse_plan_text(value)
+            if steps:
+                return steps
+
+    logger.warning(
+        "LLM planner returned no usable step list (keys=%s) — using default plan. "
+        "Expected the parsed array under 'data' or 'response'.",
+        sorted(result.keys()),
+    )
+    return default_plan
 
 
 def _run_llm_sync(coro):
@@ -236,23 +301,12 @@ Respond with ONLY a JSON array."""
                 endpoint=endpoint,
             ))
 
-            # With response_json_schema, call_llm returns the parsed
-            # value under ``data`` (list for an array schema) — NOT under
-            # ``response``.  Handle both the schema path (list) and the
-            # plain-text path (JSON string).
-            _parsed_plan = result.get("data")
-            if isinstance(_parsed_plan, list) and len(_parsed_plan) > 0:
-                plan_steps = _parsed_plan
-            else:
-                response_text = (result.get("response") or "[]").strip()
-                if "```json" in response_text:
-                    response_text = response_text.split("```json")[1].split("```")[0]
-                elif "```" in response_text:
-                    response_text = response_text.split("```")[1].split("```")[0]
-
-                parsed = json.loads(response_text)
-                if isinstance(parsed, list) and len(parsed) > 0:
-                    plan_steps = parsed
+            # Normalise the reply into a step list.  The provider does not
+            # return a bare top-level array under json_object mode, so the
+            # steps arrive as a parsed list, a schema-echo envelope, or raw
+            # (possibly fenced) text — see _extract_llm_plan_steps, which
+            # also logs loudly when nothing usable comes back.
+            plan_steps = _extract_llm_plan_steps(result, default_plan)
         except Exception as e:
             logger.warning("LLM plan generation failed, using default: %s", e)
             plan_steps = default_plan
