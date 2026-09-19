@@ -152,6 +152,13 @@ class NLAnswerService:
                     freshness_verdict,
                 )
                 window = parse_relative_window(question)
+                # Share the parsed window with candidate retrieval and the
+                # zero-row correction: the same "2026-09-01..2026-10-01" that
+                # decides staleness is what marks a candidate
+                # "NO DATA IN REQUESTED WINDOW" at table level. A source where
+                # only SOME tables are stale must not be answered as a refusal —
+                # that is the correction's job, not the short-circuit's.
+                _window = window
                 verdict = freshness_verdict(self._db, kb_id, window)
                 if verdict and verdict.get("stale"):
                     logger.info(
@@ -207,6 +214,14 @@ class NLAnswerService:
         schema_info: dict | None = None
         schema_text: str | None = None
         _selected_via_toc = False  # track whether Phase A succeeded
+        # The question's relative window ("this month"), parsed once and shared
+        # by the freshness check, candidate coverage annotation and the
+        # zero-row correction. None when the question names no period.
+        _window: tuple | None = None
+        # The catalog TOC and the candidate retrieval for this turn, kept so
+        # the answer can carry provenance about which tables it drew on.
+        _toc_snapshot: list | None = None
+        _retrieval = None
 
         # ── C1b: static route → pin the table before ANY LLM selection ──
         # If the intent resolver hit, load DDL for the pinned table directly
@@ -270,17 +285,66 @@ class NLAnswerService:
             try:
                 from app.services.knowledge_graph.schema_linker import (
                     build_full_toc,
-                    format_toc_text,
+                    format_toc_for_selection,
                     get_selected_tables_ddl,
                 )
+                from app.services.db.table_retrieval import (
+                    candidate_names,
+                    format_candidates_block,
+                    retrieve_for_question,
+                )
                 toc = build_full_toc(self._db, [kb_id])
+                _toc_snapshot = toc
                 if toc:
-                    toc_text = format_toc_text(toc, token_budget=1200)
-                    # Domain scoping: when the catalog has a business-domain map
-                    # and is large enough to need one, narrow the TOC to the
-                    # domains the question points at BEFORE asking the model to
-                    # pick tables. Never destructive — an unusable scope simply
-                    # leaves the full TOC in place.
+                    # The FULL catalog's table names. Selection is validated
+                    # against this, never against a narrowed scope: a question
+                    # can legitimately need a table the scope guessed away, and
+                    # a name that is not in the catalog does not exist.
+                    _catalog_names = {t["table_name"] for t in toc}
+
+                    # ── Deterministic candidate retrieval (the step that was
+                    # missing). Ranks the catalog for THIS question from the
+                    # semantic foundation (names/aliases/domains), verified
+                    # plans and the workload, and annotates each hit with its
+                    # catalog data window. It ORDERS — it never filters, so a
+                    # retrieval miss degrades to a lower rank, not to a lost
+                    # table.
+                    _window = None
+                    try:
+                        from app.services.knowledge_graph.business_context import (
+                            parse_relative_window,
+                        )
+                        _window = parse_relative_window(question)
+                    except Exception:
+                        _window = None
+                    _retrieval = await asyncio.to_thread(
+                        lambda: retrieve_for_question(
+                            self._db, [kb_id], question, toc,
+                            project_id=project_id, window=_window,
+                        )
+                    )
+                    logger.info(
+                        "NLAnswer: candidate retrieval → %d candidates "
+                        "(method=%s, window=%s, uncovered=%s) top=%s",
+                        len(_retrieval.candidates), _retrieval.method,
+                        _retrieval.window, _retrieval.uncovered,
+                        _retrieval.names[:5],
+                    )
+
+                    # Candidate-first surface. The legacy renderer walked the
+                    # catalog ALPHABETICALLY and stopped at a 1,200-token
+                    # budget, so on a 143-table warehouse the model picked from
+                    # 14 tables — all ``_``/``a``-prefixed, none of them
+                    # business tables. Ranked candidates are now rendered in
+                    # full before anything else, and the rest compactly.
+                    toc_text = format_toc_for_selection(toc, _retrieval.names)
+
+                    # Domain match: EVIDENCE, never an exclusion. It used to
+                    # narrow ``toc`` without re-rendering ``toc_text`` (so the
+                    # model never saw the narrowed set) and, measured live, it
+                    # scoped a Chinese contract question into "User
+                    # Authentication and Permissions". Retrieval already boosts
+                    # matched domains; here it only labels.
                     if getattr(settings, "KG_DOMAIN_SCOPING_ENABLED", False):
                         try:
                             from app.services.knowledge_graph.domain_discovery import (
@@ -293,60 +357,48 @@ class NLAnswerService:
                                 [kb_id],
                                 question,
                             )
-                            if scoped:
-                                narrowed = [
-                                    t for t in toc if t["table_name"] in scoped
-                                ]
-                                if narrowed:
-                                    logger.info(
-                                        "NLAnswer: domain scoping %s → %d/%d tables",
-                                        [d.get("name_en") for d in matched],
-                                        len(narrowed),
-                                        len(toc),
-                                    )
-                                    toc = narrowed
-                                    domains_label = ", ".join(
-                                        f"{d.get('name_en')}"
-                                        + (f" / {d['name_zh']}" if d.get("name_zh") else "")
-                                        for d in matched
-                                    )
-                                    toc_text = (
-                                        f"Matched business domains: {domains_label}\n"
-                                        + toc_text
-                                    )
-                        except Exception as e:
-                            logger.warning("NLAnswer: domain scoping skipped: %s", e)
-                    # SemanticStore retrieval: hand the selector the small
-                    # candidate set the semantic foundation already knows about
-                    # for THIS question (names + why they matched). Evidence,
-                    # not a verdict — the model still picks. Cheap and safe:
-                    # skipped for small catalogs where the whole TOC fits.
-                    if getattr(settings, "SEMANTIC_STORE_ENABLED", True) and len(toc) > 40:
-                        try:
-                            from app.services.db.semantic_store import (
-                                format_retrieval_hint,
-                                get_semantic_store,
-                            )
-
-                            _hits = await asyncio.to_thread(
-                                lambda: get_semantic_store(
-                                    self._db, [kb_id], project_id=project_id
-                                ).rank_relations(question, k=12)
-                            )
-                            _hint = format_retrieval_hint(_hits)
-                            if _hint:
-                                toc_text = f"{_hint}\n\n{toc_text}"
+                            if scoped and matched:
+                                domains_label = ", ".join(
+                                    f"{d.get('name_en')}"
+                                    + (f" / {d['name_zh']}" if d.get("name_zh") else "")
+                                    for d in matched
+                                )
                                 logger.info(
-                                    "NLAnswer: semantic retrieval → %d candidate tables %s",
-                                    len(_hits),
-                                    [h.table_name for h in _hits[:5]],
+                                    "NLAnswer: domain scoping %s → %d/%d tables "
+                                    "(annotation only)",
+                                    [d.get("name_en") for d in matched],
+                                    len(scoped),
+                                    len(toc),
+                                )
+                                toc_text = (
+                                    f"Matched business domains: {domains_label}\n"
+                                    + toc_text
                                 )
                         except Exception as e:
-                            logger.warning("NLAnswer: semantic retrieval skipped: %s", e)
+                            logger.warning("NLAnswer: domain scoping skipped: %s", e)
+
+                    # Retrieval evidence last so it sits adjacent to the
+                    # question and cannot be pushed out of the prompt.
+                    _block = format_candidates_block(_retrieval)
+                    if _block:
+                        toc_text = f"{_block}\n\n{toc_text}"
+
                     # Ask the LLM which tables are relevant
                     selected_names = await self._select_tables_from_toc(
                         question, toc_text, len(toc), endpoint=endpoint,
+                        known_names=_catalog_names,
                     )
+                    if not selected_names and _retrieval.candidates:
+                        # The model named no table that exists. Use the
+                        # deterministic candidate set instead of passing the
+                        # invented names through — the passthrough is how
+                        # "table 'contracts' doesn't exist" reached execution.
+                        selected_names = candidate_names(_retrieval)
+                        logger.info(
+                            "NLAnswer: selection contained no existing table — "
+                            "falling back to retrieval top-%d %s",
+                            len(selected_names), selected_names,
+                        )
                     if selected_names:
                         logger.info(
                             "NLAnswer: TOC phase selected %d tables: %s",
@@ -627,7 +679,7 @@ class NLAnswerService:
             try:
                 from app.services.knowledge_graph.schema_linker import (
                     build_full_toc,
-                    format_toc_text,
+                    format_toc_for_selection,
                     get_selected_tables_ddl,
                 )
                 # C2 (2026-08-26): probe table coverage so the re-selection
@@ -640,16 +692,18 @@ class NLAnswerService:
                 _probe_note = ""
                 if _probe_names:
                     try:
-                        _probe_counts = await _probe_table_counts(
-                            self._db, kb_id, _probe_names[:5],
+                        _probe_cov = await _probe_table_coverage(
+                            self._db, kb_id, _probe_names[:5], window=_window,
                         )
-                        if _probe_counts:
+                        if _probe_cov:
                             _probe_note = (
-                                " Table coverage probe (live COUNT(*)): "
+                                " Live coverage probe (bounded existence test, "
+                                "not a COUNT — safe on views): "
                                 + ", ".join(
-                                    f"{t}={c}" for t, c in _probe_counts.items()
+                                    f"{t}: {c}" for t, c in _probe_cov.items()
                                 )
-                                + ". Prefer tables with non-zero counts."
+                                + ". Use a table reported as empty or without "
+                                "data in the window only if no alternative exists."
                             )
                     except Exception:
                         _probe_note = ""
@@ -663,12 +717,41 @@ class NLAnswerService:
                 )
                 toc = build_full_toc(self._db, [kb_id])
                 if toc:
-                    toc_text = format_toc_text(toc, token_budget=1200)
+                    # Same retrieval stage as the first pass. The correction
+                    # round is where a ranked candidate set matters most: the
+                    # failed SQL already names tables to avoid, so the model
+                    # needs a bounded, evidence-carrying alternative surface
+                    # rather than the alphabetical head of the catalog.
+                    from app.services.db.table_retrieval import (
+                        candidate_names as _cand_names,
+                        format_candidates_block as _fmt_block,
+                        retrieve_for_question as _retrieve,
+                    )
+
+                    _r2 = await asyncio.to_thread(
+                        lambda: _retrieve(self._db, [kb_id], question, toc,
+                                          window=_window)
+                    )
+                    toc_text = format_toc_for_selection(toc, _r2.names)
+                    _b2 = _fmt_block(_r2)
+                    if _b2:
+                        toc_text = f"{_b2}\n\n{toc_text}"
                     selected_names = await self._select_tables_from_toc(
                         question, toc_text, len(toc),
                         error_context=failed_context,
                         endpoint=endpoint,
+                        known_names={t["table_name"] for t in toc},
                     )
+                    if not selected_names and _r2.candidates:
+                        selected_names = [
+                            n for n in _cand_names(_r2)
+                            if n not in set(_extract_table_names(sql))
+                        ] or _cand_names(_r2)
+                        logger.info(
+                            "NLAnswer: zero-row correction named no existing "
+                            "table — using retrieval top-%d %s",
+                            len(selected_names), selected_names,
+                        )
                     if selected_names:
                         logger.info(
                             "NLAnswer: zero-row correction selected %d tables: %s",
@@ -852,7 +935,23 @@ class NLAnswerService:
             # Present only when the SQL that ran contradicted the question
             # (wrong period / single scalar for a trend request). Callers can
             # qualify the answer instead of presenting it as authoritative.
-            **({"contract_violations": _contract.violations} if not _contract.ok else {}),
+            **({"contract_violations": _contract.violations}
+               if not _contract.ok else {}),
+            # Provenance: which source, which SQL (fingerprinted), which tables
+            # it actually touched, the period asked for and the freshest date
+            # the catalog holds for those tables. Enough to audit an answer
+            # after the fact without re-running it — and enough to tell a
+            # "genuinely zero" answer apart from an "answered from the wrong
+            # window" one.
+            "provenance": _build_provenance(
+                kb_id=kb_id,
+                source_name=exec_result.get("source", {}).get("name"),
+                sql=exec_result.get("sql"),
+                tables=_extract_table_names(exec_result.get("sql") or ""),
+                window=_window,
+                catalog=_toc_snapshot,
+                retrieval=None if _retrieval is None else _retrieval.as_dict(),
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -925,11 +1024,23 @@ class NLAnswerService:
         total_tables: int,
         error_context: str | None = None,
         endpoint: LLMEndpoint | None = None,
+        known_names: set[str] | None = None,
     ) -> list[str]:
         """Phase A of two-phase NL2SQL: ask the LLM to pick relevant tables
         from the full table-of-contents.
 
-        Returns a list of table names, or [] on failure.
+        Returns a list of table names that EXIST, or [] when the model named
+        nothing real. Every returned name is validated against ``known_names``
+        (the catalog) when the caller supplies it.
+
+        The empty return is load-bearing. This used to fall back to returning
+        the model's raw list when none of its names matched the catalog
+        ("LLM may use full qualified names"), which is exactly how
+        ``['contract_execution', 'contract', 'contract_execution_detail']``
+        — three names that do not exist — reached SQL generation on a live
+        warehouse and produced "table 'contracts' doesn't exist". A selection
+        that names no existing table is an EMPTY selection; the caller decides
+        what to do about it.
         """
         system_msg = (
             "You are a database expert. The user will ask a data question. "
@@ -968,11 +1079,24 @@ class NLAnswerService:
                 text = "\n".join(lines).strip()
             selected = json.loads(text)
             if isinstance(selected, list) and all(isinstance(s, str) for s in selected):
-                # Validate: table names must exist in the TOC
+                if known_names is not None:
+                    # Validate against the CATALOG, not against the rendered
+                    # text: a compact/truncated render must never be the reason
+                    # a real table is rejected, and a name absent from the
+                    # catalog is not queryable however plausible it sounds.
+                    validated = [s for s in selected if s in known_names]
+                    if not validated:
+                        logger.warning(
+                            "NLAnswer: table selection named no existing table "
+                            "(%s) — treating as empty selection",
+                            selected[:4],
+                        )
+                    return validated[:4]
+                # Validation: table names must exist in the TOC
                 known_names = set()
                 for line in toc_text.split("\n"):
                     line = line.strip()
-                    if line and not line.startswith("--"):
+                    if line and not line.startswith(("--", "#", "Matched", "##")):
                         # First word (before comma or parenthesis) is the table name
                         name = line.split(",")[0].split("(")[0].strip()
                         if name:
@@ -1356,33 +1480,149 @@ def _extract_table_names(sql: str) -> list[str]:
     return out
 
 
-async def _probe_table_counts(db: Session, kb_id: str, table_names: list[str], timeout_s: int = 3) -> dict:
-    """Run ``SELECT COUNT(*)`` per table (safe identifiers only).
+def _build_provenance(
+    *,
+    kb_id: str,
+    source_name: str | None,
+    sql: str | None,
+    tables: list[str],
+    window: tuple | None,
+    catalog: list | None,
+    retrieval: dict | None,
+) -> dict:
+    """Audit trail for one answer: source, SQL fingerprint, tables, coverage.
 
-    Returns ``{table: count_str}``; empty dict on any failure. Used by the
-    zero-row / degenerate correction so the re-selection LLM can AVOID
-    tables that are provably empty.
+    Deliberately records the CATALOG window of the tables the SQL actually
+    touched next to the window the question asked for. That pairing is what
+    lets a reader tell "the warehouse genuinely has no rows for this period"
+    apart from "we answered out of a table whose data stops a year earlier" —
+    the distinction the live failure turned on, and which neither the SQL nor
+    the prose carried.
     """
-    counts: dict[str, str] = {}
+    import hashlib
+
+    normalised = " ".join((sql or "").split())
+    fingerprint = (
+        hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]
+        if normalised
+        else ""
+    )
+    cov: dict[str, dict] = {}
+    for t in tables:
+        entry = next((c for c in (catalog or []) if c.get("table_name") == t), None)
+        if entry is not None:
+            cov[t] = {
+                "min": entry.get("min_date") or "",
+                "max": entry.get("max_date") or "",
+                "date_column": entry.get("date_column") or "",
+            }
+    return {
+        "source_id": kb_id,
+        "source_name": source_name,
+        "sql_fingerprint": fingerprint,
+        "tables": list(tables),
+        "requested_window": [str(window[0]), str(window[1])] if window else None,
+        "table_coverage": cov,
+        "retrieval_method": (retrieval or {}).get("method"),
+        "candidates_considered": (retrieval or {}).get("candidate_count"),
+    }
+
+
+async def _probe_table_coverage(
+    db: Session,
+    kb_id: str,
+    table_names: list[str],
+    window: tuple | None = None,
+    timeout_s: int = 8,
+) -> dict:
+    """Cheap, dialect-correct coverage probe for the re-selection step.
+
+    Two defects this replaces, both measured on the live stack:
+
+    1. **It was MySQL-only.** The old probe built ``SELECT COUNT(*) AS cnt FROM
+       `t```  — backticks hardcoded. Probed against every database KB in the
+       stack it returned {} for all five PostgreSQL sources (the server reports
+       a syntax error at the identifier) and worked only for MySQL/MariaDB, so
+       the "+1 zero-row correction" that depends on this evidence was dead on
+       Postgres, MSSQL, Oracle and SQLite. Identifiers now go through
+       ``quote_ident(name, dialect)``, the same helper every connector uses.
+    2. **It asked the most expensive question available.** ``COUNT(*)`` on a
+       view measured 17.7 s (``erp_v_contract``) against a 3 s budget, and
+       ``erp_v_contract_execution`` needed 150 s and lost the connection —
+       i.e. the probe reliably timed out exactly where the correction was most
+       needed. Coverage is now narrowed to a bounded existence test:
+       ``SELECT 1 … WHERE <date> >= <start> AND <date> < <end> LIMIT 1`` when
+       the catalog knows a date column, else ``SELECT 1 … LIMIT 1``. `LIMIT 1`
+       on the same view measured 0.42 s.
+
+    Returns ``{table: verdict}`` with verdicts the model can act on directly:
+    ``"empty"`` / ``"has rows"`` / ``"no data in window"`` / ``"data in window"``.
+    """
+    out: dict[str, str] = {}
+    if not table_names:
+        return out
+
+    from app.models.knowledge_base import KnowledgeBase
+    from app.models.knowledge_catalog import KBTableMeta
+    from app.services.db.base import quote_ident
     from app.services.db.query_service import QueryService
+
+    kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
+    dialect = (getattr(kb, "db_type", "") or "mysql").lower()
+    if dialect == "postgresql":
+        dialect = "postgres"
+
+    # Date column per table, from the catalog — no extra introspection query
+    # against the user's warehouse.
+    date_cols: dict[str, str] = {}
+    try:
+        for row in (
+            db.query(KBTableMeta.table_name, KBTableMeta.coverage_json)
+            .filter(KBTableMeta.kb_id == kb_id)
+            .all()
+        ):
+            cov = row[1] or {}
+            if cov.get("date_column"):
+                date_cols[row[0]] = cov["date_column"]
+    except Exception as e:
+        logger.debug("NLAnswer: coverage date columns unavailable: %s", e)
 
     qsvc = QueryService(db)
     for name in table_names:
         if not _SAFE_IDENT_RE.match(name):
             continue
         try:
+            quoted = quote_ident(name, dialect)
+        except ValueError:
+            continue
+        where = ""
+        if window:
+            dcol = date_cols.get(name)
+            if dcol and _SAFE_IDENT_RE.match(dcol):
+                try:
+                    qd = quote_ident(dcol, dialect)
+                except ValueError:
+                    qd = None
+                if qd:
+                    start, end = window
+                    where = f" WHERE {qd} >= '{start}' AND {qd} < '{end}'"
+        stmt = f"SELECT 1 FROM {quoted}{where} LIMIT 1"
+        try:
             res = await asyncio.wait_for(
-                asyncio.to_thread(
-                    qsvc.execute, kb_id, f"SELECT COUNT(*) AS cnt FROM `{name}`"
-                ),
+                asyncio.to_thread(qsvc.execute, kb_id, stmt),
                 timeout=timeout_s,
             )
-            rows = (res or {}).get("rows") or []
-            if rows and isinstance(rows[0], dict):
-                counts[name] = str(rows[0].get("cnt", "?"))
         except Exception as e:
-            logger.debug("NLAnswer: probe COUNT(%s) failed (non-fatal): %s", name, e)
-    return counts
+            logger.debug("NLAnswer: coverage probe failed (non-fatal) %s: %s", name, e)
+            continue
+        if not (res or {}).get("success"):
+            continue
+        rows = (res or {}).get("rows") or []
+        if rows:
+            out[name] = "data in window" if where else "has rows"
+        else:
+            out[name] = "no data in window" if where else "empty"
+    return out
 
 
 def _is_degenerate_result(rows: list) -> bool:

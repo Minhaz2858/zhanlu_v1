@@ -518,7 +518,7 @@ async def _describe_schema(
                         _toc_section = ""
                         try:
                             from app.services.knowledge_graph.schema_linker import (
-                                build_full_toc, format_toc_text,
+                                build_full_toc, format_toc_for_selection,
                             )
                             toc = build_full_toc(db, [kb_id])
                             if toc and len(toc) > len(candidate_tables):
@@ -527,7 +527,7 @@ async def _describe_schema(
                                     "FULL TABLE CATALOG (ALL tables in this database):\n"
                                     "If none of the tables above contain the data you need, "
                                     "check this catalog for alternatives.\n"
-                                    + format_toc_text(toc, token_budget=1000)
+                                    + format_toc_for_selection(toc)
                                 )
                         except Exception:
                             pass
@@ -552,7 +552,7 @@ async def _describe_schema(
                 _toc_section = ""
                 try:
                     from app.services.knowledge_graph.schema_linker import (
-                        build_full_toc, format_toc_text,
+                        build_full_toc, format_toc_for_selection,
                     )
                     toc = build_full_toc(db, [kb_id])
                     if toc and len(toc) > 8:
@@ -561,7 +561,7 @@ async def _describe_schema(
                             "FULL TABLE CATALOG (ALL tables in this database):\n"
                             "If none of the tables above contain the data you need, "
                             "check this catalog for alternatives.\n"
-                            + format_toc_text(toc, token_budget=1000)
+                            + format_toc_for_selection(toc)
                         )
                 except Exception:
                     pass
