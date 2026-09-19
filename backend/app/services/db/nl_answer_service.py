@@ -111,6 +111,56 @@ class NLAnswerService:
         skip_narrate: bool = False,
         agent_name: str | None = None,
     ) -> dict:
+        """Public entry point: gate + answer + readiness disclosure.
+
+        Every caller goes through here, so the readiness gate cannot be
+        bypassed by a second entry point (the previous design had one path in
+        ``db_tools`` and another in the nl2sql router, only one of which asked).
+        """
+        result = await self._answer_impl(
+            kb_id,
+            question,
+            resolved_policy=resolved_policy,
+            project_id=project_id,
+            endpoint=endpoint,
+            skip_narrate=skip_narrate,
+            agent_name=agent_name,
+        )
+        return self._attach_readiness_directive(result, kb_id)
+
+    def _attach_readiness_directive(self, result, kb_id: str):
+        """Attach a limited-source disclosure to a successful answer."""
+        try:
+            from app.services.db import readiness as _src_readiness
+
+            verdict = _src_readiness.evaluate_source(self._db, kb_id)
+            if not verdict.limited or not verdict.disclosure:
+                return result
+            if isinstance(result, dict):
+                result.setdefault("disclosure", verdict.disclosure)
+                result.setdefault(
+                    "source_readiness",
+                    {
+                        "state": verdict.state,
+                        "code": verdict.code,
+                        "limited": True,
+                        "disclosure": verdict.disclosure,
+                    },
+                )
+        except Exception:
+            logger.debug("NLAnswer: readiness disclosure skipped", exc_info=True)
+        return result
+
+    async def _answer_impl(
+        self,
+        kb_id: str,
+        question: str,
+        resolved_policy=None,
+        project_id: str | None = None,
+        endpoint: LLMEndpoint | None = None,
+        skip_narrate: bool = False,
+        agent_name: str | None = None,
+    ) -> dict:
         """Return a structured + prose answer for a user question.
 
         ``resolved_policy`` is an optional
@@ -140,6 +190,30 @@ class NLAnswerService:
                 "error": "Access to this data source is restricted.",
                 "source_id": kb_id,
             }
+
+        # 0-pre. Source readiness gate. This is the last gate before planning,
+        # retrieval and SQL generation, so it is the one that matters: a source
+        # whose structure was never catalogued, or whose preparation failed or
+        # stalled, has no trustworthy table/column knowledge to plan against.
+        # Refusing here (with a business-language disclosure the caller passes
+        # through) replaces the old behaviour of answering from whatever the
+        # live introspection happened to return.
+        #
+        # A partially prepared source is allowed through and its limitation is
+        # attached to the result for the caller to disclose.
+        from app.services.db import readiness as _src_readiness
+
+        _readiness, _refusal = _src_readiness.check_source(self._db, kb_id)
+        if _refusal:
+            _refusal["source_id"] = kb_id
+            return _refusal
+
+        # Turn-scoped artifacts the grounded plan reads. Initialised here so the
+        # plan can be built on EVERY path (TOC, linker, M-Schema) without a
+        # branch-specific variable being undefined.
+        _window: tuple | None = None
+        _toc_snapshot: list | None = None
+        _catalog_names: set[str] = set()
 
         # 0. Freshness short-circuit (deterministic, ~1s, no SQL): if the
         # question's relative window starts after every probed table's
@@ -523,6 +597,53 @@ class NLAnswerService:
             schema_info = _filter_schema_info(schema_info, resolved_policy, kb_id)
             schema_text = _format_schema_for_prompt(schema_info)
 
+        # 1c. GROUNDED PLAN (P3). One record of what this turn may answer with,
+        # assembled from artifacts already computed above (catalog, retrieval,
+        # policy, dialect layer, capability profile). This is NOT a second
+        # pipeline: no extra LLM call, no extra data query.
+        #
+        # Its job is `unsupported_slots` — the parts of the question the selected
+        # tables cannot support. They are named to the SQL model BEFORE it writes
+        # SQL (so it cannot invent a column for them), carried into the result
+        # set, and disclosed to the reader. The measured failure this replaces: a
+        # five-part question answered with four figures and a 0.0, where the 0.0
+        # was an unresolved join presented as data.
+        _grounded_plan = None
+        _grounding = None
+        try:
+            from app.services.db import grounding as _grounding
+            from app.services.db.plan_memory import question_signature as _q_sig
+
+            _denied: list[str] = []
+            if (
+                resolved_policy is not None
+                and getattr(resolved_policy, "has_policies", False)
+                and _catalog_names
+            ):
+                _denied = sorted(
+                    _catalog_names - {t.get("table_name") for t in (schema_info or {}).get("tables") or []}
+                )
+            _grounded_plan = _grounding.build_grounded_plan(
+                db=self._db,
+                kb=schema_svc._load_kb(kb_id),
+                question=question,
+                window=_window,
+                schema_info=schema_info,
+                catalog=_toc_snapshot,
+                retrieval=_retrieval,
+                authorized_tables=_catalog_names or None,
+                denied_tables=_denied,
+                intent_signature=_q_sig(question),
+            )
+            logger.info(
+                "NLAnswer: grounded plan for KB %s — tables=%d dialect=%s "
+                "slots=%d unsupported=%s",
+                kb_id, len(_grounded_plan.tables), _grounded_plan.dialect,
+                len(_grounded_plan.evidence), _grounded_plan.unsupported_labels(),
+            )
+        except Exception as e:
+            logger.debug("NLAnswer: grounded plan unavailable: %s", e, exc_info=True)
+
         # 2. Text → SQL
         # A verified plan for this same question on this same KB is injected as
         # guidance: the tables, columns and grouping that answered it last time
@@ -549,10 +670,16 @@ class NLAnswerService:
                     )
             except Exception as e:
                 logger.debug("NLAnswer: plan memory lookup skipped: %s", e)
+        _unsupported_guidance = ""
+        if _grounded_plan is not None and _grounding is not None:
+            _unsupported_guidance = _grounding.unsupported_directive(_grounded_plan)
+        _sql_guidance = "\n\n".join(
+            part for part in (_plan_guidance, _unsupported_guidance) if part
+        )
         try:
             sql = await self._text_to_sql(
                 question, schema_info, schema_text=schema_text, project_id=project_id,
-                endpoint=endpoint, extra_guidance=_plan_guidance or None,
+                endpoint=endpoint, extra_guidance=_sql_guidance or None,
             )
         except Exception as e:
             logger.warning("NLAnswer: text→SQL failed: %s", e)
@@ -854,6 +981,8 @@ class NLAnswerService:
                 _fix_guidance = f"[Constraint] {_contract.feedback(_dim_candidates)}"
                 if _plan_guidance:
                     _fix_guidance += f"\n\n{_plan_guidance}"
+                if _unsupported_guidance:
+                    _fix_guidance += f"\n\n{_unsupported_guidance}"
                 sql_c = await self._text_to_sql(
                     question, schema_info, schema_text=schema_text,
                     project_id=project_id, endpoint=endpoint,
@@ -885,6 +1014,50 @@ class NLAnswerService:
                 logger.warning(
                     "NLAnswer: answer-contract retry failed (non-fatal): %s", e,
                 )
+
+        # ── 3c-bis. CANONICAL RESULT SET (P3) ────────────────────────────
+        # The plan is completed from the SQL that will actually run (joins,
+        # filters, grain, ordering, top-N), then the executor's result is
+        # wrapped into the shape narration consumes. Slots the query could not
+        # support are re-checked here against the RESULT — a constant zero whose
+        # value crosses a join the catalog cannot vouch for becomes a disclosed
+        # unsupported slot instead of a reported 0.0.
+        _crs = None
+        _crv = _build_provenance(
+            kb_id=kb_id,
+            source_name=exec_result.get("source", {}).get("name"),
+            sql=exec_result.get("sql"),
+            tables=_extract_table_names(exec_result.get("sql") or ""),
+            window=_window,
+            catalog=_toc_snapshot,
+            retrieval=None if _retrieval is None else _retrieval.as_dict(),
+        )
+        if _grounded_plan is not None and _grounding is not None:
+            try:
+                _grounding.enrich_plan_from_sql(_grounded_plan, sql, db=self._db)
+                _crs = _grounding.build_canonical_result_set(
+                    plan=_grounded_plan,
+                    exec_result=exec_result,
+                    sql=sql,
+                    schema_info=schema_info,
+                    catalog=_toc_snapshot,
+                    contract=_contract,
+                    provenance=_crv,
+                )
+                _crs_violations = _crs.validate()
+                if _crs_violations:
+                    logger.warning(
+                        "NLAnswer: canonical result set inconsistent: %s", _crs_violations
+                    )
+                logger.info(
+                    "NLAnswer: canonical result set — rows=%d complete=%s freshness=%s "
+                    "coverage=%s unsupported=%s",
+                    _crs.row_count, _crs.complete, _crs.freshness.get("state"),
+                    {t: c.get("state") for t, c in _crs.available_coverage.items()},
+                    _crs.unsupported_labels(),
+                )
+            except Exception as e:
+                logger.warning("NLAnswer: canonical result set failed (non-fatal): %s", e)
 
         # ── 3d. Remember the plan that worked ────────────────────────────
         # Only a VERIFIED answer becomes a plan. Learning from an unchecked one
@@ -925,15 +1098,55 @@ class NLAnswerService:
         # narrate ever sees), so this call is pure duplication on those turns.
         if skip_narrate:
             logger.info("NLAnswer: skipping narrate LLM call (caller synthesizes)")
-            answer_text = _fallback_narrative(question, exec_result)
+            answer_text = _fallback_narrative(question, exec_result, crs=_crs)
         else:
             try:
-                answer_text = await self._narrate(question, exec_result, endpoint=endpoint)
+                answer_text = await self._narrate(
+                    question, exec_result, endpoint=endpoint, crs=_crs
+                )
             except Exception as e:
                 logger.debug("NLAnswer: narrate failed (non-fatal): %s", e)
                 # If narration fails, fall back to a tiny template so the
                 # caller still gets a useful string.
-                answer_text = _fallback_narrative(question, exec_result)
+                answer_text = _fallback_narrative(question, exec_result, crs=_crs)
+
+        # 4b. The prose is checked against the result set it was given. Two
+        # failure modes are caught here, both deterministic:
+        #   * a figure stated for a slot the result does not support (an
+        #     unsupported slot answered with 0 or with a number from nowhere);
+        #   * a figure the rows never contained (the existing grounding rule —
+        #     see app/services/db/answer_grounding.py, applied by the caller's
+        #     guardrail for the agent's own final text).
+        if _crs is not None and _crs.unsupported_slots:
+            try:
+                from app.services.db import grounding as _grounding2
+
+                _claims = _grounding2.check_narrative_against_result(answer_text, _crs)
+                if _claims:
+                    logger.info(
+                        "NLAnswer: narration claimed unsupported data %s — rewriting", _claims
+                    )
+                    try:
+                        answer_text = await self._narrate(
+                            question,
+                            exec_result,
+                            endpoint=endpoint,
+                            crs=_crs,
+                            correction=_grounding2.rewrite_instruction(_claims, _crs),
+                        )
+                    except Exception as e:
+                        logger.debug("NLAnswer: corrective narrate failed: %s", e)
+                    _claims2 = _grounding2.check_narrative_against_result(answer_text, _crs)
+                    if _claims2:
+                        # Still claiming it: state the limitation ourselves rather
+                        # than publish a figure the data does not support.
+                        logger.warning(
+                            "NLAnswer: narration still claimed unsupported data "
+                            "after the rewrite — appending the disclosure"
+                        )
+                        answer_text = f"{answer_text}\n\n{_crs.disclosure}"
+            except Exception as e:
+                logger.debug("NLAnswer: narrative check skipped: %s", e)
 
         _na_rows = exec_result.get("rows", [])
         if _na_rows and isinstance(_na_rows[0], dict):
@@ -965,15 +1178,23 @@ class NLAnswerService:
             # after the fact without re-running it — and enough to tell a
             # "genuinely zero" answer apart from an "answered from the wrong
             # window" one.
-            "provenance": _build_provenance(
-                kb_id=kb_id,
-                source_name=exec_result.get("source", {}).get("name"),
-                sql=exec_result.get("sql"),
-                tables=_extract_table_names(exec_result.get("sql") or ""),
-                window=_window,
-                catalog=_toc_snapshot,
-                retrieval=None if _retrieval is None else _retrieval.as_dict(),
+            "provenance": _crv,
+            # ── P3 contracts (added 2026-09-20) ───────────────────────────
+            # `plan` is what the platform decided it could answer, including the
+            # slots it could not support. `result_set` is the canonical shape
+            # narration consumed. Both are additive: every key above is
+            # unchanged, so existing callers keep working (see
+            # _legacy_result_view for the adapter contract).
+            **(
+                {
+                    "plan": _grounded_plan.to_dict(),
+                    "result_set": _crs.to_dict(),
+                    "unsupported_slots": list(_crs.unsupported_slots),
+                }
+                if (_grounded_plan is not None and _crs is not None)
+                else {}
             ),
+            **({"disclosure": _crs.disclosure} if (_crs is not None and _crs.disclosure) else {}),
         }
 
     # ------------------------------------------------------------------
@@ -1305,25 +1526,68 @@ class NLAnswerService:
         return sql, False
 
     async def _narrate(
-        self, question: str, exec_result: dict, endpoint: LLMEndpoint | None = None
+        self,
+        question: str,
+        exec_result: dict,
+        endpoint: LLMEndpoint | None = None,
+        crs=None,
+        correction: str | None = None,
     ) -> str:
-        """Ask the LLM to narrate the rows into a natural-language answer."""
-        rows = exec_result.get("rows", [])
-        sql = exec_result.get("sql", "")
+        """Ask the LLM to narrate the result into a natural-language answer.
+
+        When ``crs`` (a CanonicalResultSet) is supplied, narration consumes the
+        canonical shape ONLY: its rows, its units, its coverage and freshness,
+        its warnings, and an explicit statement of which parts of the question
+        the data cannot support. The model is not given the chance to invent a
+        column for an unsupported slot, and it is told never to write 0 for one.
+
+        ``correction`` is set on a rewrite after the prose claimed a figure the
+        result set does not support (see ``grounding.check_narrative_against_result``).
+        """
+        rows = (crs.rows if crs is not None else exec_result.get("rows", [])) or []
+        sql = (exec_result.get("sql") if crs is None else exec_result.get("sql")) or ""
         # Keep the prompt small: cap rows sent to the LLM.
         preview = rows[:50]
+
+        if crs is None:
+            body = (
+                f"Question: {question}\n"
+                f"SQL: {sql}\n"
+                f"Rows ({len(rows)} total, showing up to 50):\n"
+                f"{json.dumps(preview, default=str, ensure_ascii=False)}\n\n"
+                "Answer in the user's language. Cite column names where helpful."
+            )
+        else:
+            from app.services.db import grounding as _grounding
+
+            scope = crs.requested_coverage or {}
+            coverage = "; ".join(
+                f"{table}: {cov.get('min') or '?'}..{cov.get('max') or '?'} ({cov.get('state')})"
+                for table, cov in list(crs.available_coverage.items())[:6]
+            )
+            body = (
+                "Question: " + question + "\n"
+                "SQL: " + sql + "\n"
+                "Columns: " + json.dumps(crs.columns, ensure_ascii=False) + "\n"
+                + (f"Units: {json.dumps(crs.units, ensure_ascii=False)}\n" if crs.units else "")
+                + (
+                    "Period asked about: " + json.dumps(scope, ensure_ascii=False) + "\n"
+                    if scope else ""
+                )
+                + (f"Data actually available: {coverage}\n" if coverage else "")
+                + f"Freshness: {crs.freshness.get('state')}"
+                + (f" (as of {crs.freshness.get('as_of')})" if crs.freshness.get("as_of") else "")
+                + "\n"
+                + f"Rows ({crs.row_count} total, showing up to 50):\n"
+                + json.dumps(preview, default=str, ensure_ascii=False) + "\n\n"
+                + _grounding.narrate_directive(crs)
+                + "\n\nAnswer in the user's language. Cite column names where helpful."
+            )
+        if correction:
+            body = f"{correction}\n\n{body}"
         messages = [
             {"role": "system", "content": _NARRATE_SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": (
-                    f"Question: {question}\n"
-                    f"SQL: {sql}\n"
-                    f"Rows ({len(rows)} total, showing up to 50):\n"
-                    f"{json.dumps(preview, default=str, ensure_ascii=False)}\n\n"
-                    "Answer in the user's language. Cite column names where helpful."
-                ),
-            },
+            {"role": "user", "content": body},
         ]
         return await _chat(messages, temperature=0.2, endpoint=endpoint, max_tokens=4096)
 
@@ -1573,8 +1837,9 @@ async def _probe_table_coverage(
        ``erp_v_contract_execution`` needed 150 s and lost the connection —
        i.e. the probe reliably timed out exactly where the correction was most
        needed. Coverage is now narrowed to a bounded existence test:
-       ``SELECT 1 … WHERE <date> >= <start> AND <date> < <end> LIMIT 1`` when
-       the catalog knows a date column, else ``SELECT 1 … LIMIT 1``. `LIMIT 1`
+       ``SELECT 1 … WHERE <date> >= <start> AND <date> < <end>`` capped at one
+       row in the SOURCE'S pagination syntax when the catalog knows a date
+       column, else the same probe without a window. The row cap matters:
        on the same view measured 0.42 s.
 
     Returns ``{table: verdict}`` with verdicts the model can act on directly:
@@ -1586,13 +1851,21 @@ async def _probe_table_coverage(
 
     from app.models.knowledge_base import KnowledgeBase
     from app.models.knowledge_catalog import KBTableMeta
-    from app.services.db.base import quote_ident
+    from app.services.db.capability_probe import profile_for_kb
     from app.services.db.query_service import QueryService
 
     kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == kb_id).first()
-    dialect = (getattr(kb, "db_type", "") or "mysql").lower()
-    if dialect == "postgresql":
-        dialect = "postgres"
+    # The source's OWN capability profile decides the dialect. This used to be
+    # ``(kb.db_type or "mysql")`` — a silent default that made an unidentifiable
+    # source get MySQL syntax. No profile ⇒ skip the probe rather than author SQL
+    # for a dialect we have not identified.
+    profile = profile_for_kb(db, kb) if kb is not None else None
+    if profile is None:
+        logger.debug(
+            "NLAnswer: table-coverage probe skipped — no dialect profile for source %s",
+            kb_id,
+        )
+        return out
 
     # Date column per table, from the catalog — no extra introspection query
     # against the user's warehouse.
@@ -1614,7 +1887,7 @@ async def _probe_table_coverage(
         if not _SAFE_IDENT_RE.match(name):
             continue
         try:
-            quoted = quote_ident(name, dialect)
+            quoted = profile.quote_ident(name)
         except ValueError:
             continue
         where = ""
@@ -1622,13 +1895,14 @@ async def _probe_table_coverage(
             dcol = date_cols.get(name)
             if dcol and _SAFE_IDENT_RE.match(dcol):
                 try:
-                    qd = quote_ident(dcol, dialect)
+                    qd = profile.quote_ident(dcol)
                 except ValueError:
                     qd = None
                 if qd:
                     start, end = window
                     where = f" WHERE {qd} >= '{start}' AND {qd} < '{end}'"
-        stmt = f"SELECT 1 FROM {quoted}{where} LIMIT 1"
+        # Dialect pagination: LIMIT is a syntax error on SQL Server and Oracle.
+        stmt = profile.probe_sql(name, where, 1)
         try:
             res = await asyncio.wait_for(
                 asyncio.to_thread(qsvc.execute, kb_id, stmt),
@@ -1920,6 +2194,29 @@ def _shadow_validate_and_log(
         logger.debug("nl2sql shadow log failed (non-fatal): %s", e)
 
 
+#: Keys added by the P3 grounding contracts. The live result dict is additive:
+#: every pre-P3 key keeps its old meaning, so a caller that tolerates extra keys
+#: needs no change at all.
+P3_RESULT_KEYS = ("plan", "result_set", "unsupported_slots", "disclosure", "source_readiness")
+
+
+def legacy_result_view(result: dict) -> dict:
+    """The pre-P3 result shape, for a caller that declares its response strictly.
+
+    This is an ADAPTER, not a second pipeline: same answer, same rows, same SQL —
+    only the P3 keys removed, for a consumer whose contract would otherwise
+    break on them (a Pydantic response model, a stored snapshot, a webhook).
+
+    It must never be used to hide a disclosure from a user-facing path: the
+    caller that strips ``unsupported_slots`` is also dropping the sentence that
+    says a slot could not be answered. ``db_tools`` therefore keeps them (see
+    ``_attach_grounding_envelope``).
+    """
+    if not isinstance(result, dict):
+        return result
+    return {k: v for k, v in result.items() if k not in P3_RESULT_KEYS}
+
+
 def _strip_sql_fences(text: str) -> str:
     """Strip ```sql ... ``` fences if the model included them anyway."""
     t = text.strip()
@@ -1944,9 +2241,22 @@ def _extract_citations(schema_info: dict, exec_result: dict) -> list[str]:
     return cited[:50]  # cap
 
 
-def _fallback_narrative(question: str, exec_result: dict) -> str:
+def _fallback_narrative(question: str, exec_result: dict, crs=None) -> str:
+    """Deterministic template used when narration is skipped or fails.
+
+    When a CanonicalResultSet is available its disclosure is appended, so the
+    no-LLM path cannot drop an unsupported slot either.
+    """
     rows = exec_result.get("rows", [])
+    disclosure = ""
+    if crs is not None:
+        rows = list(crs.rows) or rows
+        disclosure = crs.disclosure or ""
     if not rows:
+        # An EMPTY result that could not support part of the question must say
+        # so — "no rows" alone reads like a zero.
+        if disclosure:
+            return f"The query returned no rows. {disclosure}"
         return "The query returned no rows."
     # 2026-08-26: business-aware deterministic report FIRST — for known
     # intents (contract performance) build the real business report from
@@ -1965,7 +2275,8 @@ def _fallback_narrative(question: str, exec_result: dict) -> str:
     cols = list(rows[0].keys())
     head = ", ".join(f"{c}={rows[0][c]!r}" for c in cols[:5])
     more = f" (+{len(rows) - 1} more rows)" if len(rows) > 1 else ""
-    return f"Found {len(rows)} row(s). First: {head}{more}."
+    tail = f"\n\n{disclosure}" if disclosure else ""
+    return f"Found {len(rows)} row(s). First: {head}{more}.{tail}"
 
 
 async def _chat(

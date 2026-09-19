@@ -209,12 +209,12 @@ def execute_plan_nodes(
                             ))
                             break  # adaptive tail executed; stop original loop
 
-    # ── Dynamic re-planning: recover failed tool/skill nodes ──────────
-    # When tool/skill nodes fail (and the re-plan budget allows), generate a
-    # corrective sub-plan from the failure context and execute it. The data
-    # pipeline (nl2sql / synthesize / sandbox) is intentionally NOT re-planned
-    # here — only general tool/skill steps. Policy-denied failures are excluded
-    # (a corrective plan would just re-deny them).
+    # ── Dynamic re-planning: recover failed nodes ─────────────────────
+    # When replannable nodes fail (and the re-plan budget allows), generate a
+    # corrective sub-plan from the failure context and execute it. Eligible
+    # node types and error classes live in synexia/replan_policy.py: general
+    # tool/skill steps plus structural nl2sql failures; synthesize/sandbox,
+    # policy denials and environmental errors are excluded.
     _max = max_replan_depth
     if _max is None:
         _max = getattr(settings, "SYNEXIA_ACT_REPLAN_MAX", 2)
@@ -222,7 +222,7 @@ def execute_plan_nodes(
         recoverable = _recoverable_failures(plan)
         if recoverable:
             logger.info(
-                "ACT re-plan (depth %d): %d failed tool/skill node(s) — generating corrective plan",
+                "ACT re-plan (depth %d): %d failed replannable node(s) — generating corrective plan",
                 replan_depth + 1, len(recoverable),
             )
             # Surface the self-heal: one activity step per failed node being
@@ -261,28 +261,23 @@ def execute_plan_nodes(
 
 
 def _recoverable_failures(plan: Optional[Plan]) -> list[dict]:
-    """Collect failed tool/skill nodes worth a corrective re-plan.
+    """Collect failed nodes worth a corrective re-plan.
 
-    Excludes the data pipeline (nl2sql / synthesize / sandbox) by design, and
-    excludes policy-denied failures (re-planning would just re-deny them).
+    General tool/skill steps plus structural data-pipeline failures (nl2sql) —
+    a failed query whose table/view was wrong can be fixed by a different plan,
+    which is why the data pipeline is no longer blanket-excluded here.
+    ``synthesize``/``sandbox`` stay excluded (they replay the failed input) and
+    so do policy denials and environmental errors (credentials, connection,
+    timeout, lock) — a new plan reproduces those identically.
+
+    Eligibility is centralised in ``synexia/replan_policy.py`` so this loop and
+    the FSM's VERIFY-driven re-plan agree.
     """
+    from app.services.synexia.replan_policy import collect_replannable_failures
+
     if not plan or not plan.nodes:
         return []
-    out: list[dict] = []
-    for node in plan.nodes:
-        if node.status != "failed":
-            continue
-        if node.node_type not in ("tool", "skill"):
-            continue
-        err = node.error or ""
-        if err.startswith("Policy denied"):
-            continue
-        out.append({
-            "name": node.name,
-            "node_type": node.node_type,
-            "error": err or "unknown error",
-        })
-    return out
+    return collect_replannable_failures(plan.nodes)
 
 
 def _persist_adaptive_tail(db, execution, steps) -> Optional[Plan]:
@@ -603,6 +598,16 @@ def _execute_nl2sql_node(db, execution, node, data_ctx_extras=None, endpoint=Non
                     "source_name": result.get("source_name") if isinstance(result, dict) else None,
                     "answer": answer,
                     "citations": result.get("citations") if isinstance(result, dict) else None,
+                    # P3: the recorded observation is a whitelist, so the
+                    # grounding envelope travels explicitly. Without this the
+                    # workflow's stored evidence says a figure was returned and
+                    # nothing says a different part of the question could not be.
+                    "disclosure": (
+                        result.get("disclosure") if isinstance(result, dict) else None
+                    ),
+                    "unsupported_slots": (
+                        result.get("unsupported_slots") if isinstance(result, dict) else None
+                    ),
                 },
                 result_text=answer or f"Generated SQL: {sql}",
                 success=True,

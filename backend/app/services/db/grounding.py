@@ -1,0 +1,1233 @@
+"""Build the two contracts from artifacts the pipeline already produced.
+
+No new pipeline. This module reads what the existing stages computed —
+``schema_info`` (the selected tables + the catalog meaning merged into them),
+the retrieval result, the access policy, ``db/dialect.py``, ``db/capability_probe.py``,
+``db/plan_memory.py``, the catalog relations — and writes it into a
+:class:`GroundedPlan`; then it turns the executor's result into a
+:class:`CanonicalResultSet`.
+
+The one genuinely new judgement is **slot support**: which things the question
+asked for can this plan actually produce?
+
+How a slot is decided (deterministic, no LLM, no name lists)
+------------------------------------------------------------
+1. The question is split into the units a reader would call "the things being
+   asked about": CJK runs (``lexical.cjk_runs``) and latin words — the same
+   primitives the retrieval layer already uses, so Chinese needs no new code.
+2. Every ``(table, column)`` of the source plus every glossary/metric contract
+   becomes a *concept document* (identifier + description + semantic type +
+   unit). A slot is *requested* only when the question's own vocabulary matches
+   a concept — so an unknown concept never becomes a slot, and the disclosure
+   can always name where the concept does live.
+3. A requested slot is **supported** when at least one matching concept lives in
+   a table this plan selected; otherwise it is recorded in
+   ``unsupported_slots`` with ``column_not_selected`` (or ``blocked_by_policy``
+   when the tables that hold it are denied to this user).
+4. After execution the same slots are re-checked against the RESULT: a slot the
+   query returned no column for is ``not_in_result``; a slot whose column is
+   constant zero/null while the value crosses a join the catalog does not know
+   is ``unvalidated_join`` (this is the measured failure — a zero that is an
+   artifact of an unresolved join, presented as a figure), and constant zero
+   with no coverage evidence for its tables is ``zero_unproven``.
+
+Rule 1 of the brief lives here: an unsupported slot is NEVER converted into a
+zero, a null-derived claim, or invented SQL. It is carried into the result set
+and disclosed.
+"""
+
+from __future__ import annotations
+
+import re
+from typing import Any, Iterable, Mapping, Sequence
+
+from app.services.db.contracts import (
+    CanonicalResultSet,
+    GroundedPlan,
+    UNSUPPORTED_REASONS,
+    coverage_state,
+    dialect_of,
+    freshness_of,
+)
+
+#: BM25 floor for "the question's vocabulary matched this concept". Low on
+#: purpose: a false slot costs one disclosure line, a missing slot costs a
+#: fabricated figure.
+CONCEPT_FLOOR = 0.35
+
+#: Only concepts within this fraction of the unit's BEST match count as its
+#: reading. A CJK question run is often a whole clause ("月成本金额是多少"), which
+#: tokenises to bigrams that several unrelated columns share (金额 appears in
+#: 合同金额, 发货金额 and 成本金额). Without a relative cut, the best match is
+#: outvoted by weaker ones and a genuine gap looks supported.
+RELATIVE_CUT = 0.5
+
+#: How many matched concept columns stay on a slot for carry detection.
+CARRY_LOOKUP_CAP = 200
+
+#: How far after an unsupported slot's label a number still counts as a claim
+#: about it. Bounded by the end of the SENTENCE as well, because a correct
+#: answer naturally continues with a legitimate figure ("…履约率无法得出。合同
+#: 签订数量为 177") and a raw character window flags that as a violation.
+CLAIM_WINDOW = 24
+_SENTENCE_END = "。！？；\n;!?"
+
+_NUMBER = re.compile(r"\d[\d,\.]*")
+_GROUP_BY = re.compile(r"\bgroup\s+by\s+(.+?)(?:\s+(?:having|order\s+by|limit)\b|$)", re.I | re.S)
+_ORDER_BY = re.compile(r"\border\s+by\s+(.+?)(?:\s+limit\b|$)", re.I | re.S)
+_LIMIT = re.compile(r"\blimit\s+(\d+)", re.I)
+_TOPN = re.compile(r"(?:\btop\s*|前\s*)(\d{1,3})", re.I)
+_FROM_TABLE = re.compile(r"\b(?:from|join)\s+([`\"\[]?[\w\.]+[`\"\]]?)", re.I)
+
+
+# ── catalog concepts ───────────────────────────────────────────────────────
+
+
+def catalog_concepts(db, kb_id: str, limit: int = 4000) -> list[dict[str, Any]]:
+    """Every (table, column) of a source, with the catalog's own meaning.
+
+    One query, no per-table loop, and cached on the session so a turn that
+    builds a plan twice pays once.
+    """
+    cached = getattr(db, "_grounding_concepts", None)
+    if isinstance(cached, dict) and kb_id in cached:
+        return cached[kb_id]
+    rows: list[dict[str, Any]] = []
+    try:
+        from app.models.knowledge_catalog import KBColumnMeta, KBTableMeta
+
+        tables = {
+            t.id: t.table_name
+            for t in db.query(KBTableMeta).filter(KBTableMeta.kb_id == kb_id).all()
+        }
+        if tables:
+            for col in (
+                db.query(KBColumnMeta)
+                .filter(KBColumnMeta.table_meta_id.in_(list(tables)))
+                .limit(limit)
+                .all()
+            ):
+                rows.append(
+                    {
+                        "table": tables.get(col.table_meta_id, ""),
+                        "column": col.column_name or "",
+                        "description": (col.description_en or col.description_zh or ""),
+                        "description_alt": (col.description_zh or col.description_en or ""),
+                        "semantic_type": (col.semantic_type or ""),
+                        "unit": (col.unit or ""),
+                    }
+                )
+    except Exception:  # pragma: no cover - catalog always present in a real turn
+        rows = []
+    try:
+        db._grounding_concepts = {**(getattr(db, "_grounding_concepts", None) or {}), kb_id: rows}
+    except Exception:
+        pass
+    return rows
+
+
+def _concept_docs(concepts: Sequence[Mapping[str, Any]]) -> tuple[dict[str, str], dict[str, dict]]:
+    docs: dict[str, str] = {}
+    meta: dict[str, dict] = {}
+    for concept in concepts:
+        table = str(concept.get("table") or "")
+        column = str(concept.get("column") or "")
+        if not table or not column:
+            continue
+        key = f"{table}\x1f{column}"
+        docs[key] = " ".join(
+            str(part)
+            for part in (
+                column,
+                concept.get("description"),
+                concept.get("description_alt"),
+                concept.get("semantic_type"),
+                concept.get("unit"),
+            )
+            if part
+        )
+        meta[key] = {
+            "table": table,
+            "column": column,
+            "description": concept.get("description") or "",
+            "semantic_type": concept.get("semantic_type") or "",
+            "unit": concept.get("unit") or "",
+        }
+    return docs, meta
+
+
+def question_units(question: str) -> list[str]:
+    """The things a question asks about, in the reader's own units.
+
+    CJK runs come back whole (``实际发货数量``, not ``发货/货数/数量``) because
+    the consumer of a slot is a sentence shown to a user; latin words are
+    lowercase and ≥3 chars (``shipped_qty``) so ``a``/``of``/``by`` never become
+    slots.
+    """
+    from app.services.db.lexical import cjk_runs
+
+    units: list[str] = []
+    for run in cjk_runs(question or ""):
+        run = run.strip()
+        if len(run) >= 2:
+            units.append(run)
+    for word in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", question or ""):
+        units.append(word.lower())
+    # a run that is contained in a longer run adds nothing
+    out: list[str] = []
+    for unit in units:
+        if any(unit != other and unit in other and not unit.isascii() for other in units):
+            continue
+        if unit not in out:
+            out.append(unit)
+    return out
+
+
+# ── slot support ───────────────────────────────────────────────────────────
+
+
+def resolve_slots(
+    question: str,
+    *,
+    concepts: Sequence[Mapping[str, Any]],
+    selected_tables: Iterable[str],
+    denied_tables: Iterable[str] = (),
+    glossary: Sequence[Any] = (),
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(evidence, unsupported_slots, metrics)``.
+
+    Evidence entries record WHY a slot is believed to be requested (which
+    question unit matched which catalog concept, and how strongly) so a reader
+    can audit a disclosure instead of trusting it.
+    """
+    from app.services.db.lexical import Bm25Index, token_list
+
+    selected = {t for t in selected_tables if t}
+    denied = {t for t in denied_tables if t}
+    docs, meta = _concept_docs(concepts)
+    index = Bm25Index(docs)
+    units = question_units(question)
+    unit_terms = {unit: token_list(unit) for unit in units}
+
+    evidence: list[dict[str, Any]] = []
+    slots: list[dict[str, Any]] = []
+    metrics: list[dict[str, Any]] = []
+
+    for term in glossary or []:
+        label = str(getattr(term, "term", "") or "")
+        if not label:
+            continue
+        if label.lower() not in (question or "").lower():
+            continue
+        metrics.append(
+            {
+                "slot": label,
+                "label": label,
+                "definition": getattr(term, "definition", "") or "",
+                "sql_expression": getattr(term, "sql_expression", None),
+                "unit": getattr(term, "unit", None),
+                "tier": getattr(term, "tier", ""),
+                "origin": getattr(term, "origin", ""),
+            }
+        )
+
+    for unit in units:
+        terms = unit_terms.get(unit) or []
+        if not terms:
+            continue
+        scores = index.score(terms)
+        if not scores:
+            continue
+        scored = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+        # `hits` is the RANKED SHORTLIST (what the concept plausibly is), and the
+        # carrier set is everything that cleared the floor at all. A top-12 cap
+        # here was the second version of the same live bug: the selected view's
+        # `out_fqty` ("出库数量", one shared bigram) ranked below twelve delivery
+        # columns, so the column the SQL actually aliased was invisible and an
+        # answered slot was reported unanswered.
+        hits = scored[:12]
+        carrier_hits = [(k, s) for k, s in scored if s >= CONCEPT_FLOOR][:CARRY_LOOKUP_CAP]
+        top = max((s for _k, s in hits), default=0.0)
+        floor = max(CONCEPT_FLOOR, top * RELATIVE_CUT)
+        kept = [(k, s) for k, s in hits if s >= floor]
+        if not kept:
+            continue
+
+        tables: list[str] = []
+        columns: list[str] = []
+        matched: set[str] = set()
+        phrases: list[str] = []
+        carriers = [f"{meta[k]['table']}.{meta[k]['column']}" for k, _s in carrier_hits]
+        for key, _score in kept:
+            info = meta[key]
+            if info["table"] not in tables:
+                tables.append(info["table"])
+            columns.append(f"{info['table']}.{info['column']}")
+            matched.update(index.matched_terms(key, terms))
+            phrase = str(info.get("description") or "")
+            if len(phrase) >= 2 and phrase in unit:
+                phrases.append(phrase)
+        if not tables:
+            continue
+
+        # The reader-facing name: the catalog's OWN phrase for the concept when
+        # the user's words contain it (成本金额 out of 月成本金额是多少), so a
+        # disclosure reads like the question rather than like the clause.
+        phrase = max(phrases, key=len) if phrases else ""
+        label = phrase or unit
+        # Is this unit the NAME OF A METRIC, or a clause that merely shares
+        # bigrams with one? "合同签订数量" / "成本金额" are names; a 10-character
+        # clause like "月合同执行情况总览" scoring on 合同 + 执行 is overlap, and
+        # disclosing it as a missing figure would be noise presented as a gap.
+        # Precision rule: a phrase match, or a unit short enough to BE a name.
+        metric_like = bool(phrase) or len(unit) <= 6
+
+        supported_by = [t for t in tables if t in selected]
+        denied_by = [t for t in tables if t in denied]
+        evidence.append(
+            {
+                "slot": label,
+                "label": label,
+                "unit": unit,
+                "matched": sorted(matched),
+                "score": round(top, 4),
+                "tables": tables[:8],
+                # NOT capped for display: this list is how a result column is
+                # traced back to the concept that carries it. An 8-column cap
+                # measured live on a 143-table warehouse hid the ONE column the
+                # query actually aliased (`out_fqty`), so a slot the query DID
+                # answer was reported as "the query returned no column for this".
+                "columns": columns[:CARRY_LOOKUP_CAP],
+                # The relative cut answers "is this the metric the user asked
+                # for"; it must NOT decide "did the query return it". A weaker
+                # concept (one shared bigram instead of three) can be the exact
+                # column the SQL aliases — live: `out_fqty` on the selected view
+                # was cut out of the disclosure list and the answered slot was
+                # then reported as unanswered.
+                "carriers": carriers[:CARRY_LOOKUP_CAP],
+                "source": "catalog",
+            }
+        )
+        if supported_by or not metric_like:
+            continue
+        reason = "blocked_by_policy" if denied_by else "column_not_selected"
+        slots.append(
+            {
+                "slot": label,
+                "label": label,
+                "unit": unit,
+                "reason": reason,
+                "detail": (
+                    "the columns that carry this are not readable by this user"
+                    if reason == "blocked_by_policy"
+                    else "the columns that carry this live in "
+                    + ", ".join(tables[:4])
+                    + ", which this query does not use"
+                ),
+                "tables": tables[:8],
+                "columns": columns[:CARRY_LOOKUP_CAP],
+                "matched": sorted(matched),
+            }
+        )
+
+    return evidence, slots, metrics
+
+
+# ── the plan ───────────────────────────────────────────────────────────────
+
+
+def build_grounded_plan(  # noqa: PLR0913 - a plan is a wide record by nature
+    *,
+    db,
+    kb,
+    question: str,
+    window: tuple | None,
+    schema_info: Mapping[str, Any] | None,
+    catalog: Sequence[Mapping[str, Any]] | None = None,
+    retrieval: Any = None,
+    authorized_tables: Iterable[str] | None = None,
+    denied_tables: Iterable[str] = (),
+    intent_signature: str = "",
+    clarification_needed: Sequence[str] = (),
+    warnings: Sequence[str] = (),
+) -> GroundedPlan:
+    """Assemble the plan. Pure assembly: nothing here queries the data source."""
+    from app.services.db import capability_probe as _caps
+
+    # NOTE: `schema_info` entries key the table as "table" (see
+    # nl_answer_service._schema_info_from_toc_selection), while the catalog
+    # snapshot uses "table_name". Read both — a plan that silently saw ZERO
+    # selected tables marked every slot unsupported, i.e. it turned a wrong key
+    # into a false disclosure.
+    tables = [_table_of(t) for t in ((schema_info or {}).get("tables") or [])]
+    tables = [t for t in tables if t]
+    columns: dict[str, list[str]] = {}
+    for t in (schema_info or {}).get("tables") or []:
+        name = _table_of(t)
+        if not name:
+            continue
+        columns[name] = [
+            str(c.get("name") or c.get("column_name") or "")
+            for c in (t.get("columns") or [])
+            if isinstance(c, dict)
+        ]
+
+    try:
+        from app.services.db.semantic_store import get_semantic_store
+
+        glossary = get_semantic_store(db, [getattr(kb, "id", "")]).glossary(question, limit=8)
+    except Exception:
+        glossary = []
+
+    evidence, unsupported, metrics = resolve_slots(
+        question,
+        concepts=catalog_concepts(db, getattr(kb, "id", "")),
+        selected_tables=tables,
+        denied_tables=denied_tables,
+        glossary=glossary,
+    )
+
+    catalog_version = ""
+    try:
+        from app.services.db.schema_shape import catalog_digest
+
+        catalog_version = catalog_digest(db, getattr(kb, "id", "")) or ""
+    except Exception:
+        catalog_version = ""
+
+    capability_version = ""
+    try:
+        from app.models.kb_capability import KBCapabilityProfile
+
+        row = (
+            db.query(KBCapabilityProfile)
+            .filter(KBCapabilityProfile.kb_id == getattr(kb, "id", ""))
+            .first()
+        )
+        if row is not None:
+            capability_version = f"{row.dialect}:{row.catalog_version or row.detected_at or ''}"
+    except Exception:
+        capability_version = ""
+
+    from app.services.db import readiness as _readiness
+
+    verdict = _readiness.evaluate(kb)
+    warn = list(warnings)
+    if verdict.limited and verdict.disclosure:
+        warn.append(verdict.disclosure)
+
+    plan = GroundedPlan(
+        intent=" ".join((question or "").split()),
+        question=question or "",
+        intent_signature=intent_signature or "",
+        temporal_scope=_temporal_scope(resolve_temporal_scope(question, window)),
+        source_ids=[getattr(kb, "id", "")] if getattr(kb, "id", "") else [],
+        tables=tables,
+        columns=columns,
+        authorized_tables=sorted({t for t in (authorized_tables or tables) if t}),
+        metrics=metrics,
+        dialect=dialect_of(kb),
+        evidence=evidence,
+        unsupported_slots=unsupported,
+        clarification_needed=list(clarification_needed),
+        warnings=warn,
+        catalog_version=catalog_version,
+        capability_version=capability_version,
+    )
+    if retrieval is not None:
+        try:
+            as_dict = retrieval.as_dict() if hasattr(retrieval, "as_dict") else dict(retrieval)
+            plan.evidence.append(
+                {
+                    "slot": "",
+                    "label": "retrieval",
+                    "matched": [],
+                    "score": 0.0,
+                    "tables": list(as_dict.get("candidates") or [])[:8],
+                    "columns": [],
+                    "source": "retrieval",
+                    "detail": as_dict.get("method") or "",
+                }
+            )
+        except Exception:
+            pass
+    if catalog:
+        plan.evidence.append(
+            {
+                "slot": "",
+                "label": "catalog",
+                "matched": [],
+                "score": 0.0,
+                "tables": [str(c.get("table_name") or "") for c in catalog][:8],
+                "columns": [],
+                "source": "catalog",
+                "detail": f"{len(catalog)} tables visible to this plan",
+            }
+        )
+    return plan
+
+
+def resolve_temporal_scope(question: str, window: tuple | None = None) -> tuple | None:
+    """The period a question names — relative phrases AND absolute dates.
+
+    Reuses the two existing resolvers rather than a third: the pipeline's own
+    ``parse_relative_window`` (passed in as ``window``) and
+    ``answer_contract.question_period``, which already handles "2026年8月" /
+    "2026-08-01 至 2026-08-31". Without the second, a plan for an absolute
+    period carried NO temporal scope, so its coverage and freshness were
+    ``unknown`` and a stale-window answer could not be told from a fresh one.
+    """
+    if window:
+        return window
+    try:
+        from app.services.db.answer_contract import question_period
+
+        found = question_period(question)
+        if found:
+            window, _phrase = found
+            return window
+    except Exception:
+        return None
+    return None
+
+
+def _temporal_scope(window: tuple | None) -> dict[str, Any]:
+    if not window:
+        return {"start": None, "end": None, "phrase": "", "kind": "none"}
+    try:
+        start, end = window[0], window[1]
+    except Exception:
+        return {"start": None, "end": None, "phrase": str(window), "kind": "unknown"}
+    return {
+        "start": str(start),
+        "end": str(end),
+        "phrase": str(window[2]) if len(window) > 2 else "",
+        "kind": "relative",
+    }
+
+
+def enrich_plan_from_sql(plan: GroundedPlan, sql: str | None, *, db=None) -> GroundedPlan:
+    """Complete the plan once the SQL exists: joins, filters, grain, ordering.
+
+    Mutates and returns ``plan``. Every value is read out of the SQL that will
+    actually run, so the plan describes the query rather than the intention.
+    """
+    sql = sql or ""
+    plan.filters = _parse_filters(sql, plan)
+    group = _GROUP_BY.search(sql)
+    plan.groupings = _split_columns(group.group(1)) if group else []
+    order = _ORDER_BY.search(sql)
+    plan.ordering = [
+        {"column": col, "direction": "desc" if re.search(r"\bdesc\b", order.group(1), re.I) else "asc"}
+        for col in _split_columns(order.group(1))
+    ] if order else []
+    limit = _LIMIT.search(sql)
+    topn = _TOPN.search(sql)
+    if limit:
+        plan.top_n = int(limit.group(1))
+    elif topn:
+        plan.top_n = int(topn.group(1))
+    plan.grain = list(plan.groupings)
+    plan.join_paths = validate_join_paths(sql, plan, db=db)
+    return plan
+
+
+def _split_columns(text: str) -> list[str]:
+    out: list[str] = []
+    for part in (text or "").split(","):
+        token = part.strip().strip('`"[]').split()  # drop ASC/DESC
+        if token and token[0]:
+            out.append(token[0])
+    return [c for c in out if c]
+
+
+def _parse_filters(sql: str, plan: GroundedPlan) -> list[dict[str, Any]]:
+    """WHERE predicates, as written. Deliberately shallow — a plan, not a parser."""
+    where = re.search(r"\bwhere\b(.+?)(?:\bgroup\s+by\b|\border\s+by\b|\blimit\b|$)", sql, re.I | re.S)
+    if not where:
+        return []
+    out: list[dict[str, Any]] = []
+    for clause in re.split(r"\band\b|\bor\b", where.group(1), flags=re.I):
+        m = re.search(r"([\w\.`\"\[\]]+)\s*(>=|<=|<>|!=|=|>|<|between|in|like)\s*(.+)", clause.strip(), re.I)
+        if not m:
+            continue
+        column = m.group(1).strip('`"[]').split(".")[-1]
+        value = m.group(3).strip()
+        out.append(
+            {
+                "column": column,
+                "op": m.group(2).upper(),
+                "value": value[:80],
+                "kind": "temporal" if re.search(r"['\"]?\d{4}[-/]\d{1,2}", value) else "value",
+            }
+        )
+    return out[:12]
+
+
+def validate_join_paths(sql: str, plan: GroundedPlan, *, db=None) -> list[dict[str, Any]]:
+    """Every join in the SQL, marked validated or not against the catalog.
+
+    Validated = the catalog holds a relation (FK or discovered) between the two
+    tables. A join the catalog cannot vouch for is recorded, not refused: it may
+    still be legitimate (a shared code column), but a constant-zero aggregate
+    that crosses it is not evidence of anything.
+    """
+    if not sql:
+        return []
+    pairs = _sql_join_pairs(sql)
+    if not pairs:
+        return []
+    known: set[frozenset[str]] = set()
+    if db is not None and plan.source_ids:
+        try:
+            from app.models.knowledge_catalog import KBTableMeta, KBTableRelation
+
+            names = {
+                t.id: t.table_name
+                for t in db.query(KBTableMeta)
+                .filter(KBTableMeta.kb_id == plan.source_ids[0])
+                .all()
+            }
+            for rel in db.query(KBTableRelation).filter(KBTableRelation.kb_id == plan.source_ids[0]).all():
+                left = names.get(rel.source_table_meta_id)
+                right = names.get(rel.target_table_meta_id)
+                if left and right:
+                    known.add(frozenset((left, right)))
+        except Exception:
+            known = set()
+    out: list[dict[str, Any]] = []
+    for left, right, on in pairs:
+        validated = frozenset((left, right)) in known
+        out.append(
+            {
+                "left": left,
+                "right": right,
+                "left_column": on[0] if on else "",
+                "right_column": on[1] if on else "",
+                "validated": validated,
+                "evidence": (
+                    "catalog relation"
+                    if validated
+                    else "no catalog relation between these tables"
+                ),
+            }
+        )
+    return out
+
+
+def _sql_join_pairs(sql: str) -> list[tuple[str, str, tuple[str, str] | tuple]]:
+    """(left_table, right_table, (left_col, right_col)) for each JOIN.
+
+    sqlglot when it can parse (it understands aliases, which a regex does not),
+    with a regex fallback so a parse failure degrades the evidence instead of
+    losing the plan.
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+
+        from app.services.db.schema_graph import _map_dialect
+
+        parse_dialect = _map_dialect(None)
+        tree = sqlglot.parse_one(sql, read=parse_dialect)
+        if tree is None:
+            raise ValueError("no tree")
+        alias: dict[str, str] = {}
+        base = ""
+        for table in tree.find_all(exp.Table):
+            name = table.name
+            if not name:
+                continue
+            alias[(table.alias or name).lower()] = name
+            if not base:
+                base = name
+        pairs: list[tuple[str, str, tuple[str, str] | tuple]] = []
+        for join in tree.find_all(exp.Join):
+            target = join.this
+            right = ""
+            if isinstance(target, exp.Table):
+                right = target.name
+            elif hasattr(target, "name"):
+                right = getattr(target, "name", "") or ""
+            left = base
+            on = join.args.get("on")
+            cols: tuple[str, str] | tuple = ()
+            if on is not None:
+                eq = on.find(exp.EQ)
+                if eq is not None:
+                    lhs = eq.left.name if hasattr(eq.left, "name") else str(eq.left)
+                    rhs = eq.right.name if hasattr(eq.right, "name") else str(eq.right)
+                    ltab = ""
+                    for side in (eq.left, eq.right):
+                        if isinstance(side, exp.Column):
+                            ltab = alias.get((side.table or "").lower(), "")
+                            if ltab:
+                                break
+                    if ltab:
+                        left = ltab
+                    cols = (lhs, rhs)
+            if right:
+                pairs.append((left, right, cols))
+        if pairs:
+            return pairs
+    except Exception:
+        pass
+
+    tables = [t.strip('`"[]').split(".")[-1] for t in _FROM_TABLE.findall(sql)]
+    out = []
+    for i in range(1, len(tables)):
+        out.append((tables[0], tables[i], ()))
+    return out
+
+
+# ── the result set ─────────────────────────────────────────────────────────
+
+
+def build_canonical_result_set(  # noqa: PLR0913 - a result envelope is wide by nature
+    *,
+    plan: GroundedPlan,
+    exec_result: Mapping[str, Any] | None,
+    sql: str | None,
+    schema_info: Mapping[str, Any] | None = None,
+    catalog: Sequence[Mapping[str, Any]] | None = None,
+    contract: Any = None,
+    provenance: Mapping[str, Any] | None = None,
+    executed_at: str | None = None,
+) -> CanonicalResultSet:
+    """Wrap the executor's result into the canonical shape, with its verdicts."""
+    exec_result = exec_result or {}
+    rows = list(exec_result.get("rows") or [])
+    columns = list(rows[0].keys()) if rows and isinstance(rows[0], Mapping) else []
+    truncated = bool(exec_result.get("truncated")) or bool(
+        exec_result.get("row_cap") and len(rows) >= int(exec_result.get("row_cap") or 0)
+    )
+
+    tables = list(plan.tables)
+    # The window of a table can come from either artifact: the DDL slice the
+    # model was given (`schema_info`) or the catalog snapshot the retrieval ran
+    # over (`catalog`). Measured live, the selected-view slice carried no
+    # min/max, so every coverage state came back `unknown` and freshness with it
+    # — the two fields the reader needs to tell a stale window from a current
+    # one. Prefer whichever entry actually has a window.
+    catalog_windows: dict[str, Mapping[str, Any]] = {}
+    for source in (catalog or [], (schema_info or {}).get("tables") or []):
+        for entry in source:
+            if not isinstance(entry, Mapping):
+                continue
+            name = _table_of(entry)
+            if not name:
+                continue
+            prior = catalog_windows.get(name)
+            if prior is None or (not prior.get("max_date") and entry.get("max_date")):
+                catalog_windows[name] = entry
+    available: dict[str, Any] = {}
+    for table in tables:
+        entry = catalog_windows.get(table) or {}
+        state, cov = coverage_state(entry, _window_tuple(plan))
+        cov["state"] = state
+        available[table] = cov
+
+    units: dict[str, str] = {}
+    for column, unit in _units_by_column(schema_info).items():
+        if column in columns and unit:
+            units[column] = unit
+
+    warnings: list[str] = list(plan.warnings)
+    if truncated:
+        warnings.append("the result hit the row cap, so it covers only part of the data")
+
+    unsupported, zero_warnings = _slots_against_result(
+        plan, sql, columns, rows, contract, truncated, available
+    )
+    warnings.extend(zero_warnings)
+
+    crs = CanonicalResultSet(
+        columns=columns,
+        rows=rows,
+        row_count=len(rows),
+        complete=not unsupported,
+        source_ids=list(plan.source_ids),
+        sql_fingerprint=_fingerprint_sql(sql),
+        requested_coverage=_requested_coverage(plan),
+        available_coverage=available,
+        freshness=freshness_of(*available.values(), window=_window_tuple(plan)),
+        units=units,
+        warnings=warnings,
+        provenance=dict(provenance or {}),
+        executed_at=executed_at or None or "",
+        validation={
+            "answer_contract": (
+                {
+                    "ok": bool(getattr(contract, "ok", True)),
+                    "violations": list(getattr(contract, "violations", []) or []),
+                    "detail": dict(getattr(contract, "detail", {}) or {}),
+                }
+                if contract is not None
+                else {"ok": True, "violations": []}
+            ),
+            "plan": plan.validate(),
+            "truncated": truncated,
+        },
+        unsupported_slots=unsupported,
+        disclosure=disclose(unsupported),
+        plan_fingerprint=plan.fingerprint(),
+    )
+    if not crs.executed_at:
+        from app.services.db.contracts import _now_iso
+
+        crs.executed_at = _now_iso()
+    return crs
+
+
+def _window_tuple(plan: GroundedPlan) -> tuple | None:
+    scope = plan.temporal_scope or {}
+    if not scope.get("start") or scope.get("kind") == "none":
+        return None
+    return (scope.get("start"), scope.get("end"))
+
+
+def _requested_coverage(plan: GroundedPlan) -> dict[str, Any] | None:
+    window = _window_tuple(plan)
+    if not window:
+        return None
+    return {"start": str(window[0]), "end": str(window[1])}
+
+
+def _fingerprint_sql(sql: str | None) -> str:
+    import hashlib
+
+    normalised = " ".join((sql or "").split())
+    if not normalised:
+        return ""
+    return hashlib.sha256(normalised.encode("utf-8")).hexdigest()[:16]
+
+
+def _table_of(entry: Mapping[str, Any]) -> str:
+    """The table name of a schema_info / catalog entry, under either key."""
+    if not isinstance(entry, Mapping):
+        return ""
+    return str(entry.get("table_name") or entry.get("table") or "")
+
+
+def _units_by_column(schema_info: Mapping[str, Any] | None) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for table in (schema_info or {}).get("tables") or []:
+        for col in (table.get("columns") or []):
+            if not isinstance(col, Mapping):
+                continue
+            name = col.get("name") or col.get("column_name")
+            unit = col.get("unit")
+            if name and unit:
+                out[str(name)] = str(unit)
+    return out
+
+
+# ── unsupported slots vs the actual result ─────────────────────────────────
+
+
+def _slots_against_result(
+    plan: GroundedPlan,
+    sql: str | None,
+    columns: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+    contract: Any,
+    truncated: bool,
+    coverage: Mapping[str, Mapping[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Re-check every requested slot against what the query returned.
+
+    Returns ``(unsupported_slots, warnings)``. The plan-time list survives (those
+    slots were never selectable); this adds the result-time reasons.
+
+    A constant zero is NOT automatically a false figure — it is a figure whose
+    support has to be shown. The catalog can show it: when every table that
+    carries the slot is ``covered`` for the requested window, the zero is data,
+    it is reported, and the fact is attached as a caveat instead. Everything
+    else (a value crossing an unknown join, unknown coverage, a window outside
+    the data) is disclosed as unsupported rather than emitted as ``0``.
+
+    Missing ≠ empty on the other side too: absent coverage is ``unknown``, which
+    convicts nothing on its own — the join evidence is what convicts here.
+    """
+    coverage = coverage or {}
+    from app.services.db.lexical import tokens
+
+    out: list[dict[str, Any]] = [dict(s) for s in plan.unsupported_slots]
+    already = {s.get("slot") for s in out}
+    warnings: list[str] = list(_ratio_sanity_warnings(plan, rows, sql))
+
+    # Which tables the SQL actually touched, and did it join them on a key the
+    # catalog cannot vouch for?
+    sql_tables = {str(t).split(".")[-1] for t in _FROM_TABLE.findall(sql or "")}
+    suspect_join = [p for p in plan.join_paths if not p.get("validated")]
+    expressions = sql_alias_expressions(sql)
+
+    for entry in plan.evidence:
+        slot = entry.get("slot")
+        if not slot or slot in already:
+            continue
+        carriers = [
+            c for c in columns
+            if _carries(slot, str(c), _carrier_pool(entry), expressions)
+        ]
+        if not carriers:
+            out.append(
+                {
+                    "slot": slot,
+                    "label": entry.get("label") or slot,
+                    "reason": "not_in_result",
+                    "detail": "the query returned no column for this",
+                    "tables": entry.get("tables") or [],
+                    "columns": entry.get("columns") or [],
+                }
+            )
+            already.add(slot)
+            continue
+
+        # The column exists. Is its value provably data, or a silent zero?
+        zero_like = [
+            c for c in carriers
+            if not rows or _constant_zero(rows, str(c))
+        ]
+        if len(zero_like) != len(carriers):
+            continue
+        slot_tables = {str(t).split(".")[-1] for t in (entry.get("tables") or [])}
+        label = entry.get("label") or slot
+        if suspect_join and (
+            not slot_tables or slot_tables & sql_tables or _touches(sql_tables, suspect_join)
+        ):
+            out.append(
+                {
+                    "slot": slot,
+                    "label": label,
+                    "reason": "unvalidated_join",
+                    "detail": _join_detail(suspect_join),
+                    "tables": entry.get("tables") or [],
+                    "columns": entry.get("columns") or [],
+                }
+            )
+        else:
+            entries = [coverage.get(t) or {} for t in slot_tables]
+            states = {str(e.get("state") or "unknown") for e in entries}
+            # `not_requested` (no period was asked about, and the catalog knows
+            # this table's window) means the zero is simply what the query
+            # returned. `unknown` — a period WAS asked and the carrier's window
+            # is unmeasured — proves nothing, so it does not rescue the zero.
+            if states and states <= {"covered", "partially_covered", "not_requested"}:
+                # The catalog vouches for the window: the zero is a measurement.
+                # Report it — and say that it is a real zero, so a reader does
+                # not have to wonder whether it is a missing-value artifact.
+                warnings.append(
+                    f"{label} is zero across every returned row; the data source "
+                    "covers the period asked about, so this is a real figure"
+                )
+                continue
+            out.append(
+                {
+                    "slot": slot,
+                    "label": label,
+                    "reason": "zero_unproven",
+                    "detail": (
+                        "every returned value is zero or null and the catalog does not "
+                        "show the tables that carry it hold rows for this period"
+                    ),
+                    "tables": entry.get("tables") or [],
+                    "columns": entry.get("columns") or [],
+                }
+            )
+        already.add(slot)
+
+    if truncated:
+        for entry in plan.evidence:
+            slot = entry.get("slot")
+            if not slot or slot in already:
+                continue
+            out.append(
+                {
+                    "slot": slot,
+                    "label": entry.get("label") or slot,
+                    "reason": "truncated",
+                    "detail": UNSUPPORTED_REASONS["truncated"],
+                    "tables": entry.get("tables") or [],
+                    "columns": entry.get("columns") or [],
+                }
+            )
+            already.add(slot)
+    return out, warnings
+
+
+def _touches(sql_tables: set[str], suspect: Sequence[Mapping[str, Any]]) -> bool:
+    for path in suspect:
+        if {str(path.get("left")), str(path.get("right"))} <= sql_tables:
+            return True
+    return False
+
+
+def _join_detail(suspect: Sequence[Mapping[str, Any]]) -> str:
+    names = [f"{p.get('left')} ↔ {p.get('right')}" for p in suspect[:3]]
+    return "the value crosses a join the catalog cannot vouch for: " + ", ".join(names)
+
+
+#: A ratio-shaped question word. Shape only — the platform's convention for
+#: patterns that are structural rather than business vocabulary (same class as
+#: id/flag/date/type detection), and it never selects a column by itself.
+_RATIO_CUE = re.compile(r"率|比|percent|ratio|rate|margin", re.I)
+
+
+def _ratio_sanity_warnings(
+    plan: GroundedPlan, rows: Sequence[Mapping[str, Any]], sql: str | None = None
+) -> list[str]:
+    """A percentage above 100% is not an unsupported value — it is a suspect one.
+
+    Measured live on Q3: the model wrote ``SUM(out_fqty) / COUNT(DISTINCT FID)``
+    as the fulfilment rate — a quantity divided by a COUNT — and the answer came
+    back 17,957%. Every guard passed it: the SQL ran, the column existed, the
+    value was non-zero. The figure is reported (it is what the data returned) and
+    the reader is told it needs checking, which is the honest treatment for a
+    number that cannot be right.
+    """
+    out: list[str] = []
+    expressions = sql_alias_expressions(sql)
+    # Only DIVISION-shaped result columns can be a percentage. Without this,
+    # every column fed by the same source column counts too — and SUM(out_fqty)
+    # as `shipped_qty` (31,605) turned a sane 89% rate into a false alarm.
+    ratio_columns = {c for c, expr in expressions.items() if "/" in expr}
+    if not ratio_columns:
+        return out
+    for entry in plan.evidence:
+        label = str(entry.get("label") or "")
+        if not label or not _RATIO_CUE.search(label):
+            continue
+        for column in [c for c in _carried_columns(entry, rows, expressions) if c in ratio_columns]:
+            values = [r.get(column) for r in rows if r.get(column) is not None]
+            if not values:
+                continue
+            try:
+                worst = max(float(v) for v in values)
+            except (TypeError, ValueError):
+                continue
+            if worst > 1.0:
+                out.append(
+                    f"{label} is reported as {worst:.4g} — over 100%, so the "
+                    "numerator and denominator may not be in the same unit; "
+                    "treat the figure as unverified"
+                )
+                break
+    return out[:3]
+
+
+def _carried_columns(
+    entry: Mapping[str, Any],
+    rows: Sequence[Mapping[str, Any]],
+    expressions: Mapping[str, str] | None = None,
+) -> list[str]:
+    """The result columns that carry this slot (same rule the zero check uses)."""
+    if not rows or not isinstance(rows[0], Mapping):
+        return []
+    return [
+        str(c) for c in rows[0].keys()
+        if _carries(
+            str(entry.get("slot") or ""), str(c), _carrier_pool(entry), expressions
+        )
+    ]
+
+
+def _carrier_pool(entry: Mapping[str, Any]) -> list[str]:
+    """Every catalog column that could carry this slot: the cut list AND the
+    wider set that only had to clear the match floor."""
+    pool = list(entry.get("columns") or [])
+    for extra in entry.get("carriers") or []:
+        if extra not in pool:
+            pool.append(extra)
+    return pool
+
+
+def _constant_zero(rows: Sequence[Mapping[str, Any]], column: str) -> bool:
+    seen = False
+    for row in rows:
+        value = row.get(column)
+        if value is None:
+            continue
+        try:
+            if float(value) != 0.0:
+                return False
+        except (TypeError, ValueError):
+            return False
+        seen = True
+    return True
+
+
+#: ``<expression> AS <alias>``. The expression class is deliberately broad (no
+#: ``;``) so a CASE/CAST/arithmetic expression is captured whole — a narrow
+#: character class silently truncated ``CASE WHEN … END AS fulfillment_rate`` to
+#: the text after the ``=``, which broke the one link this map exists for.
+_ALIASED = re.compile(r"([^;]+?)\s+AS\s+([\w\u4e00-\u9fff]+)", re.I)
+
+
+def sql_alias_expressions(sql: str | None) -> dict[str, str]:
+    """``{result_column: source_expression}`` from the SELECT list.
+
+    The link between a catalog column and a result column is usually the SQL
+    itself: ``SUM(out_fqty) AS shipped_qty``. Without this map, a slot named in
+    Chinese and returned under an English alias look unrelated, and the
+    constant-zero check never fires on the case it exists for.
+    """
+    out: dict[str, str] = {}
+    body = re.split(r"\bfrom\b", sql or "", maxsplit=1, flags=re.I)[0]
+    body = re.sub(r"^\s*select\s+(?:distinct\s+)?", "", body, flags=re.I)
+    for expr, alias in _ALIASED.findall(body):
+        expr = expr.strip().strip(",").strip()
+        if expr and alias:
+            out[alias.lower()] = expr
+    return out
+
+
+def _carries(
+    slot: str, column: str, concepts: Sequence[str], expressions: Mapping[str, str] | None = None
+) -> bool:
+    """Does ``column`` carry ``slot``?
+
+    Three independent signals, any one of which is enough:
+
+    1. the column's identifier shares vocabulary with the slot;
+    2. the column is one of the catalog columns that matched the slot
+       (``table.column``), by name;
+    3. the column's SELECT expression references one of those catalog columns
+       (``SUM(out_fqty) AS shipped_qty``) — the alias case.
+    """
+    from app.services.db.lexical import identifier_terms, tokens
+
+    slot_tokens = set(tokens(slot)) | set(identifier_terms(slot))
+    col_tokens = set(tokens(column)) | set(identifier_terms(column))
+    if slot_tokens & col_tokens:
+        return True
+    expr = (expressions or {}).get(str(column).lower(), "")
+    for concept in concepts:
+        name = str(concept).split(".")[-1]
+        if not name:
+            continue
+        if name.lower() == str(column).lower():
+            return True
+        if expr and re.search(rf"\b{re.escape(name)}\b", expr, re.I):
+            return True
+    return False
+
+
+# ── disclosure + narration ─────────────────────────────────────────────────
+
+
+def disclose(slots: Sequence[Mapping[str, Any]]) -> str:
+    """One business-language sentence for the unsupported slots ("" when none)."""
+    if not slots:
+        return ""
+    labels = [str(s.get("label") or s.get("slot") or "") for s in slots]
+    labels = [l for l in labels if l]
+    if not labels:
+        return ""
+    reasons = {str(s.get("reason") or "") for s in slots}
+    if reasons == {"truncated"}:
+        return (
+            "The result was cut off at the row limit, so the figures for "
+            + ", ".join(labels)
+            + " cover only part of the data."
+        )
+    if reasons & {"unvalidated_join", "zero_unproven"}:
+        return (
+            "For this period the data behind "
+            + ", ".join(labels)
+            + " could not be resolved, so no figure is reported for it. "
+            "It is not zero — it is unknown."
+        )
+    if reasons == {"blocked_by_policy"}:
+        return (
+            "Your access does not cover " + ", ".join(labels) + ", so no figure is reported for it."
+        )
+    return (
+        "The data source used here has nothing for "
+        + ", ".join(labels)
+        + ", so no figure is reported for it. It is not zero — it is unknown."
+    )
+
+
+def unsupported_directive(plan: GroundedPlan) -> str:
+    """Prompt text handed to the SQL model when something cannot be supported."""
+    if not plan.unsupported_slots:
+        return ""
+    lines = [
+        "[Unsupported] These parts of the question have no supporting column in the "
+        "tables selected for this query:"
+    ]
+    for slot in plan.unsupported_slots:
+        lines.append(f"  - {slot.get('label') or slot.get('slot')}: {slot.get('detail') or ''}")
+    lines.append(
+        "Do NOT invent a column, table or expression for them and do NOT return a "
+        "literal 0 for them. Omit them from the query; the answer will say they are "
+        "unavailable."
+    )
+    return "\n".join(lines)
+
+
+def narrate_directive(crs: CanonicalResultSet) -> str:
+    """The rules the narrator must obey for THIS result set."""
+    lines = [
+        "[Grounding] Report only the figures present in the rows below.",
+        "- Never restate, adjust, average, extrapolate or infer a number that is not in them.",
+    ]
+    if crs.unsupported_slots:
+        labels = ", ".join(crs.unsupported_labels())
+        lines.append(
+            f"- The following were asked for but are NOT available: {labels}. "
+            "Say plainly that they cannot be determined from this data, and never "
+            "write 0, 0%, none or a null-derived value for them."
+        )
+    if not crs.complete:
+        lines.append("- The result is incomplete: name what is missing.")
+    if crs.freshness.get("state") == "stale":
+        lines.append(
+            f"- The data covers up to {crs.freshness.get('as_of')}; say so if the "
+            "question asks for a more recent period."
+        )
+    if crs.warnings:
+        lines.append("- Include this caveat: " + "; ".join(crs.warnings[:3]))
+    return "\n".join(lines)
+
+
+def check_narrative_against_result(narrative: str, crs: CanonicalResultSet) -> list[str]:
+    """Deterministic: does the prose claim a figure for an unsupported slot?
+
+    Conservative on purpose — a number only counts as a claim when it sits next
+    to the slot's own label, so a legitimate figure elsewhere in the prose is
+    never mistaken for one.
+    """
+    text = narrative or ""
+    if not text or not crs.unsupported_slots:
+        return []
+    violations: list[str] = []
+    for slot in crs.unsupported_slots:
+        for label in {str(slot.get("label") or ""), str(slot.get("slot") or "")}:
+            if not label:
+                continue
+            for match in re.finditer(re.escape(label), text):
+                tail = text[match.end(): match.end() + CLAIM_WINDOW]
+                cut = min(
+                    (tail.find(ch) for ch in _SENTENCE_END if tail.find(ch) != -1),
+                    default=len(tail),
+                )
+                window = tail[:cut]
+                if _NUMBER.search(window):
+                    violations.append(f"{label}: {(label + window).strip()[:80]}")
+                    break
+            if violations and violations[-1].startswith(label):
+                break
+    return violations
+
+
+def rewrite_instruction(violations: Sequence[str], crs: CanonicalResultSet) -> str:
+    """What to tell the narrator when it emitted an unsupported figure."""
+    return (
+        "[Correction] The previous answer stated a value for data that is not available: "
+        + "; ".join(violations)
+        + ". Rewrite the answer using ONLY the rows provided and say plainly that "
+        + ", ".join(crs.unsupported_labels())
+        + " cannot be determined from this data. Do not use 0 for them."
+    )

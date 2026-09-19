@@ -103,6 +103,74 @@ def _schema_cache_put(
 # Helpers
 # ---------------------------------------------------------------------------
 
+# ── source readiness (P1) ───────────────────────────────────────────────────
+# Every path in this module that can put a NUMBER in front of a user asks the
+# readiness gate first (services/db/readiness.py). The split is deliberate:
+#
+#   answer paths  (_answer_from_database, _execute_query, _profile_data)
+#       REFUSE a source that is not nl2sql_ready — a pending, failed or stalled
+#       catalog means the tables and columns are not actually known, and an
+#       answer built from guesses is worse than no answer.
+#   metadata paths (_list_data_sources, _describe_schema)
+#       DISCLOSE: they still return what is visible, tagged with the source's
+#       preparation state, so the agent can explain the situation to the user
+#       and an operator can see why nothing can be answered from it.
+#
+# Nothing here is inferred from the source's name, dialect or tables: the gate
+# reads the source's own lifecycle record.
+
+
+def src_readiness_note(readiness) -> str:
+    """One-line prompt annotation for a source's preparation state."""
+    if readiness is None:
+        return ""
+    from app.services.db import readiness as _r
+
+    return _r.note(readiness)
+
+
+def _source_readiness(db: Session, kb_id: str):
+    """Readiness verdict for a source id (never raises)."""
+    from app.services.db import readiness as src_readiness
+
+    try:
+        return src_readiness.evaluate_source(db, kb_id)
+    except Exception:
+        logger.exception("db_tools: readiness evaluation failed for %s", kb_id)
+        return None
+
+
+def _refuse_if_not_ready(db: Session, kb_id: str) -> dict | None:
+    """Refusal payload when the source may not answer, else None."""
+    from app.services.db import readiness as src_readiness
+
+    try:
+        _readiness, refusal = src_readiness.check_source(db, kb_id)
+        return refusal
+    except Exception:
+        logger.exception("db_tools: readiness gate failed for %s", kb_id)
+        return None
+
+
+def _attach_readiness(result: dict, readiness) -> dict:
+    """Tag a successful result with the source's preparation state.
+
+    A limited (partially prepared) source must carry its disclosure into the
+    answer, so the tag is part of the result rather than a log line.
+    """
+    if not isinstance(result, dict) or readiness is None:
+        return result
+    result["source_readiness"] = {
+        "state": readiness.state,
+        "code": readiness.code,
+        "limited": readiness.limited,
+        "disclosure": readiness.disclosure,
+    }
+    if readiness.limited and readiness.disclosure:
+        result["disclosure"] = readiness.disclosure
+    return result
+
+
 def _resolve_bound_kb_ids(context: dict | None) -> list[str]:
     """Return the list of KB IDs the calling agent is allowed to use.
 
@@ -392,6 +460,19 @@ async def _list_data_sources(
             "indexing_status": kb.indexing_status,
             "chunk_count": kb.chunk_count or 0,
         }
+        # Readiness travels with the listing: the agent must be able to tell
+        # "this source cannot answer yet, and why" BEFORE it tries. A source is
+        # never hidden for being unready — hiding it would just make the agent
+        # invent something else to query.
+        readiness = _source_readiness(db, kb.id)
+        if readiness is not None:
+            entry["queryable"] = bool(readiness.allowed)
+            entry["preparation_state"] = readiness.state
+            note = src_readiness_note(readiness)
+            if note:
+                entry["preparation_note"] = note
+            if readiness.disclosure:
+                entry["disclosure"] = readiness.disclosure
         if policy.is_kb_restricted(kb.id):
             entry["restricted"] = True
             allowed = policy.allowed_tables_for_kb(kb.id)
@@ -410,6 +491,33 @@ async def _list_data_sources(
 # ---------------------------------------------------------------------------
 
 async def _describe_schema(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """Return schema information for a bound data source.
+
+    Metadata path: structure is always readable, and the result carries the
+    source's preparation state so the agent discloses it instead of implying
+    the source can be queried. (Answer paths refuse — see the module header.)
+    """
+    result = await _describe_schema_impl(args, db, user_id, context)
+    if isinstance(result, dict) and result.get("success") is not False:
+        try:
+            kb_id = (
+                args.get("data_source_id")
+                or args.get("kb_id")
+                or (context or {}).get("kb_id")
+            )
+            if kb_id:
+                _attach_readiness(result, _source_readiness(db, str(kb_id)))
+        except Exception:
+            logger.debug("describe_schema: readiness tag skipped", exc_info=True)
+    return result
+
+
+async def _describe_schema_impl(
     args: dict,
     db: Session,
     user_id: str | None,
@@ -439,6 +547,15 @@ async def _describe_schema(
     if policy.is_kb_fully_denied(kb_id):
         logger.warning("describe_schema: KB %s denied for user %s", kb_id, user_id)
         return {"success": False, "error": "Access to this data source is restricted."}
+
+    # Structure may always be read; the source's preparation state is attached
+    # so the agent discloses it rather than implying the source is queryable.
+    _readiness = _source_readiness(db, kb_id)
+    if _readiness is not None and not _readiness.allowed:
+        logger.info(
+            "describe_schema: KB %s is %s — returning structure with disclosure",
+            kb_id, _readiness.state,
+        )
 
     # ── TTL schema cache: serve repeated describe_schema calls from cache ──
     # Within a single conversation turn the schema is immutable, and the
@@ -630,6 +747,12 @@ async def _profile_data(
     if err:
         return err
 
+    # Answer path: profiling reads real rows and its output is quoted as fact,
+    # so an unprepared source is refused rather than profiled blind.
+    refusal = _refuse_if_not_ready(db, kb_id)
+    if refusal:
+        return refusal
+
     policy = _resolve_user_policy(db, user_id, context)
     if policy.is_kb_fully_denied(kb_id):
         logger.warning("profile_data: KB %s denied for user %s", kb_id, user_id)
@@ -783,6 +906,13 @@ async def _execute_query(
 
     max_rows = max(1, min(max_rows, int(_settings.MAX_QUERY_ROWS_CAP)))
     timeout_s = max(1, min(timeout_s, int(_settings.MAX_QUERY_TIMEOUT_S)))
+
+    # Source readiness: a source whose structure was never catalogued (or whose
+    # preparation failed) must not be executed against — the run would produce
+    # numbers nobody can vouch for. Refusal is a disclosure, not a crash.
+    refusal = _refuse_if_not_ready(db, kb_id)
+    if refusal:
+        return refusal
 
     # Read-only gate: this KB never accepts write/DDL statements. Runs before
     # the data-access-policy check so the rejection reason is unambiguous.
@@ -1132,6 +1262,31 @@ def _build_validation_hints(db: Session, kb_id: str, result: dict) -> list[dict]
 # answer_from_database
 # ---------------------------------------------------------------------------
 
+def _attach_grounding_envelope(result: dict) -> dict:
+    """P3 adapter for the TOOL surface.
+
+    ``NLAnswerService.answer`` returns the full contract, rows included in both
+    ``rows`` and ``result_set.rows``. The tool payload is read by an LLM whose
+    context the customer pays for (and, for the local models these customers
+    require, is small), so the tool gets the ENVELOPE — plan, coverage,
+    freshness, units, validation, unsupported slots, disclosure — with the
+    duplicated row payload dropped, while every legacy key (``rows``,
+    ``columns``, ``sql``, ``provenance``, …) is passed through untouched.
+
+    A caller that wants the complete contract calls ``NLAnswerService.answer``
+    directly; nothing is hidden, one copy of the rows is.
+    """
+    if not isinstance(result, dict):
+        return result
+    crs = result.get("result_set")
+    if isinstance(crs, dict):
+        slim = {k: v for k, v in crs.items() if k != "rows"}
+        slim["rows_returned"] = len(crs.get("rows") or [])
+        slim["rows_in_result"] = "see `rows` — the canonical rows are passed through once"
+        result["result_set"] = slim
+    return result
+
+
 async def _answer_from_database(
     args: dict,
     db: Session,
@@ -1148,10 +1303,25 @@ async def _answer_from_database(
 
     policy = _resolve_user_policy(db, user_id, context)
 
+    # Readiness gate: the NL answer path is the one that most looks like an
+    # authoritative answer, so it refuses a source that is not prepared and
+    # discloses a source that is only partly prepared.
+    readiness = _source_readiness(db, kb_id)
+    if readiness is not None and not readiness.allowed:
+        from app.services.db import readiness as src_readiness
+
+        _r, refusal = src_readiness.check_source(db, kb_id)
+        if refusal:
+            logger.warning(
+                "answer_from_database: refusing KB %s (%s)",
+                kb_id, readiness.detail,
+            )
+            return refusal
+
     try:
         svc = NLAnswerService(db)
         result = await svc.answer(kb_id, question, resolved_policy=policy)
-        return result
+        return _attach_grounding_envelope(_attach_readiness(result, readiness))
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}
     except Exception as e:

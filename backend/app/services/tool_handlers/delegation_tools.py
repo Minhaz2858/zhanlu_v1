@@ -927,6 +927,13 @@ async def _try_nl_fastpath(
     else:
         _fp_cols = []
 
+    # P3: this view re-shapes the service result, so it must carry the grounding
+    # envelope across explicitly — a whitelist that drops `unsupported_slots`
+    # would hand the Data Agent a result set with no way to know that part of the
+    # question had no data, which is the failure the envelope exists to prevent.
+    from app.services.tool_handlers.db_tools import _attach_grounding_envelope
+
+    _envelope = _attach_grounding_envelope(dict(result))
     return {
         "success": True,
         "answer": result.get("answer") or "",
@@ -937,6 +944,16 @@ async def _try_nl_fastpath(
         "source_name": result.get("source_name") or kb.name,
         "iterations": result.get("iterations", 1),
         "fastpath": True,
+        **({"disclosure": _envelope["disclosure"]} if _envelope.get("disclosure") else {}),
+        **(
+            {
+                "unsupported_slots": _envelope.get("unsupported_slots") or [],
+                "plan": _envelope.get("plan"),
+                "result_set": _envelope.get("result_set"),
+            }
+            if _envelope.get("unsupported_slots")
+            else {}
+        ),
     }
 
 
