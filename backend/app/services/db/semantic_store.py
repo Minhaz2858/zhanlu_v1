@@ -59,6 +59,8 @@ from typing import Any, Iterable, Sequence
 
 from sqlalchemy.orm import Session
 
+from app.services.db.lexical import tokens as lexical_tokens
+
 logger = logging.getLogger(__name__)
 
 # ── provenance tiers ───────────────────────────────────────────────────────
@@ -79,15 +81,21 @@ _TOKEN_RE = re.compile(r"[^0-9a-zA-Z\u4e00-\u9fff]+")
 # scan an unbounded telemetry table.
 _LOG_SCAN_DEFAULT = 2000
 
+# A description hit is worth 1.0, but no more than this in total — a description
+# is prose, and prose length must not buy rank (see ``rank_relations``).
+_W_DESC_CAP = 3.0
+
 
 def _tokens(text: str | None) -> set[str]:
     """Lowercased alphanumeric/CJK tokens longer than one char.
 
     Shape-only (no business vocabulary), so a new database needs no new rules.
+    CJK text is cut into overlapping bigrams by ``lexical.tokens`` — there is no
+    whitespace inside a Chinese run, so without that a whole Chinese question
+    came back as ONE token and matched nothing (measured: pure-CJK questions
+    retrieved ``method=none``, and the ordering fell to the domain guess).
     """
-    if not text:
-        return set()
-    return {t for t in _TOKEN_RE.split(text.lower()) if len(t) > 1}
+    return lexical_tokens(text)
 
 
 def _token_hits(q_tokens: set[str], text: str | None) -> int:
@@ -160,6 +168,7 @@ class SemanticRelation:
     kb_id: str
     table_name: str
     description: str = ""
+    description_alt: str = ""  # the other language variant — matching only
     tier: str = TIER_DISCOVERED
     role: str = "unknown"
     domain: str | None = None
@@ -313,11 +322,22 @@ class SemanticStore:
             description = (
                 overlay.get("description") or r.description_en or r.description_zh or ""
             )
+            # The language variant NOT chosen for display. Matching must span
+            # both: the store used to see only ``description_en``, so on a
+            # catalog whose Chinese descriptions exist for every table (all 143
+            # here) a Chinese question could not match a single one of them.
+            description_alt = ""
+            if description:
+                if description == (r.description_zh or ""):
+                    description_alt = r.description_en or ""
+                else:
+                    description_alt = r.description_zh or ""
             out.append(
                 SemanticRelation(
                     kb_id=r.kb_id,
                     table_name=name,
                     description=description,
+                    description_alt=description_alt,
                     # A human-authored alias/description is the only thing here
                     # that upgrades a row above DISCOVERED.
                     tier=TIER_VERIFIED if alias_list else TIER_DISCOVERED,
@@ -776,10 +796,21 @@ class SemanticStore:
                     semantic += 3.0
                     evidence.append(f"alias:{alias}")
 
-            d_hits = _token_hits(q_tokens, r.description)
+            d_hits = max(
+                _token_hits(q_tokens, r.description),
+                # The other language's description is matched too, so a Chinese
+                # question reaches a table whose DISPLAY description is English
+                # (and vice versa) — the catalog has both, the store used one.
+                _token_hits(q_tokens, getattr(r, "description_alt", "") or ""),
+            )
             if d_hits:
-                semantic += 1.0 * d_hits
-                evidence.append(f"description:{d_hits}")
+                # Capped: a Chinese description is a long run of bigrams, so an
+                # uncapped count let a verbose description outscore a VERIFIED
+                # plan. Rarity-weighted scoring for the same evidence lives in
+                # ``retrieval_evidence`` (BM25); this is the cheap store-side
+                # signal and must stay below the plan weight.
+                semantic += min(_W_DESC_CAP, 1.0 * d_hits)
+                evidence.append(f"description:{min(d_hits, int(_W_DESC_CAP))}")
 
             if r.domain and _token_hits(q_tokens, r.domain):
                 semantic += 1.5

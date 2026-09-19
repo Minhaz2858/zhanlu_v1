@@ -608,6 +608,12 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
         result.append({
             "table_name": r.table_name,
             "description": desc,
+            # BOTH language variants are carried, not just the display one:
+            # retrieval matches a question against the language it was written
+            # in, and picking one here is how a Chinese question lost every
+            # table whose English description happened to be filled in.
+            "description_zh": r.description_zh or "",
+            "description_en": r.description_en or "",
             "row_count": r.row_count,
             "date_column": cov.get("date_column", ""),
             "max_date": cov.get("max_date", ""),
@@ -624,14 +630,33 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
         from app.models.knowledge_catalog import KBColumnMeta
         _ids = [r.id for r in rows]
         if _ids:
+            # Column MEANING is fetched, not just name+type: the description,
+            # semantic type and unit are what let retrieval see that a question
+            # about 金额/单价/数量 belongs to the table that has such a column.
             _cols = (
-                db.query(KBColumnMeta.column_name, KBColumnMeta.data_type, KBColumnMeta.table_meta_id)
+                db.query(
+                    KBColumnMeta.column_name,
+                    KBColumnMeta.data_type,
+                    KBColumnMeta.table_meta_id,
+                    KBColumnMeta.semantic_type,
+                    KBColumnMeta.unit,
+                    KBColumnMeta.description_zh,
+                    KBColumnMeta.description_en,
+                )
                 .filter(KBColumnMeta.table_meta_id.in_(_ids))
                 .all()
             )
             _by_tbl: dict[str, list[dict]] = {}
-            for _name, _dtype, _tid in _cols:
-                _by_tbl.setdefault(_tid, []).append({"name": _name, "data_type": _dtype})
+            for _name, _dtype, _tid, _stype, _unit, _dzh, _den in _cols:
+                _by_tbl.setdefault(_tid, []).append(
+                    {
+                        "name": _name,
+                        "data_type": _dtype,
+                        "semantic_type": _stype or "unknown",
+                        "unit": _unit or "",
+                        "description": (_dzh or _den or "")[:120],
+                    }
+                )
             _tbl_by_id = {r.id: r.table_name for r in rows}
             for _tid, _c in _by_tbl.items():
                 _t = next((x for x in result if x["table_name"] == _tbl_by_id.get(_tid)), None)

@@ -358,22 +358,44 @@ class NLAnswerService:
                                 question,
                             )
                             if scoped and matched:
-                                domains_label = ", ".join(
-                                    f"{d.get('name_en')}"
-                                    + (f" / {d['name_zh']}" if d.get("name_zh") else "")
-                                    for d in matched
+                                # A domain is only ADVERTISED to the selector when
+                                # the question's own vocabulary appears in it.
+                                # Measured live: the domain ranker put a Chinese
+                                # contract question in "User Authentication and
+                                # Permissions", and this line then told the model
+                                # that was the matched domain — which is how the
+                                # eight auth_* tables got picked.
+                                from app.services.db.table_retrieval import (
+                                    domain_support as _domain_support,
                                 )
-                                logger.info(
-                                    "NLAnswer: domain scoping %s → %d/%d tables "
-                                    "(annotation only)",
-                                    [d.get("name_en") for d in matched],
-                                    len(scoped),
-                                    len(toc),
-                                )
-                                toc_text = (
-                                    f"Matched business domains: {domains_label}\n"
-                                    + toc_text
-                                )
+
+                                scored = [
+                                    d for d in matched if _domain_support(question, d)
+                                ]
+                                if scored:
+                                    domains_label = ", ".join(
+                                        f"{d.get('name_en')}"
+                                        + (f" / {d['name_zh']}" if d.get("name_zh") else "")
+                                        for d in scored
+                                    )
+                                    logger.info(
+                                        "NLAnswer: domain annotation %s "
+                                        "(%d/%d matched domains carry the question's "
+                                        "vocabulary)",
+                                        [d.get("name_en") for d in scored],
+                                        len(scored), len(matched),
+                                    )
+                                    toc_text = (
+                                        f"Matched business domains: {domains_label}\n"
+                                        + toc_text
+                                    )
+                                else:
+                                    logger.info(
+                                        "NLAnswer: domain matches %s share no "
+                                        "vocabulary with the question — not "
+                                        "advertised to the selector",
+                                        [d.get("name_en") for d in matched],
+                                    )
                         except Exception as e:
                             logger.warning("NLAnswer: domain scoping skipped: %s", e)
 
