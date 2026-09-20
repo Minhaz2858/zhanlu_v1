@@ -151,6 +151,10 @@ class MySQLConnector:
         # statement; non-SELECTs ignore the hint safely.
         if timeout_s > 0 and _is_select:
             sql = f"/*+ MAX_EXECUTION_TIME({timeout_s * 1000}) */ " + sql
+        # The executable form: the authored statement plus this dialect's own
+        # prefix. Recorded so provenance can show what the database actually ran
+        # (`COUNT(*)` stays a valid call; the hint is not part of the question).
+        self.last_executed_sql = sql
         # Guards first, on the plain connection.
         with self._engine.connect() as conn:
             self._apply_session_guards(conn, timeout_s)

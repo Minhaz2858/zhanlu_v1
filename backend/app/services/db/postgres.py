@@ -146,6 +146,9 @@ class PostgresConnector:
         timeout_s: int = 10,
     ) -> list[dict]:
         assert self._engine is not None
+        # Postgres executes the authored statement as written (the timeout is a
+        # session SET, not a prefix), so this is the executable form verbatim.
+        self.last_executed_sql = sql
         with self._engine.connect() as conn:
             # Guards first, on the plain connection: a read-only session is the
             # defense-in-depth layer under the SQL text gate (even a write that

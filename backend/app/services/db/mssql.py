@@ -104,6 +104,9 @@ class MSSQLConnector:
         timeout_s: int = 10,
     ) -> list[dict]:
         assert self._engine is not None
+        # MSSQL executes the authored statement verbatim (the timeout is a
+        # session SET, not a prefix).
+        self.last_executed_sql = sql
         with self._engine.connect() as conn:
             if timeout_s > 0:
                 # MSSQL per-statement timeout (seconds) — applies to read

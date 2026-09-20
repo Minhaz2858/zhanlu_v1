@@ -1027,6 +1027,7 @@ class NLAnswerService:
             kb_id=kb_id,
             source_name=exec_result.get("source", {}).get("name"),
             sql=exec_result.get("sql"),
+            executed_sql=exec_result.get("executed_sql"),
             tables=_extract_table_names(exec_result.get("sql") or ""),
             window=_window,
             catalog=_toc_snapshot,
@@ -1771,6 +1772,7 @@ def _build_provenance(
     kb_id: str,
     source_name: str | None,
     sql: str | None,
+    executed_sql: str | None = None,
     tables: list[str],
     window: tuple | None,
     catalog: list | None,
@@ -1793,6 +1795,18 @@ def _build_provenance(
         if normalised
         else ""
     )
+    # The statement the DATABASE ran is not always the authored text: MySQL
+    # prepends `/*+ MAX_EXECUTION_TIME */`, Oracle wraps the query in ROWNUM.
+    # A record that kept only the fingerprint of the authored SQL could not show
+    # what executed, so `COUNT(*)` read as a question with no answer next to a
+    # disclosure about the same question. Falls back to the authored SQL when the
+    # executor did not report a rewrite.
+    executed_text = " ".join((executed_sql or sql or "").split())
+    executed_fingerprint = (
+        hashlib.sha256(executed_text.encode("utf-8")).hexdigest()[:16]
+        if executed_text
+        else ""
+    )
     cov: dict[str, dict] = {}
     for t in tables:
         entry = next((c for c in (catalog or []) if c.get("table_name") == t), None)
@@ -1806,6 +1820,10 @@ def _build_provenance(
         "source_id": kb_id,
         "source_name": source_name,
         "sql_fingerprint": fingerprint,
+        #: the executable statement, verbatim and unmangled, so an auditor can
+        #: see the count/question form that actually ran
+        "executed_sql": executed_text,
+        "executed_sql_fingerprint": executed_fingerprint,
         "tables": list(tables),
         "requested_window": [str(window[0]), str(window[1])] if window else None,
         "table_coverage": cov,

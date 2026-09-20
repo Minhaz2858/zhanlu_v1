@@ -102,6 +102,8 @@ class SQLiteConnector:
         timeout_s: int = 10,
     ) -> list[dict]:
         assert self._conn is not None
+        # SQLite executes the authored statement verbatim.
+        self.last_executed_sql = sql
         # SQLite has no per-statement timeout; emulate by limiting wall time
         # via the progress handler.
         if timeout_s > 0:

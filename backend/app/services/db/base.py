@@ -67,6 +67,11 @@ class BaseConnector(Protocol):
 
     kb: Any  # the KnowledgeBase model (kept for source_name etc.)
     dialect: str
+    #: The statement the driver ACTUALLY received — the authored SQL after any
+    #: dialect rewrite (the MySQL ``/*+ MAX_EXECUTION_TIME */`` prefix, Oracle's
+    #: ``ROWNUM`` wrapper). Dialects differ here, so an audit trail that keeps
+    #: only the authored text cannot show what was executed. Set by ``execute()``.
+    last_executed_sql: str
 
     def __enter__(self) -> "BaseConnector": ...
     def __exit__(self, exc_type, exc, tb) -> None: ...

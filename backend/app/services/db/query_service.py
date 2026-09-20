@@ -66,6 +66,7 @@ class QueryService:
             {
                 "source": {"id", "name", "db_type"},
                 "sql": str,
+                "executed_sql": str,   # the statement the driver received
                 "rows": [...],
                 "row_count": int,        # rows returned (== len(rows))
                 "rows_returned": int,    # explicit alias for the above
@@ -94,6 +95,11 @@ class QueryService:
         with get_connector(kb) as conn:
             # +1 to PROVE truncation (see docstring).
             fetched = conn.execute(sql, max_rows=row_cap + 1, timeout_s=timeout_cap)
+            # The connectors differ in what they hand the driver — MySQL prepends
+            # the MAX_EXECUTION_TIME hint, Oracle wraps with ROWNUM, Postgres and
+            # the rest execute the authored text verbatim — so the executable
+            # statement is read back from the connector rather than assumed.
+            executed_sql = str(getattr(conn, "last_executed_sql", "") or sql)
         elapsed_ms = int((time.time() - t0) * 1000)
 
         truncated = len(fetched) > row_cap
@@ -105,6 +111,8 @@ class QueryService:
                 "db_type": kb.db_type,
             },
             "sql": sql,
+            #: what the database actually ran, when a dialect rewrite applies
+            "executed_sql": executed_sql,
             "rows": rows,
             "row_count": len(rows),
             "rows_returned": len(rows),

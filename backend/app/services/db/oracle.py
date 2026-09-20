@@ -109,6 +109,9 @@ class OracleConnector:
             if not _has_row_limit(sql)
             else sql
         )
+        # The executable form here is the ROWNUM wrapper, NOT the authored
+        # statement: recording only the authored text would hide the rewrite.
+        self.last_executed_sql = wrapped
         with self._engine.connect() as conn:
             result = conn.execute(text(wrapped), params or {})
             if result.returns_rows:

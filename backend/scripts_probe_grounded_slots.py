@@ -100,6 +100,13 @@ def main() -> int:
 
             print("\n── sql ──────────────────────────────────────────────────")
             print("  " + (result.get("sql") or "").replace("\n", "\n  ")[:900])
+            # The executable form is shown with its star count: a report that
+            # renders SQL as prose lets a markdown renderer eat the `*` of
+            # `COUNT(*)`, which is how `SELECT COUNT() FROM ...` appears in a
+            # write-up even though the database ran `COUNT(*)`.
+            executed = (result.get("provenance") or {}).get("executed_sql") or ""
+            if executed:
+                print(f"  executed  stars={executed.count('*')}  {executed!r}"[:900])
 
             plan = result.get("plan") or {}
             print("\n── plan ─────────────────────────────────────────────────")
