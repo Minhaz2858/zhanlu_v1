@@ -21,6 +21,7 @@ that stops reproducing the defect fails loudly instead of passing vacuously.
 from __future__ import annotations
 
 import ast
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -625,3 +626,128 @@ def test_the_ranker_has_no_business_vocabulary(module):
         f"{module} contains CJK vocabulary in code: {offenders[:5]} — Chinese must "
         f"be handled as n-grams with catalog-derived frequency, never as a word list"
     )
+
+
+# ── coverage reroute: the verdict the pipeline measured but never acted on ──
+#
+# Measured live on 2026-09-20, question 惠州伊斯科本周销售情况，用图表展示:
+#   rank 1  erp_v_sale_huizhou    score 5.73  max_date 2026-09-16  covers TRUE
+#   chosen  forecast_accuracy_log              max_date 2026-09-05  covers FALSE
+# The selector was free to pick any catalog table, and the ONLY check applied to
+# its answer was "does this name exist". So a table the catalog itself had
+# already convicted of ending 9 days before the asked-for week went to SQL,
+# returned 0 rows, and the turn wrote an articulate "no data" answer instead of
+# the sales figures. These pin the swap AND the bounds that keep it from
+# becoming the filter that rule 1 forbids.
+
+
+def _last_week() -> tuple[date, date]:
+    return (date(2026, 9, 14), date(2026, 9, 20))
+
+
+def _sales_catalog(**overrides) -> list[dict]:
+    """The two tables from the live defect, plus the window that split them."""
+    forecast = _entry(
+        "forecast_accuracy_log",
+        zh="预测准确率日志表，记录产品价格预测的准确率评估数据",
+        en="Forecast accuracy log table, records price forecast accuracy",
+        domain="Price Forecasting",
+        min_date="2026-04-06", max_date="2026-09-05",
+    )
+    forecast.update(overrides.get("forecast", {}))
+    sales = _entry(
+        "erp_v_sale_huizhou",
+        zh="ERP销售视图（惠州），展示惠州地区的销售数据。",
+        en="ERP sales view (Huizhou), displays sales",
+        domain="Product Sales and Pricing",
+        min_date="2018-06-01", max_date="2026-09-16",
+    )
+    sales.update(overrides.get("sales", {}))
+    return [sales, forecast]
+
+
+def test_a_table_ending_before_the_window_is_swapped_for_the_ranked_coverer(monkeypatch):
+    from app.services.db.table_retrieval import reroute_uncovered
+
+    _patch_off(monkeypatch)
+    toc = _sales_catalog()
+    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+                    window=_last_week())
+
+    # The ranking was never the defect: the sales view leads, and the table the
+    # selector actually chose carries no evidence at all — it was never a
+    # candidate, it was picked out of the full catalog render because it EXISTS.
+    assert res.names[0] == "erp_v_sale_huizhou", res.names[:4]
+    assert "forecast_accuracy_log" not in res.names, res.names[:4]
+    # …and the catalog's own window says it cannot hold the asked-for week.
+    forecast_toc = [t for t in toc if t["table_name"] == "forecast_accuracy_log"][0]
+    assert forecast_toc["max_date"] == "2026-09-05"
+
+    selected, swaps = reroute_uncovered(["forecast_accuracy_log"], toc, res, _last_week())
+    assert selected == ["erp_v_sale_huizhou"], selected
+    assert swaps == [("forecast_accuracy_log", "erp_v_sale_huizhou")], swaps
+
+
+def test_a_covering_selection_is_left_alone(monkeypatch):
+    """The reroute is a REROUTE, not a filter — a good selection is untouched."""
+    from app.services.db.table_retrieval import reroute_uncovered
+
+    _patch_off(monkeypatch)
+    toc = _sales_catalog()
+    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+                    window=_last_week())
+    assert reroute_uncovered(["erp_v_sale_huizhou"], toc, res, _last_week()) == (
+        ["erp_v_sale_huizhou"], [],
+    )
+
+
+def test_an_unknown_window_is_never_convicted(monkeypatch):
+    """A missing measurement is reported as missing, never as 'empty'."""
+    from app.services.db.table_retrieval import reroute_uncovered
+
+    _patch_off(monkeypatch)
+    toc = _sales_catalog(forecast={"max_date": None, "min_date": None})
+    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+                    window=_last_week())
+
+    # No window on the question at all → nothing to convict.
+    assert reroute_uncovered(["forecast_accuracy_log"], toc, res, None) == (
+        ["forecast_accuracy_log"], [],
+    )
+    # Window asked for, catalog has no measurement for this table → also untouched.
+    assert reroute_uncovered(["forecast_accuracy_log"], toc, res, _last_week()) == (
+        ["forecast_accuracy_log"], [],
+    )
+
+
+def test_the_reroute_never_empties_the_selection(monkeypatch):
+    """With nothing to swap in, the original selection stands.
+
+    Dropping the convicted table would leave the stage with no schema at all —
+    an empty selection is a worse failure than a query that honestly returns
+    nothing, and the coverage disclosure already covers that case.
+    """
+    from app.services.db.table_retrieval import reroute_uncovered
+
+    _patch_off(monkeypatch)
+    toc = [_sales_catalog()[1]]  # the convicted table is the ONLY table
+    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+                    window=_last_week())
+
+    selected, swaps = reroute_uncovered(["forecast_accuracy_log"], toc, res, _last_week())
+    assert selected == ["forecast_accuracy_log"], selected
+    assert swaps == []
+
+
+def test_the_reroute_can_only_swap_in_a_ranked_candidate(monkeypatch):
+    """The replacement is drawn from the candidates, so no invented table."""
+    from app.services.db.table_retrieval import reroute_uncovered
+
+    _patch_off(monkeypatch)
+    toc = _sales_catalog()
+    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+                    window=_last_week())
+    selected, swaps = reroute_uncovered(["forecast_accuracy_log"], toc, res, _last_week())
+    for _dropped, added in swaps:
+        assert added in res.names, (added, res.names)
+    assert len(selected) == 1

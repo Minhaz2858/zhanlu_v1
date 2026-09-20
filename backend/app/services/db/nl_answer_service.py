@@ -388,6 +388,7 @@ class NLAnswerService:
                 from app.services.db.table_retrieval import (
                     candidate_names,
                     format_candidates_block,
+                    reroute_uncovered,
                     retrieve_for_question,
                 )
                 toc = build_full_toc(self._db, [kb_id])
@@ -518,6 +519,30 @@ class NLAnswerService:
                             "falling back to retrieval top-%d %s",
                             len(selected_names), selected_names,
                         )
+
+                    # ── Coverage reroute: a selection the catalog's own window
+                    # has already convicted never reaches SQL. Until now the
+                    # per-candidate `covers_window` verdict was rendered into
+                    # the prompt and the answer and ACTED ON by nothing, so a
+                    # table whose data ends before the asked-for period was
+                    # queried anyway, returned 0 rows, and the turn narrated the
+                    # emptiness. Measured live (2026-09-20, 惠州伊斯科本周销售情况):
+                    # the selector picked forecast_accuracy_log (max_date
+                    # 2026-09-05) over the rank-1 erp_v_sale_huizhou (max_date
+                    # 2026-09-16) because the former is a REAL catalog table —
+                    # which is all the old fallback checked. Swap the convicted
+                    # table for the highest-ranked covering candidate instead.
+                    if selected_names and _window is not None and _retrieval.candidates:
+                        selected_names, _swaps = reroute_uncovered(
+                            selected_names, toc, _retrieval, _window,
+                        )
+                        if _swaps:
+                            logger.info(
+                                "NLAnswer: coverage reroute (window %s) %s",
+                                _window,
+                                "; ".join(f"{d} → {a}" for d, a in _swaps),
+                            )
+
                     if selected_names:
                         logger.info(
                             "NLAnswer: TOC phase selected %d tables: %s",

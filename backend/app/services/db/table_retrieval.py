@@ -523,3 +523,72 @@ def candidate_names(res: RetrievalResult, k: int = 4) -> list[str]:
     dumping the whole catalog into an M-Schema fallback.
     """
     return [c.table_name for c in res.candidates[:k]]
+
+
+def reroute_uncovered(
+    selected: list[str],
+    toc: list[dict],
+    res: RetrievalResult,
+    window: tuple[date, date] | None,
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """Swap out a selected table whose catalog window CANNOT hold the period.
+
+    A table whose data ENDS before the question window starts is a guaranteed
+    0 rows — that is what ``_covers`` measures, and the candidate list already
+    carries the verdict as ``covers_window``. Until now nothing ACTED on it:
+    the annotation reached the prompt and the answer, never the selection.
+
+    Measured live on 2026-09-20, question ``惠州伊斯科本周销售情况，用图表展示``
+    (window 2026-09-14..2026-09-20):
+
+      * ``erp_v_sale_huizhou`` ranked #1 (score 5.73, max_date 2026-09-16,
+        ``covers_window=True``) — and was NOT selected;
+      * the selector chose ``forecast_accuracy_log`` (max_date 2026-09-05,
+        ``covers_window=False``) because it is a REAL catalog table, so the
+        retrieval's top-ranked candidate was discarded (retrieval was only
+        consulted when the selection matched nothing that exists);
+      * the query returned 0 rows and the pipeline wrote an articulate
+        "no data, unknown not zero" answer instead of the sales figures.
+
+    So: replace each selected table convicted by a MEASURED ``covers_window is
+    False`` with the highest-ranked covering candidate the selection omitted.
+    Deliberately narrow, so the invariants hold:
+
+    * an UNKNOWN window (``None``) never convicts — a missing measurement is
+      reported as missing, exactly as ``_covers`` documents;
+    * tables are never dropped-without-replacement: if no covering candidate
+      remains, the original selection stands and the existing coverage
+      disclosure carries the message;
+    * the returned selection is never empty;
+    * this is a first-query REROUTE, not a filter — the full catalog is still
+      rendered to the selector, so nothing becomes unreachable.
+
+    Returns ``(selected, [(dropped, added), …])``; the pairs are for logging.
+    """
+    if not selected or window is None or not res.candidates:
+        return selected, []
+
+    q_start, _ = window
+    by_name = {t.get("table_name"): t for t in toc if t.get("table_name")}
+
+    def _ends_before_window(name: str) -> bool:
+        entry = by_name.get(name)
+        if entry is None:  # not in the catalog — leave it alone
+            return False
+        end = _parse_day(entry.get("max_date"))
+        return end is not None and end < q_start
+
+    spare = [c for c in res.candidates if c.covers_window and c.table_name not in selected]
+    if not spare:
+        return selected, []
+
+    out: list[str] = []
+    swaps: list[tuple[str, str]] = []
+    for name in selected:
+        if spare and _ends_before_window(name):
+            replacement = spare.pop(0).table_name
+            swaps.append((name, replacement))
+            out.append(replacement)
+        else:
+            out.append(name)
+    return (out or selected), swaps
