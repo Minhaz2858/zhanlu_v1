@@ -127,6 +127,25 @@ class PostgresConnector:
         )
         with self._engine.connect() as conn:
             pks = {r[0] for r in conn.execute(pk_sql, {"schema": self._schema, "t": table}).fetchall()}
+        # Column comments live in pg_description, not in information_schema —
+        # they are a second query for the same reason the PK lookup is.
+        comment_sql = text(
+            "SELECT a.attname, d.description FROM pg_attribute a "
+            "JOIN pg_class c ON c.oid = a.attrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "LEFT JOIN pg_description d ON d.objoid = a.attrelid "
+            "     AND d.objsubid = a.attnum "
+            "WHERE n.nspname = :schema AND c.relname = :t "
+            "AND a.attnum > 0 AND NOT a.attisdropped"
+        )
+        with self._engine.connect() as conn:
+            comments = {
+                r[0]: r[1]
+                for r in conn.execute(comment_sql, {"schema": self._schema, "t": table}).fetchall()
+            }
+        # Index membership per column (primary / unique / plain), same shape the
+        # MySQL connector gets for free from information_schema.COLUMNS.COLUMN_KEY.
+        key_roles = self._column_key_roles(table)
         return [
             {
                 "name": r[0],
@@ -134,6 +153,101 @@ class PostgresConnector:
                 "nullable": (r[2] or "").lower() == "yes",
                 "default": r[3],
                 "pk": r[0] in pks,
+                "comment": (comments.get(r[0]) or "").strip() or None,
+                "key": key_roles.get(r[0], ""),
+            }
+            for r in rows
+        ]
+
+    def _column_key_roles(self, table: str) -> dict[str, str]:
+        """``{column: 'PRI'|'UNI'|'MUL'}`` — strongest role wins per column."""
+        assert self._engine is not None
+        sql = text(
+            "SELECT a.attname, i.indisprimary, i.indisunique FROM pg_index i "
+            "JOIN pg_class c ON c.oid = i.indrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+            "WHERE n.nspname = :schema AND c.relname = :t "
+            "AND a.attnum > 0 AND NOT a.attisdropped"
+        )
+        rank = {"PRI": 3, "UNI": 2, "MUL": 1, "": 0}
+        roles: dict[str, str] = {}
+        try:
+            with self._engine.connect() as conn:
+                rows = conn.execute(sql, {"schema": self._schema, "t": table}).fetchall()
+        except Exception:
+            logger.debug("postgres: key roles unavailable for %s", table, exc_info=True)
+            return roles
+        for name, is_primary, is_unique in rows:
+            role = "PRI" if is_primary else ("UNI" if is_unique else "MUL")
+            if rank[role] > rank.get(roles.get(str(name), ""), 0):
+                roles[str(name)] = role
+        return roles
+
+    def table_facts(self, table: str) -> dict:
+        """Engine-reported facts about one relation (never its rows).
+
+        ``reltuples`` is the planner's estimate (updated by ANALYZE/VACUUM), so
+        the caller labels it ``estimated``. ``relpages * block_size`` is the
+        on-disk allocation.
+        """
+        assert self._engine is not None
+        sql = text(
+            "SELECT c.relkind, c.reltuples::bigint, "
+            "       (c.relpages * current_setting('block_size')::int)::bigint, "
+            "       obj_description(c.oid, 'pg_class') "
+            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = :schema AND c.relname = :t"
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(sql, {"schema": self._schema, "t": table}).fetchone()
+        if row is None:
+            return {}
+        kind = {"r": "BASE TABLE", "v": "VIEW", "m": "MATERIALIZED VIEW", "p": "BASE TABLE"}
+        facts: dict = {}
+        if row[0]:
+            facts["table_type"] = kind.get(str(row[0]), str(row[0]))
+        comment = (row[3] or "").strip()
+        if comment:
+            facts["comment"] = comment
+        est = row[1]
+        if est is not None and int(est) >= 0:
+            facts["est_rows"] = int(est)
+        if row[2] is not None and int(row[2]) > 0:
+            facts["size_bytes"] = int(row[2])
+        return facts
+
+    def get_indexes(self, table: str) -> list[dict]:
+        """Index inventory from pg_index (columns resolved in index order).
+
+        ``indisunique`` / ``indisprimary`` live on ``pg_index`` (alias ``ix``),
+        NOT on the index's own ``pg_class`` row (alias ``i``, which only carries
+        the index name). Reading them off ``i`` fails the whole statement, and
+        the catalog then records "indexes not collected" for every PostgreSQL
+        source — so the alias matters.
+        """
+        assert self._engine is not None
+        sql = text(
+            "SELECT i.relname, ix.indisunique, ix.indisprimary, "
+            "       array_to_string(array(SELECT a.attname FROM unnest(ix.indkey) WITH ORDINALITY "
+            "                                AS k(attnum, ord) "
+            "                                JOIN pg_attribute a ON a.attrelid = ix.indrelid "
+            "                                                     AND a.attnum = k.attnum "
+            "                                ORDER BY k.ord), ',') "
+            "FROM pg_index ix "
+            "JOIN pg_class c ON c.oid = ix.indrelid "
+            "JOIN pg_class i ON i.oid = ix.indexrelid "
+            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+            "WHERE n.nspname = :schema AND c.relname = :t"
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"schema": self._schema, "t": table}).fetchall()
+        return [
+            {
+                "name": str(r[0]),
+                "columns": [c for c in (r[3] or "").split(",") if c],
+                "unique": bool(r[1]),
+                "primary": bool(r[2]),
             }
             for r in rows
         ]

@@ -79,6 +79,7 @@ class SQLiteConnector:
         if not rows:
             return []
         # PRAGMA table_info doesn't expose FK info usefully here; PK is in row row.
+        key_roles = self._column_key_roles(table)
         return [
             {
                 "name": r[1],
@@ -86,9 +87,101 @@ class SQLiteConnector:
                 "nullable": r[3] == 0,  # notnull=0 → nullable
                 "default": r[4],
                 "pk": r[5] == 1,
+                # SQLite has no COMMENT syntax at all: None is the honest answer,
+                # and it is a different fact from "the source declared no comment".
+                "comment": None,
+                # An INTEGER PRIMARY KEY is rowid and gets no index_list entry —
+                # the PK fact comes from table_info, so it is stated here too.
+                "key": key_roles.get(str(r[1])) or ("PRI" if r[5] == 1 else ""),
             }
             for r in rows
         ]
+
+    def _column_key_roles(self, table: str) -> dict[str, str]:
+        """``{column: 'PRI'|'UNI'|'MUL'}`` from PRAGMA index_list/index_info."""
+        assert self._conn is not None
+        roles: dict[str, str] = {}
+        rank = {"PRI": 3, "UNI": 2, "MUL": 1, "": 0}
+
+        def _record(col: str, role: str) -> None:
+            if rank[role] > rank.get(roles.get(col, ""), 0):
+                roles[col] = role
+
+        try:
+            indexes = self._conn.execute(f'PRAGMA index_list("{table}")').fetchall()
+        except Exception:
+            logger.debug("sqlite: index_list unavailable for %s", table, exc_info=True)
+            return roles
+        for idx in indexes:
+            # (seq, name, unique, origin, partial) — origin 'pk' marks the PK index.
+            name = idx[1]
+            unique = bool(idx[2])
+            origin = idx[3] if len(idx) > 3 else ""
+            role = "PRI" if origin == "pk" else ("UNI" if unique else "MUL")
+            try:
+                info = self._conn.execute(f'PRAGMA index_info("{name}")').fetchall()
+            except Exception:
+                continue
+            for part in info:
+                if part[2]:
+                    _record(str(part[2]), role)
+        return roles
+
+    def table_facts(self, table: str) -> dict:
+        """SQLite reports page counts, not byte sizes or row estimates.
+
+        Rows are deliberately omitted: SQLite has no statistics, and a
+        ``COUNT(*)`` here would be the count the indexer already runs.
+        """
+        assert self._conn is not None
+        facts: dict = {}
+        try:
+            page_count = self._conn.execute("PRAGMA page_count").fetchone()
+            page_size = self._conn.execute("PRAGMA page_size").fetchone()
+            total = int((page_count or [0])[0] or 0) * int((page_size or [0])[0] or 0)
+            if total:
+                # Whole-file size: SQLite cannot attribute pages to one table.
+                facts["size_bytes"] = total
+        except Exception:
+            logger.debug("sqlite: page stats unavailable", exc_info=True)
+        try:
+            kind = self._conn.execute(
+                "SELECT type FROM sqlite_master WHERE name = ?", (table,)
+            ).fetchone()
+            if kind and kind[0]:
+                facts["table_type"] = "BASE TABLE" if str(kind[0]) == "table" else "VIEW"
+        except Exception:
+            logger.debug("sqlite: sqlite_master lookup failed for %s", table, exc_info=True)
+        return facts
+
+    def get_indexes(self, table: str) -> list[dict]:
+        """Index inventory from PRAGMA index_list (+ index_info for columns)."""
+        assert self._conn is not None
+        out: list[dict] = []
+        try:
+            indexes = self._conn.execute(f'PRAGMA index_list("{table}")').fetchall()
+        except Exception:
+            logger.debug("sqlite: index_list unavailable for %s", table, exc_info=True)
+            return out
+        for idx in indexes:
+            name = str(idx[1])
+            unique = bool(idx[2])
+            origin = idx[3] if len(idx) > 3 else ""
+            columns: list[str] = []
+            try:
+                info = self._conn.execute(f'PRAGMA index_info("{name}")').fetchall()
+                columns = [str(p[2]) for p in info if p[2]]
+            except Exception:
+                columns = []
+            out.append(
+                {
+                    "name": name,
+                    "columns": columns,
+                    "unique": unique,
+                    "primary": origin == "pk",
+                }
+            )
+        return out
 
     # ------------------------------------------------------------------
     # Execution

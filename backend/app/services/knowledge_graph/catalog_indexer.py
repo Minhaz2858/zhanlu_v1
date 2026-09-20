@@ -120,12 +120,22 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
         # Out-param: a table we could not read means the structure is only
         # partly known, and the source must not claim to be fully ready.
         unreadable: list[str] = []
-        tables = await asyncio.to_thread(_introspect_tables_sync, kb, db, unreadable)
+        index_stats: dict = {}
+        tables = await asyncio.to_thread(
+            _introspect_tables_sync, kb, db, unreadable, index_stats
+        )
         logger.info("catalog_indexer: kb=%s discovered %d tables", kb.id, len(tables))
         if unreadable:
             logger.warning(
                 "catalog_indexer: kb=%s discovery incomplete — %d unreadable table(s)",
                 kb.id, len(unreadable),
+            )
+        if index_stats.get("truncated"):
+            logger.warning(
+                "catalog_indexer: kb=%s object set truncated — %d of %d objects "
+                "catalogued (cap=%d)",
+                kb.id, len(tables), index_stats.get("objects_at_source"),
+                MAX_TABLES,
             )
 
         if tables:
@@ -196,7 +206,12 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             caps_error = str(exc)
             logger.exception("catalog_indexer: kb=%s capability probe failed", kb.id)
 
-        verdict = _classify_completion(tables, unreadable=unreadable, caps_error=caps_error)
+        verdict = _classify_completion(
+            tables,
+            unreadable=unreadable,
+            caps_error=caps_error,
+            truncated=int(index_stats.get("truncated") or 0),
+        )
         final_state, final_reason = verdict
 
         _set_status(db, kb, "ready" if final_state != src_readiness.STATE_DISCOVERY_FAILED else "error")
@@ -352,6 +367,7 @@ def _classify_completion(
     *,
     unreadable: list[str] | None = None,
     caps_error: str = "",
+    truncated: int = 0,
 ) -> tuple[str, str]:
     """Decide the terminal lifecycle state for a finished index run.
 
@@ -361,9 +377,11 @@ def _classify_completion(
       dialect could not be identified (no capability profile exists for it, so
       no SQL can be authored or executed for it).
     * ``enrichment_partial``   — structure is known, but descriptions are
-      missing for a meaningful share of it, or some tables were unreadable.
+      missing for a meaningful share of it, some tables were unreadable, or the
+      source holds more objects than ``MAX_TABLES`` so the catalog is a subset.
       The source answers, and every answer states the limitation.
-    * ``nl2sql_ready``         — discovered, described and capability-profiled.
+    * ``nl2sql_ready``         — discovered, described and capability-profiled,
+      with the whole object set catalogued.
 
     Never returns a "ready" verdict on the strength of the job merely finishing.
     """
@@ -382,6 +400,13 @@ def _classify_completion(
     gaps: list[str] = []
     if unreadable:
         gaps.append(f"{len(unreadable)} of {total + len(unreadable)} tables could not be read")
+    if truncated > 0:
+        # Honesty about coverage, not a cosmetic label: the agent must not
+        # present a capped object list as the entire database.
+        gaps.append(
+            f"only {total} of {total + truncated} objects were catalogued "
+            f"(object cap), the rest are absent from the catalog"
+        )
     if ratio < _DESCRIPTION_FLOOR:
         gaps.append(f"only {described}/{total} tables have descriptions")
     if caps_error:
@@ -399,7 +424,10 @@ def _classify_completion(
 
 
 def _introspect_tables_sync(
-    kb: KnowledgeBase, db: Session, failures: list[str] | None = None
+    kb: KnowledgeBase,
+    db: Session,
+    failures: list[str] | None = None,
+    stats: dict | None = None,
 ) -> list[dict]:
     """Sync wrapper: introspect full schema via connector (runs in thread).
 
@@ -411,6 +439,12 @@ def _introspect_tables_sync(
     the source but could not be introspected. A non-empty list means the
     structure is only partly known, which the lifecycle records as
     ``enrichment_partial`` rather than claiming a complete catalog.
+
+    ``stats`` is an optional out-param that reports ``objects_at_source`` and
+    ``truncated`` when ``MAX_TABLES`` cut the object list short. Truncation used
+    to be a log line only, so a source with more objects than the cap could
+    still be reported as fully prepared — and the agent then presented a partial
+    catalog as the whole database.
     """
     with get_connector(kb) as conn:
         table_names = _safe_list_tables(conn)
@@ -419,6 +453,9 @@ def _introspect_tables_sync(
             "catalog_indexer: kb=%s has %d tables, capping at %d",
             kb.id, len(table_names), MAX_TABLES,
         )
+        if stats is not None:
+            stats["objects_at_source"] = len(table_names)
+            stats["truncated"] = len(table_names) - MAX_TABLES
         table_names = table_names[:MAX_TABLES]
 
     # Per-table worker — each opens its own connector.  Capped at
@@ -455,25 +492,50 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
     Each worker creates its own connector (via context manager) so that
     SQLAlchemy connections are never shared across threads.  Returns None
     on failure (logged by caller).
+
+    Collected per object (2026-09-20): columns (+ the source's own comments and
+    index roles), declared foreign keys, an exact row count *or* the engine's
+    estimate with its provenance, the source's table comment / engine /
+    allocation size, and the index inventory. Everything optional degrades to
+    "not collected" — a missing fact is never written as zero or as a guess.
     """
     try:
         with get_connector(kb) as conn:
             desc = conn.describe_table(table_name)
-            row_count = _safe_row_count(conn, table_name)
+            exact_count = _safe_row_count(conn, table_name)
             fks = _safe_foreign_keys(conn, table_name)
+            facts = _safe_table_facts(conn, table_name)
+            indexes = _safe_indexes(conn, table_name)
             schema_name, table_type, columns = _normalize_desc(desc)
-            if row_count and columns:
+            # Sampling stays gated on an EXACT count: it is the only signal that
+            # the table really is non-empty (an estimate can be stale).
+            if exact_count and columns:
                 _sample_column_values(conn, table_name, columns)
                 if settings.CATALOG_JOIN_EDGES_ENABLED:
                     _sample_joinable_values(conn, table_name, columns)
             coverage = None
             if settings.KG_COVERAGE_PROBE_ENABLED and columns:
                 coverage = _probe_coverage(conn, table_name, columns)
+
+        est_rows = facts.get("est_rows")
+        if exact_count is not None:
+            row_count, row_count_source = exact_count, "exact"
+        elif est_rows is not None:
+            row_count, row_count_source = int(est_rows), "estimated"
+        else:
+            row_count, row_count_source = None, None
+
         return {
             "schema_name": schema_name,
             "table_name": table_name,
-            "table_type": table_type,
+            "table_type": facts.get("table_type") or table_type,
             "row_count": row_count,
+            "row_count_source": row_count_source,
+            "est_rows": est_rows,
+            "size_bytes": facts.get("size_bytes"),
+            "engine": facts.get("engine"),
+            "table_comment": facts.get("comment"),
+            "indexes": indexes,
             "columns": columns,
             "foreign_keys": fks,
             "coverage_json": coverage,
@@ -618,6 +680,8 @@ def _normalize_desc(desc: Any) -> tuple[str, str, list[dict]]:
     for i, c in enumerate(raw_cols, start=1):
         if not isinstance(c, dict):
             continue
+        raw_comment = c.get("comment")
+        raw_key = c.get("key")
         columns.append({
             "column_name": c.get("name") or c.get("column_name") or "",
             "ordinal": c.get("ordinal", i),
@@ -625,6 +689,10 @@ def _normalize_desc(desc: Any) -> tuple[str, str, list[dict]]:
             "is_nullable": bool(c.get("nullable", c.get("is_nullable", True))),
             "is_primary_key": bool(c.get("pk", c.get("primary_key", False))),
             "default_value": c.get("default", c.get("default_value")),
+            # The source's own words + index role. None / "" mean "the source
+            # did not supply one" — never replaced by our inference here.
+            "comment": raw_comment.strip() if isinstance(raw_comment, str) and raw_comment.strip() else None,
+            "key": raw_key.strip().upper() if isinstance(raw_key, str) else "",
         })
     return schema_name, table_type, columns
 
@@ -843,6 +911,51 @@ def _safe_foreign_keys(conn: Any, table: str) -> list[dict]:
     return []
 
 
+def _safe_table_facts(conn: Any, table: str) -> dict:
+    """Engine-reported facts about a table, or ``{}`` — never a fabrication.
+
+    A dialect that does not implement ``table_facts`` (mssql / oracle today)
+    yields ``{}``, which the catalog records as "not collected"; a probe that
+    fails yields ``{}`` as well and the log says which happened. Neither case
+    is allowed to look like a real answer of zero.
+    """
+    fn = getattr(conn, "table_facts", None)
+    if fn is None:
+        return {}
+    try:
+        facts = fn(table)
+    except Exception:
+        logger.debug(
+            "catalog_indexer: table_facts failed for '%s' (non-fatal)", table,
+            exc_info=True,
+        )
+        return {}
+    return facts if isinstance(facts, dict) else {}
+
+
+def _safe_indexes(conn: Any, table: str) -> list[dict] | None:
+    """Index inventory, or ``None`` when the source could not be asked.
+
+    ``[]`` is a real answer — "the source declares no index on this object" —
+    and must stay distinguishable from ``None`` ("we could not ask"), because
+    only the first one justifies telling a user there is no key to join on.
+    """
+    fn = getattr(conn, "get_indexes", None)
+    if fn is None:
+        return None
+    try:
+        indexes = fn(table)
+    except Exception:
+        logger.debug(
+            "catalog_indexer: get_indexes failed for '%s' (non-fatal)", table,
+            exc_info=True,
+        )
+        return None
+    if not isinstance(indexes, list):
+        return None
+    return indexes
+
+
 # ── coverage probe ─────────────────────────────────────────────────────────
 
 # Column-name tokens that strongly imply a temporal column.
@@ -1052,6 +1165,22 @@ def _is_blank_description(value: Any) -> bool:
     return not str(value or "").strip()
 
 
+# Source comments arrive from arbitrary DDL — multi-line, padded, occasionally
+# enormous. They are stored verbatim (they are evidence), so only whitespace is
+# normalised and an absurd length is cut.
+_MAX_SOURCE_COMMENT = 2000
+
+
+def _clean_comment(value: Any) -> str | None:
+    """Normalise a database comment: collapse whitespace, bound length, or None."""
+    if value is None:
+        return None
+    text = re.sub(r"\s+", " ", str(value)).strip()
+    if not text:
+        return None
+    return text[:_MAX_SOURCE_COMMENT]
+
+
 # ── `column(业务含义)` labels that leaked into the column NAME ───────────────
 # 210 columns of the live catalog are stored as `tax_price(含税单价)` instead of
 # `tax_price`. Two consequences, both user visible: the DDL handed to the model
@@ -1231,22 +1360,34 @@ async def _backfill_missing_descriptions(tables: list[dict]) -> None:
         )
 
 
+def _column_prompt_line(c: dict) -> str:
+    """One column line for the description prompt (samples + source comment)."""
+    line = (
+        f"  - {c['column_name']} ({c['data_type']}"
+        f"{', PK' if c['is_primary_key'] else ''}"
+        f"{', nullable' if c['is_nullable'] else ''})"
+    )
+    if c.get("value_samples"):
+        line += f" values: {', '.join(c['value_samples'][:12])}"
+    # The source's own column comment is authoritative context from the
+    # customer's DDL — the description must agree with it, not replace it.
+    if c.get("comment"):
+        line += f" // 数据库注释: {c['comment']}"
+    return line
+
+
 def _build_description_prompt(batch: list[dict]) -> list[str]:
     parts: list[str] = []
     for t in batch:
-        cols = "\n".join(
-            f"  - {c['column_name']} ({c['data_type']}{', PK' if c['is_primary_key'] else ''}{', nullable' if c['is_nullable'] else ''})"
-            + (
-                f" values: {', '.join(c['value_samples'][:12])}"
-                if c.get("value_samples")
-                else ""
-            )
-            for c in t["columns"]
-        )
+        cols = "\n".join(_column_prompt_line(c) for c in t["columns"])
         sample = ""
         if t.get("row_count"):
-            sample = f"\n  行数: {t['row_count']:,}"
-        parts.append(f"表名: {t['table_name']}\n  类型: {t['table_type']}{sample}\n  字段:\n{cols}")
+            provenance = "实测" if t.get("row_count_source") == "exact" else "估算"
+            sample = f"\n  行数: {t['row_count']:,} ({provenance})"
+        header = f"表名: {t['table_name']}\n  类型: {t['table_type']}{sample}"
+        if t.get("table_comment"):
+            header += f"\n  数据库注释: {t['table_comment']}"
+        parts.append(f"{header}\n  字段:\n{cols}")
     return parts
 
 
@@ -1321,6 +1462,8 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             .first()
         )
         role = t.get("table_role", "unknown") or "unknown"
+        table_comment = _clean_comment(t.get("table_comment"))
+        indexes_json = t.get("indexes")
         if existing:
             meta = existing
             meta.table_type = t.get("table_type", "TABLE")
@@ -1348,6 +1491,26 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                 table_role=role,
             )
             db.add(meta)
+        # ── source truth (2026-09-20) — written on every index, never merged
+        # into the LLM fields, so "what the database says" stays auditable.
+        # Both tables and views carry a comment / index inventory; a table with
+        # no declared index gets [] (a real answer), not None (not collected).
+        meta.source_comment = table_comment
+        meta.indexes_json = indexes_json if isinstance(indexes_json, list) else None
+        meta.size_bytes = t.get("size_bytes")
+        meta.row_count_source = t.get("row_count_source")
+        if _is_blank_description(meta.description_zh) and _is_blank_description(meta.description_en):
+            if table_comment:
+                # Never leave the customer's own label unused: when the
+                # description pass produced nothing, the source's comment is
+                # the best description that exists — and it is marked as such.
+                meta.description_zh = meta.description_zh or table_comment
+                meta.description_en = meta.description_en or table_comment
+                meta.description_source = "source_comment"
+            # else: stays blank. A blank description is a defect to fix, and
+            # inventing one from a name would hide that.
+        else:
+            meta.description_source = "llm"
         db.flush()
         existing_table_ids[t["table_name"]] = meta.id
 
@@ -1395,6 +1558,18 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
                     description_en=desc_en,
                 )
                 db.add(col)
+            # ── source truth, per column ──
+            col.source_comment = _clean_comment(c.get("comment"))
+            col.key_role = (c.get("key") or "").upper() or None
+            if _is_blank_description(desc_zh) and _is_blank_description(desc_en):
+                if col.source_comment:
+                    col.description_zh = col.source_comment
+                    col.description_en = col.source_comment
+                    col.description_source = "source_comment"
+                else:
+                    col.description_source = ""
+            else:
+                col.description_source = "llm"
             # Semantic typing is recomputed on every index (it reads the fresh
             # value samples), so a re-index repairs drift automatically.
             semantic_type, enum_values = classify_column_semantics(c, role)

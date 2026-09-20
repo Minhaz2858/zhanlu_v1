@@ -93,7 +93,7 @@ class MySQLConnector:
         assert self._engine is not None
         sql = text(
             "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
-            "       COLUMN_KEY "
+            "       COLUMN_KEY, COLUMN_COMMENT "
             "FROM information_schema.COLUMNS "
             "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
             "ORDER BY ORDINAL_POSITION"
@@ -107,9 +107,72 @@ class MySQLConnector:
                 "nullable": (r[2] or "").upper() == "YES",
                 "default": r[3],
                 "pk": (r[4] or "").upper() == "PRI",
+                # The source's own words. MySQL writes a label here whenever a
+                # COMMENT was declared, which for an ERP is the only place the
+                # business meaning exists — it used to be SELECTed nowhere.
+                "comment": (r[5] or "").strip() or None,
+                # PRI | UNI | MUL — index membership. Only 'PRI' used to be
+                # kept (as a bool); UNI/MUL came back and was thrown away.
+                "key": (r[4] or "").upper(),
             }
             for r in rows
         ]
+
+    def table_facts(self, table: str) -> dict:
+        """Engine-reported facts about one table (never its rows).
+
+        ``TABLE_ROWS`` is InnoDB's statistic, not a count — the caller labels it
+        ``estimated``. Views carry NULL there, which is why it is omitted rather
+        than coerced to 0.
+        """
+        assert self._engine is not None
+        sql = text(
+            "SELECT TABLE_TYPE, ENGINE, TABLE_COMMENT, TABLE_ROWS, "
+            "       DATA_LENGTH, INDEX_LENGTH "
+            "FROM information_schema.TABLES "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t"
+        )
+        with self._engine.connect() as conn:
+            row = conn.execute(sql, {"t": table}).fetchone()
+        if row is None:
+            return {}
+        facts: dict = {}
+        if row[0]:
+            facts["table_type"] = str(row[0])
+        if row[1]:
+            facts["engine"] = str(row[1])
+        comment = (row[2] or "").strip()
+        if comment and comment.upper() != "VIEW":
+            facts["comment"] = comment
+        if row[3] is not None:
+            facts["est_rows"] = int(row[3])
+        size = sum(int(v or 0) for v in (row[4], row[5]))
+        if size:
+            facts["size_bytes"] = size
+        return facts
+
+    def get_indexes(self, table: str) -> list[dict]:
+        """Index inventory from information_schema.STATISTICS (ordered parts)."""
+        assert self._engine is not None
+        sql = text(
+            "SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME "
+            "FROM information_schema.STATISTICS "
+            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
+            "ORDER BY INDEX_NAME, SEQ_IN_INDEX"
+        )
+        with self._engine.connect() as conn:
+            rows = conn.execute(sql, {"t": table}).fetchall()
+        by_name: dict[str, dict] = {}
+        for name, non_unique, _seq, column in rows:
+            entry = by_name.setdefault(
+                str(name),
+                {"name": str(name), "columns": [], "unique": not non_unique, "primary": False},
+            )
+            if column:
+                entry["columns"].append(str(column))
+        for entry in by_name.values():
+            entry["primary"] = entry["name"] == "PRIMARY"
+        return list(by_name.values())
 
     def _apply_session_guards(self, conn: Any, timeout_s: int) -> None:
         """Read-only session + per-statement timeout, on every checkout.

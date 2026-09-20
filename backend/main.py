@@ -225,6 +225,22 @@ def _specific_migrations() -> dict:
         "knowledge_bases": [
             ("project_id", "VARCHAR(36)"),
         ],
+        # ── catalog source-truth columns (2026-09-20) ────────────────────
+        # The database's own comments, index inventory, allocation size and
+        # row-count provenance are collected at index time. Mirror them here as
+        # well as in alembic 091 so a deployment that never runs `alembic
+        # upgrade` still gains the columns on restart (repo convention).
+        "kb_table_meta": [
+            ("source_comment", "TEXT"),
+            ("indexes_json", "JSON"),
+            ("row_count_source", "VARCHAR(16)"),
+            ("description_source", "VARCHAR(16) DEFAULT '' NOT NULL"),
+        ],
+        "kb_column_meta": [
+            ("source_comment", "TEXT"),
+            ("key_role", "VARCHAR(16)"),
+            ("description_source", "VARCHAR(16) DEFAULT '' NOT NULL"),
+        ],
         "user_files": [
             ("project_id", "VARCHAR(36)"),
         ],

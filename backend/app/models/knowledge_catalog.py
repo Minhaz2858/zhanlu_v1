@@ -26,6 +26,26 @@ class KBTableMeta(TimestampedBase):
     size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     description_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ── source-truth columns (2026-09-20) ──────────────────────────────────
+    # The database's OWN words and structure, read from information_schema /
+    # pg_catalog at index time. NEVER written by the description LLM, so an
+    # operator can always tell a customer's label apart from our inference:
+    # ``source_comment`` is verbatim, and ``description_source`` says which of
+    # the two a given description came from ('llm' | 'source_comment' | '').
+    source_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Full index inventory as the source declares it:
+    # [{"name","columns":[...],"unique":bool,"primary":bool}]. An empty list
+    # means "the source declares no index on this object", None means "not
+    # collected" — those are different facts and must not be conflated.
+    indexes_json: Mapped[list | None] = mapped_column(JSON, nullable=True)
+    # Which kind of count row_count carries: 'exact' (COUNT(*), bounded by
+    # ROW_COUNT_TIMEOUT_S) or 'estimated' (engine statistics, e.g.
+    # pg_class.reltuples / information_schema TABLE_ROWS). NULL = unknown.
+    row_count_source: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 'llm' | 'source_comment' | '' (never described).
+    description_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="", server_default=""
+    )
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     coverage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Denormalised business-domain label written by domain_discovery; lets the
@@ -61,6 +81,18 @@ class KBColumnMeta(TimestampedBase):
     default_value: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     description_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # The source's own column comment, verbatim (MySQL COLUMN_COMMENT,
+    # PostgreSQL col_description). Most ERPs label their columns here and
+    # nowhere else — this is the customer's own semantic, not our inference.
+    source_comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Index role as the source declares it, normalised across dialects:
+    # 'PRI' (primary key) | 'UNI' (unique) | 'MUL' (non-unique index) | '' |
+    # None ("not collected"). The full inventory lives on KBTableMeta.indexes_json.
+    key_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # 'llm' | 'source_comment' | '' (never described).
+    description_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="", server_default=""
+    )
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # ── semantic typing (data-driven, dialect- and domain-agnostic) ──
     # identifier | measure | dimension | temporal | flag | free_text | unknown

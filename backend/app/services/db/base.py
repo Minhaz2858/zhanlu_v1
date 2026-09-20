@@ -84,7 +84,12 @@ class BaseConnector(Protocol):
     def describe_table(self, table: str) -> list[dict]:
         """Return column metadata for a table.
 
-        Each dict has keys: name, type, nullable, default, pk (bool).
+        Each dict has keys: name, type, nullable, default, pk (bool), and
+        optionally ``comment`` (the source's own column comment, verbatim) and
+        ``key`` (index role: 'PRI' | 'UNI' | 'MUL' | ''). A dialect that cannot
+        supply a comment returns ``None`` — never a placeholder and never our
+        own inference, because the catalog distinguishes "the source says
+        nothing about this column" from "the source says this".
         """
         ...
 
@@ -98,6 +103,33 @@ class BaseConnector(Protocol):
         Order and case do not matter — ``schema_shape.normalize_pairs`` folds both.
         Implementations should include views when the dialect's own ``list_tables``
         does not filter them out, and must stay read-only.
+        """
+        ...
+
+    def table_facts(self, table: str) -> dict:
+        """Optional: the source's own facts about a TABLE (never its rows).
+
+        Keys — omit what the dialect cannot answer, never invent a value:
+
+            comment        the table's own comment, verbatim
+            table_type     'BASE TABLE' | 'VIEW' | dialect equivalent
+            engine         storage engine, where one exists
+            est_rows       the ENGINE's row estimate (statistics, not a count)
+            size_bytes     data (+ index) allocation, engine-reported
+
+        Implemented by mysql / postgres / sqlite. A dialect that does not
+        implement it returns ``{}``, which the catalog records as "not
+        collected" instead of zero.
+        """
+        ...
+
+    def get_indexes(self, table: str) -> list[dict]:
+        """Optional: the source's index inventory for one table.
+
+        ``[{"name": str, "columns": [str], "unique": bool, "primary": bool}]``.
+        An empty list asserts the source declares no index on this object; a
+        dialect that cannot answer raises instead, so callers can tell "no
+        indexes" apart from "we could not ask".
         """
         ...
 
