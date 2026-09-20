@@ -175,6 +175,52 @@ def generate_plan(
     is_followup = bool(task_spec.get("is_followup"))
     refines_id = task_spec.get("refines_artifact_id")
 
+    # User attachments. The CONTEXT state folds each upload's extracted text
+    # into the manifest as a ``user_attachments`` item. This planner used to
+    # read only ``conversation_context``, so the file never reached the planner
+    # either — it planned a generic data-fetch for a question that the attached
+    # rows could answer outright.
+    attachments_block = ""
+    try:
+        from app.services.synexia.context_assembler import render_attachment_items
+        _attach_text = render_attachment_items(context_manifest)
+        if _attach_text:
+            attachments_block = (
+                "\n=== User attachments (already extracted — the plan can "
+                "answer from this text, no file read step needed) ===\n"
+                f"{_attach_text}\n"
+            )
+    except Exception:
+        attachments_block = ""
+
+    # Real tool inventory. The planner previously saw ONLY the conversation
+    # transcript, so it invented tool and skill names (`read_attached_deck`,
+    # `attached_deck_parser`, `compose_answer`, `extract_deck_facts`) and every
+    # ACT node then failed on an unknown name. Tell it what actually exists.
+    inventory_block = ""
+    try:
+        _cm = context_manifest if isinstance(context_manifest, dict) else {}
+        _tools = list(_cm.get("available_tools") or [])
+        if not _tools:
+            for _item in (_cm.get("items") or []):
+                if isinstance(_item, dict) and _item.get("type") == "available_tools":
+                    _tools = list(_item.get("content") or [])
+                    break
+        if _tools:
+            _shown = sorted(_tools)[:400]
+            _more = "" if len(_tools) <= 400 else f" (+{len(_tools) - 400} more)"
+            inventory_block = (
+                "\n=== Tools that ACTUALLY EXIST (callable right now) ===\n"
+                f"{', '.join(_shown)}{_more}\n"
+                "Hard rule: reference ONLY names from this list, and only skill "
+                "names that appear in the skill catalog below. NEVER invent a "
+                "tool or skill name — a node naming something absent here fails "
+                "at execution and wastes the whole turn. If no listed tool fits "
+                "a step, omit the step rather than inventing one.\n"
+            )
+    except Exception:
+        inventory_block = ""
+
     # Skill catalog (progressive disclosure Layer A) so the planner can
     # emit load_skill nodes for ANY skill, not just the format defaults.
     # Pure string builder — no LLM call, no DB write, no side effects.
@@ -237,7 +283,8 @@ Task kind: {task_kind}
 Artifact intents: {artifact_intents}
 Requires data: {requires_data}
 Entities: {json.dumps(entities)}
-Agent: {agent_name}{default_skill_hint}{context_block}{followup_rules}
+Agent: {agent_name}{default_skill_hint}{context_block}{attachments_block}{followup_rules}
+{inventory_block}
 {skill_catalog_block}
 Create a plan as a JSON array of steps. Each step has:
 - node_type: "skill" | "tool" | "nl2sql" | "sandbox" | "agent"
@@ -310,6 +357,26 @@ Respond with ONLY a JSON array."""
         except Exception as e:
             logger.warning("LLM plan generation failed, using default: %s", e)
             plan_steps = default_plan
+
+    # ── Deterministic guard: a prompt rule is not a guarantee ───────────
+    # The planner is now told which tools exist, but an invented name must not
+    # be able to burn the turn. Observed live before the inventory fix:
+    # tool:read_attached_deck, tool:attached_deck_parser, agent:compose_answer
+    # and skill:extract_deck_facts / compose_final_answer — all unknown, every
+    # node failed, and their failure text reached the user as an execution
+    # narrative. Drop such steps here, where the plan is still ours to fix.
+    plan_steps, _dropped_steps = _drop_unknown_steps(plan_steps)
+    if _dropped_steps:
+        logger.warning(
+            "plan: dropped %d step(s) naming tools/skills that do NOT exist "
+            "(hallucinated names): %s",
+            len(_dropped_steps), "; ".join(_dropped_steps),
+        )
+    if not plan_steps:
+        logger.warning(
+            "plan: every authored step was invalid — falling back to the default plan"
+        )
+        plan_steps = default_plan
 
     # Create Plan record
     summary = f"Plan for {task_kind}: {', '.join(artifact_intents) or 'general task'}"
@@ -603,6 +670,85 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
         })
 
     return steps
+
+
+def _drop_unknown_steps(steps: list) -> tuple[list, list[str]]:
+    """Drop plan steps that name a tool or skill which does not exist.
+
+    Returns ``(kept_steps, dropped_labels)``. Fail-open: if a registry cannot be
+    read the plan is returned untouched, because silently emptying a plan is
+    worse than executing one bad step.
+
+    Why this exists: the LLM planner invented names it had no way to verify
+    (``read_attached_deck``, ``attached_deck_parser``, ``compose_answer``,
+    ``extract_deck_facts``, ``compose_final_answer``). Every such node failed at
+    execution, and the answer generator then reported those failures to the user
+    as an execution narrative — a plumbing leak produced entirely by names that
+    were never real. Instructions in the prompt are the first line of defence;
+    this is the second.
+    """
+    if not isinstance(steps, list) or not steps:
+        return (steps if isinstance(steps, list) else []), []
+
+    try:
+        from app.services.tool_registry import registry
+
+        known_tools = set(registry.list_names() or [])
+    except Exception as e:
+        logger.debug("plan validation: tool registry unavailable (%s) — skipping", e)
+        return steps, []
+
+    if not known_tools:
+        # An EMPTY registry means tool discovery has not run in this process —
+        # NOT that no tool exists (verified: the registry reads 0 at import time
+        # but 44 during a real request). Dropping every tool step on an empty
+        # registry would silently replace a real plan with the generic default,
+        # so treat it as "cannot validate" and leave the plan untouched.
+        logger.debug("plan validation: tool registry EMPTY — skipping validation")
+        return steps, []
+
+    known_skills: set = set()
+    try:
+        from app.services.skills_loader import get_skills_registry
+
+        _skills_reg = get_skills_registry()
+        if hasattr(_skills_reg, "list_names"):
+            known_skills = set(_skills_reg.list_names() or [])
+    except Exception as e:
+        logger.debug("plan validation: skill registry unavailable (%s)", e)
+
+    kept: list = []
+    dropped: list[str] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            kept.append(step)
+            continue
+
+        node_type = str(step.get("node_type") or "tool").lower()
+        inputs = step.get("inputs") if isinstance(step.get("inputs"), dict) else {}
+        # _execute_tool_node prefers inputs.tool_name over the human-readable
+        # node name, so validate whichever name will actually be dispatched.
+        name = str(inputs.get("tool_name") or step.get("name") or "").strip()
+
+        if node_type in ("tool", "agent"):
+            # Unknown node types are dispatched as tools too, so an "agent"
+            # step whose name is not a registered tool cannot succeed either.
+            if not name or name in known_tools:
+                kept.append(step)
+            else:
+                dropped.append(f"{node_type}:{name}")
+        elif node_type == "skill":
+            # Only enforce skill names when the registry actually loaded —
+            # otherwise every skill step would be dropped on a transient failure.
+            if not name or not known_skills or name in known_skills:
+                kept.append(step)
+            else:
+                dropped.append(f"skill:{name}")
+        else:
+            # nl2sql / sandbox / synthesize are engine nodes, not registry lookups.
+            kept.append(step)
+
+    return kept, dropped
 
 
 def _validate_acyclic(steps: list[dict]) -> bool:

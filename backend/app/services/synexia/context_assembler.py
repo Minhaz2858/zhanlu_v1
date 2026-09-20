@@ -424,6 +424,35 @@ def assemble_context(
     }
 
 
+def render_attachment_items(context_manifest: Optional[dict]) -> str:
+    """Render the extracted upload text carried by a ContextManifest.
+
+    The CONTEXT state folds each upload's extracted text into the manifest as a
+    ``user_attachments`` item (see ``assemble_context`` above). Both the PLAN
+    and the RESPOND prompt historically read ONLY the ``conversation_context``
+    item, so the text was extracted, persisted to
+    ``executions.context_manifest``, and then never shown to any model. The
+    agent answered "I could not access the attached file" — and offered to have
+    the user paste the data — while the file's actual rows sat in the manifest
+    unread.
+
+    Callers render this block into whatever prompt needs to see the file.
+    Returns the joined attachment text, or "" when the manifest carries none.
+    """
+    if not isinstance(context_manifest, dict):
+        return ""
+    blocks: list[str] = []
+    seen: set = set()
+    for item in (context_manifest.get("items") or []):
+        if not isinstance(item, dict) or item.get("type") != "user_attachments":
+            continue
+        content = item.get("content")
+        if isinstance(content, str) and content.strip() and content not in seen:
+            seen.add(content)
+            blocks.append(content.strip())
+    return "\n\n".join(blocks)
+
+
 def _get_agent_config(db: Session, agent_name: str) -> Optional[dict]:
     """Get agent configuration from the database."""
     try:
@@ -718,22 +747,80 @@ def _get_agent_memories(db: Session, agent_name: str, user_message: str) -> list
 
 
 def _get_available_tools(db: Session, agent_name: str) -> list:
-    """Get available tool names for the agent.
+    """Get the REAL registered tool names for the agent.
 
     Environment gate: when ``WEB_TOOLS_ENABLED`` is False (offline
     deployment), the web tool family is removed here too so the FSM context
     / planner can never advertise a tool that cannot succeed. Mirrors
     ``dynamic_tools.apply_env_tool_gate``.
+
+    This used to do ``from app.services.agent_tools import tool_registry`` —
+    a name that DOES NOT EXIST in this checkout. The ImportError was swallowed
+    by ``except Exception: return []``, so every manifest advertised an EMPTY
+    tool list and the LLM planner invented tool names
+    (``read_attached_deck``, ``attached_deck_parser``, ``compose_answer``,
+    ``extract_deck_facts``) that every ACT node then failed on — six failed
+    nodes in one live turn, whose failures the answer generator then reported
+    back to the user as an execution narrative.
+
+    An empty tool list is not a safe default here: it is an invitation to
+    hallucinate. Read the real registry, narrow it to the agent's own surface,
+    and log loudly instead of silently degrading to [].
     """
     try:
-        from app.services.agent_tools import tool_registry
-        names = list(tool_registry.keys()) if hasattr(tool_registry, 'keys') else []
+        from app.services.tool_registry import registry, resolve_tools_for_agent
+
+        known = list(registry.list_names() or [])
+        if not known:
+            logger.warning(
+                "available-tools: tool registry is EMPTY — the planner will be "
+                "told it has no tools and may invent tool names"
+            )
+            return []
+
+        # Narrow to the agent's configured surface when it has one, but never
+        # advertise a name that is not actually registered — an unknown name in
+        # the manifest is a name the planner will happily put in a plan.
+        try:
+            _known = set(known)
+            scoped = [
+                n for n in (resolve_tools_for_agent(agent_name, _get_agent_tool_config(db, agent_name)) or [])
+                if n in _known
+            ]
+            if scoped:
+                known = scoped
+        except Exception as e:
+            logger.debug(
+                "available-tools: scoping to agent %s failed (using full "
+                "registry): %s", agent_name, e,
+            )
+
         if not getattr(settings, "WEB_TOOLS_ENABLED", True):
             _web = {"web_search", "web_extract", "_web_search", "_web_extract", "tavily_search"}
-            names = [n for n in names if n not in _web]
-        return names
-    except Exception:
+            known = [n for n in known if n not in _web]
+        return known
+    except Exception as e:
+        logger.warning(
+            "available-tools lookup FAILED (%s: %s) — manifest will advertise no "
+            "tools; fix this rather than letting the planner invent them",
+            type(e).__name__, e,
+        )
         return []
+
+
+def _get_agent_tool_config(db: Session, agent_name: str) -> Optional[dict]:
+    """Read ``AgentApp.tool_config`` so the tool list can be scoped to the agent."""
+    try:
+        from app.models.agent_app import AgentApp
+
+        agent = (
+            db.query(AgentApp)
+            .filter(AgentApp.name == agent_name, AgentApp.is_deleted == False)
+            .first()
+        )
+        return getattr(agent, "tool_config", None) if agent else None
+    except Exception:
+        return None
 
 
 def _get_available_skills(db: Session, agent_name: str) -> list:

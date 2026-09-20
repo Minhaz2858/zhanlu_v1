@@ -260,9 +260,11 @@ class SynexiaFSM:
 
             # PLAN→GATE→ACT→VERIFY with a bounded VERIFY-driven re-plan loop.
             # When a CRITICAL deterministic check fails AND the active plan has
-            # failed tool/skill nodes, the FSM loops back to PLAN with the
+            # failed replannable nodes, the FSM loops back to PLAN with the
             # failures as context (up to SYNEXIA_VERIFY_REPLAN_MAX times).
-            # Data-pipeline-only failures never trigger a re-plan.
+            # Eligible: tool/skill steps AND structural data-pipeline failures
+            # (nl2sql) — see synexia/replan_policy.py. Environmental failures
+            # (policy denial, credentials, connection, timeout) are excluded.
             verify_budget = getattr(settings, "SYNEXIA_VERIFY_REPLAN_MAX", 1)
             failure_context: Optional[list] = None
             for attempt in range(verify_budget + 1):
@@ -604,39 +606,33 @@ class SynexiaFSM:
 
         True only when ALL hold:
           - the latest VERIFY had a CRITICAL check failure,
-          - the active plan has at least one failed tool/skill node
-            (the recoverable kind) — data-pipeline-only failures are left
-            alone per project scope,
-          - the failed tool/skill node is not a policy denial (re-planning a
-            denied action would just re-deny it).
+          - the active plan has at least one failed replannable node — general
+            tool/skill steps AND a structural data-pipeline failure (nl2sql),
+            which used to be excluded and left a failed query with no retry,
+          - the failure is actionable: policy denials and environmental errors
+            (credentials/connection/timeout/lock) are excluded because a new
+            plan reproduces them identically.
+
+        Node-type and error eligibility live in
+        ``synexia/replan_policy.py`` so this loop and the ACT corrective
+        sub-plan cannot drift apart.
         """
+        from app.services.synexia.replan_policy import collect_replannable_failures
+
         vr = getattr(self, "_last_verify_result", None)
         if vr is None or not getattr(vr, "critical_failed", False):
             return False
         if not self.plan or not self.plan.nodes:
             return False
-        return any(
-            n.status == "failed"
-            and n.node_type in ("tool", "skill")
-            and not (n.error or "").startswith("Policy denied")
-            for n in self.plan.nodes
-        )
+        return bool(collect_replannable_failures(self.plan.nodes))
 
     def _build_verify_replan_context(self) -> list[dict]:
         """Build the failure_context for a VERIFY-driven corrective re-plan."""
-        ctx: list[dict] = []
-        for n in (self.plan.nodes or []):
-            if (
-                n.status == "failed"
-                and n.node_type in ("tool", "skill")
-                and not (n.error or "").startswith("Policy denied")
-            ):
-                ctx.append({
-                    "name": n.name,
-                    "node_type": n.node_type,
-                    "error": n.error or "unknown error",
-                })
-        return ctx
+        from app.services.synexia.replan_policy import collect_replannable_failures
+
+        return collect_replannable_failures(
+            (self.plan.nodes if self.plan else []) or []
+        )
 
     def _run_reflexion(self, request: ExecutionRequest, assistant_text: str) -> None:
         """Run reflexion self-critique on the FINALIZE response.
@@ -976,6 +972,28 @@ class SynexiaFSM:
                 f"{transcript}\n"
             )
 
+        # User attachments (Phase 1 input layer). The CONTEXT state folds each
+        # upload's extracted text into the manifest as a ``user_attachments``
+        # item, but this prompt used to read only ``conversation_context`` — so
+        # the file was extracted, persisted, and never shown to the model. The
+        # agent then invented a ``read_attached_file`` tool and shipped a
+        # "could not access the attached file" narrative while the extracted
+        # rows sat unread in the manifest.
+        attachments_block = ""
+        try:
+            from app.services.synexia.context_assembler import render_attachment_items
+            _attach_text = render_attachment_items(
+                getattr(self.execution, "context_manifest", None)
+            )
+            if _attach_text:
+                attachments_block = (
+                    "\n\n=== User attachments (already extracted — read this "
+                    "instead of calling a tool) ===\n"
+                    f"{_attach_text}\n"
+                )
+        except Exception:
+            attachments_block = ""
+
         followup_note = ""
         if is_followup:
             followup_note = (
@@ -990,16 +1008,63 @@ class SynexiaFSM:
         if _criteria and not _criteria.startswith("(none"):
             criteria_block = f"\n\n=== You must satisfy ===\n{_criteria}"
 
-        return f"""You are {request.agent_name}, an AI assistant. Based on the user's request and the actions taken, provide a helpful response.
+        # When nothing actually executed, the framing above ("Based on ... the
+        # actions taken") plus "If there were errors, explain what went wrong"
+        # invites the model to INVENT a plausible execution narrative. Verified
+        # live: a turn with ZERO tool calls (executions.tool_calls IS NULL)
+        # reported "unknown tool `read_attached_file`" and a six-row table of
+        # failed attempts that never happened. Say plainly that nothing ran.
+        no_actions_note = ""
+        # extract_grounding() renders the EMPTY case as the literal string
+        # "No actions taken." — a non-empty sentinel, so a plain truthiness
+        # check on `grounding` NEVER detects it and the guard silently never
+        # fires (verified live: the fabricated narrative survived the first
+        # version of this fix). Test the sentinel and the observation list.
+        _obs = getattr(self.execution, "observations", None) or []
+        _nothing_ran = (not _obs) or (grounding or "").strip() in (
+            "", "No actions taken."
+        )
+        _answered_from_attachment = bool(_nothing_ran and attachments_block)
 
-User request: {request.user_message}{transcript_block}{followup_note}
+        # Feeding "No actions taken." under a "Findings (from executed actions)"
+        # heading — immediately after "if there were errors, explain what went
+        # wrong" — reads to the model as a FAILED execution, and it duly invents
+        # one: verified live on a turn with ZERO tool calls
+        # (executions.tool_calls IS NULL), the answer reported "unknown tool
+        # `read_attached_file`" plus a table of six failed attempts. A note
+        # alone did not stop it; stop handing it a failure-shaped prompt.
+        if _answered_from_attachment:
+            findings_text = (
+                "None. No tools, queries or actions were run for this turn, and "
+                "none were needed: the user's question is answered directly by "
+                "the attached file content above."
+            )
+        else:
+            findings_text = grounding
+
+        error_clause = (
+            "" if _answered_from_attachment
+            else " If there were errors, explain what went wrong."
+        )
+
+        if _answered_from_attachment:
+            no_actions_note = (
+                "\n\nEverything you need is in the user attachments above. "
+                "Answer straight from that text. Do NOT mention tools, tool "
+                "calls, failed attempts, or any execution narrative — the user "
+                "asked about their file, not about how it was read.\n"
+            )
+
+        return f"""You are {request.agent_name}, an AI assistant. Based on the user's request and the material provided, provide a helpful response.
+
+User request: {request.user_message}{attachments_block}{transcript_block}{followup_note}
 === Findings (from executed actions) ===
-{grounding}{criteria_block}
+{findings_text}{criteria_block}{no_actions_note}
 
 Provide a thorough response that reflects the depth and scope of the findings. Match your response depth to the user's request:
 - **Data-rich queries** (multiple metrics, comparisons, tables): produce detailed analysis with sections, tables, key figures, and actionable insights. Present every significant number the findings contain — never omit data the user explicitly asked for.
 - **Simple questions**: be direct and brief.
-Reference the actual findings above by value (figures, names, counts) — do not narrate tool calls. Your response must satisfy every criterion listed under "You must satisfy" (if any). If actions were successful, summarize what was accomplished. If there were errors, explain what went wrong.
+Reference the actual findings above by value (figures, names, counts) — do not narrate tool calls. Your response must satisfy every criterion listed under "You must satisfy" (if any). If actions were successful, summarize what was accomplished.{error_clause}
 
 OUTPUT FORMAT — STRICT RULES:
 - DO NOT output raw JSON, code fences, or structured payload objects (no `{{"title": ...}}` blocks in the answer).
