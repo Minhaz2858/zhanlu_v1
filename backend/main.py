@@ -586,6 +586,41 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Startup marketplace auto-sync error (non-fatal): %s", e)
 
+    # Backfill catalog MEASUREMENTS for KBs whose catalog predates them. The
+    # per-column statistics only reach the SQL-authoring prompt and the vector
+    # index through a catalog index run, so a catalog created before that pass
+    # existed renders nothing extra — and the gap is invisible in the product,
+    # because the DDL still looks complete. Daemon thread: a re-index reads a
+    # bounded sample per object and must never delay startup.
+    try:
+        import threading
+        from app.services.knowledge_graph.catalog_triggers import (
+            backfill_catalog_statistics,
+        )
+        from app.database import SessionLocal
+
+        def _backfill_catalog_statistics():
+            bdb = SessionLocal()
+            try:
+                ids = backfill_catalog_statistics(bdb)
+                if ids:
+                    startup_logger.info(
+                        "Startup: re-indexing %d KB(s) whose catalog has no "
+                        "column measurements", len(ids),
+                    )
+            except Exception as e:
+                startup_logger.warning("Catalog statistics backfill error: %s", e)
+            finally:
+                bdb.close()
+
+        threading.Thread(
+            target=_backfill_catalog_statistics,
+            daemon=True,
+            name="startup-catalog-statistics",
+        ).start()
+    except Exception as e:
+        startup_logger.warning("Catalog statistics backfill error (non-fatal): %s", e)
+
     # Ensure DB-backed system agents (agent_builder, skill_agent, etc.) exist
     try:
         from app.services.system_agents import ensure_system_agents

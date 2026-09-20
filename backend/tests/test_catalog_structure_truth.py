@@ -94,11 +94,16 @@ def test_mysql_reads_column_comments_and_index_roles():
     conn._engine = _FakeEngine(
         {
             "information_schema.COLUMNS": [
-                # name, type, nullable, default, COLUMN_KEY, COLUMN_COMMENT
-                ("FID", "int", "NO", None, "PRI", ""),
-                ("FQTY", "decimal(18,4)", "YES", None, "MUL", "数量"),
-                ("FCODE", "varchar(50)", "YES", None, "UNI", "业务编码\n  第二行"),
-                ("FNOTE", "text", "YES", None, "", "  "),
+                # name, COLUMN_TYPE, DATA_TYPE, nullable, default, COLUMN_KEY,
+                # COLUMN_COMMENT — COLUMN_TYPE is read because DATA_TYPE drops
+                # the declared length, and on MySQL the length is the only way
+                # to tell a real blob from the ``varbinary(0)`` marker MySQL
+                # writes for a VIEW column it cannot type.
+                ("FID", "int", "int", "NO", None, "PRI", ""),
+                ("FQTY", "decimal(18,4)", "decimal", "YES", None, "MUL", "数量"),
+                ("FCODE", "varchar(50)", "varchar", "YES", None, "UNI", "业务编码\n  第二行"),
+                ("FNOTE", "text", "text", "YES", None, "", "  "),
+                ("FSTOCK", "varbinary(0)", "varbinary", "YES", None, "", ""),
             ]
         }
     )
@@ -117,6 +122,12 @@ def test_mysql_reads_column_comments_and_index_roles():
     assert by_name["FQTY"]["key"] == "MUL", "non-unique index role was discarded before"
     assert by_name["FCODE"]["key"] == "UNI", "unique key role was discarded before"
     assert by_name["FNOTE"]["key"] == ""
+    # The declared type survives introspection, length included: this is what
+    # keeps a real blob distinguishable from MySQL's varbinary(0) marker, and
+    # what makes the rendered DDL say varchar(50) instead of varchar.
+    assert by_name["FCODE"]["type"] == "varchar(50)"
+    assert by_name["FQTY"]["type"] == "decimal(18,4)"
+    assert by_name["FSTOCK"]["type"] == "varbinary(0)"
 
 
 def test_mysql_table_facts_and_index_inventory():

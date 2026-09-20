@@ -11,10 +11,25 @@ import logging
 import threading
 from typing import Any
 
-from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 
 logger = logging.getLogger(__name__)
+
+
+def _settings():
+    """The CURRENT settings object, read at call time.
+
+    Not imported once at module load: anything that rebuilds
+    ``app.config.settings`` (a test harness, an env-reload path) otherwise
+    leaves this module holding a stale object, and every feature flag read here
+    silently answers from the wrong instance. Measured: three
+    "SEMANTIC_CATALOG_ENABLED is off" tests failed in a full run while passing
+    in isolation, purely because ``catalog_triggers.settings`` and
+    ``app.config.settings`` had stopped being the same object.
+    """
+    from app.config import settings
+
+    return settings
 
 # Connection fields that, when changed, should trigger catalog reindex.
 # Changing name/description/status should NOT reindex.
@@ -84,7 +99,7 @@ def is_catalogable_record(record) -> bool:
     The one decision every entry point (entity create/update hooks, manual
     reindex) should ask. Shape-agnostic on purpose — see ``kb_field``.
     """
-    if not settings.SEMANTIC_CATALOG_ENABLED:
+    if not _settings().SEMANTIC_CATALOG_ENABLED:
         return False
     return supports_catalog(kb_field(record, "db_type"))
 
@@ -129,7 +144,7 @@ def _should_index(kb) -> bool:
 
     Accepts a KnowledgeBase ORM row or its ``to_dict()`` dict (see ``kb_field``).
     """
-    if not settings.SEMANTIC_CATALOG_ENABLED:
+    if not _settings().SEMANTIC_CATALOG_ENABLED:
         return False
     db_type = kb_field(kb, "db_type")
     if not supports_catalog(db_type):
@@ -142,6 +157,99 @@ def _should_index(kb) -> bool:
         logger.info("catalog_triggers: kb=%s already indexing — skipping", kb_field(kb, "id"))
         return False
     return True
+
+
+def catalog_missing_statistics(db, kb_id: str) -> bool:
+    """True when a KB's catalog has structure but not one single measurement.
+
+    That combination has exactly one cause: the catalog was indexed before the
+    statistics pass existed (or before it could read anything). It is not the
+    same as "nothing to measure" — a schema whose objects are all empty reports
+    ``row_count`` 0 and is left alone, because re-indexing it would collect
+    nothing new on every startup.
+
+    Cost is two COUNTs, so it is safe to ask for every KB at startup.
+    """
+    from sqlalchemy import String, cast, func
+    from app.models.knowledge_catalog import KBColumnMeta, KBTableMeta
+
+    try:
+        has_rows = (
+            db.query(func.count(KBTableMeta.id))
+            .filter(KBTableMeta.kb_id == kb_id, KBTableMeta.row_count > 0)
+            .scalar()
+        ) or 0
+        if not has_rows:
+            return False
+        measured = (
+            db.query(func.count(KBColumnMeta.id))
+            .join(KBTableMeta, KBColumnMeta.table_meta_id == KBTableMeta.id)
+            .filter(
+                KBTableMeta.kb_id == kb_id,
+                KBColumnMeta.stats_json.isnot(None),
+                # A JSON column written through the ORM stores a Python None as
+                # the JSON LITERAL null, so ``IS NOT NULL`` alone reports a
+                # never-measured column as measured — and a catalog holding even
+                # ONE such row would look "already measured" and never be
+                # backfilled. The model now writes a real SQL NULL
+                # (``JSON(none_as_null=True)``); this keeps the probe honest for
+                # rows written before that, whatever the dialect's cast spelling.
+                cast(KBColumnMeta.stats_json, String) != "null",
+            )
+            .scalar()
+        ) or 0
+    except Exception:
+        logger.debug(
+            "catalog_triggers: statistics probe failed for kb=%s", kb_id, exc_info=True
+        )
+        return False
+    return measured == 0
+
+
+def backfill_catalog_statistics(db) -> list[str]:
+    """Re-index every catalogable KB whose catalog carries no measurements.
+
+    The measurements only reach the prompts and the vector index through a
+    catalog index run, so a catalog created before the statistics era renders
+    nothing extra — permanently, until something re-collects it. Relying on a
+    human to run a backfill script means the gap is invisible in production, so
+    this runs itself at startup (see ``main.py``). Idempotent by construction:
+    once the re-index lands, ``catalog_missing_statistics`` stops matching.
+
+    Returns the KB ids a background re-index was spawned for.
+    """
+    from app.models.knowledge_base import KnowledgeBase
+
+    spawned: list[str] = []
+    try:
+        rows = (
+            db.query(KnowledgeBase)
+            .filter(KnowledgeBase.is_deleted == False)  # noqa: E712
+            .all()
+        )
+    except Exception:
+        logger.warning("catalog_triggers: backfill query failed", exc_info=True)
+        return spawned
+
+    for kb in rows:
+        try:
+            if not _should_index(kb):
+                continue
+            kb_id = str(kb_field(kb, "id") or "")
+            if not kb_id or not catalog_missing_statistics(db, kb_id):
+                continue
+            logger.info(
+                "catalog_triggers: kb=%s has a catalog with no measurements — "
+                "re-indexing to collect them", kb_id,
+            )
+            maybe_reindex_catalog_bg(kb)
+            spawned.append(kb_id)
+        except Exception:
+            logger.warning(
+                "catalog_triggers: could not queue statistics backfill for a KB",
+                exc_info=True,
+            )
+    return spawned
 
 
 def connection_fields_changed(payload: dict, prev_record: dict | None) -> bool:

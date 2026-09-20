@@ -97,7 +97,15 @@ def is_value_profilable(data_type: Any, dialect: str | None = None) -> bool:
 # ── SQL ────────────────────────────────────────────────────────────────────
 
 
-def sample_rows_sql(conn: Any, table: str, columns: list[str], n: int) -> str:
+def sample_rows_sql(
+    conn: Any,
+    table: str,
+    columns: list[str],
+    n: int,
+    *,
+    order_by: str | None = None,
+    descending: bool = False,
+) -> str:
     """``SELECT <col,…> FROM <table>`` capped by the source's own syntax.
 
     Identifiers are quoted per the connected dialect; the row cap uses the
@@ -109,6 +117,12 @@ def sample_rows_sql(conn: Any, table: str, columns: list[str], n: int) -> str:
     statement — one unnameable column must never cost the row cap, because an
     uncapped ``SELECT`` of every column is a far worse outcome than profiling
     one column less.  Returns ``""`` when nothing is left to ask for.
+
+    ``order_by`` (a column the caller established is orderable) turns this into
+    a HEAD or TAIL page: the caller reads both so the sample is not one
+    arbitrary page of a large table.  Live, a plain ``LIMIT 200`` on the
+    14,589-row ``erp_v_sale_orderentry`` sampled only 2018-06-01…2018-09-25 of
+    a PLANDATE range that actually runs to 2026-09-19.
     """
     from app.services.db.dialect import maybe_profile
 
@@ -124,12 +138,88 @@ def sample_rows_sql(conn: Any, table: str, columns: list[str], n: int) -> str:
     if not quoted:
         return ""
     try:
+        order = ""
+        if order_by:
+            try:
+                order = f" ORDER BY {profile.quote_ident(order_by)}"
+                order += " DESC" if descending else ""
+            except ValueError:
+                # An unquotable key is not an error: the sample just goes back
+                # to being one unordered page.
+                logger.debug("column_stats: order key %r unquotable", order_by)
+                order = ""
         return profile.paged(
-            f"SELECT {', '.join(quoted)} FROM {profile.qualified(table)}", n
+            f"SELECT {', '.join(quoted)} FROM {profile.qualified(table)}{order}", n
         )
     except ValueError:
         logger.debug("column_stats: table %r is unquotable in %s", table, profile.name)
         return ""
+
+
+def sample_order_key(columns: list[dict]) -> str | None:
+    """The column to order a spread sample by, or None when there is no key.
+
+    Preferred: the primary key (an index scan, cheap even at a large offset) —
+    then the first temporal column, which exists in most business tables and
+    makes the head/tail pages the OLDEST and NEWEST rows.  None means the
+    sample stays one page, exactly as before.
+    """
+    for want_pk in (True, False):
+        for c in columns or []:
+            name = str(c.get("column_name") or c.get("name") or "").strip()
+            if not name:
+                continue
+            if want_pk and c.get("is_primary_key"):
+                return name
+            if not want_pk and role_of(c.get("data_type")) == "temporal":
+                return name
+    return None
+
+
+def _read_sample_page(
+    conn: Any,
+    table: str,
+    names: list[str],
+    n: int,
+    key: str | None,
+    *,
+    descending: bool,
+) -> list:
+    """Read one bounded page of the sample; ``[]`` on any failure (best-effort)."""
+    try:
+        sql = sample_rows_sql(
+            conn, table, names, n, order_by=key, descending=descending
+        )
+    except Exception:
+        logger.debug(
+            "column_stats: could not build a sample for '%s'", table, exc_info=True
+        )
+        return []
+    if not sql:
+        return []
+    try:
+        rows = conn.execute(sql, max_rows=n, timeout_s=STATS_TIMEOUT_S)
+    except Exception:
+        logger.debug(
+            "column_stats: sample page of '%s' failed (non-fatal)", table, exc_info=True
+        )
+        return []
+    return list(rows or [])
+
+
+def _key_bound(rows: list, key: str, pick) -> Any:
+    """``max``/``min`` of one order key across rows, or None when unreadable."""
+    values = []
+    for row in rows:
+        value = _row_lookup(row).get(str(key).lower())
+        if value is not None:
+            values.append(value)
+    if not values:
+        return None
+    try:
+        return pick(values)
+    except TypeError:
+        return None
 
 
 # ── value extraction ───────────────────────────────────────────────────────
@@ -324,25 +414,48 @@ def profile_table_columns(
         names.append(name)
     if not wanted or sample_rows <= 0:
         return {}
-    try:
-        sql = sample_rows_sql(conn, table, names, sample_rows)
-    except Exception:
-        logger.debug("column_stats: could not build a sample for '%s'", table, exc_info=True)
-        return {}
-    if not sql:
-        return {}
-    try:
-        rows = conn.execute(sql, max_rows=sample_rows, timeout_s=STATS_TIMEOUT_S)
-    except Exception:
-        logger.debug(
-            "column_stats: sample of '%s' failed (non-fatal)", table, exc_info=True
+    # ── the SPREAD sample ────────────────────────────────────────────────
+    # A plain ``LIMIT n`` is one arbitrary page, and on a large table that page
+    # is whatever the storage engine hands back first — live, the 200-row
+    # sample of the 14,589-row ``erp_v_sale_orderentry`` covered
+    # 2018-06-01…2018-09-25 while the column actually runs to 2026-09-19. Rows
+    # only seen in the unseen tail were invisible to the vocabulary the
+    # selector and the embedder read. So: a HEAD page and a TAIL page, ordered
+    # by a key the catalog already knows.
+    #
+    # Disjointness is PROVEN, never assumed. The tail counts only when its
+    # lowest key is strictly above the head's highest, i.e. the two pages
+    # cannot share a row. A table no bigger than two pages comes back
+    # overlapping, and there the single page is the honest answer: de-duping
+    # would collapse rows that are legitimately duplicates (a table with no
+    # unique key can have them) and corrupt both the value counts and the null
+    # rate. Overlap is also why this is not simply "read 2n rows".
+    key = sample_order_key(wanted)
+    head = _read_sample_page(conn, table, names, sample_rows, key, descending=False)
+    merged = list(head)
+    if key and head:
+        tail = _read_sample_page(
+            conn, table, names, sample_rows, key, descending=True
         )
-        return {}
-    if not isinstance(rows, list) or not rows:
+        if tail:
+            head_max = _key_bound(head, key, max)
+            tail_min = _key_bound(tail, key, min)
+            if (
+                head_max is not None
+                and tail_min is not None
+                and tail_min > head_max
+            ):
+                merged += tail
+            else:
+                logger.debug(
+                    "column_stats: head/tail pages of '%s' overlap (small table) "
+                    "— one page kept", table,
+                )
+    if not merged:
         # An empty object has no statistics to report — and that is a real
         # answer, so it is recorded by writing nothing rather than by zeros.
         return {}
-    return compute_column_stats(rows, wanted, cap=sample_rows, dialect=dialect)
+    return compute_column_stats(merged, wanted, cap=sample_rows, dialect=dialect)
 
 
 # ── shapes consumed downstream ─────────────────────────────────────────────

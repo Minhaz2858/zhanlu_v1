@@ -155,6 +155,29 @@ def _match_type_role(
     return None
 
 
+def _is_zero_length_binary(declared: str) -> bool:
+    """True for ``binary(0)`` / ``varbinary(0)`` — a declaration, not a payload.
+
+    MySQL types a VIEW column whose expression it cannot resolve as
+    ``varbinary(0)``.  Live: ``erp_v_sale_orderentry``'s ``instock_qty``,
+    ``produce_qty`` and ``plan_qty`` are declared ``varbinary(0)`` and are NULL
+    in ALL 14,589 rows.  Classifying them as ``binary`` made the catalog refuse
+    to read them at all, so the prompt showed three apparently usable columns
+    with no annotation — when the fact that matters ("nulls 100%") is exactly
+    what tells the SQL author to avoid them.
+
+    A POSITIVE length is still ``binary`` and still never read: that is real
+    payload, and reading a BLOB to count NULLs is how an index melts.
+    """
+    head, _, tail = declared.partition("(")
+    if not tail:
+        return False
+    return (
+        head.strip() in ("binary", "varbinary")
+        and tail.strip().rstrip(")").strip() == "0"
+    )
+
+
 def type_role(dialect: str | None, data_type: str | None) -> str:
     """Role of a DECLARED column type for reading its data.
 
@@ -173,6 +196,10 @@ def type_role(dialect: str | None, data_type: str | None) -> str:
     # An array is a list, not a comparable scalar — and vendor array syntax
     # ("integer[]") embeds the element type, which would mislead the tables.
     if declared.endswith("[]"):
+        return "other"
+    # A zero-length binary declaration is MySQL's "unresolved expression"
+    # marker, not a payload — read it (NULLs + cardinality), never enumerate it.
+    if _is_zero_length_binary(declared):
         return "other"
     profile = maybe_profile(dialect)
     if profile is not None:

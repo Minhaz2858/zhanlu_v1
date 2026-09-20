@@ -99,7 +99,14 @@ class KBColumnMeta(TimestampedBase):
     # ('full' | 'sample'), nulls, null_rate, distinct, distinct_is_exact,
     # top_values [{value, count}], and type-dependent min/max/avg/zeros or
     # min_len/max_len.  An ABSENT key means "not measured" — never 0, never [].
-    stats_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # ``none_as_null=True`` is load-bearing, not cosmetic: a plain ``JSON``
+    # column stores a Python ``None`` as the JSON LITERAL ``null``, so
+    # ``stats_json IS NULL`` is false for a column that was never measured —
+    # which is exactly the "absent key, never a zero" distinction this whole
+    # slice depends on. With it, "not measured" is a real SQL NULL.
+    stats_json: Mapped[dict | None] = mapped_column(
+        JSON(none_as_null=True), nullable=True
+    )
     # ── semantic typing (data-driven, dialect- and domain-agnostic) ──
     # identifier | measure | dimension | temporal | flag | free_text | unknown
     semantic_type: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")

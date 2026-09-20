@@ -772,14 +772,20 @@ def _toc_line(t: dict, *, compact: bool = False) -> str:
         parts.append(desc[:60])
     if role and role != "unknown" and not compact:
         parts.append(f"role={role}")
-    # Measured vocabulary, non-compact only: this line is what the table
-    # SELECTOR reads under a token budget, so the hint is capped at 3 columns /
-    # 4 values / 60 chars. Absent when nothing was measured.
-    if not compact:
-        from app.services.knowledge_graph import column_stats
-        _vocab = column_stats.vocabulary_hint(t.get("sample_values"))
-        if _vocab:
-            parts.append(_vocab)
+    # Measured vocabulary. This line is what the table SELECTOR reads, and both
+    # blocks of it need the hint: the ranked candidates (so the hint can confirm
+    # a retrieval hit) AND the rest of the catalog, where two ERP objects are
+    # routinely named alike — erp_t_sale_orderentry vs erp_v_sale_orderentry —
+    # and the only thing that separates them is which values actually occur in
+    # them. The compact form still keeps its size promise, just tighter: 1
+    # column / 3 values / 30 chars, against 3/4/60 for a full line.
+    from app.services.knowledge_graph import column_stats
+    _cap = (1, 3, 30) if compact else (3, 4, 60)
+    _vocab = column_stats.vocabulary_hint(
+        t.get("sample_values"), columns=_cap[0], values=_cap[1], width=_cap[2]
+    )
+    if _vocab:
+        parts.append(_vocab)
     if min_d and max_d:
         parts.append(f"coverage: {min_d}~{max_d}")
     elif max_d:

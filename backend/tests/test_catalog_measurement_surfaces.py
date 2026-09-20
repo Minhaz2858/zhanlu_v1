@@ -234,20 +234,26 @@ def test_the_selector_line_omits_the_hint_when_nothing_was_measured():
     assert "values" not in line
 
 
-def test_the_compact_selector_line_drops_the_hint():
-    """The compact form exists to fit a budget — it must not grow."""
-    long_line = sl._toc_line(
-        {"table_name": "orders", "description": "o", "row_count": 6,
-         "sample_values": {"region": ["华东", "华南"]}},
-        compact=False,
-    )
-    short_line = sl._toc_line(
-        {"table_name": "orders", "description": "o", "row_count": 6,
-         "sample_values": {"region": ["华东", "华南"]}},
-        compact=True,
-    )
-    assert "华东" in long_line and "华东" not in short_line
-    assert len(short_line) < len(long_line)
+def test_the_compact_selector_line_carries_a_tighter_hint():
+    """The compact form keeps its size promise — it is not vocabulary-free.
+
+    It used to be: only the ranked-candidate lines carried a hint. But the
+    "rest of the catalog" block is where two ERP objects named alike sit
+    (erp_t_sale_orderentry / erp_v_sale_orderentry), and the values that occur
+    in them are the only thing that separates them, so the compact line gets a
+    deliberately smaller hint instead of none.
+    """
+    row = {
+        "table_name": "orders", "description": "o", "row_count": 6,
+        "sample_values": {"region": ["华东", "华南", "华北", "华中"]},
+    }
+    full_line = sl._toc_line(row)
+    short_line = sl._toc_line(row, compact=True)
+    assert "华东" in short_line
+    hint = next(p for p in short_line.split(", ") if p.startswith("values "))
+    assert hint.count(":") == 1, "one column on a compact line"
+    assert len(hint) <= 30, "the compact size promise holds"
+    assert len(short_line) < len(full_line)
 
 
 def test_the_toc_carries_the_measured_vocabulary_from_the_catalog(db, monkeypatch):

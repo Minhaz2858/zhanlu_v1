@@ -92,7 +92,7 @@ class MySQLConnector:
     def describe_table(self, table: str) -> list[dict]:
         assert self._engine is not None
         sql = text(
-            "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
+            "SELECT COLUMN_NAME, COLUMN_TYPE, DATA_TYPE, IS_NULLABLE, COLUMN_DEFAULT, "
             "       COLUMN_KEY, COLUMN_COMMENT "
             "FROM information_schema.COLUMNS "
             "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t "
@@ -103,17 +103,26 @@ class MySQLConnector:
         return [
             {
                 "name": r[0],
-                "type": r[1],
-                "nullable": (r[2] or "").upper() == "YES",
-                "default": r[3],
-                "pk": (r[4] or "").upper() == "PRI",
+                # COLUMN_TYPE, not DATA_TYPE. DATA_TYPE drops the declared
+                # length, and on MySQL that is the ONLY way to tell a real
+                # binary payload from ``varbinary(0)`` — the marker MySQL writes
+                # for a VIEW column whose expression it cannot resolve. Live,
+                # erp_v_sale_orderentry's instock_qty/produce_qty/plan_qty are
+                # declared varbinary(0) and were unreadable as a result, because
+                # the length was thrown away right here. COLUMN_TYPE is also
+                # simply the truer declaration: varchar(64), decimal(14,2),
+                # int(10) unsigned, and the enum's own values for an ENUM.
+                "type": r[1] or r[2],
+                "nullable": (r[3] or "").upper() == "YES",
+                "default": r[4],
+                "pk": (r[5] or "").upper() == "PRI",
                 # The source's own words. MySQL writes a label here whenever a
                 # COMMENT was declared, which for an ERP is the only place the
                 # business meaning exists — it used to be SELECTed nowhere.
-                "comment": (r[5] or "").strip() or None,
+                "comment": (r[6] or "").strip() or None,
                 # PRI | UNI | MUL — index membership. Only 'PRI' used to be
                 # kept (as a bool); UNI/MUL came back and was thrown away.
-                "key": (r[4] or "").upper(),
+                "key": (r[5] or "").upper(),
             }
             for r in rows
         ]
