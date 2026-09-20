@@ -70,6 +70,9 @@ UNSUPPORTED_REASONS = {
     "blocked_by_policy": "this user may not read the columns that carry it",
     # the result hit the row cap, so the figure covers only part of the data
     "truncated": "the result was truncated, so the figure covers only part of the data",
+    # a ratio whose two sides are not measured on one basis (grain/unit/window):
+    # a claim about commensurability that the data source cannot vouch for
+    "ratio_unverified": "the ratio's numerator and denominator could not be shown to share a basis",
 }
 
 #: What a question unit IS. Only a named business measurement can be
@@ -214,6 +217,9 @@ class GroundedPlan:
     #: metrics can appear here (see SLOT_KINDS: a count request, a table name or
     #: a schema term is not a figure the source was supposed to produce)
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
+    #: ratio metric contracts this plan resolved (see db/ratio_contract.py):
+    #: [{"metric_id","numerator","denominator","required_grain", ...}]
+    ratio_contracts: list[dict[str, Any]] = field(default_factory=list)
     #: question units that are NOT business metrics, with their kind:
     #: [{"unit","kind"}] — kept so "no disclosure was raised" is itself auditable
     non_metric_units: list[dict[str, Any]] = field(default_factory=list)
@@ -342,6 +348,11 @@ class GroundedPlan:
                     f"unsupported slot {slot.get('slot')!r} is classified {kind!r} — "
                     "only a business metric may be unsupported"
                 )
+        if self.ratio_contracts:
+            from app.services.db.ratio_contract import RatioContract, validate_contract
+
+            for payload in self.ratio_contracts:
+                v.extend(validate_contract(RatioContract.from_dict(payload)))
         unsupported_keys = {s.get("slot") for s in self.unsupported_slots}
         for entry in self.non_metric_units:
             unit = entry.get("unit")
@@ -416,6 +427,9 @@ class CanonicalResultSet:
     validation: dict[str, Any] = field(default_factory=dict)
     #: carried forward from the plan so narration cannot lose it
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
+    #: one verdict per ratio-shaped result column, with the checks that ran:
+    #: [{"metric","column","value","ok","reasons","checks","contract","evidence"}]
+    ratio_validations: list[dict[str, Any]] = field(default_factory=list)
     #: a row-count question resolved to an actual count result:
     #: {"column","value","unit","kind":"row_count"} — "how many rows" is a
     #: supported question with a canonical answer, NOT an unsupported metric
@@ -504,6 +518,13 @@ class CanonicalResultSet:
                 )
         if self.unsupported_slots and not self.disclosure:
             v.append("unsupported slots present but no disclosure sentence")
+        for entry in self.ratio_validations:
+            if not entry.get("metric"):
+                v.append("ratio validation without a metric")
+            if "ok" not in entry:
+                v.append(f"ratio validation {entry.get('metric')!r} carries no verdict")
+            if not entry.get("checks"):
+                v.append(f"ratio validation {entry.get('metric')!r} records no checks")
         if self.canonical_count:
             if not self.canonical_count.get("column"):
                 v.append("canonical count without a column")

@@ -214,6 +214,11 @@ class GlossaryTerm:
     sql_expression: str | None = None
     query_pattern: str | None = None
     aliases: tuple[str, ...] = ()
+    #: the metric's declared aggregation (sum/avg/count/…) — the grain evidence
+    aggregation: str | None = None
+    #: the metric's own binding block (numerator/denominator/grain/range/…),
+    #: passed through untouched so a ratio contract can be read from it
+    bindings: object | None = None
 
 
 @dataclass(frozen=True)
@@ -593,6 +598,8 @@ class SemanticStore:
                         sql_expression=r.sql_expression,
                         query_pattern=r.query_pattern,
                         aliases=tuple(_json_list(r.aliases)),
+                        aggregation=getattr(r, "default_aggregation", None),
+                        bindings=getattr(r, "bindings", None),
                     )
                 )
         except Exception as e:  # pragma: no cover

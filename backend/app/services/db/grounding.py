@@ -41,6 +41,7 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable, Mapping, Sequence
 
+from app.services.db import ratio_contract as ratio_metrics
 from app.services.db.contracts import (
     CanonicalResultSet,
     GroundedPlan,
@@ -437,6 +438,10 @@ def resolve_slots(
                 "unit": getattr(term, "unit", None),
                 "tier": getattr(term, "tier", ""),
                 "origin": getattr(term, "origin", ""),
+                # the metric contract's own declarations, untouched — a ratio
+                # contract is read from these (see db/ratio_contract.py)
+                "aggregation": getattr(term, "aggregation", None),
+                "bindings": getattr(term, "bindings", None),
             }
         )
 
@@ -653,6 +658,17 @@ def build_grounded_plan(  # noqa: PLR0913 - a plan is a wide record by nature
         dialect=dialect_of(kb),
         evidence=evidence,
         unsupported_slots=unsupported,
+        ratio_contracts=[
+            contract.to_dict()
+            for contract in ratio_contracts_from_metrics(
+                metrics,
+                units={
+                    str(c.get("column") or ""): str(c.get("unit") or "")
+                    for c in concepts
+                    if c.get("column")
+                },
+            )
+        ],
         non_metric_units=non_metric_units(
             question,
             evidence=evidence,
@@ -924,6 +940,271 @@ def _sql_join_pairs(sql: str) -> list[tuple[str, str, tuple[str, str] | tuple]]:
     return out
 
 
+
+# ── ratio metrics ──────────────────────────────────────────────────────────
+
+
+class _MetricTerm:
+    """A plan metric entry read as the metric-contract term it came from."""
+
+    def __init__(self, payload: Mapping[str, Any]) -> None:
+        self._payload = payload
+
+    def __getattr__(self, name: str) -> Any:
+        return self._payload.get(name)
+
+
+def ratio_contracts_from_metrics(
+    metrics: Sequence[Mapping[str, Any]], units: Mapping[str, str] | None = None
+) -> list[Any]:
+    """Ratio contracts DECLARED by the metric vocabulary.
+
+    Never invented here: a contract is read from the metric's own
+    ``sql_expression`` / ``definition`` / ``bindings`` (the same vocabulary that
+    already supplies ``plan.metrics``), so the ratio system extends the metric
+    contract system instead of shadowing it.
+    """
+    out: list[Any] = []
+    for metric in metrics or []:
+        contract = ratio_metrics.contract_from_term(_MetricTerm(metric), units=units)
+        if contract is None:
+            continue
+        if ratio_metrics.validate_contract(contract):
+            continue
+        out.append(contract)
+    return out
+
+
+def ratio_directive(plan: GroundedPlan) -> str:
+    """Prompt text handed to the SQL model BEFORE it writes a ratio (pre-SQL).
+
+    The measured defect was arithmetic, so the fix is a stated requirement: both
+    sides of a contracted ratio are measured the same way, under one window.
+    """
+    contracts = [ratio_metrics.RatioContract.from_dict(c) for c in plan.ratio_contracts]
+    if not contracts:
+        return ""
+    lines = [
+        "[Ratio metrics] These figures are ratios. Compute both sides on the SAME basis:"
+    ]
+    for contract in contracts:
+        lines.append(f"  - {contract.metric_id} = ({contract.numerator}) / ({contract.denominator})")
+        lines.append(
+            f"    numerator is {contract.numerator_grain}; "
+            f"denominator is {contract.denominator_grain}; "
+            f"the division is only valid at grain {contract.required_grain or 'the common grain of both sides'}"
+        )
+        if contract.allowed_dimensions:
+            lines.append("    defined over: " + ", ".join(contract.allowed_dimensions))
+        lines.append(f"    a zero denominator means: {contract.zero_denominator}")
+    lines.append(
+        "Apply ONE date filter to both sides, and NEVER divide a summed quantity by a "
+        "count of records (or a count by a quantity) — that is not a percentage."
+    )
+    return "\n".join(lines)
+
+
+def _ratio_carriers(entry: Mapping[str, Any]) -> list[str]:
+    carriers = [str(c) for c in (entry.get("carriers") or [])]
+    carriers += [str(c) for c in (entry.get("columns") or [])]
+    return carriers
+
+
+def _matching_contract(
+    candidate: Mapping[str, Any],
+    declared: Mapping[str, Any],
+    plan: GroundedPlan,
+    units: Mapping[str, str] | None = None,
+) -> tuple[Any, str]:
+    """``(contract, label)`` for a ratio column — a declared one when it exists.
+
+    A declared contract is RECONCILED with the SQL before it is used: the metric
+    says how the ratio is defined, the SQL says what was computed, and it is the
+    computed arithmetic that gets checked.
+    """
+    column = str(candidate.get("column") or "")
+    lowered = column.lower()
+    for metric_id, contract in declared.items():
+        if metric_id and metric_id.lower() in lowered:
+            return _reconciled_contract(contract, candidate, units), metric_id
+    for entry in plan.evidence:
+        label = str(entry.get("label") or "")
+        if not label:
+            continue
+        for metric_id, contract in declared.items():
+            if metric_id and metric_id in label:
+                return _reconciled_contract(contract, candidate, units), label
+    # same sides, different spelling (the metric declared the expression verbatim)
+    sides = {_norm_sql(candidate.get("numerator")), _norm_sql(candidate.get("denominator"))}
+    for metric_id, contract in declared.items():
+        if {_norm_sql(contract.numerator), _norm_sql(contract.denominator)} == sides:
+            return _reconciled_contract(contract, candidate, units), metric_id
+    return (
+        ratio_metrics.contract_from_expressions(
+            column or "ratio",
+            str(candidate.get("numerator") or ""),
+            str(candidate.get("denominator") or ""),
+            units=units,
+            source_ids=plan.source_ids,
+        ),
+        column or "ratio",
+    )
+
+
+def _reconciled_contract(
+    declared: Any, candidate: Mapping[str, Any], units: Mapping[str, str] | None = None
+) -> Any:
+    """The metric contract with the SQL's ACTUAL sides put in.
+
+    A contract states the basis a ratio is defined on; the SQL states what was
+    computed. When the two disagree, the arithmetic is what gets checked — and the
+    declared POLICY is carried over (unit, range, dimensions, zero behaviour,
+    required grain) so the value is still judged against what the metric says it
+    may be. This is the seam the measured ≈17,957% came through: the metric was
+    defined as quantity/quantity, the SQL wrote quantity/count.
+    """
+    computed = ratio_metrics.contract_from_expressions(
+        declared.metric_id,
+        str(candidate.get("numerator") or ""),
+        str(candidate.get("denominator") or ""),
+        units=units,
+        source_ids=declared.source_ids,
+    )
+    merged = dict(computed.to_dict())
+    merged.update(
+        {
+            "output_unit": declared.output_unit,
+            "valid_range": list(declared.valid_range) if declared.valid_range else None,
+            "date_scope": declared.date_scope,
+            "allowed_dimensions": list(declared.allowed_dimensions),
+            "zero_denominator": declared.zero_denominator,
+            "required_grain": (
+                declared.required_grain
+                if declared.required_grain != ratio_metrics.GRAIN_UNKNOWN
+                else computed.required_grain
+            ),
+            "tier": "declared",
+            "evidence": list(computed.evidence)
+            + [f"metric contract defines it as ({declared.numerator}) / ({declared.denominator})"],
+        }
+    )
+    return ratio_metrics.RatioContract.from_dict(merged)
+
+
+def _norm_sql(text: Any) -> str:
+    return re.sub(r"[\s`\"\[\]]+", "", str(text or "")).lower()
+
+
+def _side_value(rows: Sequence[Mapping[str, Any]], expressions: Mapping[str, str], side: str) -> Any:
+    """The value of a ratio side when the query returned it as its own column.
+
+    A column whose own expression IS the ratio is skipped: it contains the text of
+    both sides, so matching on it would read the ratio as its own denominator and
+    report a healthy ratio as a zero-denominator one.
+    """
+    target = _norm_sql(side)
+    if not target:
+        return None
+    for column, expression in (expressions or {}).items():
+        if ratio_metrics.split_ratio(str(expression or "")) is not None:
+            continue
+        if target in _norm_sql(expression):
+            for row in rows:
+                if isinstance(row, Mapping) and column in row:
+                    return row.get(column)
+    return None
+
+
+def validate_ratio_columns(
+    plan: GroundedPlan,
+    sql: str | None,
+    columns: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    units: Mapping[str, str] | None = None,
+) -> list[dict[str, Any]]:
+    """Every ratio-shaped result column, checked against its contract.
+
+    A ratio is a claim that two measurements are commensurable; this is where the
+    claim is tested (grain, units, window, denominator, range, grouping) and the
+    verdict recorded with its evidence. Nothing here clamps a value or invents a
+    contract: an unprovable ratio is reported as unverified.
+    """
+    declarations = {
+        str(c.get("metric_id") or ""): ratio_metrics.RatioContract.from_dict(c)
+        for c in plan.ratio_contracts
+    }
+    declarations.pop("", None)
+    expressions = sql_alias_expressions(sql)
+    window = _window_tuple(plan)
+    verdicts: list[dict[str, Any]] = []
+    for candidate in ratio_metrics.ratios_in_sql(sql):
+        column = str(candidate.get("column") or "")
+        contract, label = _matching_contract(candidate, declarations, plan, units)
+        if not column:
+            continue
+        verdict = ratio_metrics.validate_ratio(
+            contract,
+            value=next((r.get(column) for r in rows if isinstance(r, Mapping) and column in r), None),
+            numerator_value=_side_value(rows, expressions, contract.numerator),
+            denominator_value=_side_value(rows, expressions, contract.denominator),
+            sql=sql,
+            groupings=list(plan.groupings or plan.grain),
+            source_ids=[str(s) for s in plan.source_ids],
+            plan_sources=[str(s) for s in plan.source_ids],
+            requested_window=window is not None,
+        )
+        if verdict["contract"].get("tier") != "declared":
+            # No metric contract declared this ratio, so its name is the bare
+            # column. A slot the plan DID resolve carries the business wording
+            # (履约率, "fulfilment rate") — the reader gets told in their language.
+            for entry in plan.evidence:
+                entry_label = str(entry.get("label") or "")
+                if not entry_label or not _RATIO_CUE.search(entry_label):
+                    continue
+                if column in _carried_columns(entry, rows, expressions):
+                    label = entry_label
+                    break
+        verdict["column"] = column
+        verdict["metric"] = label or verdict.get("metric") or column
+        verdict["unit"] = contract.output_unit
+        verdicts.append(verdict)
+    return verdicts
+
+
+def ratio_disclosures(verdicts: Sequence[Mapping[str, Any]]) -> tuple[list[str], list[dict[str, Any]]]:
+    """``(warnings, unsupported slots)`` for the ratios that could not be verified."""
+    warnings: list[str] = []
+    slots: list[dict[str, Any]] = []
+    for verdict in verdicts:
+        if verdict.get("ok"):
+            continue
+        label = str(verdict.get("metric") or verdict.get("column") or "the ratio")
+        text = ratio_metrics.ratio_disclosure(verdict)
+        if text:
+            warnings.append(text)
+        # A value outside the expected band is SUSPECT, not invalid: requirement is
+        # to warn and require evidence, never to withhold a figure that may be
+        # legitimate (a coverage index, a cumulative factor). Only a defect in the
+        # arithmetic itself withholds the ratio.
+        if set(verdict.get("reasons") or []) <= ratio_metrics.WARNING_ONLY_REASONS:
+            continue
+        slots.append(
+            {
+                "slot": label,
+                "label": label,
+                "kind": "metric",
+                "reason": "ratio_unverified",
+                "detail": text or UNSUPPORTED_REASONS["ratio_unverified"],
+                "tables": [],
+                "columns": [str(verdict.get("column") or "")] if verdict.get("column") else [],
+                "checks": dict(verdict.get("checks") or {}),
+                "reasons": list(verdict.get("reasons") or []),
+            }
+        )
+    return warnings, slots
+
+
 # ── the result set ─────────────────────────────────────────────────────────
 
 
@@ -1036,10 +1317,20 @@ def build_canonical_result_set(  # noqa: PLR0913 - a result envelope is wide by 
     if truncated:
         warnings.append("the result hit the row cap, so it covers only part of the data")
 
+    # Ratio metrics: a ratio is a claim that two measurements share a basis, so
+    # it is checked here (grain, units, window, denominator, range, grouping) and
+    # an unprovable one becomes an unsupported slot rather than a confident
+    # percentage. The measured 17,957% fulfilment rate came through this seam.
+    ratio_verdicts = validate_ratio_columns(plan, sql, columns, rows, units=units)
     unsupported, zero_warnings = _slots_against_result(
-        plan, sql, columns, rows, contract, truncated, available
+        plan, sql, columns, rows, contract, truncated, available,
+        permitted_ratios={str(v.get("column") or "") for v in ratio_verdicts if v.get("ok")},
     )
     warnings.extend(zero_warnings)
+    ratio_warnings, ratio_slots = ratio_disclosures(ratio_verdicts)
+    warnings.extend(ratio_warnings)
+    _claimed = {str(s.get("slot") or "") for s in unsupported}
+    unsupported.extend(s for s in ratio_slots if str(s.get("slot") or "") not in _claimed)
 
     # "How many rows" is a question with a canonical answer, not a business
     # metric the source failed to produce: when the question asks for a count and
@@ -1074,6 +1365,7 @@ def build_canonical_result_set(  # noqa: PLR0913 - a result envelope is wide by 
             "truncated": truncated,
         },
         unsupported_slots=unsupported,
+        ratio_validations=ratio_verdicts,
         canonical_count=count,
         disclosure=disclose(unsupported),
         plan_fingerprint=plan.fingerprint(),
@@ -1139,6 +1431,7 @@ def _slots_against_result(
     contract: Any,
     truncated: bool,
     coverage: Mapping[str, Mapping[str, Any]] | None = None,
+    permitted_ratios: Iterable[str] = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Re-check every requested slot against what the query returned.
 
@@ -1160,7 +1453,7 @@ def _slots_against_result(
 
     out: list[dict[str, Any]] = [dict(s) for s in plan.unsupported_slots]
     already = {s.get("slot") for s in out}
-    warnings: list[str] = list(_ratio_sanity_warnings(plan, rows, sql))
+    warnings: list[str] = list(_ratio_sanity_warnings(plan, rows, sql, permitted=permitted_ratios))
 
     # A structure/listing query reads the engine's OWN objects. Its rows are not
     # business data, so they can neither support nor convict a business metric:
@@ -1296,7 +1589,10 @@ _RATIO_CUE = re.compile(r"率|比|percent|ratio|rate|margin", re.I)
 
 
 def _ratio_sanity_warnings(
-    plan: GroundedPlan, rows: Sequence[Mapping[str, Any]], sql: str | None = None
+    plan: GroundedPlan,
+    rows: Sequence[Mapping[str, Any]],
+    sql: str | None = None,
+    permitted: Iterable[str] = (),
 ) -> list[str]:
     """A percentage above 100% is not an unsupported value — it is a suspect one.
 
@@ -1309,6 +1605,10 @@ def _ratio_sanity_warnings(
     """
     out: list[str] = []
     expressions = sql_alias_expressions(sql)
+    # A ratio whose contract DECLARES the range it may occupy (or whose unit is
+    # not a percentage) is not a suspect figure — see db/ratio_contract.py. Without
+    # this, a legitimately large ratio would be caveated forever.
+    allowed = {str(c) for c in permitted if c}
     # Only DIVISION-shaped result columns can be a percentage. Without this,
     # every column fed by the same source column counts too — and SUM(out_fqty)
     # as `shipped_qty` (31,605) turned a sane 89% rate into a false alarm.
@@ -1319,7 +1619,11 @@ def _ratio_sanity_warnings(
         label = str(entry.get("label") or "")
         if not label or not _RATIO_CUE.search(label):
             continue
-        for column in [c for c in _carried_columns(entry, rows, expressions) if c in ratio_columns]:
+        for column in [
+            c
+            for c in _carried_columns(entry, rows, expressions)
+            if c in ratio_columns and c not in allowed
+        ]:
             values = [r.get(column) for r in rows if r.get(column) is not None]
             if not values:
                 continue
@@ -1452,6 +1756,20 @@ def disclose(slots: Sequence[Mapping[str, Any]]) -> str:
             + ", ".join(labels)
             + " cover only part of the data."
         )
+    if "ratio_unverified" in reasons:
+        # The verdict already carries the reader-facing sentence (which names the
+        # actual defect: a quantity divided by a count, a unit clash, a window
+        # mismatch). Only fall back to generic wording if it is absent.
+        ratio_slots = [s for s in slots if str(s.get("reason") or "") == "ratio_unverified"]
+        details = [str(s.get("detail") or "") for s in ratio_slots if s.get("detail")]
+        if details and len(details) == len(ratio_slots):
+            return " ".join(details)
+        return (
+            "The ratio "
+            + ", ".join(labels)
+            + " could not be verified against this data, so no figure is reported for it. "
+            "It is not zero — it is unknown."
+        )
     if reasons & {"unvalidated_join", "zero_unproven"}:
         return (
             "For this period the data behind "
@@ -1525,7 +1843,12 @@ def check_narrative_against_result(narrative: str, crs: CanonicalResultSet) -> l
         return []
     violations: list[str] = []
     for slot in crs.unsupported_slots:
-        for label in {str(slot.get("label") or ""), str(slot.get("slot") or "")}:
+        # A slot names its business wording AND the columns that would have
+        # carried it, so prose that uses the raw alias ("fulfilment_rate: 17")
+        # is a claim about the slot just as much as prose using the label.
+        names = {str(slot.get("label") or ""), str(slot.get("slot") or "")}
+        names |= {str(c).split(".")[-1] for c in (slot.get("columns") or [])}
+        for label in names:
             if not label:
                 continue
             for match in re.finditer(re.escape(label), text):

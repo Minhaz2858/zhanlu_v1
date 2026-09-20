@@ -671,10 +671,16 @@ class NLAnswerService:
             except Exception as e:
                 logger.debug("NLAnswer: plan memory lookup skipped: %s", e)
         _unsupported_guidance = ""
+        _ratio_guidance = ""
         if _grounded_plan is not None and _grounding is not None:
             _unsupported_guidance = _grounding.unsupported_directive(_grounded_plan)
+            # Ratio metrics (validated again on the result — see
+            # db/ratio_contract.py): the requirement is stated BEFORE the model
+            # writes the arithmetic, because a grain mismatch is an arithmetic
+            # choice, not a data problem.
+            _ratio_guidance = _grounding.ratio_directive(_grounded_plan)
         _sql_guidance = "\n\n".join(
-            part for part in (_plan_guidance, _unsupported_guidance) if part
+            part for part in (_plan_guidance, _unsupported_guidance, _ratio_guidance) if part
         )
         try:
             sql = await self._text_to_sql(
