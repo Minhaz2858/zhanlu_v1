@@ -116,11 +116,38 @@ class _StubConnector:
         return [{"COUNT(*)": 26544}]
 
 
+def _stub_execution_gate(monkeypatch):
+    """Provenance tests are about what the driver received.
+
+    Since P5-A the execution boundary validates before it opens a connector
+    (services/db/execution_gate.py), and these fixtures have no source to validate
+    against. Enforcement itself is pinned in tests/test_execution_gate.py — here it
+    is stepped over so the provenance assertion is the only variable.
+    """
+    from app.services.db import execution_gate
+
+    monkeypatch.setattr(
+        execution_gate,
+        "enforce",
+        lambda db, kb_id, sql, **kw: {
+            "ok": True,
+            "checks": {"dialect_validity": "pass"},
+            "errors": [],
+            "detail": {},
+            "source_id": kb_id,
+            "authored_sql": sql,
+            "executed_sql": "",
+            "enforced": True,
+        },
+    )
+
+
 def test_query_service_reports_the_statement_the_driver_received(monkeypatch):
     from app.services.db import query_service as qs
 
     monkeypatch.setattr(qs, "get_connector", lambda kb: _StubConnector())
     monkeypatch.setattr(QueryService, "_load_kb", lambda self, kb_id: _StubKB())
+    _stub_execution_gate(monkeypatch)
 
     result = QueryService(db=None).execute("kb-1", COUNT_SQL)
     assert result["sql"] == COUNT_SQL, "the authored SQL is reported unchanged"
@@ -139,6 +166,7 @@ def test_query_service_falls_back_when_a_connector_reports_nothing(monkeypatch):
 
     monkeypatch.setattr(qs, "get_connector", lambda kb: _Silent())
     monkeypatch.setattr(QueryService, "_load_kb", lambda self, kb_id: _StubKB())
+    _stub_execution_gate(monkeypatch)
 
     result = QueryService(db=None).execute("kb-1", COUNT_SQL)
     assert result["executed_sql"] == COUNT_SQL

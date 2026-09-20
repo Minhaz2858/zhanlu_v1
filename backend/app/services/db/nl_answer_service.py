@@ -256,6 +256,9 @@ class NLAnswerService:
 
         schema_svc = SchemaService(self._db)
         query_svc = QueryService(self._db)
+        # Enforcement context (never a switch): the gate runs on every execution
+        # regardless, and validates against the user's policy when there is one.
+        query_svc.policy = resolved_policy
 
         # ── C1 (2026-08-26): static intent resolver ──
         # Known business questions ("top customer for last month", "sales
@@ -755,6 +758,9 @@ class NLAnswerService:
         _repair_budget = max(0, int(getattr(settings, "NL2SQL_DB_ERROR_REPAIR_MAX", 2) or 0))
         for _attempt in range(_repair_budget + 1):
             try:
+                # The grounded plan is the context the execution gate validates
+                # against (its ratio contracts in particular).
+                query_svc.plan = _grounded_plan
                 exec_result = await asyncio.to_thread(query_svc.execute, kb_id, sql)
                 _exec_error = None
                 break
@@ -791,13 +797,39 @@ class NLAnswerService:
             _shadow_validate_and_log(
                 kb_id, question, sql, live_success=False, live_error=str(_exec_error)
             )
-            return {
+            failure = {
                 "success": False,
                 "error": f"Query failed: {_exec_error}",
                 "sql": sql,
                 "source_id": kb_id,
                 "sql_repaired": bool(_repaired_from),
             }
+            # A statement refused at the execution boundary is a STRUCTURED
+            # failure, not a string: the checks that ran, the SQL as authored, the
+            # (empty) executed statement, and the same payload on the plan and the
+            # result set — so a caller reads what was refused and why.
+            payload = getattr(_exec_error, "payload", None)
+            if isinstance(payload, dict):
+                from app.services.db import execution_gate
+
+                failure.update(
+                    {
+                        "error_kind": "execution_validation_failed",
+                        "validation": payload,
+                        "authored_sql": payload.get("authored_sql") or sql,
+                        "executed_sql": payload.get("executed_sql") or "",
+                    }
+                )
+                failure["result_set"] = execution_gate.failure_result_set(
+                    _grounded_plan, payload
+                ).to_dict()
+                if _grounded_plan is not None:
+                    try:
+                        _grounded_plan.execution_validation = payload
+                        failure["plan"] = _grounded_plan.to_dict()
+                    except Exception as e:  # pragma: no cover - plan is a dataclass
+                        logger.debug("NLAnswer: could not stamp the plan: %s", e)
+            return failure
 
         if _repaired_from:
             logger.info(
@@ -2163,6 +2195,10 @@ def _shadow_validate_and_log(
       shadow_fail_live_pass — shadow rejected, live succeeded (over-rejection risk)
       agree_fail            — both failed
     """
+    # Observability only (P5-A): this switch decides whether the divergence is
+    # LOGGED. Enforcement does not live here — it lives at the execution boundary
+    # (services/db/execution_gate.py), which runs on every execution regardless of
+    # this flag, the caller, or the context.
     if not getattr(settings, "NL2SQL_SHADOW_MODE_ENABLED", False):
         return
     try:

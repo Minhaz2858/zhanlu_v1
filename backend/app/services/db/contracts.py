@@ -217,6 +217,9 @@ class GroundedPlan:
     #: metrics can appear here (see SLOT_KINDS: a count request, a table name or
     #: a schema term is not a figure the source was supposed to produce)
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
+    #: the execution-boundary validation this plan ran under, when it got to one:
+    #: {"ok","checks","errors","detail","authored_sql","executed_sql","enforced"}
+    execution_validation: dict[str, Any] | None = None
     #: ratio metric contracts this plan resolved (see db/ratio_contract.py):
     #: [{"metric_id","numerator","denominator","required_grain", ...}]
     ratio_contracts: list[dict[str, Any]] = field(default_factory=list)
@@ -427,6 +430,10 @@ class CanonicalResultSet:
     validation: dict[str, Any] = field(default_factory=dict)
     #: carried forward from the plan so narration cannot lose it
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
+    #: the execution-boundary validation that produced (or refused) this result:
+    #: present on a refused statement, where ``rows`` is empty and ``complete`` is
+    #: False, so a failure is a structured object and not just a string.
+    execution_validation: dict[str, Any] | None = None
     #: one verdict per ratio-shaped result column, with the checks that ran:
     #: [{"metric","column","value","ok","reasons","checks","contract","evidence"}]
     ratio_validations: list[dict[str, Any]] = field(default_factory=list)
@@ -518,6 +525,16 @@ class CanonicalResultSet:
                 )
         if self.unsupported_slots and not self.disclosure:
             v.append("unsupported slots present but no disclosure sentence")
+        if self.execution_validation:
+            failed = self.execution_validation
+            if "ok" not in failed:
+                v.append("execution validation without a verdict")
+            if not failed.get("checks"):
+                v.append("execution validation records no checks")
+            if failed.get("ok") is False and not failed.get("errors"):
+                v.append("a refused statement must carry its errors")
+            if not failed.get("authored_sql") and failed.get("ok") is False:
+                v.append("a refused statement must preserve the SQL that was authored")
         for entry in self.ratio_validations:
             if not entry.get("metric"):
                 v.append("ratio validation without a metric")

@@ -26,8 +26,15 @@ DEFAULT_TIMEOUT_S = 10
 class QueryService:
     """Run a SQL statement against a KnowledgeBase and return rows."""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, *, policy: Any = None, plan: Any = None):
         self._db = db
+        #: optional enforcement CONTEXT — the resolved policy and the grounded
+        #: plan are what the gate validates against. Neither is a switch: the gate
+        #: runs with or without them (see db/execution_gate.py).
+        self.policy = policy
+        self.plan = plan
+        #: the payload of the validation this execution passed, for provenance
+        self.last_validation: dict | None = None
 
     def _load_kb(self, kb_id: str) -> KnowledgeBase:
         kb = self._db.query(KnowledgeBase).filter(
@@ -91,6 +98,18 @@ class QueryService:
             timeout_cap = DEFAULT_TIMEOUT_S
 
         kb = self._load_kb(kb_id)
+
+        # ── the execution boundary validates, unconditionally ──────────────
+        # Every caller funnels through execute(): the sealed NL path, the agent's
+        # execute_query tool, dashboards, report recipes, forecasting probes. The
+        # checks live HERE rather than in whichever caller remembered to ask, so a
+        # model-authored table or column is refused before the driver sees it.
+        from app.services.db import execution_gate
+
+        self.last_validation = execution_gate.enforce(
+            self._db, kb_id, sql, policy=self.policy, plan=self.plan
+        )
+
         t0 = time.time()
         with get_connector(kb) as conn:
             # +1 to PROVE truncation (see docstring).
@@ -101,6 +120,11 @@ class QueryService:
             # statement is read back from the connector rather than assumed.
             executed_sql = str(getattr(conn, "last_executed_sql", "") or sql)
         elapsed_ms = int((time.time() - t0) * 1000)
+        validation = dict(self.last_validation or {})
+        if validation:
+            # Provenance: the authored statement was validated above; the statement
+            # the driver actually received is read back from the connector.
+            validation["executed_sql"] = executed_sql
 
         truncated = len(fetched) > row_cap
         rows = fetched[:row_cap] if truncated else fetched
@@ -119,4 +143,6 @@ class QueryService:
             "row_cap": row_cap,
             "truncated": truncated,
             "elapsed_ms": elapsed_ms,
+            #: what was verified before the statement was sent, and by which checks
+            "validation": validation,
         }

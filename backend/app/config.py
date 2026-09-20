@@ -1185,6 +1185,12 @@ class Settings(BaseSettings):
     #   alongside the live agent data path (NLAnswerService), logging
     #   divergence to nl2sql_query_logs. The served result is NEVER altered
     #   in shadow mode; the serving switch happens only on eval evidence.
+    #
+    #   P5-A: this flag is OBSERVABILITY ONLY. It controls whether the divergence
+    #   COMPARISON IS LOGGED, never whether execution is validated — the checks
+    #   owed to the database run unconditionally at the boundary itself
+    #   (services/db/execution_gate.py, called from QueryService.execute). Setting
+    #   this to False does not disable, weaken or skip any check.
     NL2SQL_SHADOW_MODE_ENABLED: bool = False
     # ── Source readiness gate (P1: dynamic database semantic enrichment) ────
     # A database source moves through connected → discovering → indexed →
