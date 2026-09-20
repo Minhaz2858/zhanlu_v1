@@ -307,6 +307,14 @@ class SynexiaFSM:
                 self._run_verify(request, on_verify=on_verify)
 
                 if attempt < verify_budget and self._should_verify_replan():
+                    # Spend from the ONE shared per-turn refinement budget.
+                    # verify_budget alone let a turn spend this AND a fresh
+                    # set of ACT-level corrective plans, because the two
+                    # budgets were independent and multiplied.
+                    from app.services.synexia.refinement_budget import may_refine
+
+                    if not may_refine(self.db, self.execution.id):
+                        break
                     failure_context = self._build_verify_replan_context()
                     logger.info(
                         "VERIFY critical failure (attempt %d/%d) — re-planning",

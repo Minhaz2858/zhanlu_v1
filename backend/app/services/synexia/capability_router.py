@@ -218,7 +218,14 @@ def execute_plan_nodes(
     _max = max_replan_depth
     if _max is None:
         _max = getattr(settings, "SYNEXIA_ACT_REPLAN_MAX", 2)
-    if replan_depth < _max:
+    # Spend from the ONE shared per-turn refinement budget (see
+    # synexia/refinement_budget.py). ACT depth alone allowed a corrective
+    # plan at every level, so combined with the FSM's VERIFY re-plan a single
+    # turn created 4 plans — spending the budget on planning and leaving the
+    # plan's own final steps `pending`.
+    from app.services.synexia.refinement_budget import may_refine
+
+    if replan_depth < _max and may_refine(db, execution.id):
         recoverable = _recoverable_failures(plan)
         if recoverable:
             logger.info(

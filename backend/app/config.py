@@ -606,6 +606,18 @@ class Settings(BaseSettings):
     # FSM loops back to PLAN with the verification failures as context.
     # 0 = disable (VERIFY stays non-fatal — the historical behaviour).
     SYNEXIA_VERIFY_REPLAN_MAX: int = 1
+    # ONE shared per-turn budget for PLAN-level refinement (2026-09-20).
+    # ACT re-plan and VERIFY re-plan were independent, so their limits
+    # MULTIPLIED: SYNEXIA_ACT_REPLAN_MAX=2 x SYNEXIA_VERIFY_REPLAN_MAX=1
+    # allowed up to six plans in a single turn (observed live: 4 plans, 12+
+    # nodes, 129s). Each failure bought another plan, and the planner's own
+    # chart step was left `pending` — planned but never reached. This cap
+    # counts TOTAL plans per turn (the initial plan plus refinements) and is
+    # shared by every re-plan path because they all persist a Plan row
+    # against the same execution_id. 2 = the turn may re-plan once. Raise for
+    # more self-correction at the cost of wall clock; the turn always answers
+    # from the best content already produced and never ships an empty reply.
+    SYNEXIA_TURN_REPLAN_MAX: int = 2
     # Tool argument self-heal: when a tool fails with a PERMANENT error
     # (not a transient infra failure), prompt the LLM to suggest corrected
     # arguments and retry the handler once. False = surface the failure to
