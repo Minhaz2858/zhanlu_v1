@@ -392,6 +392,11 @@ def _enrich_tables(db: Session, tables: list[dict], top_k: int) -> list[dict]:
                     "description_en": c.description_en,
                     "semantic_type": getattr(c, "semantic_type", None),
                     "enum_values": getattr(c, "enum_values", None),
+                    # The measured distribution (slice 2). Rendered into the
+                    # DDL slice by _format_slice; absent (None) for a column
+                    # that was never measured, which is why the renderer emits
+                    # nothing rather than a zero.
+                    "stats": getattr(c, "stats_json", None),
                     "unit": getattr(c, "unit", None),
                 }
                 for c in cols
@@ -482,59 +487,117 @@ def _join_on_text(
 
 # ── formatting ─────────────────────────────────────────────────────────────
 
+def _render_table_chunk(t: dict, *, detail: str = "full") -> str:
+    """One table as a DDL chunk at one of three detail levels.
+
+    ``full``   — the value dictionary AND the measured distribution.
+    ``stats``  — the measured distribution only: the value dictionary is the
+                 longest annotation and the first thing to give way when the
+                 prompt budget is tight, while the distribution (null rate,
+                 cardinality, range) is what stops a wrong column choice.
+    ``plain``  — neither (the pre-slice-2 content).
+
+    Even ``plain`` keeps the description, semantic type/unit, freshness flag
+    and coverage: those are the reasons the author can use the table at all.
+    """
+    from app.services.knowledge_graph.freshness import stale_flag
+    from app.services.knowledge_graph import column_stats
+
+    chunk = f"\nCREATE TABLE {t['table_name']} (\n"
+    for c in t.get("columns", []):
+        nullable = "" if c.get("is_nullable") is False else " NULL"
+        pk = " PRIMARY KEY" if c.get("is_primary_key") else ""
+        annotations: list[str] = []
+        if c.get("description_zh"):
+            annotations.append(str(c["description_zh"]))
+        stype = c.get("semantic_type")
+        unit = c.get("unit")
+        if stype and stype not in ("unknown", "identifier"):
+            annotations.append(f"{stype}" + (f", unit={unit}" if unit else ""))
+        elif unit:
+            annotations.append(f"unit={unit}")
+        if detail == "full":
+            enums = c.get("enum_values")
+            if isinstance(enums, list) and enums:
+                shown = ", ".join(str(v) for v in enums[:12])
+                annotations.append(f"values: {shown[:80]}")
+        if detail in ("full", "stats"):
+            # The MEASUREMENT (slice 2): null rate, cardinality, range. It is
+            # what tells the SQL author that a column is unusable (97 % NULL),
+            # that a filter value must sit inside a range, or that a column is
+            # effectively one record per row. Every figure carries its own
+            # provenance ("全表" vs "N 行抽样"), so a sampled bound can never be
+            # read as a measured total. Empty for an unmeasured column.
+            _measured = column_stats.stats_annotation(c.get("stats"))
+            if _measured:
+                annotations.append(_measured)
+        desc = f" -- {' | '.join(annotations)}" if annotations else ""
+        chunk += f"  {c.get('name') or c.get('column_name')} {c.get('data_type', '')}{nullable}{pk}{desc}\n"
+    chunk += ");"
+    if t.get("domain_name"):
+        chunk += f"  -- domain: {t['domain_name']}"
+    if t.get("description_zh"):
+        chunk += f"  -- {t['description_zh']}"
+    if t.get("row_count"):
+        chunk += f"  -- ~{t['row_count']:,} rows"
+    # Data-freshness marker (generic): a STALE table has no recent
+    # rows — the LLM must not use it for recent-period questions.
+    _fresh = stale_flag(t)
+    if _fresh:
+        chunk += f"  --{_fresh}"
+    _cov = t.get("coverage_json") or {}
+    if _cov.get("max_date"):
+        chunk += (
+            f"  -- coverage: latest {_cov.get('date_column') or 'date'} = "
+            f"{_cov['max_date']}"
+        )
+    return chunk
+
+
 def _format_slice(
     tables: list[dict], join_paths: list[dict], token_budget: int
 ) -> str:
-    """Format tables + joins into a curated DDL-style text slice."""
-    from app.services.knowledge_graph.freshness import stale_flag
+    """Format tables + joins into a curated DDL-style text slice.
+
+    Budget policy: the detail gives way before the table does. Measured
+    annotations roughly double a wide ERP table's chunk (live: 26-column
+    ``erp_v_sale_orderentry``), and the old loop ``break``-ed on the first
+    over-budget candidate — so adding measurements would have turned a wide
+    table's slice into a header with NO DDL at all, leaving the SQL author
+    nothing to author against. Now each table is rendered WITH the measured
+    detail first, then re-rendered without it, and the first table is included
+    even if even the lean form does not fit: the caller asked for these tables
+    by name, and a slice with no DDL is strictly worse than an over-budget one.
+    """
     parts: list[str] = ["-- Semantic catalog: relevant tables for this query\n"]
     used_tokens = _estimate_tokens(parts[0])
     included = 0
 
     for t in tables:
-        # DDL header
-        chunk = f"\nCREATE TABLE {t['table_name']} (\n"
-        # Columns
-        for c in t.get("columns", []):
-            nullable = "" if c.get("is_nullable") is False else " NULL"
-            pk = " PRIMARY KEY" if c.get("is_primary_key") else ""
-            annotations: list[str] = []
-            if c.get("description_zh"):
-                annotations.append(str(c["description_zh"]))
-            stype = c.get("semantic_type")
-            unit = c.get("unit")
-            if stype and stype not in ("unknown", "identifier"):
-                annotations.append(f"{stype}" + (f", unit={unit}" if unit else ""))
-            elif unit:
-                annotations.append(f"unit={unit}")
-            enums = c.get("enum_values")
-            if isinstance(enums, list) and enums:
-                shown = ", ".join(str(v) for v in enums[:12])
-                annotations.append(f"values: {shown[:80]}")
-            desc = f" -- {' | '.join(annotations)}" if annotations else ""
-            chunk += f"  {c['name']} {c['data_type']}{nullable}{pk}{desc}\n"
-        chunk += ");"
-        if t.get("domain_name"):
-            chunk += f"  -- domain: {t['domain_name']}"
-        if t.get("description_zh"):
-            chunk += f"  -- {t['description_zh']}"
-        if t.get("row_count"):
-            chunk += f"  -- ~{t['row_count']:,} rows"
-        # Data-freshness marker (generic): a STALE table has no recent
-        # rows — the LLM must not use it for recent-period questions.
-        _fresh = stale_flag(t)
-        if _fresh:
-            chunk += f"  --{_fresh}"
-        _cov = t.get("coverage_json") or {}
-        if _cov.get("max_date"):
-            chunk += (
-                f"  -- coverage: latest {_cov.get('date_column') or 'date'} = "
-                f"{_cov['max_date']}"
+        # Degrade the DETAIL, never the table: full -> stats-only -> plain.
+        chunk = ""
+        for detail in ("full", "stats", "plain"):
+            candidate = _render_table_chunk(t, detail=detail)
+            if used_tokens + _estimate_tokens(candidate) <= token_budget:
+                chunk = candidate
+                if detail != "full":
+                    logger.debug(
+                        "schema_linker: %s included at detail=%s (budget)",
+                        t.get("table_name"), detail,
+                    )
+                break
+        if not chunk:
+            if included:
+                break
+            # The FIRST table is never dropped for size: an empty slice gives
+            # the SQL author nothing to author against at all.
+            chunk = _render_table_chunk(t, detail="plain")
+            logger.info(
+                "schema_linker: first table %s exceeds the %d-token budget — "
+                "included without measured detail",
+                t.get("table_name"), token_budget,
             )
-
         tok = _estimate_tokens(chunk)
-        if used_tokens + tok > token_budget:
-            break
         parts.append(chunk)
         used_tokens += tok
         included += 1
@@ -620,6 +683,10 @@ def build_full_toc(db: Session, kb_ids: list[str]) -> list[dict]:
             "min_date": cov.get("min_date", ""),
             "table_role": r.table_role,
             "domain_name": getattr(r, "domain_name", None),
+            # Measured vocabulary for this table (slice 2) — the values that
+            # ACTUALLY occur, which is what lets a question phrased in the
+            # customer's own words match the table that holds those words.
+            "sample_values": r.sample_values,
             "columns": [],  # filled below for freshness detection
         })
 
@@ -705,6 +772,14 @@ def _toc_line(t: dict, *, compact: bool = False) -> str:
         parts.append(desc[:60])
     if role and role != "unknown" and not compact:
         parts.append(f"role={role}")
+    # Measured vocabulary, non-compact only: this line is what the table
+    # SELECTOR reads under a token budget, so the hint is capped at 3 columns /
+    # 4 values / 60 chars. Absent when nothing was measured.
+    if not compact:
+        from app.services.knowledge_graph import column_stats
+        _vocab = column_stats.vocabulary_hint(t.get("sample_values"))
+        if _vocab:
+            parts.append(_vocab)
     if min_d and max_d:
         parts.append(f"coverage: {min_d}~{max_d}")
     elif max_d:
@@ -821,12 +896,23 @@ def format_toc_for_selection(
 
 def get_selected_tables_ddl(
     db: Session, kb_ids: list[str], selected_table_names: list[str],
-    token_budget: int = 800,
+    token_budget: int = 2000,
 ) -> str:
     """Given a list of table names chosen by the LLM, return full DDL
     for those tables (with columns, types, descriptions, join paths).
 
     This is Phase 2 of the two-phase NL2SQL flow.
+
+    The budget is 2000, not the 800 it was. Measured annotations (slice 2)
+    roughly double a wide table's chunk: measured on the live 26-column ERP
+    view, ``_estimate_tokens`` gives 1822 with the measurements, 1601 with the
+    distribution alone, 535 with neither. At 800 the enforcer stripped the
+    measurements off exactly the view the question was about; at 1600 the full
+    detail missed by 200 tokens. This is the narrowest prompt of the flow (the
+    selector has already picked one or two tables), so it is the right place to
+    spend tokens — and the estimate is a conservative 2 chars/token, so the
+    real cost is roughly half this. It stays a budget: an unbounded catalog is
+    still cut, and a long list still degrades to the distribution or to plain.
     """
     allowlist = _resolve_table_allowlist_for_kb(db, kb_ids)
     if allowlist:
@@ -877,6 +963,11 @@ def get_selected_tables_ddl(
                     "description_en": c.description_en,
                     "semantic_type": getattr(c, "semantic_type", None),
                     "enum_values": getattr(c, "enum_values", None),
+                    # The measured distribution (slice 2). Rendered into the
+                    # DDL slice by _format_slice; absent (None) for a column
+                    # that was never measured, which is why the renderer emits
+                    # nothing rather than a zero.
+                    "stats": getattr(c, "stats_json", None),
                     "unit": getattr(c, "unit", None),
                 }
                 for c in cols

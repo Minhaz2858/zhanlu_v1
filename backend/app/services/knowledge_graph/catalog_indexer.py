@@ -857,14 +857,88 @@ def _is_string_type(data_type: str) -> bool:
     return any(k in dt for k in ("char", "text", "string", "enum"))
 
 
-def _samples_text(columns: list[dict]) -> str:
-    """Compact "Values: col: v1, v2; ..." suffix for embedded table docs."""
-    parts = []
+# Max columns whose values are echoed into one embedded document. An embedded
+# document is a RETRIEVAL TARGET: enough vocabulary for a customer's own words
+# to reach the right table, not a dump of the database.
+_EMBED_VOCAB_COLUMNS = 6
+_EMBED_VOCAB_VALUES = 6
+
+
+def _col_name(column: dict) -> str:
+    """The column's name from either dict shape — introspected or catalog-read.
+
+    ``_introspect_one_table`` produces ``column_name``; the linker's enriched
+    dicts use ``name``. Both reach these builders, and an embed pass must never
+    abort the index over a key name.
+    """
+    return str(column.get("column_name") or column.get("name") or "")
+
+
+def _column_values_text(c: dict) -> str:
+    """The values that actually occur in one column, as one bounded line.
+
+    Prefers the MEASURED top values (slice 2 — they come from the row sample and
+    carry counts) and falls back to the DISTINCT-probe samples. Empty when
+    nothing was sampled, so a document never advertises invented vocabulary.
+    """
+    stats = c.get("stats") if isinstance(c.get("stats"), dict) else {}
+    values: list[str] = []
+    for item in (stats.get("top_values") or [])[:_EMBED_VOCAB_VALUES]:
+        if isinstance(item, dict) and item.get("value") is not None:
+            values.append(str(item["value"]))
+    if not values:
+        values = [
+            str(v) for v in (c.get("value_samples") or [])[:_EMBED_VOCAB_VALUES]
+        ]
+    if not values:
+        return ""
+    return "Values: " + ", ".join(values)[:120]
+
+
+def _table_values_text(columns: list[dict]) -> str:
+    """``\\nValues — col: v1, v2; …`` suffix for the embedded TABLE document."""
+    parts: list[str] = []
     for c in columns:
-        samples = c.get("value_samples")
-        if samples:
-            parts.append(f"{c.get('column_name')}: {', '.join(samples[:_SAMPLE_LIMIT])}")
-    return ("\nValues: " + "; ".join(parts)) if parts else ""
+        line = _column_values_text(c)
+        if line:
+            parts.append(f"{_col_name(c)}: {line[len('Values: '):]}")
+        if len(parts) >= _EMBED_VOCAB_COLUMNS:
+            break
+    return ("\nValues — " + "; ".join(parts)) if parts else ""
+
+
+def _table_doc_text(t: dict) -> str:
+    """Embedded document for one table: meaning, size, provenance, vocabulary."""
+    text = (
+        f"[TABLE] {t['table_name']}\n"
+        f"{t.get('description_zh', '')}\n"
+        f"{t.get('description_en', '')}\n"
+        f"Type: {t.get('table_type', 'TABLE')}  Rows: {t.get('row_count', '?')}"
+    )
+    if t.get("row_count_source"):
+        provenance = "实测" if t["row_count_source"] == "exact" else "估算"
+        text += f" ({provenance})"
+    if t.get("table_comment"):
+        text += f"\nComment: {t['table_comment']}"
+    return text + _table_values_text(t.get("columns") or [])
+
+
+def _column_doc_text(table_name: str, c: dict) -> str:
+    """Embedded document for one column: meaning, measurement, vocabulary."""
+    text = (
+        f"[COLUMN] {table_name}.{_col_name(c)} [{c.get('data_type', '')}]\n"
+        f"{c.get('description_zh', '')}\n"
+        f"{c.get('description_en', '')}"
+    )
+    if c.get("comment"):
+        text += f"\nComment: {c['comment']}"
+    measured = column_stats.stats_annotation(c.get("stats"))
+    if measured:
+        text += f"\nMeasured: {measured}"
+    values = _column_values_text(c)
+    if values:
+        text += f"\n{values}"
+    return text
 
 
 def _sample_column_values(conn: Any, table: str, columns: list[dict]) -> None:
@@ -1808,14 +1882,7 @@ def _embed_catalog(kb_id: str, tables: list[dict]) -> None:
     table_metadatas: list[dict] = []
     for t in tables:
         mid = t.get("_meta_id", "")
-        text = (
-            f"[TABLE] {t['table_name']}\n"
-            f"{t.get('description_zh', '')}\n"
-            f"{t.get('description_en', '')}\n"
-            f"Type: {t.get('table_type', 'TABLE')}  "
-            f"Rows: {t.get('row_count', '?')}"
-            
-        )
+        text = _table_doc_text(t)
         table_ids.append(f"t:{mid}")
         table_texts.append(text)
         table_metadatas.append({
@@ -1833,11 +1900,7 @@ def _embed_catalog(kb_id: str, tables: list[dict]) -> None:
     for t in tables:
         mid = t.get("_meta_id", "")
         for c in t.get("columns", []):
-            text = (
-                f"[COLUMN] {t['table_name']}.{c['column_name']} [{c['data_type']}]\n"
-                f"{c.get('description_zh', '')}\n"
-                f"{c.get('description_en', '')}"
-            )
+            text = _column_doc_text(t["table_name"], c)
             col_ids.append(f"c:{mid}:{c['column_name']}")
             col_texts.append(text)
             col_metadatas.append({

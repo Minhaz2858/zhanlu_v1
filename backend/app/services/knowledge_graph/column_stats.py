@@ -387,11 +387,12 @@ def table_sample_values(
     return out or None
 
 
-def stats_prompt_suffix(stats: dict | None) -> str:
-    """Compact, unambiguous rendering of one column's statistics for a prompt.
+def stats_annotation(stats: dict | None) -> str:
+    """One-line rendering of a column's measurement, for any prompt or comment.
 
-    Every figure carries its own qualifier, so the description model can never
-    present a sampled bound as a measured total.
+    Every figure carries its own qualifier, so no consumer can present a
+    sampled bound as a measured total.  ``""`` when nothing was measured —
+    callers append it unconditionally.
     """
     if not isinstance(stats, dict) or not stats:
         return ""
@@ -417,4 +418,33 @@ def stats_prompt_suffix(stats: dict | None) -> str:
         return ""
     sampled = stats.get("rows_sampled")
     scope = "全表" if stats.get("basis") == "full" else f"{sampled} 行抽样"
-    return f" // 实测({scope}): " + ", ".join(bits)
+    return f"实测({scope}): " + ", ".join(bits)
+
+
+def stats_prompt_suffix(stats: dict | None) -> str:
+    """The same measurement, framed as a ``//`` comment for the description pass."""
+    annotation = stats_annotation(stats)
+    return f" // {annotation}" if annotation else ""
+
+
+def vocabulary_hint(
+    sample_values: dict | None, *, columns: int = 3, values: int = 4, width: int = 60
+) -> str:
+    """Bounded ``col: v1, v2`` hint from a table's measured vocabulary.
+
+    Consumed by the table SELECTOR, whose prompt is budget-capped, so this is
+    deliberately small: the point is that a question phrased in the customer's
+    own words ("混三甲苯 sales") can match a column's VALUES, not just its name.
+    ``""`` when the table has no measured vocabulary.
+    """
+    if not isinstance(sample_values, dict) or not sample_values:
+        return ""
+    parts: list[str] = []
+    for col, values_list in sample_values.items():
+        if not isinstance(values_list, list) or not values_list:
+            continue
+        shown = ", ".join(str(v) for v in values_list[:values])
+        parts.append(f"{col}: {shown}")
+        if len(parts) >= columns:
+            break
+    return ("values " + "; ".join(parts))[:width] if parts else ""
