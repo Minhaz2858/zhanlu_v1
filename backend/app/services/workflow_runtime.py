@@ -16,7 +16,7 @@ run_workflow_agent() orchestrates: validate -> persist WorkflowRun ->
 execute_flow_graph -> persist per-node WorkflowRunStep -> final status.
 """
 
-import hashlib
+import hashlib  # noqa: F401  (kept: node helpers elsewhere in this module hash payloads)
 import json
 import logging
 import re
@@ -484,12 +484,21 @@ class WorkflowExecutionContext:
         return {"text": text, "rows": rows}
 
     def _nl2sql_governed(self, kb, question: str, limit: int) -> dict | None:
-        """Route a workflow NL query through the governed nl2sql pipeline.
+        """Route a workflow NL query through the governed nl2sql path.
 
-        Returns the db_query-shaped result dict, or None when the
-        pipeline cannot run (unsupported dialect / adapter failure /
-        generation failure) so the caller falls back to the legacy
-        translator. Never raises into the served path.
+        The governed path IS the canonical one (``db/nl_answer_service``, reached
+        through the ``nl2sql.ask`` compatibility adapter): source readiness,
+        authorization, semantic retrieval, table linking, SQL generation, the
+        execution boundary, the grounded plan and the canonical result set.
+
+        A REFUSAL from that path is returned AS a refusal — no rows, and the
+        business sentence that says why. The previous behaviour fell back to the
+        ungoverned translator and answered anyway, which is how a source that is
+        not ready, or a table the user may not read, still produced a number.
+
+        Returns None only when the pipeline cannot run for this connector at all
+        (no dialect capability profile, or no identifiable source), which is what
+        the fallback exists for. Never raises into the served path.
         """
         try:
             from app.services.nl2sql import ask as nl2sql_ask
@@ -497,28 +506,42 @@ class WorkflowExecutionContext:
             config = _kb_datasource_config(kb)
             if config is None:
                 return None
-            # audit_events.binding_id is varchar(36) — the synthetic id
-            # MUST fit or the audit flush fails and poisons the shared
-            # SQLAlchemy session (workflow then dies with "transaction
-            # has been rolled back"). Compact form: wf:<agent8>:<q-hash16>
-            q_hash = hashlib.sha1(str(question).encode("utf-8")).hexdigest()[:16]
-            binding_id = f"wf:{str(self.agent.id)[:8]}:{q_hash}"
             res = nl2sql_ask(
                 question,
-                binding_id=binding_id,
+                kb_id=str(kb.id),
                 db=self.db,
                 datasource_config=config,
             )
-            if not res.success or res.data is None:
+            rows = [dict(r) for r in (res.rows or [])]
+            if not rows and res.data is not None:
+                rows = [
+                    {col: val for col, val in zip(res.data.columns, row)}
+                    for row in res.data.rows
+                ]
+
+            if not res.success:
+                if res.error_kind == "source_not_resolved":
+                    logger.warning(
+                        "db_query nl: governed nl2sql could not run for %s (%s)",
+                        getattr(kb, "id", ""), res.error or "unresolved source",
+                    )
+                    return None
                 logger.warning(
-                    "db_query nl: governed nl2sql failed (%s) — falling back",
-                    res.error or "no data",
+                    "db_query nl: governed nl2sql refused the question for %s (%s)",
+                    getattr(kb, "id", ""), res.error_kind or res.error,
                 )
-                return None
-            rows = [
-                {col: val for col, val in zip(res.data.columns, row)}
-                for row in res.data.rows
-            ][:max(limit, 1)]
+                return {
+                    "text": res.disclosure or res.answer or res.error
+                    or "This data source cannot answer this question.",
+                    "rows": [],
+                    "sql": "",
+                    "engine": "nl2sql",
+                    "refused": True,
+                    "error_kind": res.error_kind,
+                    "disclosure": res.disclosure,
+                }
+
+            rows = rows[: max(limit, 1)]
             if not rows:
                 text = "0 rows returned."
             else:

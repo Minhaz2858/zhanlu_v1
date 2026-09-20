@@ -28,11 +28,14 @@ class QueryService:
 
     def __init__(self, db: Session, *, policy: Any = None, plan: Any = None):
         self._db = db
-        #: optional enforcement CONTEXT — the resolved policy and the grounded
-        #: plan are what the gate validates against. Neither is a switch: the gate
-        #: runs with or without them (see db/execution_gate.py).
+        #: optional enforcement CONTEXT — the resolved policy, the grounded plan
+        #: and the row filters are what the gate validates against. None of them
+        #: is a switch: the gate runs with or without them (see db/execution_gate.py).
         self.policy = policy
         self.plan = plan
+        #: row filters (dicts) the statement must carry for the query to be a
+        #: filtered query rather than an unfiltered one. Empty == none configured.
+        self.row_filters: list[Any] = []
         #: the payload of the validation this execution passed, for provenance
         self.last_validation: dict | None = None
 
@@ -107,7 +110,15 @@ class QueryService:
         from app.services.db import execution_gate
 
         self.last_validation = execution_gate.enforce(
-            self._db, kb_id, sql, policy=self.policy, plan=self.plan
+            self._db,
+            kb_id,
+            sql,
+            policy=self.policy,
+            plan=self.plan,
+            # Empty means "this caller configured none" — the gate then falls
+            # back to its own configured-filter lookup rather than skipping the
+            # check. ``None`` (not ``[]``) is what keeps that discovery alive.
+            row_filters=(list(self.row_filters) if self.row_filters else None),
         )
 
         t0 = time.time()

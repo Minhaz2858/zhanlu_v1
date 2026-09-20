@@ -100,6 +100,11 @@ class NLAnswerService:
 
     def __init__(self, db: Session):
         self._db = db
+        #: row filters this turn must be verified against (enforcement context —
+        #: see db/execution_gate.py). Set by the caller that resolved a policy;
+        #: empty means "nothing configured", which the boundary records as
+        #: ``not-applicable`` rather than as a pass.
+        self.row_filters: list[dict] = []
 
     async def answer(
         self,
@@ -259,6 +264,21 @@ class NLAnswerService:
         # Enforcement context (never a switch): the gate runs on every execution
         # regardless, and validates against the user's policy when there is one.
         query_svc.policy = resolved_policy
+        # Row filters the policy resolved for this source are handed to the
+        # boundary as context, so a filtered query is verified to actually be
+        # filtered. Callers that already resolved their own (the legacy adapter)
+        # keep theirs.
+        if not getattr(self, "row_filters", None) and resolved_policy is not None:
+            try:
+                query_svc.row_filters = [
+                    dict(spec)
+                    for (kb, _table), spec in (getattr(resolved_policy, "row_filters", None) or {}).items()
+                    if kb == kb_id and isinstance(spec, dict)
+                ]
+            except Exception as e:  # pragma: no cover - policy shapes vary
+                logger.debug("NLAnswer: row-filter context unavailable: %s", e)
+        else:
+            query_svc.row_filters = list(getattr(self, "row_filters", None) or [])
 
         # ── C1 (2026-08-26): static intent resolver ──
         # Known business questions ("top customer for last month", "sales
@@ -1083,6 +1103,20 @@ class NLAnswerService:
                     contract=_contract,
                     provenance=_crv,
                 )
+                # What the boundary verified before the statement was sent belongs
+                # on the record for a statement that RAN, not only for one that was
+                # refused (see the failure branch above): otherwise a success is
+                # less auditable than a failure.
+                _exec_validation = (
+                    exec_result.get("validation")
+                    if isinstance(exec_result, dict)
+                    else None
+                )
+                if isinstance(_exec_validation, dict) and _exec_validation:
+                    if _grounded_plan.execution_validation is None:
+                        _grounded_plan.execution_validation = dict(_exec_validation)
+                    if _crs.execution_validation is None:
+                        _crs.execution_validation = dict(_exec_validation)
                 _crs_violations = _crs.validate()
                 if _crs_violations:
                     logger.warning(
@@ -1663,30 +1697,37 @@ class NLAnswerService:
         schema_svc = SchemaService(self._db)
         kb = schema_svc._load_kb(kb_id)
 
-        adapter = build_adapter(kb)
-        try:
-            # Build M-Schema text (with value sampling)
-            schema_text = await asyncio.to_thread(
-                render_m_schema, adapter, sample_rows=3
-            )
+        def _build() -> tuple[dict, str]:
+            """Build the M-Schema on ONE worker thread, start to finish.
 
-            # Build schema_info from adapter's refresh_schema (for db_type + citations)
-            schema_info = await asyncio.to_thread(
-                _schema_info_from_adapter, kb, adapter
-            )
+            The adapter is a driver connection, and some drivers are
+            thread-affine (sqlite3 refuses to be closed from the thread that did
+            not open it). The previous shape opened it in one ``to_thread`` call,
+            used it in another and closed it on the event-loop thread — which for
+            a SQLite source raised ``ProgrammingError`` out of the ``finally`` and
+            surfaced as "Failed to read schema", refusing a source that was
+            perfectly readable.
+            """
+            adapter = build_adapter(kb)
+            try:
+                schema_text = render_m_schema(adapter, sample_rows=3)
+                # Same adapter, same thread: describe_all-shaped dict for db_type
+                # and citation extraction.
+                schema_info = _schema_info_from_adapter(kb, adapter)
+                return schema_info, schema_text
+            finally:
+                adapter.close()
 
-            # Cache both
-            _cache_put(cache_key, {
-                "schema_info": schema_info,
-                "schema_text": schema_text,
-            })
-            logger.info(
-                "NLAnswer: M-Schema built for %s (%d tables)",
-                kb_id, len(schema_info.get("tables", [])),
-            )
-            return schema_info, schema_text
-        finally:
-            adapter.close()
+        schema_info, schema_text = await asyncio.to_thread(_build)
+        _cache_put(cache_key, {
+            "schema_info": schema_info,
+            "schema_text": schema_text,
+        })
+        logger.info(
+            "NLAnswer: M-Schema built for %s (%d tables)",
+            kb_id, len(schema_info.get("tables", [])),
+        )
+        return schema_info, schema_text
 
 
 # ---------------------------------------------------------------------------

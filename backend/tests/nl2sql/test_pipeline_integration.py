@@ -1,250 +1,194 @@
-"""Integration tests for the NL2SQL pipeline — end-to-end from question to snapshot."""
+"""The legacy ``nl2sql.ask()`` entry point, end to end through the canonical path.
+
+These tests used to drive the legacy pipeline's own seams (its adapter, its
+validator, its ``DataSnapshotService.nl2sql`` call, its retry loop). ``ask()`` is
+now a compatibility adapter over ``db/nl_answer_service``, so they were rewritten
+at the seam the product actually uses:
+
+    question → source resolution → readiness → retrieval/linking → SQL →
+    QueryService.execute (the execution boundary) → grounded plan →
+    canonical result set → disclosure
+
+A real SQLite source is used, so the gate introspects real tables and the
+connector really runs the statement. Only the LLM step is stubbed — it is the one
+part that needs a model, and stubbing it is what makes the run deterministic.
+"""
 
 import os
 import sqlite3
 import tempfile
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from app.config import settings
 from app.database import Base
-from app.models.data_snapshot import DataSnapshot
-from app.models.datasource import Datasource
 from app.models.agent_data_binding import AgentDataBinding
-from app.models.metric_definition import MetricDefinition
-from app.models.semantic_mapping import SemanticMapping
+from app.models.data_snapshot import DataSnapshot
+from app.models.knowledge_base import KnowledgeBase
 
 
 @pytest.fixture
 def pipeline_db():
-    """In-memory SQLAlchemy DB with all required tables."""
-    eng = create_engine("sqlite:///:memory:")
+    """A file-backed SQLAlchemy DB with all required tables.
+
+    File-backed, not in-memory: the answering path executes the statement on a
+    worker thread (``asyncio.to_thread``), and an in-memory SQLite connection
+    cannot be used from another thread. Production runs on a real server; this
+    keeps the test honest about the same constraint.
+    """
+    tmp = tempfile.NamedTemporaryFile(suffix=".appdb", delete=False)
+    tmp.close()
+    eng = create_engine(f"sqlite:///{tmp.name}")
     Base.metadata.create_all(eng)
     Sess = sessionmaker(bind=eng)
     s = Sess()
     yield s
     s.close()
+    eng.dispose()
+    os.unlink(tmp.name)
 
 
 @pytest.fixture
 def sqlite_ds_path():
-    """Create a temporary SQLite DB with test data, return the path."""
+    """A temporary SQLite database with real rows, and a real schema."""
     tmp = tempfile.NamedTemporaryFile(suffix=".db", delete=False)
     tmp.close()
     con = sqlite3.connect(tmp.name)
     con.execute(
         "CREATE TABLE customers (id INTEGER PRIMARY KEY, name TEXT, region TEXT)"
     )
+    con.execute(
+        "CREATE TABLE orders (id INTEGER, customer_id INTEGER, amount REAL)"
+    )
     con.execute("INSERT INTO customers VALUES (1,'Alice','EU'),(2,'Bob','US')")
+    con.execute("INSERT INTO orders VALUES (1,1,100.0),(2,2,50.0)")
     con.commit()
     con.close()
     yield tmp.name
     os.unlink(tmp.name)
 
 
-def test_ask_uses_llm_nl2sql_and_creates_snapshot(pipeline_db, sqlite_ds_path):
-    """The pipeline should call the LLM-based generator (not _build_sql) and persist a DataSnapshot."""
+def make_source(db, sqlite_ds_path, *, kb_id="kb-sqlite-1", ready=True):
+    """A KnowledgeBase the readiness gate will pass (or refuse, when not ready)."""
+    kb = KnowledgeBase(
+        id=kb_id,
+        name="Test SQLite source",
+        type="database",
+        source_kind="database",
+        db_type="sqlite",
+        # Both spellings: the connector reads ``file_url``, the datasource
+        # adapter (M-Schema) reads ``database_name`` for a file path.
+        file_url=sqlite_ds_path,
+        database_name=sqlite_ds_path,
+        catalog_status="ready" if ready else "pending",
+        nl2sql_state="nl2sql_ready" if ready else "",
+    )
+    db.add(kb)
+    db.commit()
+    return kb
+
+
+@pytest.fixture
+def offline(monkeypatch):
+    """Turn off every optional pipeline stage that needs infrastructure.
+
+    Readiness, linking, retrieval, the execution boundary and the grounded plan
+    stay ON: they are what these tests are about. What is disabled is the
+    catalog/vector machinery and the shadow logger, which need a built catalog
+    and a live deployment.
+    """
+    for flag, value in (
+        ("KG_FRESHNESS_SHORTCIRCUIT_ENABLED", False),
+        ("SCHEMA_LINKING_ENABLED", False),
+        ("SEMANTIC_CATALOG_ENABLED", False),
+        ("SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED", False),
+        ("SCHEMA_VALIDATOR_DID_YOU_MEAN_ENABLED", False),
+        ("NL2SQL_SHADOW_MODE_ENABLED", False),
+        ("NL2SQL_PLAN_MEMORY_ENABLED", False),
+        ("NL2SQL_DB_ERROR_REPAIR_MAX", 0),
+    ):
+        if hasattr(settings, flag):
+            monkeypatch.setattr(settings, flag, value)
+
+    from app.services.db import query_router
+
+    monkeypatch.setattr(
+        query_router, "resolve_static_route", lambda *a, **k: None, raising=False
+    )
+
+    def canned(sql: str):
+        """Make the one LLM call in the pipeline return *sql*."""
+
+        async def _text_to_sql(self, *args, **kwargs):
+            return sql
+
+        monkeypatch.setattr(
+            "app.services.db.nl_answer_service.NLAnswerService._text_to_sql",
+            _text_to_sql,
+        )
+        return sql
+
+    return canned
+
+
+# ── the legacy entry point answers, through the canonical path ────────────
+
+
+def test_ask_answers_from_a_real_source_and_persists_a_snapshot(
+    pipeline_db, sqlite_ds_path, offline
+):
     from app.services.nl2sql import ask
 
-    ds = Datasource(
-        id="ds-llm-1",
-        name="test-ds",
-        engine="sqlite",
-        connection_config={"path": sqlite_ds_path, "dialect": "sqlite"},
-    )
-    bd = AgentDataBinding(
-        id="b-llm-1",
-        agent_app_id="a-llm-1",
-        datasource_id="ds-llm-1",
-        allowed_tables=["customers"],
-        access_mode="read_only",
-    )
-    pipeline_db.add_all([ds, bd])
-    pipeline_db.commit()
+    make_source(pipeline_db, sqlite_ds_path)
+    canned = "SELECT id, name FROM customers"
+    offline(canned)
 
-    # Stub the LLM call to return canned SQL (deterministic, offline)
-    from app.services.data_snapshot import snapshot_service as ss_mod
+    r = ask("show customers", kb_id="kb-sqlite-1", db=pipeline_db)
 
-    orig = ss_mod.DataSnapshotService.nl2sql
+    assert r.success, r.error
+    assert r.sql == canned
+    assert r.data is not None and r.data.row_count == 2
+    assert {row["name"] for row in r.rows} == {"Alice", "Bob"}
+    assert r.answer, "a legacy caller still gets prose"
+    # The grounded contracts travel with a legacy answer too.
+    assert r.plan is not None and r.result_set is not None, "plan + result set"
+    assert r.plan["source_ids"] == ["kb-sqlite-1"]
+    assert r.result_set["source_ids"] == ["kb-sqlite-1"]
+    assert r.provenance.get("sql_fingerprint")
+    assert r.validation is not None and r.validation.is_valid
 
-    canned_sql = "SELECT id, name FROM customers"
-
-    def _stub_nl2sql(self, question, schema_description, **kw):
-        return {"sql": canned_sql, "valid": True, "errors": [], "warnings": []}
-
-    # Pass metrics that the resolver can match
-    metric = MetricDefinition(
-        id="m-cust", name="customers", datasource_id="ds-llm-1",
-        synonyms=["clients", "accounts"],
-    )
-    mapping = SemanticMapping(
-        id="sm-cust", datasource_id="ds-llm-1",
-        table_name="customers", column_name="name",
-        display_name="Customer Name",
-    )
-    pipeline_db.add_all([metric, mapping])
-    pipeline_db.commit()
-
-    ss_mod.DataSnapshotService.nl2sql = _stub_nl2sql
-    try:
-        r = ask(
-            "show customers",
-            binding_id="b-llm-1",
-            db=pipeline_db,
-            datasource_config={"path": sqlite_ds_path, "dialect": "sqlite"},
-        )
-        assert r.success, f"Pipeline failed: {r.error}"
-        assert r.sql == canned_sql
-        assert r.data is not None
-        assert r.data.row_count == 2
-
-        snap = pipeline_db.query(DataSnapshot).first()
-        assert snap is not None, "Expected a DataSnapshot to be persisted"
-        assert snap.sql_query == canned_sql
-        assert snap.row_count == 2
-        assert "Alice" in str(snap.result_data)
-    finally:
-        ss_mod.DataSnapshotService.nl2sql = orig
+    snap = pipeline_db.query(DataSnapshot).first()
+    assert snap is not None, "Expected a DataSnapshot to be persisted"
+    assert snap.sql_query == canned
+    assert snap.row_count == 2
+    assert "Alice" in str(snap.result_data)
 
 
-def test_ask_rejects_invalid_llm_sql(pipeline_db, sqlite_ds_path):
-    """When the LLM generates invalid SQL, the pipeline returns an error."""
+def test_ask_keeps_the_legacy_binding_allowlist_effective(
+    pipeline_db, sqlite_ds_path, offline
+):
+    """A binding that allows only `customers` still cannot read `orders`."""
     from app.services.nl2sql import ask
 
-    ds = Datasource(
-        id="ds-llm-2",
-        name="test-ds2",
-        engine="sqlite",
-        connection_config={"path": sqlite_ds_path, "dialect": "sqlite"},
-    )
-    bd = AgentDataBinding(
-        id="b-llm-2",
-        agent_app_id="a-llm-2",
-        datasource_id="ds-llm-2",
-        allowed_tables=["customers"],
-        access_mode="read_only",
-    )
-    metric = MetricDefinition(
-        id="m-cust2", name="customer_data", datasource_id="ds-llm-2",
-        synonyms=["users", "buyers"],
-    )
-    pipeline_db.add_all([ds, bd, metric])
-    pipeline_db.commit()
-
-    from app.services.data_snapshot import snapshot_service as ss_mod
-    orig = ss_mod.DataSnapshotService.nl2sql
-
-    def _stub_invalid(self, question, schema_description, **kw):
-        return {"sql": "INSERT INTO customers VALUES (3,'Eve','APAC')", "valid": False,
-                "errors": ["Forbidden keyword 'INSERT' detected"], "warnings": []}
-
-    ss_mod.DataSnapshotService.nl2sql = _stub_invalid
-    try:
-        r = ask(
-            "add a customer",
-            binding_id="b-llm-2",
-            db=pipeline_db,
-            datasource_config={"path": sqlite_ds_path, "dialect": "sqlite"},
+    make_source(pipeline_db, sqlite_ds_path)
+    pipeline_db.add(
+        AgentDataBinding(
+            id="b-allow-1",
+            agent_app_id="a-allow-1",
+            datasource_id="kb-sqlite-1",
+            allowed_tables=["customers"],
+            access_mode="read_only",
         )
-        assert not r.success
-        assert "Forbidden" in r.error or "INSERT" in r.error
-    finally:
-        ss_mod.DataSnapshotService.nl2sql = orig
-
-
-def test_ask_retries_with_error_message_then_succeeds(pipeline_db, sqlite_ds_path):
-    """When first LLM call returns invalid SQL, retry with <error-msg> appended."""
-    from app.services.nl2sql import ask
-
-    ds = Datasource(
-        id="ds-retry-1", name="retry-ds", engine="sqlite",
-        connection_config={"path": sqlite_ds_path, "dialect": "sqlite"},
     )
-    bd = AgentDataBinding(
-        id="b-retry-1", agent_app_id="a-retry-1", datasource_id="ds-retry-1",
-        allowed_tables=["customers"], access_mode="read_only",
-    )
-    metric = MetricDefinition(
-        id="m-retry", name="customers", datasource_id="ds-retry-1",
-        synonyms=["clients"],
-    )
-    pipeline_db.add_all([ds, bd, metric])
     pipeline_db.commit()
+    offline("SELECT id, amount FROM orders")
 
-    from app.services.data_snapshot import snapshot_service as ss_mod
-    orig = ss_mod.DataSnapshotService.nl2sql
+    r = ask("show orders", binding_id="b-allow-1", db=pipeline_db)
 
-    call_count = [0]
-
-    def _stub_retry(self, question, schema_description, **kw):
-        call_count[0] += 1
-        if call_count[0] == 1:
-            return {"sql": "SELEC * FROM customers", "valid": False,
-                    "errors": ["syntax error near 'SELEC'"], "warnings": []}
-        return {"sql": "SELECT id, name FROM customers", "valid": True,
-                "errors": [], "warnings": []}
-
-    ss_mod.DataSnapshotService.nl2sql = _stub_retry
-    try:
-        r = ask(
-            "show customers",
-            binding_id="b-retry-1",
-            db=pipeline_db,
-            datasource_config={"path": sqlite_ds_path, "dialect": "sqlite"},
-        )
-        assert r.success, f"Pipeline should succeed after retry, got: {r.error}"
-        assert call_count[0] == 2, f"Expected 2 calls, got {call_count[0]}"
-        assert r.sql == "SELECT id, name FROM customers"
-    finally:
-        ss_mod.DataSnapshotService.nl2sql = orig
-
-
-def test_ask_passes_dialect_rules_in_schema_description(pipeline_db, sqlite_ds_path):
-    """The schema_description passed to the LLM should include dialect quoting rules."""
-    from app.services.nl2sql import ask
-
-    ds = Datasource(
-        id="ds-dialect-1", name="dialect-ds", engine="sqlite",
-        connection_config={"path": sqlite_ds_path, "dialect": "sqlite"},
-    )
-    bd = AgentDataBinding(
-        id="b-dialect-1", agent_app_id="a-dialect-1", datasource_id="ds-dialect-1",
-        allowed_tables=["customers"], access_mode="read_only",
-    )
-    metric = MetricDefinition(
-        id="m-dialect", name="customers", datasource_id="ds-dialect-1",
-        synonyms=["clients"],
-    )
-    pipeline_db.add_all([ds, bd, metric])
-    pipeline_db.commit()
-
-    from app.services.data_snapshot import snapshot_service as ss_mod
-    orig = ss_mod.DataSnapshotService.nl2sql
-
-    captured_schema_desc = []
-
-    def _stub_capture(self, question, schema_description, **kw):
-        captured_schema_desc.append(schema_description)
-        return {"sql": "SELECT id, name FROM customers", "valid": True, "errors": [], "warnings": []}
-
-    ss_mod.DataSnapshotService.nl2sql = _stub_capture
-    try:
-        r = ask(
-            "show customers",
-            binding_id="b-dialect-1",
-            db=pipeline_db,
-            datasource_config={"path": sqlite_ds_path, "dialect": "sqlite"},
-        )
-        assert r.success
-        assert captured_schema_desc, "schema_description should have been captured"
-        desc = captured_schema_desc[0]
-        assert "<dialect-rules>" in desc, f"Expected dialect rules, got: {desc[:200]}"
-        # The rules now come from services/db/dialect.py, so they describe the
-        # dialect the executor actually talks to — quoting AND pagination AND
-        # date functions, not just a quoting hint.
-        assert "Target dialect: sqlite" in desc, f"dialect not identified: {desc[:200]}"
-        assert "double quotes" in desc
-        assert "LIMIT n" in desc  # SQLite caps rows with LIMIT
-        assert "STRFTIME" in desc  # SQLite month bucket, not DATE_FORMAT
-    finally:
-        ss_mod.DataSnapshotService.nl2sql = orig
+    assert not r.success
+    assert r.rows == []
+    # The refusal is structured: it names the table and reports no figure.
+    assert "orders" in (r.error + r.disclosure)
+    assert r.error_kind or r.disclosure or r.error

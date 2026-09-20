@@ -208,9 +208,14 @@ def _configured_row_filters(db: Session, kb_id: str) -> list[Any]:
     try:
         from app.models.agent_data_binding import AgentDataBinding
 
+        # ``datasource_id`` is the column bindings carry; the id it holds is the
+        # source the binding grants access to (a KnowledgeBase id on this
+        # platform). Querying a ``kb_id`` column that does not exist raised
+        # AttributeError, was swallowed, and read as "no filters configured" —
+        # i.e. a configured filter was never verified.
         rows = (
             db.query(AgentDataBinding)
-            .filter(AgentDataBinding.kb_id == kb_id)
+            .filter(AgentDataBinding.datasource_id == kb_id)
             .all()
         )
     except Exception as e:  # pragma: no cover - table optional in some installs
@@ -349,6 +354,16 @@ def enforce(
 
             # Column existence — per referenced table, against the described schema.
             alias_map = _extract_alias_map(parsed)
+            # A SELECT-list alias is not a column of the table it was computed
+            # from: `SELECT STRFTIME('%Y-Q', d) AS quarter ... GROUP BY quarter`
+            # is valid SQL, and reading `quarter` as `sales.quarter` refused a
+            # correct query (golden case g08). Unqualified identifiers that a
+            # SELECT alias defines are therefore not convicted here.
+            select_aliases = {
+                str(a.alias).lower()
+                for a in parsed.find_all(exp.Alias)
+                if getattr(a, "alias", None)
+            }
             wanted: dict[str, set[str]] = {}
             for column in parsed.find_all(exp.Column):
                 table_ref = column.table
@@ -356,6 +371,8 @@ def enforce(
                 if not table_name and len(tables) == 1:
                     table_name = tables[0]
                 name = column.name
+                if not table_ref and str(name).lower() in select_aliases:
+                    continue
                 if table_name and name:
                     wanted.setdefault(str(table_name).lower(), set()).add(str(name).lower())
             unverifiable = False

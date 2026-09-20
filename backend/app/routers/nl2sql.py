@@ -63,6 +63,20 @@ class AskResponse(BaseModel):
     validation: dict[str, Any] | None = None
     policy: dict[str, Any] | None = None
     error: str = ""
+    # ── the grounded contracts, carried through the API (2026-09-20) ──────
+    # The endpoint used to expose only success/sql/rows: the plan, the canonical
+    # result set, the disclosure and the provenance were computed and thrown
+    # away, so an API caller could not tell "the answer is complete" from "one
+    # part of the question could not be answered".
+    source_id: str = ""
+    source_name: str = ""
+    answer: str = ""
+    error_kind: str = ""
+    plan: dict[str, Any] | None = None
+    result_set: dict[str, Any] | None = None
+    unsupported_slots: list[dict[str, Any]] = []
+    disclosure: str = ""
+    provenance: dict[str, Any] = {}
 
 
 # ── Endpoints ─────────────────────────────────────────────────────
@@ -88,6 +102,7 @@ def ask_endpoint(req: AskRequest, db: Session = Depends(get_db)) -> dict[str, An
     result: NL2SQLResult = nl2sql_ask(
         req.question,
         binding_id=req.binding_id,
+        kb_id=req.datasource_id,
         db=db,
         datasource_config=ds_config,
     )
@@ -96,14 +111,31 @@ def ask_endpoint(req: AskRequest, db: Session = Depends(get_db)) -> dict[str, An
         "success": result.success,
         "question": result.question,
         "sql": result.sql,
-        "row_count": result.data.row_count if result.data else 0,
+        "row_count": result.data.row_count if result.data else len(result.rows),
         "duration_ms": result.duration_ms,
         "error": result.error,
+        "error_kind": result.error_kind or "",
+        "source_id": result.source_id,
+        "source_name": result.source_name,
+        "answer": result.answer,
+        # The plan, the canonical result set and the disclosure are part of the
+        # answer now — an API caller that gets rows but no disclosure cannot tell
+        # a complete answer from a partial one.
+        "plan": result.plan,
+        "result_set": result.result_set,
+        "unsupported_slots": result.unsupported_slots,
+        "disclosure": result.disclosure,
+        "provenance": result.provenance,
     }
 
     if result.data:
         resp["columns"] = result.data.columns
         resp["rows"] = [list(r) for r in result.data.rows]
+    elif result.rows:
+        resp["columns"] = result.columns or list(result.rows[0].keys())
+        resp["rows"] = [
+            [row.get(c) for c in resp["columns"]] for row in result.rows
+        ]
 
     if result.intent:
         resp["intent"] = {
@@ -128,7 +160,21 @@ def ask_endpoint(req: AskRequest, db: Session = Depends(get_db)) -> dict[str, An
         }
 
     if not result.success:
-        raise HTTPException(status_code=422, detail=result.error)
+        # A refusal carries the same contracts as a success: the plan it decided
+        # against, the (empty) canonical result set, the disclosure sentence and
+        # the provenance. Raising with a bare string kept the HTTP status but
+        # threw that away, so an API caller could not see WHY nothing was
+        # reported. ``detail`` keeps the business sentence for existing readers.
+        raise HTTPException(
+            status_code=422,
+            detail={"error": result.error, "error_kind": result.error_kind, **{
+                k: resp[k] for k in (
+                    "source_id", "source_name", "plan", "result_set",
+                    "unsupported_slots", "disclosure", "provenance", "validation",
+                    "policy",
+                ) if k in resp
+            }},
+        )
 
     return resp
 

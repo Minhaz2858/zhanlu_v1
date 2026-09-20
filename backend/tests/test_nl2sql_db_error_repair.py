@@ -134,6 +134,25 @@ def _prepare(monkeypatch, replies: list[str]):
     monkeypatch.setattr(nls, "SchemaService", _FakeSchema)
     monkeypatch.setattr(nls, "_shadow_validate_and_log", lambda *a, **k: None)
 
+    # The readiness gate is pinned by its own suite (tests/test_source_readiness*);
+    # these tests isolate the REPAIR loop, and this bare harness has no KB row at
+    # all (db=None), so the gate would refuse every one of them before the repair
+    # could run. Stub the verdict as ready — the source is not what is under test.
+    from app.services.db import readiness as _readiness
+
+    class _Ready:
+        allowed = True
+        limited = False
+        state = "nl2sql_ready"
+        code = "ready"
+        disclosure = ""
+        detail = ""
+        source_id = ""
+
+    monkeypatch.setattr(
+        _readiness, "check_source", lambda db, kb_id: (_Ready(), None)
+    )
+
     svc = NLAnswerService(db=None)
 
     async def _schema_fallback(kb_id, question):
@@ -147,7 +166,7 @@ def _prepare(monkeypatch, replies: list[str]):
 
     monkeypatch.setattr(svc, "_build_m_schema_fallback", _schema_fallback)
 
-    async def _text_to_sql(question, schema_info, schema_text=None, project_id=None, endpoint=None):
+    async def _text_to_sql(question, schema_info, schema_text=None, project_id=None, endpoint=None, extra_guidance=None):
         return replies.pop(0) if replies else None
 
     monkeypatch.setattr(svc, "_text_to_sql", _text_to_sql)

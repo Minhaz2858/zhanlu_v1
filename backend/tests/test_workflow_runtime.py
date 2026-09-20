@@ -139,26 +139,33 @@ def _kb(db, kid="kb-mysql-1", db_type="mysql"):
 
 
 def test_db_query_nl_uses_governed_nl2sql(monkeypatch):
-    """NL-mode db_query routes through the governed nl2sql pipeline and
-    maps its result to the db_query shape (dict rows + text)."""
+    """NL-mode db_query routes through the governed nl2sql path and maps its
+    result to the db_query shape (dict rows + text).
+
+    The governed path IS the canonical grounded one, so the call now names the
+    SOURCE (``kb_id``) instead of a synthetic binding id: the source id is what
+    resolution, audit and the execution boundary all key on.
+    """
     from app.services.nl2sql import NL2SQLResult
 
     db = SessionLocal()
     _kb(db)
     agent = _agent(db, _flow(), aid="wf-agent-nl2sql")
 
-    class FakeData:
-        columns = ["total_amount"]
-        rows = [(18410129637.66,)]
-        row_count = 1
-
     captured = {}
 
-    def fake_ask(question, *, binding_id, db, datasource_config=None, **kw):
+    def fake_ask(question, *, db, binding_id=None, kb_id=None, datasource_config=None, **kw):
         captured["question"] = question
         captured["config"] = datasource_config
+        captured["kb_id"] = kb_id
         captured["binding_id"] = binding_id
-        return NL2SQLResult(success=True, question=question, sql="SELECT SUM(x)", data=FakeData())
+        return NL2SQLResult(
+            success=True,
+            question=question,
+            sql="SELECT SUM(x)",
+            rows=[{"total_amount": 18410129637.66}],
+            columns=["total_amount"],
+        )
 
     monkeypatch.setattr("app.services.nl2sql.ask", fake_ask)
     ctx = wfr.WorkflowExecutionContext(db, "default-org", "default-app", agent, "hello", created_by_id="u1")
@@ -167,13 +174,52 @@ def test_db_query_nl_uses_governed_nl2sql(monkeypatch):
     assert captured["question"] == "what is total sales?"
     assert captured["config"]["dialect"] == "mysql"
     assert captured["config"]["kb"] is not None
-    # synthetic binding_id must fit audit_events.binding_id varchar(36)
-    assert captured["binding_id"].startswith("wf:wf-agent")
-    assert len(captured["binding_id"]) <= 36
+    # The SOURCE is named explicitly — no synthetic id is invented for it.
+    assert captured["kb_id"] == "kb-mysql-1"
+    assert captured["binding_id"] is None
     assert out["engine"] == "nl2sql"
     assert out["sql"] == "SELECT SUM(x)"
     assert out["rows"] == [{"total_amount": 18410129637.66}]
     assert "18410129637.66" in out["text"]
+
+
+def test_db_query_nl_returns_a_governed_refusal_instead_of_falling_back(monkeypatch):
+    """A governed refusal is the node's answer — no ungoverned translator.
+
+    The fallback exists for a connector the pipeline cannot run on at all (no
+    dialect profile). It must NOT be used to answer past a refusal: that is how a
+    source that is not ready, or a table the user may not read, still produced a
+    number.
+    """
+    from app.services.nl2sql import NL2SQLResult
+
+    db = SessionLocal()
+    _kb(db, kid="kb-mysql-3")
+    agent = _agent(db, _flow(), aid="wf-agent-nl2sql-refuse")
+
+    monkeypatch.setattr(
+        "app.services.nl2sql.ask",
+        lambda *a, **kw: NL2SQLResult(
+            success=False,
+            question="q",
+            error="This data source is not ready to be queried yet.",
+            error_kind="source_not_ready",
+            disclosure="This data source is not ready to be queried yet.",
+        ),
+    )
+
+    def _no_translator(*a, **kw):  # pragma: no cover - must not run
+        raise AssertionError("a governed refusal must not fall back to the translator")
+
+    monkeypatch.setattr(wfr.WorkflowExecutionContext, "_translate_to_sql", _no_translator)
+
+    ctx = wfr.WorkflowExecutionContext(db, "default-org", "default-app", agent, "hello", created_by_id="u1")
+    out = ctx.db_query("kb-mysql-3", "what is total sales?", mode="nl", limit=10)
+
+    assert out["rows"] == []
+    assert out["refused"] is True
+    assert out["error_kind"] == "source_not_ready"
+    assert "not ready" in out["text"]
 
 
 def test_db_query_nl_falls_back_when_nl2sql_fails(monkeypatch):
