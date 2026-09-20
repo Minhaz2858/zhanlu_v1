@@ -44,13 +44,26 @@ class TableNode:
 
 
 def _quote_ident(conn: Any, name: str) -> str:
-    if getattr(conn, "dialect", "") == "mysql":
-        return f"`{name}`"
-    return f'"{name}"'
+    """Quote an identifier using the CONNECTED source's dialect.
+
+    Raises ValueError when the dialect is unknown: emitting another vendor's
+    quoting is how a SQL Server source ended up with double quotes. Callers
+    treat that as "cannot do this safely on this source" and skip the step.
+    """
+    from app.services.db.dialect import profile_for
+
+    return profile_for(getattr(conn, "dialect", None)).quote_ident(name)
 
 
 def _map_dialect(db_type: str | None) -> str:
-    """Map a kb.db_type to a sqlglot dialect string."""
+    """Map a kb.db_type to a sqlglot dialect string.
+
+    PARSE ONLY. sqlglot needs a dialect argument to parse a statement at all,
+    so an unknown source falls back to a generic grammar here — that is a
+    reading fallback, never a licence to AUTHOR or EMIT another vendor's SQL.
+    SQL that runs against a source must come from ``db/dialect.py`` (see
+    DialectProfile), which raises ``UnknownDialect`` instead of guessing.
+    """
     dt = (db_type or "").lower()
     if dt in ("postgres", "postgresql"):
         return "postgres"
@@ -62,7 +75,7 @@ def _map_dialect(db_type: str | None) -> str:
         return "sqlite"
     if dt == "oracle":
         return "oracle"
-    return dt or "mysql"
+    return dt or "mysql"  # dialect-default-ok: sqlglot needs a parse grammar
 
 
 class SchemaGraph:
@@ -112,22 +125,26 @@ class SchemaGraph:
         return self
 
     def _row_count_approx(self, conn: Any, table: str) -> int | None:
+        """Approximate row count from the SOURCE'S OWN statistics tables.
+
+        Which statistics statement to use — and whether the dialect has one at
+        all — comes from the dialect capability profile, not from an
+        if-mysql/elif-postgres chain. A dialect with no stats table returns None
+        (schema_graph tolerates that; it must not silently issue a COUNT(*)
+        full scan instead).
+        """
+        from app.services.db.dialect import UnknownDialect, profile_for
+
         try:
-            if self.dialect == "mysql":
-                rows = conn.execute(
-                    "SELECT TABLE_ROWS FROM information_schema.TABLES "
-                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = :t",
-                    params={"t": table}, max_rows=1, timeout_s=5,
-                )
-            elif self.dialect == "postgres":
-                rows = conn.execute(
-                    "SELECT c.reltuples::bigint FROM pg_class c "
-                    "JOIN pg_namespace n ON n.oid = c.relnamespace "
-                    "WHERE n.nspname = current_schema() AND c.relname = :t",
-                    params={"t": table}, max_rows=1, timeout_s=5,
-                )
-            else:
+            profile = profile_for(self._source_dialect(conn))
+        except UnknownDialect as exc:
+            logger.debug("schema_graph: row count skipped for %s: %s", table, exc)
+            return None
+        try:
+            stmt = profile.row_count_sql_for(table)
+            if not stmt:
                 return None
+            rows = conn.execute(stmt, max_rows=1, timeout_s=5)
             if rows:
                 v = next(iter(rows[0].values()), None)
                 return int(v) if v is not None else None
@@ -135,12 +152,30 @@ class SchemaGraph:
             logger.debug("schema_graph: row count %s failed: %s", table, exc)
         return None
 
-    def _sample_rows(self, conn: Any, table: str, n: int) -> list[dict]:
+    def _source_dialect(self, conn: Any) -> str | None:
+        """The connected source's dialect (capability profile first)."""
         try:
+            from app.services.db.capability_probe import cap_dialect
+
+            persisted = cap_dialect(self.db, self.kb_id)
+            if persisted:
+                return persisted
+        except Exception:
+            logger.debug("schema_graph: capability dialect lookup failed", exc_info=True)
+        return getattr(conn, "dialect", None) or self.db_type or None
+
+    def _sample_rows(self, conn: Any, table: str, n: int) -> list[dict]:
+        """Sample rows with the SOURCE'S pagination syntax (no hardcoded LIMIT)."""
+        from app.services.db.dialect import UnknownDialect, profile_for
+
+        try:
+            profile = profile_for(self._source_dialect(conn))
             return conn.execute(
-                f"SELECT * FROM {_quote_ident(conn, table)} LIMIT {n}",
-                max_rows=n, timeout_s=5,
+                profile.sample_sql(table, "*", n), max_rows=n, timeout_s=5,
             ) or []
+        except UnknownDialect as exc:
+            logger.debug("schema_graph: sampling skipped for %s: %s", table, exc)
+            return []
         except Exception as exc:
             logger.debug("schema_graph: sample %s failed: %s", table, exc)
             return []

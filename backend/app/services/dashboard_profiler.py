@@ -59,23 +59,57 @@ def infer_shape(col_type: str, row_count: int, cardinality: int, null_pct: float
     return "category"
 
 
-def build_profile_queries(table: str, columns: list[str], sample_limit: int = 3) -> list[str]:
-    """Build bounded, dialect-neutral profile SQL for a table and its columns.
+def build_profile_queries(
+    table: str,
+    columns: list[str],
+    sample_limit: int = 3,
+    dialect: str | None = None,
+) -> list[str]:
+    """Build bounded profile SQL for a table and its columns.
 
-    Only standard SQL is emitted (COUNT(*), COUNT(DISTINCT c), COUNT(c),
-    MIN(c), MAX(c), LIMIT n). Every identifier goes through quote_ident()
-    so it is validated and dialect-quoted at runtime.
+    ``dialect`` selects the source's dialect rules (quoting + row cap) from
+    ``services/db/dialect.py``. Pass it whenever the source is known — that is
+    the only way the sample statements are valid on SQL Server (``TOP``) or
+    Oracle (``FETCH FIRST``).
+
+    With no dialect the builder emits ISO-standard SQL: double-quoted
+    identifiers and ``FETCH FIRST n ROWS ONLY``. That is deliberately NOT a
+    vendor default — the old code quoted with a ``"default"`` dialect and
+    appended a MySQL ``LIMIT``, which is exactly the assumption this layer
+    removes.
     """
-    tq = quote_ident(table, "default")
+    if dialect:
+        from app.services.db.dialect import profile_for
+
+        profile = profile_for(dialect)  # raises UnknownDialect — never guesses
+        tq = profile.quote_ident(table)
+        q = profile.quote_ident
+        sample = lambda col: profile.sample_sql(table, col, sample_limit)  # noqa: E731
+    else:
+        import logging as _logging
+
+        _logging.getLogger(__name__).info(
+            "build_profile_queries: no dialect supplied — emitting ISO-standard "
+            "SQL with double-quoted identifiers and FETCH FIRST"
+        )
+        from app.services.db.dialect import ansi_quote_ident as _ansi
+
+        tq = _ansi(table)
+        q = _ansi  # noqa: E731
+        sample = lambda col: (  # noqa: E731
+            f"SELECT {q(col)} AS sample_value FROM {tq} "
+            f"FETCH FIRST {int(sample_limit)} ROWS ONLY"
+        )
+
     queries = [f"SELECT COUNT(*) AS row_count FROM {tq}"]
     for col in columns:
-        cq = quote_ident(col, "default")
+        cq = q(col)
         queries.append(
             f"SELECT COUNT(DISTINCT {cq}) AS cardinality, "
             f"COUNT({cq}) AS non_null, "
             f"MIN({cq}) AS min_value, MAX({cq}) AS max_value FROM {tq}"
         )
-        queries.append(f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}")
+        queries.append(sample(col))
     return queries
 
 
@@ -134,7 +168,12 @@ def profile_engine(
                     min_value = _safe_jsonify(stats[2]) if stats else None
                     max_value = _safe_jsonify(stats[3]) if stats else None
 
-                    cur.execute(f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}")
+                    # Row cap comes from the SQLite profile, not a literal.
+                    from app.services.db.dialect import profile_for as _profile_for
+
+                    cur.execute(
+                        _profile_for("sqlite").sample_sql(table, col, sample_limit)
+                    )
                     samples = [r[0] for r in cur.fetchall()]
                     top_values = [_safe_jsonify(v) for v in samples if v is not None][:sample_limit]
 
@@ -233,8 +272,22 @@ def profile_kb(
     }
     try:
         kb = _load_kb(db, kb_id)
-        dialect = kb.db_type or "default"
-        tq = quote_ident(table, dialect)
+        # Dialect comes from the source's own capability profile; if that is
+        # not identifiable we cannot author SQL for it and say so instead of
+        # falling back to a "default" dialect string.
+        from app.services.db.capability_probe import profile_for_kb
+        from app.services.db.dialect import UnknownDialect
+
+        profile = profile_for_kb(db, kb)
+        if profile is None:
+            result["status"] = "error"
+            result["error_message"] = (
+                "The database type of this data source could not be identified, "
+                "so it cannot be profiled."
+            )
+            return result
+        dialect = profile.name
+        tq = profile.quote_ident(table)
         with get_connector(kb) as conn:
             rows = conn.execute(
                 f"SELECT COUNT(*) AS row_count FROM {tq}",
@@ -262,7 +315,7 @@ def profile_kb(
                 try:
                     if str(col).casefold() not in real_cols:
                         raise ValueError(f"unknown column: {col}")
-                    cq = quote_ident(col, dialect)
+                    cq = profile.quote_ident(col)
                     stats = conn.execute(
                         f"SELECT COUNT(DISTINCT {cq}) AS cardinality, "
                         f"COUNT({cq}) AS non_null, "
@@ -276,7 +329,7 @@ def profile_kb(
                     max_value = _safe_jsonify(s.get("max_value"))
 
                     sample_rows = conn.execute(
-                        f"SELECT {cq} AS sample_value FROM {tq} LIMIT {sample_limit}",
+                        profile.sample_sql(table, col, sample_limit),
                         max_rows=sample_limit, timeout_s=timeout_s,
                     )
                     sample_values = [r.get("sample_value") for r in sample_rows]

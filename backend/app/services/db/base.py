@@ -33,18 +33,29 @@ def quote_ident(name: str, dialect: str) -> str:
     not starting with a digit) before wrapping it — protects against
     prompt-injection attacks that try to smuggle SQL through table/column
     names. Raises ValueError if the name is not a safe identifier.
+
+    Dialect rules live in ``services/db/dialect.py`` (one table, five dialects)
+    rather than in this if/elif chain, which had no entry for MariaDB, SQL
+    Server brackets or Oracle and silently emitted double quotes for anything
+    it did not recognise.
+
+    An unrecognised dialect (including the legacy ``"default"`` sentinel used by
+    formatting-only callers) falls back to ANSI double quotes and logs at debug
+    level — this function is for *formatting* identifiers. EXECUTION paths must
+    use a DialectProfile (``services/db/dialect.profile_for``), which raises
+    ``UnknownDialect`` instead of guessing.
     """
+    from app.services.db.dialect import UnknownDialect, ansi_quote_ident, profile_for
+
     if not _SAFE_IDENT.match(name):
         raise ValueError(f"Unsafe identifier: {name!r}")
-    if dialect == "mysql":
-        return f"`{name}`"
-    if dialect in ("postgres", "mssql"):
-        return f"[{name}]" if dialect == "mssql" else f'"{name}"'
-    if dialect == "oracle":
-        return f'"{name}"'
-    if dialect == "sqlite":
-        return f'"{name}"'
-    return f'"{name}"'
+    try:
+        return profile_for(dialect).quote_ident(name)
+    except UnknownDialect:
+        logger.debug(
+            "quote_ident: no capability profile for dialect %r — using ANSI quoting", dialect
+        )
+        return ansi_quote_ident(name)
 
 
 class BaseConnector(Protocol):

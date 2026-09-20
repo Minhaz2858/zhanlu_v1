@@ -1186,6 +1186,24 @@ class Settings(BaseSettings):
     #   divergence to nl2sql_query_logs. The served result is NEVER altered
     #   in shadow mode; the serving switch happens only on eval evidence.
     NL2SQL_SHADOW_MODE_ENABLED: bool = False
+    # ── Source readiness gate (P1: dynamic database semantic enrichment) ────
+    # A database source moves through connected → discovering → indexed →
+    # enriched → validated → nl2sql_ready (see services/db/readiness.py).
+    # NL2SQL_READINESS_GATE_ENABLED: answering paths REFUSE a source that is
+    #   not nl2sql_ready instead of silently querying a pending/failed/stalled
+    #   catalog. Turning this off restores the old permissive behaviour; the
+    #   verdict is still computed and attached as a disclosure, so the
+    #   limitation stays visible either way.
+    NL2SQL_READINESS_GATE_ENABLED: bool = True
+    # NL2SQL_READINESS_ALLOW_PARTIAL: a source whose structure is known but
+    #   whose descriptions/examples are partial (enrichment_partial) may still
+    #   answer, provided every answer states the limitation.
+    NL2SQL_READINESS_ALLOW_PARTIAL: bool = True
+    # CAPABILITY_PROBE_ENABLED: at index time, actively probe the source for
+    #   its capability profile (server version, timezone, locale, views,
+    #   window functions, read-only account, latency). Probe failures are
+    #   recorded as evidence and never fail the index.
+    CAPABILITY_PROBE_ENABLED: bool = True
     # KG_RESOURCE_ROUTER_ENABLED: deterministic per-question resource routing
     #   (database / document / memory / report / multi_resource) consumed by
     #   delegation tools. Fallback decisions = behave exactly as today.

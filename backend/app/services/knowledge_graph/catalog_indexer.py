@@ -101,6 +101,8 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
     """
     import asyncio
 
+    from app.services.db import readiness as src_readiness
+
     t0 = time.monotonic()
     # Captured BEFORE any DB work: after a failed flush the ORM object is
     # expired/poisoned, so touching ``kb.id`` from the error path raised
@@ -109,11 +111,28 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
     kb_id = kb.id
     try:
         _set_status(db, kb, "indexing")
+        # Lifecycle: CONNECTED → DISCOVERING. Staged states are what the
+        # readiness gate reads on every answering path (services/db/readiness.py),
+        # so they must be written as the work actually happens — not inferred
+        # afterwards from whether the job happened to finish.
+        src_readiness.set_state(db, kb, src_readiness.STATE_DISCOVERING)
 
-        tables = await asyncio.to_thread(_introspect_tables_sync, kb, db)
+        # Out-param: a table we could not read means the structure is only
+        # partly known, and the source must not claim to be fully ready.
+        unreadable: list[str] = []
+        tables = await asyncio.to_thread(_introspect_tables_sync, kb, db, unreadable)
         logger.info("catalog_indexer: kb=%s discovered %d tables", kb.id, len(tables))
+        if unreadable:
+            logger.warning(
+                "catalog_indexer: kb=%s discovery incomplete — %d unreadable table(s)",
+                kb.id, len(unreadable),
+            )
 
         if tables:
+            src_readiness.set_state(
+                db, kb, src_readiness.STATE_INDEXED,
+                reason=f"{len(tables)} tables, {sum(len(t.get('columns') or []) for t in tables)} columns discovered",
+            )
             if settings.TABLE_ROLE_AUTO_CLASSIFY_ENABLED:
                 await asyncio.to_thread(_classify_table_roles, tables)
             else:
@@ -125,6 +144,11 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             if settings.CATALOG_JOIN_EDGES_ENABLED:
                 await asyncio.to_thread(_persist_join_edges, db, kb.id, tables)
             await _bootstrap_metrics(db, kb, tables)
+            # Lifecycle: ENRICHED — structure + descriptions + relations persisted.
+            src_readiness.set_state(
+                db, kb, src_readiness.STATE_ENRICHED,
+                reason=_enrichment_gap(tables, embedded=False),
+            )
         await asyncio.to_thread(_embed_catalog, kb.id, tables)
 
         # Business domains need the persisted rows (FK graph) and the fresh
@@ -152,14 +176,38 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
                     "catalog_indexer: domain discovery failed (non-fatal) kb=%s", kb.id
                 )
 
-        _set_status(db, kb, "ready")
+        # ── VALIDATED: discover this source's capability profile from the ──
+        # source itself (dialect quoting, pagination, date functions, null
+        # behaviour, views/window support, timezone, locale, limits, read-only
+        # account). Recorded per source; never a default dialect.
+        caps = None
+        caps_error = ""
+        try:
+            from app.services.db import capability_probe
+
+            caps = await asyncio.to_thread(
+                capability_probe.detect_and_store, db, kb, tables=tables
+            )
+            if caps is None:
+                caps_error = "capability probe disabled"
+            elif getattr(caps, "detection_error", None):
+                caps_error = str(caps.detection_error)
+        except Exception as exc:  # noqa: BLE001 — never fail the index for this
+            caps_error = str(exc)
+            logger.exception("catalog_indexer: kb=%s capability probe failed", kb.id)
+
+        verdict = _classify_completion(tables, unreadable=unreadable, caps_error=caps_error)
+        final_state, final_reason = verdict
+
+        _set_status(db, kb, "ready" if final_state != src_readiness.STATE_DISCOVERY_FAILED else "error")
+        src_readiness.set_state(db, kb, final_state, reason=final_reason)
         kb.item_count = len(tables)
         db.commit()
         _sync_registry(db, kb, len(tables))
         elapsed = time.monotonic() - t0
         logger.info(
-            "catalog_indexer: kb=%s done — %d tables (item_count=%d) in %.1fs",
-            kb.id, len(tables), kb.item_count, elapsed,
+            "catalog_indexer: kb=%s done — %d tables (item_count=%d) state=%s in %.1fs",
+            kb.id, len(tables), kb.item_count, final_state, elapsed,
         )
     except Exception:
         logger.exception("catalog_indexer: kb=%s failed", kb_id)
@@ -178,6 +226,17 @@ async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
             db.commit()
         except Exception:
             logger.exception("catalog_indexer: kb=%s could not set error status", kb_id)
+        # Lifecycle: the source failed discovery/validation and must not be
+        # queried. The readiness gate reads this and refuses with a
+        # business-language disclosure instead of answering from a half-built
+        # catalog.
+        try:
+            src_readiness.set_state_by_id(
+                db, kb_id, src_readiness.STATE_DISCOVERY_FAILED,
+                reason="index job raised — structure could not be established",
+            )
+        except Exception:
+            logger.exception("catalog_indexer: kb=%s could not set failed state", kb_id)
 
 
 def _sync_registry(db: Session, kb: KnowledgeBase, table_count: int) -> None:
@@ -254,12 +313,104 @@ def _set_status(db: Session, kb: KnowledgeBase, status: str) -> None:
     db.commit()
 
 
-def _introspect_tables_sync(kb: KnowledgeBase, db: Session) -> list[dict]:
+# ── completion classification (lifecycle: ENRICHED → VALIDATED → READY) ─────
+# How much of the catalog must be described before a source may claim to be
+# fully ready. A source below this ratio still answers, but as
+# ``enrichment_partial`` — i.e. with a disclosure — never silently.
+_DESCRIPTION_FLOOR = 0.8
+
+
+def _description_coverage(tables: list[dict]) -> tuple[int, int, int]:
+    """(described_tables, total_tables, described_columns) for a discovery run."""
+    total = len(tables)
+    described = 0
+    columns_described = 0
+    for t in tables:
+        if not _is_blank_description(t.get("description_zh")) or not _is_blank_description(
+            t.get("description_en")
+        ):
+            described += 1
+        for col in t.get("columns") or []:
+            if not _is_blank_description(col.get("description_zh")) or not _is_blank_description(
+                col.get("description_en")
+            ):
+                columns_described += 1
+    return described, total, columns_described
+
+
+def _enrichment_gap(tables: list[dict], *, embedded: bool) -> str:
+    """Human/operator-facing reason string for how complete enrichment is."""
+    described, total, cols = _description_coverage(tables)
+    bits = [f"{described}/{total} tables described", f"{cols} columns described"]
+    if not embedded:
+        bits.append("embeddings pending")
+    return "; ".join(bits)
+
+
+def _classify_completion(
+    tables: list[dict],
+    *,
+    unreadable: list[str] | None = None,
+    caps_error: str = "",
+) -> tuple[str, str]:
+    """Decide the terminal lifecycle state for a finished index run.
+
+    Returns ``(state, reason)`` from the vocabulary in ``db/readiness.py``:
+
+    * ``validation_failed``    — nothing usable was discovered, or the source's
+      dialect could not be identified (no capability profile exists for it, so
+      no SQL can be authored or executed for it).
+    * ``enrichment_partial``   — structure is known, but descriptions are
+      missing for a meaningful share of it, or some tables were unreadable.
+      The source answers, and every answer states the limitation.
+    * ``nl2sql_ready``         — discovered, described and capability-profiled.
+
+    Never returns a "ready" verdict on the strength of the job merely finishing.
+    """
+    from app.services.db import readiness as src_readiness
+
+    if not tables:
+        return (
+            src_readiness.STATE_VALIDATION_FAILED,
+            "no table or view could be read from this source",
+        )
+    if caps_error and "no dialect capability profile" in caps_error.lower():
+        return (src_readiness.STATE_VALIDATION_FAILED, caps_error)
+
+    described, total, cols = _description_coverage(tables)
+    ratio = (described / total) if total else 0.0
+    gaps: list[str] = []
+    if unreadable:
+        gaps.append(f"{len(unreadable)} of {total + len(unreadable)} tables could not be read")
+    if ratio < _DESCRIPTION_FLOOR:
+        gaps.append(f"only {described}/{total} tables have descriptions")
+    if caps_error:
+        gaps.append(f"capability profile incomplete: {caps_error}")
+
+    if gaps:
+        return (
+            src_readiness.STATE_ENRICHMENT_PARTIAL,
+            f"{len(tables)} tables, {cols} columns; " + "; ".join(gaps),
+        )
+    return (
+        src_readiness.STATE_READY,
+        f"{len(tables)} tables, {cols} columns, capability profile recorded",
+    )
+
+
+def _introspect_tables_sync(
+    kb: KnowledgeBase, db: Session, failures: list[str] | None = None
+) -> list[dict]:
     """Sync wrapper: introspect full schema via connector (runs in thread).
 
     Uses a ThreadPoolExecutor to introspect tables in parallel — each worker
     gets its own connector (via context manager) so SQLAlchemy connections
     are never shared across threads.
+
+    ``failures`` is an optional out-param: names of tables that were listed by
+    the source but could not be introspected. A non-empty list means the
+    structure is only partly known, which the lifecycle records as
+    ``enrichment_partial`` rather than claiming a complete catalog.
     """
     with get_connector(kb) as conn:
         table_names = _safe_list_tables(conn)
@@ -288,7 +439,11 @@ def _introspect_tables_sync(kb: KnowledgeBase, db: Session) -> list[dict]:
                     "catalog_indexer: kb=%s failed to introspect table '%s' — skipping",
                     kb.id, name,
                 )
+                if failures is not None:
+                    failures.append(name)
                 continue
+            if result is None and failures is not None:
+                failures.append(name)
             if result is not None:
                 tables.append(result)
     return tables
@@ -618,8 +773,7 @@ def _sample_column_values(conn: Any, table: str, columns: list[dict]) -> None:
             continue
         try:
             rows = conn.execute(
-                f"SELECT DISTINCT {_maybe_quote(conn, col)} "
-                f"FROM {_maybe_quote(conn, table)} LIMIT {_SAMPLE_LIMIT}",
+                _distinct_sample_sql(conn, table, col, _SAMPLE_LIMIT),
                 max_rows=_SAMPLE_LIMIT,
                 timeout_s=ROW_COUNT_TIMEOUT_S,
             )
@@ -662,8 +816,7 @@ def _sample_joinable_values(conn: Any, table: str, columns: list[dict]) -> None:
         col = c.get("column_name", "")
         try:
             rows = conn.execute(
-                f"SELECT DISTINCT {_maybe_quote(conn, col)} "
-                f"FROM {_maybe_quote(conn, table)} LIMIT {limit}",
+                _distinct_sample_sql(conn, table, col, limit),
                 max_rows=limit,
                 timeout_s=ROW_COUNT_TIMEOUT_S,
             )
@@ -799,8 +952,50 @@ def _normalize_temporal(value: Any) -> str | None:
 
 
 def _maybe_quote(conn: Any, name: str) -> str:
-    """Best-effort quoting — connector usually has quote_ident or we skip."""
-    return name
+    """Quote an identifier with the CONNECTED source's dialect rules.
+
+    Previously a no-op that returned the bare name, which is only safe while
+    every probe target happens to be a non-reserved, lower-case identifier — on
+    a source with a table called ``order`` or ``user`` the probe SQL broke.
+    The dialect layer raises for unsafe names; we degrade to the bare name only
+    in that case, and to unquoted output when the dialect is unknown (the probe
+    then fails visibly instead of running with another vendor's quoting).
+    """
+    from app.services.db.dialect import maybe_profile
+
+    profile = maybe_profile(getattr(conn, "dialect", None))
+    if profile is None:
+        return name
+    try:
+        return profile.quote_ident(name)
+    except ValueError:
+        return name
+
+
+def _distinct_sample_sql(conn: Any, table: str, column: str, n: int) -> str:
+    """Distinct-value probe SQL using the source's own pagination syntax.
+
+    ``LIMIT`` was hardcoded here; SQL Server needs ``SELECT DISTINCT TOP n`` and
+    Oracle needs ``FETCH FIRST n ROWS ONLY``, so the statement was a syntax
+    error on both. The dialect layer builds it; an unknown dialect falls back to
+    the bare (unpaginated) statement so the probe fails on its own terms rather
+    than borrowing another vendor's clause.
+    """
+    from app.services.db.dialect import maybe_profile
+
+    profile = maybe_profile(getattr(conn, "dialect", None))
+    if profile is None:
+        return (
+            f"SELECT DISTINCT {_maybe_quote(conn, column)} "
+            f"FROM {_maybe_quote(conn, table)}"
+        )
+    try:
+        return profile.distinct_sample_sql(table, column, n)
+    except ValueError:
+        return (
+            f"SELECT DISTINCT {_maybe_quote(conn, column)} "
+            f"FROM {_maybe_quote(conn, table)}"
+        )
 
 
 # ── LLM descriptions ───────────────────────────────────────────────────────

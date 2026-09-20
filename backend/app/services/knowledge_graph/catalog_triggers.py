@@ -222,6 +222,20 @@ async def _reindex_catalog_safe(kb_id: str) -> None:
                 if kb is None:
                     logger.warning("catalog_triggers: kb=%s not found", kb_id)
                     return
+                # Lifecycle entry point: a source that has been asked to
+                # prepare itself is CONNECTED/queued, not implicitly ready.
+                # The indexer advances it from here (discovering → indexed →
+                # enriched → validated → nl2sql_ready) and the readiness gate
+                # refuses to answer from it until it gets there.
+                try:
+                    from app.services.db import readiness as src_readiness
+
+                    src_readiness.set_state(
+                        db, kb, src_readiness.STATE_CONNECTED,
+                        reason="preparation queued",
+                    )
+                except Exception:
+                    logger.debug("catalog_triggers: readiness init skipped", exc_info=True)
                 from app.services.knowledge_graph.catalog_indexer import index_kb_catalog
                 await index_kb_catalog(kb, db)
             finally:

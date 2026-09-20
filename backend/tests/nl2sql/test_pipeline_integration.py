@@ -239,6 +239,12 @@ def test_ask_passes_dialect_rules_in_schema_description(pipeline_db, sqlite_ds_p
         assert captured_schema_desc, "schema_description should have been captured"
         desc = captured_schema_desc[0]
         assert "<dialect-rules>" in desc, f"Expected dialect rules, got: {desc[:200]}"
-        assert "double-quotes" in desc or "SQLite" in desc
+        # The rules now come from services/db/dialect.py, so they describe the
+        # dialect the executor actually talks to — quoting AND pagination AND
+        # date functions, not just a quoting hint.
+        assert "Target dialect: sqlite" in desc, f"dialect not identified: {desc[:200]}"
+        assert "double quotes" in desc
+        assert "LIMIT n" in desc  # SQLite caps rows with LIMIT
+        assert "STRFTIME" in desc  # SQLite month bucket, not DATE_FORMAT
     finally:
         ss_mod.DataSnapshotService.nl2sql = orig

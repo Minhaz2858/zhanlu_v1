@@ -109,8 +109,29 @@ class NL2SQLResult:
 
 
 def _build_adapter(ds_config: dict[str, Any]) -> DatasourceAdapter:
-    """Build the appropriate adapter from a datasource config dict."""
-    dialect = ds_config.get("dialect", "sqlite").lower()
+    """Build the appropriate adapter from a datasource config dict.
+
+    The dialect is REQUIRED: this used to default to ``sqlite``, so a binding
+    whose config was incomplete silently ran against a dialect it was not
+    connected to. An unidentified dialect raises ``UnknownDialect`` (a
+    ``ValueError``) — see ``services/db/dialect.py``.
+    """
+    raw_dialect = ds_config.get("dialect")
+    if not raw_dialect:
+        from app.services.db.dialect import UnknownDialect
+
+        raise UnknownDialect(
+            "datasource config has no 'dialect' — cannot choose an adapter "
+            "without assuming a database type."
+        )
+    from app.services.db.dialect import UnknownDialect, profile_for
+
+    try:
+        dialect = profile_for(raw_dialect).name
+    except UnknownDialect as exc:
+        raise UnknownDialect(
+            f"{exc} Cannot route this binding to an adapter."
+        ) from exc
     if dialect == "postgres" or dialect == "postgresql":
         return PostgresAdapter(
             host=ds_config.get("host", "localhost"),
@@ -167,6 +188,29 @@ def ask(
         binding = _load_binding(db, binding_id)
         if datasource_config is None:
             datasource_config = _load_datasource_config(db, binding_id)
+
+        # ── 0-pre. Dialect capability gate ────────────────────────
+        # This pipeline is bound to a raw datasource config rather than a
+        # KnowledgeBase lifecycle, so the readiness gate that applies to
+        # KnowledgeBase sources does not reach it. What DOES apply is the
+        # dialect contract: without an identified dialect no SQL can be
+        # authored or validated for this source, and borrowing another
+        # vendor's syntax is exactly the class of bug this work removes.
+        from app.services.db.dialect import maybe_profile
+
+        _raw_dialect = (datasource_config or {}).get("dialect")
+        if maybe_profile(_raw_dialect) is None:
+            result.error = (
+                "This data source is of a database type this platform cannot "
+                "read yet, so no question can be answered from it."
+            )
+            result.explanation = f"unsupported_or_missing_dialect:{_raw_dialect!r}"
+            logger.warning(
+                "nl2sql.ask: refusing binding %s — dialect %r has no capability profile",
+                binding_id, _raw_dialect,
+            )
+            return result
+
         adapter = _build_adapter(datasource_config or {})
 
         allowed_tables = _safe_list(binding.get("allowed_tables")) if binding else None

@@ -354,18 +354,25 @@ class _FakeKB:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "dialect,expected_fragment",
+    "dialect,expected_fragment,expected_cap",
     [
-        ("mysql", "FROM `customers`"),
-        ("postgresql", 'FROM "customers"'),
-        ("mssql", "FROM [customers]"),
-        ("oracle", 'FROM "customers"'),
+        ("mysql", "FROM `customers`", "LIMIT 1"),
+        ("postgresql", 'FROM "customers"', "LIMIT 1"),
+        ("sqlite", 'FROM "customers"', "LIMIT 1"),
+        # SQL Server has no LIMIT: the old statement was a syntax error here.
+        ("mssql", "FROM [customers]", "SELECT TOP 1"),
+        # Oracle has no LIMIT either; 12c+ uses FETCH FIRST.
+        ("oracle", 'FROM "customers"', "FETCH FIRST 1 ROWS ONLY"),
     ],
 )
 async def test_coverage_probe_quotes_for_every_dialect(
-    monkeypatch, dialect, expected_fragment
+    monkeypatch, dialect, expected_fragment, expected_cap
 ):
-    """The probe was MySQL-only: backticks on Postgres are a syntax error."""
+    """The probe must quote AND cap rows in the source's own dialect.
+
+    It was MySQL-only twice over: backtick quoting (a syntax error on Postgres)
+    and a hardcoded ``LIMIT 1`` (a syntax error on SQL Server and Oracle).
+    """
     import app.services.db.nl_answer_service as nls
     import app.services.db.query_service as qs
     from app.models.knowledge_base import KnowledgeBase
@@ -403,9 +410,9 @@ async def test_coverage_probe_quotes_for_every_dialect(
     assert expected_fragment in seen[0]
     assert "COUNT(*)" not in seen[0].upper(), (
         "COUNT(*) on a view measured 17.7s against a bounded budget — "
-        "the probe must stay a LIMIT 1 existence test"
+        "the probe must stay a one-row existence test"
     )
-    assert "LIMIT 1" in seen[0]
+    assert expected_cap in seen[0]
     assert out.get("customers") == "has rows"
 
 

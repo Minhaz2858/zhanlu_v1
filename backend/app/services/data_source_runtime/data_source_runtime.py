@@ -336,7 +336,12 @@ _LEGACY_DIRECTIVE = (
 
 
 def _load_bound_kb_meta(db: Session, kb_ids: list[str]) -> list[dict]:
-    """Fetch name + db_type for the bound KBs (used in the system prompt)."""
+    """Fetch name + db_type + preparation state for the bound KBs.
+
+    The preparation state travels into the prompt so the agent can choose a
+    source that can actually answer, and can explain why another cannot —
+    instead of picking by name and discovering the limitation mid-answer.
+    """
     if not kb_ids:
         return []
     rows = (
@@ -344,19 +349,34 @@ def _load_bound_kb_meta(db: Session, kb_ids: list[str]) -> list[dict]:
         .filter(KnowledgeBase.id.in_(kb_ids), KnowledgeBase.is_deleted == False)  # noqa: E712
         .all()
     )
-    return [
-        {
-            "id": kb.id,
-            "name": kb.name,
-            "db_type": kb.db_type or "",
-            "database_name": kb.database_name or "",
-            "source_kind": kb.source_kind or "",
-            "file_type": kb.file_type or "",
-            "indexing_status": kb.indexing_status,
-            "chunk_count": kb.chunk_count or 0,
-        }
-        for kb in rows
-    ]
+    try:
+        from app.services.db import readiness as _readiness
+
+        verdicts = _readiness.list_verdicts(db, [kb.id for kb in rows])
+    except Exception:  # noqa: BLE001 — prompt building must never fail here
+        logger.info("bound_kb_meta: readiness unavailable; prompt omits preparation state")
+        verdicts = {}
+    out: list[dict] = []
+    for kb in rows:
+        verdict = verdicts.get(kb.id)
+        out.append(
+            {
+                "id": kb.id,
+                "name": kb.name,
+                "db_type": kb.db_type or "",
+                "database_name": kb.database_name or "",
+                "source_kind": kb.source_kind or "",
+                "file_type": kb.file_type or "",
+                "indexing_status": kb.indexing_status,
+                "chunk_count": kb.chunk_count or 0,
+                "nl2sql_state": getattr(kb, "nl2sql_state", "") or "",
+                "queryable": bool(verdict.allowed) if verdict else True,
+                "readiness_code": verdict.code if verdict else "unknown",
+                "readiness_note": _readiness.note(verdict) if verdict else "",
+                "readiness_disclosure": verdict.disclosure if verdict else "",
+            }
+        )
+    return out
 
 
 def _load_catalog_meta(db: Session, kb_ids: list[str]) -> dict:
@@ -820,7 +840,23 @@ def _build_data_source_prompt_section(
                     " — **DEMO/TEST source — do NOT present its data as real "
                     "business data in a deliverable.**"
                 )
+            # Preparation state: never let the agent treat an unprepared source
+            # as a normal one. Ready sources stay unannotated (no prompt noise).
+            _note = kb.get("readiness_note") or ""
+            if _note:
+                label += f" — **{_note.upper()}**"
+                if kb.get("readiness_disclosure"):
+                    label += f": {kb['readiness_disclosure']}"
             lines.append(label)
+        if any(not kb.get("queryable", True) for kb in db_meta):
+            lines.append("")
+            lines.append(
+                "  A source marked NOT QUERYABLE YET cannot answer questions: its "
+                "contents have not been prepared, so any figure from it would be "
+                "a guess. Tell the user that plainly and say what is needed "
+                "(preparation re-run) rather than answering from another source's "
+                "data or from general knowledge."
+            )
         lines.append("")
         # Cross-source retrieval: with more than one database bound, the agent
         # used to pick one out of the list above. Show it the ranked match for

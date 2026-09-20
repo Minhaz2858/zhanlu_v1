@@ -99,9 +99,11 @@ from app.models.report_recipe import ReportRecipe
 from app.models.dashboard_app import DashboardApp
 from app.models.data_execution import DataExecution
 from app.models.session_state import SessionState
+from app.models.kb_capability import KBCapabilityProfile
 
 __all__ = [
     "TimestampedBase",
+    "KBCapabilityProfile",
     "Organization",
     "AppWorkspace",
     "User",
