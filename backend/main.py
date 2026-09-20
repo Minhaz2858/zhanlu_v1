@@ -240,6 +240,11 @@ def _specific_migrations() -> dict:
             ("source_comment", "TEXT"),
             ("key_role", "VARCHAR(16)"),
             ("description_source", "VARCHAR(16) DEFAULT '' NOT NULL"),
+            # 2026-09-20 (slice 2) — per-column statistics from a bounded row
+            # sample. Mirrored here as well as in alembic 092 so a deployment
+            # that never runs `alembic upgrade` still gains the column on
+            # restart (repo convention).
+            ("stats_json", "JSON"),
         ],
         "user_files": [
             ("project_id", "VARCHAR(36)"),

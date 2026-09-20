@@ -39,6 +39,151 @@ from typing import Any
 _SAFE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
+# ── declared-type classification ───────────────────────────────────────────
+#
+# What a DECLARED column type means for READING the data (not for typing SQL).
+# Tokens are matched as substrings of the lowercased declared type, longest
+# token first, so a longer name always wins over the token it contains
+# ("long raw" before "raw", "varbinary" before "binary").
+#
+# 'binary' — must never be pulled into memory (BLOBs, geometry, XML, RAW …).
+# 'large'  — readable, but its values are documents, not a vocabulary.
+# 'other'  — countable (NULLs, cardinality) but nothing more: an unknown or
+#            non-comparable type must NOT be guessed at. This is also the
+#            final fallback, so a type we have never seen is profiled
+#            conservatively instead of being forced into a wrong bucket.
+GENERIC_TYPE_ROLES: tuple[tuple[str, str], ...] = (
+    # never read
+    ("long raw", "binary"), ("varbinary", "binary"), ("binary", "binary"),
+    ("bytea", "binary"), ("blob", "binary"), ("image", "binary"),
+    ("bfile", "binary"), ("raw", "binary"), ("rowversion", "binary"),
+    ("geometry", "binary"), ("geography", "binary"), ("spatial", "binary"),
+    ("hierarchyid", "binary"), ("xml", "binary"),
+    # readable, never enumerated
+    ("clob", "large"), ("long", "large"),
+    # ANSI INTERVAL: 'interval' CONTAINS 'int'. Not comparable as a number.
+    ("interval", "other"),
+    # numeric
+    ("bigint", "numeric"), ("smallint", "numeric"), ("tinyint", "numeric"),
+    ("int", "numeric"), ("decimal", "numeric"), ("numeric", "numeric"),
+    ("number", "numeric"), ("float", "numeric"), ("double", "numeric"),
+    ("real", "numeric"), ("money", "numeric"), ("serial", "numeric"),
+    # temporal
+    ("timestamp", "temporal"), ("datetime", "temporal"),
+    ("date", "temporal"), ("time", "temporal"),
+    # string
+    ("nvarchar", "string"), ("varchar", "string"), ("char", "string"),
+    ("text", "string"), ("string", "string"), ("enum", "string"),
+    ("set", "string"), ("uuid", "string"),
+)
+
+_GENERIC_TYPE_ROLES_SORTED = tuple(
+    sorted(GENERIC_TYPE_ROLES, key=lambda kv: (-len(kv[0]), kv[0]))
+)
+
+# ── per-dialect EXCEPTIONS to the generic table ────────────────────────────
+#
+# Keyed by profile name (not by the alias the user typed), so `mariadb`
+# resolves through the mysql record automatically.  Only types whose generic
+# reading would be WRONG belong here.  Each entry below is either a vendor type
+# the ANSI-ish table cannot name, or — the dangerous case — a type whose name
+# contains a generic token that means something else in that vendor.
+#
+# A dialect with no entry (sqlite: free-form affinity names) is covered by the
+# generic table alone, which is the intended default rather than an omission.
+_DIALECT_TYPE_EXCEPTIONS: dict[str, tuple[tuple[str, str], ...]] = {
+    "mysql": (
+        # Sizes of text/blob: only the longest ones are documents.
+        ("longtext", "large"), ("mediumtext", "string"), ("tinytext", "string"),
+        ("longblob", "binary"), ("mediumblob", "binary"), ("tinyblob", "binary"),
+        # Spatial types are opaque geometry, longest name first.
+        ("geometrycollection", "binary"), ("multilinestring", "binary"),
+        ("multipolygon", "binary"), ("linestring", "binary"),
+        ("polygon", "binary"), ("multipoint", "binary"), ("point", "binary"),
+        ("json", "other"),
+        # BIT arrives as raw bytes from the driver — countable, not comparable.
+        ("bit", "other"),
+        # BOOL/BOOLEAN are tinyint(1): comparable as 0/1 proportions.
+        ("boolean", "numeric"), ("bool", "numeric"),
+        # YEAR arrives as an integer, not a date.
+        ("year", "other"),
+    ),
+    "postgres": (
+        ("jsonb", "other"), ("json", "other"),
+        # A uuid is a per-row identity, never a business vocabulary.
+        ("uuid", "other"),
+        ("tsvector", "other"), ("tsquery", "other"),
+        ("inet", "other"), ("cidr", "other"), ("macaddr8", "other"),
+        ("macaddr", "other"),
+        ("geometry", "binary"), ("geography", "binary"),
+        # Geometric primitives are not comparable values.
+        ("point", "other"), ("lseg", "other"), ("circle", "other"),
+        ("polygon", "other"), ("path", "other"), ("line", "other"),
+        ("box", "other"),
+    ),
+    "mssql": (
+        # 'timestamp' in SQL Server is ROWVERSION — an 8-byte binary, not a
+        # time.  Reading it as temporal is the single most damaging mapping in
+        # this table, because it looks right.
+        ("timestamp", "binary"), ("rowversion", "binary"),
+        ("sql_variant", "other"), ("uniqueidentifier", "other"),
+        ("hierarchyid", "binary"),
+        ("geography", "binary"), ("geometry", "binary"),
+        ("xml", "binary"), ("image", "binary"),
+        ("bit", "other"),
+    ),
+    "oracle": (
+        ("long raw", "binary"), ("raw", "binary"), ("bfile", "binary"),
+        ("rowid", "other"), ("urowid", "other"),
+        ("xmltype", "binary"), ("sdo_geometry", "binary"),
+    ),
+}
+
+
+def _match_type_role(
+    table: tuple[tuple[str, str], ...], declared: str
+) -> str | None:
+    """Longest-token-wins lookup in one type table."""
+    ordered = (
+        table
+        if table is _GENERIC_TYPE_ROLES_SORTED
+        else tuple(sorted(table, key=lambda kv: (-len(kv[0]), kv[0])))
+    )
+    for token, role in ordered:
+        if token in declared:
+            return role
+    return None
+
+
+def type_role(dialect: str | None, data_type: str | None) -> str:
+    """Role of a DECLARED column type for reading its data.
+
+    Roles: ``binary`` (never read) | ``large`` (read, never enumerate) |
+    ``numeric`` | ``temporal`` | ``string`` | ``other`` (NULLs + cardinality
+    only).
+
+    Resolution order: the connected dialect's own exceptions → the generic
+    ANSI-ish table → ``'other'``.  A dialect is never assumed: an unknown
+    dialect gets the generic table (and therefore conservative treatment of
+    anything it does not recognise) rather than another vendor's vocabulary.
+    """
+    declared = str(data_type or "").strip().lower()
+    if not declared:
+        return "other"
+    # An array is a list, not a comparable scalar — and vendor array syntax
+    # ("integer[]") embeds the element type, which would mislead the tables.
+    if declared.endswith("[]"):
+        return "other"
+    profile = maybe_profile(dialect)
+    if profile is not None:
+        exceptions = _DIALECT_TYPE_EXCEPTIONS.get(profile.name, ())
+        hit = _match_type_role(exceptions, declared) if exceptions else None
+        if hit is not None:
+            return hit
+    hit = _match_type_role(_GENERIC_TYPE_ROLES_SORTED, declared)
+    return hit if hit is not None else "other"
+
+
 class UnknownDialect(ValueError):
     """Raised when no profile exists for a dialect.
 

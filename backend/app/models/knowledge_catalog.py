@@ -94,6 +94,12 @@ class KBColumnMeta(TimestampedBase):
         String(16), nullable=False, default="", server_default=""
     )
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    # Measured distribution from a bounded row sample (2026-09-20, slice 2) —
+    # see services/knowledge_graph/column_stats.py.  Keys: rows_sampled, basis
+    # ('full' | 'sample'), nulls, null_rate, distinct, distinct_is_exact,
+    # top_values [{value, count}], and type-dependent min/max/avg/zeros or
+    # min_len/max_len.  An ABSENT key means "not measured" — never 0, never [].
+    stats_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # ── semantic typing (data-driven, dialect- and domain-agnostic) ──
     # identifier | measure | dimension | temporal | flag | free_text | unknown
     semantic_type: Mapped[str] = mapped_column(String(16), nullable=False, default="unknown")

@@ -29,6 +29,7 @@ from app.config import settings
 from app.models.knowledge_base import KnowledgeBase
 from app.models.knowledge_catalog import KBTableMeta, KBColumnMeta, KBTableRelation
 from app.services.db.connector_factory import get_connector
+from app.services.knowledge_graph import column_stats
 from app.services.knowledge_graph.join_edge_detector import detect_join_edges, type_bucket
 
 logger = logging.getLogger(__name__)
@@ -506,6 +507,7 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
             fks = _safe_foreign_keys(conn, table_name)
             facts = _safe_table_facts(conn, table_name)
             indexes = _safe_indexes(conn, table_name)
+            est_rows = facts.get("est_rows")
             schema_name, table_type, columns = _normalize_desc(desc)
             # Sampling stays gated on an EXACT count: it is the only signal that
             # the table really is non-empty (an estimate can be stale).
@@ -513,11 +515,27 @@ def _introspect_one_table(kb: KnowledgeBase, table_name: str) -> dict | None:
                 _sample_column_values(conn, table_name, columns)
                 if settings.CATALOG_JOIN_EDGES_ENABLED:
                     _sample_joinable_values(conn, table_name, columns)
+            # ── per-column statistics (2026-09-20, slice 2) — ONE bounded row
+            # sample per object. Gated on an exact count OR an engine estimate:
+            # unlike the per-column DISTINCT probes above this costs a single
+            # statement, and a large fact table (where COUNT(*) times out and
+            # only the estimate survives) is exactly where a null rate and a
+            # value range matter most. Nothing is recorded when the object
+            # reads back empty — the stats pass returns {} and the column keeps
+            # no entry, rather than a zero.
+            stats: dict = {}
+            if (exact_count or est_rows) and columns:
+                stats = column_stats.profile_table_columns(conn, table_name, columns)
+                for c in columns:
+                    name = str(c.get("column_name") or "")
+                    if name and name in stats:
+                        c["stats"] = stats[name]
             coverage = None
             if settings.KG_COVERAGE_PROBE_ENABLED and columns:
                 coverage = _probe_coverage(conn, table_name, columns)
 
-        est_rows = facts.get("est_rows")
+        # ``est_rows`` was read inside the ``with`` block (the stats gate needs
+        # it before the connector closes).
         if exact_count is not None:
             row_count, row_count_source = exact_count, "exact"
         elif est_rows is not None:
@@ -762,11 +780,17 @@ def classify_column_semantics(column: dict, table_role: str = "unknown") -> tupl
     works for any dialect and any industry without a vocabulary list.
 
     ``enum_values`` is populated only when the sampled distinct values are few
-    and provably complete (the sample stopped before the query limit).
+    and provably complete: either the DISTINCT probe stopped before its limit,
+    or the row sample read the whole object and the column has no more distinct
+    values than we kept (``column_stats`` — slice 2).
     """
     name = str(column.get("column_name") or "")
     dtype = str(column.get("data_type") or "").lower()
     samples = column.get("value_samples") or []
+    stats: dict = {}
+    _stats = column.get("stats")
+    if isinstance(_stats, dict):
+        stats = _stats
 
     enum_values: list | None = None
     if (
@@ -776,6 +800,20 @@ def classify_column_semantics(column: dict, table_role: str = "unknown") -> tupl
     ):
         # Distinct (the SQL used DISTINCT), bounded, and human-sized.
         enum_values = [str(v) for v in samples]
+    elif (
+        stats.get("basis") == "full"
+        and 0 < int(stats.get("distinct") or 0) <= column_stats.TOP_VALUE_LIMIT
+        and stats.get("top_values")
+    ):
+        # The sample read the WHOLE object and every distinct value fitted in
+        # the retained top-values list — so this enumeration is complete, not a
+        # truncation of the data. Columns the DISTINCT probe never reached
+        # (beyond its per-table cap, or numeric) get a dictionary this way.
+        enum_values = [
+            str(item.get("value"))
+            for item in stats["top_values"]
+            if isinstance(item, dict) and item.get("value") is not None
+        ] or None
 
     if column.get("is_primary_key"):
         return "identifier", enum_values
@@ -798,6 +836,18 @@ def classify_column_semantics(column: dict, table_role: str = "unknown") -> tupl
     if _is_string_type(dtype):
         if enum_values:
             return "dimension", enum_values
+        # Data-driven guard: a string whose sampled values are all distinct has
+        # no cohort to group by, whatever its name — calling it a `dimension`
+        # invites the role gate to offer it as a grouping key. The name-based
+        # length rule stays as the answer when the sample is too small to
+        # support the cardinality claim.
+        sampled = int(stats.get("rows_sampled") or 0)
+        cardinality = int(stats.get("distinct") or 0)
+        if (
+            sampled >= column_stats.MIN_ROWS_FOR_CARDINALITY
+            and cardinality >= sampled
+        ):
+            return "free_text", None
         return "dimension" if len(name) <= 40 else "free_text", None
     return "unknown", enum_values
 
@@ -1361,7 +1411,13 @@ async def _backfill_missing_descriptions(tables: list[dict]) -> None:
 
 
 def _column_prompt_line(c: dict) -> str:
-    """One column line for the description prompt (samples + source comment)."""
+    """One column line for the description prompt (samples + source comment).
+
+    Carries three kinds of evidence, each labelled as what it is: the values
+    seen (``values:``), the measured distribution (``实测`` — see
+    ``column_stats.stats_prompt_suffix``; a bounded sample is marked as one), and
+    the customer's own comment (``数据库注释``), which is authoritative.
+    """
     line = (
         f"  - {c['column_name']} ({c['data_type']}"
         f"{', PK' if c['is_primary_key'] else ''}"
@@ -1369,6 +1425,7 @@ def _column_prompt_line(c: dict) -> str:
     )
     if c.get("value_samples"):
         line += f" values: {', '.join(c['value_samples'][:12])}"
+    line += column_stats.stats_prompt_suffix(c.get("stats"))
     # The source's own column comment is authoritative context from the
     # customer's DDL — the description must agree with it, not replace it.
     if c.get("comment"):
@@ -1515,6 +1572,7 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
         existing_table_ids[t["table_name"]] = meta.id
 
         # Upsert columns
+        table_samples: dict[str, list[str]] = {}
         for c in t.get("columns", []):
             # A `column(业务含义)` label must never reach the catalog as the
             # column NAME — see _split_column_label. Applied here because this
@@ -1576,6 +1634,21 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             col.semantic_type = semantic_type
             col.enum_values = enum_values
             col.unit = c.get("unit") or None
+            # ── per-column statistics (slice 2) ──
+            # ``stats_json`` is the measurement; ``sample_values`` is the
+            # vocabulary bridge `{value: count}` the answer-verification gate
+            # and the description prompt read.  No stats were collected (empty
+            # object, unreadable, binary-only) → both stay None rather than
+            # becoming an empty dict, so "we did not look" is visible.
+            col.stats_json = c.get("stats") or None
+            col.sample_values = column_stats.column_sample_values(c.get("stats"))
+            values = list(col.sample_values or {})
+            if values:
+                table_samples[col_name] = values[: column_stats.TOP_VALUE_LIMIT]
+        # Table-level ``{column: [values]}`` — the shape `domain_discovery` and
+        # `semantic_store.sample_values()` read.  Written on every index so a
+        # source whose data changed gets a fresh vocabulary.
+        meta.sample_values = table_samples or None
     db.commit()
 
     # Store table_meta_id lookup on the table dict for relation persistence
