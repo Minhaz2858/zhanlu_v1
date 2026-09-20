@@ -114,15 +114,27 @@ class DefaultContextEngine(ContextEngine):
         messages: list[dict[str, Any]],
         current_tokens: int | None = None,
     ) -> bool:
-        from app.services.compaction import should_autocompact, estimate_messages_tokens, get_context_window
+        """Delegate the pressure decision to the compaction module.
 
-        if current_tokens is None:
-            current_tokens = estimate_messages_tokens(messages)
+        Args:
+            messages: the live request assembly.
+            current_tokens: optional caller-supplied estimate. The compaction
+                module re-estimates from ``messages`` so the trigger and the
+                compression share ONE threshold (and one failure gate); a hint
+                that disagreed with the real assembly would fire compaction at a
+                different point than the compactor's own re-check.
+
+        Raises nothing: this used to call ``should_autocompact`` with the wrong
+        arity (count first, no state), which raised TypeError on every turn and
+        made the pluggable engine silently fall back to the inline path.
+        """
+        from app.services.compaction import should_autocompact, get_context_window
 
         ctx_window = self.context_window_tokens or get_context_window(self.model)
         return should_autocompact(
-            current_tokens,
-            model=self.model,
+            messages,
+            self.model,
+            self._get_state(),
             context_window_tokens=ctx_window,
         )
 

@@ -79,6 +79,34 @@ class PostTransformResult:
 PostTransform = Callable[[str, dict, dict], "PostTransformResult | dict | None"]
 
 
+def guard_verdict(decision: Any) -> tuple[bool, str]:
+    """Interpret one guard decision. Direction of failure: DENY.
+
+    ``decision`` comes from a guard registered by the loop
+    (:class:`app.services.tool_loop_guardrails.ToolLoopGuardController`) and is
+    whatever that callable returned. Three cases:
+
+    - ``None``                    → abstain. The guard has no opinion, so the
+      call proceeds (an abstaining guard is not a denial).
+    - ``allows_execution is True`` → allow.
+    - anything else — ``False``, or a decision shape that does not declare
+      ``allows_execution`` at all — → DENY. A guard whose verdict cannot be read
+      must not be readable as permission; that is how a policy seam silently
+      stops protecting anything.
+    """
+    if decision is None:
+        return True, ""
+    allows = getattr(decision, "allows_execution", None)
+    if allows is True:
+        return True, ""
+    if allows is False:
+        return False, str(getattr(decision, "reason", None) or "blocked by guardrail")
+    return False, (
+        "guard returned a decision without 'allows_execution' "
+        f"({type(decision).__name__}) — refusing the call rather than assuming permission"
+    )
+
+
 @dataclass
 class PipelineState:
     """The tool execution pipeline for one tool batch (one turn step)."""
@@ -104,10 +132,12 @@ _active_pipeline: contextvars.ContextVar[PipelineState | None] = contextvars.Con
     "zhanlu_active_tool_pipeline", default=None
 )
 
-_post_transforms: list[tuple[str, PostTransform]] = []
+_post_transforms: list[tuple[str, PostTransform, bool]] = []
 
 
-def register_post_transform(transform: PostTransform, *, name: str | None = None) -> None:
+def register_post_transform(
+    transform: PostTransform, *, name: str | None = None, best_effort: bool = False
+) -> None:
     """Register a post-execute transform. Transforms run in registration order.
 
     ``transform(tool_name, args, result)`` may return:
@@ -116,8 +146,19 @@ def register_post_transform(transform: PostTransform, *, name: str | None = None
     - a ``dict``              → replace the result
     - a ``PostTransformResult`` → replace the result and attach extra context
       lines for the model (rendered by the loop, not here)
+
+    Direction of failure (this seam is a *policy* seam, so it fails closed):
+
+    - ``best_effort=False`` (default) — the transform carries result policy
+      (redaction, withheld content, notices). If it raises, the result is
+      WITHHELD and replaced by a structured failure. Accepting the untouched
+      result would publish content the transform existed to withhold.
+    - ``best_effort=True`` — purely decorative. A raise is logged and the
+      result passes through unchanged.
     """
-    _post_transforms.append((name or getattr(transform, "__name__", "transform"), transform))
+    _post_transforms.append(
+        (name or getattr(transform, "__name__", "transform"), transform, bool(best_effort))
+    )
 
 
 def clear_post_transforms() -> None:
@@ -126,18 +167,36 @@ def clear_post_transforms() -> None:
 
 
 def registered_transform_names() -> list[str]:
-    return [name for name, _ in _post_transforms]
+    return [name for name, _t, _be in _post_transforms]
 
 
 def apply_post_transforms(tool_name: str, args: dict, result: dict) -> tuple[dict, list[str]]:
-    """Run the post-execute seam. Never raises: a bad transform cannot break a tool."""
+    """Run the post-execute seam.
+
+    Never raises — but it does not silently accept a result a policy transform
+    failed to inspect: a raising non-``best_effort`` transform yields a
+    structured failure result instead (see ``register_post_transform``).
+    """
     current = result
     contexts: list[str] = []
-    for name, transform in _post_transforms:
+    for name, transform, best_effort in _post_transforms:
         try:
             outcome = transform(tool_name, args or {}, current)
         except Exception as exc:  # noqa: BLE001 — containment is the point
-            logger.warning("post-transform '%s' raised for %s: %s", name, tool_name, exc)
+            if best_effort:
+                logger.warning("post-transform '%s' raised for %s: %s", name, tool_name, exc)
+                continue
+            logger.warning(
+                "post-transform '%s' raised for %s (withholding result — fail-closed): %s",
+                name, tool_name, exc,
+            )
+            current = {
+                "success": False,
+                "error": (
+                    f"Result withheld — post-transform '{name}' failed (fail-closed): {exc}"
+                ),
+                "tool_name": tool_name,
+            }
             continue
         if outcome is None:
             continue
@@ -274,9 +333,9 @@ async def dispatch_sub_call(
             decision = state.before_call(tool_name, args)
         except Exception as exc:  # noqa: BLE001 — fail closed
             raise PipelineDenied(tool_name, f"guard failed: {exc}", code="guard_error") from exc
-        if decision is not None and not getattr(decision, "allows_execution", True):
-            reason = getattr(decision, "reason", None) or "blocked by guardrail"
-            raise PipelineDenied(tool_name, str(reason), code="guard_blocked")
+        allows, reason = guard_verdict(decision)
+        if not allows:
+            raise PipelineDenied(tool_name, reason, code="guard_blocked")
 
     _emit_activity(state, f"call_tool {tool_name}", "running", tool_name)
     try:

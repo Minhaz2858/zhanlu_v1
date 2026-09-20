@@ -127,11 +127,12 @@ def test_post_transforms_accept_replace_and_add_context():
     assert results[0]["tagged"] is True
 
 
-def test_raising_post_transform_is_contained():
+def test_raising_post_transform_is_contained_when_best_effort():
+    """A decorative transform that blows up must not damage a real result."""
     def _explode(tool_name, args, result):
         raise RuntimeError("transform bug")
 
-    register_post_transform(_explode)
+    register_post_transform(_explode, name="decorative", best_effort=True)
 
     async def _invoke(tool_name, args):
         return {"success": True, "value": 1}
@@ -144,6 +145,31 @@ def test_raising_post_transform_is_contained():
         )
     )
     assert results[0] == {"success": True, "value": 1}
+
+
+def test_raising_policy_post_transform_withholds_the_result():
+    """A *policy* transform that blows up must not publish the raw result.
+
+    Direction pinned by ``register_post_transform(best_effort=False)`` (the
+    default) — see tests/test_fail_closed_seams.py, which owns the contract.
+    """
+    def _explode(tool_name, args, result):
+        raise RuntimeError("redaction bug")
+
+    register_post_transform(_explode, name="policy")
+
+    async def _invoke(tool_name, args):
+        return {"success": True, "value": 1}
+
+    results = _run(
+        execute_tool_batch(
+            [{"tool_name": "t", "args": {}}],
+            before_call=lambda n, a: _Decision(True),
+            invoke=_invoke,
+        )
+    )
+    assert results[0]["success"] is False
+    assert "policy" in results[0]["error"]
 
 
 # ---------------------------------------------------------------------------

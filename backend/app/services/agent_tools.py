@@ -651,7 +651,19 @@ async def execute_tool(
             logger.info("Tool '%s' blocked by pre_tool_use hook: %s", tool_name, hook_result.reason)
             return {"success": False, "error": f"Blocked by hook: {hook_result.reason}"}
     except Exception as e:
-        logger.debug("Hook execution failed (non-fatal): %s", e)
+        # Fail-closed: a pre-tool gate that cannot be evaluated is not permission.
+        # Same direction as the permission check (:632) and the approval gate
+        # (:619) above — a policy seam that raises must DENY, never run the tool
+        # unchecked. (A hook that fails *inside* the executor is already a
+        # decision: HookExecutor honours the hook's declared block_on_failure.)
+        logger.warning(
+            "Pre-tool hook evaluation failed for '%s' (denying — fail-closed): %s", tool_name, e
+        )
+        return {
+            "success": False,
+            "error": f"Hook evaluation failed — tool call denied (fail-closed): {e}",
+            "tool_name": tool_name,
+        }
 
     # 1. Check the registry first (new tools)
     from app.services.tool_registry import registry
@@ -685,12 +697,27 @@ async def execute_tool(
     try:
         from app.services.hooks import get_hook_executor, HookEvent
         hook_executor = get_hook_executor()
-        await hook_executor.execute(
+        post_result = await hook_executor.execute(
             HookEvent.POST_TOOL_USE,
             {"tool_name": tool_name, "arguments": arguments, "result": result, "agent_name": agent_name},
         )
+        # A post-tool hook that declares block_on_failure is a result gate: it
+        # must actually gate. Its verdict was previously discarded, so an
+        # operator-configured post-hook (e.g. secret-in-output detection) could
+        # never withhold anything.
+        if getattr(post_result, "blocked", False):
+            logger.info(
+                "Tool '%s' result withheld by post_tool_use hook: %s", tool_name, post_result.reason
+            )
+            return {
+                "success": False,
+                "error": f"Result withheld by hook: {post_result.reason}",
+                "tool_name": tool_name,
+            }
     except Exception as e:
-        logger.debug("Post-tool hook failed (non-fatal): %s", e)
+        # The tool body already ran, so the result is preserved rather than
+        # discarded — but the failure is no longer silent (it was debug-level).
+        logger.warning("Post-tool hook failed for '%s' (result preserved): %s", tool_name, e)
 
     return result
 

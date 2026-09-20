@@ -28,9 +28,44 @@ from .tool_pipeline import (
     PipelineState,
     activate_pipeline,
     apply_post_transforms,
+    guard_verdict,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _guard(call: dict, before_call) -> tuple[bool, str, object]:
+    """Evaluate the loop guard for one call. Returns ``(allows, reason, decision)``.
+
+    A guard that raises is a guard that cannot answer — the call is refused
+    (fail-closed) instead of escaping as an unhandled exception.
+    """
+    try:
+        decision = before_call(call["tool_name"], call["args"])
+    except Exception as exc:  # noqa: BLE001 — fail closed
+        logger.warning("Guard raised for %s: %s", call.get("tool_name"), exc)
+        return False, f"guard failed: {exc}", None
+    allows, reason = guard_verdict(decision)
+    return allows, reason, decision
+
+
+def _blocked_result(call: dict, decision, reason: str, blocked_result_factory=None) -> dict:
+    """Turn a guard denial into one result dict.
+
+    ``blocked_result_factory`` (``synthetic_blocked_result``) produces the
+    loop's canonical blocked payload from the guard's own decision. If it is
+    absent — or cannot read a decision shape it does not understand — the call
+    is still refused, with the guard's reason.
+    """
+    if blocked_result_factory is not None:
+        try:
+            return json.loads(blocked_result_factory(decision))
+        except Exception as exc:  # noqa: BLE001 — never let the factory unblock a call
+            logger.warning(
+                "blocked_result_factory could not render a denial for %s: %s",
+                call.get("tool_name"), exc,
+            )
+    return {"success": False, "error": reason or "blocked by guardrail"}
 
 
 # Tools whose execution MUST be serialized in call order.
@@ -136,12 +171,10 @@ async def _execute_batch(
     """The pre-P2-13 batch mechanics (unchanged semantics)."""
     if len(parsed_calls) == 1:
         call = parsed_calls[0]
-        gd = before_call(call["tool_name"], call["args"])
-        if gd.allows_execution:
+        allows, reason, decision = _guard(call, before_call)
+        if allows:
             return [_finish_result(call, await invoke(call["tool_name"], call["args"]))]
-        if blocked_result_factory is None:
-            return [{"success": False, "error": "blocked by guardrail"}]
-        return [json.loads(blocked_result_factory(gd))]
+        return [_blocked_result(call, decision, reason, blocked_result_factory)]
 
     # A batch touching a serialized backend runs IN CALL ORDER, never
     # concurrently -- see _SERIAL_TOOL_PREFIXES. Same guard + isolation as
@@ -162,12 +195,10 @@ async def _execute_batch(
         return _serial_results
 
     async def _exec_one(call):
-        gd = before_call(call["tool_name"], call["args"])
-        if gd.allows_execution:
+        allows, reason, decision = _guard(call, before_call)
+        if allows:
             return _finish_result(call, await invoke(call["tool_name"], call["args"]))
-        if blocked_result_factory is None:
-            return {"success": False, "error": "blocked by guardrail"}
-        return json.loads(blocked_result_factory(gd))
+        return _blocked_result(call, decision, reason, blocked_result_factory)
 
     raw_results = await asyncio.gather(
         *[_exec_one(c) for c in parsed_calls], return_exceptions=True
@@ -188,12 +219,10 @@ async def _exec_one_serial(call, before_call, invoke, blocked_result_factory):
     Mirrors the ``_exec_one`` closure inside ``_execute_batch`` but lives at
     module level so the serial branch can call it before that closure is bound.
     """
-    gd = before_call(call["tool_name"], call["args"])
-    if gd.allows_execution:
+    allows, reason, decision = _guard(call, before_call)
+    if allows:
         return _finish_result(call, await invoke(call["tool_name"], call["args"]))
-    if blocked_result_factory is None:
-        return {"success": False, "error": "blocked by guardrail"}
-    return json.loads(blocked_result_factory(gd))
+    return _blocked_result(call, decision, reason, blocked_result_factory)
 
 
 async def emit_tool_progress_while_waiting(

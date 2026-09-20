@@ -52,7 +52,7 @@ __all__ = [
     "create_compact_boundary_message",
 ]
 
-CompactTrigger = Literal["auto", "manual", "reactive"]
+CompactTrigger = Literal["auto", "manual", "reactive", "engine"]
 CompactionKind = Literal["full", "session_memory", "microcompact", "passthrough"]
 
 

@@ -8878,8 +8878,58 @@ async def resume_conversation(
                 conversation_id, ce.reason.value, ce.retryable, ce.should_compress, e,
             )
             metrics.record_error(ce.reason.value)
-            assistant_content = f"Sorry, I encountered an error: {ce.message}"
-            break
+            if ce.should_compress:
+                # Context overflow: same recovery as the main loop. Without this
+                # branch the resume path classified the overflow, logged it, and
+                # answered the user "Sorry, I encountered an error" — the
+                # compactor was never reached, so a resumed long conversation
+                # could never get past the limit.
+                logger.warning(
+                    "Context overflow in conversation %s (resume), attempting reactive compaction",
+                    conversation_id,
+                )
+                try:
+                    from app.services.compaction import auto_compact_if_needed, AutoCompactState
+                    # build_post_compact_messages strips system-role messages and
+                    # expects the caller to re-insert the system prompt. The resume
+                    # path has no separate prompt variable, so keep the system
+                    # message(s) from the assembly being compacted.
+                    _system_msgs = [m for m in llm_messages if m.get("role") == "system"]
+                    llm_messages, was_compacted = await auto_compact_if_needed(
+                        llm_messages,
+                        model=get_model(),
+                        state=_compaction_states.get(conversation_id, AutoCompactState()),
+                        force=True,
+                        trigger="reactive",
+                    )
+                    if was_compacted:
+                        if _system_msgs and (
+                            not llm_messages or llm_messages[0].get("role") != "system"
+                        ):
+                            llm_messages.insert(0, _system_msgs[0])
+                        logger.info(
+                            "Reactive compaction done (resume), retrying LLM call with %d messages",
+                            len(llm_messages),
+                        )
+                        prune_tool_results_only(llm_messages, model=get_model())
+                        sanitize_messages(llm_messages)
+                        llm_response = await _call_llm_with_tools(
+                            llm_messages, tools, tool_choice=tool_choice,
+                            temperature=llm_overrides.get("temperature"),
+                            max_tokens=llm_overrides.get("max_tokens"),
+                        )
+                    else:
+                        assistant_content = (
+                            f"Sorry, the conversation is too long and compaction failed: {str(e)}"
+                        )
+                        break
+                except Exception as compact_err:
+                    logger.error("Reactive compaction failed (resume): %s", compact_err)
+                    assistant_content = f"Sorry, I encountered an error: {str(e)}"
+                    break
+            else:
+                assistant_content = f"Sorry, I encountered an error: {ce.message}"
+                break
 
         assistant_content = llm_response.get("content", "")
         raw_tool_calls = llm_response.get("tool_calls", [])
