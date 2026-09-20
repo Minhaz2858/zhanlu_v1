@@ -49,7 +49,7 @@ from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from typing import Any, Iterable, Mapping
 
-SCHEMA_VERSION = "p3.1"
+SCHEMA_VERSION = "p3.2"
 
 # ── controlled vocabularies ────────────────────────────────────────────────
 
@@ -71,6 +71,68 @@ UNSUPPORTED_REASONS = {
     # the result hit the row cap, so the figure covers only part of the data
     "truncated": "the result was truncated, so the figure covers only part of the data",
 }
+
+#: What a question unit IS. Only a named business measurement can be
+#: "unsupported": a count request, a table name, a schema term or a piece of
+#: scaffolding asks for no figure, so disclosing one of them as missing would be
+#: a false accusation against the source. Measured live: a correct
+#: ``COUNT(*) = 26544`` came back with "the data source has nothing for
+#: 一共有多少行数据, _ref_material_mapping", and a structure question produced
+#: slots for 订单 and 金额相关字段.
+SLOT_KINDS = {
+    # a measurement the catalog can name (合同金额, shipped_qty, 履约率)
+    "metric": "a named business measurement",
+    # "how many rows/records" — a count request, answered by a count result
+    "generic_count": "a request for how many rows or records",
+    # the name of a table/entity the source holds (customers, 订单)
+    "table": "the name of a table or entity this source holds",
+    # schema/object vocabulary (表名, 字段清单, information_schema, pg_catalog)
+    "catalog_term": "structure vocabulary, not business data",
+    # a dimension or entity the question groups by
+    "grouping": "a dimension or entity the question groups by",
+    # natural-language scaffolding (总览, 情况, 请列出, please show)
+    "scaffolding": "natural-language filler that names no measurement",
+    # nothing in the catalog names this
+    "unknown": "no catalog concept names this",
+}
+
+#: The engine's OWN objects: introspection/metadata, never business data. Kept
+#: vendor-generic (every engine names its catalog this way), because a source is
+#: bound at runtime and this module may not assume which engine answered.
+METADATA_OBJECTS = (
+    "information_schema",
+    "pg_catalog",
+    "pg_namespace",
+    "pg_class",
+    "pg_attribute",
+    "pg_tables",
+    "pg_views",
+    "pg_indexes",
+    "pg_constraint",
+    "pg_type",
+    "pg_proc",
+    "pg_stat",
+    "sqlite_master",
+    "sqlite_schema",
+    "sqlite_temp_master",
+    "performance_schema",
+    "dba_",
+    "all_tables",
+    "all_views",
+    "all_tab_columns",
+    "all_constraints",
+    "all_indexes",
+    "user_tables",
+    "user_views",
+    "user_tab_columns",
+    "user_constraints",
+    "user_indexes",
+    "sys.objects",
+    "sys.columns",
+    "sys.tables",
+    "sys.views",
+    "dual",
+)
 
 #: Coverage states for the window the question asked about.
 #:
@@ -148,8 +210,13 @@ class GroundedPlan:
     #: why each slot of the question is believed to be requested
     #: [{"slot","label","matched","score","source"}]
     evidence: list[dict[str, Any]] = field(default_factory=list)
-    #: [{"slot","label","reason","detail","tables","columns"}]
+    #: [{"slot","label","reason","detail","tables","columns"}] — ONLY business
+    #: metrics can appear here (see SLOT_KINDS: a count request, a table name or
+    #: a schema term is not a figure the source was supposed to produce)
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
+    #: question units that are NOT business metrics, with their kind:
+    #: [{"unit","kind"}] — kept so "no disclosure was raised" is itself auditable
+    non_metric_units: list[dict[str, Any]] = field(default_factory=list)
     #: questions the platform must ask before it can answer (never guessed past)
     clarification_needed: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -179,6 +246,34 @@ class GroundedPlan:
             if entry.get("slot") == slot:
                 return str(entry.get("reason") or "")
         return ""
+
+    def unit_kind(self, unit: str) -> str:
+        """The classified kind of a question unit (``""`` when it is not here)."""
+        for entry in self.non_metric_units:
+            if entry.get("unit") == unit:
+                return str(entry.get("kind") or "")
+        for entry in self.evidence:
+            if entry.get("slot") == unit or entry.get("unit") == unit:
+                return str(entry.get("kind") or "")
+        return ""
+
+    def slot_disposition(self, slot: str) -> str:
+        """One of: ``supported`` | ``unsupported_metric`` | ``non_metric`` | ``unknown_concept``.
+
+        The four-way distinction is the point: "we answered it", "we could not
+        and said so", "it was never a figure" and "we have never catalogued
+        this" are four different answers, and only the second is a gap.
+        """
+        if any(s.get("slot") == slot for s in self.unsupported_slots):
+            return "unsupported_metric"
+        kind = self.unit_kind(slot)
+        if kind == "metric":
+            return "supported"
+        if kind == "unknown":
+            return "unknown_concept"
+        if kind:
+            return "non_metric"
+        return "supported"
 
     # ── serialization ─────────────────────────────────────────────────────
     def to_dict(self) -> dict[str, Any]:
@@ -241,6 +336,29 @@ class GroundedPlan:
                     f"unsupported slot {slot.get('slot')!r} has reason "
                     f"{slot.get('reason')!r} outside the vocabulary"
                 )
+            kind = slot.get("kind")
+            if kind is not None and kind != "metric":
+                v.append(
+                    f"unsupported slot {slot.get('slot')!r} is classified {kind!r} — "
+                    "only a business metric may be unsupported"
+                )
+        unsupported_keys = {s.get("slot") for s in self.unsupported_slots}
+        for entry in self.non_metric_units:
+            unit = entry.get("unit")
+            if not unit:
+                v.append("non-metric unit without a key")
+            if entry.get("kind") not in SLOT_KINDS:
+                v.append(
+                    f"non-metric unit {unit!r} has kind {entry.get('kind')!r} "
+                    f"outside {sorted(SLOT_KINDS)}"
+                )
+            if entry.get("kind") == "metric":
+                v.append(
+                    f"non-metric unit {unit!r} is classified 'metric' — metrics belong "
+                    "in unsupported_slots, not here"
+                )
+            if unit in unsupported_keys:
+                v.append(f"unit {unit!r} is both non-metric and unsupported")
         for question in self.clarification_needed:
             if not str(question).strip():
                 v.append("empty clarification question")
@@ -298,6 +416,10 @@ class CanonicalResultSet:
     validation: dict[str, Any] = field(default_factory=dict)
     #: carried forward from the plan so narration cannot lose it
     unsupported_slots: list[dict[str, Any]] = field(default_factory=list)
+    #: a row-count question resolved to an actual count result:
+    #: {"column","value","unit","kind":"row_count"} — "how many rows" is a
+    #: supported question with a canonical answer, NOT an unsupported metric
+    canonical_count: dict[str, Any] = field(default_factory=dict)
     #: the reader-facing sentence for anything unsupported ("" when complete)
     disclosure: str = ""
     schema_version: str = SCHEMA_VERSION
@@ -307,6 +429,10 @@ class CanonicalResultSet:
     # ── derived ───────────────────────────────────────────────────────────
     def unsupported_labels(self) -> list[str]:
         return [str(s.get("label") or s.get("slot") or "") for s in self.unsupported_slots]
+
+    def count_value(self) -> Any:
+        """The resolved row-count answer, or ``None`` when the question was not a count."""
+        return self.canonical_count.get("value") if self.canonical_count else None
 
     def column(self, name: str) -> list[Any]:
         return [row.get(name) for row in self.rows]
@@ -378,6 +504,14 @@ class CanonicalResultSet:
                 )
         if self.unsupported_slots and not self.disclosure:
             v.append("unsupported slots present but no disclosure sentence")
+        if self.canonical_count:
+            if not self.canonical_count.get("column"):
+                v.append("canonical count without a column")
+            if "value" not in self.canonical_count:
+                v.append("canonical count without a value")
+            unit = self.canonical_count.get("unit")
+            if unit and unit in {s.get("slot") for s in self.unsupported_slots}:
+                v.append(f"canonical count {unit!r} is also reported as an unsupported slot")
         if not self.validation:
             v.append("no validation verdict recorded")
         return v

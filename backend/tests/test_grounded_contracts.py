@@ -24,6 +24,8 @@ from app.services.db import grounding as g
 from app.services.db.contracts import (
     CanonicalResultSet,
     GroundedPlan,
+    METADATA_OBJECTS,
+    SLOT_KINDS,
     UNSUPPORTED_REASONS,
     coverage_state,
     dialect_of,
@@ -1003,3 +1005,275 @@ def test_every_unsupported_reason_has_a_disclosure_and_a_test():
         disclosure = g.disclose([{"slot": "x", "label": "合同金额", "reason": reason}])
         assert disclosure, f"{reason} produced no disclosure"
         assert "合同金额" in disclosure
+
+
+# ── 10. non-metric units: the false-disclosure fix ────────────────────────
+#
+# Measured live, on a correctly answered question:
+#   * `表 _ref_material_mapping 一共有多少行数据？` returned COUNT(*) = 26544 and
+#     a disclosure saying the source "has nothing for 一共有多少行数据,
+#     _ref_material_mapping";
+#   * a structure question (列出表名/字段清单) produced slots for 订单 and
+#     金额相关字段;
+#   * a metadata query produced "join path 'columns' is neither selected nor
+#     authorized" for information_schema/pg_namespace.
+# Only a named business measurement may be unsupported. Everything here pins
+# that, and pins that a GENUINE gap is still disclosed.
+
+ORDERS = "orders"
+#: A plain table: an entity key, a measure, a dimension, a date. Enough to show
+#: that "订单" is the entity the phrases are about, and 订单金额 is a metric.
+ORDER_CONCEPTS = [
+    _concept(ORDERS, "order_id", "订单编号", "identifier"),
+    _concept(ORDERS, "amount", "订单金额", "measure", "元"),
+    _concept(ORDERS, "status", "订单状态", "dimension"),
+    _concept(ORDERS, "order_date", "订单日期", "date"),
+    _concept(ORDERS, "qty", "订单数量", "measure"),
+]
+COUNT_COLUMN = "COUNT(*)"
+CUSTOMERS = "customers"
+
+
+def _pipeline_plan(question, *, concepts, tables, sql_free=True):
+    """Build the plan the way the pipeline does — through resolve_slots."""
+    evidence, unsupported, metrics = g.resolve_slots(
+        question, concepts=concepts, selected_tables=tables
+    )
+    table_names = {str(c.get("table") or "") for c in concepts} | set(tables)
+    plan = _plan(
+        question=question,
+        intent=question,
+        tables=list(tables),
+        authorized_tables=sorted(set(tables)),
+        evidence=evidence,
+        unsupported_slots=unsupported,
+        non_metric_units=g.non_metric_units(
+            question,
+            evidence=evidence,
+            table_names=table_names,
+            descriptions=[c["description"] for c in concepts],
+        ),
+    )
+    assert plan.validate() == [], plan.validate()
+    return plan
+
+
+def _count_crs(question, *, concepts, tables, column, value, sql):
+    plan = _pipeline_plan(question, concepts=concepts, tables=tables)
+    crs = g.build_canonical_result_set(
+        plan=plan,
+        exec_result={"rows": [{column: value}], "truncated": False, "sql": sql},
+        sql=sql,
+        provenance={"tables": list(tables)},
+    )
+    assert crs.validate() == [], crs.validate()
+    return plan, crs
+
+
+def test_count_star_on_a_real_table_is_supported_with_no_false_disclosure():
+    """The measured live failure: a correct COUNT(*) must not be caveated."""
+    question = f"表 {ORDERS} 一共有多少行数据？"
+    sql = f"SELECT COUNT(*) FROM {ORDERS}"
+    plan, crs = _count_crs(
+        question, concepts=ORDER_CONCEPTS, tables=[ORDERS],
+        column=COUNT_COLUMN, value=26544, sql=sql,
+    )
+    assert crs.unsupported_slots == [], "a count question is not a missing metric"
+    assert crs.disclosure == "", "nothing to disclose on a correct count"
+    assert crs.complete is True
+    assert crs.canonical_count.get("value") == 26544
+    assert crs.canonical_count.get("column") == COUNT_COLUMN
+    assert "'" not in crs.disclosure and "unknown" not in crs.disclosure
+    # and the count unit is recorded as a count, not lost
+    assert plan.unit_kind("一共有多少行数据") == "generic_count"
+
+
+def test_a_chinese_row_count_request_resolves_to_the_count():
+    question = f"{ORDERS} 表有多少条记录？"
+    sql = f"SELECT COUNT(*) AS 记录数 FROM {ORDERS}"
+    plan, crs = _count_crs(
+        question, concepts=ORDER_CONCEPTS, tables=[ORDERS],
+        column="记录数", value=85, sql=sql,
+    )
+    assert crs.unsupported_slots == []
+    assert crs.disclosure == ""
+    assert crs.canonical_count.get("value") == 85
+    kinds = {u["kind"] for u in plan.non_metric_units}
+    assert "generic_count" in kinds
+
+
+def test_an_english_row_count_request_resolves_to_the_count():
+    question = f"how many rows are in the {CUSTOMERS} table?"
+    concepts = [_concept(CUSTOMERS, "customer_id", "customer id", "identifier")]
+    sql = f"SELECT COUNT(*) AS row_count FROM {CUSTOMERS}"
+    plan, crs = _count_crs(
+        question, concepts=concepts, tables=[CUSTOMERS],
+        column="row_count", value=6, sql=sql,
+    )
+    assert crs.unsupported_slots == []
+    assert crs.disclosure == ""
+    assert crs.canonical_count.get("value") == 6
+    # every english filler word is classified, not mistaken for a measurement
+    assert plan.unit_kind("rows") == "scaffolding"
+    assert plan.unit_kind(CUSTOMERS) == "table"
+
+
+def test_a_table_name_is_not_an_unsupported_metric():
+    """A table name is the entity, never a missing figure for it."""
+    assert g.classify_unit(ORDERS, table_names={ORDERS, "customers"}) == "table"
+    assert g.classify_unit(CUSTOMERS, table_names={ORDERS, CUSTOMERS}) == "table"
+    plan = _pipeline_plan(
+        f"{ORDERS} 是什么？", concepts=ORDER_CONCEPTS, tables=[ORDERS]
+    )
+    assert plan.unsupported_slots == []
+    assert plan.unit_kind(ORDERS) == "table"
+    assert plan.slot_disposition(ORDERS) == "non_metric"
+
+
+def test_a_schema_listing_question_raises_no_business_disclosure():
+    question = "请列出所有表的表名和字段清单"
+    plan = _pipeline_plan(question, concepts=ORDER_CONCEPTS, tables=[ORDERS])
+    assert plan.unsupported_slots == []
+    kinds = {u["kind"] for u in plan.non_metric_units}
+    assert kinds & {"catalog_term", "scaffolding", "generic_count"}, kinds
+    assert "metric" not in kinds
+    # structure vocabulary is recognised without any catalog lookup at all
+    assert g.classify_unit("字段清单") == "catalog_term"
+    assert g.classify_unit("表名") == "catalog_term"
+    assert g.classify_unit("金额相关字段") == "catalog_term"
+
+
+def test_a_grouped_entity_question_has_no_metric_slot():
+    """订单 is only ever a COMPONENT of the catalog's phrases, so it is the
+    entity those phrases are about — not one measurement."""
+    descriptions = [c["description"] for c in ORDER_CONCEPTS]
+    assert g.classify_unit("订单", descriptions=descriptions) == "grouping"
+    assert g.classify_unit("订单金额", descriptions=descriptions) == "metric"
+    plan = _pipeline_plan(
+        "订单、金额分别是多少", concepts=ORDER_CONCEPTS, tables=[ORDERS]
+    )
+    assert not any(s["slot"] == "订单" for s in plan.unsupported_slots)
+    assert plan.slot_disposition("订单") == "non_metric"
+    assert plan.unit_kind("订单") == "grouping"
+    # …while a question that NAMES the catalog's phrase is a metric question
+    named = _pipeline_plan("订单金额是多少", concepts=ORDER_CONCEPTS, tables=[ORDERS])
+    assert named.unit_kind("订单金额") == "metric"
+    assert named.slot_disposition("订单金额") == "supported"
+
+
+def test_postgres_catalog_introspection_raises_no_business_warnings():
+    """A metadata query is not a business query: no business disclosure, and no
+    unvalidated-join warning for the engine's own objects."""
+    sql = (
+        "SELECT c.table_name, c.column_name FROM information_schema.columns c "
+        "JOIN pg_namespace n ON n.oid = c.table_schema_id"
+    )
+    # the join IS detected — so the assertion below is not vacuous
+    assert g._sql_join_pairs(sql), "the join parser must see this join"
+    assert g.sql_is_introspection(sql) is True
+    plan = _plan(
+        question="有哪些表，字段清单是什么",
+        tables=[ORDERS],
+        authorized_tables=[ORDERS],
+        evidence=[_evidence("订单金额", [f"{ORDERS}.amount"])],
+    )
+    assert g.validate_join_paths(sql, plan) == [], (
+        "information_schema/pg_namespace are the engine's own objects, not "
+        "business tables with an unvalidated join"
+    )
+    plan.join_paths = g.validate_join_paths(sql, plan)
+    assert plan.validate() == [], "no 'neither selected nor authorized' warning"
+    crs = g.build_canonical_result_set(
+        plan=plan,
+        exec_result={"rows": [{"table_name": ORDERS, "column_name": "amount"}],
+                     "truncated": False, "sql": sql},
+        sql=sql,
+        provenance={"tables": [ORDERS]},
+    )
+    assert crs.unsupported_slots == [], "a structure query cannot convict a metric"
+    assert crs.disclosure == ""
+    assert crs.validation["plan"] == []
+
+
+def test_a_genuine_missing_metric_is_still_disclosed_next_to_non_metric_units():
+    """The fix must not become a blanket silence: a real gap stays visible."""
+    plan = _pipeline_plan("成本金额和订单金额分别是多少", concepts=ORDER_CONCEPTS,
+                          tables=[ORDERS])
+    plan.evidence.append(
+        {**_evidence("成本金额", ["erp_t_crm_contract.FCOSTAMOUNT"]), "kind": "metric"}
+    )
+    crs = _crs_for(plan, [{"amount": 1234.0}])
+    slots = {s["slot"]: s["reason"] for s in crs.unsupported_slots}
+    assert slots.get("成本金额") == "not_in_result", slots
+    assert crs.complete is False
+    assert "成本金额" in crs.disclosure
+    assert plan.slot_disposition("订单金额") == "supported", (
+        "the metric that WAS answered stays supported"
+    )
+    assert plan.slot_disposition("成本金额和订单金额分别是多少") != "unsupported_metric"
+
+
+def test_q3_slots_are_all_classified_metrics_after_the_fix():
+    """Q3 must be untouched by this change: five metrics, no non-metric noise."""
+    evidence, unsupported, _metrics = g.resolve_slots(
+        Q3, concepts=CONCEPTS, selected_tables=[VIEW]
+    )
+    assert unsupported == []
+    kinds = {e["kind"] for e in evidence if e.get("kind")}
+    assert kinds == {"metric", "scaffolding"}, kinds
+    assert g.classify_unit("实际发货数量",
+                           descriptions=["发货数量", "出库数量"]) == "metric"
+    assert g.classify_unit("履约率", descriptions=["履约率"]) == "metric"
+
+
+def test_the_four_way_slot_distinction_is_preserved():
+    plan = _plan(
+        evidence=[
+            {**_evidence("合同金额", [f"{VIEW}.contract_amount"]), "kind": "metric"},
+            {**_evidence("毛利率", []), "kind": "unknown"},
+        ],
+        unsupported_slots=[{"slot": "成本金额", "label": "成本金额",
+                            "reason": "not_in_result", "kind": "metric"}],
+        non_metric_units=[
+            {"unit": "订单", "kind": "grouping"},
+            {"unit": "毛利率", "kind": "unknown"},
+            {"unit": "一共有多少行数据", "kind": "generic_count"},
+        ],
+    )
+    assert plan.slot_disposition("合同金额") == "supported"
+    assert plan.slot_disposition("成本金额") == "unsupported_metric"
+    assert plan.slot_disposition("订单") == "non_metric"
+    assert plan.slot_disposition("一共有多少行数据") == "non_metric"
+    assert plan.slot_disposition("毛利率") == "unknown_concept"
+    assert plan.validate() == []
+    # the vocabulary itself is closed and engine-generic
+    assert set(SLOT_KINDS) == {
+        "metric", "generic_count", "table", "catalog_term",
+        "grouping", "scaffolding", "unknown",
+    }
+    for token in METADATA_OBJECTS:
+        assert (
+            token in {"dual"}
+            or token.startswith(("pg_", "sqlite_", "all_", "user_", "dba_", "sys."))
+            or token in {"information_schema", "performance_schema"}
+        ), f"{token!r} is not an engine-generic metadata object"
+
+
+def test_an_unsupported_slot_may_not_be_a_non_metric():
+    """The contract refuses the shape the fix exists to prevent."""
+    plan = _plan(
+        unsupported_slots=[{"slot": "订单", "label": "订单",
+                            "reason": "not_in_result", "kind": "grouping"}]
+    )
+    violations = plan.validate()
+    assert any("only a business metric may be unsupported" in v for v in violations), violations
+    plan2 = _plan(
+        unsupported_slots=[{"slot": "订单", "label": "订单", "reason": "not_in_result"}],
+        non_metric_units=[{"unit": "订单", "kind": "grouping"}],
+    )
+    assert any("both non-metric and unsupported" in v for v in plan2.validate())
+    plan3 = _plan(non_metric_units=[{"unit": "x", "kind": "metric"}])
+    assert any("metrics belong in unsupported_slots" in v for v in plan3.validate())
+    plan4 = _plan(non_metric_units=[{"unit": "x", "kind": "mystery"}])
+    assert any("outside" in v for v in plan4.validate())
+

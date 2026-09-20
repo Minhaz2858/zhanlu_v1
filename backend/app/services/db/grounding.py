@@ -44,6 +44,8 @@ from typing import Any, Iterable, Mapping, Sequence
 from app.services.db.contracts import (
     CanonicalResultSet,
     GroundedPlan,
+    METADATA_OBJECTS,
+    SLOT_KINDS,
     UNSUPPORTED_REASONS,
     coverage_state,
     dialect_of,
@@ -185,6 +187,209 @@ def question_units(question: str) -> list[str]:
 
 # ── slot support ───────────────────────────────────────────────────────────
 
+#: Words that ask HOW MANY rows/records. A count request is a supported question
+#: with a canonical answer (a count result), not a business metric the source
+#: failed to produce. Kept to the shapes that name no measurement at all, so a
+#: metric whose name contains 数量/总数 (合同签订数量, 库存总数) stays a metric.
+_COUNT_REQUEST_PATTERNS = (
+    re.compile(r"(多少|几)\s*(行|条|个|张|份|笔|项|次|种|台|件|列)"),
+    re.compile(r"(行数|条数|记录数|数据量|记录条数|总行数|行总数)"),
+    re.compile(r"(总数|总量|个数|总条数|总记录数|记录总数)\s*$"),
+    re.compile(r"\bhow\s+many\b", re.IGNORECASE),
+    re.compile(r"\bnumber\s+of\s+(rows|records|entries|items)\b", re.IGNORECASE),
+    re.compile(r"\b(row|record|entry)\s*count\b", re.IGNORECASE),
+    re.compile(r"\bcount\s+of\s+(rows|records|entries|items)\b", re.IGNORECASE),
+)
+
+#: Vocabulary that asks about STRUCTURE rather than data. A structure/listing
+#: question is not a business-data question, so nothing in it can be an
+#: unsupported business metric.
+_CATALOG_TERM_PATTERNS = (
+    re.compile(r"(表名|字段名|列名|字段清单|表清单|列清单|字段列表|表结构|数据结构)"),
+    re.compile(r"(字段|列信息|元数据|主键|外键|索引|数据类型|字段类型|表注释|列注释)"),
+    re.compile(r"(表有哪些|有哪些表|有哪些字段|有哪些列|有哪些表名)"),
+    re.compile(r"\b(table|column|view|schema|index|constraint|primary key|foreign key)s?\b",
+               re.IGNORECASE),
+    re.compile(r"\b(information_schema|pg_catalog|pg_namespace|pg_class|pg_attribute|"
+               r"sqlite_master|performance_schema|metadata|data dictionary)\b",
+               re.IGNORECASE),
+)
+
+#: Natural-language scaffolding: no measurement is named, so nothing can be
+#: missing. Deliberately generic wording — never a business noun.
+_SCAFFOLDING_PATTERNS = (
+    re.compile(r"(总览|概览|情况|汇总|总结|报告|分析|说明|概述|简介)"),
+    re.compile(r"(请|帮我|麻烦|列出|列举|列表|显示|展示|查询|查看|统计一下|看一下|给我)"),
+    re.compile(r"(有哪些|是什么|什么样|如何|是否|相关|所有|全部|明细|清单)"),
+    re.compile(
+        r"\b(please|show|list|give|tell|overview|summary|report|describe|"
+        r"what|which|related|all|every|how|many|much|"
+        r"is|are|was|were|be|the|this|that|these|those|"
+        r"of|in|for|and|or|with|from|to|by|on|at|as|"
+        r"row|rows|record|records|entry|entries|item|items|value|values)\b",
+        re.IGNORECASE,
+    ),
+)
+
+#: Column names a count result comes back as, when the model did not alias it.
+_COUNT_COLUMN_NAMES = frozenset(
+    {
+        "count", "cnt", "num", "n", "row_count", "rowcount", "rows", "records",
+        "total", "total_count", "total_rows", "total_records",
+        "行数", "总行数", "条数", "记录数", "总数",
+    }
+)
+
+
+def requests_row_count(question: str) -> bool:
+    """Does the question ask how many rows/records (rather than for a metric)?"""
+    text = question or ""
+    return any(pattern.search(text) for pattern in _COUNT_REQUEST_PATTERNS)
+
+
+def count_request_phrase(question: str) -> str:
+    """The words in the question that ask for a count (``how many rows``)."""
+    text = question or ""
+    for pattern in _COUNT_REQUEST_PATTERNS:
+        found = pattern.search(text)
+        if found:
+            return found.group(0).strip()
+    return ""
+
+
+def is_catalog_term(unit: str) -> bool:
+    """Is this unit structure vocabulary (表名, 字段清单, information_schema)?"""
+    return any(pattern.search(unit or "") for pattern in _CATALOG_TERM_PATTERNS)
+
+
+def is_scaffolding(unit: str) -> bool:
+    """Is this unit filler that names no measurement (总览, 请列出, overview)?"""
+    return any(pattern.search(unit or "") for pattern in _SCAFFOLDING_PATTERNS)
+
+
+def is_metadata_object(name: str) -> bool:
+    """Is this relation the engine's own catalog rather than business data?
+
+    Vendor-generic on purpose: the source is bound at runtime, so this decides
+    by the shape every engine's catalog objects share (``pg_*``,
+    ``information_schema``, ``sqlite_master``, ``all_tables``, ``v$…``), never by
+    which vendor is configured.
+    """
+    token = str(name or "").strip().strip('`"[]').split(".")[-1].lower()
+    whole = str(name or "").strip().strip('`"[]').lower()
+    if not token:
+        return False
+    if whole.startswith("v$"):
+        return True
+    return any(term in token or term in whole for term in METADATA_OBJECTS)
+
+
+def sql_is_introspection(sql: str | None) -> bool:
+    """True when EVERY relation the SQL reads is one of the engine's own objects.
+
+    Such a query answers a structure question. Its rows are not business data, so
+    it can neither support nor convict a business metric.
+    """
+    if not sql:
+        return False
+    relations = {str(t).strip().strip('`"[]') for t in _FROM_TABLE.findall(sql)}
+    for left, right, _on in _sql_join_pairs(sql):
+        relations.update({left, right})
+    relations = {r for r in relations if r}
+    if not relations:
+        return False
+    return all(is_metadata_object(r) for r in relations)
+
+
+def classify_unit(
+    unit: str,
+    *,
+    descriptions: Iterable[str] = (),
+    tables: Iterable[str] = (),
+    columns: Iterable[str] = (),
+    table_names: Iterable[str] = (),
+) -> str:
+    """What a question unit is — one of :data:`SLOT_KINDS`.
+
+    Only ``metric`` can ever be disclosed as unsupported. The order below is the
+    decision order, and each step answers a way a unit can look like a metric
+    without being one:
+
+    1. structure vocabulary (表名, 字段清单, pg_catalog) is a listing request;
+    2. "how many rows" is a count request with a canonical answer;
+    3. a table/entity the source holds is not a measurement;
+    4. scaffolding (总览, 请列出) names nothing;
+    5. a catalog phrase CONTAINED IN the unit names a measurement
+       (``实际发货数量`` contains ``发货数量``) — that is a metric;
+    6. the unit appearing only INSIDE the catalog's own phrases is the entity
+       those phrases are about (``订单`` inside 订单金额/订单日期) — a grouping;
+    7. a short unit or an identifier-shaped one is a metric name;
+    8. otherwise the catalog cannot name it (``unknown``).
+    """
+    text = (unit or "").strip()
+    if not text:
+        return "unknown"
+    if is_catalog_term(text):
+        return "catalog_term"
+    if requests_row_count(text):
+        return "generic_count"
+    known_tables = {str(t).lower() for t in table_names if t}
+    lowered = text.lower()
+    if known_tables and (
+        lowered in known_tables
+        or any(lowered == t.split(".")[-1] for t in known_tables)
+        or any(lowered == c.split(".")[-1].lower() for c in columns if c)
+    ):
+        return "table"
+    if is_scaffolding(text):
+        return "scaffolding"
+    phrases = [str(d) for d in descriptions if d and str(d) in text]
+    if phrases:
+        return "metric"
+    contained = [str(d) for d in descriptions if d and text in str(d)]
+    if contained:
+        # the user's word is only a COMPONENT of the catalog's phrases: it names
+        # the entity those phrases are about, not one measurement
+        return "grouping"
+    if len(text) <= 6 or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        return "metric"
+    return "unknown"
+
+
+def non_metric_units(
+    question: str,
+    *,
+    evidence: Sequence[Mapping[str, Any]] = (),
+    table_names: Iterable[str] = (),
+    descriptions: Iterable[str] = (),
+) -> list[dict[str, Any]]:
+    """Every question unit that is NOT a business metric, with its kind.
+
+    Recorded on the plan so "we raised no disclosure" is an auditable decision
+    rather than an omission — and so the KIND of non-metric is preserved:
+    a count request, a table name, structure vocabulary, scaffolding, and a
+    concept the catalog has never seen are four different answers.
+    """
+    kind_of = {
+        str(e.get("unit") or e.get("slot") or ""): str(e.get("kind") or "")
+        for e in evidence
+        if e.get("slot")
+    }
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for unit in question_units(question):
+        if unit in seen:
+            continue
+        seen.add(unit)
+        kind = kind_of.get(unit) or classify_unit(
+            unit, descriptions=descriptions, table_names=table_names
+        )
+        if kind == "metric":
+            continue
+        out.append({"unit": unit, "kind": kind})
+    return out
+
+
 
 def resolve_slots(
     question: str,
@@ -205,6 +410,10 @@ def resolve_slots(
     selected = {t for t in selected_tables if t}
     denied = {t for t in denied_tables if t}
     docs, meta = _concept_docs(concepts)
+    # Every table name this source holds, so a question unit that names a table
+    # is classified as a table and never as a missing measurement.
+    known_tables = {str(c.get("table") or "") for c in concepts if c.get("table")}
+    known_tables |= selected | denied
     index = Bm25Index(docs)
     units = question_units(question)
     unit_terms = {unit: token_list(unit) for unit in units}
@@ -275,12 +484,22 @@ def resolve_slots(
         # disclosure reads like the question rather than like the clause.
         phrase = max(phrases, key=len) if phrases else ""
         label = phrase or unit
-        # Is this unit the NAME OF A METRIC, or a clause that merely shares
-        # bigrams with one? "合同签订数量" / "成本金额" are names; a 10-character
-        # clause like "月合同执行情况总览" scoring on 合同 + 执行 is overlap, and
-        # disclosing it as a missing figure would be noise presented as a gap.
-        # Precision rule: a phrase match, or a unit short enough to BE a name.
-        metric_like = bool(phrase) or len(unit) <= 6
+        # What IS this unit? Only a business metric can be unsupported: a count
+        # request, a table name, structure vocabulary or scaffolding asks for no
+        # figure, so disclosing one of them as missing accuses the source of
+        # failing at something it was never asked. Measured live: a correct
+        # COUNT(*) = 26544 came back with "nothing for 一共有多少行数据,
+        # _ref_material_mapping".
+        kind = classify_unit(
+            unit,
+            descriptions=[str(meta[k].get("description") or "") for k, _s in kept],
+            tables=tables,
+            table_names=known_tables,
+        )
+        # "Is this the NAME OF A METRIC, or a clause that merely shares bigrams
+        # with one?" — the classifier answers exactly that, and keeps the answer
+        # on the evidence entry so the decision stays auditable.
+        metric_like = kind == "metric"
 
         supported_by = [t for t in tables if t in selected]
         denied_by = [t for t in tables if t in denied]
@@ -289,6 +508,8 @@ def resolve_slots(
                 "slot": label,
                 "label": label,
                 "unit": unit,
+                #: what this unit is (SLOT_KINDS) — see classify_unit
+                "kind": kind,
                 "matched": sorted(matched),
                 "score": round(top, 4),
                 "tables": tables[:8],
@@ -316,6 +537,8 @@ def resolve_slots(
                 "slot": label,
                 "label": label,
                 "unit": unit,
+                #: only metrics reach this list — see classify_unit
+                "kind": "metric",
                 "reason": reason,
                 "detail": (
                     "the columns that carry this are not readable by this user"
@@ -379,9 +602,10 @@ def build_grounded_plan(  # noqa: PLR0913 - a plan is a wide record by nature
     except Exception:
         glossary = []
 
+    concepts = catalog_concepts(db, getattr(kb, "id", ""))
     evidence, unsupported, metrics = resolve_slots(
         question,
-        concepts=catalog_concepts(db, getattr(kb, "id", "")),
+        concepts=concepts,
         selected_tables=tables,
         denied_tables=denied_tables,
         glossary=glossary,
@@ -429,6 +653,20 @@ def build_grounded_plan(  # noqa: PLR0913 - a plan is a wide record by nature
         dialect=dialect_of(kb),
         evidence=evidence,
         unsupported_slots=unsupported,
+        non_metric_units=non_metric_units(
+            question,
+            evidence=evidence,
+            descriptions=[
+                str(c.get("description") or c.get("description_alt") or "")
+                for c in concepts
+            ],
+            table_names=(
+                {str(c.get("table") or "") for c in concepts}
+                | {str(c.get("table_name") or "") for c in (catalog or [])}
+                | {t for t in tables}
+                | {str(t) for t in (authorized_tables or ())}
+            ),
+        ),
         clarification_needed=list(clarification_needed),
         warnings=warn,
         catalog_version=catalog_version,
@@ -597,6 +835,12 @@ def validate_join_paths(sql: str, plan: GroundedPlan, *, db=None) -> list[dict[s
             known = set()
     out: list[dict[str, Any]] = []
     for left, right, on in pairs:
+        # The engine's own catalog objects are not tables of this source: a join
+        # between information_schema.columns and pg_namespace is internal
+        # plumbing, and recording it as an unvalidated business join produced the
+        # false "join path 'columns' is neither selected nor authorized" warning.
+        if is_metadata_object(left) or is_metadata_object(right):
+            continue
         validated = frozenset((left, right)) in known
         out.append(
             {
@@ -683,6 +927,62 @@ def _sql_join_pairs(sql: str) -> list[tuple[str, str, tuple[str, str] | tuple]]:
 # ── the result set ─────────────────────────────────────────────────────────
 
 
+def _count_column(columns: Sequence[str], sql: str | None) -> str:
+    """The result column that holds a row count, if the query returned one."""
+    expressions = sql_alias_expressions(sql)
+    for name in columns:
+        expr = str(expressions.get(str(name).lower()) or name)
+        if re.match(r"\s*count\s*\(", expr, re.IGNORECASE):
+            return str(name)
+    for name in columns:
+        if str(name).strip().strip('`"').lower() in _COUNT_COLUMN_NAMES:
+            return str(name)
+    return ""
+
+
+def canonical_count(
+    plan: GroundedPlan,
+    sql: str | None,
+    columns: Sequence[str],
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """The row-count answer, when the question asks for a count and the query is one.
+
+    "How many rows are in this table" is a supported question with a canonical
+    answer. Treating it as a business metric is what produced a disclosure on a
+    correct ``COUNT(*) = 26544``: the phrase names no measurement, and the count
+    the query returned IS the figure asked for.
+
+    Returns ``{}`` — no claim — when the question does not ask for a count, when
+    the query returned no count column, or when there are no rows to read.
+    """
+    asked = requests_row_count(plan.question) or any(
+        str(u.get("kind") or "") == "generic_count" for u in plan.non_metric_units
+    )
+    if not asked:
+        return {}
+    column = _count_column(columns, sql)
+    if not column:
+        return {}
+    if not rows:
+        return {}
+    value = next(
+        (row.get(column) for row in rows if isinstance(row, Mapping) and column in row),
+        None,
+    )
+    if value is None:
+        return {}
+    unit = next(
+        (
+            str(u.get("unit") or "")
+            for u in plan.non_metric_units
+            if str(u.get("kind") or "") == "generic_count"
+        ),
+        "",
+    ) or count_request_phrase(plan.question)
+    return {"column": column, "value": value, "unit": unit, "kind": "row_count"}
+
+
 def build_canonical_result_set(  # noqa: PLR0913 - a result envelope is wide by nature
     *,
     plan: GroundedPlan,
@@ -741,6 +1041,11 @@ def build_canonical_result_set(  # noqa: PLR0913 - a result envelope is wide by 
     )
     warnings.extend(zero_warnings)
 
+    # "How many rows" is a question with a canonical answer, not a business
+    # metric the source failed to produce: when the question asks for a count and
+    # the query returned one, that is the supported answer to it.
+    count = canonical_count(plan, sql, columns, rows)
+
     crs = CanonicalResultSet(
         columns=columns,
         rows=rows,
@@ -769,6 +1074,7 @@ def build_canonical_result_set(  # noqa: PLR0913 - a result envelope is wide by 
             "truncated": truncated,
         },
         unsupported_slots=unsupported,
+        canonical_count=count,
         disclosure=disclose(unsupported),
         plan_fingerprint=plan.fingerprint(),
     )
@@ -856,6 +1162,14 @@ def _slots_against_result(
     already = {s.get("slot") for s in out}
     warnings: list[str] = list(_ratio_sanity_warnings(plan, rows, sql))
 
+    # A structure/listing query reads the engine's OWN objects. Its rows are not
+    # business data, so they can neither support nor convict a business metric:
+    # convicting here is what produced "the data source has nothing for
+    # 订单/金额相关字段" on a question that asked for tables and columns. The
+    # plan-time slots survive (those were never selectable, whatever the SQL was).
+    if sql_is_introspection(sql):
+        return out, warnings
+
     # Which tables the SQL actually touched, and did it join them on a key the
     # catalog cannot vouch for?
     sql_tables = {str(t).split(".")[-1] for t in _FROM_TABLE.findall(sql or "")}
@@ -865,6 +1179,11 @@ def _slots_against_result(
     for entry in plan.evidence:
         slot = entry.get("slot")
         if not slot or slot in already:
+            continue
+        # An evidence entry with no kind predates the classification (a plan
+        # serialized by an older writer, or a hand-built one) and is treated as a
+        # metric, which is what every slot used to be.
+        if entry.get("kind", "metric") != "metric":
             continue
         carriers = [
             c for c in columns
@@ -941,6 +1260,8 @@ def _slots_against_result(
         for entry in plan.evidence:
             slot = entry.get("slot")
             if not slot or slot in already:
+                continue
+            if entry.get("kind", "metric") != "metric":
                 continue
             out.append(
                 {
