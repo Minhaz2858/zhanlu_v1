@@ -13257,6 +13257,18 @@ async def add_message_stream(
         # True for the rest of the turn (all post-nudge iterations are
         # replacement content, only the last synthesis survives).
         _nudge_replacement_pending = False
+        # ── ONE refinement budget for the whole turn (2026-09-20) ─────────
+        # A post-answer gate that discards the completed answer sets
+        # _nudge_replacement_pending and `continue`s the loop, which costs a
+        # FULL new generation. There are 12+ such gates and each used to get its
+        # own attempt inside a 10-iteration loop, so one question could be
+        # written many times over ("Refining answer…" for minutes). Spend from
+        # one budget instead.
+        _refinement_used = 0
+        _refinement_max = max(0, int(getattr(settings, "AGENT_REFINEMENT_MAX", 1)))
+        # The last completed answer, captured before the gates can discard it, so
+        # an aborted refinement can still answer from real content.
+        _v3_preserved_content: list = [None]
         # UX FIX (2026-08-24): When the user asked for a file deliverable
         # (docx, pptx, xlsx, pdf, html, md), suppress ALL intermediate text
         # in the chat bubble until the turn is fully complete. Without this
@@ -13361,6 +13373,46 @@ async def add_message_stream(
             )
         )
         for iteration in range(_v3_max_iterations):
+            # ── ONE shared refinement budget (2026-09-20) ────────────────
+            # _nudge_replacement_pending means a gate discarded the previous
+            # answer and asked for a full regeneration — so THIS iteration is a
+            # re-synthesis of an answer we already had, the expensive kind. Each
+            # of the 12+ post-answer gates used to spend its own attempt inside
+            # this 10-iteration loop; the user paid N x (full generation) and
+            # watched "Refining answer…" throughout (measured: a 559.3s turn on
+            # the same question that took 285.7s elsewhere). Spend from one
+            # budget, and on exhaustion answer from the content we already have
+            # rather than generating the answer yet again.
+            if _nudge_replacement_pending:
+                if _refinement_used >= _refinement_max:
+                    _restore = _v3_preserved_content[0]
+                    if _restore:
+                        logger.info(
+                            "v3 stream: refinement budget exhausted (%d/%d) — "
+                            "refusing further re-synthesis; answering from the "
+                            "best content already produced (%d chars, conv=%s)",
+                            _refinement_used, _refinement_max,
+                            len(_restore), conversation_id,
+                        )
+                        assistant_content = _restore
+                        # Register it as the best answer so the post-loop path
+                        # keeps it even if nothing else runs.
+                        if len(_restore) > len(_v3_recovered_best[0] or ""):
+                            _v3_recovered_best[0] = _restore
+                        break
+                    logger.warning(
+                        "v3 stream: refinement budget exhausted (%d/%d) but no "
+                        "answer to restore — allowing this regeneration so the "
+                        "turn cannot end empty (conv=%s)",
+                        _refinement_used, _refinement_max, conversation_id,
+                    )
+                else:
+                    _refinement_used += 1
+                    logger.info(
+                        "v3 stream: refinement %d/%d started (conv=%s, iter=%d)",
+                        _refinement_used, _refinement_max,
+                        conversation_id, iteration,
+                    )
             # 2026-08-25: wall-clock cap. If we've been looping >60s, break
             # and let the post-loop synthesizer produce a final answer from
             # whatever we have. Prevents the "228s connection interrupted"
@@ -13758,6 +13810,10 @@ async def add_message_stream(
             # LAST iter's prose in the persisted message + `done` event.
             if assistant_content:
                 _v3_iter_contents.append(assistant_content)
+                # Capture the completed answer BEFORE the post-answer gates get a
+                # chance to discard it. The refinement budget restores from here,
+                # so refusing a regeneration can never leave the user empty.
+                _v3_preserved_content[0] = assistant_content
                 _last_iter_prose = assistant_content  # Fix 3: save for promise-as-answer check
             assistant_content = ""
             raw_tool_calls: list = []

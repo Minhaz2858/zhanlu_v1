@@ -843,6 +843,15 @@ class Settings(BaseSettings):
     # lean loop produces smoother, faster, high-quality answers.
     AGENT_FAST_MODE_ENABLED: bool = True
     AGENT_FAST_MAX_TOOL_ITERATIONS: int = 10                 # was 40
+    # ONE shared refinement budget per turn (2026-09-20). Every post-answer gate
+    # that discards a completed answer and regenerates it now spends from this
+    # single budget, instead of each of the 12+ gates getting its own attempt.
+    # Measured before this cap: one "Data Analyst" turn took 559.3s while the
+    # SAME question on general_assistant took 285.7s — that spread is
+    # re-synthesis count, not model speed. Raise to allow more self-correction
+    # at the cost of wall-clock; 0 disables regeneration (the turn still answers
+    # from the best content already produced — it never ships an empty reply).
+    AGENT_REFINEMENT_MAX: int = 1
     # Dashboard builds (2026-08-27): a full-stack dashboard turn is a LONG
     # multi-phase pipeline (design system → schema → data collection → build →
     # verify). Fast-mode budgets (10 tool iterations / 180s wall clock) fire
