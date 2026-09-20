@@ -92,6 +92,16 @@ _IN_FLIGHT = (STATE_DISCOVERING,)
 # preparation stopped there, so only part of the structure is known.
 _STALLED = (STATE_INDEXED, STATE_ENRICHED, STATE_VALIDATED)
 
+# Every state only a LIVE preparation run may hold: in flight, or part-way
+# through. A database source that is not indexing while holding one of these
+# has had its run die on it (killed process, OOM, container restart), and the
+# staged state is then a claim nobody can honour — the watchdog
+# (knowledge_graph/catalog_watchdog.py) reconciles exactly this pair. The
+# terminal writers (catalog_indexer._classify_completion) never return a
+# mid-lifecycle state, so a healthy source can never hold this pair.
+# Exported so the vocabulary keeps one home.
+MID_LIFECYCLE: tuple[str, ...] = _IN_FLIGHT + _STALLED
+
 # Legacy catalog_status → derived lifecycle state (only used when
 # nl2sql_state is empty, i.e. the source predates the staged lifecycle).
 _LEGACY_MAP = {
