@@ -945,6 +945,45 @@ def _legacy_synthesize_fallback(db, execution, node, user_message, task_spec, ro
     )
 
 
+def resolve_deliverable_format(
+    step_type: str | None,
+    *,
+    is_terminal: bool,
+    intents: list[str] | None,
+) -> tuple[str, str | None]:
+    """Reconcile a plan step's artifact type with the user's delivery intent.
+
+    ``output_artifact_type`` is free-form LLM output — ``plan_dag`` stores the
+    step's string verbatim, and the planner names the SHAPE of what a step
+    computes ("dataframe", "metrics_table") rather than what the user receives.
+    Measured live on 2026-09-20: the request was 用图表展示, the task spec
+    recorded ``artifact_intents=[sales_chart, sales_report, data_visualization]``,
+    and the planner wrote ``dataframe`` on the sandbox step. The sandbox then
+    correctly resolved dataframe -> xlsx, and the turn's only artifact was a
+    spreadsheet — the chart never existed, while the answer prose said it had
+    been generated.
+
+    For the LAST artifact step the two must agree, and the delivery intent wins:
+    it is what the user asked for. Intermediate steps keep their own type, since
+    a dataframe feeding a later chart step is legitimate.
+
+    Returns ``(format, overridden_intent)``; the second element is the intent
+    that overrode the step type, for logging, or None when nothing changed.
+    """
+    from app.services.tool_handlers.sandbox_tool import (
+        _IMAGE_BY_FORMAT as _generator_formats,
+        normalize_format,
+    )
+
+    step_fmt = normalize_format(step_type or "") or "docx"
+    if not is_terminal or not intents:
+        return step_fmt, None
+    intent_fmt = normalize_format(intents[0])
+    if intent_fmt in _generator_formats and intent_fmt != step_fmt:
+        return intent_fmt, intents[0]
+    return step_fmt, None
+
+
 def _execute_sandbox_node(db, execution, node) -> ObservationRecord:
     """Execute a sandbox node — generate a file artifact in Docker.
 
@@ -962,6 +1001,43 @@ def _execute_sandbox_node(db, execution, node) -> ObservationRecord:
     skill_name = (node.inputs or {}).get("skill_name", node.name)
     artifact_type = node.output_artifact_type or "docx"
 
+    # ── The terminal deliverable must be the format the user asked for ────
+    # ``output_artifact_type`` is free-form LLM output (plan_dag stores the
+    # step's string verbatim). Observed live: the user asked 用图表展示, the
+    # task spec recorded artifact_intents=[sales_chart, sales_report,
+    # data_visualization], and the planner wrote "dataframe" on the sandbox
+    # step. The sandbox faithfully resolved dataframe->xlsx and the turn's only
+    # artifact was a spreadsheet — the chart never existed, while the answer
+    # prose said it had been generated. The shape word described what the step
+    # COMPUTES; task_spec.artifact_intents is what the user RECEIVES. For the
+    # last artifact step they must agree, and the delivery intent wins.
+    # Intermediate steps keep their own type (a dataframe feeding a later chart
+    # step is legitimate). Reuses normalize_format so there is ONE mapping.
+    if getattr(node, "node_type", None) == "sandbox":
+        try:
+            later = (
+                db.query(PlanNode)
+                .filter(
+                    PlanNode.plan_id == node.plan_id,
+                    PlanNode.seq > node.seq,
+                    PlanNode.node_type == "sandbox",
+                )
+                .first()
+            )
+            _intents = (execution.task_spec or {}).get("artifact_intents") or []
+            _fmt, _overrode = resolve_deliverable_format(
+                artifact_type, is_terminal=(later is None), intents=_intents,
+            )
+            if _overrode:
+                logger.info(
+                    "sandbox node %r: delivery intent %r overrides step type %r "
+                    "(terminal deliverable — the user asked for %s)",
+                    node.name, _overrode, artifact_type, _fmt,
+                )
+            artifact_type = _fmt
+        except Exception as e:  # never let intent reconciliation lose the step
+            logger.warning("sandbox node: artifact-type reconciliation skipped: %s", e)
+
     # ── Gather instructions from the previous synthesize node ─────────
     prev_obs = _get_previous_observation(db, execution)
     instructions = ""
@@ -975,6 +1051,38 @@ def _execute_sandbox_node(db, execution, node) -> ObservationRecord:
         chart_spec = synth_data.get("chart") if isinstance(synth_data, dict) else None
         if chart_spec and isinstance(chart_spec, dict):
             chart_rows = chart_spec.get("data", [])
+
+    # ── No synthesize node? Use the rows the data step actually returned ───
+    # Without this the ``data`` argument fell through to the literal
+    # [{"note": "See generated report for details"}] placeholder. Measured live
+    # (2026-09-20): a plan of nl2sql -> sandbox produced report.xlsx whose sheet1
+    # was 'note | See generated report for details' and whose html preview was a
+    # Plotly template with no series — an EMPTY artifact delivered as the turn's
+    # chart, while the answer prose reported KPIs that the model had computed
+    # from the rows itself. The rows were there the whole time: the synthesize
+    # node reads them via _get_all_data_observations, and this node did not.
+    if not chart_rows:
+        for _obs in _get_all_data_observations(db, execution):
+            if not getattr(_obs, "success", False):
+                continue
+            _rd = getattr(_obs, "result_data", None)
+            if not isinstance(_rd, dict):
+                continue
+            _data = _rd.get("data")
+            if isinstance(_data, list):
+                chart_rows.extend(_data)
+        if chart_rows:
+            logger.info(
+                "sandbox node %r: no synthesize step — rendering %d row(s) from "
+                "the nl2sql observation(s) instead of the placeholder",
+                node.name, len(chart_rows),
+            )
+        else:
+            logger.warning(
+                "sandbox node %r: no rows from synthesize OR nl2sql — the "
+                "artifact will contain the placeholder note only",
+                node.name,
+            )
 
     title = (node.inputs or {}).get("title") or synth_data.get("title", node.name)
 

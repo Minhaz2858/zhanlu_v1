@@ -295,6 +295,70 @@ _MAX_POLL_SECONDS = 120
 _POLL_INTERVAL_SECONDS = 1.0
 
 
+# User/planner-facing aliases -> a real generator format.
+# "dashboard" renders as an interactive HTML artifact (KPI cards + chart +
+# table), so it maps to ``html``. Observed live: the planner also passed
+# data-shape words ("table", "dataframe") and chart words ("chart") that
+# are not generator formats; each one hard-failed the step with "Invalid
+# format" and cost the turn its deliverable. These are unambiguous, so
+# normalise them instead of failing the whole plan on a synonym.
+_FORMAT_ALIASES = {
+    "dashboard": "html",
+    "chart": "html", "plot": "html", "graph": "html",
+    "visualization": "html", "visualisation": "html", "viz": "html",
+    "table": "xlsx", "dataframe": "xlsx", "spreadsheet": "xlsx",
+    "excel": "xlsx", "csv": "xlsx",
+    "word": "docx",
+    "ppt": "pptx", "powerpoint": "pptx", "presentation": "pptx",
+    "deck": "pptx", "slides": "pptx",
+    "markdown": "md",
+}
+
+
+def normalize_format(raw: str) -> str:
+    """Best-effort mapping from whatever a caller named to a generator format.
+
+    Returns the input unchanged when nothing matches — the caller decides
+    whether that is fatal. Kept module-level (not inline in the tool handler)
+    so callers that must decide an artifact type BEFORE the sandbox runs — the
+    plan executor, which has to reconcile the planner's step type with the
+    user's delivery intent — reuse this one mapping instead of growing a second
+    one that can disagree with it.
+    """
+    fmt = (raw or "").lower().strip()
+    fmt = _FORMAT_ALIASES.get(fmt, fmt)
+    if fmt in _IMAGE_BY_FORMAT or not fmt:
+        return fmt
+    # Last resort before failing the step. The planner repeatedly names the
+    # SHAPE of the output rather than a generator format — observed live:
+    # "table", "dataframe", "aggregated_table". Failing the step on a synonym
+    # costs the turn its whole deliverable, so classify by the words actually
+    # present. Order matters: the most specific signal wins.
+    _f = re.sub(r"[^a-z]", "", fmt)
+    _guessed = None
+    if any(k in _f for k in ("ppt", "slide", "deck", "present")):
+        _guessed = "pptx"
+    elif any(k in _f for k in ("chart", "plot", "graph", "visual", "figure")):
+        _guessed = "html"
+    elif any(k in _f for k in ("table", "data", "row", "record", "csv",
+                               "excel", "sheet", "matrix", "aggregate")):
+        _guessed = "xlsx"
+    elif any(k in _f for k in ("word", "doc", "report", "narrative", "text")):
+        _guessed = "docx"
+    elif "pdf" in _f:
+        _guessed = "pdf"
+    elif "markdown" in _f or _f == "md":
+        _guessed = "md"
+    if _guessed:
+        logger.warning(
+            "sandbox format %r is not a generator format — interpreting as "
+            "%r from the words present (step loses its deliverable "
+            "otherwise)", fmt, _guessed,
+        )
+        return _guessed
+    return fmt
+
+
 # ---------------------------------------------------------------------------
 # Metric/value row enrichment
 # ---------------------------------------------------------------------------
@@ -915,54 +979,7 @@ async def _run_sandbox_skill(
         5. Poll job status until complete
         6. Return artifact info to LLM
     """
-    fmt = (args.get("format") or "").lower().strip()
-    # User/planner-facing aliases -> a real generator format.
-    # "dashboard" renders as an interactive HTML artifact (KPI cards + chart +
-    # table), so it maps to ``html``. Observed live: the planner also passed
-    # data-shape words ("table", "dataframe") and chart words ("chart") that
-    # are not generator formats; each one hard-failed the step with "Invalid
-    # format" and cost the turn its deliverable. These are unambiguous, so
-    # normalise them instead of failing the whole plan on a synonym.
-    _FORMAT_ALIASES = {
-        "dashboard": "html",
-        "chart": "html", "plot": "html", "graph": "html",
-        "visualization": "html", "visualisation": "html", "viz": "html",
-        "table": "xlsx", "dataframe": "xlsx", "spreadsheet": "xlsx",
-        "excel": "xlsx", "csv": "xlsx",
-        "word": "docx",
-        "ppt": "pptx", "powerpoint": "pptx", "presentation": "pptx",
-        "deck": "pptx", "slides": "pptx",
-        "markdown": "md",
-    }
-    fmt = _FORMAT_ALIASES.get(fmt, fmt)
-    if fmt not in _IMAGE_BY_FORMAT and fmt:
-        # Last resort before failing the step. The planner repeatedly names the
-        # SHAPE of the output rather than a generator format — observed live:
-        # "table", "dataframe", "aggregated_table". Failing the step on a
-        # synonym costs the turn its whole deliverable, so classify by the
-        # words actually present. Order matters: the most specific signal wins.
-        _f = re.sub(r"[^a-z]", "", fmt)
-        _guessed = None
-        if any(k in _f for k in ("ppt", "slide", "deck", "present")):
-            _guessed = "pptx"
-        elif any(k in _f for k in ("chart", "plot", "graph", "visual", "figure")):
-            _guessed = "html"
-        elif any(k in _f for k in ("table", "data", "row", "record", "csv",
-                                   "excel", "sheet", "matrix", "aggregate")):
-            _guessed = "xlsx"
-        elif any(k in _f for k in ("word", "doc", "report", "narrative", "text")):
-            _guessed = "docx"
-        elif "pdf" in _f:
-            _guessed = "pdf"
-        elif "markdown" in _f or _f == "md":
-            _guessed = "md"
-        if _guessed:
-            logger.warning(
-                "sandbox format %r is not a generator format — interpreting as "
-                "%r from the words present (step loses its deliverable "
-                "otherwise)", fmt, _guessed,
-            )
-            fmt = _guessed
+    fmt = normalize_format(args.get("format") or "")
     if fmt not in _IMAGE_BY_FORMAT:
         return {
             "success": False,
