@@ -1,0 +1,71 @@
+name: inline-chart
+display_name: Inline Chart
+version: 1.1.0
+description: >
+  Render a real chart inline in the chat when the user asks to SEE data
+  visually. Covers every common way that request is phrased: chart, graph,
+  plot, bar chart, column chart, line chart, pie chart, donut, scatter,
+  area, histogram, trend, visualise/visualize, visualization, data viz —
+  图表, 可视化, 图形, 图示, 画图, 作图, 画个图, 柱状图, 条形图, 折线图,
+  曲线图, 饼图, 环形图, 散点图, 面积图, 直方图, 趋势图. Teaches the exact
+  create_artifact call and the self-contained HTML/SVG document it needs.
+  Compose with data-viz-design for encoding choices.
+summary: >
+  Inline chart rendering: the create_artifact(type="html") contract,
+  self-contained document rules, aggregation, SVG/Canvas chart patterns.
+category: visualization
+tags:
+  - chart
+  - charts
+  - plot
+  - graph
+  - graph-plot
+  - bar
+  - bar-chart
+  - column
+  - line
+  - line-chart
+  - pie
+  - pie-chart
+  - donut
+  - scatter
+  - area
+  - histogram
+  - trend
+  - visualization
+  - visualisation
+  - visualise
+  - visualize
+  - data-viz
+  - inline
+  - artifact
+  - 图表
+  - 可视化
+  - 图形
+  - 图示
+  - 画图
+  - 作图
+  - 画个图
+  - 柱状图
+  - 条形图
+  - 折线图
+  - 曲线图
+  - 饼图
+  - 环形图
+  - 散点图
+  - 面积图
+  - 直方图
+  - 趋势图
+runtime: prompt
+user_invocable: true
+source: bundled
+trust_level: official
+artifact_types:
+  - html
+requires_sandbox: false
+trigger: >
+  user asks to see data as a chart, graph or plot — 画个图, 用图表展示,
+  柱状图, 折线图, 饼图, 可视化, 出个图
+entry_point:
+  type: markdown
+  file: SKILL.md

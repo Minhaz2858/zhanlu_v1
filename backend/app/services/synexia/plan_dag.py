@@ -301,6 +301,24 @@ Rules:
 - Sandbox steps are for PPTX/DOCX/XLSX generation
 - Tool steps are for simple actions (web search, file ops)
 - The last step should always produce the final output
+- VISUALISATION: when the user asks to SEE the data as a chart, graph or plot
+  (图表 / 可视化 / 画个图) and did NOT ask for a downloadable file, the plan MUST
+  include BOTH:
+    1. the data step that yields the numbers to draw, and
+    2. a skill step loading the `inline-chart` skill —
+       {{"node_type": "skill", "name": "inline-chart",
+        "inputs": {{"skill_name": "inline-chart"}}}} —
+       which carries the exact rendering contract the agent then follows.
+  The chart is rendered by the `create_artifact` tool with type="html" and a
+  self-contained document in payload.html_content. `type` has NO "chart" value
+  (enum: docx|pdf|pptx|html) and there is NO `RenderBarChart`, `render_chart`,
+  `create_chart` or `plot_chart` tool — do not put those names in a plan, and
+  do not invent a chart skill. A chart the user asked for is a deliverable: it
+  is NOT satisfied by describing the numbers in prose, and never by drawing
+  bars out of text characters.
+- Sandbox `format` must be one of: xlsx | pptx | html | pdf | docx | md.
+  Never pass format "table", "dataframe", "chart" or "csv" — the sandbox
+  rejects the step and the whole turn loses its deliverable.
 
 Respond with ONLY a JSON array."""
 
@@ -712,8 +730,25 @@ def _drop_unknown_steps(steps: list) -> tuple[list, list[str]]:
         from app.services.skills_loader import get_skills_registry
 
         _skills_reg = get_skills_registry()
-        if hasattr(_skills_reg, "list_names"):
+        # SkillsRegistry exposes list_skills() -> [SkillMetadata], NOT
+        # list_names(). The old hasattr(list_names) probe was therefore always
+        # False, so known_skills stayed empty and THIS BRANCH NEVER VALIDATED
+        # ANYTHING: an invented skill name passed straight through and was only
+        # discovered at execution, where it was marked "skipped".
+        # Observed live: the planner invented skills `render_bar_chart` and
+        # `create_bar_chart_spec` (neither exists) for a chart request, every
+        # node skipped, and the turn delivered no chart at all. Read the real
+        # names from whichever accessor this registry actually provides.
+        if hasattr(_skills_reg, "list_skills"):
+            for _s in _skills_reg.list_skills() or []:
+                _n = getattr(_s, "name", None) or (
+                    _s.get("name") if isinstance(_s, dict) else None
+                )
+                if _n:
+                    known_skills.add(str(_n))
+        elif hasattr(_skills_reg, "list_names"):
             known_skills = set(_skills_reg.list_names() or [])
+        logger.debug("plan validation: %d skill names loaded", len(known_skills))
     except Exception as e:
         logger.debug("plan validation: skill registry unavailable (%s)", e)
 

@@ -79,6 +79,27 @@ def _contains_file_intent(message: str) -> bool:
     return any(kw in text for kw in _FILE_INTENT_KEYWORDS)
 
 
+def _contains_visual_intent(message: str) -> bool:
+    """True if the user asked to SEE the data as a chart / graph / plot.
+
+    A chart the user asked for is an artifact they requested, exactly like a
+    document — it just has no file format. Without this, a chart request fell
+    through the FINALIZE gate below, which only knows file formats, and the
+    rendered chart artifact was DISCARDED before it could reach the chat
+    (``artifact_ids = []``). That gate is why no chart ever survived the FSM
+    path even when the artifact had been created successfully.
+
+    Delegates to the shared detector so the guard, the resolver and the
+    `inline-chart` skill all agree on what a visualization request is.
+    """
+    from app.services.synexia.intent_router import detect_visual_intent
+
+    try:
+        return bool(detect_visual_intent(message))
+    except Exception:
+        return False
+
+
 class FSMState(str, Enum):
     INIT = "init"
     GOAL = "goal"
@@ -741,13 +762,18 @@ class SynexiaFSM:
             if obs.artifact_ids:
                 artifact_ids.extend(obs.artifact_ids)
 
-        # ── Gate: suppress artifacts when user did not request a file ──
+        # ── Gate: suppress artifacts when user did not request one ──
         # Inline data-analysis questions ("give me sales numbers") should
-        # NOT produce artifact cards / Preview buttons.  Only ship artifacts
-        # when the user explicitly asked for a file format (docx/pptx/…).
+        # NOT produce artifact cards / Preview buttons.  Ship artifacts when
+        # the user explicitly asked for a file format (docx/pptx/…) — OR asked
+        # to SEE the data as a chart, which is a requested artifact with no
+        # file format.  Treating only file formats as "requested" silently
+        # deleted every rendered chart at this gate.
+        _user_requested_visual = _contains_visual_intent(request.user_message)
         _user_requested_file = bool(
             (task_spec.get("deliverable_format") if task_spec else None)
             or _contains_file_intent(request.user_message)
+            or _user_requested_visual
         )
         if not _user_requested_file and artifact_ids:
             logger.info(
@@ -1068,6 +1094,13 @@ Reference the actual findings above by value (figures, names, counts) — do not
 
 OUTPUT FORMAT — STRICT RULES:
 - DO NOT output raw JSON, code fences, or structured payload objects (no `{{"title": ...}}` blocks in the answer).
+- CHARTS: when the user asked to SEE the data as a chart/graph/plot (图表/可视化), the
+  chart MUST be a real artifact rendered by the chat — not text. NEVER approximate a
+  chart with ASCII or box-drawing characters (a fenced block of █ ▓ ░ bars); it cannot
+  be styled, scaled or exported, and it is not what the user asked for. If a chart
+  artifact already exists for this turn, mention it in one line instead of redrawing it.
+  If none exists and you have the numbers, say plainly that the figures are above/ready
+  — never substitute a text drawing for the chart.
 - If findings include structured data (KPIs, metrics, rankings), render it as a markdown TABLE with prose, NOT as a JSON dump.
 - Inline markdown only — never a code block containing a report-card JSON object. The user is a CEO, not an integration engineer.
 - When findings are substantial, organize into sections (##) with bold labels. Typical sections for data-rich queries: Executive Summary, Key Metrics, Detailed Findings (with tables), Notable Patterns/Anomalies, Recommendations.

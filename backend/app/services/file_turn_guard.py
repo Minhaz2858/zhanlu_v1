@@ -50,7 +50,11 @@ from app.services.pptx_turn_guard import (
     build_pptx_disclosure,
     pptx_artifact_created,
 )
-from app.services.synexia.intent_router import detect_file_intent, FileFormat
+from app.services.synexia.intent_router import (
+    detect_file_intent,
+    detect_visual_intent,
+    FileFormat,
+)
 
 # Formats covered by this guard (excludes pptx — handled by pptx_turn_guard).
 _FILE_FORMATS = frozenset({"html", "docx", "pdf", "xlsx", "md"})
@@ -319,7 +323,14 @@ def should_force_create_file(
         return False
     is_file, fmt = is_file_deliverable_request(user_content, output_format)
     if not is_file:
-        return False
+        # A requested CHART carries no file format, so it never reaches the
+        # file branch above and nothing ever forced it. Its deliverable is an
+        # inline HTML artifact, so force `create_artifact` the same way.
+        if not detect_visual_intent(user_content):
+            return False
+        if file_artifact_created(tool_calls_for_frontend, "html"):
+            return False
+        return iteration >= max_iterations - FILE_FORCE_WINDOW
     if file_artifact_created(tool_calls_for_frontend, fmt):
         return False
     return iteration >= max_iterations - FILE_FORCE_WINDOW
@@ -391,6 +402,38 @@ def build_give_up_reprompt(fmt: str) -> str:
     )
 
 
+def build_visual_nudge() -> str:
+    """Synthesis-boundary nudge for a requested CHART (injected as user turn).
+
+    A chart the user asked to see has no file format, so it never travelled
+    through the file paths above. Observed live: the turn produced an xlsx and
+    its preview, the prose claimed "可视化图表已按同一数据源生成", and no
+    chart existed. The visual deliverable is an inline HTML artifact.
+    """
+    return (
+        "The user asked to SEE this data as a chart and no chart exists yet. "
+        "A chart is a deliverable — describing the numbers in prose does NOT "
+        "satisfy it, and neither does a table or a spreadsheet preview. "
+        "If the `inline-chart` skill is available, load it for the exact "
+        "contract. Then call create_artifact(type='html', title=<chart title>, "
+        "payload={'html_content': <a self-contained HTML document with an "
+        "inline SVG or CSS bar chart>}) NOW, using the query results already "
+        "in this conversation. The document must be self-contained: inline "
+        "CSS, inline SVG, hard-coded aggregated values, no external URLs, no "
+        "CDN. Aggregate to at most 25 categories and label the axes and units. "
+        "If the data is insufficient, say exactly what is missing — but never "
+        "invent figures to fill a chart."
+    )
+
+
+def build_visual_disclosure() -> str:
+    """Fallback sentence appended when the visual budget is exhausted."""
+    return (
+        "(The requested chart could not be rendered within this turn's tool "
+        "budget. Please ask again and I will build it.)"
+    )
+
+
 @dataclass
 class FileTurnGuardResult:
     """Outcome of the synthesis-boundary check.
@@ -452,7 +495,27 @@ def file_turn_guard(
         return FileTurnGuardResult("none")
     fmt = _requested_file_format(user_content, output_format)
     if not fmt:
-        return FileTurnGuardResult("none")
+        # ── Visual deliverable (chart) ──────────────────────────────────
+        # The user asked to SEE the data. There is no file format, so the
+        # whole file path above is skipped — and before this branch the turn
+        # could close on prose that described the numbers while claiming a
+        # chart existed. Require the inline HTML artifact instead.
+        if not detect_visual_intent(user_content):
+            return FileTurnGuardResult("none")
+        if file_artifact_created(tool_calls_for_frontend, "html"):
+            return FileTurnGuardResult("none")
+        if budget_remaining >= 2:
+            return FileTurnGuardResult(
+                "nudge",
+                build_visual_nudge(),
+                force_next=(attempts == cap - 1),
+                detected_format="chart",
+            )
+        return FileTurnGuardResult(
+            "disclose",
+            build_visual_disclosure(),
+            detected_format="chart",
+        )
     if fmt == "pptx":
         if pptx_artifact_created(tool_calls_for_frontend):
             return FileTurnGuardResult("none")

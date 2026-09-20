@@ -25,6 +25,7 @@ import base64
 import json
 import logging
 import os
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -915,10 +916,53 @@ async def _run_sandbox_skill(
         6. Return artifact info to LLM
     """
     fmt = (args.get("format") or "").lower().strip()
-    # "dashboard" is a user-facing alias: it renders as an interactive
-    # HTML artifact (KPI cards + chart + table), so map it to ``html``.
-    if fmt == "dashboard":
-        fmt = "html"
+    # User/planner-facing aliases -> a real generator format.
+    # "dashboard" renders as an interactive HTML artifact (KPI cards + chart +
+    # table), so it maps to ``html``. Observed live: the planner also passed
+    # data-shape words ("table", "dataframe") and chart words ("chart") that
+    # are not generator formats; each one hard-failed the step with "Invalid
+    # format" and cost the turn its deliverable. These are unambiguous, so
+    # normalise them instead of failing the whole plan on a synonym.
+    _FORMAT_ALIASES = {
+        "dashboard": "html",
+        "chart": "html", "plot": "html", "graph": "html",
+        "visualization": "html", "visualisation": "html", "viz": "html",
+        "table": "xlsx", "dataframe": "xlsx", "spreadsheet": "xlsx",
+        "excel": "xlsx", "csv": "xlsx",
+        "word": "docx",
+        "ppt": "pptx", "powerpoint": "pptx", "presentation": "pptx",
+        "deck": "pptx", "slides": "pptx",
+        "markdown": "md",
+    }
+    fmt = _FORMAT_ALIASES.get(fmt, fmt)
+    if fmt not in _IMAGE_BY_FORMAT and fmt:
+        # Last resort before failing the step. The planner repeatedly names the
+        # SHAPE of the output rather than a generator format — observed live:
+        # "table", "dataframe", "aggregated_table". Failing the step on a
+        # synonym costs the turn its whole deliverable, so classify by the
+        # words actually present. Order matters: the most specific signal wins.
+        _f = re.sub(r"[^a-z]", "", fmt)
+        _guessed = None
+        if any(k in _f for k in ("ppt", "slide", "deck", "present")):
+            _guessed = "pptx"
+        elif any(k in _f for k in ("chart", "plot", "graph", "visual", "figure")):
+            _guessed = "html"
+        elif any(k in _f for k in ("table", "data", "row", "record", "csv",
+                                   "excel", "sheet", "matrix", "aggregate")):
+            _guessed = "xlsx"
+        elif any(k in _f for k in ("word", "doc", "report", "narrative", "text")):
+            _guessed = "docx"
+        elif "pdf" in _f:
+            _guessed = "pdf"
+        elif "markdown" in _f or _f == "md":
+            _guessed = "md"
+        if _guessed:
+            logger.warning(
+                "sandbox format %r is not a generator format — interpreting as "
+                "%r from the words present (step loses its deliverable "
+                "otherwise)", fmt, _guessed,
+            )
+            fmt = _guessed
     if fmt not in _IMAGE_BY_FORMAT:
         return {
             "success": False,

@@ -236,6 +236,67 @@ def is_deliverable_negated(text: Optional[str]) -> bool:
     return bool(_DELIVERABLE_NEGATED_RE.search(text))
 
 
+# ── Visualisation deliverable ───────────────────────────────────────────
+# A chart the user asked to SEE is a deliverable in the same sense a file is,
+# but it has no file format — so `detect_file_intent` never fires and no guard
+# ever checked it. Observed live: "本月采购订单分析，用图表展示" parsed as
+# task_kind=create_artifact, yet the plan produced an xlsx (+ its preview) and
+# the answer claimed a chart existed. Nothing enforced the chart.
+#
+# These terms mirror the vocabulary declared by the `inline-chart` skill, so
+# the detector and the skill stay consistent: whichever phrasing matches the
+# skill's semantic search also arms the guard.
+_VISUAL_CHART_TERMS = (
+    r"(?:图表|可视化|走势图|趋势图|柱状图|柱形图|条形图|折线图|曲线图"
+    r"|饼图|饼状图|环形图|圆环图|散点图|面积图|直方图|分布图"
+    r"|charts?|graphs?|plots?|visuali[sz]ation|visuali[sz]e|data\s*viz"
+    r"|bar\s*chart|column\s*chart|line\s*chart|pie\s*chart"
+    r"|donut|scatter\s*plot|histogram|heat\s*map)"
+)
+_VISUAL_INTENT_RE = re.compile(_VISUAL_CHART_TERMS, re.IGNORECASE)
+# "不要图表 / don't plot this" — a negation bound to a CHART term. The file
+# negation regex above only knows document nouns, so it cannot see this, and
+# without it the guard would force a chart the user explicitly refused.
+_VISUAL_NEGATED_RE = re.compile(
+    rf"(?:{_NEGATION_CUE})"
+    rf"\s*(?:再|直接)?\s*"
+    rf"(?:给我|帮我|发我)?\s*"
+    rf"(?:{_CREATE_VERB})?\s*"
+    rf"(?:一个|一张|一份|a|an|the|any)?\s*"
+    rf"{_VISUAL_CHART_TERMS}",
+    re.IGNORECASE,
+)
+
+
+@observe_rule("intent_router.detect_visual_intent")
+def detect_visual_intent(text: Optional[str]) -> bool:
+    """True when the user asked to SEE the data as a chart / graph / plot.
+
+    This is an enforcement signal, not a routing decision: it never selects a
+    tool or a skill, and it never authors the answer. It only tells the turn
+    guard that a rendered chart is part of the deliverable, so a turn that
+    produced no visual artifact cannot close on prose that describes numbers.
+
+    Examples
+    --------
+    >>> detect_visual_intent("本月采购订单分析，用图表展示")
+    True
+    >>> detect_visual_intent("画个柱状图")
+    True
+    >>> detect_visual_intent("plot weekly revenue as a bar chart")
+    True
+    >>> detect_visual_intent("summarize this table as text")
+    False
+    >>> detect_visual_intent("不要图表，直接把数字写在回复里")
+    False
+    """
+    if not text:
+        return False
+    if _VISUAL_NEGATED_RE.search(text):
+        return False
+    return bool(_VISUAL_INTENT_RE.search(text))
+
+
 def detect_convert_target(text: Optional[str]) -> Optional[FileFormat]:
     """Return the TARGET format of a conversion request, or ``None``.
 
