@@ -6,6 +6,7 @@ and period-over-period KPI comparisons against any connected database.
 
 from __future__ import annotations
 
+from app.services.db.dialect import maybe_profile
 from app.services.forecasting.datasource_registry import quote_identifier
 
 
@@ -26,8 +27,25 @@ def _period_minus_one_year(expr: str, db_type: str | None) -> str:
         return f"DATE({expr}, '-1 year')"
     if db == "oracle":
         return f"ADD_MONTHS({expr}, -12)"
+    if db in ("mssql", "sqlserver", "sql server"):
+        return f"DATEADD(year, -1, {expr})"
     # postgres / default — ANSI interval arithmetic
     return f"({expr} - INTERVAL '1 year')"
+
+
+def _month_bucket(expr: str, db_type: str | None) -> str:
+    """Dialect-aware month-truncation expression.
+
+    The MoM branch used to hardcode Postgres ``DATE_TRUNC('month', …)``,
+    which does not exist on MySQL or SQLite — the KPI query failed outright
+    for those sources.  Borrow the dialect capability table instead of
+    re-deriving per-vendor syntax here.
+    """
+    prof = maybe_profile(db_type)
+    if prof is None:
+        # Unknown dialect — fall back to the ANSI/Postgres spelling.
+        return f"DATE_TRUNC('month', {expr})"
+    return prof.month_bucket.format(c=expr)
 
 
 def build_kpi_sql(
@@ -90,16 +108,19 @@ def build_kpi_sql(
             f"ORDER BY cur.period"
         )
     elif kpi_type == "mom":
-        # Month-over-Month: compare with previous month
+        # Month-over-Month: compare with previous month.  The bucket
+        # expression is dialect-specific (DATE_FORMAT on MySQL, STRFTIME on
+        # SQLite, TO_CHAR/TRUNC elsewhere) — never hardcode DATE_TRUNC.
+        bucket = _month_bucket(period_col, db_type)
         return (
-            f"SELECT DATE_TRUNC('month', {period_col}) AS period, {dim_select}"
+            f"SELECT {bucket} AS period, {dim_select}"
             f"SUM({measure_col}) AS current_value, "
             f"LAG(SUM({measure_col}), 1) OVER ("
-            f"ORDER BY DATE_TRUNC('month', {period_col})"
+            f"ORDER BY {bucket}"
             f") AS prior_value "
             f"FROM {table_ref} "
             f"WHERE {measure_col} IS NOT NULL "
-            f"GROUP BY DATE_TRUNC('month', {period_col}){dim_group} "
+            f"GROUP BY {bucket}{dim_group} "
             f"ORDER BY period"
         )
     else:  # period (generic)
