@@ -7,7 +7,7 @@ Tool definitions follow the OpenAI function calling format, compatible with Deep
 import pathlib
 import re
 from datetime import datetime
-from typing import Any, Optional
+from typing import Optional
 
 from app.config import settings
 
@@ -2450,20 +2450,9 @@ def get_system_prompt(
 
 
 # ── P0-2 (IBM prompt-optimization): token accounting for block accretion ──
-
-# Known shared blocks, in the order get_system_prompt may append them.
-# Used ONLY for the per-block breakdown in the budget log — membership is
-# checked against the assembled prompt so disabled flags are skipped.
-_PROMPT_BLOCK_LEDGER: tuple[tuple[str, Any], ...] = (
-    ("conversation_tone", lambda: _CONVERSATION_TONE_BLOCK),
-    ("initiative", lambda: _INITIATIVE_BLOCK),
-    ("runtime_date_anchor", lambda: _runtime_context_block()),
-    ("answer_verification", lambda: _ANSWER_VERIFICATION_BLOCK),
-    ("schema_aware_protocol", lambda: _SCHEMA_AWARE_PROTOCOL_BLOCK),
-    ("research_analyst_directive", lambda: _RESEARCH_ANALYST_DIRECTIVE),
-    ("entity_master_filter", lambda: _ENTITY_MASTER_FILTER_BLOCK),
-    ("default_skills", lambda: _DEFAULT_SKILLS_BLOCK),
-)
+# Block identity + versions live in app/services/prompts/registry.py (P2-7);
+# this accounting reads sizes from the registry and reports which blocks
+# made it into the assembled prompt.
 
 
 def _estimate_block_tokens(text: str) -> int:
@@ -2475,6 +2464,7 @@ def _log_prompt_token_budget(agent_name: str | None, prompt: str) -> None:
     """Log the assembled system prompt size; warn with breakdown over budget."""
     try:
         from app.config import settings as _settings
+        from app.services.prompts.registry import iter_blocks
 
         total = _estimate_block_tokens(prompt)
         budget = int(getattr(_settings, "PROMPT_TOKEN_BUDGET", 24000))
@@ -2484,13 +2474,13 @@ def _log_prompt_token_budget(agent_name: str | None, prompt: str) -> None:
             )
             return
         breakdown = []
-        for name, getter in _PROMPT_BLOCK_LEDGER:
+        for spec in iter_blocks():
             try:
-                block = getter()
+                block = spec.text()
             except Exception:  # noqa: BLE001
                 continue
             if block and block.strip() and block.strip() in prompt:
-                breakdown.append(f"{name}≈{_estimate_block_tokens(block)}")
+                breakdown.append(f"{spec.name}@v{spec.version}≈{spec.tokens()}")
         _logger.warning(
             "prompt_budget: agent=%s assembled system prompt ≈%d tokens "
             "exceeds PROMPT_TOKEN_BUDGET=%d — block accretion is crowding "

@@ -193,6 +193,25 @@ _HONESTY_GUARDRAIL = (
     "fabricate rows, totals, or claims."
 )
 
+# P1-4c (IBM few-shot, 2026-10-08): contrastive examples targeting the
+# observed failure mode — a run with zero datasource queries synthesizing a
+# "report" from memory (or from the previous-run context block). Placed
+# with the honesty guardrail so the negative example lands where the rule
+# lands.
+_GROUNDING_FEWSHOT = (
+    "\n\nCONTRASTIVE EXAMPLES (grounded vs. fabricated):\n"
+    "GOOD: You ran 2 queries against the bound data source this run; the\n"
+    "  report states \"14,540 order rows through 2026-09-10 (source:\n"
+    "  erp_v_sale_orderentry)\" — every figure came from THIS run's tool\n"
+    "  results.\n"
+    "BAD: You queried nothing (or only listed tables) and wrote \"July\n"
+    "  revenue was 45.2M\" from your own memory or from the previous-run\n"
+    "  summary. That figure is unverified fiction — the run FAILS. If the\n"
+    "  data source returns no rows for the requested window, probe the\n"
+    "  latest posted date and re-query; if it is still empty, say so\n"
+    "  explicitly with the exact queries you ran."
+)
+
 _NO_PREAMBLE = (
     "Produce the deliverable directly — start with your analysis steps "
     "immediately. Do not narrate your boundaries, do not hedge, do not "
@@ -1222,6 +1241,7 @@ def execute_automation(execution_id: str) -> None:
             + _format_guidance(getattr(task, "output_format", None))
             + "\n\n"
             + _HONESTY_GUARDRAIL
+            + _GROUNDING_FEWSHOT
             + (f"\n\n{llm_tick_block}" if llm_tick_block else "")
             + (f"\n\n{prev_context}" if prev_context else "")
             + (_memory_context or "")

@@ -241,6 +241,23 @@ Classify the task:
 - refines_artifact_id: if is_followup is true and the conversation lists a prior artifact being refined, set this to that artifact's id; otherwise null.
 
 {followup_hint}{context_block}
+
+EXAMPLES (few-shot — match this output discipline):
+
+Example 1 (brand-new data question):
+User: "How many inventory lots do we have?"
+→ {{"task_kind": "analyze_data", "artifact_intents": [], "entities": {{"metric": "lot_count"}}, "kpis": ["accuracy"], "acceptance_criteria": ["answer states the exact lot count"], "complexity": "simple", "requires_data": true, "dimensions": [], "standalone_question": "How many inventory lots do we have?", "user_signal": "default", "is_followup": false, "refines_artifact_id": null}}
+
+Example 2 (follow-up that must resolve references, NOT invent formats):
+User (after a sales-data turn): "more details"
+→ {{"task_kind": "answer_question", "artifact_intents": [], "entities": {{}}, "kpis": ["completeness"], "acceptance_criteria": ["elaborates the previous sales result with specifics from the prior data"], "complexity": "simple", "requires_data": true, "dimensions": [], "standalone_question": "Provide more detail about the sales data from the previous turn.", "user_signal": "default", "is_followup": true, "refines_artifact_id": null}}
+NOTE: "more details" NEVER implies an artifact format. Do not invent
+artifact_intents like "elaboration" — that is not a renderable format.
+
+Example 3 (explicit file request):
+User: "把上个月的销售数据导出成PPT"
+→ {{"task_kind": "create_artifact", "artifact_intents": ["pptx"], "entities": {{"date_range": "last month"}}, "kpis": ["completeness", "accuracy"], "acceptance_criteria": ["PPT contains last month's sales figures from the data source"], "complexity": "moderate", "requires_data": true, "dimensions": [], "standalone_question": "Generate a PPT of last month's sales data.", "user_signal": "export_pptx", "is_followup": false, "refines_artifact_id": null}}
+
 Respond with ONLY a JSON object, no explanation."""
 
     # ── TaskSpec JSON schema ─────────────────────────────────────────

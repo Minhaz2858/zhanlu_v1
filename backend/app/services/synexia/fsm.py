@@ -1133,6 +1133,16 @@ Provide a thorough response that reflects the depth and scope of the findings. M
 - **Simple questions**: be direct and brief.
 Reference the actual findings above by value (figures, names, counts) — do not narrate tool calls. Your response must satisfy every criterion listed under "You must satisfy" (if any). If actions were successful, summarize what was accomplished.{error_clause}
 
+REASONING PROTOCOL (apply silently, in order, before writing):
+Step 1: GROUND — identify which findings above actually contain the data
+   the user asked for; note any requested dimension the findings lack.
+Step 2: SELECT — pick the figures, names, and counts that answer the
+   request; anything absent from the findings must NOT appear in the reply.
+Step 3: COMPOSE — write the response using only Step 2 material, covering
+   every criterion under "You must satisfy".
+Step 4: SELF-CHECK — confirm every number in the draft traces to a finding
+   and every requested dimension is addressed; delete or flag what fails.
+
 OUTPUT FORMAT — STRICT RULES:
 - DO NOT output raw JSON, code fences, or structured payload objects (no `{{"title": ...}}` blocks in the answer).
 - CHARTS: when the user asked to SEE the data as a chart/graph/plot (图表/可视化), the

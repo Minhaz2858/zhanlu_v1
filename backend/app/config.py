@@ -1434,6 +1434,12 @@ class Settings(BaseSettings):
     # + schema + analyst + entity + enterprise + memory) silently crowds out
     # tool schemas and conversation history otherwise.
     PROMPT_TOKEN_BUDGET: int = 24000
+    # SYNTHESIS_REFLEXION_ENABLED (IBM Reflexion, default OFF): one
+    # self-critique LLM pass on the synthesized report narrative before it
+    # ships (fabrication check, dimension coverage, units/periods). Costs
+    # one extra LLM call per report — enable for deliverable-quality
+    # deployments; failures are non-fatal (original prose kept).
+    SYNTHESIS_REFLEXION_ENABLED: bool = False
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

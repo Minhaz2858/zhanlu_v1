@@ -368,7 +368,34 @@ If the task is **general** (no specific type detected):
 - Chart: bar if label+value columns exist; line if date column; otherwise omit
 - Insights (5-8): top-N share, distribution shape, data completeness, outlier detection, correlation signals
 - key_findings: data landscape summary, signal-vs-noise assessment, analytical pathways
-- recommendations: data quality improvements, deeper-dive suggestions"""
+- recommendations: data quality improvements, deeper-dive suggestions
+
+REASONING PROTOCOL (apply silently, in order, before writing):
+Step 1: GROUND — list (mentally) which columns in the snapshot hold the
+   measures the user asked about; if a needed measure is absent, say so
+   in the appendix note instead of substituting a different one.
+Step 2: AGGREGATE — compute totals, shares, and period-over-period deltas
+   ONLY from the snapshot rows and the PRE-COMPUTED ANALYSIS block.
+Step 3: RANK — identify top performers per requested dimension.
+Step 4: COMPOSE — write the 6-section narrative using only Step 1-3 facts.
+Step 5: SELF-CHECK — verify every number in your draft appears in the
+   snapshot or the analysis block; if any figure fails this check, delete
+   that sentence. Verify every user-requested dimension is covered.
+
+CONTRASTIVE EXAMPLES (few-shot — how a grounded vs. fabricated answer is judged):
+
+GOOD (grounded — every figure traceable to the snapshot):
+  Snapshot: [{"material_name": "Copper rod", "total_revenue": 66200000}, ...]
+  ✅ "Top material Copper rod generated 66.2M CNY, 35% of the 189.3M total."
+  Every number (66.2M, 35%, 189.3M) is computed from the snapshot rows.
+
+BAD (fabricated — rejected by the verifier):
+  Snapshot: the same two rows, no "channel" column, snapshot covers Jun–Jul 2026.
+  ❌ "Online channel grew 45% YoY to 210M, led by the Aluminum segment in Q4 2025."
+  "Online channel", "45%", "210M", "Aluminum", and "Q4 2025" appear NOWHERE in
+  the snapshot — this is hallucination from model memory. NEVER do this. If
+  the snapshot lacks the dimension or period the user wants, state the gap
+  in SECTION 6 and suggest the query that would answer it."""
 
 
 def _format_money(v: Any) -> str:
@@ -1099,9 +1126,82 @@ async def synthesize_report(
     if not payload.title:
         payload.title = "Sales report" if "report" in user_message.lower() else "Data summary"
 
+    # P2-9 (IBM Reflexion, flag-gated): one self-critique pass on the
+    # narrative before it ships. The critique sees the SAME snapshot and
+    # returns a corrected prose (or "" to keep the original) — never new
+    # data, never a re-synthesis of the JSON card.
+    if prose and rows:
+        reflexion_prose = await _reflexion_pass(
+            call_llm_fn, user_message, prose, rows_for_llm
+        )
+        if reflexion_prose:
+            prose = reflexion_prose
+
     return FinalizeResult(
         task_kind="report",
         assistant_content=prose or payload.summary,
         report_card_payload=payload,
         user_signal=user_signal,
     )
+
+
+_REFLEXION_RUBRIC = """\
+You are the QUALITY CRITIC for an executive data report. Review the DRAFT \
+below against the DATA SNAPSHOT and fix it. Rubric (check in order):
+1. FABRICATION: every number/name/date in the draft must appear in the \
+snapshot or be computable from it. DELETE any sentence with an \
+untraceable figure — do not replace it with a guess.
+2. COVERAGE: every dimension the user asked for must be addressed; flag \
+missing ones explicitly ("data for X was not in the retrieved rows").
+3. UNITS & PERIODS: amounts carry units; comparisons name both periods.
+4. HONEST GAPS: state what the data does NOT cover instead of papering over it.
+
+Return ONLY the corrected narrative prose (same language as the draft, \
+same 6-section structure, no JSON, no commentary about the review \
+itself). If the draft passes all four checks, return it unchanged.
+
+USER REQUEST:
+{user_message}
+
+DATA SNAPSHOT (first {row_count} rows):
+```json
+{rows_json}
+```
+
+DRAFT:
+{draft}"""
+
+
+async def _reflexion_pass(
+    call_llm_fn,
+    user_message: str,
+    draft: str,
+    rows: list,
+) -> str:
+    """One Reflexion critique call. Returns "" when disabled or on failure."""
+    try:
+        from app.config import settings
+
+        if not getattr(settings, "SYNTHESIS_REFLEXION_ENABLED", False):
+            return ""
+        prompt = _REFLEXION_RUBRIC.format(
+            user_message=user_message,
+            row_count=min(len(rows), 100),
+            rows_json=json.dumps(rows[:100], default=str, ensure_ascii=False),
+            draft=draft,
+        )
+        response = await call_llm_fn(
+            "You are a strict data-report quality critic.",
+            [{"role": "user", "content": prompt}],
+        )
+        critique = ((response or {}).get("content") or "").strip()
+        if not critique or len(critique) < 80:
+            return ""
+        logger.info(
+            "synthesis reflexion: draft %d chars → revised %d chars",
+            len(draft), len(critique),
+        )
+        return critique
+    except Exception as e:  # noqa: BLE001 — reflexion must never break synthesis
+        logger.warning("synthesis reflexion failed (non-fatal): %s", e)
+        return ""

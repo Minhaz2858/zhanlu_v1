@@ -133,9 +133,18 @@ async def _chat(
         "temperature": 0.0,
         "max_tokens": max_tokens,
     }
+    # P1-5 (IBM structured inputs, 2026-10-08): the planner output is
+    # machine-parsed, so request json_object mode. DeepSeek/vLLM accept
+    # response_format={"type":"json_object"}; providers that reject it are
+    # retried once without it (fail-soft — regex parse stays as fallback).
+    payload["response_format"] = {"type": "json_object"}
     async with httpx.AsyncClient(timeout=45.0) as client:
         resp = await client.post(_url, headers=_headers, json=payload)
-        resp.raise_for_status()
+        if resp.status_code >= 400:
+            # Some providers reject response_format — retry once without it.
+            if payload.pop("response_format", None) is not None:
+                resp = await client.post(_url, headers=_headers, json=payload)
+            resp.raise_for_status()
     data = resp.json()
     return (data["choices"][0]["message"].get("content") or "").strip()
 

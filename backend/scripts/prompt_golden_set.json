@@ -1,0 +1,16 @@
+{
+  "description": "Golden query set for prompt A/B regression (P2-8, IBM iterate-and-refine). Real recurring questions from production usage — lot counts, sales reports, forecast asks, follow-ups. The runner evaluates prompt variants against these and persists verdicts to prompt_ab_tests.",
+  "updated": "2026-10-08",
+  "queries": [
+    "How many inventory lots do we have?",
+    "Provide the total number of inventory lots",
+    "Give me a sales report for last month broken down by product",
+    "Top 10 materials by revenue this quarter",
+    "What is the contract execution rate by customer?",
+    "Show me inventory levels by warehouse",
+    "more details",
+    "export last month's sales as a PPT",
+    "Is the price forecast for product X trending up or down?",
+    "How many lots were received in July 2026?"
+  ]
+}
