@@ -1487,6 +1487,23 @@ class Settings(BaseSettings):
     # JWT_SECRET (zero-setup encryption). Rotate carefully: ciphertexts from
     # the old key become undecryptable.
     CREDENTIAL_ENCRYPTION_KEY: str = ""
+    # ── Agentic RAG + agentic chunking (2026-10-08) ──
+    # RAG_DOC_HYBRID_ENABLED: document KB retrieval uses dense + lexical RRF
+    #   hybrid scoring (the hybrid infrastructure existed but was only wired
+    #   to the NL2SQL side). Falls back to dense-only on any error.
+    RAG_DOC_HYBRID_ENABLED: bool = True
+    # RAG_GRADE_ENABLED: LLM grades whether retrieved passages answer the
+    #   question; insufficient → one query-rewrite + re-retrieve round
+    #   (agentic-RAG self-validation). Costs one judge call per answer.
+    RAG_GRADE_ENABLED: bool = True
+    # RAG_DECOMPOSE_ENABLED: multi-part questions are split into sub-queries,
+    #   retrieved in parallel, and merged (agentic-RAG planning agent).
+    RAG_DECOMPOSE_ENABLED: bool = True
+    # RAG_AGENTIC_CHUNKING_ENABLED: ingestion uses LLM proposition grouping
+    #   with per-chunk title/summary metadata (agentic chunking). Bounded:
+    #   docs < 800 tokens skipped, ≤6 LLM windows per doc, ≤64 chunks.
+    #   OFF by default — enable per deployment; it multiplies ingest cost.
+    RAG_AGENTIC_CHUNKING_ENABLED: bool = False
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

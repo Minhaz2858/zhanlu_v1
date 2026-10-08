@@ -280,6 +280,24 @@ def ingest_kb(db: Session, kb_id: str) -> bool:
         if not chunks:
             raise ValueError("chunker produced 0 chunks")
 
+        # P1-4 agentic chunking (IBM agentic-chunking): LLM proposition
+        # grouping + per-chunk title/summary metadata. Opt-in flag; falls
+        # back to the recursive chunks on any failure.
+        try:
+            from app.services.document_ingestion.agentic_rag import (
+                agentic_chunk_text,
+            )
+
+            agentic = agentic_chunk_text(text)
+            if agentic:
+                chunks = agentic
+                logger.info(
+                    "ingest_kb: agentic chunking produced %d chunks for %s",
+                    len(chunks), kb.name,
+                )
+        except Exception as _ac_err:  # noqa: BLE001 — non-fatal
+            logger.debug("agentic chunking skipped: %s", _ac_err)
+
         kb.indexing_status = "indexing"
         db.commit()
 

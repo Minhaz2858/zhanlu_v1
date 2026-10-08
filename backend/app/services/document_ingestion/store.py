@@ -492,6 +492,9 @@ def upsert_chunks(
             "chunk_index": c["index"],
             "file_name": m.get("file_name", ""),
             "file_type": m.get("file_type", ""),
+            # P1-4 agentic chunking: optional LLM-generated metadata
+            "title": (c.get("title") or "")[:200],
+            "summary": (c.get("summary") or "")[:500],
         }
         for c, m in zip(chunks, metas)
     ]
