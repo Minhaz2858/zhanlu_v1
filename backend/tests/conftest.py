@@ -92,6 +92,51 @@ def _ensure_shared_sqlite_engine():
     yield
 
 
+# --- App-DB bootstrap for TestClient-driven tests ---------------------------
+# Tests that drive the app through ``fastapi.testclient.TestClient`` (login →
+# endpoint) need the same database the app's own lifespan would build: the full
+# schema plus a seeded admin user. ``TestClient(app)`` used as a plain object
+# does NOT run the lifespan, so ``Base.metadata.create_all`` never fires and the
+# first query (e.g. the login's ``SELECT ... FROM users``) dies with
+# ``sqlite3.OperationalError: no such table: users``. This session-scoped
+# fixture closes that gap once, on the shared engine that ``get_db`` uses.
+@pytest.fixture(autouse=True, scope="session")
+def _bootstrap_app_schema(_ensure_shared_sqlite_engine):
+    """Create the full schema on the shared engine and seed the admin user.
+
+    Depends on ``_ensure_shared_sqlite_engine`` so the StaticPool engine is
+    installed first. Mirrors ``main.lifespan`` (create_all) plus the admin seed
+    the auth tests log in with (admin@zhanlu.dev / admin123).
+    """
+    import app.models  # noqa: F401 — register every mapper on Base.metadata
+    from app.database import Base, SessionLocal, engine
+
+    Base.metadata.create_all(bind=engine)
+
+    from app.models.user import User
+    from app.services.auth_service import auth_service
+
+    db = SessionLocal()
+    try:
+        existing = db.query(User).filter(User.email == "admin@zhanlu.dev").first()
+        if existing is None:
+            db.add(
+                User(
+                    email="admin@zhanlu.dev",
+                    full_name="Admin",
+                    password_hash=auth_service.hash_password("admin123"),
+                    role="admin",
+                    org_id="default-org",
+                    app_id="default-app",
+                    is_deleted=False,
+                )
+            )
+            db.commit()
+    finally:
+        db.close()
+    yield
+
+
 # --- Config-driven domain signals (generic test data) -----------------------
 # The platform is industry-agnostic: elasticities / seasonal rules / upstream
 # maps are per-app domain-config data. Empty config = no-op overlay. This

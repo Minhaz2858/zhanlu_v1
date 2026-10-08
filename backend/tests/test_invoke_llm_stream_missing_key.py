@@ -11,7 +11,6 @@ This test locks in the fix: the endpoint must emit a clear ``error``
 event within a few hundred ms when no API key is configured, so the
 frontend can surface a readable error.
 """
-from builtins import ExceptionGroup  # py3.11+ builtin; explicit for linters
 from unittest.mock import patch
 
 
@@ -70,45 +69,46 @@ def test_stream_returns_clear_error_when_api_key_missing():
 
 
 def test_stream_attempts_call_when_api_key_set():
-    """With a (fake) key set, the endpoint must proceed to actually call httpx
-    — proving the pre-flight check only short-circuits when key is missing."""
+    """With a (fake) key set, the endpoint must proceed PAST the pre-flight
+    check and actually construct + enter the httpx client.
+
+    We prove the pass-through by mocking ``httpx.AsyncClient`` so that entering
+    it raises: if the pre-flight check had short-circuited (as it does when the
+    key is missing) the client would never be touched. We additionally assert
+    the unexpected error is surfaced as an SSE ``error`` event rather than
+    leaking out of the ASGI app (fail-safe streaming)."""
     from fastapi.testclient import TestClient
     from main import app
 
     token = _login_token()
     client = TestClient(app)
 
-    with patch("app.routers.integrations.settings.OPENAI_API_KEY", "sk-fake-test-key"):
-        with patch("app.routers.integrations.httpx.AsyncClient") as mock_client_cls:
-            # The fake client should be ENTERED (proves we got past the
-            # pre-flight check). It throws RuntimeError to short-circuit
-            # the actual HTTP attempt.
-            mock_client_cls.return_value.__aenter__.side_effect = RuntimeError(
-                "PRE_FLIGHT_PASSED"
-            )
-            pre_flight_passed = False
-            try:
-                with client.stream(
-                    "POST",
-                    "/api/apps/local-zhanlu-app/integration-endpoints/Core/InvokeLLMStream",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "prompt": "Say hi",
-                        "messages": [{"role": "user", "content": "Say hi"}],
-                    },
-                ) as resp:
-                    for _ in resp.iter_lines():
-                        pass
-            except (RuntimeError, ExceptionGroup) as e:
-                # ExceptionGroup wraps the RuntimeError from the mock
-                if "PRE_FLIGHT_PASSED" in str(e):
-                    pre_flight_passed = True
-                else:
-                    raise
+    with patch("app.routers.integrations.settings.OPENAI_API_KEY", "unit-test-key"), \
+         patch("app.routers.integrations.httpx.AsyncClient") as mock_client_cls:
+        # Entering the client raises, short-circuiting the real HTTP attempt.
+        mock_client_cls.return_value.__aenter__.side_effect = RuntimeError(
+            "PRE_FLIGHT_PASSED"
+        )
+        with client.stream(
+            "POST",
+            "/api/apps/local-zhanlu-app/integration-endpoints/Core/InvokeLLMStream",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "prompt": "Say hi",
+                "messages": [{"role": "user", "content": "Say hi"}],
+            },
+        ) as resp:
+            assert resp.status_code == 200
+            chunks = list(resp.iter_lines())
 
-    assert pre_flight_passed, (
-        "Pre-flight check did not pass through to httpx when API key was set"
+    # Pre-flight passed through: the client was constructed AND entered.
+    mock_client_cls.assert_called_once()
+    mock_client_cls.return_value.__aenter__.assert_called_once()
+    # The unexpected error surfaced as an SSE error event (not an opaque 500).
+    body = " ".join(chunks)
+    assert "error" in body.lower(), (
+        f"Expected an SSE error event from the failed client; got: {chunks}"
     )

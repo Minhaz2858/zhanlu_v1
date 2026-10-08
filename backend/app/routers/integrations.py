@@ -170,6 +170,15 @@ async def invoke_llm_stream(app_id: str, body: dict = None, user=Depends(get_cur
             yield f"data: {json.dumps({'error': f'LLM API error: {err_body}'})}\n\n"
         except httpx.RequestError as e:
             yield f"data: {json.dumps({'error': f'LLM request failed: {str(e)}'})}\n\n"
+        except Exception as e:  # noqa: BLE001 — fail-safe: never leak mid-stream
+            # Any other error (provider SDK bug, malformed payload, unexpected
+            # runtime exception) must surface as a readable SSE ``error`` event
+            # rather than propagating out of the generator — which Starlette
+            # wraps in a TaskGroup ExceptionGroup and returns as an opaque 500,
+            # exactly the "opaque Send errors" class of bug this endpoint exists
+            # to prevent.
+            logger.exception("invoke_llm_stream: unexpected error mid-stream")
+            yield f"data: {json.dumps({'error': f'LLM stream failed: {type(e).__name__}: {e}'})}\n\n"
 
     return StreamingResponse(
         event_stream(),
