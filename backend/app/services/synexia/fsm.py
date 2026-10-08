@@ -932,6 +932,10 @@ class SynexiaFSM:
                 artifact_ids = []
                 file_exports = {}
                 export_artifact_id = None
+                # Suppress the report card too — otherwise the frontend still
+                # renders the deliverable the gate decided was too
+                # low-confidence to ship.
+                report_card_payload = None
                 factors = dict(factors or {})
                 factors["quality_gate"] = quality_gate
                 notice = (

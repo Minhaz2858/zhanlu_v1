@@ -129,8 +129,12 @@ async def execute_tool_batch(
         sub_call_limit: max sub-calls a single code block may dispatch.
 
     Returns:
-        Ordered list of result dicts, one per input call. Exceptions raised
-        by ``invoke`` are converted to ``{"success": False, "error": ...}``.
+        Ordered list of result dicts, one per input call. On the multi-call
+        (serial / parallel) paths, exceptions raised by ``invoke`` are
+        converted to ``{"success": False, "error": ...}``. The SINGLE-call
+        fast path is deliberately the exception: it PROPAGATES the exception
+        (matches the original v2/resume/v3 behavior — see
+        ``test_single_call_exception_propagates``).
     """
     state = PipelineState(
         invoke=invoke,

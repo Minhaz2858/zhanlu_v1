@@ -92,11 +92,23 @@ def apply_guardrails(
     executable: list = []
     blocked: list = []
     for call in parsed_calls:
-        gd = before_call(call["tool_name"], call["args"])
+        # Fail CLOSED, same as tool_executor's `_guard` / `_blocked_result`: a
+        # raising guard must refuse the call with a reason, never let it
+        # through (or let the factory's failure unblock it).
+        try:
+            gd = before_call(call["tool_name"], call["args"])
+        except Exception as exc:
+            logger.warning("guardrail raised for %s: %s", call.get("tool_name"), exc)
+            blocked.append({"success": False, "error": f"guardrail error: {exc}"})
+            continue
         if gd.allows_execution:
             executable.append(call)
         elif blocked_result_factory is not None:
-            blocked.append(json.loads(blocked_result_factory(gd)))
+            try:
+                blocked.append(json.loads(blocked_result_factory(gd)))
+            except Exception as exc:
+                logger.warning("blocked-result factory raised for %s: %s", call.get("tool_name"), exc)
+                blocked.append({"success": False, "error": "blocked by guardrail"})
         else:
             blocked.append({"success": False, "error": "blocked by guardrail"})
     return executable, blocked

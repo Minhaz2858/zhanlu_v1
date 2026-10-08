@@ -176,6 +176,12 @@ def prune_between_fsm_states(
                     msg = {**msg, "tool_calls": kept_tcs}
         out.append(msg)
 
+    # If the contiguous tool run reached the end of the list, `insert_at` is
+    # len(messages) and the `i == insert_at` insert above never fires — append
+    # the checkpoint so the elided results are still annotated.
+    if not checkpoint_inserted:
+        out.append({"role": "assistant", "content": checkpoint_content})
+
     kept_chars = sum(
         len(str(messages[i].get("content", ""))) for i in indices_to_keep
     )

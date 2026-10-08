@@ -377,7 +377,11 @@ async def _ask_data_agent(
     # users saw). The wall-clock cap (DATA_AGENT_BUDGET_SECONDS) still
     # bounds total time; the hard cap is 6 for genuinely complex multi-table
     # questions.
-    max_iterations = min(args.get("max_iterations", 4), 10)
+    try:
+        _max_iter = int(args.get("max_iterations") or 4)
+    except (TypeError, ValueError):
+        _max_iter = 4
+    max_iterations = max(1, min(_max_iter, 10))
     final_text = ""
     # Per-call wall-clock override (2026-08-27): the orchestrator injects
     # `budget_seconds` for dashboard turns so data collection is NOT
@@ -443,13 +447,15 @@ async def _ask_data_agent(
             llm_response = await _call_llm_with_retry(messages, tool_schemas, endpoint=endpoint)
         except Exception as e:
             logger.warning("ask_data_agent LLM call failed on iter %d: %s", iteration, e)
-            # First-iteration failure is a HARD failure: no rows
-            # guaranteed, and the calling LLM has no signal beyond
-            # whatever we put in `final_text`. Later-iteration
-            # failures may still have rows from a previous iteration;
-            # we set initial_llm_failure and fall through to the
-            # synthesis / fallback path.
-            _initial_llm_failure = str(e)
+            # Hard failure ONLY when no data has been captured yet (the
+            # documented contract: "no rows are guaranteed"). Once rows exist,
+            # an LLM hiccup on a later iteration is a SOFT failure — set
+            # `_synthesis_llm_failure` and keep `success` True, so a run that
+            # already retrieved its data is not reported as a hard failure.
+            if iteration == 0 or not state.get("last_rows"):
+                _initial_llm_failure = str(e)
+            else:
+                _synthesis_llm_failure = str(e)
             break
         _llm_total_s += time.monotonic() - _llm_t0
 
@@ -1597,10 +1603,10 @@ async def _fetch_data_batch(
             return {
                 "label": q["label"],
                 "success": result.get("success", False),
-                "rows": result.get("rows", []),
-                "columns": result.get("columns", []),
+                "rows": result.get("rows") or [],
+                "columns": result.get("columns") or [],
                 "sql": q["sql"],
-                "row_count": len(result.get("rows", [])),
+                "row_count": len(result.get("rows") or []),
                 "elapsed_s": round(elapsed, 1),
                 "error": result.get("error"),
             }
