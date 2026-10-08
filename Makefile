@@ -18,7 +18,13 @@
 #                      Use this whenever you suspect "the wrong DB" or empty data.
 
 .PHONY: up down down-v logs smoke build reset \
-        db-check db-clear db-setup db-reset db-info
+        db-check db-clear db-setup db-reset db-info check-tokens
+
+# ── Enterprise-neutralization gate ────────────────────────────────────
+# Fails if any enterprise-specific token appears in the platform's own source.
+# See docs/superpowers/specs/2026-10-08-enterprise-neutralization-design.md
+check-tokens:
+	@python3 scripts/check_no_enterprise_tokens.py
 
 # ── Core commands ─────────────────────────────────────────────────────
 
@@ -91,7 +97,7 @@ db-info:
 
 # ── Testing ───────────────────────────────────────────────────────────
 
-smoke:
+smoke: check-tokens
 	@echo "Running E2E smoke test..."
 	@chmod +x scripts/smoke_e2e.sh
 	@./scripts/smoke_e2e.sh

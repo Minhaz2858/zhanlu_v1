@@ -1,0 +1,30 @@
+# Enterprise-neutralization denylist.
+# One token per line. '#' starts a comment. Blank lines ignored.
+# Matching rule (implemented by scripts/check_no_enterprise_tokens.py):
+#   - token matching [A-Za-z0-9_]+  -> word-boundary, case-insensitive
+#   - any other token (dots/dashes/CJK) -> literal, case-sensitive substring
+# Company / platform
+ecisco
+ecisco_bi
+EDIA
+edia_mysql
+aipdp
+# Vertical products & tables
+c5c9
+c5_c9
+C5_RESIN
+raffinate
+md_t_lz_price
+lz_v_
+petrochemical
+erp_v_sale_orderentry
+# CJK product/company terms
+惠州
+伊斯科
+异戊二烯
+戊烷
+# Dashboard slugs (punctuated -> substring match)
+c5c9-daily-sales
+c5c9-live-market-reference
+sales-perf-dashboard-c5c9
+sales-performance-c5c9

@@ -1,0 +1,2 @@
+# Justified survivors: "<path-substring>:<token>  # reason".
+# Target end state: this file is EMPTY.
