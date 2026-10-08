@@ -60,13 +60,19 @@ def test_static_targets_no_longer_include_erp_where_1_1():
     )
 
 
-def test_static_targets_still_has_10_md_lz_products():
-    """The md_t_lz_price-primary products remain in the static list."""
+def test_static_targets_use_md_lz_price_as_primary():
+    """All 11 static targets are md_t_lz_price-primary (the canonical set).
+
+    Matches app.services.forecasting.seed_ecisco_targets.ECISCO_FORECAST_TARGETS
+    and migration 037: 11 entries, every one sourced from md_t_lz_price. The
+    longer-history ERP views for the same products ride along as
+    ``extra_sources`` — they are not a different primary table.
+    """
     md_lz_count = sum(
         1 for t in ECISCO_FORECAST_TARGETS
         if t["datasource"].get("table") == "md_t_lz_price"
     )
-    assert md_lz_count == 6  # 6 of 11 static targets use md_t_lz_price as primary
+    assert md_lz_count == 11
 
 
 def test_discover_skus_inserts_one_target_per_sku(db_session):

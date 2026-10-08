@@ -88,25 +88,27 @@ class TestNightlyTaskRegistration:
 
 
 class TestSeedEciscoTargets:
-    """Verify seed_ecisco_forecast_targets idempotency."""
+    """The canonical Ecisco BI forecast targets.
+
+    Target definitions were de-hardcoded out of a bespoke seed module into the
+    per-app domain config (``app/domain_configs/default.json``); an empty agent
+    name resolves that default config.
+    """
 
     def test_seed_function_exists(self):
-        """The seed function must be importable."""
-        from app.services.forecasting.seed_ecisco_targets import (
-            seed_ecisco_forecast_targets,
-        )
-        assert callable(seed_ecisco_forecast_targets)
+        """The config-driven seed function must be importable."""
+        from app.services.forecasting.seed_targets import seed_forecast_targets
+        assert callable(seed_forecast_targets)
 
     def test_seed_returns_11_targets(self):
-        """seed_ecisco_forecast_targets should define 11 hardcoded targets.
+        """The default domain config should define 11 canonical targets.
 
-        10 md_t_lz_price products + ecisco.mixed_c5 (Yangzi Cracked C5).
-        The 2 ERP products (c5_resin, raffinate_c5) are seeded dynamically
-        via discover_and_seed_sku_targets(), not in this static list.
+        11 md_t_lz_price products. The 2 ERP products (c5_resin, raffinate_c5)
+        are seeded dynamically via discover_and_seed_sku_targets(), not in this
+        static list.
         """
-        from app.services.forecasting.seed_ecisco_targets import (
-            ECISCO_FORECAST_TARGETS,
-        )
-        assert len(ECISCO_FORECAST_TARGETS) == 11, (
-            f"Expected 11 Ecisco BI targets, got {len(ECISCO_FORECAST_TARGETS)}"
+        from app.services.domain_config import get_domain_config
+        targets = get_domain_config("").get("forecast_targets", [])
+        assert len(targets) == 11, (
+            f"Expected 11 Ecisco BI targets, got {len(targets)}"
         )

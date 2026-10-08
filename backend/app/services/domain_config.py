@@ -47,6 +47,12 @@ _DEFAULT_DIRS = [
     Path(__file__).resolve().parent.parent / "domain_configs",
 ]
 
+# Config base name loaded when no agent name is supplied. The seeding /
+# bootstrap callers (``seed_forecast_targets(db)``, ``discover_and_seed_sku_targets(db)``)
+# always pass an empty agent name, so an empty name means "the app's default
+# domain config". Absent that file, behaviour is unchanged (empty = generic).
+_DEFAULT_CONFIG_BASENAME = "default"
+
 # normalize agent name -> config file base name (lowercase, non-alnum -> _)
 def _safe_name(name: str) -> str:
     import re
@@ -87,9 +93,14 @@ def _load_file_for(agent_name: str) -> dict[str, Any]:
 
 @lru_cache(maxsize=256)
 def get_domain_config(agent_name: str | None) -> dict[str, Any]:
-    """Return the (cached) domain config dict for an agent. Empty = generic."""
+    """Return the (cached) domain config dict for an agent.
+
+    An empty/absent agent name resolves the app's DEFAULT config
+    (``domain_configs/default.json``); when that file is absent the result is
+    ``{}`` — i.e. the platform behaves as a generic enterprise system.
+    """
     if not agent_name:
-        return {}
+        return _load_file_for(_DEFAULT_CONFIG_BASENAME)
     return _load_file_for(agent_name)
 
 

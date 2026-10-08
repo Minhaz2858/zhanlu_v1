@@ -1,0 +1,221 @@
+{
+  "_comment": "Default app domain config. Loaded when no agent name is supplied (the seeding/bootstrap callers always pass an empty agent name). Restores the de-hardcoded forecast-target definitions from the historical app.services.forecasting.seed_ecisco_targets module so seed_forecast_targets()/discover_and_seed_sku_targets() actually seed at runtime.",
+  "forecast_targets": [
+    {
+      "product_key": "ecisco.crude_oil",
+      "name": "Crude Oil",
+      "report_order": 1,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": []
+      }
+    },
+    {
+      "product_key": "ecisco.naphtha",
+      "name": "Naphtha",
+      "report_order": 2,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": []
+      }
+    },
+    {
+      "product_key": "ecisco.cracked_c5",
+      "name": "Cracked C5",
+      "report_order": 3,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_裂解c5_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '裂解C5'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.cracked_c9",
+      "name": "Cracked C9",
+      "report_order": 4,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_裂解c9_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '裂解C9'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.mixed_c5",
+      "name": "Mixed C5 (Yangzi Cracked C5)",
+      "report_order": 5,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": []
+      }
+    },
+    {
+      "product_key": "ecisco.isoprene",
+      "name": "Isoprene",
+      "report_order": 6,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_异戊二烯_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '异戊二烯'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.piperylene",
+      "name": "Piperylene",
+      "report_order": 7,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_间戊二烯_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '间戊二烯'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.dcpd",
+      "name": "DCPD",
+      "report_order": 8,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_双环戊二烯_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '双环戊二烯'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.sis",
+      "name": "SIS",
+      "report_order": 9,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_sis_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = 'SIS'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.blowing_agent",
+      "name": "Blowing Agent",
+      "report_order": 10,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_戊烷泡发剂_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '戊烷发泡剂'"
+          }
+        ]
+      }
+    },
+    {
+      "product_key": "ecisco.styrene",
+      "name": "Styrene",
+      "report_order": 11,
+      "include_in_weekly_report": true,
+      "datasource": {
+        "source": "mysql_mirror",
+        "table": "md_t_lz_price",
+        "time_col": "FDATE",
+        "measure": "FTAXPRICE",
+        "name_col": "FMATERIAL_NAME",
+        "extra_sources": [
+          {
+            "table": "lz_v_苯乙烯_data",
+            "time_col": "biz_date(业务日期)",
+            "measure": "tax_price(含税单价)",
+            "where": "`material_name(产品名称)` = '苯乙烯'"
+          }
+        ]
+      }
+    }
+  ],
+  "erp_sku_targets": {
+    "c5_resin": "sale_erp_v_碳五石油树脂_data",
+    "raffinate_c5": "sale_erp_v_抽余碳五_data"
+  },
+  "forecast_key_prefix": "ecisco.",
+  "forecast_min_sku_rows": 50
+}
