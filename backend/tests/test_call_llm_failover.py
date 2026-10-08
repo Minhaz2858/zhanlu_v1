@@ -20,8 +20,8 @@ from app.services import llm_service
 
 def _providers():
     return [
-        SimpleNamespace(name="p1", base_url="http://p1", api_key="k1", model="m1"),
-        SimpleNamespace(name="p2", base_url="http://p2", api_key="k2", model="m2"),
+        SimpleNamespace(name="p1", base_url="http://p1", api_key="k1", model="m1", tier="flagship"),
+        SimpleNamespace(name="p2", base_url="http://p2", api_key="k2", model="m2", tier="flagship"),
     ]
 
 
