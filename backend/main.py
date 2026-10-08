@@ -543,6 +543,19 @@ async def lifespan(app: FastAPI):
         f"(org_id={settings.DEFAULT_ORG_ID}, app_id={settings.DEFAULT_APP_ID})"
     )
 
+    # ── Fault-tolerance check: warn on a single-provider setup ──
+    try:
+        from app.services.llm_service import get_llm_providers
+
+        if len(get_llm_providers()) < 2:
+            startup_logger.warning(
+                "LLM single point of failure: LLM_FALLBACK_PROVIDERS is empty — "
+                "if the primary provider goes down, all agent turns fail. "
+                "Configure at least one same-tier fallback provider."
+            )
+    except Exception:
+        pass
+
     if settings.is_sqlite:
         Base.metadata.create_all(bind=engine)
         _run_auto_migrations()

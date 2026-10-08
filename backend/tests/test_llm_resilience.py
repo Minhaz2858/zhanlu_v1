@@ -97,6 +97,47 @@ async def test_get_embedding_uses_sync_timeout(monkeypatch):
     assert captured["timeout"] == 4.5  # wired from settings, not hard-coded
 
 
+# ---------------------------------------------------------------- A3 tiers
+
+def test_fallback_tier_filtering(monkeypatch):
+    """Fallbacks are pinned to the primary's model tier so schemas stay
+    consistent; fail-open when no same-tier fallback exists."""
+    from types import SimpleNamespace
+    from app.services import llm_service as ls
+
+    providers = [
+        ls.LLMProvider(name="primary", base_url="http://a", api_key="k", model="m-flagship", tier="flagship"),
+        ls.LLMProvider(name="fb-reasoning", base_url="http://b", api_key="k", model="m-reasoning", tier="flagship"),
+        ls.LLMProvider(name="fb-fast", base_url="http://c", api_key="k", model="m-fast", tier="fast"),
+    ]
+    filtered = ls.filter_providers_by_tier(providers)
+    assert [p.name for p in filtered] == ["primary", "fb-reasoning"]
+
+    # fail-open: no same-tier fallback -> all fallbacks kept
+    providers_fast = [providers[0], providers[2]]
+    assert [p.name for p in ls.filter_providers_by_tier(providers_fast)] == ["primary", "fb-fast"]
+
+    # single provider: unchanged
+    assert ls.filter_providers_by_tier([providers[0]]) == [providers[0]]
+
+
+def test_get_llm_providers_parses_tier(monkeypatch):
+    from app.config import settings
+    from app.services import llm_service as ls
+
+    monkeypatch.setattr(settings, "OPENAI_BASE_URL", "http://a")
+    monkeypatch.setattr(settings, "OPENAI_API_KEY", "k")
+    monkeypatch.setattr(settings, "LLM_MODEL", "m1")
+    monkeypatch.setattr(
+        settings, "LLM_FALLBACK_PROVIDERS",
+        '[{"name":"fb","base_url":"http://b","api_key":"k2","model":"m2","tier":"flagship"}]',
+    )
+    providers = ls.get_llm_providers()
+    assert providers[0].tier == "flagship"  # primary default tier
+    assert providers[1].name == "fb"
+    assert providers[1].tier == "flagship"
+
+
 # ---------------------------------------------------------------- A2 retry
 
 @pytest.mark.asyncio

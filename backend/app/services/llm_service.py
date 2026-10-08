@@ -300,6 +300,7 @@ class LLMProvider:
     base_url: str
     api_key: str
     model: str
+    tier: str = "flagship"
 
 
 def get_llm_providers() -> list[LLMProvider]:
@@ -339,11 +340,26 @@ def get_llm_providers() -> list[LLMProvider]:
                             base_url=fb.get("base_url", ""),
                             api_key=fb.get("api_key", ""),
                             model=fb.get("model") or settings.LLM_MODEL,
+                            tier=fb.get("tier") or "flagship",
                         )
                     )
         except (json.JSONDecodeError, TypeError) as e:
             logger.warning("LLM_FALLBACK_PROVIDERS parse failed (non-fatal): %s", e)
     return [p for p in providers if p.base_url and p.api_key]
+
+
+def filter_providers_by_tier(providers: list[LLMProvider]) -> list[LLMProvider]:
+    """Pin fallbacks to the primary provider's model tier (schema consistency).
+
+    Keeps the primary (index 0) plus fallbacks whose ``tier`` matches; if no
+    fallback matches, returns ALL fallbacks (fail-open — never fewer than the
+    full fallback chain).
+    """
+    if len(providers) <= 1:
+        return list(providers)
+    primary = providers[0]
+    same_tier = [p for p in providers[1:] if p.tier == primary.tier]
+    return [primary] + (same_tier or providers[1:])
 
 
 def _provider_chat_url(provider: LLMProvider) -> str:
@@ -630,7 +646,7 @@ async def call_llm(
             )
         ]
     else:
-        providers = get_llm_providers()
+        providers = filter_providers_by_tier(get_llm_providers())
         if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
             chosen = select_provider(providers)
             # Reorder: chosen first, then the rest
@@ -1011,7 +1027,7 @@ async def stream_chat_completion(
             )
         ]
     else:
-        providers = get_llm_providers()
+        providers = filter_providers_by_tier(get_llm_providers())
         if getattr(settings, "LLM_HEALTH_ROUTING_ENABLED", False) and len(providers) > 1:
             chosen = select_provider(providers)
             providers = [chosen] + [p for p in providers if p.name != chosen.name]
