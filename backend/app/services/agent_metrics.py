@@ -17,11 +17,14 @@ FastAPI async architecture.
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -125,6 +128,12 @@ class AgentMetrics:
         self.background_review_completed = Counter()
         self.background_review_failed = Counter()
 
+        # Tool-selection efficiency (IBM: lightweight tool retrieval needs a
+        # miss-rate signal — if the loop executes a tool that dynamic
+        # selection excluded, selection accuracy is degrading).
+        self.tools_selected = Histogram()
+        self.tools_selection_miss = Counter()
+
     def record_guardrail_warning(self, code: str) -> None:
         self.guardrail_warnings[code].inc()
 
@@ -182,6 +191,17 @@ class AgentMetrics:
         elif status == "failed":
             self.background_review_failed.inc()
 
+    def record_tool_selection(self, selected_count: int) -> None:
+        self.tools_selected.observe(selected_count)
+
+    def record_tool_selection_miss(self, tool_name: str, selected_count: int = 0) -> None:
+        self.tools_selection_miss.inc()
+        logger.warning(
+            "tool_selection MISS: tool '%s' executed but excluded by dynamic "
+            "selection (selected_count=%s) — consider promoting to core",
+            tool_name, selected_count,
+        )
+
     def get_snapshot(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot of all metrics."""
         uptime = time.time() - self._start_time
@@ -228,6 +248,10 @@ class AgentMetrics:
                 "spawned": self.background_review_spawned.value,
                 "completed": self.background_review_completed.value,
                 "failed": self.background_review_failed.value,
+            },
+            "tool_selection": {
+                "selected_count": self.tools_selected.to_dict(),
+                "misses": self.tools_selection_miss.value,
             },
         }
 

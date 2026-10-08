@@ -12712,10 +12712,11 @@ async def add_message_stream(
     # Dynamic tool loading (2026-08-31): keep the always-on core + the
     # intent-relevant periphery tools for THIS turn. Cuts ~10-20k tokens of
     # tool schemas per turn. Fail-open: any error returns the full list.
+    # turn_key registers the selection so the loop can report misses.
     try:
         from app.services.dynamic_tools import select_tools_for_turn
 
-        tools = select_tools_for_turn(tools, user_content)
+        tools = select_tools_for_turn(tools, user_content, turn_key=conversation_id)
     except Exception as _dt_err:
         logger.debug("v3 dynamic tool loading skipped (non-fatal): %s", _dt_err)
 
@@ -17005,6 +17006,14 @@ async def add_message_stream(
                         except (ValueError, TypeError):
                             _digest_payload = {"summary": _result_str}
                         _bus.digest_tool_result(tool_name, _digest_payload)
+                except Exception:
+                    pass
+                # Tool-selection miss telemetry (IBM continuous optimization):
+                # a miss means dynamic selection excluded a tool the model
+                # actually needed — feeds TOOL_LOADING_PERIPHERY_TOP_K tuning.
+                try:
+                    from app.services.dynamic_tools import record_selection_miss
+                    record_selection_miss(conversation_id, tool_name)
                 except Exception:
                     pass
                 # FIX 2026-08-24: harvest rich-text answers from market-research

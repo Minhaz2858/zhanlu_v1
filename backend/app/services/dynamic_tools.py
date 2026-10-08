@@ -22,6 +22,7 @@ original relative order) so provider tool-ordering heuristics keep working.
 from __future__ import annotations
 
 import logging
+import threading
 from typing import Optional
 
 from app.config import settings
@@ -163,12 +164,18 @@ def _select_periphery(
 def select_tools_for_turn(
     schemas: list[dict],
     user_message: Optional[str] = None,
+    *,
+    turn_key: Optional[str] = None,
 ) -> list[dict]:
     """Filter ``schemas`` to the always-on core + intent-relevant periphery.
 
     - ``TOOL_LOADING_MODE=all`` → returns ``schemas`` unchanged.
     - ``TOOL_LOADING_MODE=dynamic`` → core + top-k periphery.
     - Any failure → returns ``schemas`` unchanged (fail-open).
+
+    When ``turn_key`` is given, the selected tool names are registered so
+    ``record_selection_miss`` can detect (IBM continuous optimization) when
+    the loop later executes a tool the selection excluded.
 
     Schemas missing a ``function.name`` are always kept (defensive).
     """
@@ -197,8 +204,65 @@ def select_tools_for_turn(
         top_k = int(getattr(settings, "TOOL_LOADING_PERIPHERY_TOP_K", 12) or 12)
         selected = _select_periphery(user_message or "", periphery, top_k)
         if not selected or len(selected) == len(periphery):
+            # Fail-open full list — still register so miss telemetry knows
+            # every tool was available (no false misses later).
+            if turn_key:
+                _register_turn_selection(turn_key, core_list, periphery)
             return list(schemas)
-        return core_list + selected
+        result = core_list + selected
+        if turn_key:
+            _register_turn_selection(turn_key, core_list, selected)
+        return result
     except Exception as exc:  # noqa: BLE001
         logger.warning("dynamic_tools: selection failed, using full list: %s", exc)
         return list(schemas)
+
+
+# ── Selection-miss telemetry (IBM: measure the efficiency win) ────────────
+
+_TURN_SELECTION: dict[str, set[str]] = {}
+_TURN_MISSES: dict[str, set[str]] = {}
+_SELECTION_LOCK = threading.Lock()
+_TURN_SELECTION_MAX = 1000
+
+
+def _register_turn_selection(turn_key: str, core_list: list, selected: list) -> None:
+    from app.services.agent_metrics import metrics
+
+    names = {_schema_name(s) for s in [*core_list, *selected]}
+    with _SELECTION_LOCK:
+        if len(_TURN_SELECTION) >= _TURN_SELECTION_MAX:
+            _TURN_SELECTION.clear()
+            _TURN_MISSES.clear()
+        _TURN_SELECTION[turn_key] = names
+    try:
+        metrics.record_tool_selection(len(names))
+    except Exception:  # noqa: BLE001 — telemetry must never break selection
+        pass
+
+
+def record_selection_miss(turn_key: Optional[str], tool_name: str) -> None:
+    """Record when the loop executes a tool dynamic selection excluded.
+
+    Only meaningful in dynamic mode; the loop wiring should gate on it.
+    Unknown ``turn_key`` (no registered selection) still counts — the tool
+    was available in the full list but not selected. Each distinct
+    (turn, tool) miss is counted once — repeated calls of the same tool in
+    the same turn are normal use, not repeated misses.
+    """
+    from app.services.agent_metrics import metrics
+
+    selected: set[str] | None = None
+    if turn_key:
+        with _SELECTION_LOCK:
+            selected = _TURN_SELECTION.get(turn_key)
+            if selected is not None and tool_name in selected:
+                return  # selected — not a miss
+            missed = _TURN_MISSES.setdefault(turn_key, set())
+            if tool_name in missed:
+                return  # already counted this turn
+            missed.add(tool_name)
+    try:
+        metrics.record_tool_selection_miss(tool_name, len(selected) if selected else 0)
+    except Exception:  # noqa: BLE001
+        pass
