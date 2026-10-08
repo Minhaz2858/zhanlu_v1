@@ -15,10 +15,10 @@ from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, get_current_user_required
 from app.services import workspace_settings_service
 
-router = APIRouter(prefix="/workspace-settings", tags=["workspace-settings"])
+router = APIRouter(prefix="/workspace-settings", tags=["workspace-settings"], dependencies=[Depends(get_current_user_required)])
 
 
 class WorkspaceSettingsPayload(BaseModel):

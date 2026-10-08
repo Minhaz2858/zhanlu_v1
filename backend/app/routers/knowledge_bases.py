@@ -32,7 +32,7 @@ from app.services.universal_analytics.auto_discover import _write_targets
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/apps/{app_id}/knowledge_bases", tags=["KnowledgeBase"])
+router = APIRouter(prefix="/apps/{app_id}/knowledge_bases", tags=["KnowledgeBase"], dependencies=[Depends(get_current_user_required)])
 
 
 class TestConnectionRequest(BaseModel):

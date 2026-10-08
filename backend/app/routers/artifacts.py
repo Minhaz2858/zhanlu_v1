@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.deps import get_current_user_required
 from app.services.artifacts.artifact_service import ArtifactService
 from app.services.artifacts.exporters import SUPPORTED_FORMATS
 from app.services.artifacts.exporters._theme import list_themes
@@ -51,7 +52,7 @@ def _log_deck_download(artifact, user_id: Optional[str], fmt: str) -> None:
         logger.warning("deck download event log failed: %s", exc)
 
 
-router = APIRouter(tags=["artifacts"])
+router = APIRouter(tags=["artifacts"], dependencies=[Depends(get_current_user_required)])
 
 
 # Characters disallowed in the legacy ``filename=`` parameter of

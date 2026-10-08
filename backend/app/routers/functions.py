@@ -12,7 +12,7 @@ import httpx
 from fastapi import APIRouter, HTTPException, Depends
 from sqlalchemy.orm import Session
 
-from app.deps import get_db
+from app.deps import get_db, get_current_user_required
 from app.models.tool import Tool
 from app.services.document_service import generate_docx, generate_pptx
 
@@ -573,6 +573,7 @@ async def collect_skills_from_url(
     app_id: str,
     body: dict = None,
     db: Session = Depends(get_db),
+    _auth=Depends(get_current_user_required),
 ):
     """Collect skills from any URL — auto-detects source type and saves to database.
 
@@ -606,6 +607,7 @@ async def collect_github_skills(
     app_id: str,
     body: dict = None,
     db: Session = Depends(get_db),
+    _auth=Depends(get_current_user_required),
 ):
     """Legacy endpoint — delegates to collectSkills with the same logic."""
     return await collect_skills_from_url(app_id, body, db)

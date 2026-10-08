@@ -23,7 +23,7 @@ from fastapi import APIRouter, HTTPException, Query, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from app.deps import get_db, get_current_user_required
+from app.deps import get_db, get_current_user_required, require_admin
 from app.models.user import User
 
 logger = logging.getLogger(__name__)
@@ -124,11 +124,13 @@ def approve_request(
     request_id: str,
     req: ReviewApprovalRequest,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user_required),
+    user: User = Depends(require_admin),
 ):
     """Approve a pending request.
 
     The reviewer identity is the authenticated user — never the request body.
+    Approving a governance gate is an administrative action: any authenticated
+    user could otherwise approve any request by guessing its id.
     """
     from app.services.governance.approval_service import ApprovalService
     service = ApprovalService(db)
@@ -147,11 +149,12 @@ def reject_request(
     request_id: str,
     req: RejectApprovalRequest,
     db: Session = Depends(get_db),
-    user: User = Depends(get_current_user_required),
+    user: User = Depends(require_admin),
 ):
     """Reject a pending request.
 
     The reviewer identity is the authenticated user — never the request body.
+    Admin-only, same as ``approve_request``.
     """
     from app.services.governance.approval_service import ApprovalService
     service = ApprovalService(db)

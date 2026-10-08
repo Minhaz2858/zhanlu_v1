@@ -22,7 +22,7 @@ from app.deps import get_db, get_current_user_required
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["mcp"])
+router = APIRouter(tags=["mcp"], dependencies=[Depends(get_current_user_required)])
 
 
 # ─── Request / Response Models ──────────────────────────────────────────

@@ -18,11 +18,12 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.deps import get_current_user_required
 from app.services.data_snapshot.snapshot_service import DataSnapshotService
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["data-snapshots"])
+router = APIRouter(tags=["data-snapshots"], dependencies=[Depends(get_current_user_required)])
 
 
 def get_db():

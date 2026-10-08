@@ -98,6 +98,7 @@ async def login_with_code(
     app_id: str,
     body: dict,
     db: Session = Depends(get_db),
+    _rl=Depends(rate_limit(settings.RATE_LIMIT_LOGIN_PER_MIN, 60)),
 ):
     """Log in with an emailed login code (passwordless). Returns {access_token, refresh_token, user}."""
     email = body.get("email")
@@ -182,7 +183,12 @@ async def register(
 
 
 @router.post("/apps/{app_id}/auth/verify-otp")
-async def verify_otp(app_id: str, body: dict, db: Session = Depends(get_db)):
+async def verify_otp(
+    app_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+    _rl=Depends(rate_limit(settings.RATE_LIMIT_LOGIN_PER_MIN, 60)),
+):
     """Verify OTP code against the database."""
     email = body.get("email")
     otp_code = body.get("otp_code")

@@ -19,10 +19,11 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.deps import get_current_user_required
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(tags=["skill-studio"])
+router = APIRouter(tags=["skill-studio"], dependencies=[Depends(get_current_user_required)])
 
 
 def get_db():
