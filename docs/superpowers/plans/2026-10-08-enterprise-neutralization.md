@@ -147,8 +147,24 @@ git commit -m "chore(neutralize): add enterprise token denylist"
 import importlib.util, subprocess, sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parents[3]
-SCRIPT = REPO / "scripts" / "check_no_enterprise_tokens.py"
+REPO_SCRIPT = "scripts/check_no_enterprise_tokens.py"
+
+
+def _find_repo() -> Path:
+    """Locate the repo root holding scripts/check_no_enterprise_tokens.py.
+
+    Robust to the backend container, where ./backend is mounted at /app and
+    ./scripts at /app/scripts — so a fixed parents[N] guess breaks there.
+    """
+    here = Path(__file__).resolve()
+    for cand in (here, *here.parents):
+        if (cand / REPO_SCRIPT).exists():
+            return cand
+    raise RuntimeError(f"could not locate repo root containing {REPO_SCRIPT}")
+
+
+REPO = _find_repo()
+SCRIPT = REPO / REPO_SCRIPT
 
 
 def _load():
@@ -160,8 +176,11 @@ def _load():
 
 def test_token_matching_rules():
     m = _load()
-    assert m.token_matches("ecisco", "ECISCO_BI is here")          # word-boundary, case-insensitive
+    assert m.token_matches("ecisco", "Ecisco is here")             # word-boundary, case-insensitive
+    assert m.token_matches("ecisco_bi", "the ECISCO_BI agent")     # compound token
     assert not m.token_matches("ecisco", "precisco")               # no boundary -> no match
+    assert not m.token_matches("ecisco", "ECISCO_BI")              # '_' is a word char; the
+    #                                                                ecisco_bi token catches it
     assert m.token_matches("c5c9-daily-sales", "x c5c9-daily-sales y")  # punctuated -> substring
     assert m.token_matches("惠州", "基地在惠州")                     # CJK -> substring
 
@@ -241,6 +260,13 @@ EXCLUDE_PARTS = {
     "deepseek-harness-master", "superpowers-main", "backups", "data", "uploads",
     "agent_qa", "outputs",
 }
+# Files that legitimately contain the tokens by definition (the gate's own artifacts).
+# Without this the denylist and its test self-match and the gate could never pass.
+EXCLUDE_RELPATHS = {
+    "scripts/enterprise_token_denylist.txt",
+    "scripts/enterprise_token_allowlist.txt",
+    "backend/tests/neutralization/test_check_no_enterprise_tokens.py",
+}
 BINARY_EXT = {
     ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".svg", ".woff", ".woff2",
     ".ttf", ".otf", ".eot", ".pdf", ".zip", ".gz", ".tar", ".whl", ".so", ".dylib",
@@ -292,8 +318,14 @@ def _iter_files(root: Path):
         base = root / rel
         if base.is_dir():
             for p in base.rglob("*"):
-                if p.is_file() and not is_excluded(p.relative_to(root)) and not is_binary_name(p):
-                    yield p
+                if not p.is_file():
+                    continue
+                relp = str(p.relative_to(root))
+                if relp in EXCLUDE_RELPATHS:
+                    continue
+                if is_excluded(p.relative_to(root)) or is_binary_name(p):
+                    continue
+                yield p
     for rel in ROOT_FILES:
         p = root / rel
         if p.is_file():
