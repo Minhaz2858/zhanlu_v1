@@ -25,6 +25,10 @@ def _providers():
     ]
 
 
+async def _async_noop(_delay):
+    pass
+
+
 def _http_error(status):
     return httpx.HTTPStatusError(
         f"HTTP {status}", request=httpx.Request("POST", "http://x"),
@@ -76,12 +80,17 @@ def test_permanent_400_raises_without_failover():
 
 
 def test_transient_503_fails_over():
+    """Transient 503: the SAME provider gets a bounded backoff retry first
+    (fault tolerance), then the ordered fallback chain is used — p2 answers."""
     client = _FakeClient({
         "http://p1/chat/completions": _http_error(503),
         "http://p2/chat/completions": _ok_response(),
     })
     with patch.object(llm_service, "get_llm_providers", return_value=_providers()), \
-         patch.object(llm_service.httpx, "AsyncClient", lambda timeout: client):
+         patch.object(llm_service.httpx, "AsyncClient", lambda timeout: client), \
+         patch("app.services.llm_retry.asyncio.sleep", _async_noop):
         result = asyncio.run(llm_service.call_llm(prompt="x"))
-    assert client.calls == ["http://p1/chat/completions", "http://p2/chat/completions"]
+    assert client.calls[0] == "http://p1/chat/completions"
+    assert "http://p1/chat/completions" in client.calls[1:]  # same-provider retries happened
+    assert client.calls[-1] == "http://p2/chat/completions"  # failover still reached
     assert result["response"] == "hi"

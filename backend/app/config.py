@@ -203,6 +203,12 @@ class Settings(BaseSettings):
     # Example: '[{"name":"backup","base_url":"https://api.deepseek.com/v1","api_key":"sk-...","model":"deepseek-chat"}]'
     LLM_FALLBACK_PROVIDERS: str = ""
 
+    # Per-call LLM timeouts (IBM fault-tolerance: explicit per-call timeout).
+    # LLM_TIMEOUT_S covers async chat/stream calls; LLM_SYNC_TIMEOUT_S covers
+    # sync JSON + embedding calls.
+    LLM_TIMEOUT_S: float = 120.0
+    LLM_SYNC_TIMEOUT_S: float = 30.0
+
     # Models that ignore or reject a caller-supplied ``temperature`` value.
     # Reasoning models like Moonshot kimi-k2.6 only accept temperature=1, and
     # OpenAI o1/o3 reject the field outright. For these, the temperature key is

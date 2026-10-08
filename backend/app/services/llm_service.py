@@ -648,14 +648,24 @@ async def call_llm(
             continue
         request_payload = dict(payload)
         request_payload["model"] = provider.model
-        try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+
+        # Same-provider transient retry with backoff (429/5xx/timeout) before
+        # failing over to the next provider. Non-transient errors (4xx auth,
+        # schema) propagate on the first attempt.
+        from app.services.llm_retry import call_with_transient_retry
+
+        async def _attempt() -> "httpx.Response":
+            async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_S) as client:
                 resp = await client.post(
                     _provider_chat_url(provider),
                     headers=_provider_headers(provider),
                     json=request_payload,
                 )
                 resp.raise_for_status()
+                return resp
+
+        try:
+            resp = await call_with_transient_retry(_attempt)
         except (httpx.HTTPStatusError, httpx.RequestError) as e:
             from app.services.api_error_classifier import classify_api_error
             from app.services.llm_retry import is_transient
@@ -782,7 +792,7 @@ def get_embedding(text: str, model: str | None = None) -> list[float] | None:
         "input": text[:8000],  # bound input length for safety
     }
     try:
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=settings.LLM_SYNC_TIMEOUT_S) as client:
             resp = client.post(embedding_url(), headers=llm_headers(), json=payload)
             resp.raise_for_status()
     except (httpx.HTTPStatusError, httpx.RequestError) as e:
@@ -838,7 +848,7 @@ def chat_completion_json_sync(
         request_payload = dict(payload)
         request_payload["model"] = provider.model
         try:
-            with httpx.Client(timeout=30.0) as client:
+            with httpx.Client(timeout=settings.LLM_SYNC_TIMEOUT_S) as client:
                 resp = client.post(
                     _provider_chat_url(provider),
                     headers=_provider_headers(provider),
@@ -1016,7 +1026,7 @@ async def stream_chat_completion(
         request_payload["model"] = provider.model
         started = False
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
+            async with httpx.AsyncClient(timeout=settings.LLM_TIMEOUT_S) as client:
                 async with client.stream(
                     "POST",
                     _provider_chat_url(provider),
