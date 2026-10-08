@@ -1469,6 +1469,18 @@ class Settings(BaseSettings):
     #   per delegation — enable when sub-agent quality matters more than
     #   latency).
     DELEGATE_VERIFY_ENABLED: bool = False
+    # ── IBM ReAct article fixes (2026-10-08) ──
+    # REACT_SIGNAL_NUDGE_ENABLED: after a data-grounding tool returns usable
+    #   data, append a system nudge telling the model it may close the loop
+    #   (pure budgets otherwise leave it iterating speculatively).
+    REACT_SIGNAL_NUDGE_ENABLED: bool = True
+    # REACT_SCRATCHPAD_FALLBACK_ENABLED: parse classic ReAct "Action:" text
+    #   into a real tool call when the model has no native function calling.
+    #   Default False — native tool calling is the primary path.
+    REACT_SCRATCHPAD_FALLBACK_ENABLED: bool = False
+    # LOOP_POSTMORTEM_ENABLED: scheduled mining of failed agent loops into
+    #   AgentMemory "LESSON" rows (failure-side counterpart of q_sql_examples).
+    LOOP_POSTMORTEM_ENABLED: bool = False
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

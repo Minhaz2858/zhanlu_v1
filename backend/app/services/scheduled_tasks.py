@@ -199,6 +199,37 @@ async def _run_red_team_cycle() -> None:
         logger.exception("[red-team] Campaign failed")
 
 
+# ---- Loop Post-Mortem (ADLC/ReAct gap #4) --------------------------------
+
+LOOP_POSTMORTEM_INTERVAL = 12 * 3600  # every 12 hours
+
+
+def _run_loop_postmortem_sync() -> dict:
+    """Mine recent failed loops into AgentMemory lessons (sync)."""
+    from app.database import SessionLocal
+    from app.services.loop_postmortem import run_loop_postmortem
+
+    db = SessionLocal()
+    try:
+        import asyncio
+        return asyncio.run(run_loop_postmortem(db))
+    finally:
+        db.close()
+
+
+async def _run_loop_postmortem_cycle() -> None:
+    """Scheduled post-mortem wrapper — no-op unless LOOP_POSTMORTEM_ENABLED."""
+    from app.config import settings
+    if not getattr(settings, "LOOP_POSTMORTEM_ENABLED", False):
+        return
+    try:
+        summary = await asyncio.to_thread(_run_loop_postmortem_sync)
+        if summary.get("lessons"):
+            logger.info("[postmortem] %s", summary)
+    except Exception:
+        logger.exception("[postmortem] Cycle failed")
+
+
 # ---- Nightly Forecast (2 AM UTC daily, NOT a UI-visible AutomationTask) -------
 
 def _calculate_seconds_until_2am() -> float:
@@ -717,6 +748,10 @@ def start_scheduled_tasks() -> None:
         loop.create_task(
             _periodic_task("red_team", RED_TEAM_INTERVAL, _run_red_team_cycle),
             name="sched-red-team",
+        ),
+        loop.create_task(
+            _periodic_task("loop_postmortem", LOOP_POSTMORTEM_INTERVAL, _run_loop_postmortem_cycle),
+            name="sched-loop-postmortem",
         ),
     ]
 

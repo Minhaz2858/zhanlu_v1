@@ -274,6 +274,40 @@ MAX_TOOL_ITERATIONS = _HARNESS_POLICY.budgets().max_tool_iterations
 TOOL_CALL_HARD_CAP = _HARNESS_POLICY.budgets().tool_call_hard_cap
 
 
+# ── ReAct signal-based loop-end nudge (IBM ReAct article, gap #3) ─────────
+# Data-grounding tools whose success means the loop's PURPOSE is likely
+# fulfilled — after one of these returns usable data, the model may close
+# the loop instead of iterating speculatively until the budget runs out.
+_SIGNAL_LOOP_END_TOOLS = frozenset({
+    "answer_from_database", "ask_data_agent", "comprehensive_data",
+    "collect_enterprise_data", "search_documents", "answer_from_documents",
+})
+
+
+def _loop_end_nudge_message(tool_name: str, result) -> dict | None:
+    """System nudge after a grounding-tool success. None = keep looping."""
+    if not getattr(settings, "REACT_SIGNAL_NUDGE_ENABLED", True):
+        return None
+    if tool_name not in _SIGNAL_LOOP_END_TOOLS:
+        return None
+    if not isinstance(result, dict) or not result.get("success"):
+        return None
+    rows = result.get("rows")
+    has_rows = isinstance(rows, list) and len(rows) > 0
+    answer = (result.get("answer") or result.get("summary") or "")
+    if not has_rows and not str(answer).strip():
+        return None
+    return {
+        "role": "system",
+        "content": (
+            "[LOOP SIGNAL] A data-grounding tool has just returned usable "
+            "data for the user's question. If this is sufficient to answer, "
+            "stop calling tools and write the final answer now. Continue "
+            "iterating ONLY if a specific, necessary piece is still missing."
+        ),
+    }
+
+
 # ── Tool-call loop guard: user-facing copy + one final answer pass ─────────
 # The guard exists to stop a runaway repeat. It must never DISCARD the work
 # already done, and it must never speak in the wrong domain.
@@ -14145,6 +14179,33 @@ async def add_message_stream(
                                     # practice assistant_content already matches).
                                     if ev_data and not assistant_content:
                                         assistant_content = ev_data
+                                    # ReAct text-scratchpad fallback (gap #2):
+                                    # a model without native function calling
+                                    # may answer with classic "Action:" text.
+                                    # Convert it to a real tool call instead of
+                                    # shipping the scratchpad as the answer.
+                                    if (
+                                        getattr(settings, "REACT_SCRATCHPAD_FALLBACK_ENABLED", False)
+                                        and assistant_content
+                                        and not raw_tool_calls
+                                    ):
+                                        try:
+                                            from app.services.agent_loop.react_fallback import parse_react_text
+                                            _synthetic = parse_react_text(
+                                                assistant_content,
+                                                allowed_tools=[t.get("function", {}).get("name") for t in (tools or []) if isinstance(t, dict)],
+                                            )
+                                            if _synthetic is not None:
+                                                raw_tool_calls = [_synthetic]
+                                                assistant_content = ""
+                                                if content_streamed and not _suppress_chat_deltas:
+                                                    yield f'data: {json.dumps({"type": "content_replace", "content": ""})}\n\n'
+                                                logger.info(
+                                                    "react_fallback: scratchpad text → tool call %s (conv=%s)",
+                                                    _synthetic["function"]["name"], conversation_id,
+                                                )
+                                        except Exception as _rf_err:
+                                            logger.debug("react fallback failed (non-fatal): %s", _rf_err)
                                 elif ev_type == "finish_reason":
                                     _it_finish_reason = ev_data
                                 elif ev_type == "error":
@@ -17087,6 +17148,13 @@ async def add_message_stream(
                     record_selection_miss(conversation_id, tool_name)
                 except Exception:
                     pass
+                # ReAct signal-based loop-end nudge (IBM ReAct article, gap #3):
+                # after a data-grounding tool returns usable data, tell the
+                # model it MAY close the loop — pure budgets otherwise leave it
+                # iterating speculatively.
+                _nudge_msg = _loop_end_nudge_message(tool_name, result)
+                if _nudge_msg is not None:
+                    llm_messages.append(_nudge_msg)
                 # FIX 2026-08-24: harvest rich-text answers from market-research
                 # sub-agents (ask_perception/ask_intelligence/ask_diagnosis/
                 # ask_decision/ask_pricing). These return prompt_text instead of
