@@ -64,6 +64,7 @@ from app.routers.admin_observability_traces import router as admin_traces_router
 from app.services.mcp_server.fastmcp_app import get_mcp_http_app
 from app.routers.a2a import router as a2a_router, wellknown_router as a2a_wellknown_router
 from app.routers.external_agents import router as external_agents_router
+from app.routers.acp import router as acp_router
 from app.routers.resource_shares import router as resource_shares_router
 from app.routers.access_policies import router as access_policies_router
 from app.routers.chat_tools import router as chat_tools_router
@@ -995,6 +996,7 @@ def create_app() -> FastAPI:
     app.include_router(mcp_router, prefix="/api")
     app.include_router(a2a_router)  # /a2a AgentCard + JSON-RPC
     app.include_router(a2a_wellknown_router)  # /.well-known/agent.json discovery
+    app.include_router(acp_router)  # /acp REST adapter (IBM BeeAI-style)
     app.include_router(external_agents_router, prefix="/api")  # external A2A registry
     app.include_router(nl2sql_router, prefix="/api")
     app.include_router(automation_api_router, prefix="/api")

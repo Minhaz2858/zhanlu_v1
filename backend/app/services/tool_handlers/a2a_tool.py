@@ -110,13 +110,31 @@ async def _invoke_external_agent(
         }
 
     try:
-        result = await a2a_client.send_task(
-            endpoint_url,
-            message_parts=[{"type": "text", "text": task}],
-            agent_id=str(agent_ref or endpoint_url),
-            token=token,
-            timeout_s=float(timeout_s or 60),
-        )
+        stream_events: list[dict] | None = None
+        if args.get("stream"):
+            # SSE streaming: capture intermediate snapshots for progress
+            # visibility, return the final task (IBM protocols #4).
+            stream_events = []
+
+            def _on_event(snapshot: dict) -> None:
+                stream_events.append(_extract_task_payload(snapshot))
+
+            result = await a2a_client.send_task_streaming(
+                endpoint_url,
+                message_parts=[{"type": "text", "text": task}],
+                agent_id=str(agent_ref or endpoint_url),
+                token=token,
+                timeout_s=float(timeout_s or 60),
+                on_event=_on_event,
+            )
+        else:
+            result = await a2a_client.send_task(
+                endpoint_url,
+                message_parts=[{"type": "text", "text": task}],
+                agent_id=str(agent_ref or endpoint_url),
+                token=token,
+                timeout_s=float(timeout_s or 60),
+            )
     except Exception as e:  # noqa: BLE001 — remote failures are tool results
         logger.warning(
             "invoke_external_agent: %s failed: %s", agent_ref or endpoint_url, e
@@ -128,6 +146,8 @@ async def _invoke_external_agent(
         }
 
     payload = _extract_task_payload(result)
+    if stream_events is not None:
+        payload["progress_events"] = len(stream_events)
     if row is not None:
         try:
             row.last_task_id = payload.get("task_id")
@@ -199,6 +219,10 @@ INVOKE_EXTERNAL_AGENT_SCHEMA = {
                 "timeout_s": {
                     "type": "number",
                     "description": "Optional per-call timeout in seconds (default 60).",
+                },
+                "stream": {
+                    "type": "boolean",
+                    "description": "Request an SSE stream from the remote agent (progress snapshots; result is the final task). Default false.",
                 },
             },
             "required": ["task"],
