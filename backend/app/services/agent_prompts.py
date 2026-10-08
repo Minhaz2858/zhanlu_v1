@@ -6,8 +6,8 @@ Tool definitions follow the OpenAI function calling format, compatible with Deep
 
 import pathlib
 import re
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import datetime
+from typing import Any, Optional
 
 from app.config import settings
 
@@ -2074,23 +2074,28 @@ def _enforce_web_grounding(
 # ---------------------------------------------------------------------------
 
 def _runtime_context_block() -> str:
-    """Return the current date/time anchor appended to EVERY system prompt.
+    """Return the current date anchor appended to EVERY system prompt.
 
     LLMs have no intrinsic clock: without an explicit anchor they cannot
     resolve relative dates ("today", "this week") and often fall back to
     the training-data refusal "I don't have real-time data access" — even
     when web_search / web_extract tools are available. Injecting the
-    current date/time plus an explicit capability statement fixes both
+    current date plus an explicit capability statement fixes both
     failure modes at the single prompt funnel used by every agent.
+
+    P0-1 (2026-10-08): DATE-ONLY granularity. This block is part of the
+    system prompt, which is the stable prefix DeepSeek/vLLM auto-cache
+    matches on. Embedding clock time (HH:MM:SS) changed the prefix every
+    second, so the provider's prefix cache never hit on the largest part
+    of every prompt. Date + timezone is stable within a day — relative
+    date resolution ("today", "yesterday") only needs the date anyway.
     """
     now_local = datetime.now().astimezone()
-    now_utc = datetime.now(timezone.utc)
+    tz_name = now_local.tzname() or "local"
     return (
         "\n\n[CURRENT DATE & TIME]\n"
         f"Today is {now_local.strftime('%A, %B %d, %Y')} "
-        f"(ISO: {now_local.date().isoformat()}).\n"
-        f"Server local time: {now_local.strftime('%H:%M:%S %Z').strip()} | "
-        f"UTC time: {now_utc.strftime('%H:%M:%S')} UTC.\n"
+        f"(ISO: {now_local.date().isoformat()}, timezone: {tz_name}).\n"
         'Use this date to resolve relative references such as "today", '
         '"yesterday", "this week", or "latest".\n'
         "You DO have real-time data access through your tools "
@@ -2439,7 +2444,61 @@ def get_system_prompt(
     if _grounding:
         prompt = prompt + _grounding
 
+    _log_prompt_token_budget(agent_name, prompt)
+
     return prompt
+
+
+# ── P0-2 (IBM prompt-optimization): token accounting for block accretion ──
+
+# Known shared blocks, in the order get_system_prompt may append them.
+# Used ONLY for the per-block breakdown in the budget log — membership is
+# checked against the assembled prompt so disabled flags are skipped.
+_PROMPT_BLOCK_LEDGER: tuple[tuple[str, Any], ...] = (
+    ("conversation_tone", lambda: _CONVERSATION_TONE_BLOCK),
+    ("initiative", lambda: _INITIATIVE_BLOCK),
+    ("runtime_date_anchor", lambda: _runtime_context_block()),
+    ("answer_verification", lambda: _ANSWER_VERIFICATION_BLOCK),
+    ("schema_aware_protocol", lambda: _SCHEMA_AWARE_PROTOCOL_BLOCK),
+    ("research_analyst_directive", lambda: _RESEARCH_ANALYST_DIRECTIVE),
+    ("entity_master_filter", lambda: _ENTITY_MASTER_FILTER_BLOCK),
+    ("default_skills", lambda: _DEFAULT_SKILLS_BLOCK),
+)
+
+
+def _estimate_block_tokens(text: str) -> int:
+    """~4 chars/token heuristic (same convention as context_assembler)."""
+    return max(1, len(text or "") // 4)
+
+
+def _log_prompt_token_budget(agent_name: str | None, prompt: str) -> None:
+    """Log the assembled system prompt size; warn with breakdown over budget."""
+    try:
+        from app.config import settings as _settings
+
+        total = _estimate_block_tokens(prompt)
+        budget = int(getattr(_settings, "PROMPT_TOKEN_BUDGET", 24000))
+        if total <= budget:
+            _logger.debug(
+                "prompt_budget: agent=%s tokens≈%d (budget=%d)", agent_name, total, budget
+            )
+            return
+        breakdown = []
+        for name, getter in _PROMPT_BLOCK_LEDGER:
+            try:
+                block = getter()
+            except Exception:  # noqa: BLE001
+                continue
+            if block and block.strip() and block.strip() in prompt:
+                breakdown.append(f"{name}≈{_estimate_block_tokens(block)}")
+        _logger.warning(
+            "prompt_budget: agent=%s assembled system prompt ≈%d tokens "
+            "exceeds PROMPT_TOKEN_BUDGET=%d — block accretion is crowding "
+            "out tool schemas/history. Breakdown of shared blocks: %s",
+            agent_name, total, budget, ", ".join(breakdown) or "n/a",
+        )
+    except Exception as e:  # noqa: BLE001 — accounting must never break assembly
+        _logger.debug("prompt_budget: accounting failed (non-fatal): %s", e)
 
 
 # ---------------------------------------------------------------------------

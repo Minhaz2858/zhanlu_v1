@@ -1427,6 +1427,13 @@ class Settings(BaseSettings):
     # whitelist) instead of the hand-rolled sub-loop. Fail-open: any swarm
     # error falls through to the legacy loop. Default OFF (measure first).
     DATA_AGENT_SWARM_ENABLED: bool = False
+    # PROMPT_TOKEN_BUDGET (IBM prompt-optimization, 2026-10-08): approximate
+    # token ceiling for the assembled system prompt. get_system_prompt logs
+    # every assembly at debug and warns with a per-block breakdown when the
+    # assembled prompt exceeds this — block accretion (base + tone + grounding
+    # + schema + analyst + entity + enterprise + memory) silently crowds out
+    # tool schemas and conversation history otherwise.
+    PROMPT_TOKEN_BUDGET: int = 24000
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

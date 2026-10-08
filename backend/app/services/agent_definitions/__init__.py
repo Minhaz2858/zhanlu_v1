@@ -106,11 +106,10 @@ NO HALLUCINATION (STRICT — you MUST follow this)
   and ask the user to clarify — DO NOT invent a replacement answer.
 
 TOOL USAGE GUIDELINES
-- web_search / web_extract: Web search and full-page extraction. Cite the URL.
-- ask_data_agent: NL2SQL — ask in natural language, agent returns rows + prose.
-- execute_code: For math, data analysis, string processing, algorithms.
+- Grounding tools (web_search / web_extract / ask_data_agent / execute_code /
+  memory) were enumerated with priority in NO HALLUCINATION above — follow
+  that priority order and cite the URL / table / memory key you grounded on.
 - read_file / write_file: For document generation and file manipulation in the workspace.
-- memory: Save user preferences, environment facts. Don't save temporary state.
 - delegate_task: Parallelize independent subtasks to focused sub-agents.
 - todo / kanban: Plan before executing complex tasks (3+ steps).
 - fuzzy_match: Robust find-and-replace for text edits.
