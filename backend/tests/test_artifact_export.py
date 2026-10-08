@@ -50,13 +50,13 @@ def _sample_payload():
         generated_at="2026-07-13T08:30:00Z",
         summary=(
             "Top 7 materials account for 76% of revenue; "
-            "\u78b3\u4e94\u77f3\u6cb9\u6811\u8102 alone is 35%."
+            "\u539f\u6599A\u590d\u5408\u6750\u6599 alone is 35%."
         ),
         kpis=[
             KPISpec(label="Total revenue",  value="189.3M CNY", delta="+12%",
                     caption="Top 7 materials"),
             KPISpec(label="Total quantity", value="11,210 tons", caption="All time"),
-            KPISpec(label="Top share",      value="35%", caption="\u78b3\u4e94\u77f3\u6cb9\u6811\u8102"),
+            KPISpec(label="Top share",      value="35%", caption="\u539f\u6599A\u590d\u5408\u6750\u6599"),
             KPISpec(label="Row count",      value="7", caption="Distinct materials"),
         ],
         chart=ChartSpec(
@@ -66,7 +66,7 @@ def _sample_payload():
             y_keys=["total_revenue"],
             unit="CNY",
             data=[
-                {"material_name": "\u78b3\u4e94\u77f3\u6cb9\u6811\u8102", "total_revenue": 66_255_000},
+                {"material_name": "\u539f\u6599A\u590d\u5408\u6750\u6599", "total_revenue": 66_255_000},
                 {"material_name": "Material B", "total_revenue": 22_100_000},
                 {"material_name": "Material C", "total_revenue": 18_700_000},
                 {"material_name": "Material D", "total_revenue": 12_500_000},
@@ -76,7 +76,7 @@ def _sample_payload():
         insights=[
             InsightSpec(icon="trending-up", text="Top 3 materials account for 76% of revenue."),
             InsightSpec(icon="alert-triangle", text="Concentration risk worth monitoring."),
-            InsightSpec(icon="lightbulb",     text="\u78b3\u4e94\u77f3\u6cb9\u6811\u8102 is 3x the next material."),
+            InsightSpec(icon="lightbulb",     text="\u539f\u6599A\u590d\u5408\u6750\u6599 is 3x the next material."),
         ],
         next_step="Want to break this down by region, or save this as a weekly recurring report?",
         actions=[

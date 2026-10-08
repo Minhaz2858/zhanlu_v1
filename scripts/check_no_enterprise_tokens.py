@@ -35,6 +35,8 @@ EXCLUDE_PARTS = {
 EXCLUDE_RELPATHS = {
     "scripts/enterprise_token_denylist.txt",
     "scripts/enterprise_token_allowlist.txt",
+    # The checker names tokens by definition (docstrings, comments).
+    "scripts/check_no_enterprise_tokens.py",
     "backend/tests/neutralization/test_check_no_enterprise_tokens.py",
     # The neutralization spec/plan name the tokens by definition.
     "docs/superpowers/specs/2026-10-08-enterprise-neutralization-design.md",
@@ -67,11 +69,29 @@ def load_tokens(denylist: Path) -> list[str]:
     return tokens
 
 
+def _escaped_forms(token: str) -> list[str]:
+    """A CJK token can be stored as \\uXXXX escapes (minified/JS sources).
+
+    Literal matching misses it — UITest.jsx hid "碳五石油树脂" that way and the
+    gate reported 0 hits while the UI served it. Match both spellings.
+    """
+    if token.isascii():
+        return []
+    forms = []
+    for case in (token,):
+        forms.append("".join(f"\\u{ord(c):04x}" for c in case))
+        forms.append("".join(f"\\u{ord(c):04X}" for c in case))
+        forms.append("".join(f"\\U{ord(c):08x}" for c in case))
+    return list(dict.fromkeys(forms))
+
+
 def token_matches(token: str, text: str) -> bool:
     if _WORD.match(token):
         return re.search(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])",
                          text, re.IGNORECASE) is not None
-    return token in text
+    if token in text:
+        return True
+    return any(form in text for form in _escaped_forms(token))
 
 
 def build_matchers(tokens: list[str]):
@@ -83,6 +103,12 @@ def build_matchers(tokens: list[str]):
     """
     ascii_tokens = [t for t in tokens if _WORD.match(t)]
     other_tokens = [t for t in tokens if not _WORD.match(t)]
+    # Expand CJK tokens with their \uXXXX-escaped spellings so escaped sources
+    # can't slip past the fast path.
+    other_patterns = []
+    for t in other_tokens:
+        other_patterns.append(re.escape(t))
+        other_patterns.extend(re.escape(f) for f in _escaped_forms(t))
     apat = (
         re.compile(
             "|".join(rf"(?<![A-Za-z0-9_]){re.escape(t)}(?![A-Za-z0-9_])"
@@ -92,8 +118,8 @@ def build_matchers(tokens: list[str]):
         if ascii_tokens else None
     )
     cpat = (
-        re.compile("|".join(re.escape(t) for t in other_tokens))
-        if other_tokens else None
+        re.compile("|".join(other_patterns))
+        if other_patterns else None
     )
     return apat, cpat
 

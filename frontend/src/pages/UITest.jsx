@@ -67,11 +67,11 @@ const MOCK_REPORT_CARD = {
   title: 'Sales report — top materials by revenue',
   source: 'sales_orders · demo_db',
   generated_at: '2026-07-13T08:30:00Z',
-  summary: 'Top 7 materials account for 76% of revenue; \u78b3\u4e94\u77f3\u6cb9\u6811\u8102 alone is 35%.',
+  summary: 'Top 7 materials account for 76% of revenue; \u590d\u5408\u6750\u6599 alone is 35%.',
   kpis: [
     { label: 'Total revenue',  value: '189.3M CNY', delta: '+12%',  caption: 'Top 7 materials' },
     { label: 'Total quantity', value: '11,210 tons', delta: '+4%', caption: 'All time' },
-    { label: 'Top share',      value: '35%',         delta: null,  caption: '\u78b3\u4e94\u77f3\u6cb9\u6811\u8102' },
+    { label: 'Top share',      value: '35%',         delta: null,  caption: '\u590d\u5408\u6750\u6599' },
     { label: 'Row count',      value: '7',           delta: null,  caption: 'Distinct materials' },
   ],
   chart: {
@@ -81,7 +81,7 @@ const MOCK_REPORT_CARD = {
     y_keys: ['total_revenue'],
     unit: 'CNY',
     data: [
-      { material_name: '\u78b3\u4e94\u77f3\u6cb9\u6811\u8102', total_revenue: 66255000 },
+      { material_name: '\u590d\u5408\u6750\u6599', total_revenue: 66255000 },
       { material_name: 'Material B', total_revenue: 22100000 },
       { material_name: 'Material C', total_revenue: 18700000 },
       { material_name: 'Material D', total_revenue: 12500000 },
@@ -90,7 +90,7 @@ const MOCK_REPORT_CARD = {
   },
   insights: [
     { icon: 'trending_up',     text: 'Top 3 materials account for 76% of revenue — concentration risk.' },
-    { icon: 'shield_alert',    text: '\u78b3\u4e94\u77f3\u6cb9\u6811\u8102 is 3x the next material.' },
+    { icon: 'shield_alert',    text: '\u590d\u5408\u6750\u6599 is 3x the next material.' },
     { icon: 'lightbulb',       text: 'Material D dropped 4% MoM despite a flat market — worth investigating.' },
   ],
   next_step: 'Want to break this down by region/month, or save this as a recurring weekly report?',
