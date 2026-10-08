@@ -113,6 +113,7 @@ class ReplayRequest(BaseModel):
 def replay_execution(
     execution_id: str,
     req: ReplayRequest | None = None,
+    run: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user_required),
 ):
@@ -135,6 +136,8 @@ def replay_execution(
     if source.plan is None or not source.plan.nodes:
         raise HTTPException(422, "Source execution has no plan to replay")
 
+    from datetime import datetime as _dt, timezone as _tz
+
     clone = Execution(
         conversation_id=source.conversation_id,
         agent_name=source.agent_name,
@@ -142,8 +145,7 @@ def replay_execution(
         mode="frozen",  # "frozen = replay a previous plan"
         task_spec=source.task_spec,
         current_state="plan",
-        started_at=__import__("datetime").datetime.now(
-            __import__("datetime").timezone.utc),
+        started_at=_dt.now(_tz.utc),
     )
     db.add(clone)
     db.flush()
@@ -184,7 +186,7 @@ def replay_execution(
         "model_override": req.model,
     }
 
-    if (req and req.model) or _replay_requested_run():
+    if run:
         from app.services.synexia.capability_router import execute_plan_nodes
 
         db.refresh(clone)
@@ -196,15 +198,6 @@ def replay_execution(
         result["status"] = "executed"
 
     return result
-
-
-def _replay_requested_run() -> bool:
-    """?run=true is read from the request via contextvar-free query param —
-    kept as a module flag set by the route for simplicity."""
-    return _REPLAY_RUN
-
-
-_REPLAY_RUN = False
 
 
 @router.get("/executions/{execution_id}/plan")

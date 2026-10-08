@@ -27,7 +27,9 @@ COMPLETE_MARKER = "[COMPLETE]"
 
 
 def _thread_transcript(registry, team_id: str, last_n: int = 12) -> str:
-    messages = registry.get_messages(team_id, "moderator", limit=last_n) or []
+    # recipient="all" = the shared thread (every group-chat message is
+    # addressed to all members)
+    messages = registry.get_messages(team_id, "all", limit=last_n) or []
     lines = []
     for m in messages:
         if isinstance(m, dict):

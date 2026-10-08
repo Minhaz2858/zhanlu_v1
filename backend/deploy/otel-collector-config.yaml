@@ -1,0 +1,34 @@
+# OpenTelemetry Collector sample config for Zhanlu (IBM framework-audit #4).
+#
+# Zhanlu's tracing/otel.py exports OTLP/HTTP to OTEL_EXPORTER_OTLP_ENDPOINT.
+# To activate distributed tracing:
+#   1. Run a collector (or any OTLP-compatible backend: Jaeger, Grafana Tempo,
+#      SigNoz, Datadog…):
+#        docker run -p 4318:4318 -v $(pwd)/deploy/otel-collector-config.yaml:/etc/otelcol/config.yaml \
+#          otel/opentelemetry-collector:latest --config=/etc/otelcol/config.yaml
+#   2. Set in backend/.env:
+#        OTEL_EXPORTER_OTLP_ENDPOINT=http://<collector-host>:4318
+#        OTEL_SERVICE_NAME=zhanlu-backend
+#   3. Restart the backend. agent_invocations.trace_id will start populating
+#      (see services/agent_invocations.py::_current_trace_id).
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 5s
+
+exporters:
+  # Replace with your backend's exporter (jaeger, otlp/datadog, debug, …).
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [debug]
