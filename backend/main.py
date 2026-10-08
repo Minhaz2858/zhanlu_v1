@@ -205,6 +205,14 @@ def _specific_migrations() -> dict:
             ("source", "VARCHAR(32) DEFAULT 'manual'"),
             ("sql_hash", "VARCHAR(64)"),
         ],
+        # IBM routing feedback (2026-10-08): per-turn route/outcome so
+        # routing_feedback.py can close the continuous-optimization loop.
+        "agent_invocations": [
+            ("route", "VARCHAR(32)"),
+            ("outcome", "VARCHAR(32)"),
+            ("tools_selected", "INTEGER"),
+            ("delegation_mode", "VARCHAR(16)"),
+        ],
         # OCI #1 (2026-09-22): description trust scores on the catalog.
         "kb_table_meta": [
             ("description_confidence", "FLOAT"),

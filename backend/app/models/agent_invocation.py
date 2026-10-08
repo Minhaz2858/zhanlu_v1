@@ -53,6 +53,15 @@ class AgentInvocation(TimestampedBase):
     model_name: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     tool_call_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
+    # IBM continuous-optimization routing feedback (2026-10-08):
+    # route = which executor served the turn; outcome = terminal state;
+    # tools_selected = size of the dynamic tool selection; delegation_mode
+    # = swarm vs loop for the data pipeline. Feeds routing_feedback.py.
+    route: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    outcome: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    tools_selected: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    delegation_mode: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+
     # Tracing
     trace_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     span_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)

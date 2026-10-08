@@ -69,6 +69,10 @@ def record_invocation(
     parent_invocation_id: Optional[str] = None,
     model_name: Optional[str] = None,
     tool_call_count: Optional[int] = None,
+    route: Optional[str] = None,
+    outcome: Optional[str] = None,
+    tools_selected: Optional[int] = None,
+    delegation_mode: Optional[str] = None,
 ) -> Optional[str]:
     """Insert one agent_invocation row. Returns the new row id (or None).
 
@@ -107,6 +111,10 @@ def record_invocation(
             span_id=parent_invocation_id,
             model_name=(model_name or "")[:128] or None,
             tool_call_count=tool_call_count,
+            route=(route or "")[:32] or None,
+            outcome=(outcome or "")[:32] or None,
+            tools_selected=tools_selected,
+            delegation_mode=(delegation_mode or "")[:16] or None,
         )
         db.add(row)
         db.commit()

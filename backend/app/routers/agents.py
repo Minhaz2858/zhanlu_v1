@@ -11540,6 +11540,24 @@ async def add_message_stream(
                 drop_context_bus(conversation_id)
             except Exception:
                 pass
+            # IBM routing feedback: workflow-routed turns count as a route.
+            try:
+                from app.services.agent_invocations import record_invocation
+                record_invocation(
+                    db,
+                    agent_app_id=agent_app_id,
+                    conversation_id=conversation_id,
+                    user_id=getattr(user, "id", None),
+                    invocation_type="conversation",
+                    trigger="user",
+                    input_message=user_content,
+                    status="completed",
+                    route="workflow",
+                    outcome="completed",
+                    assistant_content=wf_result.get("content") or "",
+                )
+            except Exception:
+                pass
 
         return StreamingResponse(
             _sse_with_heartbeat(_workflow_stream()),
@@ -11630,6 +11648,24 @@ async def add_message_stream(
                 try:
                     from app.services.context_bus import drop_context_bus
                     drop_context_bus(conversation_id)
+                except Exception:
+                    pass
+                # IBM routing feedback: cache-served turns count as a route.
+                try:
+                    from app.services.agent_invocations import record_invocation
+                    record_invocation(
+                        db,
+                        agent_app_id=agent_app_id,
+                        conversation_id=conversation_id,
+                        user_id=getattr(user, "id", None),
+                        invocation_type="conversation",
+                        trigger="user",
+                        input_message=user_content,
+                        status="completed",
+                        route="cache",
+                        outcome="completed",
+                        assistant_content=_cached_text,
+                    )
                 except Exception:
                     pass
             except Exception as _cache_stream_err:  # noqa: BLE001
@@ -12268,6 +12304,41 @@ async def add_message_stream(
                 }
                 _push_live("finalize_done", "finalize_done")
                 yield f'data: {json.dumps(done_payload)}\n\n'
+                # IBM routing feedback: FSM-routed turns previously never
+                # recorded an invocation row — route/outcome were invisible
+                # to the feedback loop. Best-effort.
+                try:
+                    from datetime import datetime as _dtf, timezone as _tzf
+                    from app.services.agent_invocations import record_invocation
+                    _inv_app_id = agent_app_id
+                    if not _inv_app_id:
+                        try:
+                            _inv_app_id = conv.agent_app_id
+                        except Exception:
+                            _inv_app_id = None
+                    record_invocation(
+                        db,
+                        agent_app_id=_inv_app_id,
+                        conversation_id=conversation_id,
+                        user_id=getattr(user, "id", None),
+                        invocation_type="conversation",
+                        trigger="user",
+                        input_message=user_content,
+                        status="completed",
+                        route="fsm",
+                        outcome="completed",
+                        assistant_content=assistant_content,
+                        started_at=_dtf.now(_tzf.utc),
+                        model_name=(
+                            effective_llm.endpoint.model_id
+                            if effective_llm.endpoint else None
+                        ),
+                        tool_call_count=(
+                            len(fsm_result.tool_calls) if fsm_result.tool_calls else None
+                        ),
+                    )
+                except Exception as _fsm_inv_err:  # noqa: BLE001 — non-fatal
+                    logger.debug("fsm invocation record failed (non-fatal): %s", _fsm_inv_err)
                 # Shared ContextBus: turn over — publish the FSM's plan/verify
                 # outcome for the next turn, then drop the per-turn bus.
                 try:
@@ -19109,6 +19180,9 @@ async def add_message_stream(
                     trigger="user",
                     input_message=user_content,
                     status="completed",
+                    route="react",
+                    outcome="completed",
+                    tools_selected=len(tools) if isinstance(tools, list) else None,
                     assistant_content=_done_content,
                     started_at=_turn_started,
                     completed_at=_dt2.now(_tz2.utc),
