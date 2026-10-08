@@ -3181,7 +3181,10 @@ export default function Chat() {
                     </button>
                   </div>
                 </div>
-                <div ref={scrollRef} className="relative flex-1 space-y-6 overflow-y-auto px-6 py-6">
+                {/* overflow-x-hidden: the transcript must never scroll
+                    horizontally — wide children (tables, code, activity feed)
+                    scroll internally; anything else is clipped, not panned. */}
+                <div ref={scrollRef} className="relative flex-1 space-y-6 overflow-y-auto overflow-x-hidden px-6 py-6">
                   <div className="mx-auto max-w-5xl space-y-6">
                     {loadStatus === 'loading' && messages.length === 0 ? (
                       <div className="animate-pulse space-y-6 py-8">

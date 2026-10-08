@@ -1388,6 +1388,79 @@ class Settings(BaseSettings):
     SEMANTIC_SOURCE_ROUTING_ENABLED: bool = True
     SEMANTIC_STORE_GLOSSARY_ENABLED: bool = True
 
+    # ── OCI NL2SQL parity stages (2026-09-22) ─────────────────────────────
+    # NOTE: these default ON by explicit user decision — a deliberate exception
+    # to the all-flags-default-False convention. Each flag is a rollback switch
+    # for one OCI stage; flag-off restores byte-identical legacy behavior.
+    # NL2SQL_SQL_REWRITE_ENABLED: deterministic, semantics-preserving SQL
+    #   rewrite pass (limit enforcement on the exploratory path, conservative
+    #   predicate push-down, join elimination with uniqueness evidence) before
+    #   execution. See services/db/sql_rewriter.py. Rewritten SQL still passes
+    #   the unconditional execution gate.
+    # NL2SQL_SQL_REWRITE_EXPLAIN_ENABLED: EXPLAIN-plan feedback for the
+    #   rewriter (telemetry only; never auto-executes costlier variants).
+    #   Default OFF: EXPLAIN round-trips cost latency on the serving path.
+    # NL2SQL_QUERY_LOG_RETRIEVAL_ENABLED: retrieve SIMILAR past successful
+    #   questions + their SQL from nl2sql_query_logs / query_plan_memory at
+    #   plan time and inject them as few-shot grounding into the SQL prompt.
+    # NL2SQL_WORKLOAD_MINING_ENABLED: offline Celery job mining the query
+    #   logs for frequent joins / common filters / popular tables into
+    #   query_workload_stat, which SemanticStore reads as workload evidence.
+    # DATA_AGENT_PLANNER_ENABLED: an explicit planning step at the start of
+    #   the ask_data_agent sub-loop (intent classification, multi-part
+    #   decomposition, tool strategy). Falls back to today's behavior on any
+    #   planner failure.
+    NL2SQL_SQL_REWRITE_ENABLED: bool = True
+    NL2SQL_SQL_REWRITE_EXPLAIN_ENABLED: bool = False
+    NL2SQL_QUERY_LOG_RETRIEVAL_ENABLED: bool = True
+    NL2SQL_WORKLOAD_MINING_ENABLED: bool = True
+    DATA_AGENT_PLANNER_ENABLED: bool = True
+
+    # ── OCI NL2SQL parity — planning, feedback loop, visualization ────────
+    # All four default OFF (the standing convention); each is an independent
+    # rollback switch and flag-off restores byte-identical legacy behaviour.
+    # NL2SQL_PLANNER_ENABLED: one bounded LLM planning call before retrieval
+    #   that resolves the business entity, metric (against the semantic
+    #   store's VERIFIED vocabulary), time window and slices. See
+    #   services/db/nl2sql_planner.py.
+    # NL2SQL_CLARIFY_ON_UNCERTAIN_ENABLED: when the planner resolves the
+    #   question with LOW confidence and self-reports ambiguity, return a
+    #   structured clarification (metric/time/slice options) instead of
+    #   guessing. Requires NL2SQL_PLANNER_ENABLED. Without it the planner's
+    #   defaults + assumptions are applied silently.
+    # NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED: promote VERIFIED successful
+    #   Q→SQL runs into q_sql_examples (source='workload', deduped by
+    #   sql_hash, capped per datasource) so the few-shot corpus learns how
+    #   this business actually asks.
+    # NL2SQL_CHART_SUGGESTION_ENABLED: attach a deterministic chart-type
+    #   suggestion inferred from result shape to the answer payload. See
+    #   services/db/chart_suggestor.py.
+    NL2SQL_PLANNER_ENABLED: bool = False
+    NL2SQL_CLARIFY_ON_UNCERTAIN_ENABLED: bool = False
+    NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED: bool = False
+    NL2SQL_EXAMPLE_AUTO_PROMOTION_MAX: int = 100
+    NL2SQL_CHART_SUGGESTION_ENABLED: bool = False
+    # NL2SQL_JOIN_PARTNER_GUARANTEE_ENABLED: when the catalog knows a relation
+    #   for a selected table but its partner was NOT selected, pull the best
+    #   partner into the selection before the DDL slice is built. Kills the
+    #   "model invents a join to a table it never saw" failure on join
+    #   questions. Default ON (serving-path accuracy precedent): only ADDS a
+    #   table the catalog already vouches for, never removes; bounded (max 2);
+    #   flag-off restores the unexpanded selection. See services/db/join_partner.py.
+    NL2SQL_JOIN_PARTNER_GUARANTEE_ENABLED: bool = True
+    # NL2SQL_COVERAGE_EXPANSION_ENABLED: pull NON-selected catalog tables that
+    #   share an entity token with a selected table into the selection (bounded).
+    #   Fixes recall failures like "contracts expiring" selecting only the
+    #   purchase-contract table while the sales-contract table exists.
+    # NL2SQL_COVERAGE_SELF_CHECK_ENABLED: after a successful execution, if the
+    #   SQL never touched catalog tables that share an entity token with the
+    #   touched tables, run bounded supplementary queries and attach them as
+    #   supplementary_snapshots to the answer payload. Measured failure:
+    #   "how many contracts expire this month" answered 25 (purchase only)
+    #   while 190 sales contracts existed in an untouched sibling table.
+    NL2SQL_COVERAGE_EXPANSION_ENABLED: bool = True
+    NL2SQL_COVERAGE_SELF_CHECK_ENABLED: bool = True
+
     # ── Data Agent latency optimizations ───────────────────────────────
     # DATA_AGENT_FASTPATH_ENABLED: when the call targets a single bound
     #   database source, ask_data_agent bypasses the iterative sub-agent

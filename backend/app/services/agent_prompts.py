@@ -1735,6 +1735,27 @@ FILE-FORMAT REQUESTS
 - Don't stop at a chart or table preview if the user asked for a file.
 - If `ask_data_agent` returns no rows, ask ONE clarifying question before producing the file.
 
+VISUALISATION REQUESTS (the user wants to SEE the data — no file asked for)
+- When the user asks to see figures as a chart, graph or plot (图表 / 可视化 / 画个图)
+  and has NOT asked for a downloadable file, produce a REAL chart the chat renders
+  inline. Call `create_artifact` and either:
+    (a) pass `payload={"chart": {"type": "bar|line|pie|area", "title": "...",
+        "x_key": "...", "y_keys": ["..."], "data": [ up to 25 PRE-AGGREGATED rows ]}}`
+        and let the platform render it, or
+    (b) pass `type="html"` with a COMPLETE self-contained document in
+        `payload={"html_content": "<!doctype html>…</html>"}` that embeds the chart
+        (inline SVG, or a script-free canvas/table) with title, axis labels and
+        values. Customers run offline/on-prem: NO external CDN, NO external JS.
+        `type="svg"` is the lighter choice for a single static chart.
+- Chart the user's REAL numbers. If you have no data for the request, say so plainly —
+  never chart invented figures.
+- NEVER approximate a chart with ASCII or box-drawing characters — a fenced block of
+  █ ▓ ░ bars is not a chart. It cannot be styled, scaled or exported, it breaks with
+  more than a handful of points, and the user asked to SEE the data. If the numbers are
+  in hand, render them as an artifact.
+- Alongside the chart, give a short takeaway in prose. Do NOT also paste a duplicate
+  text or ASCII version of the chart you just rendered.
+
 HANDLING MISSING CONFIGURATION
 Many tools need env vars / binaries / external infrastructure that may not be configured. When a tool returns `success=False` with `missing_config`, `missing_env`, `missing_binaries`, or `missing_infra`:
 1. Do NOT retry the call.

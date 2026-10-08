@@ -93,6 +93,42 @@ _JSON_SCHEMA = {
 
 # ── public API ─────────────────────────────────────────────────────────────
 
+
+def score_description_confidence(
+    description_zh: str | None,
+    description_en: str | None,
+    description_source: str | None,
+    *,
+    unit: str | None = None,
+    enum_values: list | None = None,
+) -> float:
+    """How much the NL2SQL pipeline should trust a description (0.0-1.0).
+
+    The onboarding LLM writes "未知" for columns it cannot name; until now
+    those guesses were indistinguishable from solid knowledge. Scale:
+      0.0  blank / never described
+      0.3  the LLM's own unknown-marker (a flagged defect, not knowledge)
+      0.6  plain LLM description
+      0.8  LLM description corroborated by DATA (a unit read off samples,
+           or a small enum dictionary)
+      0.9  the customer's OWN source comment (verbatim, not inference)
+      1.0  reserved for human-verified edits (catalog PATCH endpoints)
+    """
+    zh = (description_zh or "").strip()
+    en = (description_en or "").strip()
+    if not zh and not en:
+        return 0.0
+    lowered = (zh + " " + en).lower()
+    if "未知" in zh or "unknown" in lowered:
+        return 0.3
+    if (description_source or "") == "source_comment":
+        return 0.9
+    score = 0.6
+    if (unit and str(unit).strip()) or (enum_values and len(enum_values) > 0):
+        score = 0.8
+    return round(score, 2)
+
+
 async def index_kb_catalog(kb: KnowledgeBase, db: Session) -> None:
     """Main entry point — idempotent catalog index for one KnowledgeBase.
 
@@ -1642,6 +1678,11 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             # inventing one from a name would hide that.
         else:
             meta.description_source = "llm"
+        # OCI #1: trust score — human-verified rows keep their 1.0.
+        if (meta.description_source or "") != "human":
+            meta.description_confidence = score_description_confidence(
+                meta.description_zh, meta.description_en, meta.description_source,
+            )
         db.flush()
         existing_table_ids[t["table_name"]] = meta.id
 
@@ -1708,6 +1749,13 @@ def _persist_catalog(db: Session, kb_id: str, tables: list[dict]) -> None:
             col.semantic_type = semantic_type
             col.enum_values = enum_values
             col.unit = c.get("unit") or None
+            # OCI #1: trust score — human-verified rows keep their 1.0.
+            # Runs AFTER unit/enum assignment so data corroboration is fresh.
+            if (col.description_source or "") != "human":
+                col.description_confidence = score_description_confidence(
+                    desc_zh, desc_en, col.description_source,
+                    unit=col.unit, enum_values=col.enum_values,
+                )
             # ── per-column statistics (slice 2) ──
             # ``stats_json`` is the measurement; ``sample_values`` is the
             # vocabulary bridge `{value: count}` the answer-verification gate
@@ -1933,6 +1981,50 @@ def _embed_catalog(kb_id: str, tables: list[dict]) -> None:
 
 
 # ── incremental updates ─────────────────────────────────────────────────────
+
+def update_column_embedding(
+    kb_id: str,
+    table_meta_id: str,
+    table_name: str,
+    column_meta_id: str,
+    column_name: str,
+    description_zh: str | None,
+    description_en: str | None,
+) -> bool:
+    """Refresh a single column's ChromaDB embedding after a human edit.
+
+    Column docs are ids ``c:{table_meta_id}:{column_name}`` (see
+    _embed_catalog). Returns True if updated; never raises — a missing
+    collection or an edit-time failure must never break the turn.
+    """
+    try:
+        from app.services.document_ingestion.store import _get_client
+        from app.services.document_ingestion.embedder import get_embedding_function
+
+        client = _get_client()
+        ef = get_embedding_function()
+        collection_name = f"catalog_{kb_id}"
+        try:
+            coll = client.get_collection(collection_name, embedding_function=ef)
+        except Exception:
+            logger.info(
+                "update_column_embedding: collection '%s' missing — skipping",
+                collection_name,
+            )
+            return False
+
+        text = (
+            f"[COLUMN] {table_name}.{column_name}\n"
+            f"{description_zh or ''}\n"
+            f"{description_en or ''}"
+        )
+        doc_id = f"c:{table_meta_id}:{column_name}"
+        coll.update(ids=[doc_id], documents=[text])
+        return True
+    except Exception as e:
+        logger.warning("update_column_embedding failed (non-fatal): %s", e)
+        return False
+
 
 def update_table_embedding(
     kb_id: str,

@@ -7,6 +7,7 @@ import { Textarea } from '@/components/ui/textarea';
 import { Database, FileText, FileSpreadsheet, Loader2, UploadCloud } from 'lucide-react';
 import { base44 } from '@/api/base44Client';
 import { authFetch } from '@/api/authFetch';
+import { isCatalogableDbType } from '@/api/kbCapabilities';
 import { appParams } from '@/lib/app-params';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
@@ -133,10 +134,11 @@ export default function KbSetupDialog({ open, onOpenChange, onSaved, editItem })
           saved = await base44.entities.KnowledgeBase.get(saved.id);
         } catch { /* non-fatal — user can reindex from the card */ }
       }
-      // Trigger catalog discovery for database KBs (belt-and-suspenders —
-      // the backend entities hook also fires; the /catalog/reindex endpoint
-      // guards against duplicate indexing).
-      if (saved?.source_kind === 'database' && ['mysql','postgres','postgresql'].includes((saved?.db_type||'').toLowerCase())) {
+      // Trigger catalog discovery for database KBs (belt-and-suspenders — the
+      // backend entities hook also fires; the /catalog/reindex endpoint guards
+      // against duplicate indexing). Which dialects are catalogable comes from
+      // the backend manifest, never a hardcoded list here.
+      if (saved?.source_kind === 'database' && await isCatalogableDbType(saved?.db_type, saved?.app_id)) {
         try {
           await authFetch(`/api/apps/${saved.app_id || 'default-app'}/knowledge_bases/${saved.id}/catalog/reindex`, { method: 'POST' });
         } catch { /* non-fatal — backend auto-trigger also covers this */ }

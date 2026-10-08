@@ -371,7 +371,11 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
       >
         {isUser ? <User className="h-4 w-4" /> : <Bot className="h-4 w-4" />}
       </div>
-      <div className={`flex max-w-[90%] flex-col ${isUser ? 'items-end' : 'items-start'}`}>
+      {/* min-w-0: CRITICAL — without it the flex item's automatic min-width
+          (min-content floor) lets long nowrap content (live reasoning line,
+          long tokens) blow the bubble past max-w-[90%] and overflow the
+          transcript horizontally (horizontal scrollbar + cut-off card). */}
+      <div className={`flex min-w-0 max-w-[90%] flex-col ${isUser ? 'items-end' : 'items-start'}`}>
         {isUser ? (
           <div className="group flex items-start gap-2">
             {/* Edit button — appears on hover for user messages with the branching callback.
@@ -462,7 +466,15 @@ export default function MessageBubble({ message, isStreaming, onSelectOption, on
             </div>
           </div>
         ) : (
-          <div ref={contentRef} className="min-w-0 break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
+          /* max-w-full is REQUIRED: as a flex item in the bubble column
+             (items-start) this box is sized by fit-content, and the nowrap
+             content inside the live-activity feed (flex-1 truncate spans)
+             inflates that fit-content calculation — Chrome then lets the bubble
+             grow PAST the column (measured 1195px inside a 900px column), which
+             cut the LIVE line off with no ellipsis and produced a horizontal
+             scrollbar. max-w-full pins it to the column; short messages still
+             shrink-wrap. Mirrors the user bubble above. */
+          <div ref={contentRef} className="min-w-0 max-w-full break-words rounded-2xl rounded-tl-sm border border-border bg-card px-4 py-2.5 text-sm whitespace-pre-wrap text-foreground">
             {/* Unified live activity feed (2026-08-22). The component itself
                 synthesizes `live_events` from legacy `activity_steps` when
                 present, so every assistant message — past or future — renders

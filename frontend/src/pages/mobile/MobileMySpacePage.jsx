@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useTranslate } from '@/lib/useTranslate';
@@ -25,7 +25,19 @@ import DashboardPopup from '@/components/dashboard/DashboardPopup';
 export default function MobileMySpacePage() {
   const { t, lang } = useLanguage();
   const navigate = useNavigate();
-  const [tab, setTab] = useState('project');
+  const [searchParams, setSearchParams] = useSearchParams();
+  // The active tab lives in the URL (?tab=<key>), same convention as the
+  // desktop MySpace page — otherwise a refresh (or Back from a detail page)
+  // always snapped to Projects (2026-09-16).
+  const MOBILE_VALID_TABS = ['project', 'agent', 'file', 'kb', 'dashboard'];
+  const _tabParam = searchParams.get('tab');
+  const tab = MOBILE_VALID_TABS.includes(_tabParam) ? _tabParam : 'project';
+  const setTab = (key) => {
+    const next = new URLSearchParams(searchParams);
+    if (key === 'project') next.delete('tab');
+    else next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  };
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);

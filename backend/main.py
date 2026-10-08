@@ -199,6 +199,20 @@ def _specific_migrations() -> dict:
         ],
         "resource_shares": [],  # table creation only — triggers schema check
 
+        # OCI parity (2026-09-22): Q→SQL example provenance + workload dedupe
+        # key (see app/services/q_sql_examples/service.py maybe_auto_promote).
+        "q_sql_examples": [
+            ("source", "VARCHAR(32) DEFAULT 'manual'"),
+            ("sql_hash", "VARCHAR(64)"),
+        ],
+        # OCI #1 (2026-09-22): description trust scores on the catalog.
+        "kb_table_meta": [
+            ("description_confidence", "FLOAT"),
+        ],
+        "kb_column_meta": [
+            ("description_confidence", "FLOAT"),
+        ],
+
         "agent_memories": [
             ("content_hash", "VARCHAR(64)"),
             ("importance", "INTEGER DEFAULT 0"),
@@ -781,6 +795,23 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         startup_logger.warning("Catalog watchdog startup error (non-fatal): %s", e)
 
+    # OCI stage: offline workload mining — periodically mine the successful
+    # NL2SQL query logs (frequent joins, common filters, popular tables) into
+    # query_workload_stats, which SemanticStore reads as workload evidence.
+    # Flag-gated (NL2SQL_WORKLOAD_MINING_ENABLED); non-fatal on startup error.
+    workload_miner_stop = asyncio.Event()
+    workload_miner_task = None
+    if getattr(settings, "NL2SQL_WORKLOAD_MINING_ENABLED", True):
+        try:
+            from app.services.knowledge_graph.workload_miner import run_workload_miner
+            workload_miner_task = asyncio.create_task(
+                run_workload_miner(workload_miner_stop),
+                name="workload-miner",
+            )
+            startup_logger.info("Workload miner loop started (interval=6h)")
+        except Exception as e:
+            startup_logger.warning("Workload miner startup error (non-fatal): %s", e)
+
     # Mount persisted full-stack dashboard apps (generated sub-routers + pollers)
     try:
         from app.services.dashboard_app.manager import dashboard_app_manager
@@ -855,7 +886,17 @@ async def lifespan(app: FastAPI):
         except (asyncio.TimeoutError, asyncio.CancelledError):
             pass
         except Exception as e:
+
             startup_logger.warning("Catalog watchdog shutdown error: %s", e)
+
+    workload_miner_stop.set()
+    if workload_miner_task is not None:
+        try:
+            await asyncio.wait_for(workload_miner_task, timeout=5.0)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            pass
+        except Exception as e:
+            startup_logger.warning("Workload miner shutdown error: %s", e)
 
     try:
         from app.services.automation_dispatcher import stop_dispatcher

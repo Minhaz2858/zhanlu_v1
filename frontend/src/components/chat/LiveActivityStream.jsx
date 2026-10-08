@@ -538,8 +538,18 @@ function DataPreviewPane({ offer, isEn }) {
 
 // 2026-08-25: ProgressBar — horizontal bar showing event-level progress
 // and time estimate. Hidden when status is 'idle' (no events yet).
-function ProgressBar({ progress, isLive, isEn }) {
+function ProgressBar({ progress, isLive, isEn, le }) {
   if (!progress || progress.status === 'idle') return null;
+
+  // progress.currentPhase is the raw event label_key (e.g. "phase_enter.act");
+  // render the localized phase title instead of leaking the raw enum.
+  const phaseRaw = progress.currentPhase || '';
+  const phaseState = phaseRaw.startsWith('phase_enter.')
+    ? phaseRaw.slice('phase_enter.'.length)
+    : null;
+  const phaseLabel = phaseState
+    ? (le?.phase_enter?.[phaseState] || phaseRaw)
+    : phaseRaw;
 
   const fillColor =
     progress.status === 'failed'
@@ -568,7 +578,7 @@ function ProgressBar({ progress, isLive, isEn }) {
       <div className="mb-1 flex items-center justify-between text-[10px] text-muted-foreground">
         <span className="font-mono uppercase tracking-wide opacity-70">
           {labelStatus}
-          {progress.currentPhase ? ` · ${progress.currentPhase}` : ''}
+          {phaseLabel ? ` · ${phaseLabel}` : ''}
         </span>
         <span className="opacity-50">
           {isEn ? 'Step' : '步骤'} {progress.completedEvents}/{progress.totalEvents}
@@ -1140,6 +1150,7 @@ export default function LiveActivityStream({ events, legacySteps, phase, reasoni
             progress={computeProgress(mergedIndented)}
             isLive={isLive}
             isEn={isEn}
+            le={le}
           />
 
           {/* Event list (max-height, auto-scroll while live). */}

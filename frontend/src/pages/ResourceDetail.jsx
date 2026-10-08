@@ -88,7 +88,7 @@ export default function ResourceDetail() {
           {type === 'kb' && (
             <>
               <KbSourceDetail item={item} t={t} onEdit={() => setKbOpen(true)} onTogglePause={togglePauseKb} />
-              {(item.source_kind === 'database' || ['mysql','postgres','postgresql'].includes((item.db_type||'').toLowerCase())) && (
+              {(item.source_kind === 'database' || !!item.db_type) && (
                 <KbCatalogTables kbId={item.id} dbType={item.db_type} kbName={item.name} />
               )}
             </>

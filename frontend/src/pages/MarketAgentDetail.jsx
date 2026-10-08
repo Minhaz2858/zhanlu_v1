@@ -36,6 +36,27 @@ export default function MarketAgentDetail() {
   async function clone() {
     setCloning(true);
     try {
+      // Reuse an existing copy instead of minting a duplicate. This page is
+      // reachable on every visit and was calling AgentApp.create()
+      // unconditionally, so three clicks produced three same-named "CAD Agent"
+      // rows (2026-09-16). Mirrors the find-or-reuse logic in
+      // lib/launchMarketAgent.js, which is what the market "Use" path uses.
+      try {
+        const existing = await base44.entities.AgentApp.filter({ name: agent.name });
+        if (Array.isArray(existing) && existing.length > 0) {
+          const found = existing[0];
+          if (agent.name === 'CAD Agent') {
+            try {
+              await base44.entities.AgentApp.update(found.id, { tool_config: { ...CAD_TOOL_CONFIG } });
+            } catch { /* best-effort — the seeded copy already has it */ }
+          }
+          setCloned(true);
+          toast({ title: t.agentConfig.cloned, description: agent.name });
+          setTimeout(() => navigate(`/my-space/agent/${found.id}`), 600);
+          return;
+        }
+      } catch { /* fall through to create */ }
+
       let skills = [];
       try {
         const tools = await base44.entities.Tool.list();

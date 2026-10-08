@@ -164,6 +164,14 @@ class TestLlmPlannerArraySchema:
 
         monkeypatch.setattr("app.services.llm_service.call_llm", fake_call_llm)
         monkeypatch.setattr("app.config.settings.SYNEXIA_LLM_PLANNER_ENABLED", True)
+        # These tests pin the provider-reply PARSING shapes, not the
+        # hallucinated-name guard — whose verdict depends on global
+        # tool-registry state warmed up by other tests in this file
+        # ('agent:summarise' is a fake name and IS dropped when the
+        # registry is populated). Neutralise the guard here.
+        monkeypatch.setattr(
+            plan_dag, "_drop_unknown_steps", lambda steps: (steps, [])
+        )
         plan = plan_dag.generate_plan(
             db=db_session, execution_id="exec-arr",
             task_spec={"task_kind": "general", "requires_data": True, "user_signal": "default"},

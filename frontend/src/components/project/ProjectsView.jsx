@@ -13,7 +13,7 @@ import {
 import ProjectCreateDialog from '@/components/project/ProjectCreateDialog';
 import ResourceAccessPolicyDialog from '@/components/ResourceAccessPolicyDialog';
 import {
-  Folder, Plus, Loader2, Pencil, FolderKanban, Archive,
+  Folder, Plus, Loader2, Pencil, FolderKanban, Archive, Trash2,
   ArchiveRestore, AlertTriangle, Bot, Database, FileText, Search, ArrowUpDown,
   Sparkles, LayoutGrid, Clock, ArrowDownAZ, Building2, ShieldCheck,
 } from 'lucide-react';
@@ -159,6 +159,41 @@ export default function ProjectsView({ scope = null }) {
       });
     } finally {
       setArchiveBusy(false);
+    }
+  }
+
+  // ── Delete (2026-09-22): real project deletion ──
+  // Archive keeps the row for recovery; Delete removes it from every list
+  // (soft delete via the generic entity API — is_deleted flag — so an admin
+  // can still recover it in the DB). Only offered on ARCHIVED cards and
+  // only for projects the user can manage (owner or admin) — shared
+  // view-only projects never show it.
+  const [deleteTarget, setDeleteTarget] = useState(null);
+  const [deleteBusy, setDeleteBusy] = useState(false);
+  function openDelete(p) { setDeleteTarget(p); }
+  async function confirmDelete() {
+    if (!deleteTarget) return;
+    setDeleteBusy(true);
+    try {
+      await base44.entities.Project.delete(deleteTarget.id);
+      setProjects((prev) => prev.filter((x) => x.id !== deleteTarget.id));
+      toast({
+        title: isEn ? 'Project deleted' : '项目已删除',
+        description: deleteTarget.name,
+      });
+      setDeleteTarget(null);
+    } catch (e) {
+      console.error('delete failed:', e);
+      const msg = String(e?.message || e);
+      toast({
+        title: isEn ? 'Delete failed' : '删除失败',
+        description: msg.includes('403') || msg.includes('view-only')
+          ? (isEn ? 'This project was shared with you as view-only.' : '该项目以只读方式共享给您，无法删除。')
+          : msg,
+        variant: 'destructive',
+      });
+    } finally {
+      setDeleteBusy(false);
     }
   }
 
@@ -376,6 +411,7 @@ export default function ProjectsView({ scope = null }) {
                   rename={rename}
                   unarchive={unarchive}
                   openArchive={openArchive}
+                  openDelete={openDelete}
                   canManageAccess={canManageAccess}
                   onManageAccess={openAccessPolicy}
                 />
@@ -418,6 +454,7 @@ export default function ProjectsView({ scope = null }) {
                   rename={rename}
                   unarchive={unarchive}
                   openArchive={openArchive}
+                  openDelete={openDelete}
                   canManageAccess={canManageAccess}
                   onManageAccess={openAccessPolicy}
                 />
@@ -481,6 +518,51 @@ export default function ProjectsView({ scope = null }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+      {/* Delete confirmation (archived projects only) */}
+      <Dialog
+        open={!!deleteTarget}
+        onOpenChange={(open) => { if (!open && !deleteBusy) setDeleteTarget(null); }}
+      >
+        <DialogContent className="sm:max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2 text-base">
+              <span className="flex h-9 w-9 items-center justify-center rounded-full bg-red-500/10 text-red-600 dark:text-red-400">
+                <Trash2 className="h-4 w-4" />
+              </span>
+              {isEn ? 'Delete this project?' : '删除此项目？'}
+            </DialogTitle>
+            <DialogDescription className="pt-1">
+              {isEn ? (
+                <>
+                  "<b>{deleteTarget?.name}</b>" will be removed from the project list. This cannot be undone from this screen. Its agents, data sources and files are NOT deleted — they become unassigned and can be re-attached to another project.
+                </>
+              ) : (
+                <>
+                  "<b>{deleteTarget?.name}</b>" 将从项目列表中移除，此操作无法从当前界面撤销。其下的 Agent、数据源与文件不会被删除——它们会变为未分配状态，可重新附加到其他项目。
+                </>
+              )}
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter className="gap-2">
+            <Button
+              variant="outline"
+              onClick={() => setDeleteTarget(null)}
+              disabled={deleteBusy}
+            >
+              {isEn ? 'Cancel' : '取消'}
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={confirmDelete}
+              disabled={deleteBusy}
+              className="gap-1.5"
+            >
+              {deleteBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+              {isEn ? 'Delete' : '删除'}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       {/* Data access policy dialog (owner/admin only) */}
       {policyTarget && (
@@ -516,7 +598,7 @@ export default function ProjectsView({ scope = null }) {
  */
 function ProjectCard({
   project, counts, isArchived, isEn, relativeTime, onOpen, onRename, onArchive,
-  onManageAccess,
+  onManageAccess, onDelete,
 }) {
   const total = counts.agents + counts.kb + counts.files;
   return (
@@ -575,11 +657,21 @@ function ProjectCard({
                 original report). */}
             <div className="flex shrink-0 gap-0.5">
               {isArchived ? (
-                <IconAction
-                  onClick={(e) => { e.stopPropagation(); onArchive && onArchive(e); }}
-                  label={isEn ? 'Unarchive' : '恢复'}
-                  icon={<ArchiveRestore className="h-3.5 w-3.5" />}
-                />
+                <>
+                  <IconAction
+                    onClick={(e) => { e.stopPropagation(); onArchive && onArchive(e); }}
+                    label={isEn ? 'Unarchive' : '恢复'}
+                    icon={<ArchiveRestore className="h-3.5 w-3.5" />}
+                  />
+                  {onDelete && (
+                    <IconAction
+                      onClick={onDelete}
+                      label={isEn ? 'Delete project' : '删除项目'}
+                      icon={<Trash2 className="h-3.5 w-3.5" />}
+                      danger
+                    />
+                  )}
+                </>
               ) : (
                 <>
                   {onRename && (
@@ -788,7 +880,7 @@ function SectionHeader({ icon: Icon, title, badge }) {
  */
 function ProjectGrid({
   projects, counts, lang, isEn, formatRelativeTime,
-  navigate, rename, unarchive, openArchive,
+  navigate, rename, unarchive, openArchive, openDelete,
   canManageAccess, onManageAccess,
 }) {
   return (
@@ -812,6 +904,7 @@ function ProjectGrid({
             onRename={isArchived ? undefined : (e) => { e.stopPropagation(); rename(p); }}
             onArchive={isArchived ? (e) => { e.stopPropagation(); unarchive(p); } : (e) => { e.stopPropagation(); openArchive(p); }}
             onManageAccess={!isArchived && canManageAccess?.(p) ? (e) => { e.stopPropagation(); onManageAccess?.(p); } : undefined}
+            onDelete={isArchived && canManageAccess?.(p) ? (e) => { e.stopPropagation(); openDelete?.(p); } : undefined}
           />
         );
       })}

@@ -914,6 +914,27 @@ async def _execute_query(
     if refusal:
         return refusal
 
+    # ── OCI stage 5: deterministic, semantics-preserving rewrite ──
+    # Runs BEFORE every downstream validation so policy / schema / execution
+    # checks see the statement that actually runs. The tool path IS the
+    # exploratory path: the model's row budget becomes an explicit LIMIT when
+    # the statement names none. Non-SELECT statements pass through unchanged.
+    _rewrites_applied: list[str] = []
+    if getattr(_settings, "NL2SQL_SQL_REWRITE_ENABLED", True):
+        try:
+            from app.services.db.sql_rewriter import rewrite_sql
+
+            _rw = rewrite_sql(sql, max_rows=max_rows)
+            if _rw.applied:
+                logger.info(
+                    "execute_query: sql rewrite applied %s on KB %s",
+                    _rw.applied, kb_id,
+                )
+                sql = _rw.sql
+                _rewrites_applied = list(_rw.applied)
+        except Exception as exc:
+            logger.debug("execute_query: sql rewrite skipped: %s", exc)
+
     # Read-only gate: this KB never accepts write/DDL statements. Runs before
     # the data-access-policy check so the rejection reason is unambiguous.
     from app.services.nl2sql.schema_validator import check_read_only_sql
@@ -1014,6 +1035,8 @@ async def _execute_query(
         warnings = _post_execution_warnings(args, result, sql)
         if warnings:
             result["warnings"] = warnings
+        if _rewrites_applied:
+            result["rewrites_applied"] = _rewrites_applied
         return {"success": True, **result}
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing", "sql": sql}
@@ -1320,7 +1343,14 @@ async def _answer_from_database(
 
     try:
         svc = NLAnswerService(db)
-        result = await svc.answer(kb_id, question, resolved_policy=policy)
+        result = await svc.answer(
+            kb_id,
+            question,
+            resolved_policy=policy,
+            # OCI P1-6: enable the planner's structured multi-turn state when
+            # the caller carries a conversation context (stateless otherwise).
+            conversation_id=(context or {}).get("conversation_id"),
+        )
         return _attach_grounding_envelope(_attach_readiness(result, readiness))
     except DriverUnavailable as e:
         return {"success": False, "error": str(e), "error_kind": "driver_missing"}

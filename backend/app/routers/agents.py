@@ -12095,70 +12095,95 @@ async def add_message_stream(
                 )
 
                 # Persist the assistant message and emit done.
-                try:
-                    from app.models.chat_message import ChatMessage as Message
-                    # On regenerate, the frontend REUSES the existing
-                    # assistant ChatMessage row (same id, content updated
-                    # in place via ChatMessage.update), so creating a
-                    # fresh row here would leave a stale duplicate. Skip.
-                    if chat_session_id and not _regenerate:
-                        msg = Message(
-                            id=str(uuid.uuid4()),
-                            conversation_id=conversation_id,
-                            session_id=chat_session_id,
-                            role="assistant",
-                            content=assistant_content,
-                            agent_name=_v3_agent_name,
-                            trace=fsm_result.plan_summary or {},
-                            reasoning=None,
-                            live_events=live_events or None,
-                            sources=_fsm_citations or None,
-                        )
-                        db.add(msg)
-                        db.commit()
-                        db.refresh(msg)
-                except Exception as _persist_err:
-                    logger.warning("v3 FSM route: assistant persist failed (non-fatal): %s", _persist_err)
+                # FIX 2026-09-22: the old block here constructed
+                # ChatMessage(conversation_id=...) — a column that does not
+                # exist (the FK is session_id) — so EVERY assistant reply on
+                # the FSM route was silently dropped. The fresh-session
+                # persist below writes both the ChatMessage row and the
+                # conv.messages append in one place.
 
                 # Persist the assistant reply into conv.messages too, so the
                 # next turn's context assembler sees BOTH sides of the
                 # conversation (parity with the v2 blocking route at
                 # ~line 1743).  Without this, follow-up turns see only the
                 # user's messages and lose all artifact/context references.
+                _compact_tool_calls = []
+                for _tc in (fsm_result.tool_calls or []):
+                    _compact_tool_calls.append({
+                        "name": _tc.get("name"),
+                        "success": _tc.get("success"),
+                        "artifact_ids": _tc.get("artifact_ids", []),
+                    })
+                _assistant_msg = {
+                    "id": str(uuid.uuid4()),
+                    "role": "assistant",
+                    "content": (assistant_content or "")[:4000],
+                    "created_date": datetime.now(timezone.utc).isoformat(),
+                    "tool_calls": _compact_tool_calls,
+                    "artifact_ids": fsm_result.artifact_ids or [],
+                    "file_exports": (
+                        fsm_result.file_exports if hasattr(fsm_result, "file_exports") else {}
+                    ),
+                    "sources": _fsm_citations,
+                }
+                # On regenerate the old assistant reply was popped at
+                # the top of the handler, so appending yields exactly
+                # one assistant message per user turn (Kimi/GPT parity).
+                messages.append(_assistant_msg)
+                # FIX 2026-09-22: both persists MUST run on a FRESH session.
+                # (1) ChatMessage has NO conversation_id column — its FK is
+                #     session_id — so the old constructor raised
+                #     TypeError and EVERY assistant reply on the FSM route
+                #     was silently dropped.  (2) The request-scoped ``conv``
+                #     instance is no longer persistent in this session by
+                #     the time the stream generator runs (same observation
+                #     as the workflow branch at ~11500) — reloading the row
+                #     in a fresh session and appending THERE is the only
+                #     write that actually lands.
                 try:
-                    _compact_tool_calls = []
-                    for _tc in (fsm_result.tool_calls or []):
-                        _compact_tool_calls.append({
-                            "name": _tc.get("name"),
-                            "success": _tc.get("success"),
-                            "artifact_ids": _tc.get("artifact_ids", []),
-                        })
-                    _assistant_msg = {
-                        "id": str(uuid.uuid4()),
-                        "role": "assistant",
-                        "content": (assistant_content or "")[:4000],
-                        "created_date": datetime.now(timezone.utc).isoformat(),
-                        "tool_calls": _compact_tool_calls,
-                        "artifact_ids": fsm_result.artifact_ids or [],
-                        "file_exports": (
-                            fsm_result.file_exports if hasattr(fsm_result, "file_exports") else {}
-                        ),
-                        "sources": _fsm_citations,
-                    }
-                    # On regenerate the old assistant reply was popped at
-                    # the top of the handler, so appending yields exactly
-                    # one assistant message per user turn (Kimi/GPT parity).
-                    messages.append(_assistant_msg)
-                    conv.messages = list(messages)
-                    conv.updated_date = datetime.now(timezone.utc)
-                    db.commit()
-                    db.refresh(conv)
+                    from sqlalchemy.orm import sessionmaker as _fsm_sessionmaker
+
+                    from app.models.chat_message import ChatMessage as Message
+
+                    _fsm_db = _fsm_sessionmaker(bind=db.get_bind())()
+                    try:
+                        if chat_session_id and not _regenerate:
+                            # FIX 2026-09-22 (round 2): ChatMessage has NO
+                            # agent_name column and its reasoning column is
+                            # reasoning_content — the previous kwargs raised
+                            # TypeError and the reply was dropped again.
+                            msg = Message(
+                                id=str(uuid.uuid4()),
+                                session_id=chat_session_id,
+                                role="assistant",
+                                content=assistant_content,
+                                trace=fsm_result.plan_summary or {},
+                                reasoning_content=None,
+                                live_events=live_events or None,
+                                sources=_fsm_citations or None,
+                            )
+                            _fsm_db.add(msg)
+                            _fsm_db.commit()
+                        _fsm_conv = _fsm_db.query(AgentConversation).filter(
+                            AgentConversation.id == conversation_id
+                        ).first()
+                        if _fsm_conv is not None:
+                            _fsm_conv.messages = list(
+                                (_fsm_conv.messages or []) + [_assistant_msg]
+                            )
+                            _fsm_conv.updated_date = datetime.now(timezone.utc)
+                            _fsm_db.commit()
+                    finally:
+                        _fsm_db.close()
                 except Exception as _conv_msg_err:
                     logger.warning(
-                        "v3 FSM route: conv.messages append failed (non-fatal): %s",
+                        "v3 FSM route: assistant/conv persist failed (non-fatal): %s",
                         _conv_msg_err,
                     )
-                    db.rollback()
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
 
                 # --- Experience layer (Phase A): turn-end recipe + user profile ---
                 try:

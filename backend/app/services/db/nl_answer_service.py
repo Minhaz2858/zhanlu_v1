@@ -77,6 +77,31 @@ _SQL_SYNTAX_ERROR_RE = re.compile(
 )
 
 
+def _apply_sql_rewrite_stage(
+    sql: str,
+    *,
+    max_rows: int | None = None,
+    unique_columns: dict[str, set[str]] | None = None,
+):
+    """OCI stage 5 — the deterministic SQL rewrite pass, flag-gated.
+
+    Returns the ``RewriteResult`` (``None`` when the flag is off or the pass
+    is unavailable), never raises. The rewritten statement still passes the
+    unconditional execution gate inside ``QueryService.execute`` — this is an
+    optimization between authoring and execution, never a second execution
+    path. Used by the sealed NL path AND the ``execute_query`` tool.
+    """
+    if not getattr(settings, "NL2SQL_SQL_REWRITE_ENABLED", True):
+        return None
+    try:
+        from app.services.db.sql_rewriter import rewrite_sql
+
+        return rewrite_sql(sql, max_rows=max_rows, unique_columns=unique_columns)
+    except Exception as e:  # a failed optimization must never break a query
+        logger.debug("NLAnswer: sql rewrite stage unavailable: %s", e)
+        return None
+
+
 def _sanitize_llm_sql(sql: str) -> str:
     """Hygiene pass for LLM-generated SQL before execution (2026-08-28).
 
@@ -115,12 +140,17 @@ class NLAnswerService:
         endpoint: LLMEndpoint | None = None,
         skip_narrate: bool = False,
         agent_name: str | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         """Public entry point: gate + answer + readiness disclosure.
 
         Every caller goes through here, so the readiness gate cannot be
         bypassed by a second entry point (the previous design had one path in
         ``db_tools`` and another in the nl2sql router, only one of which asked).
+
+        ``conversation_id`` (optional) enables the planner's structured
+        multi-turn state: resolved entities/defaults carried across turns of
+        one conversation (OCI P1-6). None = stateless single-shot, unchanged.
         """
         result = await self._answer_impl(
             kb_id,
@@ -130,6 +160,7 @@ class NLAnswerService:
             endpoint=endpoint,
             skip_narrate=skip_narrate,
             agent_name=agent_name,
+            conversation_id=conversation_id,
         )
         return self._attach_readiness_directive(result, kb_id)
 
@@ -165,6 +196,7 @@ class NLAnswerService:
         endpoint: LLMEndpoint | None = None,
         skip_narrate: bool = False,
         agent_name: str | None = None,
+        conversation_id: str | None = None,
     ) -> dict:
         """Return a structured + prose answer for a user question.
 
@@ -298,6 +330,57 @@ class NLAnswerService:
                     "NLAnswer: static route resolver failed (non-fatal): %s", e,
                 )
                 _static_route = None
+
+        # ── C1-pre (2026-09-22): OCI agentic planning stage ──
+        # Resolve WHAT is being asked (entity / metric / time / slice) against
+        # the semantic store's VERIFIED vocabulary BEFORE any retrieval or
+        # generation. Two outcomes, both fail-soft:
+        #   * proceed — the <resolved-intent> block steers SQL generation and
+        #     the assumptions ride on the result payload;
+        #   * clarify (flag-gated) — the question is genuinely ambiguous, so
+        #     return structured options instead of guessing; the calling
+        #     agent relays them through its existing clarify channel and the
+        #     user's answer narrows the next turn.
+        _planning: dict | None = None
+        if getattr(settings, "NL2SQL_PLANNER_ENABLED", False):
+            try:
+                from app.services.db import nl2sql_planner
+
+                _planning = await nl2sql_planner.plan_question(
+                    self._db,
+                    kb_id,
+                    question,
+                    endpoint=endpoint,
+                    project_id=project_id,
+                    conversation_id=conversation_id,
+                )
+            except Exception as e:
+                logger.debug("NLAnswer: planner failed (non-fatal): %s", e)
+                _planning = None
+            if _planning is not None and _planning.get("needs_clarification"):
+                _clar = _planning.get("clarification") or {}
+                logger.info(
+                    "NLAnswer: planner requested clarification for KB %s "
+                    "(confidence=%.2f)",
+                    kb_id, _planning.get("confidence", 0.0),
+                )
+                return {
+                    "success": False,
+                    "needs_clarification": True,
+                    "answer": _clar.get("question", ""),
+                    "clarification": _clar,
+                    "source_id": kb_id,
+                    "iterations": 0,
+                    # Instruction for the CALLING agent LLM: it owns the user
+                    # channel (the NL path does not) — it either relays the
+                    # options or applies a known default itself.
+                    "guidance": (
+                        "The data question is ambiguous. Ask the user the "
+                        "clarification question below (or resolve it from "
+                        "earlier conversation context) BEFORE retrying "
+                        "answer_from_database with the narrowed question."
+                    ),
+                }
 
         # 1. Pull schema — TWO-PHASE approach:
         #   Phase A: Show LLM a full table-of-contents (ALL tables) so it can
@@ -543,6 +626,70 @@ class NLAnswerService:
                                 "; ".join(f"{d} → {a}" for d, a in _swaps),
                             )
 
+                    # ── Join-partner guarantee (2026-09-22): when the
+                    # catalog knows a relation for a selected table but its
+                    # partner was NOT selected, pull the best partner in
+                    # BEFORE the DDL slice is built. Without it a question
+                    # like "sales by customer" selects only the sales table
+                    # and the model invents a join to a table it never saw —
+                    # the dominant JOIN failure on freshly onboarded
+                    # databases. Only ADDS catalog-vouched tables.
+                    if (
+                        selected_names
+                        and getattr(
+                            settings, "NL2SQL_JOIN_PARTNER_GUARANTEE_ENABLED", True
+                        )
+                    ):
+                        try:
+                            from app.services.db.join_partner import (
+                                ensure_join_partners,
+                            )
+
+                            selected_names, _partners = await asyncio.to_thread(
+                                ensure_join_partners,
+                                self._db, kb_id, selected_names,
+                            )
+                            if _partners:
+                                logger.info(
+                                    "NLAnswer: join-partner guarantee added %s",
+                                    _partners,
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                "NLAnswer: join-partner guarantee skipped: %s", e,
+                            )
+
+                    # ── Coverage expansion (2026-09-22): pull NON-selected
+                    # catalog tables sharing an entity token with the
+                    # selection into it (bounded). Fixes recall failures
+                    # like "contracts expiring" selecting only the purchase
+                    # table while the sales-contract table exists — the
+                    # 25-vs-215 measured failure.
+                    if (
+                        selected_names
+                        and getattr(
+                            settings, "NL2SQL_COVERAGE_EXPANSION_ENABLED", True
+                        )
+                    ):
+                        try:
+                            from app.services.db.coverage import (
+                                expand_entity_selection,
+                            )
+
+                            selected_names, _cov_added = await asyncio.to_thread(
+                                expand_entity_selection,
+                                self._db, kb_id, selected_names,
+                            )
+                            if _cov_added:
+                                logger.info(
+                                    "NLAnswer: coverage expansion added %s",
+                                    _cov_added,
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                "NLAnswer: coverage expansion skipped: %s", e,
+                            )
+
                     if selected_names:
                         logger.info(
                             "NLAnswer: TOC phase selected %d tables: %s",
@@ -571,7 +718,10 @@ class NLAnswerService:
         # ── Fallback: original RRF-based schema linker ──
         if not _selected_via_toc and settings.SCHEMA_LINKING_ENABLED and settings.SEMANTIC_CATALOG_ENABLED:
             try:
-                from app.services.knowledge_graph.schema_linker import link_schema
+                from app.services.knowledge_graph.schema_linker import (
+                    get_selected_tables_ddl,
+                    link_schema,
+                )
                 linker_result = await link_schema(
                     question=question,
                     kb_ids=[kb_id],
@@ -588,6 +738,76 @@ class NLAnswerService:
                         for t in linker_result.get("tables", [])
                         if t.get("table_name")
                     ]
+
+                    # ── Join-partner guarantee on the linker path too ──
+                    if (
+                        candidate_tables
+                        and getattr(
+                            settings, "NL2SQL_JOIN_PARTNER_GUARANTEE_ENABLED", True
+                        )
+                    ):
+                        try:
+                            from app.services.db.join_partner import (
+                                ensure_join_partners,
+                            )
+
+                            candidate_tables, _partners = await asyncio.to_thread(
+                                ensure_join_partners,
+                                self._db, kb_id, candidate_tables,
+                            )
+                            if _partners:
+                                # The linker's slice_text only covers the
+                                # ORIGINAL tables — rebuild the DDL for the
+                                # expanded set so the partner's columns are
+                                # actually in the prompt.
+                                _linker_slice = await asyncio.to_thread(
+                                    get_selected_tables_ddl,
+                                    self._db, [kb_id], candidate_tables,
+                                )
+                                if _linker_slice and _linker_slice.strip():
+                                    linker_result["slice_text"] = _linker_slice
+                                logger.info(
+                                    "NLAnswer: join-partner guarantee (linker) "
+                                    "added %s",
+                                    _partners,
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                "NLAnswer: join-partner guarantee skipped: %s", e,
+                            )
+
+                    # ── Coverage expansion on the linker path too ──
+                    if (
+                        candidate_tables
+                        and getattr(
+                            settings, "NL2SQL_COVERAGE_EXPANSION_ENABLED", True
+                        )
+                    ):
+                        try:
+                            from app.services.db.coverage import (
+                                expand_entity_selection,
+                            )
+
+                            candidate_tables, _cov_added = await asyncio.to_thread(
+                                expand_entity_selection,
+                                self._db, kb_id, candidate_tables,
+                            )
+                            if _cov_added:
+                                _cov_slice = await asyncio.to_thread(
+                                    get_selected_tables_ddl,
+                                    self._db, [kb_id], candidate_tables,
+                                )
+                                if _cov_slice and _cov_slice.strip():
+                                    linker_result["slice_text"] = _cov_slice
+                                logger.info(
+                                    "NLAnswer: coverage expansion (linker) "
+                                    "added %s",
+                                    _cov_added,
+                                )
+                        except Exception as e:
+                            logger.debug(
+                                "NLAnswer: coverage expansion skipped: %s", e,
+                            )
                     if settings.SCHEMA_GRAPH_ENABLED and candidate_tables:
                         try:
                             from app.services.db.schema_graph import SchemaGraph
@@ -727,8 +947,31 @@ class NLAnswerService:
             # writes the arithmetic, because a grain mismatch is an arithmetic
             # choice, not a data problem.
             _ratio_guidance = _grounding.ratio_directive(_grounded_plan)
+        # OCI online stage — query log retrieval: SIMILAR past successful
+        # questions (not just the exact match plan memory owns) become few-shot
+        # shape grounding. Bounded, kb-scoped, LEARNED_FROM_WORKLOAD tier.
+        _log_guidance = ""
+        if getattr(settings, "NL2SQL_QUERY_LOG_RETRIEVAL_ENABLED", True):
+            try:
+                from app.services.db.query_log_retrieval import (
+                    build_query_log_guidance,
+                )
+
+                _log_guidance = build_query_log_guidance(self._db, kb_id, question)
+            except Exception as e:
+                logger.debug("NLAnswer: query-log guidance skipped: %s", e)
         _sql_guidance = "\n\n".join(
-            part for part in (_plan_guidance, _unsupported_guidance, _ratio_guidance) if part
+            part
+            for part in (
+                # Intent resolution first: the model must know WHAT to answer
+                # before it sees HOW similar questions were shaped.
+                (_planning or {}).get("guidance"),
+                _plan_guidance,
+                _log_guidance,
+                _unsupported_guidance,
+                _ratio_guidance,
+            )
+            if part
         )
         try:
             sql = await self._text_to_sql(
@@ -786,6 +1029,19 @@ class NLAnswerService:
         # produce MySQL 1064s that kill the data step. Deterministic cleanup
         # BEFORE execution (see _sanitize_llm_sql).
         sql = _sanitize_llm_sql(sql)
+
+        # 2e. OCI stage 5 — deterministic, semantics-preserving rewrite
+        # (predicate push-down, join elimination with uniqueness evidence).
+        # The canonical path passes NO row budget: narration consumes the
+        # rows, so bounding them here would silently change the answer shape.
+        # Rewrites are additive telemetry on the result either way.
+        _rewrite = _apply_sql_rewrite_stage(sql)
+        if _rewrite is not None and _rewrite.applied:
+            logger.info(
+                "NLAnswer: sql rewrite applied %s for KB %s",
+                _rewrite.applied, kb_id,
+            )
+            sql = _rewrite.sql
 
         # 3. Execute — with a bounded REPAIR loop on naming/syntax failures.
         #
@@ -897,7 +1153,7 @@ class NLAnswerService:
         # it. C2 adds a live COUNT(*) probe so the re-selection LLM can avoid
         # provably-empty tables.
         exec_rows = exec_result.get("rows", [])
-        _degenerate = _is_degenerate_result(exec_rows)
+        _degenerate = _is_degenerate_result(exec_rows, question=question)
         if (
             (not exec_rows or _degenerate)
             and settings.SCHEMA_LINKING_ENABLED
@@ -1009,19 +1265,43 @@ class NLAnswerService:
                                     schema_text=schema_text, project_id=project_id,
                                     endpoint=endpoint,
                                 )
+                                _rw2 = _apply_sql_rewrite_stage(sql2 or "")
+                                if _rw2 is not None and _rw2.applied:
+                                    sql2 = _rw2.sql
                                 if sql2:
                                     try:
                                         exec_result = await asyncio.to_thread(
                                             query_svc.execute, kb_id, sql2
                                         )
                                         exec_rows = exec_result.get("rows", [])
-                                        if exec_rows:
+                                        # Accept the correction only when it
+                                        # produced REAL data: an all-null /
+                                        # all-zero result is the same empty
+                                        # signal the correction was escaping.
+                                        # Adopting it replaces a failed attempt
+                                        # with a confidently wrong answer —
+                                        # measured 2026-09-22: "total number of
+                                        # inventory lots" corrected onto
+                                        # COUNT(DISTINCT FMTONO) over a table
+                                        # where FMTONO is NULL on all 52,647
+                                        # rows, then narrated "No inventory
+                                        # lots are currently recorded".
+                                        if exec_rows and not _is_degenerate_result(exec_rows, question=question):
                                             logger.info(
                                                 "NLAnswer: zero-row correction "
                                                 "SUCCEEDED — got %d rows",
                                                 len(exec_rows),
                                             )
                                             sql = sql2
+                                        elif exec_rows:
+                                            logger.warning(
+                                                "NLAnswer: zero-row correction "
+                                                "returned %d DEGENERATE rows "
+                                                "(all-null/all-zero) — not "
+                                                "adopting; surfacing the "
+                                                "empty-result disclosure",
+                                                len(exec_rows),
+                                            )
                                         else:
                                             logger.info(
                                                 "NLAnswer: zero-row correction "
@@ -1071,6 +1351,9 @@ class NLAnswerService:
                     project_id=project_id, endpoint=endpoint,
                     extra_guidance=_fix_guidance,
                 )
+                _rw_c = _apply_sql_rewrite_stage(sql_c or "")
+                if _rw_c is not None and _rw_c.applied:
+                    sql_c = _rw_c.sql
                 if sql_c and sql_c.strip() and sql_c.strip() != sql.strip():
                     res_c = await asyncio.to_thread(query_svc.execute, kb_id, sql_c)
                     rows_c = (res_c or {}).get("rows") or []
@@ -1157,6 +1440,105 @@ class NLAnswerService:
             except Exception as e:
                 logger.warning("NLAnswer: canonical result set failed (non-fatal): %s", e)
 
+        # ── 3c-ter. Coverage self-check (2026-09-22): the 25-vs-215 fix ──
+        # Measured live: "How many contracts expire this month?" answered 25
+        # (purchase contracts) while 190 sales contracts sat in a sibling
+        # table the SQL never touched. When the catalog knows entity-token
+        # siblings of the touched tables that the SQL did NOT touch, run
+        # bounded supplementary queries and attach them to the payload as
+        # ``supplementary_snapshots`` — the calling agent sees the complete
+        # entity set instead of a confident partial one.
+        _supplementary: list[dict] = []
+        # Reaching this point means the execution succeeded (execution
+        # errors returned above) — the flag is the only gate.
+        if getattr(settings, "NL2SQL_COVERAGE_SELF_CHECK_ENABLED", True):
+            logger.info(
+                "NLAnswer: coverage self-check ENTER (flag=%s sql=%r)",
+                getattr(settings, "NL2SQL_COVERAGE_SELF_CHECK_ENABLED", True),
+                (sql or "")[:80],
+            )
+            try:
+                from app.services.db.coverage import find_uncovered_siblings
+                from app.services.knowledge_graph.schema_linker import (
+                    get_selected_tables_ddl as _sib_ddl_fn,
+                )
+
+                _touched = _extract_table_names(sql) or []
+                _siblings = await asyncio.to_thread(
+                    find_uncovered_siblings, self._db, kb_id, _touched,
+                )
+                if _siblings:
+                    logger.info(
+                        "NLAnswer: coverage self-check — entity siblings the "
+                        "SQL never touched: %s", _siblings,
+                    )
+                    for _sib in _siblings[:2]:
+                        try:
+                            _sib_ddl = await asyncio.to_thread(
+                                _sib_ddl_fn, self._db, [kb_id], [_sib],
+                            )
+                            if not (_sib_ddl and _sib_ddl.strip()):
+                                continue
+                            _sib_info = _schema_info_from_toc_selection(
+                                self._db, kb_id, [_sib], schema_svc,
+                            )
+                            _sib_sql = await self._text_to_sql(
+                                f"{question} — query ONLY the table {_sib} "
+                                f"for the same request",
+                                _sib_info, schema_text=_sib_ddl,
+                                project_id=project_id, endpoint=endpoint,
+                            )
+                            if not _sib_sql:
+                                continue
+                            _sib_sql, _ = await self._correct_sql_with_validator_feedback(
+                                _sib_sql, question, kb_id, _sib_info,
+                                schema_text=_sib_ddl, project_id=project_id,
+                                endpoint=endpoint,
+                            )
+                            if not _sib_sql:
+                                continue
+                            _sib_res = await asyncio.to_thread(
+                                query_svc.execute, kb_id, _sib_sql,
+                            )
+                            # NOTE: QueryService.execute has NO 'success'
+                            # key — gating on it silently skipped every
+                            # supplementary query (measured 2026-09-22).
+                            # Success here = rows came back at all.
+                            _sib_rows = (_sib_res or {}).get("rows") or []
+                            if not _sib_rows:
+                                logger.info(
+                                    "NLAnswer: supplementary query for %s "
+                                    "returned 0 rows — not attaching",
+                                    _sib,
+                                )
+                                continue
+                            _supplementary.append({
+                                "table": _sib,
+                                "sql": _sib_res.get("sql") or _sib_sql,
+                                "row_count": len(_sib_rows),
+                                "rows": _sib_rows[:50],
+                                "note": (
+                                    f"entity sibling of {_touched} — the "
+                                    f"primary query did not include this table"
+                                ),
+                            })
+                            logger.info(
+                                "NLAnswer: supplementary snapshot for %s — "
+                                "%d rows", _sib, len(_sib_rows),
+                            )
+                        except Exception as _sib_err:
+                            logger.debug(
+                                "NLAnswer: supplementary query for %s failed "
+                                "(non-fatal): %s", _sib, _sib_err,
+                            )
+            except Exception as e:
+                logger.debug("NLAnswer: coverage self-check skipped: %s", e)
+
+        # The narrator and every downstream consumer read exec_result — the
+        # snapshots must be ON it, not only on the final payload.
+        if _supplementary:
+            exec_result["supplementary_snapshots"] = _supplementary
+
         # ── 3d. Remember the plan that worked ────────────────────────────
         # Only a VERIFIED answer becomes a plan. Learning from an unchecked one
         # would make the platform consistently wrong instead of occasionally
@@ -1188,6 +1570,34 @@ class NLAnswerService:
                     )
             except Exception as e:
                 logger.debug("NLAnswer: plan memory save skipped: %s", e)
+
+        # ── 3d-bis. Promote the VERIFIED Q→SQL pair into the few-shot corpus
+        # (OCI feedback loop, P0-3). Same eligibility as plan memory —
+        # execution OK, contract OK, non-empty rows, not degenerate — so the
+        # corpus only ever learns answers that passed the deterministic
+        # checks. Deduped by sql_hash, capped per datasource, flag-gated.
+        if (
+            getattr(settings, "NL2SQL_EXAMPLE_AUTO_PROMOTION_ENABLED", False)
+            and _contract.ok
+            and exec_rows
+            and not _degenerate
+        ):
+            try:
+                from app.services.q_sql_examples.service import QSqlExampleService
+
+                _promoted = QSqlExampleService.maybe_auto_promote(
+                    self._db,
+                    question=question,
+                    sql=sql,
+                    datasource_id=kb_id,
+                )
+                if _promoted:
+                    logger.info(
+                        "NLAnswer: promoted verified Q→SQL example for KB %s",
+                        kb_id,
+                    )
+            except Exception as e:
+                logger.debug("NLAnswer: example auto-promotion skipped: %s", e)
 
         # 4. Narrate
         # PERF 2026-08-24: skip_narrate lets deliverable-turn callers bypass
@@ -1252,6 +1662,49 @@ class NLAnswerService:
         else:
             _na_cols = []
 
+        # ── 4c. Visualization hint (OCI stage 8, P2-7). Deterministic shape
+        # inference — no LLM call. Advisory: renderers may ignore it.
+        _visualization = None
+        if (
+            getattr(settings, "NL2SQL_CHART_SUGGESTION_ENABLED", False)
+            and _na_rows
+        ):
+            try:
+                from app.services.db.chart_suggestor import suggest_chart
+
+                _visualization = suggest_chart(_na_rows, _na_cols)
+            except Exception as e:
+                logger.debug("NLAnswer: chart suggestion skipped: %s", e)
+
+        # ── 4d. Persist the planner's structured turn state (OCI P1-6): the
+        # next turn in this conversation starts from what was resolved here
+        # instead of re-deriving entity/metric/time from scratch.
+        if _planning is not None and conversation_id:
+            try:
+                from app.services.db import nl2sql_planner as _planner
+
+                if not _planning.get("needs_clarification"):
+                    _resolved = {
+                        k: _planning.get(k)
+                        for k in ("metric", "metric_definition", "entity", "intent")
+                        if _planning.get(k)
+                    }
+                    _defaults = None
+                    if _planning.get("time_range") or _planning.get("slices"):
+                        _defaults = {
+                            "time_range": _planning.get("time_range") or {},
+                            "slices": _planning.get("slices") or [],
+                        }
+                    _planner.save_turn_state(
+                        self._db,
+                        conversation_id,
+                        kb_id,
+                        resolved=_resolved or None,
+                        defaults=_defaults,
+                    )
+            except Exception as e:
+                logger.debug("NLAnswer: turn-state save skipped: %s", e)
+
         return {
             "success": True,
             "answer": answer_text,
@@ -1265,6 +1718,14 @@ class NLAnswerService:
             # Present when the first query died and the model rebuilt it from
             # the driver's error — callers surface it as "recovered" evidence.
             "repaired_from_error": _repaired_from,
+            # OCI stage 5 telemetry: which deterministic rewrites changed the
+            # statement that actually ran (empty when the flag is off or the
+            # SQL was already clean).
+            **(
+                {"rewrites_applied": list(_rewrite.applied)}
+                if _rewrite is not None and _rewrite.applied
+                else {}
+            ),
             # Present only when the SQL that ran contradicted the question
             # (wrong period / single scalar for a trend request). Callers can
             # qualify the answer instead of presenting it as authoritative.
@@ -1277,6 +1738,19 @@ class NLAnswerService:
             # "genuinely zero" answer apart from an "answered from the wrong
             # window" one.
             "provenance": _crv,
+            # Coverage self-check (2026-09-22): snapshots from entity-sibling
+            # tables the primary SQL never touched. Present only when the
+            # self-check ran and produced them; callers (agent narration,
+            # report synthesis) MUST fold these in before claiming a
+            # complete entity-level answer.
+            **(
+                {"supplementary_snapshots": _supplementary}
+                if _supplementary else {}
+            ),
+            # OCI stage 8 (P2-7): deterministic chart-type suggestion from the
+            # result shape. Present only when NL2SQL_CHART_SUGGESTION_ENABLED
+            # and the result is chartable; renderers may ignore it.
+            **({"visualization": _visualization} if _visualization is not None else {}),
             # ── P3 contracts (added 2026-09-20) ───────────────────────────
             # `plan` is what the platform decided it could answer, including the
             # slots it could not support. `result_set` is the canonical shape
@@ -1647,6 +2121,28 @@ class NLAnswerService:
         # Keep the prompt small: cap rows sent to the LLM.
         preview = rows[:50]
 
+        # Coverage self-check (2026-09-22): supplementary snapshots from
+        # entity-sibling tables the primary SQL never touched MUST reach the
+        # narrator — otherwise the answer reports a partial entity set as if
+        # it were complete (the measured 25-vs-215 failure).
+        _supp_block = ""
+        _supp = exec_result.get("supplementary_snapshots") or []
+        if _supp:
+            lines = [
+                "RELATED TABLES the query above did NOT include (same entity, "
+                "other tables of this database). The rows below are VERIFIED "
+                "query results — you MUST cite their figures in the answer "
+                "alongside the primary rows, labeling each by table, so the "
+                "answer covers the COMPLETE entity set:"
+            ]
+            for snap in _supp[:3]:
+                lines.append(
+                    f"- Table {snap.get('table')}: {snap.get('row_count')} rows "
+                    f"(SQL: {(snap.get('sql') or '')[:160]})\n"
+                    f"  Rows: {json.dumps((snap.get('rows') or [])[:10], default=str, ensure_ascii=False)}"
+                )
+            _supp_block = "\n".join(lines) + "\n\n"
+
         if crs is None:
             body = (
                 f"Question: {question}\n"
@@ -1655,6 +2151,7 @@ class NLAnswerService:
                 f"{json.dumps(preview, default=str, ensure_ascii=False)}\n\n"
                 "Answer in the user's language. Cite column names where helpful."
             )
+            body = f"{_supp_block}{body}" if _supp_block else body
         else:
             from app.services.db import grounding as _grounding
 
@@ -1678,7 +2175,10 @@ class NLAnswerService:
                 + "\n"
                 + f"Rows ({crs.row_count} total, showing up to 50):\n"
                 + json.dumps(preview, default=str, ensure_ascii=False) + "\n\n"
-                + _grounding.narrate_directive(crs)
+                + _supp_block
+                + _grounding.narrate_directive(
+                    crs, supplementary=exec_result.get("supplementary_snapshots")
+                )
                 + "\n\nAnswer in the user's language. Cite column names where helpful."
             )
         if correction:
@@ -2043,7 +2543,7 @@ async def _probe_table_coverage(
     return out
 
 
-def _is_degenerate_result(rows: list) -> bool:
+def _is_degenerate_result(rows: list, question: str | None = None) -> bool:
     """True when the result is degenerate business data (not a real answer).
 
     Conservative on purpose: a legit 1-row COUNT(*) summary (e.g. total
@@ -2055,7 +2555,7 @@ def _is_degenerate_result(rows: list) -> bool:
         return False
     try:
         from app.services.goal_contract import is_metadata_only_rows
-        if is_metadata_only_rows(rows):
+        if is_metadata_only_rows(rows, question=question):
             return True
     except Exception:
         pass

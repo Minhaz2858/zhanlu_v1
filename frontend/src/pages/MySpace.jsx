@@ -4,6 +4,7 @@ import { base44 } from '@/api/base44Client';
 import { useLanguage } from '@/lib/LanguageProvider';
 import { useTranslate } from '@/lib/useTranslate';
 import { authFetch } from '@/api/authFetch';
+import { isCatalogableDbType } from '@/api/kbCapabilities';
 import PageHeader from '@/components/PageHeader';
 import CreateResourceDialog from '@/components/CreateResourceDialog';
 import KbSetupDialog from '@/components/kb/KbSetupDialog';
@@ -32,7 +33,6 @@ export default function MySpace() {
   // the default from "agent" to "project" matches that mental
   // model: the project is the container, the agents inside it are
   // just one of its resources.
-  const [tab, setTab] = useState('project');
   const [items, setItems] = useState([]);
   const [loading, setLoading] = useState(true);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -46,6 +46,25 @@ export default function MySpace() {
   const [initialProjectId, setInitialProjectId] = useState(null);
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
+
+  // ── The active tab lives in the URL (?tab=<key>) ─────────────────────────
+  // It used to be component-local state, which broke BOTH reported symptoms:
+  // refreshing /my-space and clicking Back from /my-space/agent/:id both
+  // snapped to Projects, because the URL never described which tab was open.
+  // PageHeader's back button prefers navigate(-1), so it replays whatever the
+  // previous history entry's URL was — which carried no tab (2026-09-16).
+  // Deriving the tab from the URL makes it part of the route. `replace: true`
+  // rewrites the current entry instead of stacking one per tab click, so Back
+  // from a detail page lands on the listing WITH the originating tab.
+  const VALID_TABS = ['project', 'agent', 'kb', 'dashboard', 'workflow', 'mcp'];
+  const _tabParam = searchParams.get('tab');
+  const tab = VALID_TABS.includes(_tabParam) ? _tabParam : 'project';
+  const setTab = (key) => {
+    const next = new URLSearchParams(searchParams);
+    if (key === 'project') next.delete('tab');   // Projects is the default → keep the URL clean
+    else next.set('tab', key);
+    setSearchParams(next, { replace: true });
+  };
   // Monotonic token so a slower response from a previous tab can never
   // overwrite the current tab's items (mount races tab switches).
   const loadToken = useRef(0);
@@ -54,13 +73,6 @@ export default function MySpace() {
   // builder pre-selecting the project. We read ?initialProjectId once and
   // strip it from the URL so a refresh doesn't reopen the builder.
   useEffect(() => {
-    const tabParam = searchParams.get('tab');
-    if (tabParam && ['project', 'agent', 'kb', 'dashboard', 'workflow'].includes(tabParam)) {
-      setTab(tabParam);
-      const next = new URLSearchParams(searchParams);
-      next.delete('tab');
-      setSearchParams(next, { replace: true });
-    }
     const pid = searchParams.get('initialProjectId');
     if (pid) {
       setInitialProjectId(pid);
@@ -214,7 +226,12 @@ export default function MySpace() {
   }
   async function reindexKb(item) {
     try {
-      const isDbKb = item.source_kind === 'database' && ['mysql','postgres','postgresql'].includes((item.db_type||'').toLowerCase());
+      // Database KBs go through the semantic catalog; file KBs through document
+      // ingestion. Which dialects the catalog supports comes from the backend
+      // manifest — never a hardcoded list here (that list used to silently
+      // route MariaDB / SQL Server / Oracle KBs to the wrong endpoint).
+      const isDbKb = item.source_kind === 'database'
+        && await isCatalogableDbType(item.db_type, item.app_id);
       const endpoint = isDbKb
         ? `/api/apps/${item.app_id || 'default-app'}/knowledge_bases/${item.id}/catalog/reindex`
         : `/api/apps/${item.app_id || 'default-app'}/knowledge_bases/${item.id}/reindex`;

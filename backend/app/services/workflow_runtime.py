@@ -179,6 +179,128 @@ def _kb_datasource_config(kb) -> dict | None:
     return None
 
 
+# Canonical node-type registry aliases — the workflow_builder LLM may emit
+# plain-language / Chinese type strings (定时触发器, 聊天触发, 大模型, …) which
+# are not in NODE_TYPES and would fail validation with a misleading
+# "exactly one trigger node" error. Normalise them deterministically so a
+# well-formed graph is accepted on the first try.
+_TYPE_ALIASES = {
+    "trigger_chat": "trigger_chat", "chat trigger": "trigger_chat", "聊天触发": "trigger_chat",
+    "聊天触发器": "trigger_chat", "对话触发": "trigger_chat", "对话触发器": "trigger_chat", "chat": "trigger_chat",
+    "trigger_manual": "trigger_manual", "manual trigger": "trigger_manual", "手动触发": "trigger_manual",
+    "手动触发器": "trigger_manual", "manual": "trigger_manual",
+    "trigger_schedule": "trigger_schedule", "schedule trigger": "trigger_schedule",
+    "定时触发": "trigger_schedule", "定时触发器": "trigger_schedule", "定时器": "trigger_schedule",
+    "定时": "trigger_schedule", "cron": "trigger_schedule", "schedule": "trigger_schedule",
+    "trigger_webhook": "trigger_webhook", "webhook trigger": "trigger_webhook",
+    "webhook": "trigger_webhook", "webhook触发": "trigger_webhook", "webhook触发器": "trigger_webhook", "http触发": "trigger_webhook",
+    "llm": "llm", "大模型": "llm", "大模型节点": "llm",
+    "agent": "agent", "智能体": "agent", "智能体节点": "agent", "agent node": "agent",
+    "kb_search": "kb_search", "知识库检索": "kb_search", "知识库检索器": "kb_search", "知识库": "kb_search", "kb": "kb_search",
+    "db_query": "db_query", "数据库查询": "db_query", "数据库查询节点": "db_query", "数据库": "db_query", "db": "db_query",
+    "mcp_tool": "mcp_tool", "mcp": "mcp_tool", "mcp工具": "mcp_tool", "mcp节点": "mcp_tool",
+    "http_request": "http_request", "http": "http_request", "http请求": "http_request", "http节点": "http_request",
+    "api": "http_request",
+    "code": "code", "代码": "code", "代码节点": "code",
+    "set_fields": "set_fields", "设置字段": "set_fields", "设置字段节点": "set_fields", "set": "set_fields",
+    "split_out": "split_out", "拆分": "split_out", "拆分节点": "split_out", "split": "split_out",
+    "remove_duplicates": "remove_duplicates", "去重": "remove_duplicates", "去重节点": "remove_duplicates", "dedupe": "remove_duplicates",
+    "condition": "condition", "条件": "condition", "条件分支": "condition", "条件节点": "condition", "if": "condition",
+    "switch": "switch", "多分支": "switch", "多分支节点": "switch",
+    "merge": "merge", "合并": "merge", "合并节点": "merge",
+    "output": "output", "输出": "output", "输出节点": "output", "output node": "output",
+}
+
+
+def normalize_workflow_flow(flow: dict) -> dict:
+    """Deterministically repair a workflow_builder graph BEFORE validation.
+
+    Repairs (none of which change a correct graph's meaning):
+      - node types written as aliases / Chinese labels → canonical registry type
+      - missing edge ids → stable e1..eN
+      - missing node positions → left-to-right BFS layout (trigger first)
+      - zero triggers → prepend a `trigger_chat` wired to the first node
+
+    Returns a NEW flow dict; the input is not mutated.
+    """
+    from app.services.workflow_node_types import NODE_TYPES, is_trigger_type
+
+    nodes = [dict(n) for n in (flow.get("nodes") or [])]
+    edges = [dict(e) for e in (flow.get("edges") or [])]
+
+    # 1. normalise node types + labels.
+    for n in nodes:
+        raw_type = str(n.get("type") or "").strip().lower()
+        canon = _TYPE_ALIASES.get(raw_type)
+        if canon and canon in NODE_TYPES:
+            n["type"] = canon
+        data = n.get("data") or {}
+        if not isinstance(data, dict):
+            data = {}
+        if not data.get("label"):
+            data["label"] = canon or raw_type
+        n["data"] = data
+
+    # 2. edge ids.
+    for i, edge in enumerate(edges, start=1):
+        if not edge.get("id"):
+            edge["id"] = f"e{i}"
+
+    # 3. positions — BFS from triggers (or first node) left-to-right.
+    ids = [n.get("id") for n in nodes]
+    by_id = {n.get("id"): n for n in nodes}
+    if nodes and not all(isinstance(n.get("position"), dict) for n in nodes):
+        adj = {nid: [] for nid in ids}
+        for e in edges:
+            if e.get("source") in adj and e.get("target") in adj:
+                adj[e["source"]].append(e["target"])
+        roots = [n.get("id") for n in nodes if is_trigger_type(n.get("type"))] or [ids[0]]
+        depth = {}
+        queue = list(roots)
+        for r in roots:
+            depth[r] = 0
+        while queue:
+            cur = queue.pop(0)
+            for nxt in adj.get(cur, []):
+                if nxt not in depth:
+                    depth[nxt] = depth[cur] + 1
+                    queue.append(nxt)
+        col_count = {}
+        for nid in ids:
+            d = depth.get(nid, 0)
+            row = col_count.get(d, 0)
+            col_count[d] = row + 1
+            if not isinstance(by_id[nid].get("position"), dict):
+                by_id[nid]["position"] = {"x": 80 + d * 280, "y": 80 + row * 130}
+
+    # 4. exactly-one-trigger guard: prepend a trigger_chat if none present.
+    if nodes and not any(is_trigger_type(n.get("type")) for n in nodes):
+        head = nodes[0]
+        trig_id = "wb_auto_trigger"
+        nodes.insert(
+            0,
+            {
+                "id": trig_id,
+                "type": "trigger_chat",
+                "position": {"x": 80, "y": 80},
+                "data": {"label": "Chat Trigger", "config": {}},
+            },
+        )
+        if head.get("id"):
+            edges.insert(
+                0,
+                {
+                    "id": "e0",
+                    "source": trig_id,
+                    "target": head["id"],
+                    "sourceHandle": "source-main",
+                    "targetHandle": "target-main",
+                },
+            )
+
+    return {"version": flow.get("version", 1), "nodes": nodes, "edges": edges}
+
+
 def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -> dict:
     """Validate + persist a workflow graph emitted by workflow_builder.
 
@@ -205,9 +327,19 @@ def save_flow_from_decision_summary(payload: dict, workflow_id: str, db, user) -
     if not isinstance(flow, dict) or not isinstance(flow.get("nodes"), list):
         return {"status": "flow_invalid", "errors": ["flow.nodes must be a list"]}
 
+    # Deterministic normalise + repair (aliases, missing ids/positions,
+    # zero-trigger) BEFORE validation — this is the self-contained "retry"
+    # that turns most malformed graphs valid without another LLM call.
+    flow = normalize_workflow_flow(flow)
+
     errors = validate_flow(flow)
     if errors:
-        return {"status": "flow_invalid", "errors": errors}
+        # Second pass: re-normalise (covers cases where the first pass only
+        # partially fixed the graph) then re-validate once.
+        flow = normalize_workflow_flow(flow)
+        errors = validate_flow(flow)
+        if errors:
+            return {"status": "flow_invalid", "errors": errors}
 
     # The builder agent often omits edge ids — assign stable ones (e1..eN)
     # so canvas edits (delete/reconnect) have identities to work with.

@@ -31,3 +31,15 @@ class QSqlExample(TimestampedBase):
         Text, nullable=True
     )  # Combined question for the retriever embedder
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Provenance: "manual" (authored in a UI / API) or "workload" (auto-
+    # promoted from a VERIFIED successful run — see QSqlExampleService
+    # .maybe_auto_promote). Only manual rows may never be overwritten by the
+    # auto-promoter.
+    source: Mapped[Optional[str]] = mapped_column(
+        String(32), nullable=True, default="manual"
+    )
+    # sha256 of the normalised SQL — the auto-promoter's dedupe key, so one
+    # query does not accumulate one example per phrasing.
+    sql_hash: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True, index=True
+    )

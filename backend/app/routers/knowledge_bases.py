@@ -581,6 +581,11 @@ async def update_catalog_table(
     if not applied:
         raise HTTPException(status_code=400, detail="No editable fields supplied")
 
+    # OCI #1 (2026-09-22): a human edit is the strongest provenance — mark it
+    # so the pipeline can trust this description above any LLM output.
+    table.description_source = "human"
+    table.description_confidence = 1.0
+
     db.commit()
     db.refresh(table)
 
@@ -601,7 +606,79 @@ async def update_catalog_table(
         "id": str(table.id),
         "description_zh": table.description_zh,
         "description_en": table.description_en,
+        "description_confidence": table.description_confidence,
         "indexed_at": table.indexed_at.isoformat() if table.indexed_at else None,
+    }
+
+
+@router.patch("/{kb_id}/catalog/columns/{column_id}")
+async def update_catalog_column(
+    app_id: str,
+    kb_id: str,
+    column_id: str,
+    body: dict,
+    db: Session = Depends(get_db),
+):
+    """Update a catalog column's human-editable fields (description_zh/en, unit).
+
+    OCI #1 (2026-09-22): the onboarding LLM writes "未知" for columns it
+    cannot name and nothing distinguished those guesses from knowledge.
+    A human edit here is the strongest provenance: ``description_source``
+    becomes 'human' and ``description_confidence`` 1.0, so the pipeline
+    trusts it above any LLM output. The parent table's ChromaDB embeddings
+    are refreshed so retrieval sees the corrected text.
+    """
+    from app.models.knowledge_catalog import KBColumnMeta, KBTableMeta
+    from app.services.knowledge_graph.catalog_indexer import update_column_embedding
+
+    col = (
+        db.query(KBColumnMeta)
+        .join(KBTableMeta, KBColumnMeta.table_meta_id == KBTableMeta.id)
+        .filter(KBColumnMeta.id == column_id, KBTableMeta.kb_id == kb_id)
+        .first()
+    )
+    if col is None:
+        raise HTTPException(status_code=404, detail="Catalog column not found")
+
+    table = db.query(KBTableMeta).filter(KBTableMeta.id == col.table_meta_id).first()
+
+    allowed = {"description_zh", "description_en", "unit"}
+    applied = []
+    for field in allowed:
+        if field in body:
+            value = body[field]
+            if value is not None and not isinstance(value, str):
+                raise HTTPException(status_code=400, detail=f"{field} must be a string or null")
+            setattr(col, field, value)
+            applied.append(field)
+    if not applied:
+        raise HTTPException(status_code=400, detail="No editable fields supplied")
+
+    col.description_source = "human"
+    col.description_confidence = 1.0
+    db.commit()
+    db.refresh(col)
+
+    if table is not None:
+        update_column_embedding(
+            kb_id=kb_id,
+            table_meta_id=table.id,
+            table_name=table.table_name,
+            column_meta_id=str(col.id),
+            column_name=col.column_name,
+            description_zh=col.description_zh,
+            description_en=col.description_en,
+        )
+
+    logger.info("catalog column %s edited: %s", column_id, applied)
+
+    return {
+        "id": str(col.id),
+        "column_name": col.column_name,
+        "description_zh": col.description_zh,
+        "description_en": col.description_en,
+        "unit": col.unit,
+        "description_confidence": col.description_confidence,
     }
 
 

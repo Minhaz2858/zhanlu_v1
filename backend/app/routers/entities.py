@@ -27,20 +27,34 @@ def _maybe_fire_catalog_index(record) -> None:
 
     Also drops the in-process schema cache for this KB so the agent never
     sees a stale table list after a new connection is saved.
+
+    IMPORTANT: ``record`` is the dict returned by
+    ``entity_service.create_record`` (``record.to_dict()``), NOT the ORM row.
+    Reading ``getattr(record, "db_type", "")`` off a dict silently yields ``""``,
+    which made this hook a no-op for EVERY KB created through the generic entity
+    API — the UI only appeared to work because KbSetupDialog calls
+    /catalog/reindex itself. All field access goes through
+    ``catalog_triggers.kb_field`` and the dialect gate through
+    ``catalog_triggers.supports_catalog`` so both shapes work and there is one
+    place that decides which dialects are catalogable.
     """
+    from app.services.knowledge_graph.catalog_triggers import kb_field
+    if not kb_field(record, "id"):
+        # No id → nothing to index (and nothing to cache-invalidate). Defensive:
+        # a payload without an id would otherwise key the per-KB lock on None.
+        return
     try:
         from app.services.db.schema_service import invalidate_schema_cache
-        invalidate_schema_cache(getattr(record, "id", None))
+        invalidate_schema_cache(kb_field(record, "id"))
     except Exception:
         pass  # cache invalidation is best-effort
     try:
-        from app.config import settings
-        if not settings.SEMANTIC_CATALOG_ENABLED:
+        from app.services.knowledge_graph.catalog_triggers import (
+            is_catalogable_record,
+            maybe_reindex_catalog_bg,
+        )
+        if not is_catalogable_record(record):
             return
-        db_type = (getattr(record, "db_type", "") or "").lower()
-        if db_type not in ("mysql", "postgres", "postgresql"):
-            return
-        from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog_bg
         maybe_reindex_catalog_bg(record)
     except Exception:
         logger.warning("catalog auto-index on create failed", exc_info=True)
@@ -51,7 +65,11 @@ def _maybe_fire_catalog_index_on_update(prev, payload: dict, record) -> None:
 
     Also drops the in-process schema cache for this KB whenever connection
     fields change — the agent must not keep querying the old database.
+
+    ``prev`` and ``record`` are ``to_dict()`` dicts — see the create hook note
+    about shape-agnostic field access.
     """
+    from app.services.knowledge_graph.catalog_triggers import kb_field
     try:
         from app.config import settings
         connection_changed = False
@@ -61,18 +79,20 @@ def _maybe_fire_catalog_index_on_update(prev, payload: dict, record) -> None:
                 for f in _KB_CONNECTION_FIELDS
             )
         # Invalidate the schema cache on ANY connection-field change (even
-        # when the semantic catalog is disabled or db_type is non-catalog).
+        # when the semantic catalog is disabled or the dialect isn't catalogable).
         if connection_changed:
             from app.services.db.schema_service import invalidate_schema_cache
-            invalidate_schema_cache(getattr(record, "id", None))
+            invalidate_schema_cache(kb_field(record, "id"))
         if not settings.SEMANTIC_CATALOG_ENABLED:
             return
-        db_type = (getattr(record, "db_type", "") or "").lower()
-        if db_type not in ("mysql", "postgres", "postgresql"):
+        from app.services.knowledge_graph.catalog_triggers import (
+            is_catalogable_record,
+            maybe_reindex_catalog_bg,
+        )
+        if not is_catalogable_record(record):
             return
         if prev is not None and not connection_changed:
             return
-        from app.services.knowledge_graph.catalog_triggers import maybe_reindex_catalog_bg
         maybe_reindex_catalog_bg(record)
     except Exception:
         logger.warning("catalog auto-index on update failed", exc_info=True)

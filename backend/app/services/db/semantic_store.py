@@ -750,6 +750,41 @@ class SemanticStore:
         except Exception as e:  # pragma: no cover
             logger.debug("semantic_store: query log unavailable: %s", e)
 
+        # 3. Mined workload stats (offline enrichment — see
+        #    knowledge_graph/workload_miner.py). The miner ACCUMULATES what
+        #    successful executions looked like; here it contributes USES to
+        #    tables the catalog already knows. Popularity re-ranks, never
+        #    creates: a table absent from ``known`` stays absent.
+        try:
+            from app.models.query_workload_stat import QueryWorkloadStat
+
+            mined = (
+                self.db.query(QueryWorkloadStat)
+                .filter(
+                    QueryWorkloadStat.kb_id.in_(list(self.kb_ids)),
+                    QueryWorkloadStat.stat_kind == "popular_table",
+                )
+                .all()
+            )
+            for r in mined:
+                real = known.get((r.table_name or "").lower())
+                if not real:
+                    continue
+                sig = out.get(real) or WorkloadSignal(table_name=real)
+                occ = int(r.occurrences or 0)
+                out[real] = WorkloadSignal(
+                    table_name=real,
+                    uses=sig.uses + occ,
+                    successes=sig.successes + occ,
+                    failures=sig.failures,
+                    last_used=max(
+                        [d for d in (sig.last_used, r.last_seen_at) if d],
+                        default=None,
+                    ),
+                )
+        except Exception as e:  # pragma: no cover
+            logger.debug("semantic_store: mined workload unavailable: %s", e)
+
         self._workload = out
         return out
 

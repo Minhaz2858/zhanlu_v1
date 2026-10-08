@@ -1241,7 +1241,12 @@ def _record_observation(
 def _topological_sort(nodes) -> list:
     """Sort plan nodes in topological order (dependencies first).
 
-    Raises ValueError if a dependency cycle is detected.
+    FIX 2026-09-22: a dependency CYCLE used to raise ValueError and kill the
+    whole turn ("FSM execution failed: Dependency cycle") — for a defect that
+    is always salvageable. Self-dependencies and back-edges are now BROKEN
+    here (the offending dependency is removed from the node and the mutation
+    persists with the executor's commit), so every authored plan runs:
+    nodes are never removed, only impossible edges.
     """
     # Build node index by seq
     node_map = {n.seq: n for n in nodes}
@@ -1249,9 +1254,24 @@ def _topological_sort(nodes) -> list:
     visiting = set()  # in current DFS path (gray)
     result = []
 
+    # Pre-pass: drop self-dependencies outright.
+    for n in nodes:
+        deps = n.dependencies or []
+        if n.seq in deps:
+            n.dependencies = [d for d in deps if d != n.seq]
+
     def visit(seq):
         if seq in visiting:
-            raise ValueError(f"Dependency cycle detected at node seq={seq}")
+            # Cycle: break it — remove seq from the dependencies of every
+            # node on the current DFS path that points back at it.
+            for s in list(visiting):
+                n = node_map.get(s)
+                if n and seq in (n.dependencies or []):
+                    n.dependencies = [
+                        d for d in (n.dependencies or []) if d != seq
+                    ]
+            visiting.discard(seq)
+            return
         if seq in visited:
             return
         visiting.add(seq)
@@ -1259,7 +1279,7 @@ def _topological_sort(nodes) -> list:
         if not node:
             visiting.discard(seq)
             return
-        for dep in (node.dependencies or []):
+        for dep in list(node.dependencies or []):
             visit(dep)
         visiting.discard(seq)
         visited.add(seq)

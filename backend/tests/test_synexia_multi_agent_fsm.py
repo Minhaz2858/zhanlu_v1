@@ -11,7 +11,7 @@ import json
 import os
 import sys
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 _BACKEND_ROOT = os.path.abspath(os.path.join(_THIS_DIR, ".."))
@@ -31,7 +31,7 @@ class TestTaskSpecParserFileIntent(unittest.TestCase):
         """Create a mock call_llm that returns a fixed payload."""
         return MagicMock(return_value={"response": json.dumps(return_payload)})
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_docx_file_intent_injected(self, mock_call_llm):
         """When user asks for docx, artifact_intents=['docx'] and user_signal='export_docx'."""
         mock_call_llm.return_value = {
@@ -53,7 +53,7 @@ class TestTaskSpecParserFileIntent(unittest.TestCase):
         self.assertEqual(result["user_signal"], "export_docx")
         self.assertTrue(result["requires_data"])
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_no_file_intent_no_change(self, mock_call_llm):
         """When no format is mentioned, artifact_intents and user_signal keep LLM values."""
         mock_call_llm.return_value = {
@@ -75,7 +75,7 @@ class TestTaskSpecParserFileIntent(unittest.TestCase):
         self.assertNotIn("export_", result.get("user_signal", ""))
         self.assertEqual(result["user_signal"], "default")
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_llm_fails_default_has_file_intent(self, mock_call_llm):
         """When LLM call fails, the fallback dict still has the detected file intent."""
         mock_call_llm.side_effect = Exception("LLM timeout")
@@ -87,7 +87,7 @@ class TestTaskSpecParserFileIntent(unittest.TestCase):
         self.assertEqual(result["user_signal"], "export_pptx")
         self.assertTrue(result["requires_data"])
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_llm_returns_different_intent_overridden(self, mock_call_llm):
         """When LLM returns wrong artifact_intents, the deterministic override wins."""
         mock_call_llm.return_value = {
@@ -112,7 +112,7 @@ class TestTaskSpecParserFileIntent(unittest.TestCase):
         self.assertTrue(result["requires_data"])
         self.assertEqual(result["task_kind"], "create_artifact")
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_selected_skill_sets_override_metadata(self, mock_call_llm):
         """A runtime-selected custom skill must be preserved on TaskSpec
         and must suppress default-skill auto-pick metadata."""
@@ -320,7 +320,7 @@ class TestExecuteSynthesizeNode(unittest.TestCase):
         self.assertIn("instructions", obs.result_data)
         self.assertIn("synth_data", obs.result_data)
 
-    @patch("app.services.llm_service.call_llm", new_callable=MagicMock)
+    @patch("app.services.llm_service.call_llm", new_callable=AsyncMock)
     def test_synthesize_llm_failure_fallback(self, mock_call_llm):
         """When LLM fails, the synthesize node still returns a fallback observation."""
         mock_call_llm.side_effect = Exception("LLM unavailable")

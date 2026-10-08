@@ -234,6 +234,8 @@ Classify the task:
 - acceptance_criteria: list of CONCRETE, checkable criteria the final reply must satisfy (e.g. "report must include revenue figures", "must cite the data source", "must contain a chart of Q2 sales"). These are judged by the QUALITY_EVAL phase after the response is generated.
 - complexity: "simple" | "moderate" | "complex"
 - requires_data: true if data retrieval/analysis is needed
+- dimensions: list of the breakdown dimensions the question explicitly asks for (e.g. ["产品", "客户", "组织"] for 按产品、客户及组织划分; ["region", "product"]). Empty if the question does not name breakdown dimensions.
+- standalone_question: CRITICAL for follow-ups. Rewrite the user message as a SELF-CONTAINED question that resolves every dangling reference (periods like "last week" / "this month", entities, metrics, "the requested X") against the conversation context. A follow-up like "breakdown by product" after "sales data for last week" MUST become "sales data for last week (2026-09-14 ~ 09-20) broken down by product". For a brand-new self-contained message, repeat it unchanged. NEVER leave a period or entity implicit.
 - user_signal: "default" | "export_docx" | "export_pptx" | "export_xlsx" | "export_pdf" | "export_md"{format_hint}
 - is_followup: true if this message refines or updates an artifact/result from a previous turn in this conversation (e.g. "make it better", "dark theme", "add a chart"). false for a brand-new request.
 - refines_artifact_id: if is_followup is true and the conversation lists a prior artifact being refined, set this to that artifact's id; otherwise null.
@@ -265,6 +267,8 @@ Respond with ONLY a JSON object, no explanation."""
             "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
             "complexity": {"type": "string", "enum": ["simple", "moderate", "complex"]},
             "requires_data": {"type": "boolean"},
+            "dimensions": {"type": "array", "items": {"type": "string"}},
+            "standalone_question": {"type": ["string", "null"]},
             "user_signal": {"type": "string"},
             "is_followup": {"type": "boolean"},
             "refines_artifact_id": {"type": ["string", "null"]},
@@ -316,10 +320,91 @@ Respond with ONLY a JSON object, no explanation."""
         task_spec.setdefault("acceptance_criteria", [])
         task_spec.setdefault("complexity", "simple")
         task_spec.setdefault("requires_data", False)
+        task_spec.setdefault(
+            "dimensions",
+            [str(d).strip() for d in (task_spec.get("dimensions") or [])
+             if str(d).strip()],
+        )
+        # ── Standalone-question resolution (2026-09-22, root-cause fix) ──
+        # Measured live: "breakdown by product" (a follow-up to "sales data
+        # for last week") reached the nl2sql node VERBATIM — no date, no
+        # entity — so the SQL had NO WHERE clause and answered with ALL-TIME
+        # totals (¥15.57B instead of ¥49.56M). Every follow-up must be
+        # rewritten into a self-contained question before planning.
+        task_spec.setdefault("standalone_question", None)
+        if task_spec.get("is_followup") and conversation_context:
+            _sq = (task_spec.get("standalone_question") or "").strip()
+            if not _sq:
+                # LLM did not provide one — degrade to prior user message
+                # (last "User:" line of the transcript) + current message.
+                _prior_q = ""
+                for _line in reversed(
+                    str(conversation_context.get("transcript") or "").splitlines()
+                ):
+                    if _line.lower().startswith("user:"):
+                        _prior_q = _line[5:].strip()
+                        break
+                if _prior_q:
+                    _sq = f"{_prior_q} — {user_message}"
+                    task_spec["standalone_question"] = _sq
+                    logger.info(
+                        "TaskSpec: standalone_question synthesized from prior "
+                        "turn: %r", _sq[:120],
+                    )
         task_spec.setdefault("user_signal", "default")
         task_spec.setdefault("is_followup", False)
         task_spec.setdefault("refines_artifact_id", None)
         task_spec.setdefault("previous_artifact_type", "")
+
+        # ── Sanitize free-form LLM output (2026-09-22) ────────────────
+        # The TaskSpec LLM invents values the pipeline cannot deliver:
+        # "more details" was classified artifact_intents=['elaboration'],
+        # user_signal='more details' — plan_dag then built a sandbox node
+        # "Generate elaboration" with format 'elaboration', the sandbox
+        # had no data, and the turn failed with "output type 'elaboration'
+        # isn't a supported format". Only KNOWN intents may plan an
+        # artifact; an invented intent is dropped, an unknown user_signal
+        # collapses to "default", and a create_artifact task left with no
+        # deliverable intent downgrades to a plain answer (which CAN
+        # elaborate from the conversation or re-query).
+        _known_intents = {
+            "pptx", "docx", "pdf", "md", "html", "chart", "dashboard",
+            "xlsx", "image", "mini_app",
+        }
+        _raw_intents = task_spec.get("artifact_intents") or []
+        _valid_intents = [
+            str(i).lower().strip()
+            for i in _raw_intents
+            if str(i).lower().strip() in _known_intents
+        ]
+        if len(_valid_intents) != len(_raw_intents):
+            logger.warning(
+                "TaskSpec: dropped invented artifact intent(s) %s — unknown "
+                "types can never be delivered",
+                [i for i in _raw_intents
+                 if str(i).lower().strip() not in _known_intents],
+            )
+        task_spec["artifact_intents"] = _valid_intents
+        if task_spec.get("user_signal") not in (
+            "default", "export_docx", "export_pptx", "export_xlsx",
+            "export_pdf", "export_md",
+        ):
+            logger.warning(
+                "TaskSpec: unknown user_signal %r — collapsing to 'default'",
+                task_spec.get("user_signal"),
+            )
+            task_spec["user_signal"] = "default"
+        if (
+            task_spec.get("task_kind") == "create_artifact"
+            and not _valid_intents
+            and not requested_fmt
+        ):
+            logger.info(
+                "TaskSpec: create_artifact with no deliverable intent — "
+                "downgrading to answer_question (elaborate/re-query, no file)"
+            )
+            task_spec["task_kind"] = "answer_question"
+
         task_spec["skill_override"] = skill_override
         task_spec["auto_picked_default"] = auto_picked_default
         task_spec["forced_skill"] = forced_skill

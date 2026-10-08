@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from typing import Any
 
 from app.services.harness.rule_events import observe_rule
 from typing import Callable, List, Optional, Sequence, Tuple
@@ -237,7 +238,20 @@ _METADATA_ONLY_COLUMN_RE = re.compile(
 )
 
 
-def is_metadata_only_rows(rows: Optional[Sequence[dict]]) -> bool:
+#: A question that itself asks for a count. When the user asked "how many",
+#: a positive COUNT row IS the answer; when they asked for anything else, a
+#: bare count is a dodge the contract should reject.
+_COUNT_INTENT_RE = re.compile(
+    r"(how\s+many|number\s+of|total\s+number|count\s+of|"
+    r"记录数|行数|多少个|多少条|多少家|多少行|多少只|几个|几条|几只|总数|数量)",
+    re.IGNORECASE,
+)
+
+
+def is_metadata_only_rows(
+    rows: Optional[Sequence[dict]],
+    question: Optional[str] = None,
+) -> bool:
     """True when ``rows`` has the "metadata-only" shape: 1-2 rows where EVERY
     column name is a MIN/MAX/COUNT aggregate (bare, ``min_*`` prefix, or
     ``min(...)`` function form).
@@ -250,10 +264,23 @@ def is_metadata_only_rows(rows: Optional[Sequence[dict]]) -> bool:
     shape AND the row count must be <= 2. A result like
     ``{product_name: "X", total_revenue: 100}`` is never flagged, and any
     mixed aggregate + measure result is never flagged either.
+
+    Question-aware value rule (2026-09-22): an ALIASED COUNT column is an
+    answer only when the QUESTION itself asks for a count ("how many
+    inventory lots..." → ``{"total_lot_count": 16143}``). Measured failure:
+    that result was flagged metadata-only, the correct answer was discarded,
+    and the zero-row correction answered "0 lots" from a wrong table. For
+    any OTHER question a bare count is still a dodge (asked for shipments,
+    got a row count), and a ZERO count is always a wrong-table candidate.
+    Bare (``count``) and function-form (``count(*)``) columns stay flagged
+    regardless — unaliased probe/degraded output by construction. Callers
+    that know the user's question SHOULD pass it; ``question=None`` keeps
+    the question-blind (conservative) behaviour.
     """
     rows = rows or []
     if not rows or len(rows) > 2:
         return False
+    count_intent = bool(question and _COUNT_INTENT_RE.search(question))
     saw_column = False
     for row in rows:
         if not isinstance(row, dict):
@@ -264,7 +291,34 @@ def is_metadata_only_rows(rows: Optional[Sequence[dict]]) -> bool:
             saw_column = True
             if not _METADATA_ONLY_COLUMN_RE.match(str(col).strip()):
                 return False
+            # A positive aliased COUNT answers a count question (see the
+            # docstring question-aware rule). Bare and function forms stay
+            # flagged whatever the value.
+            lowered = str(col).strip().lower()
+            if (
+                count_intent
+                and "(" not in lowered
+                and lowered not in ("count", "min", "max")
+                and "count" in lowered
+                and _is_positive_number(row[col])
+            ):
+                return False
     return saw_column
+
+
+def _is_positive_number(value: Any) -> bool:
+    """True for an int/float/numeric-string strictly greater than zero.
+    Strings and bools are not counts."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value > 0
+    if isinstance(value, str):
+        try:
+            return float(value.strip()) > 0
+        except ValueError:
+            return False
+    return False
 
 
 def extract_tables_from_sql(sql: Optional[str]) -> List[str]:
@@ -372,6 +426,7 @@ class UnmetCriterion:
 
 @dataclass
 class GoalContract:
+    question: Optional[str] = None
     deliverable: Optional[str] = None
     requires_data: bool = False
     expects_rows: bool = False
@@ -413,7 +468,9 @@ class GoalContract:
             self.zero_row_events += 1
         else:
             self.zero_row_events = 0
-        if is_metadata_only_rows(rows):
+        # Question-aware: a positive aliased count answers a "how many"
+        # question but stays a dodge for any other question.
+        if is_metadata_only_rows(rows, question=self.question):
             # A pure MIN/MAX/COUNT snapshot (date range / row count) is a
             # distinct degradation: it carries signal, so it is NOT counted as
             # empty, but it is also NOT business data — it gets its own
@@ -690,6 +747,7 @@ def build_goal_contract(
     (trivially satisfied → immediate text answer, no forcing)."""
     text = (user_content or "").strip()
     contract = GoalContract(
+        question=text or None,
         max_forces=max_forces,
         catalog_meta=catalog_meta,
         distinct_executor=distinct_executor,

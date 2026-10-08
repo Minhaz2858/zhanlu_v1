@@ -190,7 +190,8 @@ export default function AgentConfig() {
 
   async function remove() {
     await base44.entities.AgentApp.delete(id);
-    navigate('/my-space');
+    // Return to the Agents tab, not the Projects landing tab.
+    navigate('/my-space?tab=agent');
   }
 
   const flowMode = !!form.flow_mode;
@@ -265,7 +266,7 @@ export default function AgentConfig() {
   return (
     <div className="h-full overflow-y-auto px-8 py-8 lg:flex lg:min-h-0 lg:flex-col lg:overflow-hidden">
       <PageHeader
-        backTo="/my-space"
+        backTo="/my-space?tab=agent"
         title={translate(form.name) || t.agentConfig.title}
         action={
           <div className="flex gap-2">

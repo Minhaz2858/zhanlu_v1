@@ -46,6 +46,11 @@ class KBTableMeta(TimestampedBase):
     description_source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="", server_default=""
     )
+    # OCI #1 (2026-09-22): how much to trust the descriptions. 0.0 blank,
+    # 0.3 unknown-marker, 0.6 plain LLM, 0.8 data-corroborated, 0.9 source
+    # comment, 1.0 human-verified (set by the catalog PATCH endpoints).
+    # Recomputed on every index EXCEPT human rows (source='human').
+    description_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     coverage_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Denormalised business-domain label written by domain_discovery; lets the
@@ -89,10 +94,12 @@ class KBColumnMeta(TimestampedBase):
     # 'PRI' (primary key) | 'UNI' (unique) | 'MUL' (non-unique index) | '' |
     # None ("not collected"). The full inventory lives on KBTableMeta.indexes_json.
     key_role: Mapped[str | None] = mapped_column(String(16), nullable=True)
-    # 'llm' | 'source_comment' | '' (never described).
+    # 'llm' | 'source_comment' | 'human' | '' (never described).
     description_source: Mapped[str] = mapped_column(
         String(16), nullable=False, default="", server_default=""
     )
+    # See KBTableMeta.description_confidence — same scale, per column.
+    description_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
     sample_values: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     # Measured distribution from a bounded row sample (2026-09-20, slice 2) —
     # see services/knowledge_graph/column_stats.py.  Keys: rows_sampled, basis

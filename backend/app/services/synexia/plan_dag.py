@@ -102,6 +102,280 @@ def _run_llm_sync(coro):
         return pool.submit(asyncio.run, coro).result()
 
 
+def _sanitize_plan_step(step: dict) -> tuple[str | None, dict]:
+    """Validate a plan step's artifact type and format BEFORE it becomes a node.
+
+    ``output_artifact_type`` and ``inputs.format`` are free-form LLM output.
+    Measured live 2026-09-22: "more details" → TaskSpec intent 'elaboration'
+    → a sandbox node "Generate elaboration" with format 'elaboration' → the
+    sandbox rejected the format / had no data, and the turn lost its
+    deliverable AND its answer. A type the sandbox cannot render is dropped
+    here (and the format key removed) so the planner's word-shapes cannot
+    doom a node; known aliases ('dataframe' → xlsx) are normalised through
+    the sandbox's own mapping so there is ONE source of truth.
+
+    Returns ``(output_artifact_type, inputs)``.
+    """
+    inputs = dict(step.get("inputs") or {})
+    raw_type = step.get("output_artifact_type") or inputs.get("format")
+    if not raw_type:
+        return None, inputs
+    try:
+        from app.services.tool_handlers.sandbox_tool import (
+            _IMAGE_BY_FORMAT as _gen_formats,
+            normalize_format,
+        )
+
+        normalized = normalize_format(str(raw_type))
+        if normalized in _gen_formats:
+            if "format" in inputs:
+                inputs["format"] = normalized
+            return normalized, inputs
+        logger.warning(
+            "plan_dag: dropped unrenderable artifact type %r from step %r — "
+            "the sandbox can never produce it (invented intent?)",
+            raw_type, step.get("name"),
+        )
+        inputs.pop("format", None)
+        return None, inputs
+    except Exception as e:  # sanitizer must never break planning
+        logger.debug("plan_dag: step sanitization skipped: %s", e)
+        return step.get("output_artifact_type"), inputs
+
+
+def _intent_is_renderable(artifact_type) -> bool:
+    """True when the sandbox can actually render this artifact type.
+
+    An invented intent ('elaboration', 2026-09-22) used to become a doomed
+    sandbox node: no data, invalid format, failed turn. A non-renderable
+    intent means the user wants MORE of the answer, not a file — the
+    nl2sql/answer steps serve that. Normalises through the sandbox's own
+    mapping (dataframe → xlsx) so there is ONE source of truth.
+    """
+    try:
+        from app.services.tool_handlers.sandbox_tool import (
+            _IMAGE_BY_FORMAT as _gen_formats,
+            normalize_format,
+        )
+
+        return normalize_format(str(artifact_type or "")) in _gen_formats
+    except Exception:
+        return False
+
+
+def _strip_sandbox_without_file_intent(steps: list, task_spec: dict) -> list:
+    """Sandbox steps exist to produce a DOWNLOADABLE file.
+
+    Measured live 2026-09-22: "上周按产品、客户及组织划分的销售报告" (no
+    format words) was planned as an XLSX/DOCX file turn fed with TWO rows —
+    the analysis itself never ran. When the task spec carries no file intent
+    (no known artifact_intents, user_signal not export_*), sandbox steps are
+    stripped: an analytical report is answered in chat (multi-query +
+    synthesis), files only when the user explicitly asks for one.
+    """
+    try:
+        has_file_intent = bool(task_spec.get("artifact_intents")) or str(
+            task_spec.get("user_signal") or ""
+        ).startswith("export_")
+        if has_file_intent or not isinstance(steps, list):
+            return steps
+        kept = [st for st in steps
+                if isinstance(st, dict) and st.get("node_type") != "sandbox"]
+        if len(kept) != len(steps):
+            logger.info(
+                "plan: stripped %d sandbox step(s) — no file intent in the "
+                "task spec (analytical answers run in chat)",
+                len(steps) - len(kept),
+            )
+        return kept or steps
+    except Exception as e:
+        logger.debug("plan_dag: sandbox strip skipped: %s", e)
+        return steps
+
+
+def _build_report_decomposition_steps(task_spec: dict) -> list | None:
+    """Decompose a multi-dimension report question into per-dimension queries.
+
+    A question like "上周按产品、客户及组织划分的销售报告" cannot be answered
+    by ONE SQL statement — the measured good answer (Hermes, 2026-09-22) runs
+    ~10 queries: totals, one per requested dimension, the prior-period twin
+    for WoW comparisons, then synthesizes. Generic across databases: the
+    dimensions come from the TaskSpec LLM (which reads them off the question),
+    never from per-database code.
+
+    Emits: 1 totals node + 1 node per dimension + 1 prior-period twin +
+    1 synthesize node depending on all of them. ``None`` when the question
+    names no dimensions (the standard plan applies).
+    """
+    try:
+        dimensions = [
+            str(d).strip() for d in (task_spec.get("dimensions") or [])
+            if str(d).strip()
+        ]
+        if not dimensions:
+            return None
+        question = (
+            task_spec.get("user_message")
+            or (task_spec.get("entities", {}) or {}).get("question")
+            or ""
+        ).strip()
+        if not question:
+            return None
+
+        steps: list[dict] = []
+
+        def _nl2sql(name: str, sub_question: str, deps: list[int]) -> dict:
+            return {
+                "node_type": "nl2sql",
+                "name": name,
+                "description": sub_question,
+                "dependencies": deps,
+                "expected_output": "DataSnapshot",
+                "inputs": {"question": sub_question},
+            }
+
+        steps.append(_nl2sql(
+            "Retrieve totals",
+            f"{question} — overall totals only, no dimensional breakdown",
+            [],
+        ))
+        for dim in dimensions:
+            steps.append(_nl2sql(
+                f"Break down by {dim}",
+                f"{question} — break down by {dim} ONLY (one row per {dim}, "
+                f"with amounts, quantities and completion rate where available)",
+                [],
+            ))
+        steps.append(_nl2sql(
+            "Retrieve prior period",
+            f"{question} — the SAME metrics for the PREVIOUS period of the "
+            f"same length (for week-over-week / period-over-period comparison)",
+            [],
+        ))
+        steps.append({
+            "node_type": "synthesize",
+            "name": "Synthesize report",
+            "description": (
+                "Merge the totals, per-dimension and prior-period snapshots "
+                "into one report. Disclose the caliber (period window "
+                "semantics, filters, source, freshness), the WoW deltas, and "
+                "any data-quality findings (NULL dimension keys)."
+            ),
+            "dependencies": list(range(len(steps))),
+            "expected_output": "ReportCardPayload + executive summary text",
+            "inputs": {},
+        })
+        return steps
+    except Exception as e:
+        logger.debug("plan_dag: report decomposition skipped: %s", e)
+        return None
+
+
+def _sanitize_plan_dependencies(steps: list) -> tuple[list, list]:
+    """Make an LLM-authored dependency graph executable (2026-09-22).
+
+    Measured live: the planner emitted a CYCLIC graph for a follow-up
+    question and the executor refused it — "FSM execution failed: Dependency
+    cycle" — the plan was authored, then the WHOLE turn died on a defect
+    that is always salvageable. A plan with a cycle is fixed here, not
+    refused:
+
+    1. drop garbage deps (non-int, out of range, self);
+    2. reorder steps topologically when deps merely point forward
+       (legal in a DAG, fatal in a sequential renderer);
+    3. when a TRUE cycle exists, drop one back-edge per pass (largest dep
+       of the smallest stuck node) until acyclic — nodes are never removed.
+
+    Returns ``(steps, dropped_labels)``; result always passes
+    ``_validate_acyclic``. Fail-soft: on any internal error the input is
+    returned untouched.
+    """
+    try:
+        if not isinstance(steps, list) or not steps:
+            return steps, []
+
+        n = len(steps)
+        dropped: list[str] = []
+
+        def _deps(i: int) -> list:
+            d = steps[i].get("dependencies")
+            return d if isinstance(d, list) else []
+
+        # 1. garbage / self deps
+        for i in range(n):
+            clean = [d for d in _deps(i)
+                     if isinstance(d, int) and 0 <= d < n and d != i]
+            if len(clean) != len(_deps(i)):
+                for d in _deps(i):
+                    if not (isinstance(d, int) and 0 <= d < n) or d == i:
+                        dropped.append(f"dep {d!r} of step {i}")
+                steps[i]["dependencies"] = clean
+
+        # 2. topological reorder (stable) — legal DAGs stay legal, just ordered
+        def _topo_order(cur: list) -> list[int] | None:
+            m = len(cur)
+            indeg = [0] * m
+            for i in range(m):
+                for d in cur[i].get("dependencies") or []:
+                    if isinstance(d, int) and 0 <= d < m:
+                        indeg[i] += 1
+            queue = [i for i in range(m) if indeg[i] == 0]
+            order: list[int] = []
+            seen = list(indeg)
+            deps_of = [
+                [d for d in (cur[i].get("dependencies") or [])
+                 if isinstance(d, int) and 0 <= d < m]
+                for i in range(m)
+            ]
+            while queue:
+                i = queue.pop(0)
+                order.append(i)
+                for j in range(m):
+                    if i in deps_of[j]:
+                        seen[j] -= 1
+                        if seen[j] == 0:
+                            queue.append(j)
+            return order if len(order) == m else None
+
+        order = _topo_order(steps)
+        if order is not None:
+            ordered = [steps[i] for i in order]
+            # Re-index dependencies to the new order.
+            pos = {old: new for new, old in enumerate(order)}
+            for i, st in enumerate(ordered):
+                st["dependencies"] = [
+                    pos[d] for d in (st.get("dependencies") or [])
+                    if isinstance(d, int) and d in pos
+                ]
+            if ordered != steps:
+                steps[:] = ordered
+            return steps, dropped
+
+        # 3. true cycle: drop one back-edge per pass until acyclic.
+        guard = 0
+        while _topo_order(steps) is None and guard < n * n:
+            guard += 1
+            m = len(steps)
+            # smallest-index node that is part of a cycle: stuck in Kahn
+            order = _topo_order(steps)
+            stuck = [i for i in range(m)
+                     if i not in set(order or [])]
+            if not stuck:
+                break
+            i = min(stuck)
+            deps = [d for d in (steps[i].get("dependencies") or [])
+                    if isinstance(d, int) and 0 <= d < m]
+            if not deps:
+                break
+            victim = max(deps)
+            steps[i]["dependencies"] = [d for d in deps if d != victim]
+            dropped.append(f"dep {victim} of step {i}")
+        return steps, dropped
+    except Exception as e:
+        logger.debug("plan_dag: dependency sanitization skipped: %s", e)
+        return steps, []
+
+
 def generate_plan(
     db: Session,
     execution_id: str,
@@ -319,6 +593,14 @@ Rules:
 - Sandbox `format` must be one of: xlsx | pptx | html | pdf | docx | md.
   Never pass format "table", "dataframe", "chart" or "csv" — the sandbox
   rejects the step and the whole turn loses its deliverable.
+- REPORT / MULTI-DIMENSION questions (the task_spec lists `dimensions`,
+  e.g. 按产品、客户及组织) MUST be planned as MULTIPLE nl2sql nodes — ONE per
+  requested dimension, plus a totals node, plus a prior-period twin node for
+  comparison — all feeding ONE final synthesize step. A single nl2sql node
+  cannot answer a multi-dimension report; a sandbox file built from one
+  query is NOT the deliverable unless the user asked for a downloadable file.
+- NO file format requested = NO sandbox step. Analytical reports are
+  answered in chat from the merged nl2sql snapshots.
 
 Respond with ONLY a JSON array."""
 
@@ -413,6 +695,7 @@ Respond with ONLY a JSON array."""
 
     # Create PlanNode records
     for i, step in enumerate(plan_steps):
+        _out_type, _step_inputs = _sanitize_plan_step(step)
         node = PlanNode(
             id=str(uuid4()),
             plan_id=plan.id,
@@ -421,18 +704,51 @@ Respond with ONLY a JSON array."""
             name=step.get("name", f"Step {i+1}"),
             description=step.get("description", ""),
             dependencies=step.get("dependencies", []),
-            inputs=step.get("inputs") or {},
+            inputs=_step_inputs,
             expected_output=step.get("expected_output"),
-            output_artifact_type=step.get("output_artifact_type"),
+            output_artifact_type=_out_type,
             status="pending",
         )
         db.add(node)
 
-    # Validate acyclicity
+    # Validate acyclicity. A cycle is SANITIZED (back-edges dropped), not
+    # marked-invalid — the executor refuses cyclic graphs and the whole turn
+    # died on a salvageable defect (measured live 2026-09-22).
+    plan_steps, _dropped_deps = _sanitize_plan_dependencies(plan_steps)
+    if _dropped_deps:
+        logger.warning(
+            "plan: sanitized dependency graph — dropped %s", _dropped_deps
+        )
+    plan_steps = _strip_sandbox_without_file_intent(plan_steps, task_spec)
+    if not plan_steps:
+        logger.warning("plan: empty after file-intent strip — default plan")
+        plan_steps = default_plan
+
+    # ── Enforce report decomposition on EVERY plan author (2026-09-22) ──
+    # Measured live: the LLM planner authored ONE nl2sql node for a
+    # three-dimension report ("sales by product, customer, organization")
+    # — the 30-row grouped result was narrated as "top 3" and the report
+    # shape was lost. When the TaskSpec names dimensions, the plan MUST
+    # carry at least one nl2sql node per dimension (+ totals + prior
+    # period); otherwise the deterministic decomposition replaces it.
+    _dims = [str(d).strip() for d in (task_spec.get("dimensions") or []) if str(d).strip()]
+    if (
+        _dims
+        and task_spec.get("requires_data")
+        and not str(task_spec.get("user_signal") or "").startswith("export_")
+    ):
+        _nl_nodes = [st for st in plan_steps if st.get("node_type") == "nl2sql"]
+        if len(_nl_nodes) < len(_dims) + 1:
+            _dec = _build_report_decomposition_steps(task_spec)
+            if _dec:
+                logger.info(
+                    "plan: report decomposition enforced (%d nl2sql nodes "
+                    "replaces %d) for dimensions %s",
+                    len([x for x in _dec if x["node_type"] == "nl2sql"]),
+                    len(_nl_nodes), _dims,
+                )
+                plan_steps = _dec
     plan.is_acyclic = _validate_acyclic(plan_steps)
-    if not plan.is_acyclic:
-        logger.warning("Plan has cycles — marking as invalid")
-        plan.summary += " (WARNING: cycle detected)"
 
     db.commit()
     db.refresh(plan)
@@ -528,7 +844,8 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
     # Question the nl2sql node should ask the data agent (Phase 3a: concrete
     # node inputs so tool nodes don't execute with empty args — G4).
     _question = (
-        task_spec.get("user_message")
+        task_spec.get("standalone_question")
+        or task_spec.get("user_message")
         or (task_spec.get("entities", {}) or {}).get("question")
         or ""
     )
@@ -654,6 +971,21 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
 
         return steps
 
+    # ── Report decomposition (2026-09-22): multi-dimension report
+    # questions are answered by MULTIPLE nl2sql nodes (totals + per
+    # dimension + prior period) feeding one synthesize — one SQL statement
+    # cannot produce a three-dimension report, and the measured failure
+    # routed them into a 2-row file instead of an analysis.
+    if (
+        not steps
+        and task_kind in ("analyze_data", "answer_question", "general")
+        and requires_data
+        and not user_signal.startswith("export_")
+    ):
+        _report_steps = _build_report_decomposition_steps(task_spec)
+        if _report_steps:
+            return _report_steps
+
     # ── Standard (non-file) plan ───────────────────────────────────────
     if requires_data:
         steps.append({
@@ -665,7 +997,7 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
             "inputs": {"question": _question},
         })
 
-    if artifact_intents:
+    if artifact_intents and _intent_is_renderable(artifact_intents[0]):
         artifact_type = artifact_intents[0]
         steps.append({
             "node_type": "sandbox",

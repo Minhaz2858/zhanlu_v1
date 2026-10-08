@@ -57,6 +57,8 @@ from app.models.datasource import Datasource
 from app.models.metric_definition import MetricDefinition
 from app.models.semantic_mapping import SemanticMapping
 from app.models.query_plan_memory import QueryPlanMemory
+from app.models.query_workload_stat import QueryWorkloadStat
+from app.models.nl2sql_turn_state import Nl2sqlTurnState
 from app.models.context_manifest import ContextManifest
 from app.models.experience_entry import ExperienceEntry
 from app.models.learning_proposal import LearningProposal

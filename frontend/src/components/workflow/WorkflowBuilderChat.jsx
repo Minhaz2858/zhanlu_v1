@@ -5,6 +5,7 @@ import {
   listAgentConversations,
   streamAgentResponse,
 } from '@/api/agentEnhanced';
+import { NODE_DEF_MAP, nodeLabel } from '@/lib/workflowGraph';
 import { Button } from '@/components/ui/button';
 import {
   Send,
@@ -192,6 +193,126 @@ function renderBlocks(content) {
     }
   }
   return out;
+}
+
+// Extract a `:::decision-summary` JSON block from an assistant message.
+// Returns { ok, payload, prose } — prose is the message text with the fence
+// stripped so the bubble can show clean explanation prose next to the card.
+function parseDecisionSummary(content) {
+  const text = String(content ?? '');
+  const m = text.match(/:::decision-summary\s*([\s\S]*?)\s*:::/);
+  if (!m) return { ok: false };
+  const raw = m[1];
+  let payload = null;
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    return { ok: false };
+  }
+  const prose = text.replace(/:::decision-summary[\s\S]*?:::/, '').trim();
+  return { ok: true, payload, prose };
+}
+
+// Build a readable A → B → C chain from the flow's edges (BFS from the
+// trigger so the order reads like a pipeline, falling back to edge order).
+function buildFlowChain(flow) {
+  const nodes = (flow?.nodes || []).filter((n) => n && n.id);
+  const byId = Object.fromEntries(nodes.map((n) => [n.id, n]));
+  const edges = flow?.edges || [];
+  if (!nodes.length) return [];
+  const adj = {};
+  const indeg = {};
+  nodes.forEach((n) => {
+    adj[n.id] = [];
+    indeg[n.id] = 0;
+  });
+  edges.forEach((e) => {
+    if (adj[e.source] && adj[e.target] !== undefined) {
+      adj[e.source].push(e.target);
+      indeg[e.target] += 1;
+    }
+  });
+  const roots = nodes.filter((n) => indeg[n.id] === 0).map((n) => n.id);
+  const start = roots[0] || nodes[0].id;
+  const seen = new Set();
+  const chain = [];
+  let cur = start;
+  while (cur && !seen.has(cur) && chain.length < nodes.length) {
+    seen.add(cur);
+    chain.push(cur);
+    const next = (adj[cur] || [])[0];
+    cur = next;
+  }
+  // Append any disconnected nodes so the chain always lists everything.
+  nodes.forEach((n) => {
+    if (!seen.has(n.id)) chain.push(n.id);
+  });
+  return chain.map((id) => byId[id]).filter(Boolean);
+}
+
+// Workflow preview card — replaces the raw JSON dump for an assistant message
+// that carries a `:::decision-summary` graph. Shows the title, a node list
+// with type icons/labels, a pipeline chain, and an "apply to canvas" action.
+function WorkflowPreviewCard({ payload, lang, onApply }) {
+  if (!payload || !payload.flow) return null;
+  const isEn = lang === 'en';
+  const flow = payload.flow;
+  const chain = buildFlowChain(flow);
+  const nodeCount = (flow.nodes || []).length;
+  const edgeCount = (flow.edges || []).length;
+
+  return (
+    <div className="my-1.5 rounded-lg border bg-background">
+      <div className="flex items-center gap-2 border-b px-3 py-2">
+        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-primary/10 text-primary">
+          <Workflow className="h-3.5 w-3.5" />
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-xs font-semibold">
+            {payload.name || (isEn ? 'Generated workflow' : '生成的工作流')}
+          </div>
+          <div className="text-[10px] text-muted-foreground">
+            {nodeCount} {isEn ? 'nodes' : '个节点'} · {edgeCount} {isEn ? 'links' : '条连线'}
+          </div>
+        </div>
+      </div>
+
+      <div className="space-y-1 px-3 py-2">
+        {chain.map((n, i) => {
+          const def = NODE_DEF_MAP[n.type];
+          const label = def ? (isEn ? def.label.en : def.label.zh) : n.type;
+          return (
+            <div key={n.id || i} className="flex items-center gap-1.5 text-[12px]">
+              <span aria-hidden="true" className="w-4 text-center text-sm">
+                {def ? def.icon : '◆'}
+              </span>
+              <span className="truncate font-medium">{n.data?.label || label}</span>
+              <span className="truncate text-[10px] text-muted-foreground">· {label}</span>
+              {i < chain.length - 1 && (
+                <span aria-hidden="true" className="ml-1 text-muted-foreground">
+                  →
+                </span>
+              )}
+            </div>
+          );
+        })}
+      </div>
+
+      <div className="flex items-center justify-between gap-2 border-t px-3 py-2">
+        <span className="text-[10px] text-emerald-600">
+          {isEn ? 'Ready to apply' : '可应用到画布'}
+        </span>
+        <Button
+          size="sm"
+          onClick={onApply}
+          className="h-7"
+          title={isEn ? 'Apply to canvas' : '应用到画布'}
+        >
+          {isEn ? 'Apply to canvas' : '应用到画布'}
+        </Button>
+      </div>
+    </div>
+  );
 }
 
 // Autosize helper for the composer textarea (Task 4): grow the box with the
@@ -620,12 +741,22 @@ export default function WorkflowBuilderChat({ workflowId, open, onClose, onFlowS
               </div>
             );
           }
+          const ds = parseDecisionSummary(m.content);
           return (
             <div
               key={i}
               className="w-full max-w-[85%] space-y-1 rounded-lg bg-muted px-3 py-2 text-foreground"
             >
-              {m.content ? (
+              {ds.ok && (
+                <WorkflowPreviewCard
+                  payload={ds.payload}
+                  lang={lang}
+                  onApply={onFlowSaved}
+                />
+              )}
+              {ds.ok && ds.prose ? (
+                renderBlocks(ds.prose)
+              ) : ds.ok ? null : m.content ? (
                 renderBlocks(m.content)
               ) : showCaret ? (
                 <span aria-hidden="true" className="inline-block animate-pulse text-[1em] leading-none">

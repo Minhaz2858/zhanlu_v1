@@ -263,6 +263,35 @@ async def _ask_data_agent(
         if fastpath_result is not None:
             return fastpath_result
 
+    # ── OCI agentic planner (flag-gated): ONE bounded planning call before
+    # the loop spends its iterations — classify intent, decompose multi-part
+    # questions, decide SQL vs deterministic. A high-uncertainty plan returns
+    # the structured clarification WITHOUT starting the loop. Any planner
+    # failure (or flag off) = today's behavior, unchanged.
+    _planner_plan = None
+    if getattr(settings, "DATA_AGENT_PLANNER_ENABLED", True):
+        try:
+            from app.services.db import data_agent_planner as _planner
+
+            _planner_plan = await _planner.plan_data_question(
+                question, bound_kb_ids=bound_kb_ids, endpoint=endpoint,
+            )
+        except Exception as e:
+            logger.debug("ask_data_agent: planner skipped (non-fatal): %s", e)
+        if _planner_plan is not None and _planner_plan.needs_clarification:
+            _cl = _planner_plan.clarification or {}
+            logger.info(
+                "ask_data_agent: planner requested clarification (%s)",
+                _planner_plan.intent,
+            )
+            return {
+                "success": False,
+                "needs_clarification": True,
+                "clarification": _cl,
+                "error": str(_cl.get("question") or ""),
+                "planner": _planner_plan.to_state(),
+            }
+
     # ── Opt-in progress sub-step emitter (wired by the v3 FSM for chat
     # streaming). When the FSM passes ``context["progress_emitter"]`` (a
     # mutable list) + ``context["step_counter"]`` (the FSM's ``[int]``
@@ -819,7 +848,7 @@ async def _ask_data_agent(
     # "success with metadata rows" that it would render as real data. The
     # rows are still passed through so the main loop's GoalContract can
     # count the metadata-only shape and force a real query on exit.
-    _metadata_only = is_metadata_only_rows(state.get("last_rows"))
+    _metadata_only = is_metadata_only_rows(state.get("last_rows"), question=question)
     if _metadata_only:
         final_text = (
             "The Data Agent's query returned only metadata (date range / "

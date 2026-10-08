@@ -44,13 +44,9 @@ class TestDataAgentStructuredFailure(unittest.TestCase):
                 "source": {"id": "kb-1", "name": "db_zhanlu_no1"},
             }
 
-        # The sub-loop self-eval gate (SELF_EVAL_REPLAN_ENABLED=true in .env)
-        # runs its own LLM/verification path which would otherwise consume the
-        # mocked responses or hit the network. Disable it so these tests
-        # exercise ONLY the honesty gate in isolation.
-        async def fake_gate(*args, **kwargs):
-            return "", ""
-
+        # The old `_sub_loop_answer_gate` (self-eval verification) no longer
+        # exists in delegation_tools — its logic moved to the main loop. These
+        # tests exercise ONLY the inline metadata-only honesty gate.
         db = MagicMock()
         kb = MagicMock()
         kb.id = "kb-1"
@@ -62,8 +58,7 @@ class TestDataAgentStructuredFailure(unittest.TestCase):
             "question": question or "what is the date range of sales?",
             "data_source_id": "kb-1",
         }
-        with patch.object(delegation_tools, "_sub_loop_answer_gate", side_effect=fake_gate), \
-             patch.object(delegation_tools, "_call_llm", side_effect=fake_call_llm), \
+        with patch.object(delegation_tools, "_call_llm", side_effect=fake_call_llm), \
              patch.object(agent_tools, "execute_tool", side_effect=fake_execute_tool):
             return asyncio.run(delegation_tools._ask_data_agent(
                 args=args, db=db, user_id="u-1",
@@ -93,8 +88,15 @@ class TestDataAgentStructuredFailure(unittest.TestCase):
         # Rows still pass through so the contract can count the shape.
         self.assertEqual(result["rows"], rows)
 
-    def test_count_only_rows_also_flagged(self):
-        """COUNT-only rows → structured failure too."""
+    def test_positive_count_rows_are_a_real_answer(self):
+        """A POSITIVE aliased COUNT is the answer to a "how many" question —
+        it must succeed, not be flagged metadata_only.
+
+        2026-09-22 measured failure: "How many inventory lots do we have?" →
+        ``{"total_lot_count": 16143}`` was flagged, the correct answer was
+        discarded, and the retry answered "0 lots" from the wrong table
+        (FMTONO is NULL on all rows of erp_t_stk_inventory).
+        """
         rows = [{"count_rows": 12}]
         llm_responses = [
             {"content": "", "tool_calls": [{
@@ -105,6 +107,29 @@ class TestDataAgentStructuredFailure(unittest.TestCase):
                 },
             }]},
             {"content": "There are 12 orders.", "tool_calls": []},
+        ]
+        result = self._run(
+            llm_responses,
+            rows_to_capture=rows,
+            question="How many orders do we have?",
+        )
+
+        self.assertTrue(result["success"])
+        self.assertIsNone(result.get("error_kind"))
+
+    def test_zero_count_rows_still_flagged(self):
+        """A ZERO aliased count is a wrong-table candidate — still flagged so
+        the calling agent re-queries instead of answering "0"."""
+        rows = [{"count_rows": 0}]
+        llm_responses = [
+            {"content": "", "tool_calls": [{
+                "id": "tc1", "type": "function",
+                "function": {
+                    "name": "execute_query",
+                    "arguments": '{"sql":"SELECT COUNT(*) AS count_rows FROM orders"}',
+                },
+            }]},
+            {"content": "No orders.", "tool_calls": []},
         ]
         result = self._run(llm_responses, rows_to_capture=rows)
 

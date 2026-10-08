@@ -1806,12 +1806,31 @@ def unsupported_directive(plan: GroundedPlan) -> str:
     return "\n".join(lines)
 
 
-def narrate_directive(crs: CanonicalResultSet) -> str:
-    """The rules the narrator must obey for THIS result set."""
+def narrate_directive(
+    crs: CanonicalResultSet, supplementary: list | None = None
+) -> str:
+    """The rules the narrator must obey for THIS result set.
+
+    ``supplementary`` (2026-09-22): verified snapshots from entity-sibling
+    tables the primary SQL never touched (see services/db/coverage.py).
+    When present, the narrator MUST cite them too — excluding them is how
+    the answer reported a partial entity set as complete (25 vs 215
+    contracts)."""
     lines = [
-        "[Grounding] Report only the figures present in the rows below.",
+        "[Grounding] Report only the figures present in the rows below"
+        + (" and in the RELATED-TABLES block." if supplementary else "."),
         "- Never restate, adjust, average, extrapolate or infer a number that is not in them.",
     ]
+    if supplementary:
+        labels = ", ".join(
+            str(s.get("table")) for s in supplementary[:3]
+        )
+        lines.append(
+            f"- The RELATED-TABLES block holds VERIFIED results from sibling "
+            f"tables ({labels}) that the primary query did not cover: cite "
+            f"their figures in the answer, labeled by table — the primary "
+            f"rows alone are a PARTIAL entity set."
+        )
     if crs.unsupported_slots:
         labels = ", ".join(crs.unsupported_labels())
         lines.append(

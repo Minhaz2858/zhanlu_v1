@@ -198,8 +198,12 @@ class TestSynthesisFallback(unittest.TestCase):
         )
         self.assertIsInstance(p, ReportCardPayload)
         self.assertEqual(len(p.kpis), 3)
-        self.assertGreater(p.kpis[0].value.find("M"), -1,
-                           "KPI value should be formatted in millions")
+        # kpis[0] is the prepended "Row count" KPI; the revenue KPI carries
+        # the millions formatting.
+        self.assertTrue(
+            any("M" in k.value for k in p.kpis),
+            f"revenue KPI value should be formatted in millions: {p.kpis}",
+        )
         self.assertIsNotNone(p.chart)
         self.assertEqual(p.chart.x_key, "material_name")
         self.assertEqual(p.chart.data, rows)
@@ -394,7 +398,7 @@ class TestFinalizeArtifactWrite(unittest.TestCase):
             chart=None,
             insights=[],
         )
-        art = finalize_into_artifact(
+        art, _exports = finalize_into_artifact(
             db,
             conversation_id="conv-1",
             agent_name="erp_sales",
@@ -420,7 +424,7 @@ class TestFinalizeArtifactWrite(unittest.TestCase):
         db.rollback = MagicMock()
 
         payload = ReportCardPayload(title="X", summary="y")
-        art = finalize_into_artifact(
+        art, _exports = finalize_into_artifact(
             db,
             conversation_id="c", agent_name="a",
             user_message="m", source="s", sql=None, payload=payload,
