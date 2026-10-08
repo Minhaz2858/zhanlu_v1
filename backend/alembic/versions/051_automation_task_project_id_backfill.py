@@ -28,7 +28,8 @@ Behaviours:
 * Tasks whose legacy ``project`` is NULL / empty / "global" are left alone
   — they belong to the workspace-wide bucket, not a specific project.
 * If a legacy name maps to multiple ``projects`` rows within the same app
-  (e.g. a user created two "Ecisco BI" projects in their org), we pick the
+  (e.g. a user created two projects with the same legacy name in their org),
+  we pick the
   active (``is_deleted=False``) and oldest row — stable and predictable.
 * Logs a brief summary at the end for ops visibility.
 """

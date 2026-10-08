@@ -4,7 +4,7 @@ Revision ID: 052
 Revises: 051
 Create Date: 2026-08-12
 
-Ported from EDIA 5.1.2 MySQL ``alerts_log`` → PostgreSQL ``alert_logs``.
+Ported from an external MySQL ``alerts_log`` table → PostgreSQL ``alert_logs``.
 Indexes support: unread count queries, dedup lookups, per-org listing.
 """
 

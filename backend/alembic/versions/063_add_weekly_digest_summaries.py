@@ -6,7 +6,7 @@ Create Date: 2026-08-14
 
 Adds two nullable TEXT columns to ``weekly_report_cards`` to hold the two
 report-level LLM-generated sections that align the weekly summary with the
-EDIA C5C9 PPT reference:
+reference executive-brief format:
 
 - ``market_overview`` — 市场概况 / 原料情况 narrative at the top of the report.
 - ``executive_summary`` — 总结预测及建议 numbered recommendations at the bottom.

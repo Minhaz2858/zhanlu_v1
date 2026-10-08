@@ -1,4 +1,4 @@
-"""Create intelligence tables for EDIA Intelligence Layer integration.
+"""Create intelligence tables for the intelligence-events layer.
 
 Tables:
     intelligence_events             — detected market events with causal metadata

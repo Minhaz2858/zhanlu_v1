@@ -1,4 +1,4 @@
-"""Create forecasting tables for the Ecisco BI Agent.
+"""Create forecasting tables for the forecasting subsystem.
 
 Tables:
     forecast_targets          — registry of forecastable series
