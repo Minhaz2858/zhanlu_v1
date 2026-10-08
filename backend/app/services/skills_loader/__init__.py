@@ -165,7 +165,15 @@ def validate_manifest(manifest: dict[str, Any]) -> tuple[bool, list[str]]:
         _validate_schema(instance=manifest, schema=schema)
         return True, []
     except _ValidationError as e:
-        return False, [str(e)]
+        # NOTE: ``str(ValidationError)`` embeds the ENTIRE JSON schema
+        # (thousands of characters) plus the instance — one malformed
+        # manifest then floods the log on every startup / rescan.  Log the
+        # concise message with the offending path instead.
+        path = "/".join(str(p) for p in (getattr(e, "absolute_path", None) or []))
+        detail = getattr(e, "message", None) or str(e).splitlines()[0]
+        if path:
+            detail = f"{detail} (at: {path})"
+        return False, [detail]
 
 
 # Well-known format-bound skill names → their output format. Used as a

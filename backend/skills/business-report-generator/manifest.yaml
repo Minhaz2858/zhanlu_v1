@@ -23,8 +23,13 @@ compatible_formats:
   - docx
   - pdf
   - pptx
-references:
-  - output-formats.md
-  - report-structures.md
-assets:
-  - templates/default-report-template.docx
+references_manifest:
+  output-formats.md: >-
+    Choose the export format — DOCX (default), PDF, or PPTX — and what each
+    is best for.
+  report-structures.md: >-
+    Section layouts per audience: weekly ops, monthly performance, QBR,
+    investor update.
+assets_manifest:
+  templates/default-report-template.docx: >-
+    Bundled DOCX template used for the exported report.
