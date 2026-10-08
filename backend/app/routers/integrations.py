@@ -2,6 +2,7 @@
 
 import os
 import json
+import re
 import uuid
 import logging
 from datetime import datetime
@@ -17,14 +18,142 @@ from app.services.llm_service import (
     llm_url as _llm_url,
     get_model,
 )
+from app.services.tool_registry import registry
 
 router = APIRouter(tags=["integrations"])
 
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------------
+# Live-web grounding for the raw InvokeLLM / InvokeLLMStream path.
+#
+# The raw integration path is a tool-less LLM proxy: when the user message is
+# time-sensitive ("today's news", "latest price") the base model has no browsing
+# and refuses ("I don't have real-time information"). This hook runs
+# ``web_search`` and prepends the results to the prompt — but only when the
+# message is time-sensitive, only when the search tool is registered, and never
+# if anything goes wrong (a search outage must not break the chat).
+# ---------------------------------------------------------------------------
+
+_TIME_SENSITIVE_RE = re.compile(
+    r"\b("
+    r"today|todays?|tonight|tomorrow|yesterday|"
+    r"latest|newest|current|currently|now|live|breaking|recent|recently|"
+    r"news|headline|headlines|update[sd]?|trending|"
+    r"weather|forecast|price|prices|stock|stocks|market|score|scores|"
+    r"this (?:week|month|year|morning|evening|afternoon)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Hard cap on the search query handed to web_search; very long prompts would
+# otherwise produce absurd queries.
+_MAX_QUERY_CHARS = 300
+# Max results injected into the prompt — keeps prompt size bounded.
+_MAX_RESULTS = 5
+
+
+def _is_time_sensitive(text: str) -> bool:
+    return bool(text) and bool(_TIME_SENSITIVE_RE.search(text))
+
+
+def _query_from(prompt: str, messages: list[dict] | None) -> str:
+    """Derive the search query: last USER message when a ``messages`` list is
+    given (avoids feeding the whole system+history blob), else the prompt."""
+    source = prompt or ""
+    if isinstance(messages, list):
+        for msg in reversed(messages):
+            if isinstance(msg, dict) and msg.get("role") == "user":
+                content = msg.get("content")
+                if isinstance(content, str) and content.strip():
+                    source = content
+                break
+    return source.strip()[:_MAX_QUERY_CHARS]
+
+
+async def _maybe_ground_prompt(
+    prompt: str,
+    messages: list[dict] | None = None,
+    db=None,
+    user_id=None,
+) -> str:
+    """Return ``prompt``, optionally prefixed with live web-search results.
+
+    Fail-safe by design: returns the prompt unchanged whenever the message is
+    not time-sensitive, the ``web_search`` tool is not registered, the search
+    reports failure / returns nothing, or the handler raises.
+    """
+    if not _is_time_sensitive(prompt):
+        return prompt
+
+    handler = registry.get_handler("web_search")
+    if handler is None:
+        return prompt
+
+    query = _query_from(prompt, messages)
+    if not query:
+        return prompt
+
+    try:
+        result = await handler({"query": query}, db, user_id, context=None)
+    except Exception as exc:  # noqa: BLE001 — a search outage must not break chat
+        logger.warning("grounding: web_search handler raised (non-fatal): %s", exc)
+        return prompt
+
+    if not isinstance(result, dict) or not result.get("success"):
+        return prompt
+
+    results = result.get("results") or []
+    if not results:
+        return prompt
+
+    lines = [
+        "[Live web results — current information retrieved just now; "
+        "cite the source URLs below:]",
+        "",
+    ]
+    for idx, item in enumerate(results[:_MAX_RESULTS], start=1):
+        if not isinstance(item, dict):
+            continue
+        title = item.get("title") or item.get("name") or ""
+        url = item.get("url") or item.get("link") or ""
+        desc = item.get("description") or item.get("snippet") or ""
+        lines.append(f"{idx}. {title}")
+        if url:
+            lines.append(f"   Source: {url}")
+        if desc:
+            lines.append(f"   {desc}")
+        lines.append("")
+
+    block = "\n".join(lines).rstrip() + "\n\n"
+    return f"{block}{prompt}"
+
+
+
+def _with_grounded_prompt(body: dict, grounded: str) -> dict:
+    """Return a copy of ``body`` with ``prompt`` (and the last user message, when
+    a ``messages`` list is present) replaced by the grounded prompt."""
+    new_body = dict(body)
+    new_body["prompt"] = grounded
+    msgs = new_body.get("messages")
+    if isinstance(msgs, list) and msgs:
+        copied = [dict(m) if isinstance(m, dict) else m for m in msgs]
+        for m in reversed(copied):
+            if isinstance(m, dict) and m.get("role") == "user":
+                m["content"] = grounded
+                break
+        new_body["messages"] = copied
+    return new_body
+
+
 @router.post("/apps/{app_id}/integration-endpoints/Core/InvokeLLM")
-async def invoke_llm(app_id: str, body: dict = None, user=Depends(get_current_user_required)):
+async def invoke_llm(
+    app_id: str,
+    body: dict = None,
+    user=Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
     """Invoke the configured LLM (OpenAI-compatible API) and return the response."""
     body = body or {}
     prompt = body.get("prompt", "")
@@ -35,7 +164,17 @@ async def invoke_llm(app_id: str, body: dict = None, user=Depends(get_current_us
     # frontend (Base44 apps hardcode names like "gpt_5_4" which won't exist
     # on a self-hosted OpenAI-compatible API such as DeepSeek).
     model = settings.LLM_MODEL
+
+    # Live-web grounding for time-sensitive prompts (fail-safe: returns the
+    # prompt unchanged if search is unavailable or anything goes wrong).
+    grounded = await _maybe_ground_prompt(
+        prompt, messages=body.get("messages"), db=db, user_id=getattr(user, "id", None)
+    )
+    if grounded and grounded != prompt:
+        body = _with_grounded_prompt(body, grounded)
+
     payload, messages, json_schema = build_llm_payload(body, model)
+
 
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
@@ -80,7 +219,12 @@ async def invoke_llm(app_id: str, body: dict = None, user=Depends(get_current_us
 
 
 @router.post("/apps/{app_id}/integration-endpoints/Core/InvokeLLMStream")
-async def invoke_llm_stream(app_id: str, body: dict = None, user=Depends(get_current_user_required)):
+async def invoke_llm_stream(
+    app_id: str,
+    body: dict = None,
+    user=Depends(get_current_user_required),
+    db: Session = Depends(get_db),
+):
     """Stream the LLM response via Server-Sent Events (SSE).
 
     Emits ``data: {"delta": "..."}`` for each token chunk and a final
@@ -93,8 +237,18 @@ async def invoke_llm_stream(app_id: str, body: dict = None, user=Depends(get_cur
         raise HTTPException(status_code=400, detail="prompt is required")
 
     model = settings.LLM_MODEL
+
+    # Live-web grounding for time-sensitive prompts (fail-safe: returns the
+    # prompt unchanged if search is unavailable or anything goes wrong).
+    grounded = await _maybe_ground_prompt(
+        prompt, messages=body.get("messages"), db=db, user_id=getattr(user, "id", None)
+    )
+    if grounded and grounded != prompt:
+        body = _with_grounded_prompt(body, grounded)
+
     payload, messages, json_schema = build_llm_payload(body, model)
     payload["stream"] = True
+
 
     # Pre-flight check: if no API key is configured, emit a clear error event
     # to the SSE stream so the frontend surfaces a readable error in the
