@@ -791,6 +791,26 @@ def _is_num(v) -> bool:
 
 
 def pd_is_na(v) -> bool:
+    """True when *v* is a missing value (None / NaN / NaT).
+
+    ``pd`` is only imported lazily inside a few functions in this module
+    (the pure-Python fallback path deliberately avoids a hard pandas
+    dependency), so the old ``return bool(pd.isna(v))`` raised
+    ``NameError`` at this module-level scope — and the broad ``except``
+    below swallowed it, making this helper *always* return False.  That
+    silently disabled the date-range guard at its only call site.
+    """
+    if v is None:
+        return True
+    try:
+        import pandas as pd  # lazy — optional dependency in this module
+    except ImportError:
+        # Pure-Python fallback: NaN/NaT are the only values that are not
+        # equal to themselves.
+        try:
+            return bool(v != v)
+        except Exception:
+            return False
     try:
         return bool(pd.isna(v))
     except Exception:

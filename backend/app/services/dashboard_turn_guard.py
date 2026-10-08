@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import re
 
 from app.services.harness.rule_events import observe_rule
+
+logger = logging.getLogger(__name__)
 
 # English dashboard keywords — \b works fine here.
 _LIVE_DASHBOARD_EN_RE = re.compile(

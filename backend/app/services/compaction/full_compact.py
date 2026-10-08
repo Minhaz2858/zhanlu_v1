@@ -10,12 +10,15 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .token_estimator import estimate_messages_tokens
 from .microcompact import microcompact_messages, DEFAULT_KEEP_RECENT
 from .context_collapse import truncate_head_for_ptl_retry
 from .attachments import build_compact_attachments, render_compact_attachment
+
+if TYPE_CHECKING:
+    from . import CompactionResult
 
 log = logging.getLogger(__name__)
 

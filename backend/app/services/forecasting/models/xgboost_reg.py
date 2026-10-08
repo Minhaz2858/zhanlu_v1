@@ -11,6 +11,7 @@ registry's ``build_model_pool()`` and the model is silently skipped.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
 import pandas as pd

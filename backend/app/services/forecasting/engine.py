@@ -361,8 +361,8 @@ class ForecastEngine:
                     run_date=datetime.utcnow(),
                     promoted=False,
                 )
-                db.add(shadow_row)
-                db.flush()
+                self._db.add(shadow_row)
+                self._db.flush()
                 logger.info(
                     "ChallengerShadowRun persisted for %s: stacking_mape=%.2f%%, champion_mape=%s",
                     target.product_key, _stacking_mape,
@@ -379,7 +379,7 @@ class ForecastEngine:
             # Build rolling MAPE window from historical accuracy logs
             rolling_mape: dict[str, list[float]] = {}
             try:
-                latest = db.query(ForecastAccuracyLog).filter(
+                latest = self._db.query(ForecastAccuracyLog).filter(
                     ForecastAccuracyLog.product_key == target.product_key,
                 ).order_by(ForecastAccuracyLog.created_at.desc()).limit(10).all()
                 for log in reversed(latest):
@@ -720,7 +720,7 @@ class ForecastEngine:
                     apply_feedback_adjustment,
                 )
                 _feedback_adjustment = compute_feedback_adjustment(
-                    db,
+                    self._db,
                     target.id,
                     list(ensemble_result.point_forecast.values),
                     forecast_date=datetime.utcnow(),
@@ -757,6 +757,13 @@ class ForecastEngine:
 
         # P2-1: Advanced guard flag-gated — replaces simple evaluate_guard
         advanced_guard_enabled = settings.FORECAST_ADVANCED_GUARD_ENABLED
+        # P0.1/P0.2: the blend's own MAPE at the decision horizon (h=7),
+        # not the legacy mean-of-members scalar.  Computed for BOTH guard
+        # paths — the advanced path passes these as `_blend_mape` /
+        # `_naive_mape` too, so they must exist before the branch.
+        _decision_h = 7
+        _blend_mape = bt.ensemble_mape_by_horizon.get(_decision_h, bt.ensemble_mape)
+        _naive_mape = bt.naive_mape_by_horizon.get(_decision_h, bt.naive_mape)
         if advanced_guard_enabled:
             from app.services.forecasting.guard_advanced import evaluate_guard_advanced
             last_actual = float(y_model.iloc[-1]) if len(y_model) > 0 else None
@@ -781,11 +788,6 @@ class ForecastEngine:
         else:
             soft_gate_enabled = settings.FORECAST_SOFT_GATE_ENABLED
             soft_gate_margin = settings.FORECAST_SOFT_GATE_MARGIN_PCT
-            # P0.1/P0.2: Use the blend's own MAPE at the decision horizon (h=7),
-            # not the legacy mean-of-members / averaged-across-horizons scalar.
-            _decision_h = 7
-            _blend_mape = bt.ensemble_mape_by_horizon.get(_decision_h, bt.ensemble_mape)
-            _naive_mape = bt.naive_mape_by_horizon.get(_decision_h, bt.naive_mape)
             guard_result = evaluate_guard(
                 ensemble_result.point_forecast,
                 naive_fc,

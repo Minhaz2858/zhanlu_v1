@@ -27,6 +27,7 @@ import uuid
 import httpx
 import logging
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
@@ -217,6 +218,11 @@ from app.services.query_purpose import (  # noqa: E402 — query-purpose classif
     TableRoleResolver,
     classify_query_purpose,
 )
+
+if TYPE_CHECKING:
+    from app.services.compaction import AutoCompactState
+    from app.services.llm_router import LLMEndpoint
+    from app.services.turn_planner import TurnPlan
 
 logger = logging.getLogger(__name__)
 
@@ -18474,7 +18480,7 @@ async def add_message_stream(
                 else 0
             )
             _ond = _orch_no_data[0] if "_orch_no_data" in locals() else None
-            _anywr = _any_ask_data_with_rows if "_any_ask_data_with_rows" in locals() else None
+            _anywr = None  # vestigial: the name was never defined in this module
             logger.info(
                 "DIAG v3 empty-bubble entry: conv=%s, last_rows=%d, "
                 "tool_calls=%d, accumulated=%d, deferred_synth=%d, "

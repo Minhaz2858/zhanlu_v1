@@ -14,9 +14,12 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
+
+if TYPE_CHECKING:  # annotations only; pandas is imported lazily at runtime
+    import pandas as pd
 
 logger = logging.getLogger(__name__)
 

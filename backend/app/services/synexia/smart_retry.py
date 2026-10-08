@@ -224,8 +224,6 @@ async def llm_driven_retry_ask_data(
             )
             # Treat as a failed attempt so the loop continues
             failed_result = new_result
-            last_sql = new_result.get("sql") or last_sql
-            last_error = "metadata-only rows returned (not real business data)"
             continue
         # Still empty — feed the failure back for the next round.
         failed_result = new_result

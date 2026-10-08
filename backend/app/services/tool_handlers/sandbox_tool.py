@@ -371,7 +371,7 @@ def normalize_format(raw: str) -> str:
 # ``Product N``, etc.) become a section.
 
 import re as _re_meta
-import sys as _sys_meta
+import sys
 
 
 _META_PREFIX_RE = _re_meta.compile(
@@ -877,9 +877,6 @@ def _enrich_args_from_data_auto_analysis(args: dict, *, fmt: str) -> dict:
             f"{len(kpis)} kpis from {len(data)} metric/value rows",
             file=sys.stderr, flush=True,
         )
-        filled.append("sections")
-        filled.append("kpis")
-        filled.append("summary")
         return args
 
     try:

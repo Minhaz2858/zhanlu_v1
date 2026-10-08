@@ -8,10 +8,13 @@ and combined into a single "session memory summary" message.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .token_estimator import estimate_messages_tokens
 from .attachments import build_compact_attachments, render_compact_attachment
+
+if TYPE_CHECKING:
+    from . import CompactionResult
 
 log = logging.getLogger(__name__)
 

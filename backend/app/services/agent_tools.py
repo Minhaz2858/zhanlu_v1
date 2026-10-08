@@ -1693,7 +1693,6 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
                 ).first()
                 if _sess is not None and _sess.project_id:
                     project_id = _sess.project_id
-                    project = _sess.project or project
                     logger.warning(
                         "create_automation: PROJECT GUARD — project_id was "
                         "None despite chat context (%r / %r); recovered "
@@ -1712,7 +1711,8 @@ def _create_automation(args: dict, db: Session, user_id: str | None) -> dict:
                 "context (%r / %r) but will persist with project=global / "
                 "project_id=NULL. Calls to this task may have wrong data-"
                 "source bindings!",
-                task_name, _ctx_project_id, _ctx_project_name,
+                args.get("name") or "Untitled Automation",
+                _ctx_project_id, _ctx_project_name,
             )
 
     # P0: Adopt the Manus UX — every automation gets a dedicated chat
@@ -1968,6 +1968,8 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
 
     # If the user toggled the task active and we have a valid cron,
     # make sure next_run_at is in the future.
+    from datetime import datetime, timezone
+
     if task.status == "active" and task.cron_expression and (
         task.next_run_at is None or task.next_run_at < datetime.now(timezone.utc)
     ):
@@ -1977,7 +1979,6 @@ def _update_automation(args: dict, db: Session, user_id: str | None) -> dict:
         except Exception:
             pass
 
-    from datetime import datetime, timezone
     task.updated_date = datetime.now(timezone.utc)
     db.commit()
     db.refresh(task)

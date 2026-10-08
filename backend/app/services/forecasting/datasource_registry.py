@@ -17,10 +17,13 @@ from __future__ import annotations
 
 import logging
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 
 import pandas as pd
 from sqlalchemy.orm import Session
+
+if TYPE_CHECKING:
+    from app.models.forecasting import ForecastTarget
 
 logger = logging.getLogger(__name__)
 

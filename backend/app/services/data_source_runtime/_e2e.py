@@ -29,7 +29,11 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
+
+if TYPE_CHECKING:
+    from app.models.agent_app import AgentApp
 
 # Make `app` importable.
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))

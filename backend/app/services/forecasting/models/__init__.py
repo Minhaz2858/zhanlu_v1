@@ -137,6 +137,7 @@ def build_model_pool(
         try:
             from app.services.forecasting.models.var_model import VARModel
             from app.services.forecasting.models.var_model import _CORRELATED_GROUPS
+            from app.services.forecasting.models.var_model import _VAR_MIN_PRODUCTS
 
             group_keys = _CORRELATED_GROUPS.get(product_key, [])
             if len(group_keys) >= _VAR_MIN_PRODUCTS - 1:

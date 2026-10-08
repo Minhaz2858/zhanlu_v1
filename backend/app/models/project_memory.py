@@ -5,11 +5,15 @@ this shared memory, providing continuity across agent boundaries.
 """
 
 from datetime import datetime
+from typing import TYPE_CHECKING
 
 from sqlalchemy import String, Text, Integer, ForeignKey, DateTime, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import TimestampedBase
+
+if TYPE_CHECKING:
+    from app.models.project import Project
 
 
 class ProjectMemory(TimestampedBase):

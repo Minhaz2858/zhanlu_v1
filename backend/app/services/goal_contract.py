@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.harness.rule_events import observe_rule
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 
 
 # ── Intent normalization (single source of truth) ────────────────────────
