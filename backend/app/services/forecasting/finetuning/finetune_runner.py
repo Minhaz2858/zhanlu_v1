@@ -251,7 +251,7 @@ def _load_price_series_from_db(db) -> dict[str, "pd.Series"]:
                     continue
 
             # Fallback: try to get from the raw price table
-            # (This would be the lz_v_* views in production)
+            # (This would be the v_* views in production)
             logger.debug(
                 "No sufficient ForecastRun actuals for %s — skipping",
                 product_key,

@@ -72,8 +72,8 @@ def test_normalize_tools_list_handles_empty():
     assert normalize_tools_list([]) == []
 
 
-def test_normalize_tools_list_realistic_ecisco_bi_scenario():
-    """Simulate the Ecisco BI scenario: 100+ tools, some flat, some wrapped."""
+def test_normalize_tools_list_realistic_acme_bi_scenario():
+    """Simulate the Acme BI scenario: 100+ tools, some flat, some wrapped."""
     tools = []
     # 95 properly wrapped
     for i in range(95):

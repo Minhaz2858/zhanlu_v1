@@ -86,32 +86,32 @@ def compute_seasonal_adjustment(product_id: str, month: int) -> float:
 
 def compute_causal_chain_adjustment(
     product_id: str,
-    naphtha_pct_change: float | None,
+    product_c_pct_change: float | None,
 ) -> float:
     """Propagate a feedstock price change through the causal chain.
 
     Args:
         product_id: The product whose forecast is being adjusted.
-        naphtha_pct_change: The recent % change in feedstock price
+        product_c_pct_change: The recent % change in feedstock price
             (e.g. 10.0 means feedstock rose 10%). None if no signal.
 
     Returns:
         The propagated % adjustment for this product (e.g. 4.464 means
-        +4.464%). Returns 0.0 if naphtha_pct_change is None or the
+        +4.464%). Returns 0.0 if product_c_pct_change is None or the
         product is not in the elasticity table.
     """
-    if naphtha_pct_change is None:
+    if product_c_pct_change is None:
         return 0.0
     elasticity = _ELASTICITIES.get(product_id)
     if elasticity is None:
         return 0.0
-    return round(naphtha_pct_change * elasticity, 4)
+    return round(product_c_pct_change * elasticity, 4)
 
 
 def compute_domain_signal_adjustment(
     product_id: str,
     as_of_date: datetime,
-    naphtha_pct_change: float | None = None,
+    product_c_pct_change: float | None = None,
 ) -> dict[str, Any]:
     """Combined domain-signal overlay: seasonal + causal-chain.
 
@@ -122,7 +122,7 @@ def compute_domain_signal_adjustment(
         product_id: The dashboard product_id.
         as_of_date: The forecast anchor date (determines the month for
             seasonal rules).
-        naphtha_pct_change: Recent % change in feedstock price, or None.
+        product_c_pct_change: Recent % change in feedstock price, or None.
 
     Returns:
         dict with keys:
@@ -139,11 +139,11 @@ def compute_domain_signal_adjustment(
     if seasonal_pct != 0.0:
         applied_rules.append(f"seasonal:{product_id}:{as_of_date.month}")
 
-    causal_pct = compute_causal_chain_adjustment(product_id, naphtha_pct_change)
-    if causal_pct != 0.0 and naphtha_pct_change is not None:
-        sign = "+" if naphtha_pct_change >= 0 else ""
+    causal_pct = compute_causal_chain_adjustment(product_id, product_c_pct_change)
+    if causal_pct != 0.0 and product_c_pct_change is not None:
+        sign = "+" if product_c_pct_change >= 0 else ""
         applied_rules.append(
-            f"causal:{product_id}:feedstock={sign}{naphtha_pct_change}%"
+            f"causal:{product_id}:feedstock={sign}{product_c_pct_change}%"
         )
 
     total_pct = round(seasonal_pct + causal_pct, 4)

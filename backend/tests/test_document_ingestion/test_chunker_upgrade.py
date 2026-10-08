@@ -71,7 +71,7 @@ class TestChineseTokenEstimation:
 
     def test_approx_tokens_chinese_mixed(self):
         # Mixed text → use char count / 1.5
-        text = "乙烯 DCPD 价格"
+        text = "乙烯 PRODUCT_B 价格"
         # len(text) = 10 (including spaces) → 10 / 1.5 = 6.67 → int = 6 tokens
         assert _approx_tokens_chinese(text) == 6
 
@@ -136,7 +136,7 @@ class TestSplitChineseSentences:
 
     def test_mixed_cjk_and_ascii(self):
         sentences = _split_chinese_sentences(
-            "DCPD price increased. 市场波动明显。 Price dropped."
+            "PRODUCT_B price increased. 市场波动明显。 Price dropped."
         )
         # Should split at both Chinese and English sentence boundaries
         assert len(sentences) >= 2

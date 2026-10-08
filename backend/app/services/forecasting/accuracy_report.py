@@ -297,8 +297,8 @@ def generate_discrepancy_report(
     # Fetch actuals
     from app.services.forecasting.mysql_data_source import MysqlDataSource
     try:
-        edia = MysqlDataSource()
-        df = edia.read_history(target.datasource)
+        src = MysqlDataSource()
+        df = src.read_history(target.datasource)
     except Exception as e:
         logger.exception("Failed to load actuals for %s: %s", product_key, e)
         return {

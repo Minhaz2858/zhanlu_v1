@@ -73,7 +73,7 @@ def _make_llm_model(db, **kwargs):
 def _make_project(db, llm_model_id):
     p = Project(
         id=str(uuid.uuid4()),
-        name="Ecisco BI",
+        name="Acme BI",
         llm_model_id=llm_model_id,
         resource_type="personal",
         org_id="default-org",

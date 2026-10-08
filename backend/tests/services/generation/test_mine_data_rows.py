@@ -56,14 +56,14 @@ class TestMineAskDataRows:
                 "name": "ask_erp_kpi",
                 "results": {
                     "success": True,
-                    "rows": [{"product_id": "isoprene", "inventory_tons": 1234.5}],
-                    "source_name": "EDIA:ask_erp_kpi",
+                    "rows": [{"product_id": "product_d", "inventory_tons": 1234.5}],
+                    "source_name": "acme:ask_erp_kpi",
                 },
             }
         ]
         rows = _mine_ask_data_rows(tcs)
         assert len(rows) == 1
-        assert rows[0]["product_id"] == "isoprene"
+        assert rows[0]["product_id"] == "product_d"
 
     def test_execute_query_rows_found(self):
         """Regression: execute_query still works."""
@@ -88,7 +88,7 @@ class TestMineAskDataRows:
             },
             {
                 "name": "ask_erp_kpi",
-                "results": {"rows": [{"product_id": "dcpd"}]},
+                "results": {"rows": [{"product_id": "product_b"}]},
             },
             {
                 "name": "execute_query",
@@ -224,7 +224,7 @@ class TestIterHistoricalDataResults:
                     {
                         "name": "ask_erp_kpi",
                         "results": {
-                            "rows": [{"product_id": "isoprene", "inventory_tons": 1234.5}],
+                            "rows": [{"product_id": "product_d", "inventory_tons": 1234.5}],
                         },
                     }
                 ],
@@ -233,7 +233,7 @@ class TestIterHistoricalDataResults:
         results = list(_iter_historical_data_results(messages))
         assert len(results) == 1
         tc, res = results[0]
-        assert res["rows"][0]["product_id"] == "isoprene"
+        assert res["rows"][0]["product_id"] == "product_d"
 
     def test_mixed_tools_in_history(self):
         """Multiple data-producing tools across turns."""
@@ -242,7 +242,7 @@ class TestIterHistoricalDataResults:
                 "role": "assistant",
                 "tool_calls": [
                     {"name": "ask_data_agent", "results": {"rows": [{"id": 1}]}},
-                    {"name": "ask_erp_kpi", "results": {"rows": [{"product_id": "dcpd"}]}},
+                    {"name": "ask_erp_kpi", "results": {"rows": [{"product_id": "product_b"}]}},
                 ],
             },
             {
@@ -364,13 +364,13 @@ class TestMineHistoricalAskDataResult:
                 "role": "assistant",
                 "tool_calls": [
                     {"name": "ask_data_agent", "results": {"answer": "no data", "rows": []}},
-                    {"name": "ask_erp_kpi", "results": {"rows": [{"product_id": "isoprene"}]}},
+                    {"name": "ask_erp_kpi", "results": {"rows": [{"product_id": "product_d"}]}},
                 ],
             },
         ]
         result = _mine_historical_ask_data_result(messages)
         assert result is not None
-        assert result["rows"][0]["product_id"] == "isoprene"
+        assert result["rows"][0]["product_id"] == "product_d"
 
     def test_returns_none_when_no_data(self):
         messages = [
@@ -390,7 +390,7 @@ class TestMineHistoricalAskDataResult:
 # ═══════════════════════════════════════════════════════════════════
 
 class TestMineHistoricalAnswerRows:
-    """_mine_historical_answer_rows now includes EDIA tool rows."""
+    """_mine_historical_answer_rows now includes Acme tool rows."""
 
     def test_erp_kpi_rows_included(self):
         messages = [
@@ -401,8 +401,8 @@ class TestMineHistoricalAnswerRows:
                         "name": "ask_erp_kpi",
                         "results": {
                             "rows": [
-                                {"product_id": "isoprene", "inventory_tons": 1234.5},
-                                {"product_id": "dcpd", "inventory_tons": 5678.0},
+                                {"product_id": "product_d", "inventory_tons": 1234.5},
+                                {"product_id": "product_b", "inventory_tons": 5678.0},
                             ],
                         },
                     },
@@ -412,8 +412,8 @@ class TestMineHistoricalAnswerRows:
         rows = _mine_historical_answer_rows(messages)
         assert len(rows) == 2
         product_ids = [r["product_id"] for r in rows]
-        assert "isoprene" in product_ids
-        assert "dcpd" in product_ids
+        assert "product_d" in product_ids
+        assert "product_b" in product_ids
 
     def test_mixed_tools_rows_merged(self):
         messages = [

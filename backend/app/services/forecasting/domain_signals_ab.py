@@ -55,14 +55,14 @@ def apply_overlay(
     forecast_value: float,
     product_id: str,
     as_of_date: pd.Timestamp,
-    naphtha_pct_change: float | None = None,
+    product_c_pct_change: float | None = None,
 ) -> float:
     """Apply the combined seasonal + causal-chain overlay to a forecast value.
 
     Returns the adjusted forecast (forecast * (1 + total_pct / 100)).
     """
     seasonal = compute_seasonal_adjustment(product_id, as_of_date.month)
-    causal = compute_causal_chain_adjustment(product_id, naphtha_pct_change)
+    causal = compute_causal_chain_adjustment(product_id, product_c_pct_change)
     total_pct = seasonal + causal
     return forecast_value * (1.0 + total_pct / 100.0)
 
@@ -82,7 +82,7 @@ def ab_evaluate(
     y : pd.Series
         Target price series, datetime index.
     feedstock_pct : pd.Series | None
-        Naphtha price series (same index), or None if not available.
+        Product_C price series (same index), or None if not available.
     forecast_fn : callable
         ``forecast_fn(train_y, h) -> np.ndarray`` of length h.
     product_id : str
@@ -131,11 +131,11 @@ def ab_evaluate(
         pred_off = float(fc[-1])
 
         # Compute feedstock % change in the training window
-        naphtha_pct = None
+        product_c_pct = None
         if feedstock_pct is not None:
             n_train = feedstock_pct.iloc[:origin].dropna()
             if len(n_train) >= 2:
-                naphtha_pct = (n_train.iloc[-1] - n_train.iloc[0]) / n_train.iloc[0] * 100.0
+                product_c_pct = (n_train.iloc[-1] - n_train.iloc[0]) / n_train.iloc[0] * 100.0
 
         as_of = y.index[origin + h - 1] if hasattr(y.index, "__getitem__") else None
         if as_of is None:
@@ -143,7 +143,7 @@ def ab_evaluate(
 
         pred_on = apply_overlay(
             pred_off, product_id=product_id,
-            as_of_date=as_of, naphtha_pct_change=naphtha_pct,
+            as_of_date=as_of, product_c_pct_change=product_c_pct,
         )
 
         # Track absolute percentage errors

@@ -35,7 +35,7 @@ class TestBuildPooledDataset:
         """With enough data, should produce samples."""
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         series_map = {
-            "naphtha": pd.Series(np.random.uniform(80, 120, 100), index=dates),
+            "product_c": pd.Series(np.random.uniform(80, 120, 100), index=dates),
             "c5_cracked": pd.Series(np.random.uniform(100, 140, 100), index=dates),
         }
         samples = build_pooled_dataset(series_map, context_len=30, horizon=7, step=7)
@@ -69,7 +69,7 @@ class TestBuildPooledDataset:
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         vals = np.random.uniform(80, 120, 100)
         vals[50] = np.nan
-        series_map = {"naphtha": pd.Series(vals, index=dates)}
+        series_map = {"product_c": pd.Series(vals, index=dates)}
         samples = build_pooled_dataset(series_map, context_len=30, horizon=7, step=7)
         # Should still produce samples (NaN dropped)
         assert len(samples) > 0
@@ -78,13 +78,13 @@ class TestBuildPooledDataset:
         """Exogenous features should be included when provided."""
         dates = pd.date_range("2024-01-01", periods=100, freq="D")
         series_map = {
-            "naphtha": pd.Series(np.random.uniform(80, 120, 100), index=dates),
+            "product_c": pd.Series(np.random.uniform(80, 120, 100), index=dates),
         }
         exog = pd.DataFrame(
             {"brent": np.random.uniform(70, 90, 100)},
             index=dates,
         )
-        exog_map = {"naphtha": exog}
+        exog_map = {"product_c": exog}
         samples = build_pooled_dataset(
             series_map, context_len=30, horizon=7, step=7, exog_map=exog_map,
         )

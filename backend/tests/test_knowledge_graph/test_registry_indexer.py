@@ -134,7 +134,7 @@ class TestKnowledgeBaseIndexing:
     def test_index_knowledge_base(self, db):
         class _KB:
             id = "kb-1"
-            name = "aipdp warehouse"
+            name = "acme warehouse"
             db_type = "mysql"
 
         r = ri.index_knowledge_base(db, _KB(), project_id=PID, table_count=139)

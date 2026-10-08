@@ -29,7 +29,7 @@ class TestDomainSignalsComputeAdjustment:
         result = compute_domain_signal_adjustment(
             product_id="widget",
             as_of_date=datetime(2024, 3, 15),
-            naphtha_pct_change=5.0,
+            product_c_pct_change=5.0,
         )
         assert isinstance(result, dict)
         assert "total_pct" in result
@@ -37,7 +37,7 @@ class TestDomainSignalsComputeAdjustment:
         assert "seasonal_pct" in result
         assert "applied_rules" in result
 
-        # With 5% naphtha change, causal_pct should be non-zero
+        # With 5% product_c change, causal_pct should be non-zero
         assert result["causal_pct"] != 0.0
 
     def test_unknown_product_returns_zero(self):
@@ -45,28 +45,28 @@ class TestDomainSignalsComputeAdjustment:
         result = compute_domain_signal_adjustment(
             product_id="unknown_product_xyz",
             as_of_date=datetime(2024, 3, 15),
-            naphtha_pct_change=5.0,
+            product_c_pct_change=5.0,
         )
         assert result["total_pct"] == 0.0
         assert result["causal_pct"] == 0.0
         assert result["seasonal_pct"] == 0.0
         assert result["applied_rules"] == []
 
-    def test_zero_naphtha_change_no_causal(self, domain_signals_config):
+    def test_zero_product_c_change_no_causal(self, domain_signals_config):
         """When the feedstock hasn't moved, causal adjustment is zero."""
         result = compute_domain_signal_adjustment(
             product_id="widget",
             as_of_date=datetime(2024, 3, 15),
-            naphtha_pct_change=0.0,
+            product_c_pct_change=0.0,
         )
         assert result["causal_pct"] == 0.0
 
-    def test_negative_naphtha_change(self, domain_signals_config):
+    def test_negative_product_c_change(self, domain_signals_config):
         """Negative feedstock change → negative causal adjustment."""
         result = compute_domain_signal_adjustment(
             product_id="widget",
             as_of_date=datetime(2024, 3, 15),
-            naphtha_pct_change=-3.0,
+            product_c_pct_change=-3.0,
         )
         assert result["causal_pct"] < 0.0
 
@@ -77,12 +77,12 @@ class TestDomainSignalsComputeAdjustment:
         r1 = compute_domain_signal_adjustment(
             product_id="widget",
             as_of_date=datetime(2024, 3, 15),
-            naphtha_pct_change=5.0,
+            product_c_pct_change=5.0,
         )
         r2 = compute_domain_signal_adjustment(
             product_id="widget_t2",
             as_of_date=datetime(2024, 3, 15),
-            naphtha_pct_change=5.0,
+            product_c_pct_change=5.0,
         )
         assert abs(r2["causal_pct"]) <= abs(r1["causal_pct"])
         assert r2["causal_pct"] < r1["causal_pct"]
@@ -95,12 +95,12 @@ class TestDomainSignalsComputeAdjustment:
         r_jan = compute_domain_signal_adjustment(
             product_id="widget",
             as_of_date=jan,
-            naphtha_pct_change=0.0,
+            product_c_pct_change=0.0,
         )
         r_jul = compute_domain_signal_adjustment(
             product_id="widget",
             as_of_date=jul,
-            naphtha_pct_change=0.0,
+            product_c_pct_change=0.0,
         )
         assert r_jan["seasonal_pct"] == -2.5
         assert r_jul["seasonal_pct"] == 0.0

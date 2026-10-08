@@ -1,7 +1,7 @@
 """Explicit refusal of a file deliverable must not be read as a request for one.
 
 Live defect (2026-09-18): the user asked
-``本周销售情况 ，只统计 惠州伊斯科数据 ，直接输出，不要输出 文档`` — the phrasing
+``本周销售情况 ，只统计 示例工厂数据 ，直接输出，不要输出 文档`` — the phrasing
 FORBIDS a document. ``normalize_deliverable_intent`` returned ``'docx'``, so
 ``should_force_create_file`` injected the create_artifact nudge near the iteration
 cap; the turn ended with a docx the user had refused, and the model explained the
@@ -19,7 +19,7 @@ from app.services.file_turn_guard import is_file_deliverable_request, should_for
 from app.services.synexia.intent_router import detect_file_intent, is_deliverable_negated
 
 # The exact prompt from the failing live turn.
-LIVE_QUESTION = "本周销售情况 ，只统计 惠州伊斯科数据 ，直接输出，不要输出 文档"
+LIVE_QUESTION = "本周销售情况 ，只统计 示例工厂数据 ，直接输出，不要输出 文档"
 
 
 @pytest.mark.parametrize(

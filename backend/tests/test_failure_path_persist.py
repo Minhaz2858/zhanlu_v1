@@ -87,7 +87,7 @@ def _make_task(
         prompt=description,
         description=description,
         cron_expression="0 8 * * *",
-        project="Ecisco BI",
+        project="Acme BI",
         output_format="html",
         is_deleted=False,
         notify_chat=True,
@@ -119,7 +119,7 @@ def _seed_auto_prompt_marker(db, task, ex):
         id=str(_uuid.uuid4()),
         session_id=task.session_id,
         role="user",
-        content=f"Run Automation Task:  Name: {task.name}  Type: data_sync  Project: Ecisco BI",
+        content=f"Run Automation Task:  Name: {task.name}  Type: data_sync  Project: Acme BI",
         order=0,
         phase={
             "verb": "▶",

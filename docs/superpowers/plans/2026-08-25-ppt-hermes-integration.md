@@ -184,7 +184,7 @@ if tool_name == "ask_data_agent":
         )
 ```
 
-Place this IMMEDIATELY after the `if tool_name == "ask_data_agent":` block starts.
+Place this IMMAcmeTELY after the `if tool_name == "ask_data_agent":` block starts.
 
 - [ ] **Step 5: Run test to verify it passes**
 

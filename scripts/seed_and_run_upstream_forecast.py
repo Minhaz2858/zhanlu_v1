@@ -1,4 +1,4 @@
-"""One-shot script: seed Ecisco forecast targets + run full pipeline per target.
+"""One-shot script: seed Acme forecast targets + run full pipeline per target.
 
 Used to populate ForecastRun rows when the nightly cron hasn't run yet, so that
 the dashboard chart (/forecast-chart/{product_id}) can show forecast data.
@@ -17,12 +17,12 @@ logger = logging.getLogger("seed_run_forecast")
 from app.database import SessionLocal
 from app.models.forecasting import ForecastTarget, ForecastRun
 from app.services.forecasting.engine import ForecastEngine
-from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
+from app.services.forecasting.seed_acme_targets import seed_acme_forecast_targets
 
 ORG_ID = "default-org"
 APP_ID = "default-app"
 # Upstream-only for the dashboard chart
-UPSTREAM_KEYS = {"ecisco.crude_oil", "ecisco.naphtha", "ecisco.cracked_c5"}
+UPSTREAM_KEYS = {"acme.product_e", "acme.product_c", "acme.cracked_c5"}
 
 
 def main():
@@ -41,8 +41,8 @@ def main():
     db = SessionLocal()
     try:
         # 1. Seed all 12 targets (idempotent)
-        logger.info("Seeding Ecisco forecast targets for org=%s…", ORG_ID)
-        inserted = seed_ecisco_forecast_targets(db, org_id=ORG_ID, app_id=APP_ID)
+        logger.info("Seeding Acme forecast targets for org=%s…", ORG_ID)
+        inserted = seed_acme_forecast_targets(db, org_id=ORG_ID, app_id=APP_ID)
         logger.info("Seed: %d new target(s) inserted.", inserted)
 
         # 2. Select targets: --all → every seeded target; --keys → explicit

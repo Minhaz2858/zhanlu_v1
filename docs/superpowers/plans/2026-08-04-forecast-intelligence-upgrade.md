@@ -145,7 +145,7 @@
 - [x] Signature: `(event: ExtractedEvent, desired_status: str) -> str`.
 - [x] Hard rule: if `desired_status == "rejected"` → return `"rejected"` unchanged.
 - [x] Compute `impact = event.impact_magnitude` (derived: `mag_score*0.40 + cert_score*0.35 + rel_score*0.25`).
-- [x] Compute `relevance = event.relevance_score` (derived from `relevance_to_c5_c9`).
+- [x] Compute `relevance = event.relevance_score` (derived from `relevance_to_sample`).
 - [x] Normalize credibility: `(event.source_credibility or "tier2").strip().lower()`.
 - [x] Promotion rule: `if impact >= 0.70 and relevance >= 0.70 and credibility in {"tier1", "tier2"}: return "auto_approved"`.
 - [x] Default: return `desired_status` unchanged.

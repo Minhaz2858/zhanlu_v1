@@ -189,7 +189,7 @@ def extract_palette_from_image(data: bytes, *, max_colors: int = 6) -> dict[str,
 
     # Downscale for speed, then quantize to a small adaptive palette.
     img.thumbnail((128, 128))
-    q = img.quantize(colors=max_colors, method=Image.MEDIANCUT).convert("RGB")
+    q = img.quantize(colors=max_colors, method=Image.MAcmeNCUT).convert("RGB")
     counts = sorted(q.getcolors(maxcolors=128 * 128) or [], reverse=True)
     if not counts:
         raise ValueError("image has no extractable colors")

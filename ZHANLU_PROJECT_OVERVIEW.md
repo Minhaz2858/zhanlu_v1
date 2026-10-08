@@ -8,7 +8,7 @@
 
 ## 1. Project Summary
 
-Zhanlu is a multi-tenant enterprise AI operating system: a FastAPI + React platform where users chat with a governed main agent ("Synexia" cognitive core) that plans work, delegates to sub-agents, queries connected databases through a policy-enforced NL2SQL gateway, runs code in disposable Docker sandboxes, and ships verifiable deliverables (PPT/DOCX/XLSX/PDF/HTML dashboards, mini-apps) as permission-checked artifacts instead of chat text. It is built for enterprises that cannot treat an LLM chatbot as production software — every agent runs as a versioned "harness" with a 5-layer constitutional prompt, iteration budgets, grounding gates, audit events, and tenant-isolated data access, so answers are verifiable, sandboxed, and auditable rather than merely conversational. Deployed first in the Chinese chemical/BI industry (Ecisco) but industry-agnostic by design, it turns "AI that talks about your business" into "AI that queries your governed data, executes code safely, and produces the report your team needed — with a receipt for every step."
+Zhanlu is a multi-tenant enterprise AI operating system: a FastAPI + React platform where users chat with a governed main agent ("Synexia" cognitive core) that plans work, delegates to sub-agents, queries connected databases through a policy-enforced NL2SQL gateway, runs code in disposable Docker sandboxes, and ships verifiable deliverables (PPT/DOCX/XLSX/PDF/HTML dashboards, mini-apps) as permission-checked artifacts instead of chat text. It is built for enterprises that cannot treat an LLM chatbot as production software — every agent runs as a versioned "harness" with a 5-layer constitutional prompt, iteration budgets, grounding gates, audit events, and tenant-isolated data access, so answers are verifiable, sandboxed, and auditable rather than merely conversational. Deployed first in the Chinese chemical/BI industry (Acme) but industry-agnostic by design, it turns "AI that talks about your business" into "AI that queries your governed data, executes code safely, and produces the report your team needed — with a receipt for every step."
 
 ---
 
@@ -96,7 +96,7 @@ Two execution runtimes coexist honestly: the **active path is the legacy ReAct l
 | Sandboxing | Docker (DooD), Redis BRPOP worker, Unix-socket LLM proxy | Isolated code/doc execution, no network, capped resources |
 | NL2SQL | sqlglot validation, SQLAlchemy dialect adapters, semantic catalog | Governed read-only SQL with allow-lists, cost gates, snapshots |
 | Document gen | python-docx / python-pptx / openpyxl / reportlab / LibreOffice headless | Office artifact generation and inline previews |
-| Forecasting (domain) | XGBoost, statsmodels (VAR/VECM), Chronos-Bolt/Moirai, Optuna, conformal intervals | EDIA BI forecasting suite (~60 feature flags, ~20 tables) |
+| Forecasting (domain) | XGBoost, statsmodels (VAR/VECM), Chronos-Bolt/Moirai, Optuna, conformal intervals | Acme BI forecasting suite (~60 feature flags, ~20 tables) |
 | Protocols | MCP 2026 (FastMCP streamable-HTTP), A2A (JSON-RPC), OTel GenAI spans | Interop with external tool servers and agent ecosystems |
 | Auth | PyJWT (HS256, jti), rotating SHA-256-hashed refresh tokens, email OTP, OIDC/SSO with PKCE | Hardened per-route auth (no anonymous access anywhere) |
 | Frontend | React 18 + Vite 6 (plain JS), Tailwind 3, Radix/shadcn, framer-motion, lucide | Warm-paper design system, bilingual (zh-first) UI |
@@ -141,7 +141,7 @@ All verified by direct inspection unless marked otherwise.
 - Bundled skills: 55 skill directories in `backend/skills/`; 3 system skills [verified from code / PROJECT.md]
 
 **Agents**
-- Built-in `BUILTIN_AGENTS` roster: 14 code-defined agents (explore, plan, worker, verification, data_agent, forecast_agent, report_agent, orchestrator_agent, perception_agent, rag_research_agent, diagnosis_agent, pricing_agent, intelligence_agent, ecisco_bi_assistant) + 5 seeded system meta-agents (agent_builder, skill_agent, automation_agent, general_assistant, power_user) [verified from PROJECT.md listing — needs confirmation of exact current count in `agent_definitions.py`]
+- Built-in `BUILTIN_AGENTS` roster: 14 code-defined agents (explore, plan, worker, verification, data_agent, forecast_agent, report_agent, orchestrator_agent, perception_agent, rag_research_agent, diagnosis_agent, pricing_agent, intelligence_agent, acme_bi_assistant) + 5 seeded system meta-agents (agent_builder, skill_agent, automation_agent, general_assistant, power_user) [verified from PROJECT.md listing — needs confirmation of exact current count in `agent_definitions.py`]
 - Agent definition: 5-layer constitutional prompt (identity/boundary/reasoning/tools/output) + auto-derived harness JSON [PROJECT.md]
 
 **Budgets & limits** (all verified from code)
@@ -189,7 +189,7 @@ Companies want to use AI assistants on their own data — sales numbers, reports
 Things the code cannot answer; prepare answers before presenting.
 
 1. **My specific role vs. teammates.** The repo shows *what* was built, not *who built it*. Which components were solely mine vs. shared? (Suggested framing: "sole architect of X; contributed Y to team-built Z.") `PROJECT.md` is written in first-person-plural; be ready to attribute concretely.
-2. **Production tenants and real users.** Is there more than the Ecisco deployment? How many daily active users, agents created, conversations served? Nothing in code reveals adoption. The platform is described as "Chinese chemical/BI-industry-first (Ecisco), generic in design" — quantify it or present as pilot-stage.
+2. **Production tenants and real users.** Is there more than the Acme deployment? How many daily active users, agents created, conversations served? Nothing in code reveals adoption. The platform is described as "Chinese chemical/BI-industry-first (Acme), generic in design" — quantify it or present as pilot-stage.
 3. **Real scale and performance numbers.** Code shows *limits* (budgets, timeouts) but no *measurements*: p50/p95 chat-turn latency, tokens per turn, sandbox job duration distribution, concurrent-user ceiling, DB sizes. Do load-test results or production dashboards exist? If not, the honest claim is "bounded by design," not "fast."
 4. **Flag-gated = not running.** The flagship 12-state FSM (`SYNEXIA_FSM_ENABLED=false`), harness orchestrator, SSO/OIDC, computer use, A2A, and OTel tracing are all implemented but OFF in `.env`. A reviewer will ask: "Why ship dark code?" Prepare the answer (staged rollout risk management) and ideally a demo of one dark module enabled.
 5. **Parallel DAG execution is not implemented.** Both plan nodes (`capability_router.py:99`) and workflow nodes (`workflow_executor.py:169`) execute strictly serially despite topological sorting — parallel branch execution is future work. Also future work: the workflow `run_agent` node does a single LLM completion with no sub-agent tool calling ("documented follow-up," `workflow_runtime.py:7-12`), and custom-tool sandbox execution is likewise a documented follow-up.

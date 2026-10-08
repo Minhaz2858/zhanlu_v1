@@ -41,7 +41,7 @@
     "config": {
      "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
      "mode": "sql",
-     "sql": "SELECT (SELECT COUNT(DISTINCT FID) FROM erp_v_sale_orderentry) AS total_orders, (SELECT COUNT(DISTINCT FCUSTID) FROM erp_v_sale_orderentry) AS total_customers, (SELECT COUNT(DISTINCT material_name) FROM erp_v_sale_orderentry) AS total_materials, (SELECT ROUND(SUM(FQTY_ORIGIN),2) FROM erp_v_sale_orderentry) AS total_qty, (SELECT ROUND(SUM(FALLAMOUNT),2) FROM erp_v_sale_orderentry) AS total_amount, (SELECT ROUND(SUM(FAMOUNT),2) FROM erp_v_sale_orderentry) AS pretax_amount, (SELECT ROUND(SUM(FTAXAMOUNT),2) FROM erp_v_sale_orderentry) AS tax_amount, (SELECT ROUND(SUM(FREMAINOUTQTY),2) FROM erp_v_sale_orderentry) AS undelivered_qty, (SELECT ROUND(SUM(FALLAMOUNT)/COUNT(DISTINCT FID),2) FROM erp_v_sale_orderentry) AS avg_order_value",
+     "sql": "SELECT (SELECT COUNT(DISTINCT FID) FROM v_sale_order) AS total_orders, (SELECT COUNT(DISTINCT FCUSTID) FROM v_sale_order) AS total_customers, (SELECT COUNT(DISTINCT material_name) FROM v_sale_order) AS total_materials, (SELECT ROUND(SUM(FQTY_ORIGIN),2) FROM v_sale_order) AS total_qty, (SELECT ROUND(SUM(FALLAMOUNT),2) FROM v_sale_order) AS total_amount, (SELECT ROUND(SUM(FAMOUNT),2) FROM v_sale_order) AS pretax_amount, (SELECT ROUND(SUM(FTAXAMOUNT),2) FROM v_sale_order) AS tax_amount, (SELECT ROUND(SUM(FREMAINOUTQTY),2) FROM v_sale_order) AS undelivered_qty, (SELECT ROUND(SUM(FALLAMOUNT)/COUNT(DISTINCT FID),2) FROM v_sale_order) AS avg_order_value",
      "limit": 50,
      "continueOnFail": false,
      "question": ""
@@ -120,7 +120,7 @@
      "sql": "",
      "limit": 50,
      "continueOnFail": true,
-     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request (last week / last month / this quarter / this year) with a WHERE filter on PLANDATE. Group by org_name; report sales amount (FALLAMOUNT), quantity (FQTY_ORIGIN) and distinct order count (FID). Order by amount descending. If no time window is given, use the full dataset."
+     "question": "{{inputs.n1.text}} — Use the ERP sales view v_sale_order. IMPORTANT: honor any time window in the request (last week / last month / this quarter / this year) with a WHERE filter on PLANDATE. Group by org_name; report sales amount (FALLAMOUNT), quantity (FQTY_ORIGIN) and distinct order count (FID). Order by amount descending. If no time window is given, use the full dataset."
     }
    }
   },
@@ -139,7 +139,7 @@
      "sql": "",
      "limit": 50,
      "continueOnFail": true,
-     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request (last week / last month / this quarter) with a WHERE filter on PLANDATE. Report the top customers by sales amount: group by CUST_NAME, sum FALLAMOUNT, count distinct FID. Order by amount descending, limit to the number requested (default 5-10). If no time window is given, use the full dataset."
+     "question": "{{inputs.n1.text}} — Use the ERP sales view v_sale_order. IMPORTANT: honor any time window in the request (last week / last month / this quarter) with a WHERE filter on PLANDATE. Report the top customers by sales amount: group by CUST_NAME, sum FALLAMOUNT, count distinct FID. Order by amount descending, limit to the number requested (default 5-10). If no time window is given, use the full dataset."
     }
    }
   },
@@ -158,7 +158,7 @@
      "sql": "",
      "limit": 50,
      "continueOnFail": true,
-     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request (last week / last month / this quarter) with a WHERE filter on PLANDATE. Report the top products by sales amount: group by material_name, sum FALLAMOUNT, sum FQTY_ORIGIN, count distinct FID. Order by amount descending, limit to the number requested (default 5-10). If no time window is given, use the full dataset."
+     "question": "{{inputs.n1.text}} — Use the ERP sales view v_sale_order. IMPORTANT: honor any time window in the request (last week / last month / this quarter) with a WHERE filter on PLANDATE. Report the top products by sales amount: group by material_name, sum FALLAMOUNT, sum FQTY_ORIGIN, count distinct FID. Order by amount descending, limit to the number requested (default 5-10). If no time window is given, use the full dataset."
     }
    }
   },
@@ -177,7 +177,7 @@
      "sql": "",
      "limit": 50,
      "continueOnFail": true,
-     "question": "{{inputs.n1.text}} — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor any time window in the request with a WHERE filter on PLANDATE. Report financial KPIs by org_name: pretax FAMOUNT, tax FTAXAMOUNT, total FALLAMOUNT, avg order value FALLAMOUNT/count distinct FID. If a metric is not derivable, say so — never invent."
+     "question": "{{inputs.n1.text}} — Use the ERP sales view v_sale_order. IMPORTANT: honor any time window in the request with a WHERE filter on PLANDATE. Report financial KPIs by org_name: pretax FAMOUNT, tax FTAXAMOUNT, total FALLAMOUNT, avg order value FALLAMOUNT/count distinct FID. If a metric is not derivable, say so — never invent."
     }
    }
   },
@@ -193,7 +193,7 @@
     "config": {
      "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
      "mode": "sql",
-     "sql": "SELECT DATE_FORMAT(PLANDATE, '%Y-%m') AS month, COUNT(DISTINCT FID) AS orders, ROUND(SUM(FQTY_ORIGIN),2) AS qty, ROUND(SUM(FALLAMOUNT),2) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 12 MONTH), '%Y-%m-01') GROUP BY DATE_FORMAT(PLANDATE, '%Y-%m') ORDER BY month",
+     "sql": "SELECT DATE_FORMAT(PLANDATE, '%Y-%m') AS month, COUNT(DISTINCT FID) AS orders, ROUND(SUM(FQTY_ORIGIN),2) AS qty, ROUND(SUM(FALLAMOUNT),2) AS amount FROM v_sale_order WHERE PLANDATE >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 12 MONTH), '%Y-%m-01') GROUP BY DATE_FORMAT(PLANDATE, '%Y-%m') ORDER BY month",
      "limit": 50,
      "continueOnFail": true,
      "question": ""
@@ -331,7 +331,7 @@
     "config": {
      "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
      "mode": "nl",
-     "question": "Top 5 products by sales amount — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor the time window in this request ({{inputs.n1.text}} — e.g. last week / last month / this quarter) with a WHERE filter on PLANDATE. Group by material_name, sum FALLAMOUNT as amount, sum FQTY_ORIGIN as qty. Order by amount DESC, LIMIT 5. If no window given, use the full dataset.",
+     "question": "Top 5 products by sales amount — Use the ERP sales view v_sale_order. IMPORTANT: honor the time window in this request ({{inputs.n1.text}} — e.g. last week / last month / this quarter) with a WHERE filter on PLANDATE. Group by material_name, sum FALLAMOUNT as amount, sum FQTY_ORIGIN as qty. Order by amount DESC, LIMIT 5. If no window given, use the full dataset.",
      "sql": "",
      "limit": 5,
      "continueOnFail": true
@@ -350,7 +350,7 @@
     "config": {
      "kb_id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
      "mode": "nl",
-     "question": "Top 5 customers by sales amount — Use the ERP sales view erp_v_sale_orderentry. IMPORTANT: honor the time window in this request ({{inputs.n1.text}} — e.g. last week / last month / this quarter) with a WHERE filter on PLANDATE. Group by CUST_NAME, sum FALLAMOUNT as amount, count distinct FID as orders. Order by amount DESC, LIMIT 5. If no window given, use the full dataset.",
+     "question": "Top 5 customers by sales amount — Use the ERP sales view v_sale_order. IMPORTANT: honor the time window in this request ({{inputs.n1.text}} — e.g. last week / last month / this quarter) with a WHERE filter on PLANDATE. Group by CUST_NAME, sum FALLAMOUNT as amount, count distinct FID as orders. Order by amount DESC, LIMIT 5. If no window given, use the full dataset.",
      "sql": "",
      "limit": 5,
      "continueOnFail": true

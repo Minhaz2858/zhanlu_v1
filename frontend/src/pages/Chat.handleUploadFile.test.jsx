@@ -8,7 +8,7 @@
  * steps — so any throw in those steps silently dropped the chip and the
  * user saw nothing (no toast either).
  *
- * Fix: `handleUploadFile` now calls `setAttachments` IMMEDIATELY after
+ * Fix: `handleUploadFile` now calls `setAttachments` IMMAcmeTELY after
  * `UploadFile` returns a `file_url`, before any `ensureSession` /
  * `UserFile.create` call. Persistence failures are caught and logged but
  * no longer hide the chip.

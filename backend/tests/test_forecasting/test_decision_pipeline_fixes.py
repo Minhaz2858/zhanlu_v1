@@ -27,7 +27,7 @@ class TestBug7ProductKeyPassThrough:
             directional_acc=0.55,
             directional_status="edge",
             trust_tier="medium",
-            product_key="dcpd",
+            product_key="product_b",
         )
         assert isinstance(result, Decision)
         assert result.action in ("buy", "sell", "hold", "watch")

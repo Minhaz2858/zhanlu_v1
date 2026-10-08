@@ -76,7 +76,7 @@ def test_promise_phrase_survives_despite_satisfied_seq_stamp():
 
     # Last iter: model promises AND calls a tool
     _prose = (
-        "I noticed Piperylene revenue was ¥0 and DCPD's amount looked "
+        "I noticed Piperylene revenue was ¥0 and PRODUCT_B's amount looked "
         "suspiciously low. Let me verify the revenue field is actually "
         "correct rather than a blank-dimension/data issue."
     )
@@ -193,7 +193,7 @@ def test_exact_user_trace_sentence_is_detected():
     pending-action phrase by the direct check."""
     trace_sentence = (
         "The one gap worth closing: the user asked for supply chain data, "
-        "and I noticed Piperylene revenue was ¥0 and DCPD's amount looked "
+        "and I noticed Piperylene revenue was ¥0 and PRODUCT_B's amount looked "
         "suspiciously low (¥1.93M for 6,181 t ≈ ¥312/t). Let me verify "
         "the revenue field is actually correct rather than a blank-dimension/data issue."
     )

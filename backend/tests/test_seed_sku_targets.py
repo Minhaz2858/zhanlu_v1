@@ -61,16 +61,16 @@ def test_static_targets_no_longer_include_erp_where_1_1():
 
 
 def test_static_targets_use_md_lz_price_as_primary():
-    """All 11 static targets are md_t_lz_price-primary (the canonical set).
+    """All 11 static targets are md_market_price-primary (the canonical set).
 
-    Matches app.services.forecasting.seed_ecisco_targets.ECISCO_FORECAST_TARGETS
-    and migration 037: 11 entries, every one sourced from md_t_lz_price. The
+    Matches app.services.forecasting.seed_acme_targets.ECISCO_FORECAST_TARGETS
+    and migration 037: 11 entries, every one sourced from md_market_price. The
     longer-history ERP views for the same products ride along as
     ``extra_sources`` — they are not a different primary table.
     """
     md_lz_count = sum(
         1 for t in ECISCO_FORECAST_TARGETS
-        if t["datasource"].get("table") == "md_t_lz_price"
+        if t["datasource"].get("table") == "md_market_price"
     )
     assert md_lz_count == 11
 
@@ -100,13 +100,13 @@ def test_discover_skus_inserts_one_target_per_sku(db_session):
 
     targets = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org",
-        ForecastTarget.product_key.like("ecisco.c5_resin.%"),
+        ForecastTarget.product_key.like("acme.product_a.%"),
     ).all()
     assert len(targets) == 2
     keys = {t.product_key for t in targets}
-    assert "ecisco.c5_resin.SKU_A" in keys
-    assert "ecisco.c5_resin.SKU_C" in keys
-    assert "ecisco.c5_resin.SKU_B" not in keys
+    assert "acme.product_a.SKU_A" in keys
+    assert "acme.product_a.SKU_C" in keys
+    assert "acme.product_a.SKU_B" not in keys
 
 
 def test_discover_skus_assigns_primary_sku_lowest_report_order(db_session):
@@ -124,10 +124,10 @@ def test_discover_skus_assigns_primary_sku_lowest_report_order(db_session):
     )
 
     primary = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.PRIMARY"
+        ForecastTarget.product_key == "acme.product_a.PRIMARY"
     ).one()
     secondary = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.SECONDARY"
+        ForecastTarget.product_key == "acme.product_a.SECONDARY"
     ).one()
     assert primary.report_order == 12
     assert secondary.report_order == 13
@@ -145,7 +145,7 @@ def test_discover_skus_where_clause_filters_by_material_code(db_session):
     )
 
     target = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.CODE_123"
+        ForecastTarget.product_key == "acme.product_a.CODE_123"
     ).one()
     assert "material_code = 'CODE_123'" in target.datasource["where"]
     assert "FTAXPRICE > 0" in target.datasource["where"]
@@ -169,7 +169,7 @@ def test_discover_skus_is_idempotent(db_session):
 
 
 def test_discover_skus_handles_both_erp_products(db_session):
-    """Both c5_resin and raffinate_c5 should be discovered."""
+    """Both product_a and raffinate_c5 should be discovered."""
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
@@ -195,10 +195,10 @@ def test_discover_skus_handles_both_erp_products(db_session):
     )
     assert count == 2
     resin = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.RESIN_1"
+        ForecastTarget.product_key == "acme.product_a.RESIN_1"
     ).one()
     raff = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.raffinate_c5.RAFF_1"
+        ForecastTarget.product_key == "acme.raffinate_c5.RAFF_1"
     ).one()
     assert resin.report_order == 12
     assert raff.report_order == 12  # both families start at 12

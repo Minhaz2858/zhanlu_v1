@@ -50,7 +50,7 @@ def db():
         session.close()
 
 
-def _seed_series(db, domain: str, product_key="isoprene",
+def _seed_series(db, domain: str, product_key="product_d",
                  series_key=None) -> ForecastExternalSeries:
     s = ForecastExternalSeries(
         series_key=series_key or f"test_{domain}_{product_key}",
@@ -77,7 +77,7 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        loader = OperatingRateLoader(product_id="isoprene", db_session=None)
+        loader = OperatingRateLoader(product_id="product_d", db_session=None)
         df = loader.load()
         assert isinstance(df, pd.DataFrame)
         assert df.empty
@@ -87,7 +87,7 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        s = _seed_series(db, "operating_rate", "isoprene")
+        s = _seed_series(db, "operating_rate", "product_d")
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         points = [
             (today - timedelta(days=10), 75.0),
@@ -96,7 +96,7 @@ class TestOperatingRateLoader:
         ]
         _seed_points(db, s.id, points)
 
-        loader = OperatingRateLoader(product_id="isoprene", db_session=db)
+        loader = OperatingRateLoader(product_id="product_d", db_session=db)
         df = loader.load()
         assert len(df) == 3
         assert list(df.columns) == ["date", "op_rate"]
@@ -106,9 +106,9 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        s = _seed_series(db, "inventory", "isoprene")
+        s = _seed_series(db, "inventory", "product_d")
         _seed_points(db, s.id, [(datetime(2025, 1, 1), 100.0)])
-        loader = OperatingRateLoader(product_id="isoprene", db_session=db)
+        loader = OperatingRateLoader(product_id="product_d", db_session=db)
         df = loader.load()
         assert df.empty
 
@@ -118,7 +118,7 @@ class TestOperatingRateLoader:
         )
         s = _seed_series(db, "operating_rate", "butadiene")
         _seed_points(db, s.id, [(datetime(2025, 1, 1), 70.0)])
-        loader = OperatingRateLoader(product_id="isoprene", db_session=db)
+        loader = OperatingRateLoader(product_id="product_d", db_session=db)
         df = loader.load()
         assert df.empty
 
@@ -126,7 +126,7 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        s = _seed_series(db, "operating_rate", "isoprene")
+        s = _seed_series(db, "operating_rate", "product_d")
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         points = [
             (today - timedelta(days=400), 70.0),  # too old for lookback=365
@@ -135,7 +135,7 @@ class TestOperatingRateLoader:
         _seed_points(db, s.id, points)
 
         loader = OperatingRateLoader(
-            product_id="isoprene", lookback_days=365, db_session=db,
+            product_id="product_d", lookback_days=365, db_session=db,
         )
         df = loader.load()
         assert len(df) == 1
@@ -146,7 +146,7 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        s = _seed_series(db, "operating_rate", "isoprene")
+        s = _seed_series(db, "operating_rate", "product_d")
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         points = [
             (today - timedelta(days=10), 75.0),    # past
@@ -155,7 +155,7 @@ class TestOperatingRateLoader:
         ]
         _seed_points(db, s.id, points)
 
-        loader = OperatingRateLoader(product_id="isoprene", db_session=db)
+        loader = OperatingRateLoader(product_id="product_d", db_session=db)
         df = loader.load()
         assert len(df) == 1
         assert float(df.iloc[0]["op_rate"]) == 75.0
@@ -164,8 +164,8 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        _seed_series(db, "operating_rate", "isoprene")
-        loader = OperatingRateLoader(product_id="isoprene", db_session=db)
+        _seed_series(db, "operating_rate", "product_d")
+        loader = OperatingRateLoader(product_id="product_d", db_session=db)
         df = loader.load()
         assert df.empty
 
@@ -173,7 +173,7 @@ class TestOperatingRateLoader:
         from app.services.forecasting.features.exogenous_loaders import (
             OperatingRateLoader,
         )
-        s = _seed_series(db, "operating_rate", "isoprene")
+        s = _seed_series(db, "operating_rate", "product_d")
         today = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
         points = [
             (today - timedelta(days=5), 80.0),
@@ -182,7 +182,7 @@ class TestOperatingRateLoader:
         ]
         _seed_points(db, s.id, points)
 
-        loader = OperatingRateLoader(product_id="isoprene", db_session=db)
+        loader = OperatingRateLoader(product_id="product_d", db_session=db)
         df = loader.load()
         dates = list(df["date"])
         assert dates == sorted(dates)

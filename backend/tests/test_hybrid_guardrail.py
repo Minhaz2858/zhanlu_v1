@@ -49,7 +49,7 @@ def test_intent_falls_back_to_regex_when_llm_unclassified():
 
     intent, conf, tools, query, source = asyncio.run(
         classify_user_intent(
-            "can you collect some petrochemical news from website",
+            "can you collect some industrial news from website",
             llm_call=fake_llm,
         )
     )
@@ -62,7 +62,7 @@ def test_intent_falls_back_to_regex_when_llm_unavailable():
     """When the LLM is None, regex still works."""
     intent, conf, tools, query, source = asyncio.run(
         classify_user_intent(
-            "can you collect some petrochemical news from website",
+            "can you collect some industrial news from website",
             llm_call=None,
         )
     )
@@ -85,7 +85,7 @@ def test_intent_llm_raises_falls_back():
 
     intent, conf, tools, query, source = asyncio.run(
         classify_user_intent(
-            "can you collect some petrochemical news from website",
+            "can you collect some industrial news from website",
             llm_call=fake_llm,
         )
     )
@@ -137,7 +137,7 @@ def test_refusal_detected_by_regex_when_llm_says_no():
 
     async def main():
         return await detect_and_correct_refusal(
-            user_message="can you collect some petrochemical news from website",
+            user_message="can you collect some industrial news from website",
             assistant_text="I'm sorry, but I cannot browse the internet.",
             llm_call=fake_llm,
             session_id="test",
@@ -181,7 +181,7 @@ def test_refusal_llm_raises_falls_back_to_regex():
 
     async def main():
         return await detect_and_correct_refusal(
-            user_message="can you collect some petrochemical news from website",
+            user_message="can you collect some industrial news from website",
             assistant_text="I'm sorry, but I cannot browse the internet.",
             llm_call=fake_llm,
             session_id="test",

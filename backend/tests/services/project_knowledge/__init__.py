@@ -41,10 +41,10 @@ def _enable():
 def test_layer1_resolver_hit(db):
     _enable()
     cache = ProjectKnowledgeCache("p1")
-    r = cache.query(db, "isoprene upstream", model_id="qwen3.6-27b")
+    r = cache.query(db, "product_d upstream", model_id="qwen3.6-27b")
     assert r is not None
     assert r.kind == "product"
-    assert r.data["product_id"] == "isoprene"
+    assert r.data["product_id"] == "product_d"
     assert "Upstream" in r.context_block
 
 
@@ -61,9 +61,9 @@ def test_layer2_entity_hit(db):
     db.commit()
     cache = ProjectKnowledgeCache("p1")
     # query mentioning a custom alias, no resolver hit
-    r = cache.query(db, "show me 异戊二烯 status", model_id="qwen3.6-27b")
+    r = cache.query(db, "show me 电子元件 status", model_id="qwen3.6-27b")
     assert r is not None
-    # Layer 1 will hit isoprene first, that's fine
+    # Layer 1 will hit product_d first, that's fine
     assert r.kind in ("entity", "product")
 
 
@@ -71,7 +71,7 @@ def test_layer3_metric_hit(db):
     _enable()
     db.add(ProjectMetric(
         id=str(uuid.uuid4()),
-        project_id="p1", name="Crude Oil Avg Price",
+        project_id="p1", name="Product E Avg Price",
         aliases=["crude price", "原油价格"],
         unit="USD/bbl", default_aggregation="avg",
         status="approved", source="user",
@@ -87,7 +87,7 @@ def test_query_returns_none_when_flag_off(db):
     settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = False
     settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH = True
     cache = ProjectKnowledgeCache("p1")
-    assert cache.query(db, "isoprene", model_id="qwen3.6-27b") is None
+    assert cache.query(db, "product_d", model_id="qwen3.6-27b") is None
 
 
 def test_invalidate_all(db):
@@ -118,6 +118,6 @@ def test_empty_project_id_raises():
 
 
 def test_tokenize_cjk_safe():
-    toks = tokenize_for_match("异戊二烯价格")
+    toks = tokenize_for_match("电子元件价格")
     assert any("异戊二" in t for t in toks)
     assert "价格" not in toks  # single CJK chars not tokens

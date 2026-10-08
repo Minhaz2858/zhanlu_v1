@@ -1,6 +1,6 @@
 """Regression tests for deterministic candidate retrieval + the selection surface.
 
-Every defect pinned here was measured LIVE on the aipdp warehouse (143 tables,
+Every defect pinned here was measured LIVE on the acme warehouse (143 tables,
 MySQL) on 2026-09-18, driving the real ``NLAnswerService.answer()``:
 
   * ``format_toc_text(toc, token_budget=1200)`` rendered 14 of 143 tables — the

@@ -324,7 +324,7 @@ def test_project_selected_but_deleted_project_yields_no_context(db_session):
 # Contract 4: general_assistant + selected project → REPLACE stale own
 # bindings with the project's KBs (cross-project leakage regression,
 # conv 1769bf33: Data Analysis project's PDF-only chat answered from the
-# C5_C9 company warehouse KB that general_assistant carried agent-level).
+# SAMPLE company warehouse KB that general_assistant carried agent-level).
 # ---------------------------------------------------------------------------
 
 
@@ -333,14 +333,14 @@ def test_general_assistant_project_selected_replaces_stale_own_bindings(db_sessi
     must NOT carry it into a project-scoped chat: the selected project's
     KBs REPLACE the stale own binding (no union)."""
     selected = _make_project("Data Analysis")
-    other = _make_project("C5_C9")
+    other = _make_project("SAMPLE")
     db_session.add_all([selected, other])
     db_session.commit()
 
     # The stale agent-level KB lives in the OTHER project (company
     # warehouse) — must never leak into the selected project's chat.
-    stale_kb = _make_kb("aipdp_data_warehouse_prod", project_id=other.id)
-    pdf_kb = _make_kb("C5C9 PDF", project_id=selected.id)
+    stale_kb = _make_kb("demo_warehouse_prod", project_id=other.id)
+    pdf_kb = _make_kb("SAMPLE PDF", project_id=selected.id)
     db_session.add_all([stale_kb, pdf_kb])
     db_session.commit()
 

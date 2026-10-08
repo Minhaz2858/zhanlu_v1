@@ -29,21 +29,21 @@ class TestComputeImportParitySignal:
         df = pd.DataFrame(columns=["date", "import_price_cny"])
         domestic_df = _make_price_df([100.0] * 10)
         sig = compute_import_parity_signal(df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert isinstance(sig, ImportParitySignal)
         assert sig.has_sufficient_data is False
 
     def test_insufficient_data_no_domestic(self):
         """< 4 import rows AND no domestic → insufficient."""
         df = _make_import_df([12.0] * 3)
-        sig = compute_import_parity_signal(df, product_id="isoprene")
+        sig = compute_import_parity_signal(df, product_id="product_d")
         assert sig.has_sufficient_data is False
 
     def test_insufficient_data_no_import(self):
         df = _make_import_df([12.0] * 3)
         domestic_df = _make_price_df([100.0] * 10)
         sig = compute_import_parity_signal(df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert sig.has_sufficient_data is False
 
     def test_positive_gap_ceiling_pressure_true(self):
@@ -51,7 +51,7 @@ class TestComputeImportParitySignal:
         import_df = _make_import_df([12.0] * 10)
         domestic_df = _make_price_df([15.0] * 10)
         sig = compute_import_parity_signal(import_df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert sig.has_sufficient_data is True
         assert sig.import_parity_gap is not None
         assert sig.import_parity_gap == pytest.approx(0.20, abs=0.01)
@@ -62,7 +62,7 @@ class TestComputeImportParitySignal:
         import_df = _make_import_df([18.0] * 10)
         domestic_df = _make_price_df([15.0] * 10)
         sig = compute_import_parity_signal(import_df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert sig.import_parity_gap is not None
         assert sig.import_parity_gap == pytest.approx(-0.20, abs=0.01)
         assert sig.ceiling_pressure is False
@@ -72,7 +72,7 @@ class TestComputeImportParitySignal:
         import_df = _make_import_df([14.25] * 10)
         domestic_df = _make_price_df([15.0] * 10)
         sig = compute_import_parity_signal(import_df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert sig.import_window_open is True
 
     def test_import_window_closed_below_5pct(self):
@@ -80,13 +80,13 @@ class TestComputeImportParitySignal:
         import_df = _make_import_df([14.55] * 10)
         domestic_df = _make_price_df([15.0] * 10)
         sig = compute_import_parity_signal(import_df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert sig.import_window_open is False
 
     def test_no_domestic_price_no_gap(self):
         """Without domestic_price_df → gap is None, both flags False."""
         import_df = _make_import_df([12.0] * 10)
-        sig = compute_import_parity_signal(import_df, product_id="isoprene")
+        sig = compute_import_parity_signal(import_df, product_id="product_d")
         assert sig.has_sufficient_data is True
         assert sig.import_parity_gap is None
         assert sig.ceiling_pressure is False
@@ -97,7 +97,7 @@ class TestComputeImportParitySignal:
         import_df = _make_import_df([20.0, 18.0, 15.0, 12.0, 10.0])
         domestic_df = _make_price_df([15.0] * 5)
         sig = compute_import_parity_signal(import_df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         # Latest import = 10, domestic = 15 → gap = (15-10)/15 = +0.33
         assert sig.import_parity_gap == pytest.approx(0.333, abs=0.01)
         assert sig.ceiling_pressure is True
@@ -106,7 +106,7 @@ class TestComputeImportParitySignal:
         import_df = _make_import_df([12.0] * 10)
         domestic_df = _make_price_df([15.0] * 10)
         sig = compute_import_parity_signal(import_df, domestic_price_df=domestic_df,
-                                            product_id="isoprene")
+                                            product_id="product_d")
         assert isinstance(sig, ImportParitySignal)
         assert hasattr(sig, "import_parity_gap")
         assert hasattr(sig, "import_window_open")

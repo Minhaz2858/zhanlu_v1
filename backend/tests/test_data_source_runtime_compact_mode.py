@@ -37,16 +37,16 @@ from app.services.data_source_runtime.data_source_runtime import (
 def _bound_meta_db_only():
     return [{
         "id": "kb-test-1",
-        "name": "ecisco_sales",
+        "name": "acme_sales",
         "source_kind": "database",
         "db_type": "postgresql",
-        "database_name": "ecisco",
+        "database_name": "acme",
     }]
 
 
 def _big_schema_hint() -> str:
     return """
-Table: ecisco.contracts
+Table: acme.contracts
   id: INTEGER PRIMARY KEY
   customer_id: INTEGER REFERENCES customers(id)
   amount: NUMERIC(12,2) -- Total contract value
@@ -118,7 +118,7 @@ class TestCompactSchemaHintStructural:
         hint = _big_schema_hint()
         out = _compact_schema_hint(hint)
         assert "Sample rows" not in out
-        assert "Table: ecisco.contracts" in out
+        assert "Table: acme.contracts" in out
         assert "id: INTEGER PRIMARY KEY" in out
         assert "customer_id" in out
 
@@ -255,7 +255,7 @@ class TestSmallModelCompactMode:
             concept_catalogs={"kb-test-1": _big_concept_catalog()},
             compact_mode=True,
         )
-        assert "Table: ecisco.contracts" in out
+        assert "Table: acme.contracts" in out
         assert "id: INTEGER PRIMARY KEY" in out
         assert "amount: NUMERIC(12,2)" in out
         assert "status: VARCHAR(32)" in out

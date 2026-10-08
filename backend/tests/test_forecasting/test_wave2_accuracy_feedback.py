@@ -46,7 +46,7 @@ def db():
     s.close()
 
 
-def _make_target(db, pk="异戊二烯"):
+def _make_target(db, pk="电子元件"):
     t = ForecastTarget(product_key=pk, name=pk, org_id="default-org",
                        status="active", source="manual")
     db.add(t)
@@ -74,7 +74,7 @@ def test_run_accuracy_feedback_flags_degraded_product(db, monkeypatch):
     # Recent window: bad decisions (2 losses)
     for i in range(2):
         db.add(ForecastDecisionLog(
-            product_id="异戊二烯",
+            product_id="电子元件",
             horizon_day=7,
             as_of_date=datetime.date(2026, 7, 20) + datetime.timedelta(days=i),
             action="buy",
@@ -89,7 +89,7 @@ def test_run_accuracy_feedback_flags_degraded_product(db, monkeypatch):
     # Baseline window: good decisions (10 wins)
     for i in range(10):
         db.add(ForecastDecisionLog(
-            product_id="异戊二烯",
+            product_id="电子元件",
             horizon_day=7,
             as_of_date=datetime.date(2026, 5, 1) + datetime.timedelta(days=i),
             action="buy",
@@ -137,7 +137,7 @@ def test_run_accuracy_feedback_idempotent(db, monkeypatch):
 
     for i in range(2):
         db.add(ForecastDecisionLog(
-            product_id="异戊二烯",
+            product_id="电子元件",
             horizon_day=7,
             as_of_date=datetime.date(2026, 7, 20) + datetime.timedelta(days=i),
             action="buy",
@@ -171,7 +171,7 @@ def test_run_accuracy_feedback_no_degradation(db):
 
     for i in range(10):
         db.add(ForecastDecisionLog(
-            product_id="异戊二烯",
+            product_id="电子元件",
             horizon_day=7,
             as_of_date=datetime.date(2026, 7, 1) + datetime.timedelta(days=i),
             action="buy",

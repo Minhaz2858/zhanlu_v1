@@ -1,7 +1,7 @@
-# Brent-Oil Real-Time Data Fix — Verification Report
+# Benchmark A-Oil Real-Time Data Fix — Verification Report
 
 **Date:** 2026-07-23
-**User-reported issue:** "give me today brent oil price" → "I'm sorry, but I cannot provide real-time data such as today's Brent oil price. Please check a financial news website or use a dedicated data service for the latest prices."
+**User-reported issue:** "give me today brent oil price" → "I'm sorry, but I cannot provide real-time data such as today's Benchmark A oil price. Please check a financial news website or use a dedicated data service for the latest prices."
 
 ## TL;DR
 
@@ -55,7 +55,7 @@ Topic list includes: price, weather, score, rate, stock, crypto, oil, gas, gold,
 
 ### Refusal cases (all MUST match)
 ```
-✓ I'm sorry, but I cannot provide real-time data such as today's Brent oil price.
+✓ I'm sorry, but I cannot provide real-time data such as today's Benchmark A oil price.
 ✓ I cannot give you today's stock price.
 ✓ I do not have access to live data sources.
 ✓ I have no access to live data.
@@ -84,7 +84,7 @@ PASS: 14/14
 ✓ price of bitcoin today
 ✓ tell me the current exchange rate
 ✓ show me the live score
-✓ can you collect some petrochemical news from website
+✓ can you collect some industrial news from website
 ✓ search online for python tutorials
 ✓ look up the latest AI news online
 PASS: 13/13
@@ -135,7 +135,7 @@ tests/test_result_block_processor.py ....... 6  ✓  (existing — preserved)
 2. Pull the changes on the `zhanlui.ai:8000` server.
 3. Restart the backend service on that server.
 4. Re-test the user's exact message: "give me today brent oil price"
-5. Expected: the agent now auto-runs `web_search` and returns real Brent oil price with source links.
+5. Expected: the agent now auto-runs `web_search` and returns real Benchmark A oil price with source links.
 
 If the LLM still refuses despite the system prompt strengthening, the self-healing guardrail auto-runs `web_search(query="brent oil price today")` and appends the results.
 

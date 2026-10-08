@@ -19,7 +19,7 @@ Configuration:
 
 Reference:
 - ``Intent-Driven Query Planner.md``
-- ``EDIA_5.1.2/backend/src/engine/decision_graph.py``
+- ``Acme_5.1.2/backend/src/engine/decision_graph.py``
 """
 
 from __future__ import annotations

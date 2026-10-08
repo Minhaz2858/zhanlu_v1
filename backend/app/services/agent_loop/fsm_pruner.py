@@ -128,7 +128,7 @@ def prune_between_fsm_states(
     # contiguous run of tool messages that starts at the first replaced
     # index — NOT at the first replaced index itself. The kept (most
     # recent) tool responses live at the END of that run, and their
-    # assistant(tool_calls) message must be IMMEDIATELY followed by them.
+    # assistant(tool_calls) message must be IMMAcmeTELY followed by them.
     # Inserting the checkpoint between the assistant and its tool
     # responses produced exactly the 400 this pruner exists to prevent:
     #   "An assistant message with 'tool_calls' must be followed by tool

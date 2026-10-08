@@ -1,7 +1,7 @@
 # Web-Browse Refusal Fix — Verification Report
 
 **Date:** 2026-07-23
-**User-reported issue:** "can you collect some petrochemical news from website" → "I'm sorry, but I cannot browse the internet or collect real-time news from websites."
+**User-reported issue:** "can you collect some industrial news from website" → "I'm sorry, but I cannot browse the internet or collect real-time news from websites."
 
 ## TL;DR
 
@@ -33,21 +33,21 @@ The LLM occasionally emits a training-data default refusal ("I cannot browse the
 
 ## The User's Exact Scenario
 
-**User message:** `can you collect some petrochemical news from website`
+**User message:** `can you collect some industrial news from website`
 
 **Old behavior:**
-> I'm sorry, but I cannot browse the internet or collect real-time news from websites. However, I can help you summarize or generate a report based on petrochemical news if you provide the text or links.
+> I'm sorry, but I cannot browse the internet or collect real-time news from websites. However, I can help you summarize or generate a report based on industrial news if you provide the text or links.
 
 **New behavior** (any of these, depending on which layer catches it):
 
 1. **Layer 1 (LLM with stronger prompt):** The LLM correctly calls `web_search` and returns real results.
 2. **Layer 2 (pattern match):** The backend forces `tool_choice=web_search` and the LLM complies.
-3. **Layer 3 (refusal fallback):** If the LLM still refuses, the backend auto-runs `web_search(query="some petrochemical news")` and appends:
+3. **Layer 3 (refusal fallback):** If the LLM still refuses, the backend auto-runs `web_search(query="some industrial news")` and appends:
    ```
    I'm sorry, but I cannot browse the internet or collect real-time news from websites.
    However, I can help you summarize or generate a report...
    ---
-   _I can browse the web — here is what I found for "some petrochemical news":_
+   _I can browse the web — here is what I found for "some industrial news":_
    - [Title 1](https://example.com/1): snippet...
    - [Title 2](https://example.com/2): snippet...
    ```
@@ -57,7 +57,7 @@ The user always gets a real answer.
 ## Pattern Test Coverage
 
 `ONLINE_RESEARCH_PATTERN` matches:
-- "collect some petrochemical news from website" ✓ (the user's exact message)
+- "collect some industrial news from website" ✓ (the user's exact message)
 - "search online for python tutorials" ✓
 - "look up the latest iphone news online" ✓
 - "find news from website about climate change" ✓
@@ -92,8 +92,8 @@ tests/test_default_skills_prompt_block.py ....                          4 ✓ (e
 ## How to Verify in Production
 
 1. Restart the backend: `cd /root/zhanlu/backend && bash restart.sh` (or the existing restart procedure).
-2. In the chat UI, type: `can you collect some petrochemical news from website`
-3. Expected: the agent returns real petrochemical news with source links (not a refusal).
+2. In the chat UI, type: `can you collect some industrial news from website`
+3. Expected: the agent returns real industrial news with source links (not a refusal).
 
 If the LLM still refuses despite the system prompt strengthening, the self-healing guardrail auto-runs `web_search` and appends results, so the user always gets a real answer.
 

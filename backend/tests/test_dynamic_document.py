@@ -42,15 +42,15 @@ def _explicit_plan_payload():
                              "y": [[20.1, 19.8, 19.4, 19.0]]}),
         DocumentBlock(type="chart", title="Revenue by Product", chart_type="bar",
                       chart={"x_label": "product", "y_label": "revenue_m",
-                             "x": ["Isoprene", "DCPD", "SIS"],
+                             "x": ["Product_D", "PRODUCT_B", "SIS"],
                              "y": [742, 531, 388]}),
         DocumentBlock(type="data_table", title="Performance",
                       columns=["product", "revenue_m"],
-                      rows=[["Isoprene", 742], ["DCPD", 531], ["SIS", 388]]),
+                      rows=[["Product_D", 742], ["PRODUCT_B", 531], ["SIS", 388]]),
         DocumentBlock(type="findings", title="Key Findings", items=[
             {"label": "Cost", "text": "Feedstock costs rose 9% QoQ."}]),
         DocumentBlock(type="recommendations", title="Recommendations", items=[
-            {"label": "Pricing", "text": "Re-price DCPD contracts."}]),
+            {"label": "Pricing", "text": "Re-price PRODUCT_B contracts."}]),
         DocumentBlock(type="callout", variant="info", title="Methodology",
                       text="Weighted ERP sale-order prices."),
     ]
@@ -63,12 +63,12 @@ def _explicit_plan_payload():
 
 def _mixed_dataset_payload(tone="analyst"):
     rows = [
-        {"month": "2026-01", "product": "Isoprene", "revenue_m": 110},
-        {"month": "2026-02", "product": "Isoprene", "revenue_m": 118},
-        {"month": "2026-03", "product": "Isoprene", "revenue_m": 121},
-        {"month": "2026-01", "product": "DCPD", "revenue_m": 80},
-        {"month": "2026-02", "product": "DCPD", "revenue_m": 84},
-        {"month": "2026-03", "product": "DCPD", "revenue_m": 90},
+        {"month": "2026-01", "product": "Product_D", "revenue_m": 110},
+        {"month": "2026-02", "product": "Product_D", "revenue_m": 118},
+        {"month": "2026-03", "product": "Product_D", "revenue_m": 121},
+        {"month": "2026-01", "product": "PRODUCT_B", "revenue_m": 80},
+        {"month": "2026-02", "product": "PRODUCT_B", "revenue_m": 84},
+        {"month": "2026-03", "product": "PRODUCT_B", "revenue_m": 90},
     ]
     arch = synthesize_plan(
         "Monthly Revenue by Product", rows=rows,

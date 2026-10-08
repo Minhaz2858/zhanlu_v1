@@ -61,7 +61,7 @@ class TestGenerateMockSeries:
 
     def test_operating_rate_shape(self):
         df = generate_mock_series(
-            domain="operating_rate", product_key="isoprene",
+            domain="operating_rate", product_key="product_d",
             n_weeks=52, end_date=datetime(2025, 1, 1),
         )
         assert list(df.columns) == ["date", "op_rate"]
@@ -82,7 +82,7 @@ class TestGenerateMockSeries:
 
     def test_import_price_shape(self):
         df = generate_mock_series(
-            domain="import_price", product_key="isoprene",
+            domain="import_price", product_key="product_d",
             n_weeks=52,
         )
         assert list(df.columns) == ["date", "import_price_cny"]
@@ -92,7 +92,7 @@ class TestGenerateMockSeries:
 
     def test_dates_sorted_ascending(self):
         df = generate_mock_series(
-            domain="operating_rate", product_key="isoprene",
+            domain="operating_rate", product_key="product_d",
             n_weeks=52, end_date=datetime(2025, 6, 1),
         )
         dates = list(df["date"])
@@ -103,7 +103,7 @@ class TestGenerateMockSeries:
 
     def test_unknown_domain_returns_empty(self):
         df = generate_mock_series(
-            domain="weather", product_key="isoprene", n_weeks=10,
+            domain="weather", product_key="product_d", n_weeks=10,
         )
         assert df.empty
 
@@ -117,7 +117,7 @@ class TestSeedMockFeeds:
     def test_seeds_all_three_domains(self, db):
         result = seed_mock_feeds(
             db=db,
-            product_key="isoprene",
+            product_key="product_d",
             n_weeks=52,
         )
         assert set(result.keys()) == {"operating_rate", "inventory", "import_price"}
@@ -135,8 +135,8 @@ class TestSeedMockFeeds:
 
     def test_seed_is_idempotent(self, db):
         """Seeding twice with the same product_key re-seeds the same series."""
-        result1 = seed_mock_feeds(db=db, product_key="isoprene", n_weeks=52)
-        result2 = seed_mock_feeds(db=db, product_key="isoprene", n_weeks=52)
+        result1 = seed_mock_feeds(db=db, product_key="product_d", n_weeks=52)
+        result2 = seed_mock_feeds(db=db, product_key="product_d", n_weeks=52)
         # row_count should be 52 in both (replaced, not appended)
         for domain in result1:
             assert result1[domain]["row_count"] == result2[domain]["row_count"]
@@ -147,17 +147,17 @@ class TestSeedMockFeeds:
             OperatingRateLoader, InventoryLoader, ImportPriceLoader,
         )
 
-        seed_mock_feeds(db=db, product_key="isoprene", n_weeks=52)
+        seed_mock_feeds(db=db, product_key="product_d", n_weeks=52)
 
-        op_df = OperatingRateLoader(product_id="isoprene", db_session=db).load()
+        op_df = OperatingRateLoader(product_id="product_d", db_session=db).load()
         assert len(op_df) == 52
         assert list(op_df.columns) == ["date", "op_rate"]
 
-        inv_df = InventoryLoader(product_id="isoprene", db_session=db).load()
+        inv_df = InventoryLoader(product_id="product_d", db_session=db).load()
         assert len(inv_df) == 52
         assert list(inv_df.columns) == ["date", "inventory_t"]
 
-        ip_df = ImportPriceLoader(product_id="isoprene", db_session=db).load()
+        ip_df = ImportPriceLoader(product_id="product_d", db_session=db).load()
         assert len(ip_df) == 52
         assert list(ip_df.columns) == ["date", "import_price_cny"]
 
@@ -176,32 +176,32 @@ class TestSeedMockFeeds:
             OperatingRateLoader, InventoryLoader, ImportPriceLoader,
         )
 
-        seed_mock_feeds(db=db, product_key="isoprene", n_weeks=104)
+        seed_mock_feeds(db=db, product_key="product_d", n_weeks=104)
 
-        op_df = OperatingRateLoader(product_id="isoprene", db_session=db).load()
-        inv_df = InventoryLoader(product_id="isoprene", db_session=db).load()
-        ip_df = ImportPriceLoader(product_id="isoprene", db_session=db).load()
+        op_df = OperatingRateLoader(product_id="product_d", db_session=db).load()
+        inv_df = InventoryLoader(product_id="product_d", db_session=db).load()
+        ip_df = ImportPriceLoader(product_id="product_d", db_session=db).load()
 
-        op_sig = compute_operating_signal(op_df, product_id="isoprene")
+        op_sig = compute_operating_signal(op_df, product_id="product_d")
         assert op_sig.has_sufficient_data is True
         assert op_sig.rolling_4wk_op_rate is not None
         assert op_sig.utilization_regime in ("tight", "normal", "loose")
 
-        inv_sig = compute_inventory_signal(inv_df, product_id="isoprene")
+        inv_sig = compute_inventory_signal(inv_df, product_id="product_d")
         assert inv_sig.has_sufficient_data is True
         assert inv_sig.inventory_pressure in ("high", "normal", "low")
 
-        ip_sig = compute_import_parity_signal(ip_df, product_id="isoprene")
+        ip_sig = compute_import_parity_signal(ip_df, product_id="product_d")
         assert ip_sig.has_sufficient_data is True  # import-only mode
 
     def test_seeded_series_metadata_correct(self, db):
-        seed_mock_feeds(db=db, product_key="isoprene", n_weeks=52)
+        seed_mock_feeds(db=db, product_key="product_d", n_weeks=52)
         s = db.query(ForecastExternalSeries).filter_by(
-            series_key="mock_op_rate_isoprene",
+            series_key="mock_op_rate_product_d",
         ).first()
         assert s is not None
         assert s.domain == "operating_rate"
         assert s.source == "mock"
-        assert s.product_key == "isoprene"
+        assert s.product_key == "product_d"
         assert s.row_count == 52
         assert s.last_value_date is not None

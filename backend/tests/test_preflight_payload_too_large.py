@@ -1,6 +1,6 @@
 """Tests for ``call_llm`` pre-flight payload-vs-context-window check.
 
-Bug repro (Aug 2026): user runs ``ecisco_bi_assistant`` under qwen3.6-27b
+Bug repro (Aug 2026): user runs ``acme_bi_assistant`` under qwen3.6-27b
 (``context_window=65536`` from the DB row).  The system prompt + data-source
 context alone is ~60k tokens, the conversation itself is tiny (~100
 tokens), and the LLM call fails with HTTP 400 "maximum context length is

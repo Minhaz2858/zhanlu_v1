@@ -18,7 +18,7 @@ from app.services.forecasting.features.exogenous_loaders import (
     ImportPriceLoader,
 )
 
-PRODUCTS = ["isoprene", "piperylene", "dcpd", "cracked_c5", "cracked_c9", "styrene"]
+PRODUCTS = ["product_d", "product_f", "product_b", "cracked_c5", "cracked_c9", "styrene"]
 
 
 def test_production():

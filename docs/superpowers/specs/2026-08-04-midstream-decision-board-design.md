@@ -27,13 +27,13 @@ Response:
   "group": "midstream",
   "day": 7,
   "generated_at": "2026-08-04T08:00:00",
-  "briefing_zh": "下周重点关注:异戊二烯看涨(上涨概率 68%),建议提前备货;双环戊二烯信号不明,建议观望。…",
+  "briefing_zh": "下周重点关注:电子元件看涨(上涨概率 68%),建议提前备货;材料B信号不明,建议观望。…",
   "products": [
     {
-      "id": "isoprene",
-      "name_zh": "异戊二烯",
-      "name_en": "Isoprene",
-      "code": "isoprene",
+      "id": "product_d",
+      "name_zh": "电子元件",
+      "name_en": "Product_D",
+      "code": "product_d",
       "current_price": 12100.0,
       "price_date": "2026-08-03",
       "weekly_change_pct": 1.8,
@@ -52,14 +52,14 @@ Response:
       "intel_bias": "up",
       "volatility_regime": "NORMAL",
       "one_liner_zh": "供应偏紧,上涨概率 68%,建议提前备货",
-      "narrative_zh": "异戊二烯现价 12,100 元/吨,预计下周涨至 12,450 元/吨(+2.9%),上涨概率 68%。方向预测历史准确率 72%,市场情报偏多(3 条在册事件)。建议:提前备货,锁定当前价格。",
+      "narrative_zh": "电子元件现价 12,100 元/吨,预计下周涨至 12,450 元/吨(+2.9%),上涨概率 68%。方向预测历史准确率 72%,市场情报偏多(3 条在册事件)。建议:提前备货,锁定当前价格。",
       "skus": []
     }
   ]
 }
 ```
 
-- `skus` populated for ERP products (raffinate_c5) from existing `sku_forecasts_by_product` (material_code + name + forecast_base).
+- `skus` populated for ERP products (feedstock_a) from existing `sku_forecasts_by_product` (material_code + name + forecast_base).
 - Missing forecast/decision data → fields `null`, `action="watch"`, `one_liner_zh="数据不足,建议观望"` — never crash.
 
 ### New service module: `backend/app/services/decision_board_service.py`
@@ -76,7 +76,7 @@ Response:
 
 ### Router
 
-Add route in `backend/app/routers/market_dashboard.py` (same `get_current_user_required` guard). Reuse EDIA-enabled fail-closed pattern (503 `edia_unavailable`).
+Add route in `backend/app/routers/market_dashboard.py` (same `get_current_user_required` guard). Reuse Acme-enabled fail-closed pattern (503 `edia_unavailable`).
 
 ## Frontend
 
@@ -100,7 +100,7 @@ Layout (inserted between `ObservedDataStrip` and `ForecastTrendChart`):
 3. **Expanded card** (B-part, inline below the row, full width):
    - Left: mini chart (recharts `AreaChart`, past 30d actual + 7d base forecast) via existing `marketDashboardApi.forecastChart(id, 30)`, lazy-fetched only when expanded.
    - Right: full `narrative_zh` paragraph + stats grid (方向准确率, 情报事件数, 波动状态, 置信度).
-   - SKU table for raffinate_c5 (material_code, name, forecast_base).
+   - SKU table for feedstock_a (material_code, name, forecast_base).
    - Only one row expanded at a time.
 
 ### Wiring: `MarketDashboardPage.jsx`

@@ -94,7 +94,7 @@ class TestReportCardPayload(unittest.TestCase):
 
         p = ReportCardPayload(
             title="Sales",
-            source="erp_v_sale_orderentry",
+            source="v_sale_order",
             summary="Top 3 = 76%",
             kpis=[
                 KPISpec(label="Total", value="189M", caption="Top 7"),
@@ -186,7 +186,7 @@ class TestSynthesisFallback(unittest.TestCase):
 
         rows = [
             {"material_name": "碳五石油树脂", "total_revenue": 66_400_000.0},
-            {"material_name": "异戊二烯",     "total_revenue": 22_100_000.0},
+            {"material_name": "电子元件",     "total_revenue": 22_100_000.0},
             {"material_name": "间戊二烯",     "total_revenue": 18_000_000.0},
         ]
         p = _fallback_payload(

@@ -3,7 +3,7 @@
 Verifies:
 - _calculate_seconds_until_2am returns correct delay
 - _run_nightly_forecast_cycle runs without errors
-- seed_ecisco_forecast_targets is idempotent
+- seed_acme_forecast_targets is idempotent
 - bootstrap endpoint returns 200 (backward compat)
 """
 
@@ -87,8 +87,8 @@ class TestNightlyTaskRegistration:
         ), "start_scheduled_tasks should register the nightly forecast task"
 
 
-class TestSeedEciscoTargets:
-    """The canonical Ecisco BI forecast targets.
+class TestSeedAcmeTargets:
+    """The canonical Acme BI forecast targets.
 
     Target definitions were de-hardcoded out of a bespoke seed module into the
     per-app domain config (``app/domain_configs/default.json``); an empty agent
@@ -103,12 +103,12 @@ class TestSeedEciscoTargets:
     def test_seed_returns_11_targets(self):
         """The default domain config should define 11 canonical targets.
 
-        11 md_t_lz_price products. The 2 ERP products (c5_resin, raffinate_c5)
+        11 md_market_price products. The 2 ERP products (product_a, raffinate_c5)
         are seeded dynamically via discover_and_seed_sku_targets(), not in this
         static list.
         """
         from app.services.domain_config import get_domain_config
         targets = get_domain_config("").get("forecast_targets", [])
         assert len(targets) == 11, (
-            f"Expected 11 Ecisco BI targets, got {len(targets)}"
+            f"Expected 11 Acme BI targets, got {len(targets)}"
         )

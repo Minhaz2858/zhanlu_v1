@@ -2,13 +2,13 @@
 
 The forecast engine's `_fetch_series` traditionally reads from a bound
 KnowledgeBase via QueryService. For dashboard products, the
-authoritative price history lives in the external MySQL mirror (`md_t_lz_price`
+authoritative price history lives in the external MySQL mirror (`md_market_price`
 and ERP fallback tables at 10.10.10.49). This module provides a thin
 adapter that returns the same `pd.DataFrame` shape the engine expects
 (columns `ds` + `y`), so the downstream pipeline (quality → models →
 ensemble → guard → scenarios) runs unchanged.
 
-Sentinel handling: `md_t_lz_price.FTAXPRICE` is a VARCHAR and contains
+Sentinel handling: `md_market_price.FTAXPRICE` is a VARCHAR and contains
 "F7" / "NaN" / "" sentinels for some blowing-agent rows. These are
 dropped before coercion to float, matching the dashboard's
 logic.
@@ -41,7 +41,7 @@ class MysqlDataSource:
 
         {
             "source": "mysql_mirror",
-            "table": "md_t_lz_price",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "MATERIAL_NAME = '<material>'",
@@ -67,8 +67,8 @@ class MysqlDataSource:
         primary source, deduplicates by date, and returns the longest
         available history. Each extra_source has the same shape as a
         primary datasource (table, time_col, measure, where). Used for
-        products where ``md_t_lz_price`` only covers a recent window but
-        the ``lz_v_<product>_data`` views extend further back.
+        products where ``md_market_price`` only covers a recent window but
+        the ``v_<product>_data`` views extend further back.
 
         Raises:
             RuntimeError: If the external MySQL mirror is unreachable or the query returns
@@ -110,8 +110,8 @@ class MysqlDataSource:
             )
 
         df = pd.concat(dfs, ignore_index=True)
-        # Deduplicate by date — primary wins over extras (md_t_lz_price has
-        # clean daily prices; lz_v_*_data views may have duplicate dates
+        # Deduplicate by date — primary wins over extras (md_market_price has
+        # clean daily prices; v_*_data views may have duplicate dates
         # for the same product). Primary rows come first in the concat, so
         # keep="first" preserves them on overlap.
         df = df.drop_duplicates(subset=["ds"], keep="first")
@@ -126,7 +126,7 @@ class MysqlDataSource:
 
     def _read_single_source(self, eng: Engine, src: dict) -> pd.DataFrame:
         """Read a single source descriptor into a DataFrame."""
-        table = src.get("table", "md_t_lz_price")
+        table = src.get("table", "md_market_price")
         time_col = src.get("time_col", "FDATE")
         measure = src.get("measure", "FTAXPRICE")
         where = src.get("where", "1=1")
@@ -164,7 +164,7 @@ class MysqlDataSource:
 def _source_to_dict(source: dict) -> dict:
     """Normalize a datasource descriptor to the standard shape."""
     return {
-        "table": source.get("table", "md_t_lz_price"),
+        "table": source.get("table", "md_market_price"),
         "time_col": source.get("time_col", "FDATE"),
         "measure": source.get("measure", "FTAXPRICE"),
         "where": source.get("where", "1=1"),

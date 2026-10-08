@@ -1192,7 +1192,7 @@ Expected: `Up N seconds`, healthy
 - [ ] **Step 4: Manual smoke test in the UI**
 
 In the browser:
-1. Open a project (e.g. `Ecisco BI`)
+1. Open a project (e.g. `Acme BI`)
 2. Send: `"Show me top 5 customers by revenue"`
 3. Verify the new UI appears:
    - Thinking section shows live reasoning text

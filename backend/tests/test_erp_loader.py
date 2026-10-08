@@ -13,22 +13,22 @@ def sqlite_engine():
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE `sale_erp_v_异戊二烯_data` ("
+            "CREATE TABLE `sale_erp_v_电子元件_data` ("
             "`Unnamed: 0` TEXT, `qty` REAL, `date` TEXT, "
             "`price` REAL, `amount` REAL, `product` TEXT, `supplier` TEXT)"
         ))
         # Insert: 3 days, multiple txns per day, plus a non-matching product
         rows = [
-            ("r1", 100, "2018-07-01", 9300.0, 930000.0, "异戊二烯", "中石化华中"),
-            ("r2", 50, "2018-07-01", 9310.0, 465500.0, "异戊二烯", "恒河材料"),  # same day
-            ("r3", 200, "2018-07-02", 9350.0, 1870000.0, "异戊二烯", "中石化华中"),
-            ("r4", 300, "2026-06-30", 12000.0, 3600000.0, "异戊二烯", "恒河材料"),
-            ("r5", 100, "2026-07-01", 12050.0, 1205000.0, "异戊二烯", "恒河材料"),
+            ("r1", 100, "2018-07-01", 9300.0, 930000.0, "电子元件", "中石化华中"),
+            ("r2", 50, "2018-07-01", 9310.0, 465500.0, "电子元件", "恒河材料"),  # same day
+            ("r3", 200, "2018-07-02", 9350.0, 1870000.0, "电子元件", "中石化华中"),
+            ("r4", 300, "2026-06-30", 12000.0, 3600000.0, "电子元件", "恒河材料"),
+            ("r5", 100, "2026-07-01", 12050.0, 1205000.0, "电子元件", "恒河材料"),
             ("r6", 100, "2026-07-02", 9999.0, 999900.0, "苯乙烯", "中石化华中"),  # wrong product
         ]
         for r in rows:
             conn.execute(text(
-                "INSERT INTO `sale_erp_v_异戊二烯_data` "
+                "INSERT INTO `sale_erp_v_电子元件_data` "
                 "(`Unnamed: 0`, `qty`, `date`, `price`, `amount`, `product`, `supplier`) "
                 "VALUES (:u, :q, :d, :p, :a, :prod, :sup)"
             ), {
@@ -44,12 +44,12 @@ def test_erp_loader_filters_by_product(sqlite_engine):
     from app.services.forecasting.features.exogenous_loaders import ErpTxLoader
     loader = ErpTxLoader(engine=sqlite_engine)
     df = loader.load(
-        erp_table="sale_erp_v_异戊二烯_data",
-        product_filter="异戊二烯",
+        erp_table="sale_erp_v_电子元件_data",
+        product_filter="电子元件",
         window_start=date(2018, 1, 1),
         window_end=date(2026, 12, 31),
     )
-    # 5 isoprene txns (r6 excluded), 4 distinct days (r1+r2 same day)
+    # 5 product_d txns (r6 excluded), 4 distinct days (r1+r2 same day)
     assert len(df) == 4, df
     assert list(df.columns) == ["erp_price"]
     assert df.index.is_monotonic_increasing
@@ -60,8 +60,8 @@ def test_erp_loader_daily_mean(sqlite_engine):
     from app.services.forecasting.features.exogenous_loaders import ErpTxLoader
     loader = ErpTxLoader(engine=sqlite_engine)
     df = loader.load(
-        erp_table="sale_erp_v_异戊二烯_data",
-        product_filter="异戊二烯",
+        erp_table="sale_erp_v_电子元件_data",
+        product_filter="电子元件",
         window_start=date(2018, 1, 1),
         window_end=date(2026, 12, 31),
     )
@@ -75,8 +75,8 @@ def test_erp_loader_window_filter(sqlite_engine):
     from app.services.forecasting.features.exogenous_loaders import ErpTxLoader
     loader = ErpTxLoader(engine=sqlite_engine)
     df = loader.load(
-        erp_table="sale_erp_v_异戊二烯_data",
-        product_filter="异戊二烯",
+        erp_table="sale_erp_v_电子元件_data",
+        product_filter="电子元件",
         window_start=date(2026, 1, 1),
         window_end=date(2026, 12, 31),
     )
@@ -90,7 +90,7 @@ def test_erp_loader_empty_on_missing_table(sqlite_engine):
     loader = ErpTxLoader(engine=sqlite_engine)
     df = loader.load(
         erp_table="nonexistent_table",
-        product_filter="异戊二烯",
+        product_filter="电子元件",
         window_start=date(2026, 1, 1),
         window_end=date(2026, 12, 31),
     )
@@ -126,7 +126,7 @@ def test_erp_loader_no_product_filter_takes_all(sqlite_engine):
     from app.services.forecasting.features.exogenous_loaders import ErpTxLoader
     loader = ErpTxLoader(engine=sqlite_engine)
     df = loader.load(
-        erp_table="sale_erp_v_异戊二烯_data",
+        erp_table="sale_erp_v_电子元件_data",
         product_filter="",  # no filter
         window_start=date(2018, 1, 1),
         window_end=date(2026, 12, 31),

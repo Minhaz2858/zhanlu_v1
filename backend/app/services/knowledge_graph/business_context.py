@@ -362,7 +362,7 @@ def build_business_context(
     #    context is token-capped and truncated from the TAIL. Domains are long
     #    and low-signal (four of them consumed 1,516 chars live), so a curated
     #    term appended after them was cut off and never reached the model —
-    #    measured on the aipdp warehouse. Curated meaning gets the budget first.
+    #    measured on the acme warehouse. Curated meaning gets the budget first.
     try:
         from app.services.db.semantic_store import get_semantic_store
 

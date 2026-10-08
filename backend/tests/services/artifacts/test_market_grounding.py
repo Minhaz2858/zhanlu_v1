@@ -1,7 +1,7 @@
 """Task B2: market intent → market KB grounding (deterministic, no LLM).
 
-The C5_C9 project binds two KBs after B1: the ERP warehouse
-(``aipdp_data_warehouse_prod``) and the Market Research KB copy (name
+The SAMPLE project binds two KBs after B1: the ERP warehouse
+(``demo_warehouse_prod``) and the Market Research KB copy (name
 contains 'Market'). When the user intent mentions market/industry keywords
 (market / industry / research / 市场 / 行业 / 行情), the KB grounding
 selection must prefer the Market Research KB over the first-bound ERP KB.
@@ -26,7 +26,7 @@ ERP_ID = "kb-erp-warehouse"
 MARKET_ID = "kb-market-research"
 
 KB_META = {
-    ERP_ID: {"name": "aipdp_data_warehouse_prod", "description": "ERP warehouse"},
+    ERP_ID: {"name": "demo_warehouse_prod", "description": "ERP warehouse"},
     MARKET_ID: {"name": "Market Research 2026", "description": "Industry market research data"},
 }
 
@@ -76,7 +76,7 @@ def test_empty_bounds_returns_none():
 def test_market_kb_detected_via_description_only():
     """A KB whose DESCRIPTION mentions market/research is still preferred."""
     meta = {
-        ERP_ID: {"name": "aipdp_data_warehouse_prod", "description": "ERP warehouse"},
+        ERP_ID: {"name": "demo_warehouse_prod", "description": "ERP warehouse"},
         MARKET_ID: {"name": "external_copy_1", "description": "Market research data warehouse"},
     }
     assert _select_grounding_kb([ERP_ID, MARKET_ID], meta, "market data") == MARKET_ID

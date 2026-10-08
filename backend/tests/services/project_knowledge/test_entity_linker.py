@@ -62,7 +62,7 @@ def test_link_falls_back_to_name_match(db):
     db.commit()
     db.add(KBTableMeta(
         id=str(uuid.uuid4()),
-        kb_id=kb_id, schema_name="public", table_name="md_t_lz_isoprene_price",
+        kb_id=kb_id, schema_name="public", table_name="md_t_lz_product_d_price",
         table_type="TABLE", table_role="unknown",
     ))
     db.commit()
@@ -76,12 +76,12 @@ def test_link_falls_back_to_name_match(db):
 
 
 def test_tokenize_ascii():
-    toks = tokenize_for_match("isoprene price")
-    assert "isoprene" in toks
+    toks = tokenize_for_match("product_d price")
+    assert "product_d" in toks
     assert "price" in toks
 
 
 def test_tokenize_mixed():
-    toks = tokenize_for_match("异戊二烯 isoprene price")
-    assert "isoprene" in toks
+    toks = tokenize_for_match("电子元件 product_d price")
+    assert "product_d" in toks
     assert any("异戊二" in t for t in toks)

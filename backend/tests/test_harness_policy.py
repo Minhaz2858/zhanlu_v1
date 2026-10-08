@@ -79,8 +79,8 @@ def test_agent_class_override_beats_global(monkeypatch):
 def test_agent_class_normalisation(monkeypatch):
     monkeypatch.setenv("HARNESS_BUDGETS_ECISCO_BI_ASSISTANT_JSON", '{"guardrail_retries": 5}')
     p = HarnessPolicy()
-    assert p.for_agent_class("ecisco-bi-assistant").guardrail_retries == 5
-    assert p.for_agent_class("Ecisco BI Assistant").guardrail_retries == 5
+    assert p.for_agent_class("acme-bi-assistant").guardrail_retries == 5
+    assert p.for_agent_class("Acme BI Assistant").guardrail_retries == 5
 
 
 def test_unknown_or_absent_class_falls_back_to_global():

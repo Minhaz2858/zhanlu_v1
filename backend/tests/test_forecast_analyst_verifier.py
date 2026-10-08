@@ -1,6 +1,6 @@
 """Brief output verifier — the anti-hallucination gate."""
 from app.services.forecasting.analyst.verifier import verify_brief
-from tests.test_forecast_analyst_template import _dcpd_pack
+from tests.test_forecast_analyst_template import _product_b_pack
 
 
 def _brief(**over):
@@ -18,13 +18,13 @@ def _brief(**over):
 
 
 def test_valid_brief_passes():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     # numbers: 6940 (current), 6400/6900 (bear/bull), 42 (p_rise*100), 55 threshold
     assert verify_brief(_brief(), pack) == []
 
 
 def test_hallucinated_price_rejected():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     v = verify_brief(_brief(price_data_zh="现价 7,200 元/吨,预计涨至 7,500 元/吨(+4.2%)。"), pack)
     assert v != []
     assert any("7,200" in msg or "7,500" in msg for msg in v)
@@ -33,16 +33,16 @@ def test_hallucinated_price_rejected():
 def test_missing_key_rejected():
     b = _brief()
     del b["upstream_logic_zh"]
-    assert verify_brief(b, _dcpd_pack()) != []
+    assert verify_brief(b, _product_b_pack()) != []
 
 
 def test_triggers_must_be_list():
-    assert verify_brief(_brief(watch_triggers_zh="not a list"), _dcpd_pack()) != []
+    assert verify_brief(_brief(watch_triggers_zh="not a list"), _product_b_pack()) != []
 
 
 def test_small_numbers_exempt():
     # 7 (day), 8 (models), 3 (count) — all ≤12, exempt
-    assert verify_brief(_brief(supply_demand_zh="8 模型集成,7 日维度,3 大因素。"), _dcpd_pack()) == []
+    assert verify_brief(_brief(supply_demand_zh="8 模型集成,7 日维度,3 大因素。"), _product_b_pack()) == []
 
 
 def test_unsigned_chinese_prose_accepted():

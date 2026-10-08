@@ -11,7 +11,7 @@ architectural invariant of the session-cached re-export pipeline:
         -> produces a non-empty DOCX artifact
 
 Skipped unless ``E2E_RUN=1`` (same convention as
-``test_ecisco_bi_report_e2e.py``), so the regular regression suite never
+``test_acme_bi_report_e2e.py``), so the regular regression suite never
 touches the live server / model.
 
 Typical run:
@@ -40,7 +40,7 @@ ADMIN_PASSWORD = os.environ.get("E2E_ADMIN_PASSWORD", "admin123")
 APP_ID = os.environ.get("E2E_APP_ID", "default-app")
 
 AGENT_NAME = "general_assistant"
-PROJECT_ID = "e5ac337b-469a-480d-822b-f6a3155e652c"  # Ecisco BI
+PROJECT_ID = "e5ac337b-469a-480d-822b-f6a3155e652c"  # Acme BI
 
 # Tool names that read data from the warehouse. Turn 2 must NOT call any.
 DATA_TOOL_NAMES = frozenset({

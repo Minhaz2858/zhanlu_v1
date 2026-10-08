@@ -195,12 +195,12 @@ class TestPostRouterPick(unittest.TestCase):
         self.assertIsNone(result)
 
     def test_weekly_summary_phrase_does_not_force_skill_without_strong_match(self):
-        """The C5C9 regression: 'list the weekly summary…' must not be forced
+        """The SAMPLE regression: 'list the weekly summary…' must not be forced
         onto weekly-report-generation purely because of the phrase."""
         from app.services.skill_routing.post_router_hook import post_router_pick
 
         result = post_router_pick(
-            "Please list the weekly summary and forecast for C5C9 from Dec 24-30 2025",
+            "Please list the weekly summary and forecast for SAMPLE from Dec 24-30 2025",
             candidates=[
                 {"name": "resume-writer", "trigger": "cv resume", "source": "filesystem"},
             ],
@@ -210,7 +210,7 @@ class TestPostRouterPick(unittest.TestCase):
     def test_trigger_only_strong_match_does_not_force(self):
         """2026-09-03 regression: 'tell me about last month sales report'
         scored 0.70 against weekly-report-generation via trigger keywords
-        ('sales', 'report') and forced the Ecisco C5/C9 pipeline onto the
+        ('sales', 'report') and forced the Acme C5/C9 pipeline onto the
         generic Data Analyst — which then ground for minutes against a demo
         datasource that has none of the skill's tables. A trigger-only match
         (fewer than two skill-NAME tokens) must never force; the model makes
@@ -222,7 +222,7 @@ class TestPostRouterPick(unittest.TestCase):
             candidates=[
                 {
                     "name": "weekly-report-generation",
-                    "description": "Ecisco C5/C9 petrochemical weekly market report",
+                    "description": "Acme C5/C9 industrial weekly market report",
                     "trigger": "report sales weekly market",
                     "source": "db",
                 },
@@ -237,11 +237,11 @@ class TestPostRouterPick(unittest.TestCase):
         from app.services.skill_routing.post_router_hook import post_router_pick
 
         result = post_router_pick(
-            "generate the weekly report for C5C9",
+            "generate the weekly report for SAMPLE",
             candidates=[
                 {
                     "name": "weekly-report-generation",
-                    "description": "Ecisco C5/C9 petrochemical weekly market report",
+                    "description": "Acme C5/C9 industrial weekly market report",
                     "trigger": "report sales weekly market",
                     "source": "db",
                 },

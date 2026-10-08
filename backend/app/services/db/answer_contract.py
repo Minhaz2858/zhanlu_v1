@@ -60,7 +60,7 @@ _GROUP_BY = re.compile(r"\bgroup\s+by\b", re.I)
 #   2. a date function      DATE_FORMAT(CURRENT_DATE - INTERVAL 1 MONTH, ...)
 #   3. interval arithmetic  CURDATE() - INTERVAL 30 DAY
 # Shape 2 is what the live model actually writes (verified 2026-09-18 against
-# aipdp_data_warehouse_prod) — missing it flagged a CORRECT query as unfiltered.
+# demo_warehouse_prod) — missing it flagged a CORRECT query as unfiltered.
 _DATE_LITERAL = r"\d{4}[-/]\d{1,2}(?:[-/]\d{1,2})?"
 _DATE_FUNC = (
     r"(?:date_format|str_to_date|date_sub|date_add|date_trunc|to_date|last_day"

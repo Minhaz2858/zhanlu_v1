@@ -65,7 +65,7 @@ class TestE2EPipeline:
         # Index in multiple collections
         idx.index_event({
             "event_id": "ev_mc_1",
-            "headline": "DCPD price volatility",
+            "headline": "PRODUCT_B price volatility",
             "key_information": "up 5%",
         })
         idx.index_signal({
@@ -74,20 +74,20 @@ class TestE2EPipeline:
         })
         idx.index_product({
             "product_id": "p_mc_1",
-            "name": "DCPD",
+            "name": "PRODUCT_B",
             "aliases": ["dicyclopentadiene"],
             "category": "C5",
         })
 
         # Build a multi-collection context block
         ctx = build_domain_context(
-            query="DCPD price",
+            query="PRODUCT_B price",
             collections=["news_events", "market_signals", "product_catalog"],
             max_chars=3000,
         )
         assert isinstance(ctx, str)
         # At least one of the collections should have a hit
-        assert "DCPD" in ctx or "Crude" in ctx or "price" in ctx
+        assert "PRODUCT_B" in ctx or "Crude" in ctx or "price" in ctx
 
     def test_past_decision_roundtrip(self, tmp_chroma):
         from app.services.rag.smart_indexer import SmartIndexer
@@ -96,18 +96,18 @@ class TestE2EPipeline:
         idx = SmartIndexer()
         idx.index_decision({
             "decision_id": "d_rt_1",
-            "summary": "Increase DCPD production by 10%",
+            "summary": "Increase PRODUCT_B production by 10%",
             "outcome": "Profit +8%",
             "outcome_id": "o_rt_1",
         })
 
         # Find the decision
         decisions = retrieve_rich(
-            query="DCPD production increase",
+            query="PRODUCT_B production increase",
             n_results=3,
             collection="past_decisions",
         )
-        assert any("DCPD" in d.text for d in decisions)
+        assert any("PRODUCT_B" in d.text for d in decisions)
 
         # Find the outcome
         outcomes = retrieve_rich(
@@ -124,16 +124,16 @@ class TestE2EPipeline:
         idx = SmartIndexer()
         idx.index_causal_chain({
             "chain_id": "c_rt_1",
-            "description": "Naphtha price ↑ → C5 spread ↓ → DCPD margin shrinks",
-            "nodes": ["naphtha", "c5", "dcpd"],
-            "edges": [["naphtha", "c5"], ["c5", "dcpd"]],
+            "description": "Product_C price ↑ → C5 spread ↓ → PRODUCT_B margin shrinks",
+            "nodes": ["product_c", "c5", "product_b"],
+            "edges": [["product_c", "c5"], ["c5", "product_b"]],
         })
         hits = retrieve_rich(
-            query="Naphtha C5 spread",
+            query="Product_C C5 spread",
             n_results=3,
             collection="causal_graph_embeddings",
         )
-        assert any("Naphtha" in h.text for h in hits) or len(hits) == 0
+        assert any("Product_C" in h.text for h in hits) or len(hits) == 0
 
     def test_user_memory_roundtrip(self, tmp_chroma, monkeypatch):
         from app.services.rag.user_memory_retriever import (

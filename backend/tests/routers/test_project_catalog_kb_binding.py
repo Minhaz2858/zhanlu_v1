@@ -1,7 +1,7 @@
 """B1: scoped KB copy binding — clone_kb_for_project isolation test.
 
 Verifies the app isolation rule for binding the 'Market Research Data' KB to
-the C5_C9 project: `clone_kb_for_project` must create a SCOPED COPY (new row,
+the SAMPLE project: `clone_kb_for_project` must create a SCOPED COPY (new row,
 new id) bound to the target project and must NEVER repoint the original KB
 away from its source project (inverse isolation check), and `_bound_kbs` for
 the target project must return the copy.
@@ -69,7 +69,7 @@ def _make_kb(project_id, **kw):
 
 def test_clone_kb_for_project_scoped_copy(db):
     p1 = str(uuid.uuid4())  # Data Analysis
-    p2 = str(uuid.uuid4())  # C5_C9
+    p2 = str(uuid.uuid4())  # SAMPLE
 
     src = _make_kb(
         p1,
@@ -81,7 +81,7 @@ def test_clone_kb_for_project_scoped_copy(db):
     db.commit()
     db.refresh(src)
 
-    project_p2 = Project(id=p2, name="C5_C9", created_by_id="user-1")
+    project_p2 = Project(id=p2, name="SAMPLE", created_by_id="user-1")
     db.add(project_p2)
     db.commit()
 
@@ -117,7 +117,7 @@ def test_clone_kb_for_project_scoped_copy(db):
     original = db.query(KnowledgeBase).filter(KnowledgeBase.id == src.id).one()
     assert original.project_id == p1
 
-    # _bound_kbs for P2 (C5_C9) returns exactly the copy
+    # _bound_kbs for P2 (SAMPLE) returns exactly the copy
     bound_p2 = _bound_kbs(db, project_p2)
     assert [kb.id for kb in bound_p2] == [copy.id]
 

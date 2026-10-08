@@ -183,11 +183,11 @@ def test_create_allows_a_deliberately_different_dashboard_in_same_conversation()
            "conversation_id": "conv-owns-dash"}
 
     result = _run_create(
-        _args(slug="c5c9-financial", name="C5_C9 财务仪表盘"), db, ctx
+        _args(slug="sample-financial", name="SAMPLE 财务仪表盘"), db, ctx
     )
 
     assert result["success"] is True, result
-    assert result["dashboard_app"]["slug"] == "c5c9-financial"
+    assert result["dashboard_app"]["slug"] == "sample-financial"
 
 
 def test_create_without_owned_dashboard_still_uniquifies_taken_slug():

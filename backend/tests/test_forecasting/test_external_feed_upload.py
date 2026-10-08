@@ -87,7 +87,7 @@ class TestIngestCsvHappyPath:
             file=_make_csv(csv),
             series_key="op_rate_iso",
             domain="operating_rate",
-            product_key="isoprene",
+            product_key="product_d",
             unit="%",
             cadence="weekly",
             uploaded_by="test_user",
@@ -95,7 +95,7 @@ class TestIngestCsvHappyPath:
 
         assert result["series_key"] == "op_rate_iso"
         assert result["domain"] == "operating_rate"
-        assert result["product_key"] == "isoprene"
+        assert result["product_key"] == "product_d"
         assert result["row_count"] == 3
         assert result["rows_inserted"] == 3
         assert result["rows_updated"] == 0
@@ -113,7 +113,7 @@ class TestIngestCsvHappyPath:
             file=_make_csv(csv),
             series_key="inv_iso",
             domain="inventory",
-            product_key="isoprene",
+            product_key="product_d",
             unit="吨",
         )
         assert result["row_count"] == 2
@@ -131,13 +131,13 @@ class TestIngestCsvHappyPath:
         ingest_csv(
             db=db, file=_make_csv(csv_v1),
             series_key="op_rate_iso", domain="operating_rate",
-            product_key="isoprene",
+            product_key="product_d",
         )
         csv_v2 = "date,value\n2025-01-01,80.0\n2025-01-08,82.0\n"
         result = ingest_csv(
             db=db, file=_make_csv(csv_v2),
             series_key="op_rate_iso", domain="operating_rate",
-            product_key="isoprene",
+            product_key="product_d",
         )
         assert result["rows_inserted"] == 1
         assert result["rows_updated"] == 1

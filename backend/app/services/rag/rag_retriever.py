@@ -50,8 +50,8 @@ class RetrievedChunk:
     """A single retrieved document chunk with its metadata and relevance score."""
 
     text: str
-    source: str  # e.g. "docs/EDIA_AI_REBUILD_SPEC.md"
-    file_stem: str  # e.g. "EDIA_AI_REBUILD_SPEC"
+    source: str  # e.g. "docs/Acme_AI_REBUILD_SPEC.md"
+    file_stem: str  # e.g. "Acme_AI_REBUILD_SPEC"
     chunk_index: int
     total_chunks: int
     score: float = 0.0  # Normalized 0–1 relevance (1 = most relevant)

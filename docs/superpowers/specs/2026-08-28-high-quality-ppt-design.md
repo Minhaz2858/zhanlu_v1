@@ -7,7 +7,7 @@ Author: Synexia Agent
 ## Problem
 
 User asked: "make a c5 c9 market view ppt don't use my data use market data".
-The delivered `real_c5c9.pptx` (9 slides, 59KB) was **very low quality**:
+The delivered `real_sample.pptx` (9 slides, 59KB) was **very low quality**:
 text bullets only, 0 images, 0 charts, density overflow (slide 3, 42 words),
 generic "Product A/B" filler instead of real market data.
 
@@ -31,8 +31,8 @@ Question to solve: what does the agent need so it reliably produces
 3. **Audit is non-blocking.** `render_dispatcher` runs `audit_deck`, repairs
    up to MAX_REPAIR_PASSES, but **delivers the deck even when status stays
    FAIL** — it only logs warnings. The density-FAIL slide 3 shipped.
-4. **No market data bound to C5_C9.** C5_C9 project binds only
-   `aipdp_data_warehouse_prod` (company ERP MySQL). The "Market Research Data"
+4. **No market data bound to SAMPLE.** SAMPLE project binds only
+   `demo_warehouse_prod` (company ERP MySQL). The "Market Research Data"
    KB (128 items, vector_db) lives in the "Data Analysis" project
    (`be8cdaac`). The agent had exactly one datasource — the ERP warehouse —
    so "don't use my data" was impossible to honor. It burned 26
@@ -71,7 +71,7 @@ A4. **Theme intent mapping.** Ensure `select_theme` (12-preset catalog +
 
 B1. **Bind market data to the project.** The `knowledge_bases` table has a
     `project_id` column. Bind the "Market Research Data" KB (or a
-    project-scoped copy) to the C5_C9 project so `ask_data_agent` / KB
+    project-scoped copy) to the SAMPLE project so `ask_data_agent` / KB
     retrieval can reach it. App isolation: do NOT leak KBs across projects —
     verify the agent's KB-scoping honors project_id.
 
@@ -119,12 +119,12 @@ data: ask_data_agent → project KBs (ERP + Market KB after B1), market KB
 - A2: router unit tests — default → sandbox; "plain data dump" → structured.
 - A3: dispatcher test — audit FAIL after repairs → raises, no bytes returned;
   audit PASS → bytes returned. Regression: repair loop still runs.
-- B1: KB binding test — market KB visible to C5_C9 agent, not other projects.
+- B1: KB binding test — market KB visible to SAMPLE agent, not other projects.
 - B2: grounding test — market intent picks market KB rows.
 - B3: audit rule — every slide has a source footer (extend audit_deck rules
   or add citation check).
 - C1: skill registry test — ppt-design loadable.
-- E2E: regenerate the C5_C9 market deck → PPTX has images/charts, real market
+- E2E: regenerate the SAMPLE market deck → PPTX has images/charts, real market
   data with citations, audit PASS.
 
 ## Scope / non-goals

@@ -1,4 +1,4 @@
-"""Tests that EDIA sub-agent tools inherit the project LLM endpoint from the
+"""Tests that Acme sub-agent tools inherit the project LLM endpoint from the
 tool context (``context["endpoint"]``) and pass it to every
 ``call_llm_with_reliability`` call site.
 

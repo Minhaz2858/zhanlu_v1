@@ -46,7 +46,7 @@ def test_slides_plan_renders_agent_structure_not_generic_filler():
             },
         },
         "slides": [
-            {"title": "C5/C9 裂解产品市场洞察报告", "subtitle": "数据驱动的产品线分析", "bullets": ["覆盖主体：惠州伊斯科"]},
+            {"title": "C5/C9 裂解产品市场洞察报告", "subtitle": "数据驱动的产品线分析", "bullets": ["覆盖主体：示例工厂"]},
             {"title": "执行摘要", "bullets": ["2026年8月合同销售额 ¥1.52亿，环比下降 9.7%"], "layout": "executive_brief"},
             {"title": "产品线结构分析", "bullets": ["碳五石油树脂 ¥20.25亿"], "layout": "data_table"},
             {"title": "月度趋势与波动", "bullets": ["3月–4月需求旺盛"], "layout": "chart_full"},
@@ -156,7 +156,7 @@ def test_findings_block_gets_real_title_not_notes():
 
     plan = DocumentPlan(title="T", blocks=[
         DocumentBlock(type="findings", items=[
-            {"label": "top", "text": "惠州伊斯科 89.9%"},
+            {"label": "top", "text": "示例工厂 89.9%"},
         ]),
         DocumentBlock(type="recommendations", items=[
             {"text": "深挖高附加值产品"},
@@ -186,14 +186,14 @@ def test_legit_methodology_survives():
     payload = ReportCardPayload.model_validate({
         "title": "T",
         "summary": "s",
-        "methodology": "Queried erp_v_sale_orderentry filtered by date >= 2026-03-01.",
+        "methodology": "Queried v_sale_order filtered by date >= 2026-03-01.",
     })
-    assert "erp_v_sale_orderentry" in payload.methodology
+    assert "v_sale_order" in payload.methodology
 
 
 # ── Full round-trip: the exact C5/C9 payload now yields the authored deck ─
 
-def test_c5c9_payload_roundtrip_keeps_consulting_structure():
+def test_sample_payload_roundtrip_keeps_consulting_structure():
     from app.services.artifacts.exporters.service import ExportService
     from app.services.synexia.contracts import ReportCardPayload
 
@@ -211,11 +211,11 @@ def test_c5c9_payload_roundtrip_keeps_consulting_structure():
         },
         "slides": [
             {"title": "C5/C9 裂解产品市场洞察报告", "subtitle": "数据驱动的产品线分析与战略建议",
-             "bullets": ["数据来源：ERP 销售订单", "覆盖主体：惠州伊斯科"]},
+             "bullets": ["数据来源：ERP 销售订单", "覆盖主体：示例工厂"]},
             {"title": "执行摘要", "bullets": ["2026年8月 C5/C9 产品线实现合同销售额 ¥1.52亿"], "layout": "executive_brief"},
             {"title": "产品线结构分析", "bullets": ["碳五石油树脂 ¥20.25亿 第一大类"], "layout": "data_table"},
             {"title": "月度趋势与波动", "bullets": ["3月–4月为上半年高点"], "layout": "chart_full"},
-            {"title": "组织贡献分析", "bullets": ["惠州伊斯科 89.9%"], "layout": "kpi_grid"},
+            {"title": "组织贡献分析", "bullets": ["示例工厂 89.9%"], "layout": "kpi_grid"},
             {"title": "战略建议", "bullets": ["优先级1 — 深挖碳五石油树脂"], "layout": "recommendations"},
             {"title": "结论", "bullets": ["C5/C9 产品线整体健康"], "layout": "closing"},
         ],

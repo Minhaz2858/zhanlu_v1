@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 
 class TestIntentPlanner:
-    """Verify EDIA 6-stage intent classification."""
+    """Verify Acme 6-stage intent classification."""
 
     def test_keyword_classify_perception(self):
         from app.services.intent_planner import _keyword_classify

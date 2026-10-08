@@ -72,7 +72,7 @@ def test_extracts_name_schedule_project_from_arguments_string():
                     "type": "data_sync",
                     "schedule": "0 8 * * *",
                     "output_format": "html",
-                    "project": "Ecisco BI",
+                    "project": "Acme BI",
                 }
             ),
             "results": '{"success": true, "task": {...}}',
@@ -81,7 +81,7 @@ def test_extracts_name_schedule_project_from_arguments_string():
     msg = _automation_scheduled_confirmation(calls, "html")
     assert "Daily Sales Data Sync" in msg
     assert "0 8 * * *" in msg
-    assert "Ecisco BI" in msg
+    assert "Acme BI" in msg
     assert "HTML" in msg  # format label uppercase
     assert "cron" in msg.lower()
 
@@ -148,7 +148,7 @@ def test_ignores_unrelated_tool_calls():
                 {
                     "name": "Forecast Run",
                     "schedule": "0 0 * * *",
-                    "project": "EDIA",
+                    "project": "Acme",
                     "output_format": "md",
                 }
             ),
@@ -157,7 +157,7 @@ def test_ignores_unrelated_tool_calls():
     ]
     msg = _automation_scheduled_confirmation(calls, "md")
     assert "Forecast Run" in msg
-    assert "EDIA" in msg
+    assert "Acme" in msg
     assert "MD" in msg
 
 
@@ -216,7 +216,7 @@ def test_choose_fallback_returns_automation_confirmation_when_scheduled():
                 {
                     "name": "Daily Sales Data Sync",
                     "schedule": "0 8 * * *",
-                    "project": "Ecisco BI",
+                    "project": "Acme BI",
                     "output_format": "html",
                 }
             ),
@@ -229,12 +229,12 @@ def test_choose_fallback_returns_automation_confirmation_when_scheduled():
         "- Type: Data Sync\n"
         "- Schedule: Daily 08:00\n"
         "- Output format: HTML report (html)\n"
-        "- Project: Ecisco BI"
+        "- Project: Acme BI"
     )
     result = _choose_fallback(calls, orch_created=[], user_content=user_content)
     assert "Daily Sales Data Sync" in result
     assert "0 8 * * *" in result
-    assert "Ecisco BI" in result
+    assert "Acme BI" in result
     # NO generic apology.
     assert "had trouble putting it all together" not in result
     # NO misleading budget disclosure.

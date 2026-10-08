@@ -65,7 +65,7 @@ class TestDecisionService:
 
     def test_upsert_decision_returns_true(self, mock_kb):
         s = DecisionService()
-        ok = s.upsert_decision("d1", "Buy DCPD", metadata={"price": 100})
+        ok = s.upsert_decision("d1", "Buy PRODUCT_B", metadata={"price": 100})
         assert ok is True
 
     def test_upsert_outcome_returns_true(self, mock_kb):
@@ -75,7 +75,7 @@ class TestDecisionService:
 
     def test_query_decisions(self, mock_kb):
         s = DecisionService()
-        out = s.query_decisions("DCPD", top_k=3)
+        out = s.query_decisions("PRODUCT_B", top_k=3)
         assert isinstance(out, list)
 
 
@@ -89,7 +89,7 @@ class TestSignalService:
         assert SignalService().collection_name == MARKET_SIGNALS
 
     def test_upsert_returns_true(self, mock_kb):
-        assert SignalService().upsert("s1", "DCPD price up 5%") is True
+        assert SignalService().upsert("s1", "PRODUCT_B price up 5%") is True
 
     def test_query(self, mock_kb):
         out = SignalService().query("price signal", top_k=3)
@@ -108,14 +108,14 @@ class TestCausalService:
     def test_upsert_chain(self, mock_kb):
         ok = CausalService().upsert_chain(
             chain_id="c1",
-            description="Naphtha price ↑ → C5 spread ↓",
-            nodes=["naphtha", "c5"],
-            edges=[("naphtha", "c5")],
+            description="Product_C price ↑ → C5 spread ↓",
+            nodes=["product_c", "c5"],
+            edges=[("product_c", "c5")],
         )
         assert ok is True
 
     def test_query(self, mock_kb):
-        out = CausalService().query("naphtha impact", top_k=3)
+        out = CausalService().query("product_c impact", top_k=3)
         assert isinstance(out, list)
 
 
@@ -158,7 +158,7 @@ class TestProductService:
     def test_upsert_product(self, mock_kb):
         ok = ProductService().upsert_product(
             product_id="p1",
-            name="DCPD",
+            name="PRODUCT_B",
             aliases=["dicyclopentadiene", "双环戊二烯"],
             category="C5",
         )
@@ -210,7 +210,7 @@ class TestRegistry:
 
 class TestBuildDomainContext:
     def test_returns_string(self, mock_kb):
-        out = build_domain_context("DCPD price", collections=["news_events"])
+        out = build_domain_context("PRODUCT_B price", collections=["news_events"])
         assert isinstance(out, str)
 
     def test_empty_collections_returns_empty(self, mock_kb):

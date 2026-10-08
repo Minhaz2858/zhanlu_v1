@@ -11,7 +11,7 @@ Four tiers:
                   Use for direction only, not point estimates.
   - low:          Data too sparse to forecast. Red badge.
 
-Source: EDIA_5.1.2/backend/src/service/forecast_supervisor.py:150-283.
+Source: Acme_5.1.2/backend/src/service/forecast_supervisor.py:150-283.
 """
 from __future__ import annotations
 

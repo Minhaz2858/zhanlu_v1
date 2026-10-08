@@ -38,7 +38,7 @@ def test_empty_config_compute_domain_signal_adjustment_all_zeros():
     result = compute_domain_signal_adjustment(
         product_id="widget",
         as_of_date=datetime(2026, 12, 15),
-        naphtha_pct_change=10.0,
+        product_c_pct_change=10.0,
     )
     assert result["seasonal_pct"] == 0.0
     assert result["causal_pct"] == 0.0
@@ -61,7 +61,7 @@ def test_empty_config_causal_adjustment_zero_for_any_product():
 
 def test_empty_config_no_elasticity_entries():
     """Empty config → no product has an effective elasticity."""
-    for pid in ("widget", "gadget", "c5_resin", "naphtha"):
+    for pid in ("widget", "gadget", "product_a", "product_c"):
         assert _ELASTICITIES.get(pid) is None
 
 
@@ -129,7 +129,7 @@ def test_config_combined_seasonal_only_when_no_feedstock(domain_signals_config):
     result = compute_domain_signal_adjustment(
         product_id="widget",
         as_of_date=datetime(2026, 12, 15),  # December → -2.5%
-        naphtha_pct_change=None,
+        product_c_pct_change=None,
     )
     assert result["seasonal_pct"] == -2.5
     assert result["causal_pct"] == 0.0
@@ -143,7 +143,7 @@ def test_config_combined_applies_both_layers(domain_signals_config):
     result = compute_domain_signal_adjustment(
         product_id="widget",
         as_of_date=datetime(2026, 6, 15),  # June → +1.0%
-        naphtha_pct_change=10.0,           # → +5.0% causal
+        product_c_pct_change=10.0,           # → +5.0% causal
     )
     assert result["seasonal_pct"] == 1.0
     assert result["causal_pct"] == pytest.approx(5.0)
@@ -157,7 +157,7 @@ def test_config_combined_unknown_product_all_zeros(domain_signals_config):
     result = compute_domain_signal_adjustment(
         product_id="unknown",
         as_of_date=datetime(2026, 7, 1),
-        naphtha_pct_change=10.0,
+        product_c_pct_change=10.0,
     )
     assert result["seasonal_pct"] == 0.0
     assert result["causal_pct"] == 0.0

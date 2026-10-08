@@ -19,29 +19,29 @@ from app.services.artifacts import llm_narrative
 
 FAKE_NARRATIVE = {
     "executive_summary": (
-        "Revenue declined 6% across H1, driven by softer DCPD demand; "
-        "Isoprene held steady and should anchor the recovery plan."
+        "Revenue declined 6% across H1, driven by softer PRODUCT_B demand; "
+        "Product_D held steady and should anchor the recovery plan."
     ),
     "findings": [
-        "Isoprene is the most stable line, easing only 1% while peers fell further.",
-        "DCPD concentration risk: a single customer drove 40% of the drop.",
+        "Product_D is the most stable line, easing only 1% while peers fell further.",
+        "PRODUCT_B concentration risk: a single customer drove 40% of the drop.",
         "March was the inflection point — all lines turned down together.",
     ],
     "recommendations": [
-        "Reallocate sales effort to Isoprene where demand is resilient.",
-        "Diversify the DCPD customer base to remove single-buyer risk.",
+        "Reallocate sales effort to Product_D where demand is resilient.",
+        "Diversify the PRODUCT_B customer base to remove single-buyer risk.",
     ],
 }
 
 
 def _make_plan():
     rows = [
-        {"month": "2026-01", "product": "Isoprene", "revenue_m": 110},
-        {"month": "2026-02", "product": "Isoprene", "revenue_m": 118},
-        {"month": "2026-03", "product": "Isoprene", "revenue_m": 121},
-        {"month": "2026-01", "product": "DCPD", "revenue_m": 80},
-        {"month": "2026-02", "product": "DCPD", "revenue_m": 84},
-        {"month": "2026-03", "product": "DCPD", "revenue_m": 90},
+        {"month": "2026-01", "product": "Product_D", "revenue_m": 110},
+        {"month": "2026-02", "product": "Product_D", "revenue_m": 118},
+        {"month": "2026-03", "product": "Product_D", "revenue_m": 121},
+        {"month": "2026-01", "product": "PRODUCT_B", "revenue_m": 80},
+        {"month": "2026-02", "product": "PRODUCT_B", "revenue_m": 84},
+        {"month": "2026-03", "product": "PRODUCT_B", "revenue_m": 90},
     ]
     return synthesize_plan(
         "Monthly Revenue by Product",
@@ -89,7 +89,7 @@ def test_enrich_overwrites_exec_summary_and_inserts_blocks():
         out = asyncio.run(
             llm_narrative.enrich_plan_narrative(
                 plan,
-                rows=[{"month": "2026-01", "product": "Isoprene", "revenue_m": 110}],
+                rows=[{"month": "2026-01", "product": "Product_D", "revenue_m": 110}],
                 columns=["month", "product", "revenue_m"],
                 request_text="exec summary of revenue",
                 user_context={"role": "executive"},
@@ -109,7 +109,7 @@ def test_enrich_overwrites_exec_summary_and_inserts_blocks():
     assert "recommendations" in [b.type for b in out.blocks]
     findings_block = next(b for b in out.blocks if b.type == "findings")
     recs_block = next(b for b in out.blocks if b.type == "recommendations")
-    assert findings_block.items[0]["text"].startswith("Isoprene is the most stable")
+    assert findings_block.items[0]["text"].startswith("Product_D is the most stable")
     assert recs_block.items[0]["text"].startswith("Reallocate sales effort")
 
     # 3) the plan object identity is preserved (mutated in place)

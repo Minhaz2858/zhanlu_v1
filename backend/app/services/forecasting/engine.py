@@ -429,13 +429,13 @@ class ForecastEngine:
 
         if exog_enabled:
             try:
-                from app.services.knowledge_graph.graph import build_c5_c9_graph
+                from app.services.knowledge_graph.graph import build_sample_graph
                 from app.services.forecasting.features.exogenous_loaders import (
                     FeedstockLoader, FxLoader, EventFlagLoader, ErpVolumeLoader,
                     OperatingRateLoader, InventoryLoader, ImportPriceLoader,
                 )
 
-                kg = build_c5_c9_graph()
+                kg = build_sample_graph()
                 # Allow domain experts to override exog features per product
                 _exog_override = None
                 if isinstance(target.model_config, dict):
@@ -850,7 +850,7 @@ class ForecastEngine:
                 domain_signals_report = compute_domain_signal_adjustment(
                     product_id=product_id,
                     as_of_date=datetime.now(),
-                    naphtha_pct_change=feedstock_pct,
+                    product_c_pct_change=feedstock_pct,
                 )
 
                 # Apply the combined % adjustment to the published forecast
@@ -1464,8 +1464,8 @@ class ForecastEngine:
 
         if cascade_enabled and len(targets) > 0:
             try:
-                from app.services.knowledge_graph.graph import build_c5_c9_graph
-                kg = build_c5_c9_graph()
+                from app.services.knowledge_graph.graph import build_sample_graph
+                kg = build_sample_graph()
                 product_keys = [t.product_key for t in targets]
                 ordered_keys = topological_order(product_keys, kg)
                 # Sort targets by topological order
@@ -1564,7 +1564,7 @@ class ForecastEngine:
         from app.services.forecasting.datasource_registry import get_datasource
 
         ds = target.datasource or {}
-        source_type = ds.get("source", "edia_mysql")
+        source_type = ds.get("source", "mysql")
         strategy = get_datasource(source_type)
         return strategy.fetch(target, self._db)
 

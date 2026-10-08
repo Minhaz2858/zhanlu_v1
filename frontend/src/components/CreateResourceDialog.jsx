@@ -305,7 +305,7 @@ export default function CreateResourceDialog({ open, onOpenChange, resourceType,
     // (which owns the create_automation / list_knowledge_bases /
     // list_data_sources tools) for the FIRST turn. Without this the chat
     // resolves ``effectiveAgent`` from whatever project agent is bound
-    // (e.g. ecisco_bi_assistant), which has ask_data_agent but NOT
+    // (e.g. acme_bi_assistant), which has ask_data_agent but NOT
     // create_automation — the LLM then misreads the description as a
     // data-analysis request and emits a generic HTML deliverable instead
     // of actually creating the task. The downstream ``isAutomationOrigin``

@@ -1,6 +1,6 @@
 """Tests for the deferred-deliverable wire + empty-bubble guarantee (2026-08-21).
 
-Covers the two production bugs from the Ecisco BI traces:
+Covers the two production bugs from the Acme BI traces:
 1. Wire gap: the agent collected 41 rows via execute_query (direct SQL),
    but record_dataset only fired for ask_data_agent → answer_datasets()
    stayed empty → no card was built. Fix: DATA_PRODUCING_TOOLS covers all
@@ -55,9 +55,9 @@ class TestDataProducingToolsWire:
     def test_single_column_id_dump_is_probe_not_answer(self):
         """The screenshot-1 shape: an 80-row single-column FMATERIALID dump
         (warehouse probe) must NOT become a deliverable dataset."""
-        sql = "SELECT FMATERIALID FROM aipdp_data_warehouse_prod LIMIT 80"
+        sql = "SELECT FMATERIALID FROM demo_warehouse_prod LIMIT 80"
         rows = [{"FMATERIALID": i} for i in range(80)]
-        purpose = classify_query_purpose(sql, rows, {"aipdp_data_warehouse_prod": "unknown"})
+        purpose = classify_query_purpose(sql, rows, {"demo_warehouse_prod": "unknown"})
         assert purpose != "answer"
 
 

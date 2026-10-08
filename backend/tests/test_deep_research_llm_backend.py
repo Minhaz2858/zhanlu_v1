@@ -103,15 +103,15 @@ async def test_planner_system_prompt_names_tools_for_both_scope():
         "app.services.deep_research.llm_backend.call_llm",
         new=AsyncMock(return_value={"data": {"steps": []}}),
     ) as mock_llm:
-        await build_planner(scope="both")([{"role": "user", "content": "C5C9 sales?"}])
+        await build_planner(scope="both")([{"role": "user", "content": "SAMPLE sales?"}])
     sent = mock_llm.await_args.kwargs["messages"]
     assert sent[0]["role"] == "system"
     sys_text = sent[0]["content"]
     assert "ask_data_agent" in sys_text
     assert "web_search" in sys_text
     assert "hybrid" in sys_text.lower() or "both" in sys_text.lower()
-    assert "C5C9" in sys_text  # example internal product code in the prompt
-    assert sent[1] == {"role": "user", "content": "C5C9 sales?"}
+    assert "SAMPLE" in sys_text  # example internal product code in the prompt
+    assert sent[1] == {"role": "user", "content": "SAMPLE sales?"}
 
 
 @pytest.mark.asyncio

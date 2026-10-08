@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# ── Run THIS checkout as an isolated stack, side-by-side with the Ecisco one ──
+# ── Run THIS checkout as an isolated stack, side-by-side with the Acme one ──
 #
 # Two independent Zhanlu lineages live on this Mac:
-#   Ecisco_zhanlu_v.1        project zhanlu_sep_1_n8n   UI 8088  API 5002  pg 5400  redis 6300  minio 9400/9401
+#   Acme_zhanlu_v.1        project zhanlu_sep_1_n8n   UI 8088  API 5002  pg 5400  redis 6300  minio 9400/9401
 #   zhanlu_n8n_main_version  project zhanlu_copy        UI 8090  API 5012  pg 5401  redis 6301  minio 9402/9403   <- THIS
 #
 # Everything that could collide is separated:
@@ -10,7 +10,7 @@
 #   containers      zhanlu-copy-*
 #   networks        zhanlu_copy_app_net / zhanlu_copy_data_net
 #   volumes         zhanlu_copy_* named volumes (own postgres data)
-#   image tags      zhanlu-copy-backend / zhanlu-copy-sandbox-worker   (base file shares `zhanlu-backend:latest` with Ecisco!)
+#   image tags      zhanlu-copy-backend / zhanlu-copy-sandbox-worker   (base file shares `zhanlu-backend:latest` with Acme!)
 #   host ports      see table above
 #
 # Usage:
@@ -34,7 +34,7 @@ COMPOSE=(docker compose -p "$PROJECT"
 UI_PORT=8090
 API_PORT=5012
 COPY_PORTS=(5012 8090 5401 6301 9402 9403)
-ECISCO_PORTS=(5002 8088 5400 6300 9400 9401)
+DEMO_PORTS=(5002 8088 5400 6300 9400 9401)
 
 # Fail loudly if a NON-docker process squats a port we need. Docker owning it is
 # expected (our own stack) — anything else means the ports drifted.
@@ -55,22 +55,22 @@ check_ports() {
   echo "  ports ${COPY_PORTS[*]} clear (or owned by our own Docker stack)"
 }
 
-guard_ecisco() {
-  # Never let this script touch the Ecisco lineage's ports or image tags.
-  for p in "${ECISCO_PORTS[@]}"; do
+guard_acme() {
+  # Never let this script touch the Acme lineage's ports or image tags.
+  for p in "${DEMO_PORTS[@]}"; do
     if [ "$p" = "$UI_PORT" ] || [ "$p" = "$API_PORT" ]; then
-      echo "FATAL: script would collide with Ecisco port $p"; exit 1
+      echo "FATAL: script would collide with Acme port $p"; exit 1
     fi
   done
   if "${COMPOSE[@]}" config 2>/dev/null | grep -qE 'image: zhanlu-(backend|sandbox-worker):latest'; then
-    echo "FATAL: shared image tag still configured — rebuild would clobber Ecisco's image."; exit 1
+    echo "FATAL: shared image tag still configured — rebuild would clobber Acme's image."; exit 1
   fi
 }
 
 case "${1:-up}" in
   up)
     echo "== port check"; check_ports
-    echo "== shared-tag guard"; guard_ecisco
+    echo "== shared-tag guard"; guard_acme
     echo "== building isolated images (zhanlu-copy-*)"
     if ! "${COMPOSE[@]}" build backend sandbox-worker; then
       echo
@@ -99,13 +99,13 @@ case "${1:-up}" in
     done
     echo
     echo "  THIS project  UI  http://localhost:$UI_PORT     API http://localhost:$API_PORT"
-    echo "  Ecisco        UI  http://localhost:8088    API http://localhost:5002   (untouched)"
+    echo "  Acme        UI  http://localhost:8088    API http://localhost:5002   (untouched)"
     ;;
   down)    "${COMPOSE[@]}" down ;;
   restart) "$0" down; "$0" up ;;
   status)
     "${COMPOSE[@]}" ps
-    echo "-- ecisco (must stay up) --"
+    echo "-- acme (must stay up) --"
     docker ps --filter name=zhanlu-frontend --filter name=zhanlu-backend --format '{{.Names}} {{.Status}} {{.Ports}}'
     ;;
   logs)    shift; "${COMPOSE[@]}" logs -f --tail=100 "${@:-backend}" ;;

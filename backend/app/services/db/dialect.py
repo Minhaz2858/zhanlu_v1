@@ -159,7 +159,7 @@ def _is_zero_length_binary(declared: str) -> bool:
     """True for ``binary(0)`` / ``varbinary(0)`` — a declaration, not a payload.
 
     MySQL types a VIEW column whose expression it cannot resolve as
-    ``varbinary(0)``.  Live: ``erp_v_sale_orderentry``'s ``instock_qty``,
+    ``varbinary(0)``.  Live: ``v_sale_order``'s ``instock_qty``,
     ``produce_qty`` and ``plan_qty`` are declared ``varbinary(0)`` and are NULL
     in ALL 14,589 rows.  Classifying them as ``binary`` made the catalog refuse
     to read them at all, so the prompt showed three apparently usable columns

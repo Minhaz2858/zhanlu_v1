@@ -1,8 +1,8 @@
 """Regression tests for create_automation placeholder-arg handling.
 
 Root cause (2026-08-25): the user created the "Daily Sales Data Sync"
-automation inside an Ecisco BI chat. The chat session has
-project_id=e5ac337b-... (Ecisco BI) and conv.session_id=4b0f7a77-... — both
+automation inside an Acme BI chat. The chat session has
+project_id=e5ac337b-... (Acme BI) and conv.session_id=4b0f7a77-... — both
 real UUIDs. The LLM called `create_automation` but passed
 project_id="TOOL_CONTEXT.project_id" as the literal string (the prompt said
 "use TOOL_CONTEXT.project_id if you don't already have it" and the LLM
@@ -56,14 +56,14 @@ def _clean_slate():
     TOOL_CONTEXT.clear()
 
 
-def _make_project(db, name: str = "Ecisco BI") -> Project:
+def _make_project(db, name: str = "Acme BI") -> Project:
     p = Project(id=str(uuid.uuid4()), name=name, is_deleted=False)
     db.add(p)
     db.flush()
     return p
 
 
-def _make_chat_session(db, project_id: str, project_name: str = "Ecisco BI") -> ChatSession:
+def _make_chat_session(db, project_id: str, project_name: str = "Acme BI") -> ChatSession:
     conv = AgentConversation(
         id=str(uuid.uuid4()),
         title="t",
@@ -114,7 +114,7 @@ def test_looks_like_llm_placeholder_true(value: str) -> None:
     "value",
     [
         "e5ac337b-469a-480d-822b-f6a3155e652c",  # real UUID
-        "Ecisco BI",                              # legacy project name
+        "Acme BI",                              # legacy project name
         "kebab-case-name",
         "0",
         "",
@@ -143,7 +143,7 @@ def test_looks_like_uuid_true(value: str) -> None:
         0,
         123,
         "TOOL_CONTEXT.project_id",
-        "Ecisco BI",
+        "Acme BI",
         "not-a-uuid",
         "e5ac337b-469a-480d-822b-f6a3155e652c ",  # trailing space still True
     ],
@@ -172,7 +172,7 @@ def test_create_automation_rejects_placeholder_project_id() -> None:
     """
     db = SessionLocal()
     try:
-        proj = _make_project(db, "Ecisco BI")
+        proj = _make_project(db, "Acme BI")
         proj_uuid = str(proj.id)
         sess = _make_chat_session(db, proj_uuid)
 
@@ -201,7 +201,7 @@ def test_create_automation_rejects_placeholder_project_id() -> None:
         # The placeholder must NOT be persisted; the context UUID must.
         assert row.project_id == proj_uuid
         assert row.session_id == sess.id
-        assert row.project == "Ecisco BI"
+        assert row.project == "Acme BI"
     finally:
         db.close()
 
@@ -214,7 +214,7 @@ def test_create_automation_honors_real_uuid_project_id() -> None:
     """
     db = SessionLocal()
     try:
-        proj = _make_project(db, "Ecisco BI")
+        proj = _make_project(db, "Acme BI")
         explicit_uuid = str(proj.id)
         _make_project(db, "Other Project")
 
@@ -229,7 +229,7 @@ def test_create_automation_honors_real_uuid_project_id() -> None:
                 "type": "custom",
                 "schedule": "manual",
                 "project_id": explicit_uuid,
-                "project": "Ecisco BI",
+                "project": "Acme BI",
             },
             db=db,
             user_id="u-test",
@@ -238,7 +238,7 @@ def test_create_automation_honors_real_uuid_project_id() -> None:
 
         row = db.get(AutomationTask, result["id"])
         assert row.project_id == explicit_uuid
-        assert row.project == "Ecisco BI"
+        assert row.project == "Acme BI"
     finally:
         db.close()
 
@@ -247,7 +247,7 @@ def test_create_automation_falls_back_to_session_when_toycontext_empty() -> None
     """No TOOL_CONTEXT + no explicit arg → chat-session-derived project_id."""
     db = SessionLocal()
     try:
-        proj = _make_project(db, "Ecisco BI")
+        proj = _make_project(db, "Acme BI")
         sess = _make_chat_session(db, str(proj.id))
 
         TOOL_CONTEXT.clear()
@@ -277,7 +277,7 @@ def test_create_automation_rejects_placeholder_session_id() -> None:
     """Session placeholders must fall back to TOOL_CONTEXT.chat_session_id."""
     db = SessionLocal()
     try:
-        proj = _make_project(db, "Ecisco BI")
+        proj = _make_project(db, "Acme BI")
         sess = _make_chat_session(db, str(proj.id))
 
         TOOL_CONTEXT.clear()

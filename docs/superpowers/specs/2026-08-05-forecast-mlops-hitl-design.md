@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-05
 **Status:** Confirmed by user (combined spec, validated bias-correction, auto-adjust+notify, Decision Board card, Approach A in-process scheduler)
-**Trigger:** Two requests — (1) AI DevOps/MLOps: daily self-retraining, drift detection, seamless deployment of improved models; (2) Human-in-the-Loop: when AI forecasts a price the user disagrees with (e.g. 异戊二烯 10,388 → user believes 11,000), the user flags it, explains why, and the agent learns from validated feedback.
+**Trigger:** Two requests — (1) AI DevOps/MLOps: daily self-retraining, drift detection, seamless deployment of improved models; (2) Human-in-the-Loop: when AI forecasts a price the user disagrees with (e.g. 电子元件 10,388 → user believes 11,000), the user flags it, explains why, and the agent learns from validated feedback.
 
 ## Problem
 
@@ -61,7 +61,7 @@ Human-in-the-Loop (user-initiated, any time):
 
 The keystone. Without this, drift detection and adaptive weights are dead code.
 
-- **Input:** for each `ForecastTarget`, find `ForecastRun` rows whose `as_of_date` + `horizon_days` has now passed AND whose matching actual has arrived in the EDIA MySQL source (`md_t_lz_price` / `lz_v_{product}_data`, via existing `edia_source.py` loaders).
+- **Input:** for each `ForecastTarget`, find `ForecastRun` rows whose `as_of_date` + `horizon_days` has now passed AND whose matching actual has arrived in the Acme MySQL source (`md_market_price` / `v_{product}_data`, via existing `edia_source.py` loaders).
 - **Match:** align forecast horizon dates to actual dates; reuse `accuracy_tracker.compute_realized_error()` (already implemented, lines 21-39) which returns `{mape, n_matched}`.
 - **Write:** update the corresponding `ForecastAccuracyLog` row's `realized_mape`, `realized_error`, `evaluated_at = now()`. Per-model realized accuracy (where reconstructable from `model_detail`) feeds a realized-weights map for `adaptive_weights()`.
 - **Score HITL:** for each `forecast_feedback` row in `pending` status whose target date has actuals: compute `ai_error = |ai_price - actual|/actual`, `user_error = |user_price - actual|/actual`; set `beat = user_error < ai_error`, `status = scored`, persist errors. This is the evidence the trust gate consumes.

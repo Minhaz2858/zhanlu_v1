@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Replace product-family-level ERP forecasting (which blends multiple SKUs into meaningless averages) with SKU-level forecasting keyed by `material_code`, while keeping the 10 `md_t_lz_price` products unchanged.
+**Goal:** Replace product-family-level ERP forecasting (which blends multiple SKUs into meaningless averages) with SKU-level forecasting keyed by `material_code`, while keeping the 10 `md_market_price` products unchanged.
 
-**Architecture:** Zero-migration schema approach — SKU identity is encoded in `ForecastTarget.product_key` (e.g. `ecisco.c5_resin.201000018`) and `datasource` JSON (`where` clause filters by `material_code`). The dashboard service discovers SKU targets by prefix matching (`product_key LIKE 'ecisco.c5_resin.%'`), picks the primary SKU (lowest `report_order`) for the main forecast card, and returns all SKUs in a new `sku_forecasts_by_product` field for drill-down. A `groupby("ds").agg({"y": "mean"})` step in `edia_source.py` deduplicates same-date rows (no-op for `md_t_lz_price` where prices are identical; correctness fix for ERP tables where multiple order entries land on the same `PLANDATE`).
+**Architecture:** Zero-migration schema approach — SKU identity is encoded in `ForecastTarget.product_key` (e.g. `acme.product_a.201000018`) and `datasource` JSON (`where` clause filters by `material_code`). The dashboard service discovers SKU targets by prefix matching (`product_key LIKE 'acme.product_a.%'`), picks the primary SKU (lowest `report_order`) for the main forecast card, and returns all SKUs in a new `sku_forecasts_by_product` field for drill-down. A `groupby("ds").agg({"y": "mean"})` step in `edia_source.py` deduplicates same-date rows (no-op for `md_market_price` where prices are identical; correctness fix for ERP tables where multiple order entries land on the same `PLANDATE`).
 
 **Tech Stack:** Python 3.11, SQLAlchemy 2.0, pandas, FastAPI, Pydantic, React/Vite/Tailwind, lucide-icons. Backend runs in Docker (no `--reload` — `docker compose restart backend` after service changes).
 
@@ -12,9 +12,9 @@
 
 **Phases:**
 - **Phase A (Tasks 1–9):** SKU-level data plumbing — replace `WHERE 1=1` blended ERP averages with per-`material_code` targets, drill-down UI, agent tool. No engine changes.
-- **Phase B (Tasks B1–B4):** EDIA domain-signal layers — port tier-dampened causal-chain elasticities (naphtha → C5 → downstream), per-product seasonal adjustment rules, and forecast trust tiers. Pure-Python overlay functions slotted into the engine between the intelligence overlay (Step 8.5) and the policy service (Step 8.6). Gated by `FORECAST_DOMAIN_SIGNALS_ENABLED` (default False).
+- **Phase B (Tasks B1–B4):** Acme domain-signal layers — port tier-dampened causal-chain elasticities (product_c → C5 → downstream), per-product seasonal adjustment rules, and forecast trust tiers. Pure-Python overlay functions slotted into the engine between the intelligence overlay (Step 8.5) and the policy service (Step 8.6). Gated by `FORECAST_DOMAIN_SIGNALS_ENABLED` (default False).
 
-Phase B is **independent of Phase A** — it can be executed before, after, or in parallel. Phase A targets are keyed by `material_code` but the product_id (`c5_resin`, `naphtha`, etc.) used by the domain-signal dicts is unchanged, so the overlay works identically on SKU-level and family-level targets.
+Phase B is **independent of Phase A** — it can be executed before, after, or in parallel. Phase A targets are keyed by `material_code` but the product_id (`product_a`, `product_c`, etc.) used by the domain-signal dicts is unchanged, so the overlay works identically on SKU-level and family-level targets.
 
 ---
 
@@ -25,12 +25,12 @@ Phase B is **independent of Phase A** — it can be executed before, after, or i
 - **Test runner:** `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/<file>::<test> -v` — run individually, SSH RAM is limited (no parallelism, no backgrounding).
 - **Docker:** Backend has no `--reload`. After service code changes: `cd /home/ysk2025/zhanlu_7_30 && docker compose restart backend`.
 - **Frontend:** Bind-mounted to nginx. After component changes: `cd /home/ysk2025/zhanlu_7_30/frontend && npm run build` (auto-rebuilds on save too).
-- **Alembic:** No new migration needed — SKU identity is encoded in existing `product_key` (VARCHAR 100) + `datasource` (JSON) columns. The unique constraint is `(product_key, org_id)`, and SKU keys like `ecisco.c5_resin.201000018` are unique within an org.
+- **Alembic:** No new migration needed — SKU identity is encoded in existing `product_key` (VARCHAR 100) + `datasource` (JSON) columns. The unique constraint is `(product_key, org_id)`, and SKU keys like `acme.product_a.201000018` are unique within an org.
 - **Code style:** Follow existing patterns — `from __future__ import annotations`, dataclasses for result types, `TimestampedBase` for DB models, lazy imports for heavy deps, type hints everywhere.
-- **ERP tables:** `sale_erp_v_碳五石油树脂_data` (c5_resin) and `sale_erp_v_抽余碳五_data` (raffinate_c5). Columns: `PLANDATE` (date), `FTAXPRICE` (decimal), `material_code` (varchar, the SKU key), `material_name` (varchar, the product family). `FTAXPRICE > 0` filter is required to exclude cancelled/reversed entries.
-- **md_t_lz_price tables:** Already keyed by `FMATERIAL_NAME` (one series per product). The `groupby` aggregation is a no-op here because duplicate dates have identical prices. ERP tables have multiple order entries per date with different prices — `groupby` averages them into a daily mean price.
+- **ERP tables:** `sale_erp_v_原料A石油树脂_data` (product_a) and `sale_erp_v_原料A_data` (feedstock_a). Columns: `PLANDATE` (date), `FTAXPRICE` (decimal), `material_code` (varchar, the SKU key), `material_name` (varchar, the product family). `FTAXPRICE > 0` filter is required to exclude cancelled/reversed entries.
+- **md_market_price tables:** Already keyed by `FMATERIAL_NAME` (one series per product). The `groupby` aggregation is a no-op here because duplicate dates have identical prices. ERP tables have multiple order entries per date with different prices — `groupby` averages them into a daily mean price.
 - **Minimum SKU history:** 50 rows. SKUs with fewer than 50 rows are skipped (insufficient for forecasting).
-- **Primary SKU selection:** Highest row count (= highest transaction volume) gets `report_order` = the family's original value (12 for both c5_resin and raffinate_c5). Secondary SKUs get `report_order` 13, 14, 15, ... in descending volume order.
+- **Primary SKU selection:** Highest row count (= highest transaction volume) gets `report_order` = the family's original value (12 for both product_a and feedstock_a). Secondary SKUs get `report_order` 13, 14, 15, ... in descending volume order.
 
 ---
 
@@ -41,7 +41,7 @@ Phase B is **independent of Phase A** — it can be executed before, after, or i
 | File | Change |
 |---|---|
 | `backend/app/services/forecasting/edia_source.py` | Add `groupby("ds").agg({"y": "mean"})` after sentinel filtering — deduplicates same-date rows |
-| `backend/app/services/forecasting/seed_ecisco_targets.py` | Replace 2 static ERP targets with dynamic `discover_and_seed_sku_targets()` that queries distinct `material_code` values |
+| `backend/app/services/forecasting/seed_acme_targets.py` | Replace 2 static ERP targets with dynamic `discover_and_seed_sku_targets()` that queries distinct `material_code` values |
 | `backend/app/schemas/market_dashboard.py` | Add `SkuForecastMeta` schema + `sku_forecasts_by_product` field on `ForecastBaseBatchResponse` |
 | `backend/app/services/market_dashboard_service.py` | Update `get_forecast_base_batch_v2()` — SKU prefix lookup, primary SKU selection, drill-down data |
 | `backend/app/services/tool_handlers/forecast_tool.py` | Add SKU fields to `_serialize_target()`, `material_code`+`product_id` params to `forecast_get`/`forecast_run`, new `forecast_list_skus` tool |
@@ -114,7 +114,7 @@ def test_groupby_averages_duplicate_dates():
     eng = _make_mock_engine_with_duplicates(rows)
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history({
-        "source": "edia_mysql",
+        "source": "mysql",
         "table": "erp_test",
         "time_col": "PLANDATE",
         "measure": "FTAXPRICE",
@@ -131,7 +131,7 @@ def test_groupby_averages_duplicate_dates():
 
 
 def test_groupby_noop_when_dates_already_unique():
-    """md_t_lz_price has duplicate dates with identical prices — avg is a no-op."""
+    """md_market_price has duplicate dates with identical prices — avg is a no-op."""
     rows = [
         ("2026-07-01", 5500.0, "裂解C5-裂解C5均价"),
         ("2026-07-01", 5500.0, "裂解C5-裂解C5均价"),  # triplicate, same price
@@ -141,7 +141,7 @@ def test_groupby_noop_when_dates_already_unique():
     eng = _make_mock_engine_with_duplicates(rows)
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history({
-        "source": "edia_mysql",
+        "source": "mysql",
         "table": "erp_test",
         "time_col": "PLANDATE",
         "measure": "FTAXPRICE",
@@ -165,7 +165,7 @@ def test_groupby_preserves_sort_order():
     eng = _make_mock_engine_with_duplicates(rows)
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history({
-        "source": "edia_mysql",
+        "source": "mysql",
         "table": "erp_test",
         "time_col": "PLANDATE",
         "measure": "FTAXPRICE",
@@ -191,7 +191,7 @@ In `backend/app/services/forecasting/edia_source.py`, add the `groupby` line aft
 
         # Deduplicate by date: multiple ERP order entries can land on the
         # same PLANDATE with different prices. Average them into a single
-        # daily mean price. For md_t_lz_price this is a no-op — duplicate
+        # daily mean price. For md_market_price this is a no-op — duplicate
         # dates have identical prices, so AVG(price) = price.
         df = df.groupby("ds", as_index=False).agg({"y": "mean"})
 
@@ -224,7 +224,7 @@ git commit -m "feat(forecast): add groupby date deduplication to edia_source
 
 ERP tables (sale_erp_v_*_data) have multiple order entries per PLANDATE
 with different prices. groupby('ds').agg({'y': 'mean'}) averages them
-into a daily mean price. For md_t_lz_price this is a no-op — duplicate
+into a daily mean price. For md_market_price this is a no-op — duplicate
 dates have identical prices."
 ```
 
@@ -233,12 +233,12 @@ dates have identical prices."
 ## Task 2: Dynamic SKU Discovery Seeder
 
 **Files:**
-- Modify: `backend/app/services/forecasting/seed_ecisco_targets.py:166-242`
+- Modify: `backend/app/services/forecasting/seed_acme_targets.py:166-242`
 - Test: `backend/tests/test_seed_sku_targets.py`
 
 **Interfaces:**
 - Consumes: `EdiaMysqlDataSource` from Task 1 (for reading the ERP engine)
-- Produces: `discover_and_seed_sku_targets(db, org_id, app_id, engine=None) -> int` — replaces the 2 static ERP entries in `ECISCO_FORECAST_TARGETS` with dynamically discovered SKU-level targets.
+- Produces: `discover_and_seed_sku_targets(db, org_id, app_id, engine=None) -> int` — replaces the 2 static ERP entries in `FORECAST_TARGETS` with dynamically discovered SKU-level targets.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -254,9 +254,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
 from app.models.forecasting import ForecastTarget
-from app.services.forecasting.seed_ecisco_targets import (
+from app.services.forecasting.seed_acme_targets import (
     discover_and_seed_sku_targets,
-    ECISCO_FORECAST_TARGETS,
+    FORECAST_TARGETS,
 )
 
 
@@ -272,19 +272,19 @@ def db_session():
 
 
 def _make_mock_erp_engine(rows: list[tuple]) -> object:
-    """Build an in-memory SQLite engine simulating sale_erp_v_碳五石油树脂_data.
+    """Build an in-memory SQLite engine simulating sale_erp_v_原料A石油树脂_data.
 
     Each row is (material_code, plandate, ftaxprice).
     """
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_碳五石油树脂_data "
+            "CREATE TABLE sale_erp_v_原料A石油树脂_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         for code, dt, price in rows:
             conn.execute(text(
-                "INSERT INTO sale_erp_v_碳五石油树脂_data "
+                "INSERT INTO sale_erp_v_原料A石油树脂_data "
                 "(material_code, PLANDATE, FTAXPRICE) VALUES (:c, :d, :p)"
             ), {"c": code, "d": dt, "p": price})
         conn.commit()
@@ -292,10 +292,10 @@ def _make_mock_erp_engine(rows: list[tuple]) -> object:
 
 
 def test_static_targets_no_longer_include_erp_where_1_1():
-    """The 2 ERP products (c5_resin, raffinate_c5) should NOT be in the
+    """The 2 ERP products (product_a, feedstock_a) should NOT be in the
     static list anymore — they're discovered dynamically."""
     erp_keys = [
-        t["product_key"] for t in ECISCO_FORECAST_TARGETS
+        t["product_key"] for t in FORECAST_TARGETS
         if t["datasource"].get("table", "").startswith("sale_erp_v_")
     ]
     assert len(erp_keys) == 0, (
@@ -305,10 +305,10 @@ def test_static_targets_no_longer_include_erp_where_1_1():
 
 
 def test_static_targets_still_has_10_md_lz_products():
-    """The 10 md_t_lz_price products remain in the static list."""
+    """The 10 md_market_price products remain in the static list."""
     md_lz_count = sum(
-        1 for t in ECISCO_FORECAST_TARGETS
-        if t["datasource"].get("table") == "md_t_lz_price"
+        1 for t in FORECAST_TARGETS
+        if t["datasource"].get("table") == "md_market_price"
     )
     assert md_lz_count == 10
 
@@ -338,13 +338,13 @@ def test_discover_skus_inserts_one_target_per_sku(db_session):
 
     targets = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org",
-        ForecastTarget.product_key.like("ecisco.c5_resin.%"),
+        ForecastTarget.product_key.like("acme.product_a.%"),
     ).all()
     assert len(targets) == 2
     keys = {t.product_key for t in targets}
-    assert "ecisco.c5_resin.SKU_A" in keys
-    assert "ecisco.c5_resin.SKU_C" in keys
-    assert "ecisco.c5_resin.SKU_B" not in keys
+    assert "acme.product_a.SKU_A" in keys
+    assert "acme.product_a.SKU_C" in keys
+    assert "acme.product_a.SKU_B" not in keys
 
 
 def test_discover_skus_assigns_primary_sku_lowest_report_order(db_session):
@@ -362,10 +362,10 @@ def test_discover_skus_assigns_primary_sku_lowest_report_order(db_session):
     )
 
     primary = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.PRIMARY"
+        ForecastTarget.product_key == "acme.product_a.PRIMARY"
     ).one()
     secondary = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.SECONDARY"
+        ForecastTarget.product_key == "acme.product_a.SECONDARY"
     ).one()
     assert primary.report_order == 12
     assert secondary.report_order == 13
@@ -383,7 +383,7 @@ def test_discover_skus_where_clause_filters_by_material_code(db_session):
     )
 
     target = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.CODE_123"
+        ForecastTarget.product_key == "acme.product_a.CODE_123"
     ).one()
     assert "material_code = 'CODE_123'" in target.datasource["where"]
     assert "FTAXPRICE > 0" in target.datasource["where"]
@@ -407,24 +407,24 @@ def test_discover_skus_is_idempotent(db_session):
 
 
 def test_discover_skus_handles_both_erp_products(db_session):
-    """Both c5_resin and raffinate_c5 should be discovered."""
+    """Both product_a and feedstock_a should be discovered."""
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_碳五石油树脂_data "
+            "CREATE TABLE sale_erp_v_原料A石油树脂_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         conn.execute(text(
-            "CREATE TABLE sale_erp_v_抽余碳五_data "
+            "CREATE TABLE sale_erp_v_原料A_data "
             "(material_code TEXT, PLANDATE TEXT, FTAXPRICE REAL)"
         ))
         for i in range(55):
             conn.execute(text(
-                "INSERT INTO sale_erp_v_碳五石油树脂_data VALUES (:c, :d, :p)"
+                "INSERT INTO sale_erp_v_原料A石油树脂_data VALUES (:c, :d, :p)"
             ), {"c": "RESIN_1", "d": f"2025-01-{(i % 28) + 1:02d}", "p": 5000.0 + i})
         for i in range(55):
             conn.execute(text(
-                "INSERT INTO sale_erp_v_抽余碳五_data VALUES (:c, :d, :p)"
+                "INSERT INTO sale_erp_v_原料A_data VALUES (:c, :d, :p)"
             ), {"c": "RAFF_1", "d": f"2025-01-{(i % 28) + 1:02d}", "p": 4000.0 + i})
         conn.commit()
 
@@ -433,10 +433,10 @@ def test_discover_skus_handles_both_erp_products(db_session):
     )
     assert count == 2
     resin = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.c5_resin.RESIN_1"
+        ForecastTarget.product_key == "acme.product_a.RESIN_1"
     ).one()
     raff = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.raffinate_c5.RAFF_1"
+        ForecastTarget.product_key == "acme.feedstock_a.RAFF_1"
     ).one()
     assert resin.report_order == 12
     assert raff.report_order == 12  # both families start at 12
@@ -449,11 +449,11 @@ Expected: FAIL — `discover_and_seed_sku_targets` doesn't exist yet, and the st
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `backend/app/services/forecasting/seed_ecisco_targets.py`:
+In `backend/app/services/forecasting/seed_acme_targets.py`:
 
-**3a.** Remove the 2 ERP entries from `ECISCO_FORECAST_TARGETS` (the last 2 entries, lines 166-195 — the ones with `"table": "sale_erp_v_碳五石油树脂_data"` and `"table": "sale_erp_v_抽余碳五_data"`).
+**3a.** Remove the 2 ERP entries from `FORECAST_TARGETS` (the last 2 entries, lines 166-195 — the ones with `"table": "sale_erp_v_原料A石油树脂_data"` and `"table": "sale_erp_v_原料A_data"`).
 
-**3b.** Add the `discover_and_seed_sku_targets` function at the bottom of the file, before the `seed_ecisco_forecast_targets` function's closing:
+**3b.** Add the `discover_and_seed_sku_targets` function at the bottom of the file, before the `seed_acme_forecast_targets` function's closing:
 
 ```python
 # ── ERP product families that need dynamic SKU discovery ───────────────
@@ -461,8 +461,8 @@ In `backend/app/services/forecasting/seed_ecisco_targets.py`:
 # The seeder queries SELECT DISTINCT material_code from these tables
 # and creates one ForecastTarget per SKU (material_code) with >= 50 rows.
 _ERP_PRODUCT_TABLES: dict[str, str] = {
-    "c5_resin":     "sale_erp_v_碳五石油树脂_data",
-    "raffinate_c5": "sale_erp_v_抽余碳五_data",
+    "product_a":     "sale_erp_v_原料A石油树脂_data",
+    "feedstock_a": "sale_erp_v_原料A_data",
 }
 
 # Minimum row count for a SKU to be forecastable.
@@ -478,13 +478,13 @@ def discover_and_seed_sku_targets(
     """Discover SKUs (material_code values) in ERP tables and seed one
     ForecastTarget per SKU.
 
-    For each ERP product family (c5_resin, raffinate_c5):
+    For each ERP product family (product_a, feedstock_a):
     1. Query SELECT DISTINCT material_code, COUNT(*) FROM <table>
        WHERE FTAXPRICE > 0 GROUP BY material_code
     2. Filter to SKUs with >= 50 rows (minimum for forecasting)
     3. Sort by row count descending — primary SKU gets report_order=12,
        secondary SKUs get 13, 14, ...
-    4. Insert ForecastTarget rows with product_key="ecisco.<family>.<code>"
+    4. Insert ForecastTarget rows with product_key="acme.<family>.<code>"
 
     Idempotent: skips targets that already exist (matched by product_key
     + org_id). Safe to call on every boot.
@@ -506,7 +506,7 @@ def discover_and_seed_sku_targets(
         engine = get_mysql_engine()
     if engine is None:
         logger.warning(
-            "discover_and_seed_sku_targets: EDIA MySQL unreachable, "
+            "discover_and_seed_sku_targets: Acme MySQL unreachable, "
             "skipping SKU discovery."
         )
         return 0
@@ -552,7 +552,7 @@ def discover_and_seed_sku_targets(
         )
 
         for idx, (code, cnt) in enumerate(qualified):
-            product_key = f"ecisco.{family}.{code}"
+            product_key = f"acme.{family}.{code}"
             # Primary SKU (idx=0) gets report_order=12 (family's original).
             # Secondary SKUs get 13, 14, 15, ...
             report_order = 12 + idx
@@ -571,7 +571,7 @@ def discover_and_seed_sku_targets(
                 product_key=product_key,
                 name=f"{family} SKU {code} (ERP, {cnt} rows)",
                 datasource={
-                    "source": "edia_mysql",
+                    "source": "mysql",
                     "table": table_name,
                     "time_col": "PLANDATE",
                     "measure": "FTAXPRICE",
@@ -604,26 +604,26 @@ Expected: PASS — all 7 tests pass.
 
 - [ ] **Step 5: Run existing seed tests to verify no regression**
 
-Run: `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_ecisco_targets.py -v`
-Expected: The `test_ecisco_forecast_targets_has_12_entries` test will FAIL because we removed 2 entries. Update it:
+Run: `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_acme_targets.py -v`
+Expected: The `test_acme_forecast_targets_has_12_entries` test will FAIL because we removed 2 entries. Update it:
 
-In `backend/tests/test_seed_ecisco_targets.py`, change:
+In `backend/tests/test_seed_acme_targets.py`, change:
 ```python
-def test_ecisco_forecast_targets_has_12_entries():
-    assert len(ECISCO_FORECAST_TARGETS) == 12
+def test_acme_forecast_targets_has_12_entries():
+    assert len(FORECAST_TARGETS) == 12
 ```
 to:
 ```python
-def test_ecisco_forecast_targets_has_10_md_lz_entries():
-    """Static list now has 10 md_t_lz_price products. ERP products are
+def test_acme_forecast_targets_has_10_md_lz_entries():
+    """Static list now has 10 md_market_price products. ERP products are
     discovered dynamically by discover_and_seed_sku_targets()."""
-    assert len(ECISCO_FORECAST_TARGETS) == 10
+    assert len(FORECAST_TARGETS) == 10
 ```
 
 Also update `test_seeder_inserts_12_rows_on_first_call`:
 ```python
 def test_seeder_inserts_10_rows_on_first_call(db_session):
-    count = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
+    count = seed_acme_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert count == 10
     rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org"
@@ -634,9 +634,9 @@ def test_seeder_inserts_10_rows_on_first_call(db_session):
 And `test_seeder_is_idempotent_second_call_inserts_zero`:
 ```python
 def test_seeder_is_idempotent_second_call_inserts_zero(db_session):
-    first = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
+    first = seed_acme_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert first == 10
-    second = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
+    second = seed_acme_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert second == 0
     rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org"
@@ -648,8 +648,8 @@ And `test_seeder_scoped_to_org_id`:
 ```python
 def test_seeder_scoped_to_org_id(db_session):
     """Seeding for org-a should not affect org-b."""
-    seed_ecisco_forecast_targets(db_session, org_id="org-a", app_id="app-a")
-    seed_ecisco_forecast_targets(db_session, org_id="org-b", app_id="app-b")
+    seed_acme_forecast_targets(db_session, org_id="org-a", app_id="app-a")
+    seed_acme_forecast_targets(db_session, org_id="org-b", app_id="app-b")
     a_rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "org-a"
     ).all()
@@ -660,19 +660,19 @@ def test_seeder_scoped_to_org_id(db_session):
     assert len(b_rows) == 10
 ```
 
-Run: `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_ecisco_targets.py -v`
+Run: `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_acme_targets.py -v`
 Expected: PASS — all updated tests pass.
 
 - [ ] **Step 6: Commit**
 
 ```bash
 cd /home/ysk2025/zhanlu_7_30
-git add backend/app/services/forecasting/seed_ecisco_targets.py \
+git add backend/app/services/forecasting/seed_acme_targets.py \
         backend/tests/test_seed_sku_targets.py \
-        backend/tests/test_seed_ecisco_targets.py
+        backend/tests/test_seed_acme_targets.py
 git commit -m "feat(forecast): replace static ERP targets with dynamic SKU discovery
 
-The 2 ERP products (c5_resin, raffinate_c5) had WHERE 1=1 which blended
+The 2 ERP products (product_a, feedstock_a) had WHERE 1=1 which blended
 all SKUs into a meaningless average. discover_and_seed_sku_targets()
 queries SELECT DISTINCT material_code, groups by row count, and creates
 one ForecastTarget per SKU with >= 50 rows. Primary SKU (highest volume)
@@ -788,10 +788,10 @@ def _make_sku_target(db, org_id, family, code, report_order, with_run=False, bas
     target = ForecastTarget(
         org_id=org_id,
         app_id="test-app",
-        product_key=f"ecisco.{family}.{code}",
+        product_key=f"acme.{family}.{code}",
         name=f"{family} SKU {code}",
         datasource={
-            "source": "edia_mysql",
+            "source": "mysql",
             "table": f"sale_erp_v_{family}_data",
             "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
@@ -833,13 +833,13 @@ def _make_sku_target(db, org_id, family, code, report_order, with_run=False, bas
 
 def test_sku_forecasts_returned_for_erp_product(db_session):
     """get_forecast_base_batch_v2 should return sku_forecasts_by_product
-    for c5_resin with all SKU targets."""
-    _make_sku_target(db_session, "default-org", "c5_resin", "PRIMARY", 12, with_run=True, base_price=5000.0)
-    _make_sku_target(db_session, "default-org", "c5_resin", "SECONDARY", 13, with_run=True, base_price=6000.0)
+    for product_a with all SKU targets."""
+    _make_sku_target(db_session, "default-org", "product_a", "PRIMARY", 12, with_run=True, base_price=5000.0)
+    _make_sku_target(db_session, "default-org", "product_a", "SECONDARY", 13, with_run=True, base_price=6000.0)
 
-    resp = get_forecast_base_batch_v2(["c5_resin"], day=7, db=db_session)
-    assert "c5_resin" in resp.sku_forecasts_by_product
-    skus = resp.sku_forecasts_by_product["c5_resin"]
+    resp = get_forecast_base_batch_v2(["product_a"], day=7, db=db_session)
+    assert "product_a" in resp.sku_forecasts_by_product
+    skus = resp.sku_forecasts_by_product["product_a"]
     assert len(skus) == 2
     # Primary SKU (report_order=12) should be first
     assert skus[0].material_code == "PRIMARY"
@@ -851,24 +851,24 @@ def test_sku_forecasts_returned_for_erp_product(db_session):
 
 
 def test_primary_sku_base_used_for_main_forecast(db_session):
-    """The main base_by_product[c5_resin] should use the primary SKU's forecast."""
-    _make_sku_target(db_session, "default-org", "c5_resin", "PRIMARY", 12, with_run=True, base_price=5000.0)
-    _make_sku_target(db_session, "default-org", "c5_resin", "SECONDARY", 13, with_run=True, base_price=6000.0)
+    """The main base_by_product[product_a] should use the primary SKU's forecast."""
+    _make_sku_target(db_session, "default-org", "product_a", "PRIMARY", 12, with_run=True, base_price=5000.0)
+    _make_sku_target(db_session, "default-org", "product_a", "SECONDARY", 13, with_run=True, base_price=6000.0)
 
-    resp = get_forecast_base_batch_v2(["c5_resin"], day=7, db=db_session)
-    assert resp.base_by_product["c5_resin"] == 5000.0
+    resp = get_forecast_base_batch_v2(["product_a"], day=7, db=db_session)
+    assert resp.base_by_product["product_a"] == 5000.0
 
 
 def test_no_sku_forecasts_for_md_lz_products(db_session):
-    """md_t_lz_price products (e.g. crude_oil) should NOT have SKU data."""
+    """md_market_price products (e.g. product_e) should NOT have SKU data."""
     target = ForecastTarget(
         org_id="default-org",
         app_id="test-app",
-        product_key="ecisco.crude_oil",
-        name="Crude Oil (Brent)",
+        product_key="acme.product_e",
+        name="Product E (Benchmark A)",
         datasource={
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-布伦特'",
@@ -897,30 +897,30 @@ def test_no_sku_forecasts_for_md_lz_products(db_session):
     db_session.add(run)
     db_session.commit()
 
-    resp = get_forecast_base_batch_v2(["crude_oil"], day=7, db=db_session)
-    assert resp.base_by_product["crude_oil"] == 75.0
-    # crude_oil should NOT appear in sku_forecasts_by_product
-    assert "crude_oil" not in resp.sku_forecasts_by_product
+    resp = get_forecast_base_batch_v2(["product_e"], day=7, db=db_session)
+    assert resp.base_by_product["product_e"] == 75.0
+    # product_e should NOT appear in sku_forecasts_by_product
+    assert "product_e" not in resp.sku_forecasts_by_product
 
 
 def test_sku_forecasts_empty_when_no_targets(db_session):
     """No SKU targets → empty list (not missing key)."""
-    resp = get_forecast_base_batch_v2(["c5_resin"], day=7, db=db_session)
-    assert resp.base_by_product["c5_resin"] is None
+    resp = get_forecast_base_batch_v2(["product_a"], day=7, db=db_session)
+    assert resp.base_by_product["product_a"] is None
     # Should return empty list, not None
-    assert resp.sku_forecasts_by_product.get("c5_resin", []) == []
+    assert resp.sku_forecasts_by_product.get("product_a", []) == []
 
 
 def test_both_erp_products_return_sku_data(db_session):
-    """Both c5_resin and raffinate_c5 should return SKU lists."""
-    _make_sku_target(db_session, "default-org", "c5_resin", "R1", 12, with_run=True, base_price=5000.0)
-    _make_sku_target(db_session, "default-org", "raffinate_c5", "RC1", 12, with_run=True, base_price=4000.0)
+    """Both product_a and feedstock_a should return SKU lists."""
+    _make_sku_target(db_session, "default-org", "product_a", "R1", 12, with_run=True, base_price=5000.0)
+    _make_sku_target(db_session, "default-org", "feedstock_a", "RC1", 12, with_run=True, base_price=4000.0)
 
-    resp = get_forecast_base_batch_v2(["c5_resin", "raffinate_c5"], day=7, db=db_session)
-    assert len(resp.sku_forecasts_by_product["c5_resin"]) == 1
-    assert len(resp.sku_forecasts_by_product["raffinate_c5"]) == 1
-    assert resp.base_by_product["c5_resin"] == 5000.0
-    assert resp.base_by_product["raffinate_c5"] == 4000.0
+    resp = get_forecast_base_batch_v2(["product_a", "feedstock_a"], day=7, db=db_session)
+    assert len(resp.sku_forecasts_by_product["product_a"]) == 1
+    assert len(resp.sku_forecasts_by_product["feedstock_a"]) == 1
+    assert resp.base_by_product["product_a"] == 5000.0
+    assert resp.base_by_product["feedstock_a"] == 4000.0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -936,13 +936,13 @@ In `backend/app/services/market_dashboard_service.py`, modify the `get_forecast_
 
 ```python
 # ERP product_ids whose forecasts are keyed by material_code (SKU-level).
-# The forecast target product_key is "ecisco.<product_id>.<material_code>".
-_ERP_PRODUCT_KEYS: set[str] = {"c5_resin", "raffinate_c5"}
+# The forecast target product_key is "acme.<product_id>.<material_code>".
+_ERP_PRODUCT_KEYS: set[str] = {"product_a", "feedstock_a"}
 ```
 
 Add this right after the `PRODUCT_FORECAST_TARGET_KEY` dict (after line 872).
 
-**3b.** Restructure `get_forecast_base_batch_v2` to handle both md_t_lz_price products (direct key lookup) and ERP products (prefix lookup). Replace the function body (lines 875-983) with:
+**3b.** Restructure `get_forecast_base_batch_v2` to handle both md_market_price products (direct key lookup) and ERP products (prefix lookup). Replace the function body (lines 875-983) with:
 
 ```python
 def get_forecast_base_batch_v2(
@@ -950,7 +950,7 @@ def get_forecast_base_batch_v2(
 ) -> ForecastBaseBatchResponse:
     """Read forecast base prices from the local ForecastRun table.
 
-    Replaces the v1 reader that hit EDIA's stale v_forecast_price view.
+    Replaces the v1 reader that hit Acme's stale v_forecast_price view.
     Returns the latest `results['{day}d']['base'][0]` per product, or
     None for products with no run yet.
 
@@ -976,11 +976,11 @@ def get_forecast_base_batch_v2(
         from app.database import SessionLocal
         db = SessionLocal()
     try:
-        # ── Separate md_t_lz_price products (direct key) from ERP products (prefix lookup) ──
+        # ── Separate md_market_price products (direct key) from ERP products (prefix lookup) ──
         md_lz_pids = [pid for pid in product_ids if pid in PRODUCT_FORECAST_TARGET_KEY and pid not in _ERP_PRODUCT_KEYS]
         erp_pids = [pid for pid in product_ids if pid in _ERP_PRODUCT_KEYS]
 
-        # ── md_t_lz_price products: direct product_key lookup (existing logic) ──
+        # ── md_market_price products: direct product_key lookup (existing logic) ──
         if md_lz_pids:
             pid_to_key = {
                 pid: PRODUCT_FORECAST_TARGET_KEY[pid]
@@ -1047,7 +1047,7 @@ def get_forecast_base_batch_v2(
 
         # ── ERP products: prefix lookup for SKU-level targets ──
         for pid in erp_pids:
-            prefix = f"ecisco.{pid}."
+            prefix = f"acme.{pid}."
             sku_targets = db.query(ForecastTarget).filter(
                 ForecastTarget.product_key.like(f"{prefix}%"),
                 ForecastTarget.org_id == "default-org",
@@ -1059,7 +1059,7 @@ def get_forecast_base_batch_v2(
 
             sku_list: list[SkuForecastMeta] = []
             for tgt in sku_targets:
-                # Extract material_code from product_key: "ecisco.c5_resin.CODE" → "CODE"
+                # Extract material_code from product_key: "acme.product_a.CODE" → "CODE"
                 material_code = tgt.product_key[len(prefix):]
 
                 # Latest ForecastRun for this SKU target
@@ -1121,8 +1121,8 @@ git add backend/app/services/market_dashboard_service.py backend/tests/test_fore
 git commit -m "feat(dashboard): SKU prefix lookup + drill-down in forecast batch
 
 get_forecast_base_batch_v2 now handles two paths:
-- md_t_lz_price products: direct product_key lookup (unchanged)
-- ERP products: prefix lookup (ecisco.c5_resin.%) returns all SKU targets
+- md_market_price products: direct product_key lookup (unchanged)
+- ERP products: prefix lookup (acme.product_a.%) returns all SKU targets
 
 Primary SKU (lowest report_order) feeds the main forecast card.
 All SKUs returned in sku_forecasts_by_product for drill-down UI."
@@ -1149,10 +1149,10 @@ def _serialize_target(t: ForecastTarget) -> dict:
     """Convert a ForecastTarget row to a safe dict for tool responses."""
     ds = t.datasource or {}
     # Extract material_code from product_key for SKU targets
-    # (e.g. "ecisco.c5_resin.201000018" → "201000018")
+    # (e.g. "acme.product_a.201000018" → "201000018")
     material_code = None
     parts = t.product_key.split(".")
-    if len(parts) >= 3 and parts[0] == "ecisco":
+    if len(parts) >= 3 and parts[0] == "acme":
         material_code = parts[2]
 
     return {
@@ -1166,7 +1166,7 @@ def _serialize_target(t: ForecastTarget) -> dict:
         "source": t.source,
         "include_in_weekly_report": t.include_in_weekly_report,
         "report_order": t.report_order,
-        # SKU fields (None for md_t_lz_price products)
+        # SKU fields (None for md_market_price products)
         "material_code": material_code,
         "datasource_table": ds.get("table"),
         "datasource_where": ds.get("where"),
@@ -1191,15 +1191,15 @@ async def _forecast_list_skus(
     """List all SKU-level forecast targets for an ERP product family.
 
     Required args:
-        product_id  (str): The dashboard product_id (e.g. 'c5_resin',
-                           'raffinate_c5').
+        product_id  (str): The dashboard product_id (e.g. 'product_a',
+                           'feedstock_a').
     """
     product_id = args.get("product_id")
     if not product_id:
         return {"success": False, "error": "product_id is required."}
 
     org_id, _app_id = _resolve_org_context(context)
-    prefix = f"ecisco.{product_id}."
+    prefix = f"acme.{product_id}."
 
     targets = db.query(ForecastTarget).filter(
         ForecastTarget.product_key.like(f"{prefix}%"),
@@ -1228,7 +1228,7 @@ FORECAST_LIST_SKUS_SCHEMA = {
         "name": "forecast_list_skus",
         "description": (
             "List all SKU-level forecast targets for an ERP product family "
-            "(c5_resin or raffinate_c5). Returns material_code, target_id, "
+            "(product_a or feedstock_a). Returns material_code, target_id, "
             "report_order, and whether each SKU is the primary (highest volume) "
             "for its family. Safe for the user-facing agent."
         ),
@@ -1239,7 +1239,7 @@ FORECAST_LIST_SKUS_SCHEMA = {
                     "type": "string",
                     "description": (
                         "The dashboard product_id to list SKUs for. "
-                        "Must be an ERP product: 'c5_resin' or 'raffinate_c5'."
+                        "Must be an ERP product: 'product_a' or 'feedstock_a'."
                     ),
                 },
             },
@@ -1272,7 +1272,7 @@ In the `FORECAST_RUN_SCHEMA`, add an optional `product_id` parameter that, when 
                     "type": "string",
                     "description": (
                         "ERP product family to run all SKU targets for "
-                        "(e.g. 'c5_resin', 'raffinate_c5'). "
+                        "(e.g. 'product_a', 'feedstock_a'). "
                         "Alternative to target_id for batch SKU runs."
                     ),
                 },
@@ -1286,7 +1286,7 @@ And in the `_forecast_run` handler, add handling for `product_id` (after the `ta
     
     if product_id:
         # Run all SKU targets for an ERP product family
-        prefix = f"ecisco.{product_id}."
+        prefix = f"acme.{product_id}."
         sku_targets = db.query(ForecastTarget).filter(
             ForecastTarget.product_key.like(f"{prefix}%"),
             ForecastTarget.org_id == org_id,
@@ -1350,7 +1350,7 @@ datasource details. forecast_run gains product_id param for batch SKU runs."
 In `frontend/src/api/marketDashboard.js`, add the new method after the `forecastChart` method (around line 80):
 
 ```javascript
-  /** List all SKU targets for an ERP product family (c5_resin, raffinate_c5). */
+  /** List all SKU targets for an ERP product family (product_a, feedstock_a). */
   forecastListSkus: (productId) =>
     getJson('/api/market-dashboard/forecast-skus', { product_id: productId }),
 ```
@@ -1370,8 +1370,8 @@ import { RefreshCw, Activity, Zap, Layers } from 'lucide-react';
 ```javascript
   const [showSkuPopover, setShowSkuPopover] = useState(false);
 
-  // Fetch SKU list for ERP products (c5_resin, raffinate_c5)
-  const isErpProduct = productId === 'c5_resin' || productId === 'raffinate_c5';
+  // Fetch SKU list for ERP products (product_a, feedstock_a)
+  const isErpProduct = productId === 'product_a' || productId === 'feedstock_a';
   const { data: skuData } = useQuery({
     queryKey: ['market-dashboard', 'forecast-skus', productId],
     queryFn: () => marketDashboardApi.forecastListSkus(productId),
@@ -1476,7 +1476,7 @@ git add frontend/src/api/marketDashboard.js \
         frontend/src/pages/MarketDashboard/components/ForecastTrendChart.jsx
 git commit -m "feat(frontend): SKU badge with drill-down popover in ForecastTrendChart
 
-ERP products (c5_resin, raffinate_c5) now show a 'N SKUs' badge with
+ERP products (product_a, feedstock_a) now show a 'N SKUs' badge with
 a Layers icon. Clicking opens a popover table listing all material_code
 SKUs, their forecast base prices, and confidence levels. Primary SKU
 (highest volume) is marked with a star and highlighted."
@@ -1492,7 +1492,7 @@ SKUs, their forecast base prices, and confidence levels. Primary SKU
 
 **Interfaces:**
 - Consumes: `forecast_list_skus` tool from Task 5 (or direct service call)
-- Produces: `GET /api/market-dashboard/forecast-skus?product_id=c5_resin` endpoint
+- Produces: `GET /api/market-dashboard/forecast-skus?product_id=product_a` endpoint
 
 - [ ] **Step 1: Find the market dashboard router**
 
@@ -1514,15 +1514,15 @@ async def list_forecast_skus(product_id: str):
     from app.database import SessionLocal
     from app.schemas.market_dashboard import SkuForecastMeta
 
-    if product_id not in ("c5_resin", "raffinate_c5"):
+    if product_id not in ("product_a", "feedstock_a"):
         raise HTTPException(
             status_code=400,
-            detail=f"product_id must be an ERP product ('c5_resin' or 'raffinate_c5'), got '{product_id}'"
+            detail=f"product_id must be an ERP product ('product_a' or 'feedstock_a'), got '{product_id}'"
         )
 
     db = SessionLocal()
     try:
-        prefix = f"ecisco.{product_id}."
+        prefix = f"acme.{product_id}."
         targets = db.query(ForecastTarget).filter(
             ForecastTarget.product_key.like(f"{prefix}%"),
             ForecastTarget.org_id == "default-org",
@@ -1571,7 +1571,7 @@ Run: `cd /home/ysk2025/zhanlu_7_30 && docker compose restart backend`
 
 Wait 10 seconds, then test:
 ```bash
-curl -s "http://localhost:8000/api/market-dashboard/forecast-skus?product_id=c5_resin" | python3 -m json.tool | head -20
+curl -s "http://localhost:8000/api/market-dashboard/forecast-skus?product_id=product_a" | python3 -m json.tool | head -20
 ```
 Expected: Returns `{"skus": [...], "count": N}` with SKU data (if seeded).
 
@@ -1591,28 +1591,28 @@ prices and confidence. Used by the frontend SKU badge popover."
 ## Task 8: Wire Up SKU Seeder in Bootstrap
 
 **Files:**
-- Modify: `backend/app/services/forecasting/seed.py` (or wherever `seed_ecisco_forecast_targets` is called on boot)
+- Modify: `backend/app/services/forecasting/seed.py` (or wherever `seed_acme_forecast_targets` is called on boot)
 - Test: manual verification via docker restart
 
 - [ ] **Step 1: Find where the seeder is called on boot**
 
-Run: `grep -rn "seed_ecisco_forecast_targets" backend/app/ --include="*.py"`
+Run: `grep -rn "seed_acme_forecast_targets" backend/app/ --include="*.py"`
 
 - [ ] **Step 2: Add `discover_and_seed_sku_targets` call after the static seeder**
 
-In the file where `seed_ecisco_forecast_targets` is called (likely `backend/app/services/forecasting/seed.py` or `backend/app/main.py` lifespan), add:
+In the file where `seed_acme_forecast_targets` is called (likely `backend/app/services/forecasting/seed.py` or `backend/app/main.py` lifespan), add:
 
 ```python
-    # Seed static md_t_lz_price targets (10 products)
-    seed_ecisco_forecast_targets(db, org_id=org_id, app_id=app_id)
-    # Discover and seed ERP SKU targets (c5_resin, raffinate_c5)
+    # Seed static md_market_price targets (10 products)
+    seed_acme_forecast_targets(db, org_id=org_id, app_id=app_id)
+    # Discover and seed ERP SKU targets (product_a, feedstock_a)
     discover_and_seed_sku_targets(db, org_id=org_id, app_id=app_id)
 ```
 
 Add the import at the top:
 ```python
-from app.services.forecasting.seed_ecisco_targets import (
-    seed_ecisco_forecast_targets,
+from app.services.forecasting.seed_acme_targets import (
+    seed_acme_forecast_targets,
     discover_and_seed_sku_targets,
 )
 ```
@@ -1625,7 +1625,7 @@ Wait 15 seconds, then check logs:
 ```bash
 docker compose logs backend 2>&1 | grep -i "sku\|discover" | tail -10
 ```
-Expected: Logs show `discover_and_seed_sku_targets: c5_resin — N SKUs qualified` and `inserted N new SKU targets`.
+Expected: Logs show `discover_and_seed_sku_targets: product_a — N SKUs qualified` and `inserted N new SKU targets`.
 
 - [ ] **Step 4: Verify in database**
 
@@ -1633,11 +1633,11 @@ Expected: Logs show `discover_and_seed_sku_targets: c5_resin — N SKUs qualifie
 docker compose exec postgres psql -U zhanlu -d zhanlu -c "
   SELECT product_key, name, report_order, include_in_weekly_report
   FROM forecast_targets
-  WHERE product_key LIKE 'ecisco.c5_resin.%' OR product_key LIKE 'ecisco.raffinate_c5.%'
+  WHERE product_key LIKE 'acme.product_a.%' OR product_key LIKE 'acme.feedstock_a.%'
   ORDER BY product_key;
 "
 ```
-Expected: Shows SKU-level targets with `product_key` like `ecisco.c5_resin.201000018`.
+Expected: Shows SKU-level targets with `product_key` like `acme.product_a.201000018`.
 
 - [ ] **Step 5: Commit**
 
@@ -1646,7 +1646,7 @@ cd /home/ysk2025/zhanlu_7_30
 git add backend/app/services/forecasting/seed.py  # or wherever the call is
 git commit -m "feat(bootstrap): call discover_and_seed_sku_targets on startup
 
-The dynamic SKU seeder runs after the static md_t_lz_price seeder on
+The dynamic SKU seeder runs after the static md_market_price seeder on
 every boot. It's idempotent — skips targets that already exist."
 ```
 
@@ -1660,7 +1660,7 @@ every boot. It's idempotent — skips targets that already exist."
 
 Run:
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_edia_source.py tests/test_edia_source_groupby.py tests/test_seed_ecisco_targets.py tests/test_seed_sku_targets.py tests/test_forecast_batch_sku.py -v
+cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_edia_source.py tests/test_edia_source_groupby.py tests/test_seed_acme_targets.py tests/test_seed_sku_targets.py tests/test_forecast_batch_sku.py -v
 ```
 Expected: All tests pass.
 
@@ -1698,11 +1698,11 @@ for pid, skus in sku_data.items():
         print(f'    - {s.get(\"material_code\")}: base={s.get(\"forecast_base\")}, primary={s.get(\"is_primary\")}')
 "
 ```
-Expected: Shows SKU data for c5_resin and/or raffinate_c5.
+Expected: Shows SKU data for product_a and/or feedstock_a.
 
 - [ ] **Step 5: Preview the dashboard**
 
-Open the market dashboard in the browser and navigate to the forecast section for c5_resin. Verify:
+Open the market dashboard in the browser and navigate to the forecast section for product_a. Verify:
 - SKU badge appears with "N SKUs · <primary_code>"
 - Clicking the badge opens the popover with all SKUs listed
 - Primary SKU is marked with a star
@@ -1748,21 +1748,21 @@ git commit -m "chore: SKU-level forecasting — final cleanup"
 
 ---
 
-# Phase B: EDIA Domain Signal Layers
+# Phase B: Acme Domain Signal Layers
 
 > **Phase B is independent of Phase A.** It touches the forecast *engine* (overlay application) and the *dashboard* (trust-tier badge), not the SKU data plumbing. It can be executed before, after, or in parallel with Phase A.
 
-**Goal:** Port three cheap, high-value domain-knowledge layers from EDIA 5.1.2 that our statistical ensemble (ARIMA + XGBoost + STL) cannot infer from short price series alone:
+**Goal:** Port three cheap, high-value domain-knowledge layers from Acme 5.1.2 that our statistical ensemble (ARIMA + XGBoost + STL) cannot infer from short price series alone:
 
-1. **Tier-dampened causal-chain elasticities** — naphtha → C5 → downstream propagation. When naphtha moves X%, `c5_resin` moves ~X × 0.62 × 0.72 = X × 0.45. Encodes petrochem supply-chain economics.
-2. **Per-product seasonal adjustment rules** — additive % by (product_id, month). E.g. `c5_resin` is −2.5% Nov–Feb, +1.0% Mar–Oct. Captures demand seasonality the models under-fit on short series.
-3. **Forecast trust tiers** — label weekly-cadence products (`cracked_c9`, `raffinate_c5`…) as "directional only" instead of presenting misleading daily precision. Four tiers: high / medium / directional / low, with bilingual labels + badge colors.
+1. **Tier-dampened causal-chain elasticities** — product_c → C5 → downstream propagation. When product_c moves X%, `product_a` moves ~X × 0.62 × 0.72 = X × 0.45. Encodes petrochem supply-chain economics.
+2. **Per-product seasonal adjustment rules** — additive % by (product_id, month). E.g. `product_a` is −2.5% Nov–Feb, +1.0% Mar–Oct. Captures demand seasonality the models under-fit on short series.
+3. **Forecast trust tiers** — label weekly-cadence products (`cracked_c9`, `feedstock_a`…) as "directional only" instead of presenting misleading daily precision. Four tiers: high / medium / directional / low, with bilingual labels + badge colors.
 
-**Rationale:** EDIA's ensemble is architecturally similar to ours but gained measurable accuracy and trustworthiness from these layers because they encode domain economics. All three are pure-Python dict + overlay functions — no new ML dependencies, no torch, no training data. ~2 days of work.
+**Rationale:** Acme's ensemble is architecturally similar to ours but gained measurable accuracy and trustworthiness from these layers because they encode domain economics. All three are pure-Python dict + overlay functions — no new ML dependencies, no torch, no training data. ~2 days of work.
 
-**EDIA source (read-only reference):**
-- `EDIA_5.1.2/backend/src/service/forecasting_engine.py:113-179` — `_RAW_ELASTICITIES`, `_ELASTICITIES`, `_SEASONAL_RULES` dicts
-- `EDIA_5.1.2/backend/src/service/forecast_supervisor.py:150-283` — `compute_forecast_trust_tier()`, `_HIGH_SKILL_PRODUCTS`, `_WEEKLY_CADENCE_PRODUCTS`
+**Acme source (read-only reference):**
+- `Acme_5.1.2/backend/src/service/forecasting_engine.py:113-179` — `_RAW_ELASTICITIES`, `_ELASTICITIES`, `_SEASONAL_RULES` dicts
+- `Acme_5.1.2/backend/src/service/forecast_supervisor.py:150-283` — `compute_forecast_trust_tier()`, `_HIGH_SKILL_PRODUCTS`, `_WEEKLY_CADENCE_PRODUCTS`
 
 **Integration point in zhanlu:** `backend/app/services/forecasting/engine.py` — the `compute_target()` method has numbered steps. Step 8.5 (intelligence overlay, line ~337) and Step 8.6 (policy service, line ~380) already exist. A new **Step 8.55 (domain signals)** slots between them, mirroring the intelligence overlay's try/except + gated-flag pattern. The explanation dict (line ~449) gains a `domain_signals` key alongside the existing `intelligence` and `policy` keys.
 
@@ -1805,15 +1805,15 @@ git commit -m "chore: SKU-level forecasting — final cleanup"
   - `_ELASTICITIES: dict[str, float]` — pre-computed raw × dampening
   - `_SEASONAL_RULES: dict[tuple[str, int], float]` — (product_id, month) → additive pct
   - `compute_seasonal_adjustment(product_id: str, month: int) -> float` — returns the seasonal % (0.0 if no rule)
-  - `compute_causal_chain_adjustment(product_id: str, naphtha_pct_change: float | None) -> float` — returns the propagated % (0.0 if no naphtha signal or unknown product)
-  - `compute_domain_signal_adjustment(product_id: str, as_of_date: datetime, naphtha_pct_change: float | None = None) -> dict` — combined overlay, returns `{seasonal_pct, causal_pct, total_pct, applied_rules: list[str]}`
+  - `compute_causal_chain_adjustment(product_id: str, product_c_pct_change: float | None) -> float` — returns the propagated % (0.0 if no product_c signal or unknown product)
+  - `compute_domain_signal_adjustment(product_id: str, as_of_date: datetime, product_c_pct_change: float | None = None) -> dict` — combined overlay, returns `{seasonal_pct, causal_pct, total_pct, applied_rules: list[str]}`
 
 - [ ] **Step 1: Write the failing test**
 
 Create `backend/tests/test_domain_signals.py`:
 
 ```python
-"""Tests for EDIA-ported domain signals: elasticities + seasonal rules."""
+"""Tests for Acme-ported domain signals: elasticities + seasonal rules."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -1834,8 +1834,8 @@ from app.services.forecasting.domain_signals import (
 
 def test_elasticities_dict_has_known_products():
     """The elasticity table should include the petrochem chain products."""
-    for pid in ("naphtha", "cracked_c5", "isoprene", "piperylene",
-                "dcpd", "c5_resin", "raffinate_c5", "sbs"):
+    for pid in ("product_c", "cracked_c5", "product_d", "product_f",
+                "product_b", "product_a", "feedstock_a", "sbs"):
         assert pid in _ELASTICITIES, f"{pid} missing from _ELASTICITIES"
 
 
@@ -1848,42 +1848,42 @@ def test_elasticities_are_raw_times_dampening():
         )
 
 
-def test_naphtha_elasticity_is_unity():
-    """Naphtha is the root of the causal chain — elasticity 1.0."""
-    assert _ELASTICITIES["naphtha"] == 1.0
+def test_product_c_elasticity_is_unity():
+    """Product_C is the root of the causal chain — elasticity 1.0."""
+    assert _ELASTICITIES["product_c"] == 1.0
 
 
-def test_c5_resin_tier3_dampening():
-    """c5_resin is Tier 3: raw 0.62 × damp 0.72 = 0.4464."""
-    assert _RAW_ELASTICITIES["c5_resin"] == (0.62, 0.72)
-    assert _ELASTICITIES["c5_resin"] == 0.4464
+def test_product_a_tier3_dampening():
+    """product_a is Tier 3: raw 0.62 × damp 0.72 = 0.4464."""
+    assert _RAW_ELASTICITIES["product_a"] == (0.62, 0.72)
+    assert _ELASTICITIES["product_a"] == 0.4464
 
 
-def test_isoprene_tier2_dampening():
-    """isoprene is Tier 2: raw 0.88 × damp 0.85 = 0.748."""
-    assert _ELASTICITIES["isoprene"] == 0.748
+def test_product_d_tier2_dampening():
+    """product_d is Tier 2: raw 0.88 × damp 0.85 = 0.748."""
+    assert _ELASTICITIES["product_d"] == 0.748
 
 
 # ── Seasonal rules ──────────────────────────────────────────────────────────
 
-def test_seasonal_rules_cover_c5_resin_full_year():
-    """c5_resin should have a rule for every month 1-12."""
-    c5_months = {m for (pid, m) in _SEASONAL_RULES if pid == "c5_resin"}
+def test_seasonal_rules_cover_product_a_full_year():
+    """product_a should have a rule for every month 1-12."""
+    c5_months = {m for (pid, m) in _SEASONAL_RULES if pid == "product_a"}
     assert c5_months == set(range(1, 13)), (
-        f"c5_resin seasonal rules missing months: {set(range(1,13)) - c5_months}"
+        f"product_a seasonal rules missing months: {set(range(1,13)) - c5_months}"
     )
 
 
-def test_seasonal_c5_resin_winter_is_negative():
-    """c5_resin Nov-Feb should be -2.5% (winter demand dip)."""
+def test_seasonal_product_a_winter_is_negative():
+    """product_a Nov-Feb should be -2.5% (winter demand dip)."""
     for month in (11, 12, 1, 2):
-        assert _SEASONAL_RULES[("c5_resin", month)] == -2.5
+        assert _SEASONAL_RULES[("product_a", month)] == -2.5
 
 
-def test_seasonal_c5_resin_spring_summer_is_positive():
-    """c5_resin Mar-Oct should be +1.0%."""
+def test_seasonal_product_a_spring_summer_is_positive():
+    """product_a Mar-Oct should be +1.0%."""
     for month in range(3, 11):
-        assert _SEASONAL_RULES[("c5_resin", month)] == 1.0
+        assert _SEASONAL_RULES[("product_a", month)] == 1.0
 
 
 def test_seasonal_adjustment_returns_zero_for_unknown_product():
@@ -1893,74 +1893,74 @@ def test_seasonal_adjustment_returns_zero_for_unknown_product():
 
 def test_seasonal_adjustment_returns_zero_for_unrule_month():
     """Product with no rule for the given month → 0.0."""
-    # naphtha has no seasonal rules at all
-    assert compute_seasonal_adjustment("naphtha", 7) == 0.0
+    # product_c has no seasonal rules at all
+    assert compute_seasonal_adjustment("product_c", 7) == 0.0
 
 
 def test_seasonal_adjustment_returns_pct_for_known_combo():
     """Known (product, month) → the rule's pct value."""
-    assert compute_seasonal_adjustment("c5_resin", 12) == -2.5
-    assert compute_seasonal_adjustment("c5_resin", 6) == 1.0
+    assert compute_seasonal_adjustment("product_a", 12) == -2.5
+    assert compute_seasonal_adjustment("product_a", 6) == 1.0
 
 
 # ── Causal-chain adjustment ─────────────────────────────────────────────────
 
-def test_causal_chain_zero_when_no_naphtha_signal():
-    """No naphtha % change → causal adjustment is 0.0."""
-    assert compute_causal_chain_adjustment("c5_resin", None) == 0.0
+def test_causal_chain_zero_when_no_product_c_signal():
+    """No product_c % change → causal adjustment is 0.0."""
+    assert compute_causal_chain_adjustment("product_a", None) == 0.0
 
 
 def test_causal_chain_zero_for_unknown_product():
-    """Unknown product → 0.0 even if naphtha moved."""
+    """Unknown product → 0.0 even if product_c moved."""
     assert compute_causal_chain_adjustment("unknown", 10.0) == 0.0
 
 
-def test_causal_chain_propagates_naphtha_to_c5_resin():
-    """Naphtha +10% → c5_resin moves +10 × 0.4464 = +4.464%."""
-    pct = compute_causal_chain_adjustment("c5_resin", 10.0)
+def test_causal_chain_propagates_product_c_to_product_a():
+    """Product_C +10% → product_a moves +10 × 0.4464 = +4.464%."""
+    pct = compute_causal_chain_adjustment("product_a", 10.0)
     assert pct == pytest.approx(4.464, abs=1e-3)
 
 
-def test_causal_chain_propagates_negative_naphtha_move():
-    """Naphtha -5% → c5_resin moves -5 × 0.4464 = -2.232%."""
-    pct = compute_causal_chain_adjustment("c5_resin", -5.0)
+def test_causal_chain_propagates_negative_product_c_move():
+    """Product_C -5% → product_a moves -5 × 0.4464 = -2.232%."""
+    pct = compute_causal_chain_adjustment("product_a", -5.0)
     assert pct == pytest.approx(-2.232, abs=1e-3)
 
 
-def test_causal_chain_naphtha_self_is_full_pass_through():
-    """Naphtha elasticity = 1.0, so naphtha +8% → naphtha +8%."""
-    pct = compute_causal_chain_adjustment("naphtha", 8.0)
+def test_causal_chain_product_c_self_is_full_pass_through():
+    """Product_C elasticity = 1.0, so product_c +8% → product_c +8%."""
+    pct = compute_causal_chain_adjustment("product_c", 8.0)
     assert pct == pytest.approx(8.0)
 
 
 # ── Combined domain signal adjustment ───────────────────────────────────────
 
-def test_combined_adjustment_seasonal_only_when_no_naphtha():
-    """Without a naphtha signal, only the seasonal rule applies."""
+def test_combined_adjustment_seasonal_only_when_no_product_c():
+    """Without a product_c signal, only the seasonal rule applies."""
     result = compute_domain_signal_adjustment(
-        product_id="c5_resin",
+        product_id="product_a",
         as_of_date=datetime(2026, 12, 15),  # December → -2.5%
-        naphtha_pct_change=None,
+        product_c_pct_change=None,
     )
     assert result["seasonal_pct"] == -2.5
     assert result["causal_pct"] == 0.0
     assert result["total_pct"] == -2.5
-    assert "seasonal:c5_resin:12" in result["applied_rules"]
+    assert "seasonal:product_a:12" in result["applied_rules"]
     assert not any(r.startswith("causal:") for r in result["applied_rules"])
 
 
 def test_combined_adjustment_applies_both_layers():
-    """Both seasonal + causal apply when naphtha signal is present."""
+    """Both seasonal + causal apply when product_c signal is present."""
     result = compute_domain_signal_adjustment(
-        product_id="c5_resin",
+        product_id="product_a",
         as_of_date=datetime(2026, 6, 15),  # June → +1.0%
-        naphtha_pct_change=10.0,           # → +4.464%
+        product_c_pct_change=10.0,           # → +4.464%
     )
     assert result["seasonal_pct"] == 1.0
     assert result["causal_pct"] == pytest.approx(4.464, abs=1e-3)
     assert result["total_pct"] == pytest.approx(5.464, abs=1e-3)
-    assert "seasonal:c5_resin:6" in result["applied_rules"]
-    assert "causal:c5_resin:naphtha=+10.0%" in result["applied_rules"]
+    assert "seasonal:product_a:6" in result["applied_rules"]
+    assert "causal:product_a:product_c=+10.0%" in result["applied_rules"]
 
 
 def test_combined_adjustment_no_rules_for_unknown_product():
@@ -1968,7 +1968,7 @@ def test_combined_adjustment_no_rules_for_unknown_product():
     result = compute_domain_signal_adjustment(
         product_id="unknown",
         as_of_date=datetime(2026, 7, 1),
-        naphtha_pct_change=10.0,
+        product_c_pct_change=10.0,
     )
     assert result["seasonal_pct"] == 0.0
     assert result["causal_pct"] == 0.0
@@ -1986,23 +1986,23 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'app.services.forecasti
 Create `backend/app/services/forecasting/domain_signals.py`:
 
 ```python
-"""EDIA-ported domain signal layers for the forecast engine.
+"""Acme-ported domain signal layers for the forecast engine.
 
 Two pure-Python overlay layers that encode petrochem supply-chain economics
 the statistical ensemble (ARIMA + XGBoost + STL) cannot infer from short
 price series alone:
 
-1. **Tier-dampened causal-chain elasticities** — naphtha is the root feedstock.
-   When naphtha moves X%, downstream products move X × (raw_elasticity ×
+1. **Tier-dampened causal-chain elasticities** — product_c is the root feedstock.
+   When product_c moves X%, downstream products move X × (raw_elasticity ×
    tier_dampening)%. Three tiers model propagation attenuation:
-     Tier 1 (naphtha → C5):        ×1.00
+     Tier 1 (product_c → C5):        ×1.00
      Tier 2 (C5 → downstream):     ×0.85
      Tier 3 (downstream → end-use): ×0.72
 
 2. **Per-product seasonal adjustment rules** — additive % by (product_id, month).
    Captures demand seasonality (winter dip, spring recovery).
 
-Source: EDIA_5.1.2/backend/src/service/forecasting_engine.py:113-179 (verbatim).
+Source: Acme_5.1.2/backend/src/service/forecasting_engine.py:113-179 (verbatim).
 
 Integration: called by ForecastEngine.compute_target() at Step 8.55, between
 the intelligence overlay (8.5) and the policy service (8.6). Gated by
@@ -2018,29 +2018,29 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Tier-dampened causal-chain elasticities (EDIA §6.3)
+# Tier-dampened causal-chain elasticities (Acme §6.3)
 # ---------------------------------------------------------------------------
 
 # product_id: (raw_elasticity, tier_dampening_factor)
-# Tier 1 (naphtha → C5): ×1.00   Tier 2 (C5 → downstream): ×0.85
+# Tier 1 (product_c → C5): ×1.00   Tier 2 (C5 → downstream): ×0.85
 # Tier 3 (downstream → end-use): ×0.72
 _RAW_ELASTICITIES: dict[str, tuple[float, float]] = {
     # product_id: (raw_elasticity, tier_dampening_factor)
-    "naphtha": (1.00, 1.00),
+    "product_c": (1.00, 1.00),
     "cracked_c5": (0.82, 1.00),  # Tier 1
     "mixed_c5": (0.82, 1.00),  # Tier 1
     "cracked_c9": (0.65, 0.85),
-    "isoprene": (0.88, 0.85),  # Tier 2: 0.88 × 0.85 = 0.748
-    "piperylene": (0.85, 0.85),  # Tier 2: 0.85 × 0.85 = 0.7225
-    "dcpd": (0.78, 0.85),  # Tier 2: 0.78 × 0.85 = 0.663
-    "raffinate_c5": (0.70, 0.85),
+    "product_d": (0.88, 0.85),  # Tier 2: 0.88 × 0.85 = 0.748
+    "product_f": (0.85, 0.85),  # Tier 2: 0.85 × 0.85 = 0.7225
+    "product_b": (0.78, 0.85),  # Tier 2: 0.78 × 0.85 = 0.663
+    "feedstock_a": (0.70, 0.85),
     "styrene": (0.55, 0.85),  # Tier 2: 0.55 × 0.85 = 0.4675
     "sis": (0.71, 0.72),  # Tier 3: 0.71 × 0.72 = 0.5112
     "sis_rubber": (0.71, 0.72),  # Tier 3
     "blowing_agent": (0.70, 0.85),
     "butadiene": (0.65, 0.85),
     "sbs": (0.60, 0.72),  # Tier 3
-    "c5_resin": (0.62, 0.72),  # Tier 3: 0.62 × 0.72 = 0.4464
+    "product_a": (0.62, 0.72),  # Tier 3: 0.62 × 0.72 = 0.4464
     "mixed_c9": (0.65, 0.85),
     "hydrogenated_c9": (0.60, 0.72),
     "trimethylbenzene": (0.60, 0.72),
@@ -2058,36 +2058,36 @@ _ELASTICITIES: dict[str, float] = {
 # ---------------------------------------------------------------------------
 
 _SEASONAL_RULES: dict[tuple[str, int], float] = {
-    ("c5_resin", 11): -2.5,
-    ("c5_resin", 12): -2.5,
-    ("c5_resin", 1): -2.5,
-    ("c5_resin", 2): -2.5,
-    ("c5_resin", 3): 1.0,
-    ("c5_resin", 4): 1.0,
-    ("c5_resin", 5): 1.0,
-    ("c5_resin", 6): 1.0,
-    ("c5_resin", 7): 1.0,
-    ("c5_resin", 8): 1.0,
-    ("c5_resin", 9): 1.0,
-    ("dcpd", 11): -3.0,
-    ("dcpd", 12): -3.0,
-    ("dcpd", 1): -3.0,
-    ("dcpd", 2): -3.0,
-    ("dcpd", 3): 1.5,
-    ("dcpd", 4): 1.5,
-    ("dcpd", 5): 1.5,
-    ("dcpd", 6): 1.5,
-    ("dcpd", 7): 1.5,
-    ("dcpd", 8): 1.5,
-    ("isoprene", 2): 0.8,
-    ("isoprene", 3): 0.8,
+    ("product_a", 11): -2.5,
+    ("product_a", 12): -2.5,
+    ("product_a", 1): -2.5,
+    ("product_a", 2): -2.5,
+    ("product_a", 3): 1.0,
+    ("product_a", 4): 1.0,
+    ("product_a", 5): 1.0,
+    ("product_a", 6): 1.0,
+    ("product_a", 7): 1.0,
+    ("product_a", 8): 1.0,
+    ("product_a", 9): 1.0,
+    ("product_b", 11): -3.0,
+    ("product_b", 12): -3.0,
+    ("product_b", 1): -3.0,
+    ("product_b", 2): -3.0,
+    ("product_b", 3): 1.5,
+    ("product_b", 4): 1.5,
+    ("product_b", 5): 1.5,
+    ("product_b", 6): 1.5,
+    ("product_b", 7): 1.5,
+    ("product_b", 8): 1.5,
+    ("product_d", 2): 0.8,
+    ("product_d", 3): 0.8,
     ("cracked_c5", 1): -1.0,
     ("cracked_c5", 2): -1.0,
     ("cracked_c5", 3): 0.5,
     ("cracked_c5", 4): 0.5,
     ("cracked_c5", 5): 0.5,
-    ("piperylene", 2): 1.2,
-    ("piperylene", 3): 1.2,
+    ("product_f", 2): 1.2,
+    ("product_f", 3): 1.2,
     ("sis", 2): 0.5,
     ("sis", 3): 0.8,
     ("sis", 9): 0.5,
@@ -2102,7 +2102,7 @@ def compute_seasonal_adjustment(product_id: str, month: int) -> float:
     """Return the seasonal % adjustment for a product in a given month.
 
     Args:
-        product_id: The dashboard product_id (e.g. "c5_resin", "naphtha").
+        product_id: The dashboard product_id (e.g. "product_a", "product_c").
         month: Month number 1-12.
 
     Returns:
@@ -2114,32 +2114,32 @@ def compute_seasonal_adjustment(product_id: str, month: int) -> float:
 
 def compute_causal_chain_adjustment(
     product_id: str,
-    naphtha_pct_change: float | None,
+    product_c_pct_change: float | None,
 ) -> float:
-    """Propagate a naphtha price change through the causal chain.
+    """Propagate a product_c price change through the causal chain.
 
     Args:
         product_id: The product whose forecast is being adjusted.
-        naphtha_pct_change: The recent % change in naphtha price
-            (e.g. 10.0 means naphtha rose 10%). None if no signal.
+        product_c_pct_change: The recent % change in product_c price
+            (e.g. 10.0 means product_c rose 10%). None if no signal.
 
     Returns:
         The propagated % adjustment for this product (e.g. 4.464 means
-        +4.464%). Returns 0.0 if naphtha_pct_change is None or the
+        +4.464%). Returns 0.0 if product_c_pct_change is None or the
         product is not in the elasticity table.
     """
-    if naphtha_pct_change is None:
+    if product_c_pct_change is None:
         return 0.0
     elasticity = _ELASTICITIES.get(product_id)
     if elasticity is None:
         return 0.0
-    return round(naphtha_pct_change * elasticity, 4)
+    return round(product_c_pct_change * elasticity, 4)
 
 
 def compute_domain_signal_adjustment(
     product_id: str,
     as_of_date: datetime,
-    naphtha_pct_change: float | None = None,
+    product_c_pct_change: float | None = None,
 ) -> dict[str, Any]:
     """Combined domain-signal overlay: seasonal + causal-chain.
 
@@ -2150,7 +2150,7 @@ def compute_domain_signal_adjustment(
         product_id: The dashboard product_id.
         as_of_date: The forecast anchor date (determines the month for
             seasonal rules).
-        naphtha_pct_change: Recent % change in naphtha price, or None.
+        product_c_pct_change: Recent % change in product_c price, or None.
 
     Returns:
         dict with keys:
@@ -2158,7 +2158,7 @@ def compute_domain_signal_adjustment(
             causal_pct: float — additive % from causal-chain propagation
             total_pct: float — seasonal_pct + causal_pct
             applied_rules: list[str] — human-readable rule identifiers
-                          (e.g. "seasonal:c5_resin:12", "causal:c5_resin:naphtha=+10.0%")
+                          (e.g. "seasonal:product_a:12", "causal:product_a:product_c=+10.0%")
     """
     applied_rules: list[str] = []
 
@@ -2166,11 +2166,11 @@ def compute_domain_signal_adjustment(
     if seasonal_pct != 0.0:
         applied_rules.append(f"seasonal:{product_id}:{as_of_date.month}")
 
-    causal_pct = compute_causal_chain_adjustment(product_id, naphtha_pct_change)
-    if causal_pct != 0.0 and naphtha_pct_change is not None:
-        sign = "+" if naphtha_pct_change >= 0 else ""
+    causal_pct = compute_causal_chain_adjustment(product_id, product_c_pct_change)
+    if causal_pct != 0.0 and product_c_pct_change is not None:
+        sign = "+" if product_c_pct_change >= 0 else ""
         applied_rules.append(
-            f"causal:{product_id}:naphtha={sign}{naphtha_pct_change}%"
+            f"causal:{product_id}:product_c={sign}{product_c_pct_change}%"
         )
 
     total_pct = round(seasonal_pct + causal_pct, 4)
@@ -2193,62 +2193,62 @@ Expected: PASS — all tests pass.
 ```bash
 cd /home/ysk2025/zhanlu_7_30
 git add backend/app/services/forecasting/domain_signals.py backend/tests/test_domain_signals.py
-git commit -m "feat(forecast): port EDIA domain signals — elasticities + seasonal rules
+git commit -m "feat(forecast): port Acme domain signals — elasticities + seasonal rules
 
-Two pure-Python overlay layers from EDIA 5.1.2:
-- Tier-dampened causal-chain elasticities (naphtha → C5 → downstream)
+Two pure-Python overlay layers from Acme 5.1.2:
+- Tier-dampened causal-chain elasticities (product_c → C5 → downstream)
 - Per-product seasonal adjustment rules by (product_id, month)
 
 No new ML deps. Standalone module — wired into the engine in Task B2.
-Source: EDIA_5.1.2/backend/src/service/forecasting_engine.py:113-179"
+Source: Acme_5.1.2/backend/src/service/forecasting_engine.py:113-179"
 ```
 
 ---
 
-## Task B2: Naphtha % Change Fetcher + Wire Overlay into Engine
+## Task B2: Product_C % Change Fetcher + Wire Overlay into Engine
 
 **Files:**
 - Modify: `backend/app/services/forecasting/engine.py` (insert Step 8.55 between lines ~378 and ~380)
 - Test: covered by `tests/test_domain_signals.py` (B1) + manual verification of engine run
 
 **Interfaces:**
-- Consumes: `compute_domain_signal_adjustment` from Task B1, `EdiaMysqlDataSource` for naphtha history
+- Consumes: `compute_domain_signal_adjustment` from Task B1, `EdiaMysqlDataSource` for product_c history
 - Produces: a `domain_signals` report dict embedded in the forecast run's `explanation`, and an applied percentage adjustment to the base forecast
 
-**Design — naphtha signal:** The causal chain needs the recent naphtha % change. We compute it by reading the naphtha forecast target's recent history (last 14 days) and comparing the mean of the last 3 days vs. the mean of the preceding 11 days. This is a robust measure that ignores single-day spikes. If naphtha history is unavailable (e.g. MySQL down), `naphtha_pct_change` is `None` and only the seasonal rule applies — graceful degradation.
+**Design — product_c signal:** The causal chain needs the recent product_c % change. We compute it by reading the product_c forecast target's recent history (last 14 days) and comparing the mean of the last 3 days vs. the mean of the preceding 11 days. This is a robust measure that ignores single-day spikes. If product_c history is unavailable (e.g. MySQL down), `product_c_pct_change` is `None` and only the seasonal rule applies — graceful degradation.
 
-- [ ] **Step 1: Add the naphtha % change fetcher**
+- [ ] **Step 1: Add the product_c % change fetcher**
 
 In `backend/app/services/forecasting/domain_signals.py`, append at the bottom of the file:
 
 ```python
 # ---------------------------------------------------------------------------
-# Naphtha signal fetcher
+# Product_C signal fetcher
 # ---------------------------------------------------------------------------
 
 _NAPHTHA_LOOKBACK_DAYS = 14
 _NAPHTHA_RECENT_WINDOW = 3  # last 3 days vs preceding 11
 
 
-def fetch_naphtha_recent_pct_change(
+def fetch_product_c_recent_pct_change(
     db: Any,
     org_id: str = "default-org",
     lookback_days: int = _NAPHTHA_LOOKBACK_DAYS,
 ) -> float | None:
-    """Compute the recent % change in naphtha price.
+    """Compute the recent % change in product_c price.
 
-    Reads the naphtha forecast target's source history (last 14 days) and
+    Reads the product_c forecast target's source history (last 14 days) and
     compares the mean of the last 3 days against the mean of the preceding
     11 days. This is robust to single-day spikes.
 
     Args:
         db: SQLAlchemy session (sync).
-        org_id: Org ID for the naphtha target.
+        org_id: Org ID for the product_c target.
         lookback_days: Total lookback window (default 14).
 
     Returns:
-        The % change (e.g. 10.0 means naphtha rose 10%), or None if the
-        naphtha target or its history is unavailable.
+        The % change (e.g. 10.0 means product_c rose 10%), or None if the
+        product_c target or its history is unavailable.
     """
     try:
         from app.models.forecasting import ForecastTarget
@@ -2256,7 +2256,7 @@ def fetch_naphtha_recent_pct_change(
         from datetime import timedelta, timezone
 
         target = db.query(ForecastTarget).filter(
-            ForecastTarget.product_key == "ecisco.naphtha",
+            ForecastTarget.product_key == "acme.product_c",
             ForecastTarget.org_id == org_id,
             ForecastTarget.is_deleted == False,  # noqa: E712
         ).first()
@@ -2281,33 +2281,33 @@ def fetch_naphtha_recent_pct_change(
 
         pct = round((recent_mean - preceding_mean) / preceding_mean * 100.0, 2)
         logger.info(
-            "[domain-signals] naphtha %s: recent_mean=%.2f, preceding_mean=%.2f → %+.2f%%",
+            "[domain-signals] product_c %s: recent_mean=%.2f, preceding_mean=%.2f → %+.2f%%",
             org_id, recent_mean, preceding_mean, pct,
         )
         return pct
     except Exception as exc:
-        logger.warning("[domain-signals] naphtha pct change fetch failed: %s", exc)
+        logger.warning("[domain-signals] product_c pct change fetch failed: %s", exc)
         return None
 ```
 
-- [ ] **Step 2: Write a test for the naphtha fetcher (optional but recommended)**
+- [ ] **Step 2: Write a test for the product_c fetcher (optional but recommended)**
 
 Append to `backend/tests/test_domain_signals.py`:
 
 ```python
-def test_fetch_naphtha_returns_none_when_no_target(db_session=None):
-    """No naphtha ForecastTarget → None (graceful degradation)."""
-    from app.services.forecasting.domain_signals import fetch_naphtha_recent_pct_change
+def test_fetch_product_c_returns_none_when_no_target(db_session=None):
+    """No product_c ForecastTarget → None (graceful degradation)."""
+    from app.services.forecasting.domain_signals import fetch_product_c_recent_pct_change
     # Pass a bare session-like object with a .query that returns None
     class _FakeQuery:
         def filter(self, *a, **k): return self
         def first(self): return None
     class _FakeDb:
         def query(self, model): return _FakeQuery()
-    assert fetch_naphtha_recent_pct_change(_FakeDb()) is None
+    assert fetch_product_c_recent_pct_change(_FakeDb()) is None
 ```
 
-Run: `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_domain_signals.py::test_fetch_naphtha_returns_none_when_no_target -v`
+Run: `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_domain_signals.py::test_fetch_product_c_returns_none_when_no_target -v`
 Expected: PASS.
 
 - [ ] **Step 3: Wire Step 8.55 into `engine.py`**
@@ -2316,7 +2316,7 @@ In `backend/app/services/forecasting/engine.py`, locate Step 8.5 (intelligence o
 
 ```python
         # --- Step 8.55: Domain signals overlay (Phase B) ---
-        # EDIA-ported causal-chain elasticities + seasonal rules.
+        # Acme-ported causal-chain elasticities + seasonal rules.
         # Gated by FORECAST_DOMAIN_SIGNALS_ENABLED (default False).
         domain_signals_enabled = _get_config_bool(
             "FORECAST_DOMAIN_SIGNALS_ENABLED", False
@@ -2326,22 +2326,22 @@ In `backend/app/services/forecasting/engine.py`, locate Step 8.5 (intelligence o
             try:
                 from app.services.forecasting.domain_signals import (
                     compute_domain_signal_adjustment,
-                    fetch_naphtha_recent_pct_change,
+                    fetch_product_c_recent_pct_change,
                 )
                 # Extract product_id from target.product_key.
-                # For family targets: "ecisco.c5_resin" → "c5_resin"
-                # For SKU targets:   "ecisco.c5_resin.201000018" → "c5_resin"
+                # For family targets: "acme.product_a" → "product_a"
+                # For SKU targets:   "acme.product_a.201000018" → "product_a"
                 parts = (target.product_key or "").split(".")
                 product_id = parts[1] if len(parts) >= 2 else (target.product_key or "")
 
-                naphtha_pct = fetch_naphtha_recent_pct_change(
+                product_c_pct = fetch_product_c_recent_pct_change(
                     self._db, org_id=target.org_id or "default-org"
                 )
 
                 domain_signals_report = compute_domain_signal_adjustment(
                     product_id=product_id,
                     as_of_date=datetime.now(),
-                    naphtha_pct_change=naphtha_pct,
+                    product_c_pct_change=product_c_pct,
                 )
 
                 # Apply the combined % adjustment to the base forecast.
@@ -2408,7 +2408,7 @@ git commit -m "feat(forecast): wire domain signals overlay into engine (Step 8.5
 Inserts a new Step 8.55 between the intelligence overlay (8.5) and the
 policy service (8.6). Computes seasonal + causal-chain adjustments and
 applies them to the base forecast. Gated by FORECAST_DOMAIN_SIGNALS_ENABLED
-(default False). Adds a naphtha % change fetcher that reads the naphtha
+(default False). Adds a product_c % change fetcher that reads the product_c
 target's recent history (last 14d, last 3d vs preceding 11d)."
 ```
 
@@ -2424,14 +2424,14 @@ target's recent history (last 14d, last 3d vs preceding 11d)."
 - Consumes: `ForecastRun.below_naive_baseline` (bool) and `ForecastRun.confidence` (float)
 - Produces: `compute_forecast_trust_tier(product_id, below_naive, cadence_class, mape) -> dict` with `tier`, `badge_color`, `badge_label_zh`, `badge_label_en`, `reason_zh`, `reason_en`
 
-**Design — cadence classification:** EDIA's `get_cadence_info()` classifies products by trading cadence. Zhanlu doesn't have this yet, so we use a simplified static map (the two frozensets ported from EDIA) plus a `row_count`-based fallback: products with < 100 history rows are treated as `cadence_class="sparse"`. This is a pragmatic starting point; a proper cadence classifier can be added later.
+**Design — cadence classification:** Acme's `get_cadence_info()` classifies products by trading cadence. Zhanlu doesn't have this yet, so we use a simplified static map (the two frozensets ported from Acme) plus a `row_count`-based fallback: products with < 100 history rows are treated as `cadence_class="sparse"`. This is a pragmatic starting point; a proper cadence classifier can be added later.
 
 - [ ] **Step 1: Write the failing test**
 
 Create `backend/tests/test_forecast_trust_tier.py`:
 
 ```python
-"""Tests for EDIA-ported forecast trust tiers."""
+"""Tests for Acme-ported forecast trust tiers."""
 from __future__ import annotations
 
 import pytest
@@ -2445,10 +2445,10 @@ from app.services.forecasting.forecast_trust_tier import (
 
 def test_high_skill_products_includes_known_set():
     """Products with documented ARIMA skill vs naive baseline."""
-    assert "isoprene" in _HIGH_SKILL_PRODUCTS
-    assert "piperylene" in _HIGH_SKILL_PRODUCTS
-    assert "c5_resin" in _HIGH_SKILL_PRODUCTS
-    assert "dcpd" in _HIGH_SKILL_PRODUCTS
+    assert "product_d" in _HIGH_SKILL_PRODUCTS
+    assert "product_f" in _HIGH_SKILL_PRODUCTS
+    assert "product_a" in _HIGH_SKILL_PRODUCTS
+    assert "product_b" in _HIGH_SKILL_PRODUCTS
 
 
 def test_weekly_cadence_products_includes_known_set():
@@ -2456,13 +2456,13 @@ def test_weekly_cadence_products_includes_known_set():
     assert "cracked_c9" in _WEEKLY_CADENCE_PRODUCTS
     assert "mixed_c9" in _WEEKLY_CADENCE_PRODUCTS
     assert "trimethylbenzene" in _WEEKLY_CADENCE_PRODUCTS
-    assert "raffinate_c5" in _WEEKLY_CADENCE_PRODUCTS
+    assert "feedstock_a" in _WEEKLY_CADENCE_PRODUCTS
 
 
 def test_high_tier_for_skilled_product_beating_naive():
     """High-skill product that beats naive → tier='high', green badge."""
     result = compute_forecast_trust_tier(
-        product_id="isoprene",
+        product_id="product_d",
         below_naive=False,
         cadence_class="daily",
         mape=8.0,
@@ -2549,7 +2549,7 @@ def test_default_medium_tier_for_daily_product():
 
 def test_return_dict_has_all_required_keys():
     """The returned dict must have all keys the frontend expects."""
-    result = compute_forecast_trust_tier("isoprene", below_naive=False, cadence_class="daily", mape=8.0)
+    result = compute_forecast_trust_tier("product_d", below_naive=False, cadence_class="daily", mape=8.0)
     for key in ("tier", "below_naive", "cadence_class", "mape",
                 "reason_zh", "reason_en", "badge_color",
                 "badge_label_zh", "badge_label_en"):
@@ -2559,7 +2559,7 @@ def test_return_dict_has_all_required_keys():
 def test_tier_values_are_constrained():
     """tier must be one of the 4 valid values."""
     for pid, bn, cad in [
-        ("isoprene", False, "daily"),
+        ("product_d", False, "daily"),
         ("cracked_c9", True, "weekly"),
         ("unknown", False, "sparse"),
         ("random", False, "daily"),
@@ -2580,7 +2580,7 @@ Expected: FAIL — `ModuleNotFoundError`.
 Create `backend/app/services/forecasting/forecast_trust_tier.py`:
 
 ```python
-"""EDIA-ported forecast trust tiers.
+"""Acme-ported forecast trust tiers.
 
 Labels each product's forecast with a user-facing trust tier so the dashboard
 doesn't present misleading daily precision for weekly-cadence products or
@@ -2593,7 +2593,7 @@ Four tiers:
                   Use for direction only, not point estimates.
   - low:          Data too sparse to forecast. Red badge.
 
-Source: EDIA_5.1.2/backend/src/service/forecast_supervisor.py:150-283.
+Source: Acme_5.1.2/backend/src/service/forecast_supervisor.py:150-283.
 """
 from __future__ import annotations
 
@@ -2604,16 +2604,16 @@ logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Static product classification (ported from EDIA)
+# Static product classification (ported from Acme)
 # ---------------------------------------------------------------------------
 
 # Products with documented genuine ARIMA skill (skill_vs_naive < 0 in backtest).
 # These get the "high" trust tier when they also beat naive on the current run.
 _HIGH_SKILL_PRODUCTS: frozenset[str] = frozenset({
-    "isoprene",
-    "piperylene",
-    "c5_resin",
-    "dcpd",
+    "product_d",
+    "product_f",
+    "product_a",
+    "product_b",
 })
 
 # Products that trade weekly or less frequently; daily forecast is misleading.
@@ -2622,7 +2622,7 @@ _WEEKLY_CADENCE_PRODUCTS: frozenset[str] = frozenset({
     "cracked_c9",
     "mixed_c9",
     "trimethylbenzene",
-    "raffinate_c5",
+    "feedstock_a",
 })
 
 
@@ -2640,7 +2640,7 @@ def compute_forecast_trust_tier(
     """Compute a user-facing trust tier for a product's forecast.
 
     Args:
-        product_id: The dashboard product_id (e.g. "c5_resin", "cracked_c9").
+        product_id: The dashboard product_id (e.g. "product_a", "cracked_c9").
         below_naive: Whether the model's MAPE exceeds a naive last-price-hold
             baseline on this run. If None, treated as False.
         cadence_class: One of "daily", "weekly", "sparse", "unknown".
@@ -2664,7 +2664,7 @@ def compute_forecast_trust_tier(
     if cadence_class is None:
         cadence_class = "unknown"
 
-    # ── Tier logic (mirrors EDIA forecast_supervisor.py:211-268) ──
+    # ── Tier logic (mirrors Acme forecast_supervisor.py:211-268) ──
 
     if cadence_class in ("sparse", "unsupported", "unknown"):
         tier = "low"
@@ -2757,7 +2757,7 @@ def classify_cadence(product_id: str, row_count: int | None) -> str:
     the default for everything else.
 
     A proper cadence classifier (analyzing date gaps in the history) can
-    replace this later — see EDIA's get_cadence_info().
+    replace this later — see Acme's get_cadence_info().
     """
     if row_count is not None and row_count < 50:
         return "sparse"
@@ -2807,12 +2807,12 @@ cd /home/ysk2025/zhanlu_7_30
 git add backend/app/services/forecasting/forecast_trust_tier.py \
         backend/tests/test_forecast_trust_tier.py \
         backend/app/services/forecasting/engine.py
-git commit -m "feat(forecast): port EDIA trust tiers + wire into engine explanation
+git commit -m "feat(forecast): port Acme trust tiers + wire into engine explanation
 
 Four user-facing trust tiers (high/medium/directional/low) with bilingual
 labels and badge colors. Ports _HIGH_SKILL_PRODUCTS and _WEEKLY_CADENCE_PRODUCTS
-frozensets from EDIA. Includes a simple cadence classifier (static map +
-row-count threshold) as a starting point. Source: EDIA_5.1.2 forecast_supervisor.py:150-283"
+frozensets from Acme. Includes a simple cadence classifier (static map +
+row-count threshold) as a starting point. Source: Acme_5.1.2 forecast_supervisor.py:150-283"
 ```
 
 ---
@@ -2856,7 +2856,7 @@ class ForecastOverlayMeta(BaseModel):
 
 - [ ] **Step 2: Populate `trust_tier` in `get_forecast_base_batch_v2`**
 
-In `backend/app/services/market_dashboard_service.py`, in the md_t_lz_price branch of `get_forecast_base_batch_v2` (around lines 1010-1040, where `intel_meta` and `policy_meta` are built), add trust-tier extraction:
+In `backend/app/services/market_dashboard_service.py`, in the md_market_price branch of `get_forecast_base_batch_v2` (around lines 1010-1040, where `intel_meta` and `policy_meta` are built), add trust-tier extraction:
 
 ```python
                 # Phase B: trust tier
@@ -2893,7 +2893,7 @@ TOKEN=$(curl -s -X POST "http://localhost:8000/api/apps/default-app/auth/login" 
   -H "Content-Type: application/json" \
   -d '{"email":"admin@zhanlu.dev","password":"admin123"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
 
-curl -s "http://localhost:8000/api/market-dashboard/forecast-base-batch?product_ids=isoprene&product_ids=c5_resin&day=7" \
+curl -s "http://localhost:8000/api/market-dashboard/forecast-base-batch?product_ids=product_d&product_ids=product_a&day=7" \
   -H "Authorization: Bearer $TOKEN" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
@@ -2988,16 +2988,16 @@ Run: `cd /home/ysk2025/zhanlu_7_30 && docker compose restart backend`
 
 - [ ] **Step 3: Trigger a forecast recompute**
 
-Run a forecast for a product with seasonal rules (e.g. `c5_resin` in any month, or `dcpd`):
+Run a forecast for a product with seasonal rules (e.g. `product_a` in any month, or `product_b`):
 ```bash
 TOKEN=$(curl -s -X POST "http://localhost:8000/api/apps/default-app/auth/login" \
   -H "Content-Type: application/json" \
   -d '{"email":"admin@zhanlu.dev","password":"admin123"}' | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))")
 
-curl -s -X POST "http://localhost:8000/api/apps/default-app/agents/ecisco_bi_assistant/tools/forecast_run" \
+curl -s -X POST "http://localhost:8000/api/apps/default-app/agents/acme_bi_assistant/tools/forecast_run" \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"target_id": "<c5_resin_target_id>", "horizons": [7]}'
+  -d '{"target_id": "<product_a_target_id>", "horizons": [7]}'
 ```
 
 - [ ] **Step 4: Verify domain signals in the run explanation**
@@ -3006,11 +3006,11 @@ curl -s -X POST "http://localhost:8000/api/apps/default-app/agents/ecisco_bi_ass
 docker compose exec postgres psql -U zhanlu -d zhanlu -c "
   SELECT jsonb_pretty((results->'7d'->'explanation'->'domain_signals')::jsonb)
   FROM forecast_runs
-  WHERE target_id = '<c5_resin_target_id>'
+  WHERE target_id = '<product_a_target_id>'
   ORDER BY created_date DESC LIMIT 1;
 "
 ```
-Expected: Shows `{"seasonal_pct": 1.0, "causal_pct": <n>, "total_pct": <n>, "applied_rules": ["seasonal:c5_resin:8", ...]}`.
+Expected: Shows `{"seasonal_pct": 1.0, "causal_pct": <n>, "total_pct": <n>, "applied_rules": ["seasonal:product_a:8", ...]}`.
 
 - [ ] **Step 5: Run all Phase B tests**
 
@@ -3024,7 +3024,7 @@ Expected: All tests pass.
 
 Run:
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_edia_source.py tests/test_edia_source_groupby.py tests/test_seed_ecisco_targets.py tests/test_seed_sku_targets.py tests/test_forecast_batch_sku.py tests/test_forecast_engine.py -v
+cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_edia_source.py tests/test_edia_source_groupby.py tests/test_seed_acme_targets.py tests/test_seed_sku_targets.py tests/test_forecast_batch_sku.py tests/test_forecast_engine.py -v
 ```
 Expected: All tests pass.
 
@@ -3034,11 +3034,11 @@ Expected: All tests pass.
 
 ### Spec Coverage
 
-| EDIA Source | Task(s) | Status |
+| Acme Source | Task(s) | Status |
 |---|---|---|
-| `_RAW_ELASTICITIES` + `_ELASTICITIES` (naphtha → downstream, 3 tiers) | Task B1 | ✓ — Ported verbatim, 19 products |
-| `_SEASONAL_RULES` (product_id, month → additive %) | Task B1 | ✓ — Ported verbatim, covers c5_resin/dcpd/isoprene/cracked_c5/piperylene/sis |
-| Causal-chain propagation: naphtha % × elasticity | Task B1, B2 | ✓ — `compute_causal_chain_adjustment` + naphtha fetcher |
+| `_RAW_ELASTICITIES` + `_ELASTICITIES` (product_c → downstream, 3 tiers) | Task B1 | ✓ — Ported verbatim, 19 products |
+| `_SEASONAL_RULES` (product_id, month → additive %) | Task B1 | ✓ — Ported verbatim, covers product_a/product_b/product_d/cracked_c5/product_f/sis |
+| Causal-chain propagation: product_c % × elasticity | Task B1, B2 | ✓ — `compute_causal_chain_adjustment` + product_c fetcher |
 | Seasonal application: month lookup | Task B1, B2 | ✓ — `compute_seasonal_adjustment` + combined overlay |
 | Engine integration (Step 8.55) | Task B2 | ✓ — Slotted between 8.5 (intel) and 8.6 (policy), gated by flag |
 | `compute_forecast_trust_tier` (4 tiers, bilingual) | Task B3 | ✓ — Ported with `_HIGH_SKILL_PRODUCTS` + `_WEEKLY_CADENCE_PRODUCTS` |
@@ -3055,11 +3055,11 @@ Expected: All tests pass.
 
 - `compute_domain_signal_adjustment` — returns `{seasonal_pct, causal_pct, total_pct, applied_rules}`. Task B2 reads `total_pct` and `applied_rules` — keys match.
 - `compute_forecast_trust_tier` — returns `{tier, below_naive, cadence_class, mape, reason_zh, reason_en, badge_color, badge_label_zh, badge_label_en}`. Task B4's `TrustTierMeta` reads `tier`, `badge_color`, `badge_label_zh`, `badge_label_en`, `reason_zh`, `reason_en` — all match.
-- `fetch_naphtha_recent_pct_change` — returns `float | None`. Task B2 passes it as `naphtha_pct_change` to `compute_domain_signal_adjustment`, which accepts `float | None` — matches.
+- `fetch_product_c_recent_pct_change` — returns `float | None`. Task B2 passes it as `product_c_pct_change` to `compute_domain_signal_adjustment`, which accepts `float | None` — matches.
 - `classify_cadence` — returns `str`. Task B3 passes it as `cadence_class` to `compute_forecast_trust_tier`, which accepts `Optional[str]` — matches.
 
 ### Phase Independence
 
 - Phase B does **not** import or depend on any Phase A code (SKU seeder, `product_key` prefix logic, `SkuForecastMeta`).
-- Phase B's `product_id` extraction (`parts[1]` of `product_key`) works identically on family targets (`"ecisco.c5_resin"` → `"c5_resin"`) and SKU targets (`"ecisco.c5_resin.201000018"` → `"c5_resin"`).
+- Phase B's `product_id` extraction (`parts[1]` of `product_key`) works identically on family targets (`"acme.product_a"` → `"product_a"`) and SKU targets (`"acme.product_a.201000018"` → `"product_a"`).
 - Phase A and Phase B can be executed in either order or in parallel.

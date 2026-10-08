@@ -26,28 +26,28 @@ class TestChampionChallenger:
         """Tracker must record shadow forecasts without affecting champion."""
         tracker = ChampionChallengerTracker()
         shadow = ShadowForecastResult(
-            product_id="isoprene",
+            product_id="product_d",
             challenger_model="ets_tuned",
             forecast_value=12500.0,
             mase_estimate=0.85,
         )
         tracker.record_shadow(shadow)
         assert len(tracker.shadows) == 1
-        assert tracker.shadows[0].product_id == "isoprene"
+        assert tracker.shadows[0].product_id == "product_d"
 
     def test_promotion_requires_4_consecutive_weeks(self):
         """Promotion rule: >5% MASE improvement over 4 consecutive weeks."""
         tracker = ChampionChallengerTracker()
         # 3 weeks of improvement — not enough
         for week in range(3):
-            tracker.record_weekly_result("isoprene", challenger_mase=0.80, champion_mase=0.90)
-        assert not tracker.check_promotion("isoprene")
+            tracker.record_weekly_result("product_d", challenger_mase=0.80, champion_mase=0.90)
+        assert not tracker.check_promotion("product_d")
 
         # 4th week — now eligible
-        tracker.record_weekly_result("isoprene", challenger_mase=0.80, champion_mase=0.90)
-        rec = tracker.check_promotion("isoprene")
+        tracker.record_weekly_result("product_d", challenger_mase=0.80, champion_mase=0.90)
+        rec = tracker.check_promotion("product_d")
         assert rec is not None
-        assert rec["product_id"] == "isoprene"
+        assert rec["product_id"] == "product_d"
         assert rec["improvement_pct"] > 5.0
 
     def test_no_promotion_when_not_better(self):

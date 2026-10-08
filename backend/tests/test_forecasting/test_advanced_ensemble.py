@@ -38,25 +38,25 @@ def make_correlated_data(n: int = 200, seed: int = 42) -> dict[str, pd.Series]:
     base_season = 3 * np.sin(2 * np.pi * np.arange(n) / 7)
 
     products = {}
-    products["naphtha"] = pd.Series(
-        trend + base_season + rng.normal(0, 1.5, n), index=dr, name="naphtha",
+    products["product_c"] = pd.Series(
+        trend + base_season + rng.normal(0, 1.5, n), index=dr, name="product_c",
     )
-    # C5 correlated with naphtha (upstream)
+    # C5 correlated with product_c (upstream)
     products["C5"] = pd.Series(
-        0.9 * products["naphtha"].values + rng.normal(0, 1, n), index=dr, name="C5",
+        0.9 * products["product_c"].values + rng.normal(0, 1, n), index=dr, name="C5",
     )
-    # Isoprene correlated with C5
-    products["isoprene"] = pd.Series(
-        1.1 * products["C5"].values + rng.normal(0, 1, n), index=dr, name="isoprene",
+    # Product_D correlated with C5
+    products["product_d"] = pd.Series(
+        1.1 * products["C5"].values + rng.normal(0, 1, n), index=dr, name="product_d",
     )
-    # DCPD correlated with C5 and isoprene
-    products["DCPD"] = pd.Series(
-        0.7 * products["C5"].values + 0.2 * products["isoprene"].values + rng.normal(0, 1, n),
-        index=dr, name="DCPD",
+    # PRODUCT_B correlated with C5 and product_d
+    products["PRODUCT_B"] = pd.Series(
+        0.7 * products["C5"].values + 0.2 * products["product_d"].values + rng.normal(0, 1, n),
+        index=dr, name="PRODUCT_B",
     )
-    # C5_resin downstream
-    products["C5_resin"] = pd.Series(
-        1.2 * products["DCPD"].values + rng.normal(0, 2, n), index=dr, name="C5_resin",
+    # product_a downstream
+    products["product_a"] = pd.Series(
+        1.2 * products["PRODUCT_B"].values + rng.normal(0, 2, n), index=dr, name="product_a",
     )
     return products
 
@@ -222,10 +222,10 @@ class TestVARModel:
         from app.services.forecasting.models.var_model import VARModel
 
         # Only provide target, no correlated products
-        y = correlated["naphtha"]
+        y = correlated["product_c"]
         m = VARModel(
-            product_key="naphtha",
-            correlated_data={"naphtha": correlated["naphtha"]},  # only one
+            product_key="product_c",
+            correlated_data={"product_c": correlated["product_c"]},  # only one
             max_lags=3,
         )
         m.fit(y)
@@ -256,9 +256,9 @@ class TestVARModel:
         from app.services.forecasting.models.var_model import _CORRELATED_GROUPS
 
         assert "C5" in _CORRELATED_GROUPS
-        assert "naphtha" in _CORRELATED_GROUPS["C5"]
-        assert "isoprene" in _CORRELATED_GROUPS["C5"]
-        assert "DCPD" in _CORRELATED_GROUPS["C5"]
+        assert "product_c" in _CORRELATED_GROUPS["C5"]
+        assert "product_d" in _CORRELATED_GROUPS["C5"]
+        assert "PRODUCT_B" in _CORRELATED_GROUPS["C5"]
 
 
 # ================================================================

@@ -137,7 +137,7 @@ class TestComputeFromAccuracyLog:
 
         metrics = ForecastPolicyService.compute_from_accuracy_log(
             mock_db,
-            product_key="ecisco.nonexistent",
+            product_key="acme.nonexistent",
             org_id="default-org",
         )
         assert metrics.bias_pct == 0.0
@@ -163,7 +163,7 @@ class TestComputeFromAccuracyLog:
 
         metrics = ForecastPolicyService.compute_from_accuracy_log(
             mock_db,
-            product_key="ecisco.isoprene",
+            product_key="acme.product_d",
             org_id="default-org",
         )
         assert metrics.bias_pct == 0.0
@@ -196,7 +196,7 @@ class TestComputeFromAccuracyLog:
 
         metrics = ForecastPolicyService.compute_from_accuracy_log(
             mock_db,
-            product_key="ecisco.isoprene",
+            product_key="acme.product_d",
             org_id="default-org",
         )
         # Non-zero bias: mean(0.03, 0.02, 0.01) = 0.02, bias = -0.02 * 0.35 * 100 = -0.7

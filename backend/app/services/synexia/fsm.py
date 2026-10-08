@@ -1093,6 +1093,18 @@ class SynexiaFSM:
         )
         _answered_from_attachment = bool(_nothing_ran and attachments_block)
 
+        # A plan with ZERO nodes is a deliberate no-tool turn (the default
+        # plan no longer fabricates a "Process request" placeholder tool
+        # node — that node dispatched as a nonexistent tool, failed with
+        # "Unknown tool: Process request", and FINALIZE narrated the failure
+        # as "no data source is connected"). Distinguish it from a turn
+        # whose nodes failed to run: zero NODES (not just zero
+        # observations) means nothing was ever scheduled.
+        _plan_nodes = getattr(self, "plan", None) and getattr(self.plan, "nodes", None)
+        _no_tool_turn = bool(
+            _nothing_ran and not _answered_from_attachment and not _plan_nodes
+        )
+
         # Feeding "No actions taken." under a "Findings (from executed actions)"
         # heading — immediately after "if there were errors, explain what went
         # wrong" — reads to the model as a FAILED execution, and it duly invents
@@ -1110,16 +1122,33 @@ class SynexiaFSM:
             findings_text = grounding
 
         error_clause = (
-            "" if _answered_from_attachment
+            "" if (_answered_from_attachment or _no_tool_turn)
             else " If there were errors, explain what went wrong."
         )
 
+        no_actions_note = ""
         if _answered_from_attachment:
             no_actions_note = (
                 "\n\nEverything you need is in the user attachments above. "
                 "Answer straight from that text. Do NOT mention tools, tool "
                 "calls, failed attempts, or any execution narrative — the user "
                 "asked about their file, not about how it was read.\n"
+            )
+        elif _no_tool_turn:
+            # Zero-node plan → deliberate direct answer. Without this note the
+            # "No actions taken." findings block plus the "explain what went
+            # wrong" clause read as a FAILED execution, and the model invented
+            # one ("Unknown tool: Process request", "no data source is
+            # connected") — verified live 2026-10-08.
+            no_actions_note = (
+                "\n\nNo tools or data queries were scheduled for this turn — "
+                "the plan contains zero tool nodes by design, so 'No actions "
+                "taken.' is NOT a failure. Answer the user directly from the "
+                "request, the conversation history, and your own knowledge. "
+                "Do NOT invent tool calls, failed attempts, or execution "
+                "narratives, and do NOT claim a data source is disconnected "
+                "or unavailable unless the conversation history above shows "
+                "an explicit, real failure.\n"
             )
 
         return f"""You are {request.agent_name}, an AI assistant. Based on the user's request and the material provided, provide a helpful response.

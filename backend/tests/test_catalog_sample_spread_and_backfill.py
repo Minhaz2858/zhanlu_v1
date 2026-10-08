@@ -3,7 +3,7 @@
 Each section pins a defect that was observed on real data, not a hypothetical:
 
 A. **The sample was one arbitrary page.** ``LIMIT 200`` on the 14,589-row
-   ``erp_v_sale_orderentry`` returned 2018-06-01…2018-09-25 of a PLANDATE range
+   ``v_sale_order`` returned 2018-06-01…2018-09-25 of a PLANDATE range
    that actually runs to 2026-09-19, so everything the customer sold after that
    first page was invisible to the vocabulary the selector and the embedder
    read.  The sample is now a HEAD + TAIL page, de-duplicated.
@@ -15,7 +15,7 @@ C. **Nothing backfilled.** A catalog indexed before the statistics era renders
    nothing extra until it is re-collected, and there was no path that did that
    without a human running a script.
 D. **The compact selector line had no vocabulary.** Two ERP objects are
-   routinely named alike (``erp_t_sale_orderentry`` / ``erp_v_sale_orderentry``);
+   routinely named alike (``erp_t_sale_orderentry`` / ``v_sale_order``);
    only the values that occur in them separate them.
 """
 
@@ -275,7 +275,7 @@ def _kb(db, *, db_type="mysql", **kw) -> KnowledgeBase:
 def _table_with(db, kb, *, stats: dict | None, row_count: int = 14589) -> KBTableMeta:
     meta = KBTableMeta(
         id=str(uuid.uuid4()), kb_id=kb.id, schema_name="",
-        table_name="erp_v_sale_orderentry", table_type="VIEW",
+        table_name="v_sale_order", table_type="VIEW",
         row_count=row_count,
     )
     db.add(meta)
@@ -348,10 +348,10 @@ def test_the_backfill_is_a_no_op_when_the_catalog_feature_is_off(db, monkeypatch
 
 def test_the_compact_selector_line_carries_a_tighter_vocabulary_hint():
     row = {
-        "table_name": "erp_v_sale_orderentry", "description": "销售订单明细",
+        "table_name": "v_sale_order", "description": "销售订单明细",
         "row_count": 14589, "table_role": "fact",
         "sample_values": {
-            "material_name": ["混三甲苯", "碳五石油树脂", "双环戊二烯", "异戊二烯"],
+            "material_name": ["混三甲苯", "碳五石油树脂", "双环戊二烯", "电子元件"],
             "region": ["华东", "华南", "华北", "华中"],
         },
     }

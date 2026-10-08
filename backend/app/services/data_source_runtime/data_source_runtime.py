@@ -1292,14 +1292,14 @@ def _resolve_project_from_message(
 
     The global chat (``general_assistant`` with no project selected) has zero
     bound data, but the user may explicitly name a project in the message
-    (\"make a c5 c9 market view ppt\" → C5_C9).  When that happens we scope
+    (\"make a c5 c9 market view ppt\" → SAMPLE).  When that happens we scope
     the agent to THAT project's data sources instead of leaving it with
     nothing — same anti-leakage wall, but the user's explicit mention is the
     selection.
 
     Matching is deterministic and conservative:
       * normalize both sides (lowercase, strip non-alphanumeric) so
-        \"C5_C9\" / \"c5 c9\" / \"c5-c9\" all match project \"C5_C9\";
+        \"SAMPLE\" / \"c5 c9\" / \"c5-c9\" all match project \"SAMPLE\";
       * exact normalized match required — never prefix/partial fuzzy;
       * the literal \"global\" is never a binding.
     Returns (project_id, project_name) or (None, None).
@@ -1377,7 +1377,7 @@ def prepare_data_source_runtime(
     # selected project's KBs (REPLACE, never union). Mirrors the
     # message-resolution branch below; keeps cross-project leakage
     # impossible in project chats (observed: general_assistant carrying a
-    # company-warehouse KB owned by project C5_C9 answered a Data
+    # company-warehouse KB owned by project SAMPLE answered a Data
     # Analysis chat whose only bound data was a project PDF). Every other
     # agent keeps its own explicit bindings and UNIONS the selected
     # project's KBs.
@@ -1412,7 +1412,7 @@ def prepare_data_source_runtime(
     # This prevents cross-project data leakage in ungrouped chats even if
     # stale knowledge_bases or workspace auto-bind settings are present in
     # the database.  When the user explicitly names a project in the message
-    # (e.g. \"make a c5 c9 market view ppt\" → C5_C9), we scope the agent to
+    # (e.g. \"make a c5 c9 market view ppt\" → SAMPLE), we scope the agent to
     # THAT project's data sources — the explicit mention IS the selection,
     # and the resolved project's KBs REPLACE any stale own/auto-bindings
     # (cross-project leakage must stay impossible).
@@ -1523,7 +1523,7 @@ def prepare_data_source_runtime(
     # (should_force_create_dashboard / goal-contract force / narration
     # nudge) is inert when the tool is absent, so the turn ended with a
     # "readiness assessment" report instead of a live dashboard (observed
-    # conv 3e7fa92b, C5_C9 project, 2026-08-27).
+    # conv 3e7fa92b, SAMPLE project, 2026-08-27).
     #
     # Fix: inject the full dashboard pipeline idempotently alongside the
     # data tools when the full-stack pipeline is flag-enabled. Any agent

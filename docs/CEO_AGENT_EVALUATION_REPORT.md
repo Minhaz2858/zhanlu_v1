@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-06  
 **Evaluator:** AI CEO Simulator (Automated Playwright + API Testing)  
-**System:** Zhanlu 7.30 — Ecisco AI Platform  
+**System:** Zhanlu 7.30 — Acme AI Platform  
 **Methodology:** Hybrid (Playwright UI Automation + Backend API Analysis + Codebase Review)  
 **Questions Designed:** 57 across 8 categories  
 **Test Duration:** ~45 minutes  
@@ -79,7 +79,7 @@ The Zhanlu AI Agent platform demonstrates **strong foundational capabilities** i
 **Backend Evidence (from PostgreSQL error traces):**
 The agent DID generate responses for these queries. Evidence from DB transaction logs:
 ```json
-{"content": "Hi there! I'm Ecisco AI, a versatile AI assistant. 
+{"content": "Hi there! I'm Acme AI, a versatile AI assistant. 
 I can help you with data analysis, documents, automation, web tasks, 
 and more. What are you working on today?"}
 ```
@@ -159,7 +159,7 @@ and more. What are you working on today?"}
 
 **Backend Evidence:**
 ```
-Response: "Hi there! I'm Ecisco AI, a versatile AI assistant. 
+Response: "Hi there! I'm Acme AI, a versatile AI assistant. 
 I can help you with data analysis, documents, automation, 
 web tasks, and more. What are you working on today?"
 ```
@@ -207,7 +207,7 @@ User → Chat UI → /agents/conversations/v2|v3 → add_message()
 
 **Strengths:**
 - 7 system agents: `general_agent`, `intelligence_agent`, `rag_research_agent`, `forecast_agent`, `report_agent`, `analysis_agent`, `mcp_tools_agent`
-- Ecisco BI agent provides specialized domain tools (50 tools across 7 modules)
+- Acme BI agent provides specialized domain tools (50 tools across 7 modules)
 - Tool injection via `prepare_data_source_runtime()` for data-bound agents
 - `bound_kb_ids` mechanism ensures project-scoped data isolation
 
@@ -221,7 +221,7 @@ User → Chat UI → /agents/conversations/v2|v3 → add_message()
 | Tool Category | Count | Status |
 |--------------|-------|--------|
 | Universal Analytics | 6 | ✅ Production |
-| Ecisco BI (EDIA) | 50 | ✅ Production (7 modules) |
+| Acme BI (Acme) | 50 | ✅ Production (7 modules) |
 | Web Search | 1 | ✅ Production |
 | File Skills (DOCX/XLSX/PPTX/PDF) | 4 | ✅ Plugin-based |
 | Forecasting | 8 models | ✅ Production |
@@ -312,7 +312,7 @@ User → Chat UI → /agents/conversations/v2|v3 → add_message()
 ### 7.2 Response Samples (from backend traces)
 ```
 Q: "Hello, what can you do?"
-A: "Hi there! I'm Ecisco AI, a versatile AI assistant. 
+A: "Hi there! I'm Acme AI, a versatile AI assistant. 
     I can help you with data analysis, documents, automation, 
     web tasks, and more. What are you working on today?"
 

@@ -20,7 +20,7 @@ class TestWebSearchCitations:
             "name": "web_search",
             "result": {
                 "success": True,
-                "query": "crude oil price october",
+                "query": "product e price october",
                 "results": [
                     {"title": "Oil price today", "url": "https://example.com/oil", "description": "..."},
                     {"title": "Brent crude", "url": "https://example.com/brent", "description": "..."},
@@ -52,7 +52,7 @@ class TestWebSearchCitations:
             "tool_name": "web_search",
             "results": {
                 "success": True,
-                "query": "petrochemical market",
+                "query": "industrial market",
                 "results": [
                     {"title": "C5 resin demand", "url": "https://example.com/c5", "description": "s"},
                 ],

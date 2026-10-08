@@ -74,14 +74,14 @@ def _sample_payload() -> dict:
                 "text": "Total volume over the period: 1,234.56 tons",
                 "source_facet": "sales_summary",
                 "source_row_ids": ["Steel", "Aluminium"],
-                "source_sql": "SELECT SUM(qty) FROM erp_v_sale_orderentry",
+                "source_sql": "SELECT SUM(qty) FROM v_sale_order",
                 "verified": True,
             },
         ],
         "lineage": {
             "sales_summary": {
-                "source_sql": "SELECT SUM(qty) FROM erp_v_sale_orderentry",
-                "source_label": "erp_v_sale_orderentry",
+                "source_sql": "SELECT SUM(qty) FROM v_sale_order",
+                "source_label": "v_sale_order",
                 "row_count": 2,
                 "execution_log": [
                     {"step": "service_invoke", "latency_ms": 120, "status": "ok"},
@@ -148,9 +148,9 @@ def test_title_is_not_generic_executive_summary():
 def test_lineage_appendix_has_sql_and_execution_log():
     text = _render()
     assert "Data Lineage" in text
-    assert "SELECT SUM(qty) FROM erp_v_sale_orderentry" in text
+    assert "SELECT SUM(qty) FROM v_sale_order" in text
     assert "service_invoke" in text
-    assert "erp_v_sale_orderentry" in text
+    assert "v_sale_order" in text
 
 
 def test_missing_facet_rendered_as_unavailable():

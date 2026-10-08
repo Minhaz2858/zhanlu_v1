@@ -1,7 +1,7 @@
 """UI E2E — prove the DOCX report is DYNAMIC & QUESTION-DRIVEN (CEO view).
 
 Drives the REAL browser UI (system Chrome via Playwright) with a CEO-style
-question against the C5_C9 project datasource, then:
+question against the SAMPLE project datasource, then:
   1. waits for the agent to produce a .docx artifact (UI + backend API)
   2. downloads it via /download?format=docx&force=true (fixed render path)
   3. verifies the DOCX carries CEO framing driven by the QUESTION, not a
@@ -25,7 +25,7 @@ APP_ID  = "local-zhanlu-app"
 EMAIL   = "admin@zhanlu.dev"
 PASSWORD = "admin123"
 PROJECT_ID = "07d8d339-f287-4ead-b1e2-a5733a34a239"
-PROJECT_NAME = "C5_C9"
+PROJECT_NAME = "SAMPLE"
 PROJECT_URL = f"{BASE}/my-space/project/{PROJECT_ID}"
 OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                    "agent_qa")
@@ -35,7 +35,7 @@ REQUEST = (
     "请从CEO视角生成一份 2026年6月-7月 销售运营分析与决策建议报告。"
     "要求：1) 月度核心指标对比（6月 vs 7月，含环比MoM）；"
     "2) 产品线与客户结构分析；3) 给CEO的战略建议（管理层决策与战略建议）。"
-    "请使用本项目的实时数据源(aipdp_data_warehouse_prod)的真实数据，"
+    "请使用本项目的实时数据源(demo_warehouse_prod)的真实数据，"
     "并调用 create_artifact 生成 type='docx' 的正式报告文件。"
 )
 
@@ -265,7 +265,7 @@ def main():
 
         passed = sum(1 for a in report["assertions"] if a["pass"])
         total = len(report["assertions"])
-        lines = ["# UI E2E — Dynamic CEO Report (question-driven, C5_C9)",
+        lines = ["# UI E2E — Dynamic CEO Report (question-driven, SAMPLE)",
                  "",
                  f"- Project: `{PROJECT_ID}` ({PROJECT_NAME})",
                  f"- Conversation: `{conv_id}`",

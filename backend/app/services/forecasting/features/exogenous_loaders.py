@@ -12,7 +12,7 @@ Design rules:
 
 Phase F2: Added ``ErpTxLoader`` — reads ERP transaction prices from
 ``sale_erp_v_{product}_data`` tables. These go back to 2018 (vs ~88 days
-for ``md_t_lz_price``) and serve as exogenous features for XGBoost,
+for ``md_market_price``) and serve as exogenous features for XGBoost,
 NOT as forecast targets (transaction prices ≠ market quotations).
 """
 
@@ -49,7 +49,7 @@ def _resolve_mysql_engine() -> Engine | None:
 class FeedstockLoader:
     """Loads historical prices for feedstock products from the external MySQL.
 
-    In Phase 1, the loader reads `md_t_lz_price` via raw SQL (same path
+    In Phase 1, the loader reads `md_market_price` via raw SQL (same path
     as MysqlDataSource). For each feedstock key, it queries
     WHERE FMATERIAL_NAME LIKE '%{key}%' and returns the aggregated
     mean price per day.
@@ -83,7 +83,7 @@ class FeedstockLoader:
             try:
                 sql = text(
                     "SELECT FDATE AS ds, FTAXPRICE AS y "
-                    "FROM md_t_lz_price "
+                    "FROM md_market_price "
                     "WHERE FMATERIAL_NAME LIKE :pattern "
                     "AND FDATE >= :start AND FDATE <= :end "
                     "ORDER BY FDATE ASC"
@@ -154,7 +154,7 @@ class FxLoader:
             try:
                 from sqlalchemy import text
                 row = session.execute(
-                    text("SELECT y FROM md_t_lz_price WHERE product_id = 'usdcny' ORDER BY ds DESC LIMIT 1")
+                    text("SELECT y FROM md_market_price WHERE product_id = 'usdcny' ORDER BY ds DESC LIMIT 1")
                 ).first()
                 if row and row[0] and row[0] > 0:
                     rate = float(row[0])
@@ -257,7 +257,7 @@ class ErpTxLoader:
     """Loads ERP transaction prices from ``sale_erp_v_{product}_data``.
 
     ERP transactions (sales order actuals) differ from market quotations:
-      - Market quotation (md_t_lz_price): daily published price for the
+      - Market quotation (md_market_price): daily published price for the
         product across regions/suppliers.
       - ERP transaction: actual realized price on a sales order line item.
 
@@ -446,7 +446,7 @@ class ErpVolumeLoader:
 # ---------------------------------------------------------------------------
 
 class SupplierDispersionLoader:
-    """Load per-supplier price spread from md_t_lz_price (supplier-ladder signal).
+    """Load per-supplier price spread from md_market_price (supplier-ladder signal).
 
     Queries daily prices per supplier for a given product, then computes the
     max-min spread across suppliers each day. A widening spread signals market
@@ -454,7 +454,7 @@ class SupplierDispersionLoader:
 
     Schema::
 
-        md_t_lz_price(FDATE, FTAXPRICE, FMATERIAL_NAME)
+        md_market_price(FDATE, FTAXPRICE, FMATERIAL_NAME)
         FMATERIAL_NAME = "{product}-{supplier}"
 
     Returns a DataFrame with columns ``['date', 'spread', 'supplier_count']``
@@ -489,7 +489,7 @@ class SupplierDispersionLoader:
 
         sql = text(
             "SELECT FDATE, FTAXPRICE, FMATERIAL_NAME "
-            "FROM md_t_lz_price "
+            "FROM md_market_price "
             "WHERE FMATERIAL_NAME LIKE :pattern "
             "AND FDATE >= :cutoff "
             "ORDER BY FDATE ASC"

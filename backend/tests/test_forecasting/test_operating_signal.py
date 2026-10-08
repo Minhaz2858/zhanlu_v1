@@ -27,27 +27,27 @@ class TestComputeOperatingSignal:
 
     def test_empty_df_returns_insufficient(self):
         df = pd.DataFrame(columns=["date", "op_rate"])
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert isinstance(sig, OperatingSignal)
-        assert sig.product_id == "isoprene"
+        assert sig.product_id == "product_d"
         assert sig.has_sufficient_data is False
         assert sig.utilization_regime == "normal"
 
     def test_none_df_returns_insufficient(self):
-        sig = compute_operating_signal(None, product_id="isoprene")
+        sig = compute_operating_signal(None, product_id="product_d")
         assert sig.has_sufficient_data is False
 
     def test_insufficient_data_returns_normal(self):
         """len(df) < 8 → has_sufficient_data=False."""
         df = _make_op_rate_df([70.0] * 5)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert sig.has_sufficient_data is False
 
     def test_rolling_4wk_mean_correct(self):
         # Daily: last 28 days are all 80.0
         rates = [70.0] * 28 + [80.0] * 28
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert sig.has_sufficient_data is True
         assert sig.rolling_4wk_op_rate == pytest.approx(80.0, abs=0.01)
 
@@ -55,7 +55,7 @@ class TestComputeOperatingSignal:
         # Daily: 400 rows total, first 372 at 70%, last 28 at 77%
         rates = [70.0] * 372 + [77.0] * 28
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert sig.yoy_change_pct is not None
         # (77 - 70) / 70 * 100 ≈ 10.0%
         assert sig.yoy_change_pct == pytest.approx(10.0, abs=0.5)
@@ -63,19 +63,19 @@ class TestComputeOperatingSignal:
     def test_regime_tight_at_80(self):
         rates = [82.0] * 100
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert sig.utilization_regime == "tight"
 
     def test_regime_loose_below_55(self):
         rates = [50.0] * 100
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert sig.utilization_regime == "loose"
 
     def test_regime_normal_between(self):
         rates = [65.0] * 100
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert sig.utilization_regime == "normal"
 
     def test_divergence_op_flat_price_rising(self):
@@ -89,7 +89,7 @@ class TestComputeOperatingSignal:
             "price": prices,
         })
         sig = compute_operating_signal(
-            op_df, price_df=price_df, product_id="isoprene",
+            op_df, price_df=price_df, product_id="product_d",
         )
         # Op-rate change = 0%, price change = +100% → divergence = -100
         assert sig.op_rate_vs_price_divergence is not None
@@ -106,7 +106,7 @@ class TestComputeOperatingSignal:
             "price": prices,
         })
         sig = compute_operating_signal(
-            op_df, price_df=price_df, product_id="isoprene",
+            op_df, price_df=price_df, product_id="product_d",
         )
         # Op-rate change = +33.33%, price change = 0% → divergence = +33.33
         assert sig.op_rate_vs_price_divergence is not None
@@ -115,14 +115,14 @@ class TestComputeOperatingSignal:
     def test_no_price_df_no_divergence(self):
         rates = [75.0] * 100
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, price_df=None, product_id="isoprene")
+        sig = compute_operating_signal(df, price_df=None, product_id="product_d")
         assert sig.op_rate_vs_price_divergence is None
         assert sig.has_sufficient_data is True
 
     def test_returns_operating_signal_dataclass(self):
         rates = [75.0] * 100
         df = _make_op_rate_df(rates)
-        sig = compute_operating_signal(df, product_id="isoprene")
+        sig = compute_operating_signal(df, product_id="product_d")
         assert isinstance(sig, OperatingSignal)
         assert hasattr(sig, "rolling_4wk_op_rate")
         assert hasattr(sig, "yoy_change_pct")

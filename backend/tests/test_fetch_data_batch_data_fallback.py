@@ -91,14 +91,14 @@ def test_extract_top_level_rows_shape() -> None:
         "results": {
             "success": True,
             "rows": [{"product": "C5", "price": 5500}],
-            "source_name": "aipdp_data_warehouse_prod",
+            "source_name": "demo_warehouse_prod",
         },
     }
     extracted = _extract_data_rows_from_tool_call(tc)
     assert extracted is not None
     rows, src = extracted
     assert rows == [{"product": "C5", "price": 5500}]
-    assert src == "aipdp_data_warehouse_prod"
+    assert src == "demo_warehouse_prod"
 
 
 def test_extract_top_level_no_source_name_falls_back() -> None:
@@ -308,8 +308,8 @@ def test_data_rows_fallback_handles_top_level_rows_unchanged() -> None:
         "name": "ask_data_agent",
         "results": {
             "success": True,
-            "rows": [{"product": "Crude Oil", "price": 92.0}],
-            "source_name": "aipdp_data_warehouse_prod",
+            "rows": [{"product": "Product E", "price": 92.0}],
+            "source_name": "demo_warehouse_prod",
         },
     }
     out = _data_rows_fallback([tc])

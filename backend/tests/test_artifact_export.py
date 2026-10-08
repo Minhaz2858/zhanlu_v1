@@ -46,7 +46,7 @@ def _sample_payload():
     )
     return ReportCardPayload(
         title="Top materials by revenue",
-        source="erp_v_sale_orderentry · db_zhanlu_no1",
+        source="v_sale_order · db_zhanlu_no1",
         generated_at="2026-07-13T08:30:00Z",
         summary=(
             "Top 7 materials account for 76% of revenue; "
@@ -187,7 +187,7 @@ class TestPDFExport(unittest.TestCase):
         from app.services.artifacts.exporters import render, ExportContext
         data, _, _ = render(
             "pdf", _sample_payload(),
-            ExportContext(source="erp_v_sale_orderentry", sql="SELECT 1", conversation_id="c-1"),
+            ExportContext(source="v_sale_order", sql="SELECT 1", conversation_id="c-1"),
         )
         self.assertTrue(data.startswith(b"%PDF-"))
 

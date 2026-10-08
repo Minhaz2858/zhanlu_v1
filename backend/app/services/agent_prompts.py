@@ -196,10 +196,10 @@ def _build_default_skills_block() -> str:
             "and the Chinese market convention RED = up / GREEN = down. Use the default "
             "`style: \"standard\"` for Western/global audiences.\n"
             "PREMIUM STYLES (2026-08-29): `style: \"ceo\"` renders a dark petroleum executive decision center (near-black ink, amber/gold accent, KPI pulse cards, alert-strip insights) — use for CEO/executive dashboards; always include 1-3 `insights` {title, body} when style=ceo. `style: \"editorial\"` renders a light print report (warm paper, serif display + mono numerals, maroon accent) — use for polished sales/ops reports; always include 1-3 `insights` pull-quotes. Both work with ANY bound database — data comes from the bound datasource's real tables via read-only SQL.\n"
-"DECISION-CENTER INFO ARCHITECTURE (2026-08-29, HARD RULE for executive/CEO requests): a professional executive dashboard is an INFORMATION ARCHITECTURE, not a theme. When the user asks for a CEO / executive / decision / command-center dashboard (or a reference like the Ecisco CEO dashboard), use style=ceo and express the analysis through typed panels + multi-page tabs:\n"
+"DECISION-CENTER INFO ARCHITECTURE (2026-08-29, HARD RULE for executive/CEO requests): a professional executive dashboard is an INFORMATION ARCHITECTURE, not a theme. When the user asks for a CEO / executive / decision / command-center dashboard (or a reference like the Acme CEO dashboard), use style=ceo and express the analysis through typed panels + multi-page tabs:\n"
 "- `pages`: [{id, label}] — e.g. CEO 总览 / 周报行情 / 产品详情 / 竞争格局 / 财务表现.\n"
 "- `panels` (typed AI-analysis, narrate ONLY from data you actually queried — compute figures via execute_query / profile_data / metric deltas, NEVER invent):\n"
-"  • alerts — severity rail (crit|warn|opp|info); EVERY alert body = data → why it matters → recommended action; add cta + time. \"异戊二烯报价超市场 3.1% — 正在流失现货询盘\" with body explaining cost baseline shift, competitor prices, and the exact suggested price, cta \"批准调价 →\", time \"2 h前\".\n"
+"  • alerts — severity rail (crit|warn|opp|info); EVERY alert body = data → why it matters → recommended action; add cta + time. \"电子元件报价超市场 3.1% — 正在流失现货询盘\" with body explaining cost baseline shift, competitor prices, and the exact suggested price, cta \"批准调价 →\", time \"2 h前\".\n"
 "  • decisions — approval cards with tag, product+action, reasoning, quantified P&L impact badge (pnl: \"维持现价损失风险：−¥8,000/周\"), buttons [批准, 调整, 延期].\n"
 "  • chain — cost/value cascade (布伦特 → 石脑油 → C5成本 → IP成本) with per-node value, delta, delta_tone, and P&L note.\n"
 "  • narrative — long-form AI 综合研判 block (market context + trend reading + action).\n"
@@ -731,7 +731,7 @@ authoring:
      size & growth, price levels/trends, key players & market structure,
      recent news / policy / capacity changes. Search in BOTH English and
      Chinese when the topic is China-relevant (e.g. "C5 C9 petroleum
-     resin market size 2026" AND "裂解碳五 石油树脂 市场 价格 2026").
+     resin market size 2026" AND "裂解原料A 石油树脂 市场 价格 2026").
   2. EXTRACT — for the 2-3 most authoritative results (industry reports,
      exchanges, news agencies, 生意社/百川盈孚-class price trackers),
      call ``web_extract`` to pull CONCRETE figures (market size, growth
@@ -1588,7 +1588,7 @@ user-facing message.
 
 Use [[CLARIFY]] blocks for clickable options. Example:
 [[CLARIFY]]
-{"prompt": "Which data source contains the ERP sales data?", "options": [{"label": "test3 (MySQL)", "desc": "test3"}, {"label": "aipdp_data_warehouse_prod (MySQL)", "desc": "aipdp_data_warehouse_prod"}]}
+{"prompt": "Which data source contains the ERP sales data?", "options": [{"label": "test3 (MySQL)", "desc": "test3"}, {"label": "demo_warehouse_prod (MySQL)", "desc": "demo_warehouse_prod"}]}
 [[END]]"""
 
 

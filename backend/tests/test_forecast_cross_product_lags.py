@@ -35,8 +35,8 @@ class TestCrossProductLagFeatures:
     def test_disabled_returns_no_upstream_cols(self):
         """When disabled, no upstream_* columns should appear."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["naphtha"])
-        upstream = {"naphtha": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
+        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        upstream = {"product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
 
         result = build_features(
             "c5_cracked", y, spec,
@@ -51,8 +51,8 @@ class TestCrossProductLagFeatures:
     def test_enabled_adds_upstream_lag_cols(self):
         """When enabled, upstream_{key}_lag1/2/3 columns should appear."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["naphtha"])
-        upstream = {"naphtha": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
+        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        upstream = {"product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
 
         result = build_features(
             "c5_cracked", y, spec,
@@ -62,16 +62,16 @@ class TestCrossProductLagFeatures:
             cross_product_lags_enabled=True,
         )
         assert result.X_train is not None
-        assert "upstream_naphtha_lag1" in result.feature_names
-        assert "upstream_naphtha_lag2" in result.feature_names
-        assert "upstream_naphtha_lag3" in result.feature_names
+        assert "upstream_product_c_lag1" in result.feature_names
+        assert "upstream_product_c_lag2" in result.feature_names
+        assert "upstream_product_c_lag3" in result.feature_names
 
     def test_multiple_upstream_products(self):
         """Multiple upstream products should each get lag columns."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["naphtha"])
+        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
         upstream = {
-            "naphtha": pd.Series(np.random.uniform(80, 120, 30), index=y.index),
+            "product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index),
             "brent": pd.Series(np.random.uniform(60, 90, 30), index=y.index),
         }
 
@@ -82,16 +82,16 @@ class TestCrossProductLagFeatures:
             upstream_series_map=upstream,
             cross_product_lags_enabled=True,
         )
-        assert "upstream_naphtha_lag1" in result.feature_names
+        assert "upstream_product_c_lag1" in result.feature_names
         assert "upstream_brent_lag1" in result.feature_names
 
     def test_lag_values_are_shifted(self):
         """Lag values should be from previous days, not current day."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["naphtha"])
+        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
         # Create upstream series with known values
         upstream_vals = list(range(30))
-        upstream = {"naphtha": pd.Series(upstream_vals, index=y.index)}
+        upstream = {"product_c": pd.Series(upstream_vals, index=y.index)}
 
         result = build_features(
             "c5_cracked", y, spec,
@@ -102,16 +102,16 @@ class TestCrossProductLagFeatures:
         )
         # For date 2024-01-05 (index 4), lag1 should be value from 2024-01-04 (index 3)
         date_5 = y.index[4]
-        lag1_val = result.X_train.loc[date_5, "upstream_naphtha_lag1"]
+        lag1_val = result.X_train.loc[date_5, "upstream_product_c_lag1"]
         assert lag1_val == 3.0  # upstream_vals[3]
 
     def test_future_rows_have_upstream_cols(self):
         """Future X_future should also have upstream lag columns."""
         y = _make_series(30)
-        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["naphtha"])
-        upstream = {"naphtha": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
+        spec = FeatureSpec(product_key="c5_cracked", feedstock_keys=["product_c"])
+        upstream = {"product_c": pd.Series(np.random.uniform(80, 120, 30), index=y.index)}
         # Need cascade_forecasts for X_future to be built
-        cascade = {"naphtha": [100.0] * 7}
+        cascade = {"product_c": [100.0] * 7}
 
         result = build_features(
             "c5_cracked", y, spec,
@@ -122,4 +122,4 @@ class TestCrossProductLagFeatures:
             cross_product_lags_enabled=True,
         )
         assert result.X_future is not None
-        assert "upstream_naphtha_lag1" in result.X_future.columns
+        assert "upstream_product_c_lag1" in result.X_future.columns

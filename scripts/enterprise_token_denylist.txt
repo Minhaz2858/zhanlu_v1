@@ -11,6 +11,7 @@ edia_mysql
 aipdp
 # Vertical products & tables
 c5c9
+C5C9
 c5_c9
 C5_RESIN
 raffinate
@@ -18,6 +19,12 @@ md_t_lz_price
 lz_v_
 petrochemical
 erp_v_sale_orderentry
+# Petrochemical product codes used as example fixtures across forecasting
+DCPD
+dcpd
+naphtha
+isoprene
+crude_oil
 # CJK product/company terms
 惠州
 伊斯科

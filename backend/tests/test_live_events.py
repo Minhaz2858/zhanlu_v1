@@ -155,7 +155,7 @@ class TestContentInvariant:
     def test_erp_table_names_replaced(self):
         out = agents._sanitize_live_event_params({"label": "erp_t_sal_outstock"})
         assert out["label"] == agents._LIVE_EVENT_SAFE_FALLBACK
-        out2 = agents._sanitize_live_event_params({"label": "erp_v_sale_orderentry"})
+        out2 = agents._sanitize_live_event_params({"label": "v_sale_order"})
         assert out2["label"] == agents._LIVE_EVENT_SAFE_FALLBACK
 
     def test_erp_column_ids_replaced(self):

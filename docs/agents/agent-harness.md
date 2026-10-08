@@ -126,7 +126,7 @@ initial_prompt) whose body is the system prompt. Loaded into
 `explore`, `plan`, `worker`, `verification`, `data_agent`,
 `forecast_agent`, `report_agent`, `orchestrator_agent`,
 `perception_agent`, `rag_research_agent`, `diagnosis_agent`,
-`pricing_agent`, `intelligence_agent`, `ecisco_bi_assistant`.
+`pricing_agent`, `intelligence_agent`, `acme_bi_assistant`.
 
 These are invoked **through delegation tools**, never as top-level chat
 agents. `data_agent` is explicitly code-only (see
@@ -337,7 +337,7 @@ model routing (`model_router.py`); responses may be cached
 | **Knowledge bases / RAG** | `knowledge_bases` ids → `data_bindings`; data questions forced to `ask_data_agent` (NL2SQL: `describe_schema`, `execute_query`, `answer_from_database`); hybrid retrieval in `retrieval_hybrid.py` |
 | **Artifacts** | `create_artifact` tool + `◤…◤` markers + server-side fallback (`generation_orchestrator.py`); exporters for docx/pptx/pdf/html; governed by `output_contract.allowed_artifact_types` |
 | **Automations** | Hidden `role="automation_runtime"` agent per tenant executes scheduled runs (`automation_executor.py`, `automation_dispatcher.py`); `create_automation`/`update_automation` CRUD tools; live execution SSE in `automation_api.py` |
-| **Ecisco BI (EDIA port)** | 12 `ask_*` delegation tools (`tool_handlers/edia_delegation_tools.py`) gated by `ECISCO_BI_AGENT_ENABLED`; per-module flags (`PRICING_ENABLED`, `KNOWLEDGE_GRAPH_ENABLED`, …) in `app/config.py`; pipeline agents in `BUILTIN_AGENTS` |
+| **Acme BI (Acme port)** | 12 `ask_*` delegation tools (`tool_handlers/edia_delegation_tools.py`) gated by `BI_AGENT_ENABLED`; per-module flags (`PRICING_ENABLED`, `KNOWLEDGE_GRAPH_ENABLED`, …) in `app/config.py`; pipeline agents in `BUILTIN_AGENTS` |
 | **Forecasting** | `forecast_discover/run/get/accuracy/rules/report/ppt` tool family + `forecast_agent` builtin |
 | **Memory** | `memory` tool; `AgentMemory` scoped by `memory_scope`; background consolidation |
 | **Skills** | `skills` ≠ tools: skills are name-referenced markdown bodies (progressive disclosure), resolved to tools via `resolve_tools_from_skills()` / `SKILL_DISPLAY_TO_TOOL`; lifecycle via `skill_agent`, Agent Studio (`agent_studio/`), `skill_factory.py` |
@@ -420,7 +420,7 @@ What the harness derives (`_autofill_missing_fields` +
 - Loop bounded by `max_call_count=50` conversation budget and the
   per-tool hard cap.
 
-### 6.3 Builtin pipeline agent: `forecast_agent` (EDIA)
+### 6.3 Builtin pipeline agent: `forecast_agent` (Acme)
 
 From `BUILTIN_AGENTS` (code-only, no DB row), invoked via:
 
@@ -460,9 +460,9 @@ execution SSE stream in `automation_api.py`.
 | Chat runtime (v2 + v3 SSE) | `app/routers/agents.py` |
 | Turn-action router | `app/services/turn_action.py` |
 | Tool registry | `app/services/tool_registry.py` |
-| EDIA delegation | `app/services/tool_handlers/edia_delegation_tools.py` |
+| Acme delegation | `app/services/tool_handlers/edia_delegation_tools.py` |
 | Sub-agent reliability | `app/services/sub_agent_reliability.py` |
 | Artifact orchestration | `app/services/generation_orchestrator.py` |
 | Memory | `app/services/memory_manager.py`, `memory_advanced.py` |
 | LLM access | `app/services/llm_service.py` |
-| Feature flags | `app/config.py` (`ECISCO_BI_AGENT_ENABLED`, …) |
+| Feature flags | `app/config.py` (`BI_AGENT_ENABLED`, …) |

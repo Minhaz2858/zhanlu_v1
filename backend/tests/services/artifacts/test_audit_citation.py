@@ -53,13 +53,13 @@ def _slide_text(slide) -> str:
 
 
 def test_layout_engine_emits_source_footer_on_content_slides():
-    data = _render_pptx({"source_label": "erp_v_sale_orderentry"})
+    data = _render_pptx({"source_label": "v_sale_order"})
     prs = Presentation(BytesIO(data))
     slides = list(prs.slides)
     assert len(slides) == 2
     # Cover slide carries no footer; the content slide does.
     assert "Source:" not in _slide_text(slides[0])
-    assert "Source: erp_v_sale_orderentry" in _slide_text(slides[1])
+    assert "Source: v_sale_order" in _slide_text(slides[1])
 
 
 def test_footer_runs_meet_10pt_caption_floor():
@@ -68,7 +68,7 @@ def test_footer_runs_meet_10pt_caption_floor():
     Regression: FOOTER_PT was 9pt, below the audit's CAPTION_FLOOR_PT (10pt),
     so every rendered deck FAILed the font_floor rule.
     """
-    data = _render_pptx({"source_label": "erp_v_sale_orderentry"})
+    data = _render_pptx({"source_label": "v_sale_order"})
     prs = Presentation(BytesIO(data))
     sizes: list[float] = []
     for slide in prs.slides:
@@ -89,7 +89,7 @@ def test_footer_runs_meet_10pt_caption_floor():
 
 
 def test_audit_passes_when_source_footer_present(tmp_path):
-    data = _render_pptx({"source_label": "erp_v_sale_orderentry"})
+    data = _render_pptx({"source_label": "v_sale_order"})
     path = tmp_path / "with_source.pptx"
     path.write_bytes(data)
     report = audit(str(path))

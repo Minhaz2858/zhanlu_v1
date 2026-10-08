@@ -17,7 +17,7 @@ from app.services.forecasting.engine import ForecastEngine
 
 db = next(get_db())
 
-TARGETS = ["ecisco.dcpd"]
+TARGETS = ["acme.product_b"]
 passed = 0
 
 for product_key in TARGETS:

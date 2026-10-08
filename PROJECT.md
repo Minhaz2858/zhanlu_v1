@@ -38,7 +38,7 @@ Zhanlu is an **enterprise AI operating system** — an industry-agnostic platfor
 with a main AI agent (the **Synexia** cognitive core) that plans, delegates to sub-agents, queries
 connected databases through a governed datasource gateway, runs sandboxed code, and produces
 **artifacts** (PPT/DOCX/XLSX/PDF/HTML dashboards, mini-apps) previewed inline in chat. Chinese
-chemical/BI-industry-first in practice (Ecisco), generic in design. The September 2026 push adds an
+chemical/BI-industry-first in practice (Acme), generic in design. The September 2026 push adds an
 **n8n-parity visual workflow builder** (canvas, merge/code/db_query nodes, Build-with-AI).
 
 ## 2. Product Rules (non-negotiable, from docs/00_FINAL_READ_ME_FOR_CODING_AGENT.md)
@@ -160,7 +160,7 @@ Layer-3 harness JSON auto-derived) and code-backed `AgentDefinition`/`BUILTIN_AG
 - Integrations (implemented, OFF): `SSO_ENABLED=False`, `COMPUTER_USE_ENABLED=False` (+ URL allowlist),
   `A2A_ENABLED` absent → off; MCP marketplace flags; `DEEP_RESEARCH_ENABLED` config False / **.env True**
   (v1 loop) while `DEEP_RESEARCH_MODE_ENABLED=False` (harness-gated P3 variant).
-- EDIA domain gates mostly OFF: forecasting master False but ~30 `.env` overrides True
+- Acme domain gates mostly OFF: forecasting master False but ~30 `.env` overrides True
   (foundation models, stacking, champion/challenger); NL2SQL semantic catalog + schema linking True,
   shadow mode False; dashboards `FULLSTACK_DASHBOARD_ENABLED=False`.
 
@@ -234,7 +234,7 @@ This is the heart of the platform — everything a user-created agent inherits.
   - Code `AgentDefinition`/`BUILTIN_AGENTS` (.md + YAML frontmatter) — roster: explore, plan,
     worker, verification, data_agent, forecast_agent, report_agent, orchestrator_agent,
     perception_agent, rag_research_agent, diagnosis_agent, pricing_agent, intelligence_agent,
-    ecisco_bi_assistant. Seeded system meta-agents: agent_builder, skill_agent, automation_agent,
+    acme_bi_assistant. Seeded system meta-agents: agent_builder, skill_agent, automation_agent,
     general_assistant, power_user (system_agents.py); hidden `automation_runtime` executor per tenant.
 - **Agent Studio** (creating new agents): chat builder (AgentBuilder page, `agent_builder` system
   agent) + StepsAgentBuilder; AgentConfig editor with 5-layer form, topology tree, sub-agent nesting,
@@ -424,7 +424,7 @@ September 2026 push ("like n8n and much more better"), driven against n8n-master
 
 ## 14. Domain Subsystems
 
-- **Forecasting/BI (Ecisco):** ~60 flags; XGBoost/statsmodels/VAR/foundation models
+- **Forecasting/BI (Acme):** ~60 flags; XGBoost/statsmodels/VAR/foundation models
   (Chronos/Moirai); champion/challenger + shadow runs (migration 074); thresholds MAPE 8/15/25;
   nightly cron 2am; HITL/accuracy feedback; demand signal; ~20 forecasting tables.
 - **NL2SQL + semantic layer:** semantic catalog, schema linking/graph + validator + did-you-mean,

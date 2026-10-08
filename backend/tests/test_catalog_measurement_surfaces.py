@@ -206,16 +206,16 @@ def test_a_26_column_measured_table_keeps_its_measurement_at_the_default_budget(
 
 def test_the_selector_line_carries_bounded_vocabulary():
     line = sl._toc_line({
-        "table_name": "erp_v_sale_orderentry", "description": "销售订单明细",
+        "table_name": "v_sale_order", "description": "销售订单明细",
         "row_count": 14589, "table_role": "fact",
         "sample_values": {
-            "material_name": ["混三甲苯", "碳五石油树脂", "双环戊二烯", "异戊二烯", "他"],
+            "material_name": ["混三甲苯", "碳五石油树脂", "双环戊二烯", "电子元件", "他"],
             "region": ["华东", "华南", "华北", "华中"],
             "status": ["paid", "pending"],
             "amount": ["1", "2"],
         },
     })
-    assert line.startswith("  erp_v_sale_orderentry"), "the name stays first"
+    assert line.startswith("  v_sale_order"), "the name stays first"
     assert "values " in line
     assert "混三甲苯" in line, "the customer's own words must reach the selector"
     # bounded: 3 columns, 4 values each, 60 chars for the whole hint
@@ -239,7 +239,7 @@ def test_the_compact_selector_line_carries_a_tighter_hint():
 
     It used to be: only the ranked-candidate lines carried a hint. But the
     "rest of the catalog" block is where two ERP objects named alike sit
-    (erp_t_sale_orderentry / erp_v_sale_orderentry), and the values that occur
+    (erp_t_sale_orderentry / v_sale_order), and the values that occur
     in them are the only thing that separates them, so the compact line gets a
     deliberately smaller hint instead of none.
     """
@@ -258,7 +258,7 @@ def test_the_compact_selector_line_carries_a_tighter_hint():
 
 def test_the_toc_carries_the_measured_vocabulary_from_the_catalog(db, monkeypatch):
     kb = _kb_row(db)
-    meta = _table_row(db, kb, table_name="erp_v_sale_orderentry")
+    meta = _table_row(db, kb, table_name="v_sale_order")
     meta.sample_values = {"material_name": ["混三甲苯", "碳五石油树脂"]}
     db.commit()
 

@@ -69,14 +69,14 @@ def _sample_payload() -> dict:
                 "text": "Total volume over the period: 1,234.56 tons",
                 "source_facet": "sales_summary",
                 "source_row_ids": ["Steel", "Aluminium"],
-                "source_sql": "SELECT SUM(qty) FROM erp_v_sale_orderentry",
+                "source_sql": "SELECT SUM(qty) FROM v_sale_order",
                 "verified": True,
             },
         ],
         "lineage": {
             "sales_summary": {
-                "source_sql": "SELECT SUM(qty) FROM erp_v_sale_orderentry",
-                "source_label": "erp_v_sale_orderentry",
+                "source_sql": "SELECT SUM(qty) FROM v_sale_order",
+                "source_label": "v_sale_order",
                 "row_count": 2,
                 "execution_log": [
                     {"step": "service_invoke", "latency_ms": 120, "status": "ok"},
@@ -118,7 +118,7 @@ def test_lineage_collapsed_details():
     out = render_enterprise_html(_sample_payload())
     assert "<details" in out
     assert "Data Lineage" in out
-    assert "SELECT SUM(qty) FROM erp_v_sale_orderentry" in out
+    assert "SELECT SUM(qty) FROM v_sale_order" in out
 
 
 def test_citation_anchor_links_to_details_entry():

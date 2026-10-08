@@ -31,10 +31,10 @@ def main():
     print("login keys:", list(login.keys()))
 
     # 2. create conversation — project_id is REQUIRED: datasource bindings
-    # are project-scoped (Ecisco BI project a3dc76e3-...), so without it
+    # are project-scoped (Acme BI project a3dc76e3-...), so without it
     # the data agent finds no bound sources.
     conv = post("/agents/conversations", {
-        "agent_name": "ecisco_bi_assistant",
+        "agent_name": "acme_bi_assistant",
         "title": "E2E contract perf check",
         "metadata": {"project_id": "a3dc76e3-6d04-4bcf-9c14-55d1a92a4d07"},
     }, token)

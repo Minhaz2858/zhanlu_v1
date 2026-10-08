@@ -81,14 +81,14 @@ class TestDegeneracyGate:
         assert "degenerate" in why
 
     def test_one_row_real_data_passes(self):
-        rows = [{"product": "isoprene", "volume": 123.45, "revenue": 6789.0}]
+        rows = [{"product": "product_d", "volume": 123.45, "revenue": 6789.0}]
         avail, why = _check_degeneracy(rows)
         assert avail is True
         assert why == ""
 
     def test_multi_row_real_data_passes(self):
         rows = [
-            {"product": "isoprene", "volume": 123.45},
+            {"product": "product_d", "volume": 123.45},
             {"product": "piperylene", "volume": 67.89},
         ]
         avail, why = _check_degeneracy(rows)
@@ -112,7 +112,7 @@ class TestDegeneracyGate:
             {"Total": 51601.685, "Max volume": 51601.685, "Min volume": 51601.685}
         )
         assert not _is_pivoted_aggregate_row(
-            {"product": "isoprene", "volume": 123.45}
+            {"product": "product_d", "volume": 123.45}
         )
 
 
@@ -156,7 +156,7 @@ class TestServiceResultNormalization:
 
     def test_normal_rows_available(self):
         facet = _svc_facet()
-        raw = {"rows": [{"product": "isoprene", "volume": 1234.56}], "source": "erp_v"}
+        raw = {"rows": [{"product": "product_d", "volume": 1234.56}], "source": "erp_v"}
         out = _normalize_service_result(facet, raw)
         assert out["available"] is True
         assert out["row_count"] == 1
@@ -169,13 +169,13 @@ class TestAdHocResultNormalization:
             "success": True,
             "rows": [{"customer": "A", "ytd": 1.5}],
             "sql": "SELECT * FROM x",
-            "source_name": "erp_v_sale_orderentry",
+            "source_name": "v_sale_order",
             "answer": "found 1 row",
         }
         out = _normalize_ad_hoc_result(facet, raw)
         assert out["available"] is True
         assert out["source_sql"] == "SELECT * FROM x"
-        assert out["source_label"] == "erp_v_sale_orderentry"
+        assert out["source_label"] == "v_sale_order"
 
     def test_degenerate_rows_become_unavailable_and_cleared(self):
         facet = _ad_facet()
@@ -216,7 +216,7 @@ class TestParallelExecution:
         ]
         svc_results = {
             "ErpKpiService.sales_summary_for_period": {
-                "rows": [{"product": "isoprene", "volume": 100.0}],
+                "rows": [{"product": "product_d", "volume": 100.0}],
                 "source": "erp_v",
             }
         }

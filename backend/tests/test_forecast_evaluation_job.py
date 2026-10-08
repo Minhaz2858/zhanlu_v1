@@ -30,7 +30,7 @@ def db():
 
 def _make_run(db, as_of, base_values_by_h):
     """Seed a target + a ForecastRun with results[str(h)]["base"] = list."""
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     results = {str(h): {"base": vals, "bull": vals, "bear": vals}
                for h, vals in base_values_by_h.items()}
@@ -51,7 +51,7 @@ def test_writes_realized_mape_for_past_run(db):
     actuals = pd.Series([110.0] * 7, index=idx)
     loader = lambda datasource: actuals  # noqa: E731
 
-    summary = run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
+    summary = run_evaluation(db, actuals_loader=loader, product_key="电子元件")
 
     logs = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.run_id == run.id,
@@ -69,8 +69,8 @@ def test_idempotent_rerun_no_duplicate(db):
     target, run = _make_run(db, as_of, {7: [100.0] * 7})
     idx = pd.date_range("2026-07-02", periods=7, freq="D")
     loader = lambda datasource: pd.Series([110.0] * 7, index=idx)  # noqa: E731
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")  # re-run
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")  # re-run
     n = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.run_id == run.id,
         ForecastAccuracyLog.realized_mape.isnot(None),
@@ -83,7 +83,7 @@ def test_skips_run_whose_horizon_not_yet_arrived(db):
     as_of = datetime.now(timezone.utc) - timedelta(days=1)
     target, run = _make_run(db, as_of, {30: [100.0] * 30})
     loader = lambda datasource: pd.Series([110.0], index=pd.date_range("2026-01-01", periods=1))  # noqa: E731
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")
     n = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.run_id == run.id,
         ForecastAccuracyLog.realized_mape.isnot(None),
@@ -96,14 +96,14 @@ def test_scores_pending_feedback(db):
     target, run = _make_run(db, as_of, {7: [100.0] * 7})
     # AI said 100; user said 109; actual = 110 -> user_error < ai_error -> beat
     fb = ForecastFeedback(
-        target_id=target.id, product_id="异戊二烯", ai_price=100.0,
+        target_id=target.id, product_id="电子元件", ai_price=100.0,
         user_price=109.0, reason="tightening", author_id="u1", author_name="a1",
         target_date=datetime(2026, 7, 5), status="pending", org_id="default-org",
     )
     db.add(fb); db.commit()
     idx = pd.date_range("2026-07-02", periods=7, freq="D")
     loader = lambda datasource: pd.Series([110.0] * 7, index=idx)  # noqa: E731
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")
     db.refresh(fb)
     assert fb.status == "scored"
     assert fb.beat is True

@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-04
 **Status:** Confirmed by user (both decision-first, LLM analyst + evidence pack, all three surfaces)
-**Trigger:** DCPD Decision Board brief was empty: "建议观望,等待更明确的信号(置信度:低)" with dashes for directional accuracy / fluctuation state — no *why*, no *what to watch*.
+**Trigger:** PRODUCT_B Decision Board brief was empty: "建议观望,等待更明确的信号(置信度:低)" with dashes for directional accuracy / fluctuation state — no *why*, no *what to watch*.
 
 ## Problem
 
@@ -11,7 +11,7 @@ The Decision Board's AI简评/AI建议 is 100% deterministic template strings (`
 1. **No causal explanation** — cannot say *why* price moves (upstream transmission, seasonality, model drivers).
 2. **Silent at low trust** — `decision_engine.py` gates on trust tier; when low, narrative collapses to "watch" + dashes, never explaining *why trust is low* or *what would change the call*.
 3. **Rich evidence computed but unused** — XGBoost top-5 drivers (`explain.py`), price-chain percentiles (`get_price_chain()`), scenarios, SKU forecasts, seasonal stats all exist but none reach the narrative.
-4. **Dormant domain brain** — `domain_signals.py` (naphtha→C5→downstream elasticities, monthly seasonality, ported from EDIA) is gated off (`FORECAST_DOMAIN_SIGNALS_ENABLED`, default False).
+4. **Dormant domain brain** — `domain_signals.py` (product_c→C5→downstream elasticities, monthly seasonality, ported from Acme) is gated off (`FORECAST_DOMAIN_SIGNALS_ENABLED`, default False).
 5. **forecast_agent chat is disconnected** — the board never uses the LLM agent; chat answers don't share the board's evidence.
 
 ## Design Decisions (user-confirmed)
@@ -46,23 +46,23 @@ Evidence pack assembler pulls signals that exist but are unused/dormant:
 1. **Domain signals enablement** — validate `domain_signals.py` via existing `domain_signals_ab.py` A/B harness; enable per-product where it beats baseline (flag stays per-product configurable).
 2. **Price-chain divergence signal** (new) — `get_price_chain()` upstream 30d moves + 3yr percentiles; compute elasticity-implied move vs model forecast. Agreement → confidence support; divergence → explicit risk flag.
 3. **Model agreement metric** — spread across 8 models' point forecasts; wide disagreement → lower confidence + narrative "模型间分歧较大".
-4. **"Why low trust" reasons** — trust tier emits machine-readable reasons (short history / below naive baseline / high volatility / drift) instead of a bare label. Directly fixes the DCPD dashes case.
+4. **"Why low trust" reasons** — trust tier emits machine-readable reasons (short history / below naive baseline / high volatility / drift) instead of a bare label. Directly fixes the PRODUCT_B dashes case.
 5. **Surface existing drivers** — XGBoost top-5 features (already in `explain.py`) + seasonal position ("8月为传统需求淡季") into the pack.
 
 Decision engine thresholds (`p_rise ≥ 0.70` etc.) unchanged — we enrich evidence/explanation, not the gate.
 
 ## Section 2 — LLM brief writer
 
-- **Input:** evidence pack JSON only. Strict analyst contract: "You are a petrochemical market analyst. Use ONLY the provided evidence. Every number must come from the evidence. Output JSON."
+- **Input:** evidence pack JSON only. Strict analyst contract: "You are a industrial market analyst. Use ONLY the provided evidence. Every number must come from the evidence. Output JSON."
 - **Output schema:** `{summary_zh, why_price_zh, why_action_zh, watch_triggers_zh[], risk_zh}` — structured sections, not one blob.
 - **Verifier:** extract every number in LLM output, check it exists in pack (±tolerance). Hallucinated number → discard → template fallback. Anti-bullshit gate.
 - **Caching:** keyed by `product + day + forecast_run_id`. New run invalidates; page loads cost zero LLM calls.
 - **Fallback chain:** LLM timeout/error/verification-fail → enriched template (Section-1 pack rendered by much better deterministic templates — a big upgrade even without LLM).
 - **Feature flag:** `FORECAST_ANALYST_LLM_ENABLED` (default off).
 
-Example output for the DCPD case (same decision, now reasoned):
+Example output for the PRODUCT_B case (same decision, now reasoned):
 
-> 双环戊二烯现价 6,940 元/吨,处于近三年约 42% 分位。上游裂解 C5 近 30 日下跌 2.8%,按 0.66 弹性传导约 -1.9%,与模型预测 -4.0% 方向一致但幅度更深,8 模型间分歧偏大(区间 6,580–6,790)。当前为 8 月传统需求淡季,方向预测历史准确率未达 55% 显著门槛,故可信度低、建议观望。若上游 C5 止跌或方向准确率回升至 55% 以上,将重新评估为可操作信号。
+> 材料B现价 6,940 元/吨,处于近三年约 42% 分位。上游裂解 C5 近 30 日下跌 2.8%,按 0.66 弹性传导约 -1.9%,与模型预测 -4.0% 方向一致但幅度更深,8 模型间分歧偏大(区间 6,580–6,790)。当前为 8 月传统需求淡季,方向预测历史准确率未达 55% 显著门槛,故可信度低、建议观望。若上游 C5 止跌或方向准确率回升至 55% 以上,将重新评估为可操作信号。
 
 ## Section 3 — Surfaces
 

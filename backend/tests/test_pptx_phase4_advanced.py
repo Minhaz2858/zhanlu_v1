@@ -36,7 +36,7 @@ def _payload(**kw):
     )
     base = dict(
         title="Phase 4 Deck",
-        source="erp_v_sale_orderentry",
+        source="v_sale_order",
         generated_at="2026-07-23T08:30:00Z",
         summary="Summary text.",
         methodology="Method text.",
@@ -85,7 +85,7 @@ def test_chart_slide_carries_source_footnote():
     chart_slide = next(s for s in slides
                        if any(getattr(sh, "has_chart", False) for sh in s.shapes))
     texts = _slide_texts(chart_slide)
-    assert any("Source: erp_v_sale_orderentry" in t for t in texts), \
+    assert any("Source: v_sale_order" in t for t in texts), \
         f"chart slide must cite the source, got {texts}"
 
 
@@ -93,7 +93,7 @@ def test_data_slide_carries_source_footnote_when_not_truncated():
     slides = _slides(_render(_payload()))
     data_slide = next(s for s in slides if "Data" in _slide_texts(s))
     texts = _slide_texts(data_slide)
-    assert any("Source: erp_v_sale_orderentry" in t for t in texts)
+    assert any("Source: v_sale_order" in t for t in texts)
 
 
 def test_data_slide_combines_source_with_truncation_note():

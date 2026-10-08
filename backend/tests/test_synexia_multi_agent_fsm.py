@@ -215,7 +215,13 @@ class TestBuildDefaultPlanMultiAgent(unittest.TestCase):
         self.assertEqual(steps[0]["node_type"], "nl2sql")
 
     def test_non_file_plan_no_data(self):
-        """When no data needed and no file format, emit fallback tool plan."""
+        """When no data needed and no file format, the plan is EMPTY.
+
+        2026-10-08: the old single "Process request" placeholder tool node
+        was removed — its name was never a real tool, so execute_tool
+        failed with "Unknown tool: Process request" on every such turn.
+        Zero nodes → FINALIZE answers directly (see
+        test_no_placeholder_tool_node.py)."""
         from app.services.synexia.plan_dag import _build_default_plan
         steps = _build_default_plan({
             "task_kind": "answer_question",
@@ -224,8 +230,7 @@ class TestBuildDefaultPlanMultiAgent(unittest.TestCase):
             "user_signal": "default",
         }, agent_name="test_agent")
 
-        self.assertEqual(len(steps), 1)
-        self.assertEqual(steps[0]["node_type"], "tool")
+        self.assertEqual(steps, [])
 
 
 # ---------------------------------------------------------------------------

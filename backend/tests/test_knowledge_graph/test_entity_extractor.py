@@ -58,8 +58,8 @@ class TestPromptGeneric:
 
     def test_prompt_has_no_domain_examples(self):
         full = ee._EXTRACTION_SYSTEM + ee._build_extraction_prompt("dummy text")
-        # Must NOT contain any petrochemical / domain-specific terms
-        forbidden = ["C5", "C9", "ethylene", "naphtha", "cracked", "裂解", "乙烯", "石脑油"]
+        # Must NOT contain any industrial / domain-specific terms
+        forbidden = ["C5", "C9", "ethylene", "product_c", "cracked", "裂解", "乙烯", "石脑油"]
         for term in forbidden:
             assert term.lower() not in full.lower(), (
                 f"Extraction prompt contains domain-specific term: {term}"

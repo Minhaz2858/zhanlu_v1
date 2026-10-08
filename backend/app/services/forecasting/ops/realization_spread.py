@@ -6,7 +6,7 @@ Stored in target.model_config["realization_spread"] (ratio, e.g. 0.97).
 At decision time: adjusted_forecast = forecast * (1 - spread).
 
 This corrects the systematic gap between published market quotation
-(md_t_lz_price) and actual deal prices in the ERP (sale_erp_v_*_data).
+(md_market_price) and actual deal prices in the ERP (sale_erp_v_*_data).
 """
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ def compute_realization_spread(
         return None
 
     ds = tgt.datasource
-    quote_table = ds.get("table", "md_t_lz_price")
+    quote_table = ds.get("table", "md_market_price")
     quote_measure = ds.get("measure", "price")
     quote_filter = ds.get("filter", "")
 

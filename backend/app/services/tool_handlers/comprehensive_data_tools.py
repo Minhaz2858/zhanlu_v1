@@ -72,7 +72,7 @@ COMPREHENSIVE_DATA_SCHEMA: dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "The user's natural-language question (e.g. 'weekly "
-                    "crude oil market overview', 'Q3 sales by region'). "
+                    "product e market overview', 'Q3 sales by region'). "
                     "The profiler derives intent, period, primary metric, "
                     "and facet plan from it."
                 ),

@@ -36,7 +36,7 @@ class TestKeywordClassify:
         assert "what_if" in result
 
     def test_what_if_scenario_keyword(self):
-        result = _keyword_classify("simulate a naphtha +3% shock")
+        result = _keyword_classify("simulate a product_c +3% shock")
         assert result is not None
         assert "what_if" in result
 

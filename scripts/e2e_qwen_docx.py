@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live E2E: qwen + 'give me ... docx' on the user's real Ecisco BI app."""
+"""Live E2E: qwen + 'give me ... docx' on the user's real Acme BI app."""
 import json, sys, time, urllib.request
 
 BASE = "http://localhost:5002"
@@ -23,7 +23,7 @@ print("LOGIN OK", st)
 
 # 2. create conversation
 st, raw = req("POST", f"/api/apps/{APP}/agents/conversations",
-              {"agent_name": "ecisco_bi_assistant",
+              {"agent_name": "acme_bi_assistant",
                "metadata": {"name": "qwen-docx-e2e", "project_id": PROJECT}},
               token=tok)
 conv = json.loads(raw)

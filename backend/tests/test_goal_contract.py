@@ -215,8 +215,8 @@ def test_extract_tables_from_sql_none() -> None:
 
 def test_record_query_result_records_candidate_tables() -> None:
     c = GoalContract(requires_data=True, expects_rows=True, max_forces=3)
-    c.record_query_result(rows=[], sql="SELECT * FROM erp_v_sale_orderentry LIMIT 5")
-    assert c.candidate_tables == ["erp_v_sale_orderentry"]
+    c.record_query_result(rows=[], sql="SELECT * FROM v_sale_order LIMIT 5")
+    assert c.candidate_tables == ["v_sale_order"]
 
 
 def test_record_query_result_all_null_numeric_counts_as_zero_row() -> None:

@@ -66,9 +66,9 @@ class TestQueryTerms:
         assert "123.45" in result
 
     def test_mixed_chinese_english(self):
-        result = query_terms("DCPD 树脂价格上涨")
+        result = query_terms("PRODUCT_B 树脂价格上涨")
         # English token
-        assert "dcpd" in result
+        assert "product_b" in result
         # Chinese bigrams
         assert "树脂" in result
         assert "价格" in result

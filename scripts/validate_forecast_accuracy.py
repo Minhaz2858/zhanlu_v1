@@ -9,7 +9,7 @@ Usage:
     cd /home/ysk2025/zhanlu_7_30/backend
     venv/bin/python scripts/validate_forecast_accuracy.py          # All products
     venv/bin/python scripts/validate_forecast_accuracy.py --days 30  # 30-day window
-    venv/bin/python scripts/validate_forecast_accuracy.py --product crude_oil  # Single
+    venv/bin/python scripts/validate_forecast_accuracy.py --product product_e  # Single
     venv/bin/python scripts/validate_forecast_accuracy.py --walk-forward      # + WF backtest
     venv/bin/python scripts/validate_forecast_accuracy.py --json > report.json
 """
@@ -157,11 +157,11 @@ def aggregate_per_product(rows: list[dict]) -> dict[str, dict]:
 
 def run_walk_forward(db, targets: list) -> dict[str, dict]:
     """Run walk-forward backtest for each target using its datasource config."""
-    from app.services.forecasting.edia_source import EdiaMysqlDataSource
+    from app.services.forecasting.mysql_data_source import MysqlDataSource
     from app.services.forecasting.models import build_model_pool
     from tests.walk_forward_backtest import walk_forward_evaluate_v2
 
-    edia = EdiaMysqlDataSource()
+    src = MysqlDataSource()
     models = build_model_pool(seasonal_period=7)
     horizons = [7, 14, 30]
 
@@ -171,7 +171,7 @@ def run_walk_forward(db, targets: list) -> dict[str, dict]:
         name = t.name or pk
         logger.info("[WF] Fetching data for %s (%s)…", pk, name)
         try:
-            df = edia.read_history(t.datasource)
+            df = src.read_history(t.datasource)
         except Exception as e:
             logger.warning("[WF] Skipping %s — data fetch failed: %s", pk, e)
             results[pk] = {"error": str(e)}
@@ -368,7 +368,7 @@ def main() -> int:
         epilog="Examples:\n"
                "  venv/bin/python scripts/validate_forecast_accuracy.py\n"
                "  venv/bin/python scripts/validate_forecast_accuracy.py --days 14\n"
-               "  venv/bin/python scripts/validate_forecast_accuracy.py --product crude_oil --walk-forward",
+               "  venv/bin/python scripts/validate_forecast_accuracy.py --product product_e --walk-forward",
     )
     parser.add_argument(
         "--days", type=int, default=30,

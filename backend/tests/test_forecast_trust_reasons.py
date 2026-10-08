@@ -3,13 +3,13 @@ from app.services.forecasting.forecast_trust_tier import compute_forecast_trust_
 
 
 def test_low_tier_sparse_data_code():
-    out = compute_forecast_trust_tier("dcpd", below_naive=False, cadence_class="sparse")
+    out = compute_forecast_trust_tier("product_b", below_naive=False, cadence_class="sparse")
     assert out["tier"] == "low"
     assert "sparse_data" in out["reason_codes"]
 
 
 def test_directional_below_naive_code():
-    out = compute_forecast_trust_tier("isoprene", below_naive=True, cadence_class="daily")
+    out = compute_forecast_trust_tier("product_d", below_naive=True, cadence_class="daily")
     assert out["tier"] == "directional"
     assert "below_naive_baseline" in out["reason_codes"]
 
@@ -21,7 +21,7 @@ def test_directional_weekly_product_has_both_codes():
 
 
 def test_high_tier_code():
-    out = compute_forecast_trust_tier("isoprene", below_naive=False, cadence_class="daily", mape=8.0)
+    out = compute_forecast_trust_tier("product_d", below_naive=False, cadence_class="daily", mape=8.0)
     assert out["tier"] == "high"
     assert out["reason_codes"] == ["model_skill_high"]
 

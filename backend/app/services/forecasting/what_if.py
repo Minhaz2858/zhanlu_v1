@@ -107,7 +107,7 @@ def compute_what_if(
         feedstock_adj = compute_domain_signal_adjustment(
             product_id=product_key,
             as_of_date=datetime.now(timezone.utc),
-            naphtha_pct_change=feedstock_delta_pct,
+            product_c_pct_change=feedstock_delta_pct,
         )
         impact = feedstock_adj.get("causal_pct", 0.0)
         total_impact += impact
@@ -128,7 +128,7 @@ def compute_what_if(
         market_adj = compute_domain_signal_adjustment(
             product_id=product_key,
             as_of_date=datetime.now(timezone.utc),
-            naphtha_pct_change=market_to_feedstock,
+            product_c_pct_change=market_to_feedstock,
         )
         impact = market_adj.get("causal_pct", 0.0)
         total_impact += impact

@@ -84,7 +84,7 @@ def _serialize_target(t: ForecastTarget) -> dict:
         "source": t.source,
         "include_in_weekly_report": t.include_in_weekly_report,
         "report_order": t.report_order,
-        # SKU fields (None for md_t_lz_price products)
+        # SKU fields (None for md_market_price products)
         "material_code": material_code,
         "datasource_table": ds.get("table"),
         "datasource_where": ds.get("where"),

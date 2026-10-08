@@ -107,7 +107,7 @@ class MySQLConnector:
                 # length, and on MySQL that is the ONLY way to tell a real
                 # binary payload from ``varbinary(0)`` — the marker MySQL writes
                 # for a VIEW column whose expression it cannot resolve. Live,
-                # erp_v_sale_orderentry's instock_qty/produce_qty/plan_qty are
+                # v_sale_order's instock_qty/produce_qty/plan_qty are
                 # declared varbinary(0) and were unreadable as a result, because
                 # the length was thrown away right here. COLUMN_TYPE is also
                 # simply the truer declaration: varchar(64), decimal(14,2),
@@ -257,7 +257,7 @@ class MySQLConnector:
 
         Returns:
             [{"column": "product_id", "ref_table": "products",
-              "ref_schema": "aipdp", "ref_column": "id"}, ...]
+              "ref_schema": "acme", "ref_column": "id"}, ...]
         """
         assert self._engine is not None
         sql = text(

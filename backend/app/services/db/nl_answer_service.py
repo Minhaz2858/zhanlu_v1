@@ -609,7 +609,7 @@ class NLAnswerService:
                     # the prompt and the answer and ACTED ON by nothing, so a
                     # table whose data ends before the asked-for period was
                     # queried anyway, returned 0 rows, and the turn narrated the
-                    # emptiness. Measured live (2026-09-20, 惠州伊斯科本周销售情况):
+                    # emptiness. Measured live (2026-09-20, 示例工厂本周销售情况):
                     # the selector picked forecast_accuracy_log (max_date
                     # 2026-09-05) over the rank-1 erp_v_sale_huizhou (max_date
                     # 2026-09-16) because the former is a REAL catalog table —

@@ -84,7 +84,7 @@ def test_no_forcing_for_weekly_summary_list_request():
     # The regression that started Phase A/B: "please list the weekly
     # summary…" must NOT be forced toward any file/data tool.
     action = resolve_turn_action(
-        "Please list the weekly summary and forecast for C5C9 from December 24th to 30th",
+        "Please list the weekly summary and forecast for SAMPLE from December 24th to 30th",
         ALL_TOOLS, BOUND, is_data_question=False, iteration=0,
     )
     assert action.forced_tool is None
@@ -119,7 +119,7 @@ def test_list_request_never_forces_or_imposes_format():
     # prompt text only — resolve_turn_action still returns no forced tool
     # and no doc_format.
     msg = (
-        "Please list the weekly summary and forecast for C5C9 from December 24th to 30th"
+        "Please list the weekly summary and forecast for SAMPLE from December 24th to 30th"
     )
     action = resolve_turn_action(
         msg, ALL_TOOLS, NO_BOUND, is_data_question=False, iteration=0,

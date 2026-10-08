@@ -35,9 +35,9 @@ def _patch_reads(monkeypatch):
     monkeypatch.setattr(analyst_service.mds, "read_product_history_rows",
                         lambda pid: _history(start=7000.0, step=-0.8))
     monkeypatch.setattr(analyst_service.mds, "PRODUCT_FORECAST_TARGET_KEY",
-                        {"dcpd": "ecisco.dcpd"})
+                        {"product_b": "acme.product_b"})
     monkeypatch.setattr(analyst_service, "PRODUCT_LABELS",
-                        {"dcpd": {"label_zh": "双环戊二烯"}})
+                        {"product_b": {"label_zh": "双环戊二烯"}})
 
 
 def test_cache_hit_returns_without_llm(monkeypatch):
@@ -49,7 +49,7 @@ def test_cache_hit_returns_without_llm(monkeypatch):
     def _no_llm():
         raise AssertionError("LLM called on cache hit")
     monkeypatch.setattr(analyst_service, "_llm_enabled", _no_llm)
-    assert analyst_service.get_analyst_brief("dcpd", 7, db=db) == cached
+    assert analyst_service.get_analyst_brief("product_b", 7, db=db) == cached
     assert db.commits == 0
 
 
@@ -58,7 +58,7 @@ def test_miss_builds_template_and_persists(monkeypatch):
     run = _run(_explanation())
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: False)
-    brief = analyst_service.get_analyst_brief("dcpd", 7, db=db)
+    brief = analyst_service.get_analyst_brief("product_b", 7, db=db)
     assert brief is not None and brief["source"] == "template"
     assert run.explanation["analyst_brief"]["7"]["source"] == "template"
     assert db.commits == 1
@@ -77,7 +77,7 @@ def test_llm_upgrade_when_enabled(monkeypatch):
             "watch_triggers_zh": ["准确率 55% 以上再评估"], "risk_zh": "近期无重大市场事件。"}
     monkeypatch.setattr(analyst_service, "chat_completion_json_sync",
                         lambda prompt, schema: dict(good))
-    brief = analyst_service.get_analyst_brief("dcpd", 7, db=db)
+    brief = analyst_service.get_analyst_brief("product_b", 7, db=db)
     assert brief["source"] == "llm"
 
 
@@ -87,7 +87,7 @@ def test_llm_failure_falls_back_to_template(monkeypatch):
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: True)
     monkeypatch.setattr(analyst_service, "chat_completion_json_sync", lambda p, s: {})
-    assert analyst_service.get_analyst_brief("dcpd", 7, db=db)["source"] == "template"
+    assert analyst_service.get_analyst_brief("product_b", 7, db=db)["source"] == "template"
 
 
 def test_unknown_product_returns_none(monkeypatch):

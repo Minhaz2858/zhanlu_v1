@@ -44,7 +44,7 @@ def _seed_realized(db, target, baseline_mapes, recent_mapes):
 
 
 def test_writes_audit_row_on_drift(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     # baseline ~12%, recent ~25% -> 25 > 12*1.2 -> drift
     _seed_realized(db, target, [0.12, 0.11, 0.12], [0.25, 0.26, 0.24])
@@ -74,7 +74,7 @@ def test_no_audit_when_stable(db):
 
 
 def test_no_duplicate_audit_within_7_days(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     _seed_realized(db, target, [0.12, 0.11, 0.12], [0.25, 0.26, 0.24])
     drift_response.check_drift_and_audit(db, target)

@@ -32,7 +32,7 @@ def _facet(facet_id, rows, summary="", source_sql="SELECT 1", purpose="primary")
         "rows": rows,
         "summary": summary,
         "source_sql": source_sql,
-        "source_label": "erp_v_sale_orderentry",
+        "source_label": "v_sale_order",
         "row_count": len(rows),
         "warnings": [],
         "available": True,

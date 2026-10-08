@@ -24,11 +24,11 @@ ORDER_ROWS = [
     ("121895", "2026-08-03 18:02:35", "客户E",  "双环戊二烯",   65,    6017.70, 391150.44),
     ("121896", "2026-08-03 18:10:05", "客户F",  "双环戊二烯",   96,    5663.72, 543716.81),
     ("121903", "2026-08-05 16:31:59", "碳五G",  "碳五石油树脂",  26,    1245.00, 32370.00),
-    ("121906", "2026-08-05 23:22:27", "客户H",  "异戊二烯",     153,   1410.00, 215730.00),
-    ("121909", "2026-08-06 14:27:45", "客户I",  "异戊二烯",     321,   1410.00, 453033.00),
+    ("121906", "2026-08-05 23:22:27", "客户H",  "电子元件",     153,   1410.00, 215730.00),
+    ("121909", "2026-08-06 14:27:45", "客户I",  "电子元件",     321,   1410.00, 453033.00),
     ("121910", "2026-08-06 15:06:28", "客户J",  "双环戊二烯",   32,    6460.18, 206725.66),
     ("121911", "2026-08-06 15:12:49", "客户K",  "双环戊二烯",   65,    6283.19, 408407.08),
-    ("121913", "2026-08-06 22:11:57", "客户L",  "异戊二烯",     500,  10442.48, 5221238.94),
+    ("121913", "2026-08-06 22:11:57", "客户L",  "电子元件",     500,  10442.48, 5221238.94),
     ("121917", "2026-08-07 17:27:46", "碳五M",  "碳五石油树脂",  26,    1310.00, 34060.00),
 ]
 COLS = ["order_id", "order_date", "customer_name", "product_name",
@@ -81,7 +81,7 @@ def test_auto_analyze_key_findings_mention_top_category():
     assert 1 <= len(findings) <= 5
     joined = " ".join(f["text"] for f in findings)
     # The product that holds 61% of revenue must be named in key_findings.
-    assert "异戊二烯" in joined, "top product should be highlighted"
+    assert "电子元件" in joined, "top product should be highlighted"
 
 
 def test_auto_analyze_recommendations_have_actionable_text():
@@ -139,4 +139,4 @@ def test_chart_handles_three_products_correctly():
     data = payload["chart"]["data"]
     # All three products should appear in the aggregated chart.
     products = {d["product_name"] for d in data}
-    assert products == {"碳五石油树脂", "双环戊二烯", "异戊二烯"}
+    assert products == {"碳五石油树脂", "双环戊二烯", "电子元件"}

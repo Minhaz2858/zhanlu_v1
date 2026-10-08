@@ -13,7 +13,7 @@ from tests._dashboard_e2e_helpers import (
 APP = os.environ.get("E2E_APP_URL", "http://localhost:8000")
 ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@zhanlu.dev")
 ADMIN_PASS = os.environ.get("E2E_ADMIN_PASS", "Test1234!")
-BAD_KB_ID = "90e80028-8e6e-4fdf-b91c-81c73aca9932"  # aipdp_data_warehouse_prod (unreachable)
+BAD_KB_ID = "90e80028-8e6e-4fdf-b91c-81c73aca9932"  # demo_warehouse_prod (unreachable)
 
 LIVE_VALUE_SEL = "div.rounded-xl:has-text('Live Time') .text-3xl"
 

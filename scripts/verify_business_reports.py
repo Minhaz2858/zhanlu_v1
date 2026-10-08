@@ -28,7 +28,7 @@ REVENUE_ROWS = [
 REVENUE_ALIAS_ROWS = [
     {'CUST_NAME': '中国石化化工销售有限公司华中分公司', 'contract_quantity': 3000.0, 'shipment_quantity': 319.6, 'contract_revenue': 38400000.0, 'shipment_revenue': 6342400.0},
     {'CUST_NAME': '中海壳牌石油化工有限公司', 'contract_quantity': 5000.0, 'shipment_quantity': None, 'contract_revenue': 38150000.0, 'shipment_revenue': 0.0},
-    {'CUST_NAME': '惠州伊斯科新材料科技发展有限公司', 'contract_quantity': 5000.0, 'shipment_quantity': 3420.92, 'contract_revenue': 32500000.0, 'shipment_revenue': 25812670.0},
+    {'CUST_NAME': '示例工厂新材料科技发展有限公司', 'contract_quantity': 5000.0, 'shipment_quantity': 3420.92, 'contract_revenue': 32500000.0, 'shipment_revenue': 25812670.0},
 ]
 
 # ── Fixture 3c: run6 shape — total_revenue ONLY (no delivered-amount col).
@@ -51,10 +51,10 @@ DELIVERY_ALIAS_ROWS = [
 # Correct: Contracted value = SUM(contract_price) = ¥324,313,278.41;
 # Delivered value = SUM(revenue). NEVER price×qty (would be ¥458B). ──
 USER_SHAPE_ROWS = [
-    {'contract_id': 121917, 'customer_name': '天津鲁华泓锦新材料科技有限公司', 'product_name': '双环戊二烯', 'contract_quantity': 400.0, 'contract_price': 2540000.0, 'shipment_quantity': 386.44, 'revenue': 2453894.0},
-    {'contract_id': 121952, 'customer_name': '东莞市同舟化工有限公司', 'product_name': '双环戊二烯', 'contract_quantity': 160.0, 'contract_price': 1024000.0, 'shipment_quantity': 159.33, 'revenue': 1019712.0},
-    {'contract_id': 121888, 'customer_name': '广东天元实业集团股份有限公司', 'product_name': '碳五石油树脂', 'contract_quantity': 32.0, 'contract_price': 300800.0, 'shipment_quantity': 32.0, 'revenue': 300800.0},
-    {'contract_id': 121963, 'customer_name': '广东汇泉联骏化学工业有限公司', 'product_name': '双环戊二烯', 'contract_quantity': 65.0, 'contract_price': 416000.0, 'shipment_quantity': 64.82, 'revenue': 414848.0},
+    {'contract_id': 121917, 'customer_name': '天津鲁华泓锦新材料科技有限公司', 'product_name': '材料B', 'contract_quantity': 400.0, 'contract_price': 2540000.0, 'shipment_quantity': 386.44, 'revenue': 2453894.0},
+    {'contract_id': 121952, 'customer_name': '东莞市同舟化工有限公司', 'product_name': '材料B', 'contract_quantity': 160.0, 'contract_price': 1024000.0, 'shipment_quantity': 159.33, 'revenue': 1019712.0},
+    {'contract_id': 121888, 'customer_name': '广东天元实业集团股份有限公司', 'product_name': '原料A石油树脂', 'contract_quantity': 32.0, 'contract_price': 300800.0, 'shipment_quantity': 32.0, 'revenue': 300800.0},
+    {'contract_id': 121963, 'customer_name': '广东汇泉联骏化学工业有限公司', 'product_name': '材料B', 'contract_quantity': 65.0, 'contract_price': 416000.0, 'shipment_quantity': 64.82, 'revenue': 414848.0},
 ]
 
 # ── Fixture 3f: run9 shape — total_shipped_qty / fulfillment_rate_pct.
@@ -90,7 +90,7 @@ def check(name, cond, detail=""):
     print(("PASS" if cond else "FAIL"), "-", name, ("| " + detail if detail else ""))
 
 # 1. classic contract report
-out = br.try_build_business_report('give me Contract Performance for last month report in docx file', CONTRACT_ROWS, 'aipdp_data_warehouse_prod')
+out = br.try_build_business_report('give me Contract Performance for last month report in docx file', CONTRACT_ROWS, 'demo_warehouse_prod')
 check("classic: report built", out is not None)
 check("classic: title", out is not None and '# Contract Performance' in out)
 check("classic: exec summary + key figures", out and '## Executive Summary' in out and '## Key Figures' in out)
@@ -99,7 +99,7 @@ check("classic: risk row TRIBUTE", out and 'TRIBUTE ENERGY' in out)
 check("classic: MoM 63.8%", out and '63.8%' in out)
 
 # 2. LLM-aggregated aliases
-out2 = br.try_build_business_report('Contract Performance for last month report in docx file', ALIAS_ROWS, 'aipdp_data_warehouse_prod')
+out2 = br.try_build_business_report('Contract Performance for last month report in docx file', ALIAS_ROWS, 'demo_warehouse_prod')
 check("alias: report built", out2 is not None)
 check("alias: total qty 4,395.00", out2 and '4,395.00' in out2)
 check("alias: total revenue ¥41,301,000.00", out2 and '¥41,301,000.00' in out2)
@@ -114,7 +114,7 @@ check("revenue-total: ¥800,000.00", out3 and '¥800,000.00' in out3)
 check("revenue-total: no ¥400,000,000", out3 and '¥400,000,000' not in out3)
 
 # 3b. run4 revenue aliases (contract_revenue / shipment_revenue)
-out3b = br.try_build_business_report('Contract Performance for last month report in docx file', REVENUE_ALIAS_ROWS, 'aipdp_data_warehouse_prod')
+out3b = br.try_build_business_report('Contract Performance for last month report in docx file', REVENUE_ALIAS_ROWS, 'demo_warehouse_prod')
 check("rev-alias: report built", out3b is not None)
 # total contract value = 38.4M + 38.15M + 32.5M = 109,050,000
 check("rev-alias: total contract value ¥109,050,000.00", out3b and '¥109,050,000.00' in out3b)
@@ -133,14 +133,14 @@ check("rev-alias: no missing contract values", out3b and '| — |' not in out3b)
 check("rev-alias: no double-count ¥115,200,000,000", out3b and '¥115,200,000,000' not in out3b)
 
 # 3c. run6 shape — total_revenue only; delivered value must NOT duplicate
-out3c = br.try_build_business_report('Contract Performance for last month report in docx file', TOTAL_REV_ONLY_ROWS, 'aipdp_data_warehouse_prod')
+out3c = br.try_build_business_report('Contract Performance for last month report in docx file', TOTAL_REV_ONLY_ROWS, 'demo_warehouse_prod')
 check("rev-only: report built", out3c is not None)
 check("rev-only: total contract value ¥76,550,000.00", out3c and '¥76,550,000.00' in out3c)
 check("rev-only: NO delivered-value duplication", out3c and 'Delivered value' not in out3c)
 check("rev-only: no missing contract values", out3c and '| — |' not in out3c)
 
 # 3d. run7 shape — delivery_quantities/undelivered_quantities aliases
-out3d = br.try_build_business_report('Contract Performance for last month report in docx file', DELIVERY_ALIAS_ROWS, 'aipdp_data_warehouse_prod')
+out3d = br.try_build_business_report('Contract Performance for last month report in docx file', DELIVERY_ALIAS_ROWS, 'demo_warehouse_prod')
 check("del-alias: report built", out3d is not None)
 # delivered qty = 2650 + 100 = 2750; exec rate = 2750/2915 = 94.3%
 check("del-alias: total delivered qty 2,750.00", out3d and '2,750.00' in out3d)
@@ -149,7 +149,7 @@ check("del-alias: contract value ¥32,833,000.00", out3d and '¥32,833,000.00' i
 check("del-alias: outstanding 165.00", out3d and '165.00' in out3d)
 
 # 3e. user-docx shape — contract_price holds TOTAL (misnamed), revenue=delivered
-out3e = br.try_build_business_report('give me Contract Performance for last month report in docx file', USER_SHAPE_ROWS, 'aipdp_data_warehouse_prod')
+out3e = br.try_build_business_report('give me Contract Performance for last month report in docx file', USER_SHAPE_ROWS, 'demo_warehouse_prod')
 check("user-shape: report built", out3e is not None)
 # contracted value = SUM(contract_price) = 2,540,000+1,024,000+300,800+416,000 = 4,280,800
 check("user-shape: contracted value ¥4,280,800.00", out3e and '¥4,280,800.00' in out3e)
@@ -161,7 +161,7 @@ check("user-shape: no double-count ¥1,016,000,000", out3e and '¥1,016,000,000'
 check("user-shape: exec rate 97.8%", out3e and '97.8%' in out3e)
 
 # 3f. run9 shape — shipped_qty aliases; aggregate exec rate must win
-out3f = br.try_build_business_report('Contract performance for last month report', SHIPPED_ALIAS_ROWS, 'aipdp_data_warehouse_prod')
+out3f = br.try_build_business_report('Contract performance for last month report', SHIPPED_ALIAS_ROWS, 'demo_warehouse_prod')
 check("shipped-alias: report built", out3f is not None)
 # aggregate rate = 3740.52/8000 = 46.8% — NOT the avg of 10.7/68.4 (39.55%)
 check("shipped-alias: exec rate 46.8%", out3f and '46.8%' in out3f)
@@ -170,7 +170,7 @@ check("shipped-alias: contracted value ¥70,900,000.00", out3f and '¥70,900,000
 check("shipped-alias: delivered qty 3,740.52", out3f and '3,740.52' in out3f)
 
 # 3g. run10 shape — delivered-only query must be REFUSED (return None)
-out3g = br.try_build_business_report('give me Contract Performance for last month report in docx file', DELIVERED_ONLY_ROWS, 'aipdp_data_warehouse_prod')
+out3g = br.try_build_business_report('give me Contract Performance for last month report in docx file', DELIVERED_ONLY_ROWS, 'demo_warehouse_prod')
 check("delivered-only: returns None (refused)", out3g is None)
 
 # 4. raw ERP columns + Chinese question

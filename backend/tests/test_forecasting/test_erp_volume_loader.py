@@ -11,11 +11,11 @@ from sqlalchemy import create_engine, text
 
 @pytest.fixture
 def sqlite_engine():
-    """In-memory SQLite simulating sale_erp_v_isoprene_data with qty column."""
+    """In-memory SQLite simulating sale_erp_v_product_d_data with qty column."""
     eng = create_engine("sqlite:///:memory:")
     with eng.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE `sale_erp_v_isoprene_data` ("
+            "CREATE TABLE `sale_erp_v_product_d_data` ("
             "`Unnamed: 0` TEXT, `qty` REAL, `date` TEXT, "
             "`price` REAL, `amount` REAL, `product` TEXT, `supplier` TEXT)"
         ))
@@ -28,7 +28,7 @@ def sqlite_engine():
         ]
         for r in rows:
             conn.execute(text(
-                "INSERT INTO `sale_erp_v_isoprene_data` "
+                "INSERT INTO `sale_erp_v_product_d_data` "
                 "(`Unnamed: 0`, `qty`, `date`, `price`, `amount`, `product`, `supplier`) "
                 "VALUES (:u, :q, :d, :p, :a, :prod, :sup)"
             ), {
@@ -45,7 +45,7 @@ class TestErpVolumeLoader:
         from app.services.forecasting.features.exogenous_loaders import ErpVolumeLoader
 
         # Use 730-day lookback to ensure 2025 test data is within range
-        loader = ErpVolumeLoader(product_id="isoprene", lookback_days=730)
+        loader = ErpVolumeLoader(product_id="product_d", lookback_days=730)
         loader._engine = sqlite_engine
 
         result = loader.load()
@@ -73,7 +73,7 @@ class TestErpVolumeLoader:
         mock_pool = MagicMock()
         mock_pool.connect.return_value = mock_connect
 
-        loader = ErpVolumeLoader(product_id="isoprene", lookback_days=90)
+        loader = ErpVolumeLoader(product_id="product_d", lookback_days=90)
         loader._engine = mock_pool
 
         result = loader.load()
@@ -85,14 +85,14 @@ class TestErpVolumeLoader:
         """source_label must be erp_volume."""
         from app.services.forecasting.features.exogenous_loaders import ErpVolumeLoader
 
-        loader = ErpVolumeLoader(product_id="isoprene")
+        loader = ErpVolumeLoader(product_id="product_d")
         assert loader.source_label == "erp_volume"
 
     def test_lookback_filter(self, sqlite_engine):
         """lookback_days restricts how far back data is read."""
         from app.services.forecasting.features.exogenous_loaders import ErpVolumeLoader
 
-        loader = ErpVolumeLoader(product_id="isoprene", lookback_days=1)
+        loader = ErpVolumeLoader(product_id="product_d", lookback_days=1)
         loader._engine = sqlite_engine
 
         result = loader.load()
@@ -103,7 +103,7 @@ class TestErpVolumeLoader:
         from app.services.forecasting.features.exogenous_loaders import ErpVolumeLoader
         from app.services.forecasting.features import exogenous_loaders as el
 
-        loader = ErpVolumeLoader(product_id="isoprene")
+        loader = ErpVolumeLoader(product_id="product_d")
         loader._engine = None
         original = el._resolve_mysql_engine
         el._resolve_mysql_engine = lambda: None

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add three data assets the forecast engine and AI Brief currently ignore — ERP sales **volume** (the `qty` column), **supplier price dispersion** (per-supplier daily prices from `md_t_lz_price`), and a **calibrated event-impact store** (schema for Wave 2's T2.2) — plus pure derived-metric functions and new evidence-pack fields that surface a real 供需研判 signal.
+**Goal:** Add three data assets the forecast engine and AI Brief currently ignore — ERP sales **volume** (the `qty` column), **supplier price dispersion** (per-supplier daily prices from `md_market_price`), and a **calibrated event-impact store** (schema for Wave 2's T2.2) — plus pure derived-metric functions and new evidence-pack fields that surface a real 供需研判 signal.
 
 **Architecture:** New loaders follow the existing `exogenous_loaders.py` pattern (`.load()` → `pd.DataFrame`, indexed by date, no future leakage). Derived demand metrics live in a new pure module `demand_signal.py` (no I/O) so they are trivially unit-testable and reusable by both the evidence pack (brief) and, later, `feature_builder.py` (XGBoost exogenous). A new `ForecastEventImpact` model creates the calibration table that Wave 2's T2.2 populates. The evidence pack gains `demand` and `supplier_ladder` fields; the brief rewrite that *consumes* them is deferred to T1.1.
 
@@ -15,7 +15,7 @@
 - **Sentinel handling**: drop `_SENTINEL_VALUES = {"F7","NaN","nan","None","","null","NULL"}` before numeric coercion, matching `edia_source.py`.
 - **Schema management**: new ORM tables are created by `Base.metadata.create_all()` at startup (project convention — Alembic is not the source of truth; migration 026 crashes). Do NOT write an Alembic migration.
 - **Chinese market colors**: 涨=red, 跌=green (applies to later brief work, not this plan).
-- **MySQL engine**: `from app.core.mysql_db import get_mysql_engine` returns the EDIA MySQL engine (`EDIA_MYSQL_URL` @ 10.10.10.49:3306). Loaders tolerate `None` engine → return empty DataFrame.
+- **MySQL engine**: `from app.core.mysql_db import get_mysql_engine` returns the Acme MySQL engine (`Acme_MYSQL_URL` @ 10.10.10.49:3306). Loaders tolerate `None` engine → return empty DataFrame.
 - **Docker**: after touching `models/forecasting.py` (new table) restart with `docker restart zhanlu-backend`. No `--reload`.
 - **Test isolation**: use SQLite in-memory or monkeypatched engines for loader tests; never require live MySQL in unit tests.
 
@@ -81,8 +81,8 @@ class TestErpVolumeLoader:
         ]
         loader = ErpVolumeLoader(engine=_fake_engine(rows))
         df = loader.load(
-            erp_table="sale_erp_v_异戊二烯_data",
-            product_filter="异戊二烯",
+            erp_table="sale_erp_v_电子元件_data",
+            product_filter="电子元件",
             window_start=date(2026, 1, 1),
             window_end=date(2026, 1, 2),
         )
@@ -209,14 +209,14 @@ git commit -m "feat(forecast): add ErpVolumeLoader to read ERP sales qty column"
 
 ---
 
-### Task 2: SupplierDispersionLoader — per-supplier price spread from `md_t_lz_price`
+### Task 2: SupplierDispersionLoader — per-supplier price spread from `md_market_price`
 
 **Files:**
 - Modify: `backend/app/services/forecasting/features/exogenous_loaders.py` (append after `ErpVolumeLoader`)
 - Test: `backend/tests/test_forecasting/test_loaders_volume_supplier.py` (append `TestSupplierDispersionLoader`)
 
 **Interfaces:**
-- Consumes: `FMATERIAL_NAME` = `{product}-{supplier}` pattern from `md_t_lz_price`.
+- Consumes: `FMATERIAL_NAME` = `{product}-{supplier}` pattern from `md_market_price`.
 - Produces: `SupplierDispersionLoader.load(product_key, window_start, window_end) -> pd.DataFrame` with columns `min_price`, `max_price`, `mean_price`, `spread_pct`, `n_suppliers`, indexed by date. Empty DataFrame on failure/no engine.
 
 - [ ] **Step 1: Write the failing test**
@@ -228,14 +228,14 @@ class TestSupplierDispersionLoader:
     def test_load_returns_per_supplier_dispersion(self):
         # FMATERIAL_NAME = "{product}-{supplier}"
         rows = [
-            ("2026-01-01", "异戊二烯-供应商A", 100.0),
-            ("2026-01-01", "异戊二烯-供应商B", 120.0),
-            ("2026-01-01", "异戊二烯-供应商C", 110.0),
-            ("2026-01-02", "异戊二烯-供应商A", 105.0),
+            ("2026-01-01", "电子元件-供应商A", 100.0),
+            ("2026-01-01", "电子元件-供应商B", 120.0),
+            ("2026-01-01", "电子元件-供应商C", 110.0),
+            ("2026-01-02", "电子元件-供应商A", 105.0),
         ]
         engine = _fake_engine(rows)
         loader = SupplierDispersionLoader(engine=engine)
-        df = loader.load("异戊二烯", date(2026, 1, 1), date(2026, 1, 2))
+        df = loader.load("电子元件", date(2026, 1, 1), date(2026, 1, 2))
         assert set(df.columns) == {
             "min_price", "max_price", "mean_price", "spread_pct", "n_suppliers",
         }
@@ -252,7 +252,7 @@ class TestSupplierDispersionLoader:
     def test_load_empty_when_no_rows(self):
         engine = _fake_engine([])
         loader = SupplierDispersionLoader(engine=engine)
-        df = loader.load("异戊二烯", date(2026, 1, 1), date(2026, 1, 2))
+        df = loader.load("电子元件", date(2026, 1, 1), date(2026, 1, 2))
         assert df.empty
 ```
 
@@ -271,7 +271,7 @@ Append to `backend/app/services/forecasting/features/exogenous_loaders.py`:
 # ---------------------------------------------------------------------------
 
 class SupplierDispersionLoader:
-    """Loads per-supplier price dispersion from ``md_t_lz_price``.
+    """Loads per-supplier price dispersion from ``md_market_price``.
 
     ``FMATERIAL_NAME`` follows the ``{product}-{supplier}`` convention, so a
     single product has multiple rows per day (one per supplier). Dispersion
@@ -301,7 +301,7 @@ class SupplierDispersionLoader:
 
         sql = text(
             "SELECT FDATE AS ds, FMATERIAL_NAME AS mat, FTAXPRICE AS y "
-            "FROM md_t_lz_price "
+            "FROM md_market_price "
             "WHERE FMATERIAL_NAME LIKE :pattern "
             "AND FDATE >= :start AND FDATE <= :end "
             "ORDER BY FDATE ASC"
@@ -610,7 +610,7 @@ def test_event_impact_round_trip():
     TimestampedBase.metadata.create_all(engine, tables=[ForecastEventImpact.__table__])
     with Session(engine) as session:
         impact = ForecastEventImpact(
-            product_key="isoprene",
+            product_key="product_d",
             event_type="supply_disruption",
             measured_impact_pct=7.5,
             n_observations=12,
@@ -621,7 +621,7 @@ def test_event_impact_round_trip():
         session.add(impact)
         session.commit()
         loaded = session.query(ForecastEventImpact).filter_by(
-            product_key="isoprene", event_type="supply_disruption"
+            product_key="product_d", event_type="supply_disruption"
         ).one()
         assert loaded.measured_impact_pct == 7.5
         assert loaded.n_observations == 12
@@ -711,7 +711,7 @@ from app.services.forecasting.analyst.evidence_pack import build_pack
 
 def _base_kwargs():
     return dict(
-        product_id="isoprene", name_zh="异戊二烯", day=7,
+        product_id="product_d", name_zh="电子元件", day=7,
         history_rows=[], upstream_histories={}, run_results={},
         model_detail=None, explanation={}, as_of_month=8,
     )

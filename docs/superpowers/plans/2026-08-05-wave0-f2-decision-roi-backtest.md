@@ -81,7 +81,7 @@ def test_decision_log_round_trip():
     TimestampedBase.metadata.create_all(engine, tables=[ForecastDecisionLog.__table__])
     with Session(engine) as session:
         log = ForecastDecisionLog(
-            product_key="isoprene",
+            product_key="product_d",
             as_of_date=datetime(2026, 7, 1),
             horizon_days=7,
             action="buy",
@@ -98,7 +98,7 @@ def test_decision_log_round_trip():
         session.add(log)
         session.commit()
         loaded = session.query(ForecastDecisionLog).filter_by(
-            product_key="isoprene", as_of_date=datetime(2026, 7, 1)
+            product_key="product_d", as_of_date=datetime(2026, 7, 1)
         ).one()
         assert loaded.action == "buy"
         assert loaded.p_rise == 0.74
@@ -422,7 +422,7 @@ def test_log_decision_writes_pending_row():
         log = log_decision(
             session,
             target_id=None,
-            product_key="isoprene",
+            product_key="product_d",
             as_of_date=datetime(2026, 7, 1),
             horizon_days=7,
             decision=dec,
@@ -442,7 +442,7 @@ def test_log_decision_writes_pending_row():
         assert log.thresholds["buy_p"] == 0.70
         # Row persisted
         loaded = session.query(ForecastDecisionLog).filter_by(
-            product_key="isoprene").one()
+            product_key="product_d").one()
         assert loaded.action == "buy"
 ```
 
@@ -555,7 +555,7 @@ class TestScorePendingDecisions:
         horizon = 7
         with Session(engine) as session:
             session.add(ForecastDecisionLog(
-                product_key="isoprene", as_of_date=as_of, horizon_days=horizon,
+                product_key="product_d", as_of_date=as_of, horizon_days=horizon,
                 action="buy", confidence="medium", p_rise=0.74,
                 expected_change_pct=0.045, realized_price_t=10000.0,
                 status="pending",
@@ -564,7 +564,7 @@ class TestScorePendingDecisions:
 
         # Realized price at T+7 = 10400 (buy was correct, +4%)
         def lookup(product_key, date):
-            if product_key == "isoprene" and date == as_of + timedelta(days=7):
+            if product_key == "product_d" and date == as_of + timedelta(days=7):
                 return 10400.0
             return None
 
@@ -589,7 +589,7 @@ class TestScorePendingDecisions:
         as_of = datetime(2026, 7, 1)
         with Session(engine) as session:
             session.add(ForecastDecisionLog(
-                product_key="isoprene", as_of_date=as_of, horizon_days=7,
+                product_key="product_d", as_of_date=as_of, horizon_days=7,
                 action="buy", confidence="medium", realized_price_t=10000.0,
                 status="pending",
             ))

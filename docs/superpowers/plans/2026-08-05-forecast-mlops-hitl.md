@@ -101,10 +101,10 @@ def db():
 
 
 def test_forecast_feedback_roundtrip(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     fb = ForecastFeedback(
-        target_id=target.id, product_id="异戊二烯", ai_price=10388.0,
+        target_id=target.id, product_id="电子元件", ai_price=10388.0,
         user_price=11000.0, reason="supply tightening", author_id="u1",
         author_name="analyst", target_date=datetime(2026, 8, 10), status="pending",
         org_id="default-org",
@@ -117,7 +117,7 @@ def test_forecast_feedback_roundtrip(db):
 
 
 def test_forecast_weight_adjustment_roundtrip(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     adj = ForecastWeightAdjustment(
         target_id=target.id, triggered_by="drift",
@@ -132,7 +132,7 @@ def test_forecast_weight_adjustment_roundtrip(db):
 
 
 def test_accuracy_log_run_id_nullable(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     log = ForecastAccuracyLog(
         target_id=target.id, horizon_days=7, mape=0.12, naive_mape=0.10,
@@ -375,7 +375,7 @@ def db():
 
 def _make_run(db, as_of, base_values_by_h):
     """Seed a target + a ForecastRun with results[str(h)]["base"] = list."""
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     results = {str(h): {"base": vals, "bull": vals, "bear": vals}
                for h, vals in base_values_by_h.items()}
@@ -397,7 +397,7 @@ def test_writes_realized_mape_for_past_run(db):
     actuals = pd.Series([110.0] * 7, index=idx)
     loader = lambda datasource: actuals  # noqa: E731
 
-    summary = run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
+    summary = run_evaluation(db, actuals_loader=loader, product_key="电子元件")
 
     logs = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.run_id == run.id,
@@ -415,8 +415,8 @@ def test_idempotent_rerun_no_duplicate(db):
     target, run = _make_run(db, as_of, {7: [100.0] * 7})
     idx = pd.date_range("2026-07-02", periods=7, freq="D")
     loader = lambda datasource: pd.Series([110.0] * 7, index=idx)  # noqa: E731
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")  # re-run
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")  # re-run
     n = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.run_id == run.id,
         ForecastAccuracyLog.realized_mape.isnot(None),
@@ -429,7 +429,7 @@ def test_skips_run_whose_horizon_not_yet_arrived(db):
     as_of = datetime.now(timezone.utc) - timedelta(days=1)
     target, run = _make_run(db, as_of, {30: [100.0] * 30})
     loader = lambda datasource: pd.Series([110.0], index=pd.date_range("2026-01-01", periods=1))  # noqa: E731
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")
     n = db.query(ForecastAccuracyLog).filter(
         ForecastAccuracyLog.run_id == run.id,
         ForecastAccuracyLog.realized_mape.isnot(None),
@@ -442,14 +442,14 @@ def test_scores_pending_feedback(db):
     target, run = _make_run(db, as_of, {7: [100.0] * 7})
     # AI said 100; user said 109; actual = 110 → user_error < ai_error → beat
     fb = ForecastFeedback(
-        target_id=target.id, product_id="异戊二烯", ai_price=100.0,
+        target_id=target.id, product_id="电子元件", ai_price=100.0,
         user_price=109.0, reason="tightening", author_id="u1", author_name="a1",
         target_date=datetime(2026, 7, 5), status="pending", org_id="default-org",
     )
     db.add(fb); db.commit()
     idx = pd.date_range("2026-07-02", periods=7, freq="D")
     loader = lambda datasource: pd.Series([110.0] * 7, index=idx)  # noqa: E731
-    run_evaluation(db, actuals_loader=loader, product_key="异戊二烯")
+    run_evaluation(db, actuals_loader=loader, product_key="电子元件")
     db.refresh(fb)
     assert fb.status == "scored"
     assert fb.beat is True
@@ -497,7 +497,7 @@ DEFAULT_HORIZONS = [3, 7, 30]
 
 
 def _default_actuals_loader():
-    """Build the default loader that reads EDIA MySQL actuals."""
+    """Build the default loader that reads Acme MySQL actuals."""
     from app.services.forecasting.edia_source import EdiaMysqlDataSource
     src = EdiaMysqlDataSource()
     return lambda datasource: src.read_history(datasource)
@@ -516,7 +516,7 @@ def _actuals_series(actuals_loader, datasource) -> Optional[pd.Series]:
         return None
     if df is None or len(df) == 0:
         return None
-    # EDIA frames: time col FDATE, measure FTAXPRICE. read_history already
+    # Acme frames: time col FDATE, measure FTAXPRICE. read_history already
     # returns a clean series-like frame; normalize to a date-indexed Series.
     time_col = "FDATE" if "FDATE" in df.columns else df.columns[0]
     measure = "FTAXPRICE" if "FTAXPRICE" in df.columns else df.columns[-1]
@@ -725,7 +725,7 @@ def _seed_realized(db, target, baseline_mapes, recent_mapes):
 
 
 def test_writes_audit_row_on_drift(db, monkeypatch):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     # baseline ~12%, recent ~25% → 25 > 12*1.2 → drift
     _seed_realized(db, target, [0.12, 0.11, 0.12], [0.25, 0.26, 0.24])
@@ -742,7 +742,7 @@ def test_writes_audit_row_on_drift(db, monkeypatch):
 
 
 def test_no_audit_when_stable(db):
-    target = ForecastTarget(product_key="苯乙烯", name="苯乙烯", org_id="default-org")
+    target = ForecastTarget(product_key="材料J", name="材料J", org_id="default-org")
     db.add(target); db.commit()
     _seed_realized(db, target, [0.10, 0.10, 0.10], [0.11, 0.10, 0.10])
 
@@ -755,7 +755,7 @@ def test_no_audit_when_stable(db):
 
 
 def test_no_duplicate_audit_within_7_days(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     _seed_realized(db, target, [0.12, 0.11, 0.12], [0.25, 0.26, 0.24])
     drift_response.check_drift_and_audit(db, target)
@@ -891,9 +891,9 @@ def db():
 
 
 def test_record_feedback_pending(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
-    fb = record_feedback(db, product_id="异戊二烯", ai_price=10388.0,
+    fb = record_feedback(db, product_id="电子元件", ai_price=10388.0,
                          user_price=11000.0, reason="supply tightening",
                          author_id="u1", author_name="analyst",
                          target_date=datetime(2026, 8, 10))
@@ -902,33 +902,33 @@ def test_record_feedback_pending(db):
 
 
 def test_list_feedback_returns_history(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
-    record_feedback(db, "异戊二烯", 100.0, 109.0, "x", "u1", "a1", datetime(2026, 8, 1))
-    rows = list_feedback(db, "异戊二烯")
+    record_feedback(db, "电子元件", 100.0, 109.0, "x", "u1", "a1", datetime(2026, 8, 1))
+    rows = list_feedback(db, "电子元件")
     assert len(rows) == 1
     assert rows[0]["user_price"] == 109.0
 
 
 def test_author_track_record(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     # 3 scored: 2 beat, 1 miss
     for ai, usr in [(100, 109), (100, 109), (100, 90)]:
-        fb = record_feedback(db, "异戊二烯", float(ai), float(usr), "r", "u1", "a1", datetime(2026, 8, 1))
+        fb = record_feedback(db, "电子元件", float(ai), float(usr), "r", "u1", "a1", datetime(2026, 8, 1))
         fb.status = "scored"; fb.beat = (usr == 109); fb.ai_error = 0.1; fb.user_error = 0.01
     db.commit()
-    tr = author_track_record(db, author_id="u1", product_id="异戊二烯")
+    tr = author_track_record(db, author_id="u1", product_id="电子元件")
     assert tr["scored"] == 3
     assert tr["beat"] == 2
     assert abs(tr["beat_rate"] - 2 / 3) < 0.01
 
 
 def test_rejects_non_positive_user_price(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     with pytest.raises(ValueError):
-        record_feedback(db, "异戊二烯", 100.0, -5.0, "r", "u1", "a1", datetime(2026, 8, 1))
+        record_feedback(db, "电子元件", 100.0, -5.0, "r", "u1", "a1", datetime(2026, 8, 1))
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1095,11 +1095,11 @@ def _fake_user():
 
 
 def test_post_feedback_creates_pending(db, monkeypatch):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     c = _client(db, hitl_on=True)
     r = c.post("/api/market-dashboard/forecast-feedback", json={
-        "product_id": "异戊二烯", "ai_price": 10388.0, "user_price": 11000.0,
+        "product_id": "电子元件", "ai_price": 10388.0, "user_price": 11000.0,
         "reason": "tightening", "target_date": "2026-08-10T00:00:00",
     })
     assert r.status_code == 200, r.text
@@ -1109,23 +1109,23 @@ def test_post_feedback_creates_pending(db, monkeypatch):
 
 
 def test_post_feedback_disabled_when_flag_off(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     c = _client(db, hitl_on=False)
     r = c.post("/api/market-dashboard/forecast-feedback", json={
-        "product_id": "异戊二烯", "ai_price": 100.0, "user_price": 110.0, "reason": "x",
+        "product_id": "电子元件", "ai_price": 100.0, "user_price": 110.0, "reason": "x",
     })
     assert r.status_code in (404, 501, 503)
 
 
 def test_get_feedback_history(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     c = _client(db, hitl_on=True)
     c.post("/api/market-dashboard/forecast-feedback", json={
-        "product_id": "异戊二烯", "ai_price": 100.0, "user_price": 109.0, "reason": "r",
+        "product_id": "电子元件", "ai_price": 100.0, "user_price": 109.0, "reason": "r",
     })
-    r = c.get("/api/market-dashboard/forecast-feedback?product_id=异戊二烯")
+    r = c.get("/api/market-dashboard/forecast-feedback?product_id=电子元件")
     assert r.status_code == 200
     assert len(r.json()) == 1
 ```
@@ -1311,7 +1311,7 @@ def db():
 
 def _add_scored(db, target, author, days_ago, ai, usr, beat):
     fb = ForecastFeedback(
-        target_id=target.id, product_id="异戊二烯", ai_price=float(ai),
+        target_id=target.id, product_id="电子元件", ai_price=float(ai),
         user_price=float(usr), reason="r", author_id=author, author_name=author,
         target_date=datetime.now(timezone.utc) - timedelta(days=days_ago),
         status="scored", beat=beat, ai_error=0.1, user_error=0.05,
@@ -1322,43 +1322,43 @@ def _add_scored(db, target, author, days_ago, ai, usr, beat):
 
 
 def test_gate_not_met_below_3(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     _add_scored(db, t, "u1", 5, 100, 109, True)
     _add_scored(db, t, "u1", 4, 100, 109, True)
-    assert bc.trust_gate_met(db, "u1", "异戊二烯") is False
+    assert bc.trust_gate_met(db, "u1", "电子元件") is False
 
 
 def test_gate_not_met_low_beat_rate(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     for beat in [True, False, False]:
         _add_scored(db, t, "u1", 5, 100, 109, beat)
     # 1/3 beat → <50%
-    assert bc.trust_gate_met(db, "u1", "异戊二烯") is False
+    assert bc.trust_gate_met(db, "u1", "电子元件") is False
 
 
 def test_gate_met(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     for beat in [True, True, False]:
         _add_scored(db, t, "u1", 5, 100, 109, beat)
-    assert bc.trust_gate_met(db, "u1", "异戊二烯") is True
+    assert bc.trust_gate_met(db, "u1", "电子元件") is True
 
 
 def test_bias_delta_clamped_to_10pct(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     # user consistently 50% above AI → delta_ratio 0.5 → clamped to 0.10
     for _ in range(4):
         _add_scored(db, t, "u1", 3, 100, 150, True)
-    delta = bc.compute_bias_delta(db, "异戊二烯", "u1")
+    delta = bc.compute_bias_delta(db, "电子元件", "u1")
     assert delta["clamped"] is True
     assert math.isclose(delta["delta_ratio"], 0.10, abs_tol=1e-6)
 
 
 def test_apply_returns_unadjusted_when_gate_not_met(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     s = pd.Series([100.0, 101.0, 102.0])
     out, expl = bc.apply_bias_correction(db, t, s, author_id="u1")
@@ -1367,7 +1367,7 @@ def test_apply_returns_unadjusted_when_gate_not_met(db):
 
 
 def test_apply_adjusts_and_audits_when_gate_met(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     for _ in range(4):
         _add_scored(db, t, "u1", 3, 100, 110, True)  # +10% consistently
@@ -1560,7 +1560,7 @@ def db():
 
 def test_drift_blend_pulls_published_toward_naive(db):
     """The engine helper blends published*(1-f) + naive*f."""
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     # Seed an unapplied drift audit row.
     db.add(ForecastWeightAdjustment(
@@ -1585,11 +1585,11 @@ def test_drift_blend_pulls_published_toward_naive(db):
 
 
 def test_bias_correction_explanation_shape(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     for _ in range(4):
         fb = ForecastFeedback(
-            target_id=target.id, product_id="异戊二烯", ai_price=100.0, user_price=110.0,
+            target_id=target.id, product_id="电子元件", ai_price=100.0, user_price=110.0,
             reason="r", author_id="u1", author_name="u1",
             target_date=datetime.now(timezone.utc) - timedelta(days=3),
             status="scored", beat=True, ai_error=0.1, user_error=0.01, org_id="default-org",
@@ -1768,7 +1768,7 @@ def _client(db, eval_on: bool, admin=True):
 
 
 def test_status_returns_chips(db):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     db.add(ForecastWeightAdjustment(
         target_id=t.id, org_id="default-org", triggered_by="drift",
@@ -1778,11 +1778,11 @@ def test_status_returns_chips(db):
     r = c.get("/api/forecast-ops/status")
     assert r.status_code == 200
     body = r.json()
-    assert any(p["product_key"] == "异戊二烯" for p in body["products"])
+    assert any(p["product_key"] == "电子元件" for p in body["products"])
 
 
 def test_run_evaluation_admin_only(db, monkeypatch):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(t); db.commit()
     # stub the actuals loader so no MySQL is hit
     monkeypatch.setattr(
@@ -1927,7 +1927,7 @@ def db():
 
 
 def test_nightly_runs_eval_and_drift_when_enabled(db, monkeypatch):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org",
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org",
                        status="active")
     db.add(t); db.commit()
 
@@ -2077,7 +2077,7 @@ beforeEach(() => {
 describe('ForecastFeedbackModal', () => {
   it('shows the AI price read-only and rejects non-positive user price', async () => {
     marketDashboardApi.submitForecastFeedback.mockResolvedValue({ id: '1', status: 'pending' });
-    render(<ForecastFeedbackModal productId="异戊二烯" aiPrice={10388} onClose={() => {}} />);
+    render(<ForecastFeedbackModal productId="电子元件" aiPrice={10388} onClose={() => {}} />);
     expect(screen.getByDisplayValue('10388')).toBeDisabled();
     fireEvent.change(screen.getByLabelText(/我认为应该是/i), { target: { value: '11000' } });
     fireEvent.click(screen.getByRole('button', { name: /提交/i }));
@@ -2087,7 +2087,7 @@ describe('ForecastFeedbackModal', () => {
   });
 
   it('rejects zero user price', () => {
-    render(<ForecastFeedbackModal productId="异戊二烯" aiPrice={10388} onClose={() => {}} />);
+    render(<ForecastFeedbackModal productId="电子元件" aiPrice={10388} onClose={() => {}} />);
     fireEvent.change(screen.getByLabelText(/我认为应该是/i), { target: { value: '0' } });
     fireEvent.click(screen.getByRole('button', { name: /提交/i }));
     expect(marketDashboardApi.submitForecastFeedback).not.toHaveBeenCalled();
@@ -2304,7 +2304,7 @@ docker exec zhanlu-backend python -c "
 from app.database import SessionLocal
 from app.services.forecasting.accuracy_tracker import detect_drift
 db = SessionLocal()
-print(detect_drift(db, '异戊二烯'))
+print(detect_drift(db, '电子元件'))
 db.close()
 "
 ```

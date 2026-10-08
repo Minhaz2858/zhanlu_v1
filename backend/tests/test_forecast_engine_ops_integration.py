@@ -35,7 +35,7 @@ def db():
 
 def test_drift_blend_pulls_published_toward_naive(db):
     """The engine helper blends published*(1-f) + naive*f."""
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     # Seed an unapplied drift audit row.
     db.add(ForecastWeightAdjustment(
@@ -60,11 +60,11 @@ def test_drift_blend_pulls_published_toward_naive(db):
 
 
 def test_bias_correction_explanation_shape(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.commit()
     for _ in range(4):
         fb = ForecastFeedback(
-            target_id=target.id, product_id="异戊二烯", ai_price=100.0, user_price=110.0,
+            target_id=target.id, product_id="电子元件", ai_price=100.0, user_price=110.0,
             reason="r", author_id="u1", author_name="u1",
             target_date=datetime.now(timezone.utc) - timedelta(days=3),
             status="scored", beat=True, ai_error=0.1, user_error=0.01, org_id="default-org",

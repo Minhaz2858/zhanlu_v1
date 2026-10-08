@@ -2,7 +2,7 @@
 
 The store upgrade adds:
 - ``CollectionStore`` class — operates on a single named collection
-  (one of the 9 EDIA semantic collections, e.g. ``industry_reports``,
+  (one of the 9 Acme semantic collections, e.g. ``industry_reports``,
   ``weekly_reports``, etc.). Wraps ChromaDB operations with metadata
   safety, a configurable embedding function, and clean test isolation.
 - ``MultiCollectionStore`` — owns a per-org registry of CollectionStore
@@ -101,8 +101,8 @@ def embed_fn():
 
 class TestTokenizeLexical:
     def test_ascii_tokens(self):
-        toks = tokenize_lexical("DCPD price increased")
-        assert "dcpd" in toks
+        toks = tokenize_lexical("PRODUCT_B price increased")
+        assert "product_b" in toks
         assert "price" in toks
         assert "increased" in toks
 
@@ -113,8 +113,8 @@ class TestTokenizeLexical:
         assert any("烯价" in t for t in toks)
 
     def test_mixed_text(self):
-        toks = tokenize_lexical("DCPD 乙烯价格 2024")
-        assert "dcpd" in toks
+        toks = tokenize_lexical("PRODUCT_B 乙烯价格 2024")
+        assert "product_b" in toks
         assert any("乙烯" in t for t in toks)
         assert any("2024" in t for t in toks)
 
@@ -207,9 +207,9 @@ class TestCollectionStore:
             collection_name="industry_reports",
             embedding_fn=embed_fn,
         )
-        cs.upsert(doc_id="doc1", text="DCPD price increased")
+        cs.upsert(doc_id="doc1", text="PRODUCT_B price increased")
         cs.upsert(doc_id="doc2", text="市场波动明显")
-        results = cs.query("DCPD price", top_k=2)
+        results = cs.query("PRODUCT_B price", top_k=2)
         assert len(results) > 0
         assert all("text" in r for r in results)
         assert all("score" in r for r in results)
@@ -303,12 +303,12 @@ class TestHybridQuery:
             collection_name="industry_reports",
             embedding_fn=embed_fn,
         )
-        cs.upsert(doc_id="d1", text="DCPD price increased significantly")
+        cs.upsert(doc_id="d1", text="PRODUCT_B price increased significantly")
         cs.upsert(doc_id="d2", text="Market volatility in ethylene sector")
         cs.upsert(doc_id="d3", text="Crude oil supply trends")
-        out = hybrid_query(cs, "DCPD price", top_k=3)
+        out = hybrid_query(cs, "PRODUCT_B price", top_k=3)
         assert len(out) > 0
-        # Dense match for "DCPD" should rank first
+        # Dense match for "PRODUCT_B" should rank first
         assert out[0]["id"] in ("d1", "d2")
 
     def test_hybrid_query_boosts_keyword_match(self, tmp_chroma_dir, embed_fn):
@@ -318,9 +318,9 @@ class TestHybridQuery:
             embedding_fn=embed_fn,
         )
         cs.upsert(doc_id="d1", text="Short blurb.")
-        cs.upsert(doc_id="d2", text="DCPD price DCPD price DCPD")
-        out = hybrid_query(cs, "DCPD price", top_k=2)
-        # d2 has many "DCPD" tokens → should rank first via lexical boost
+        cs.upsert(doc_id="d2", text="PRODUCT_B price PRODUCT_B price PRODUCT_B")
+        out = hybrid_query(cs, "PRODUCT_B price", top_k=2)
+        # d2 has many "PRODUCT_B" tokens → should rank first via lexical boost
         assert out[0]["id"] == "d2"
 
     def test_hybrid_query_with_metadata_filter(

@@ -538,7 +538,7 @@ def reroute_uncovered(
     carries the verdict as ``covers_window``. Until now nothing ACTED on it:
     the annotation reached the prompt and the answer, never the selection.
 
-    Measured live on 2026-09-20, question ``惠州伊斯科本周销售情况，用图表展示``
+    Measured live on 2026-09-20, question ``示例工厂本周销售情况，用图表展示``
     (window 2026-09-14..2026-09-20):
 
       * ``erp_v_sale_huizhou`` ranked #1 (score 5.73, max_date 2026-09-16,

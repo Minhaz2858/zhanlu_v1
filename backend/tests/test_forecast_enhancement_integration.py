@@ -47,10 +47,10 @@ class TestEngineTopologicalOrder:
             Relationship(source_id="derivative_a", target_id="derivative_b",
                          relation=RelationshipType.PRODUCES),
         ]
-        monkeypatch.setattr(kg_graph, "_C5_C9_NODES", nodes)
-        monkeypatch.setattr(kg_graph, "_C5_C9_EDGES", edges)
+        monkeypatch.setattr(kg_graph, "_SAMPLE_NODES", nodes)
+        monkeypatch.setattr(kg_graph, "_SAMPLE_EDGES", edges)
 
-        kg = kg_graph.build_c5_c9_graph()
+        kg = kg_graph.build_sample_graph()
         products = ["derivative_b", "raw_material", "intermediate", "derivative_a"]
         ordered = topological_order(products, kg)
         assert len(ordered) == len(products)

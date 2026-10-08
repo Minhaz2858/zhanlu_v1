@@ -34,7 +34,7 @@ DEPTH_PRESETS: dict[str, dict[str, int]] = {
 }
 
 # Which tools each scope may invoke. Web scope uses web search/extract;
-# internal scope uses the bound-data tools (Ecisco BI / SQL / data agent).
+# internal scope uses the bound-data tools (Acme BI / SQL / data agent).
 SCOPE_TOOLS: dict[str, tuple[str, ...]] = {
     "web": ("web_search", "web_extract"),
     "internal": ("sql_query", "ask_data_agent", "comprehensive_data"),
@@ -149,7 +149,7 @@ async def run_deep_research(
         Pre-fix: every tool result was appended as evidence, so a web_search
         that returned ``{"success": False, ...}`` was fed to the synthesizer
         as a "finding" — that is how a 9× all-failed web run produced a
-        confident "no data exists for C5C9" report instead of a hybrid
+        confident "no data exists for SAMPLE" report instead of a hybrid
         answer. Only success-shaped results (rows / summary / answer /
         content) are evidence now.
         """

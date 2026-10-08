@@ -3,15 +3,15 @@
 ## End-to-End Test (Real Warehouse)
 
 Ran a Python script that:
-1. Confirmed 9 `ForecastTarget` rows exist for the Ecisco BI project (org=`default-org`, app=`ecisco-bi`)
-2. Connected to the real MySQL warehouse at `10.10.10.49:3306` / `aipdp_data_warehouse_prod`
+1. Confirmed 9 `ForecastTarget` rows exist for the Acme BI project (org=`default-org`, app=`acme-bi`)
+2. Connected to the real MySQL warehouse at `10.10.10.49:3306` / `demo_warehouse_prod`
 3. For each of 3 sampled products, pulled real data via the same SQL pattern the engine uses
 4. Ran the data through `truth_gate.wrap_forecast_result` to verify the gating logic
 
-### Question 1: cracked_c5 (`lz_v_裂解c5_data`)
+### Question 1: cracked_c5 (`v_demo_data`)
 
 - **Outcome:** SUCCESS — 392 rows, real data
-- **Source table:** `lz_v_裂解c5_data`
+- **Source table:** `v_demo_data`
 - **Sample size:** 392
 - **Date range:** 2025-06-13 → 2026-03-20
 - **First row:** 2025-06-13, value 3,391.77 CNY
@@ -19,10 +19,10 @@ Ran a Python script that:
 - **Truth gate:** `success=True`
 - **Verdict:** PASS — would produce a real forecast with data anchor
 
-### Question 2: cracked_c9 (`lz_v_裂解c9_data`)
+### Question 2: cracked_c9 (`v_材料K_data`)
 
 - **Outcome:** SUCCESS — 330 rows, real data
-- **Source table:** `lz_v_裂解c9_data`
+- **Source table:** `v_材料K_data`
 - **Sample size:** 330
 - **Date range:** 2025-06-15 → 2026-03-20
 - **First row:** 2025-06-15, value 3,880.67 CNY
@@ -30,10 +30,10 @@ Ran a Python script that:
 - **Truth gate:** `success=True`
 - **Verdict:** PASS
 
-### Question 3: isoprene (`lz_v_异戊二烯_data`)
+### Question 3: product_d (`v_电子元件_data`)
 
 - **Outcome:** SUCCESS — 305 rows, real data
-- **Source table:** `lz_v_异戊二烯_data`
+- **Source table:** `v_电子元件_data`
 - **Sample size:** 305
 - **Date range:** 2025-03-07 → 2026-07-29
 - **First row:** 2025-03-07, value 11,475.00 CNY
@@ -47,15 +47,15 @@ Ran a Python script that:
 |---|---|---|
 | cracked_c5 | 392 rows | ✓ YES |
 | cracked_c9 | 330 rows | ✓ YES |
-| isoprene | 305 rows | ✓ YES |
-| piperylene | (not sampled but in seed) | ✓ YES (expected) |
-| dcpd | (not sampled but in seed) | ✓ YES (expected) |
+| product_d | 305 rows | ✓ YES |
+| product_f | (not sampled but in seed) | ✓ YES (expected) |
+| product_b | (not sampled but in seed) | ✓ YES (expected) |
 | sis | (not sampled but in seed) | ✓ YES (expected) |
 | blowing_agent | (not sampled but in seed) | ✓ YES (expected) |
 | trimethylbenzene | (not sampled but in seed) | ✓ YES (expected) |
 | styrene | (not sampled but in seed) | ✓ YES (expected) |
 | **9 / 16 products** | | **9/16 work** |
-| naphtha, raffinate_c5, c5_resin, hydrogenated_c9, crude_oil, butadiene, sbs | NO warehouse data | Returns "ForecastTarget not found" — truth_gate catches this as insufficient_data |
+| product_c, feedstock_a, product_a, hydrogenated_c9, product_e, butadiene, sbs | NO warehouse data | Returns "ForecastTarget not found" — truth_gate catches this as insufficient_data |
 
 ## Overall
 
@@ -73,6 +73,6 @@ Ran a Python script that:
 ## Next Steps
 
 1. **Recommended:** Fix the engine's `_fetch_series` MySQL quoting (1-line follow-up).
-2. **Optional:** Run the seed against more orgs if Ecisco BI uses multi-tenant orgs.
+2. **Optional:** Run the seed against more orgs if Acme BI uses multi-tenant orgs.
 3. **Optional:** The 7 missing products need either a warehouse data source or removal from the pack — out of scope.
 4. **Out of scope:** The forecast_agent subagent's prompt (line 432) was already correct — no changes needed.

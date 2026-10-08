@@ -23,14 +23,14 @@ def test_chinese_contract_routes_to_contract_execution():
 def test_sales_still_routes_to_sales():
     r = resolve_static_route("give me top customer for last month")
     assert r is not None
-    assert r["table"] == "erp_v_sale_orderentry"
+    assert r["table"] == "v_sale_order"
 
 
 def test_contract_route_carries_date_hint():
     r = resolve_static_route("contract performance last month")
     assert r is not None
     assert "erp_v_contract_execution" in (r.get("date_hint") or "")
-    assert "NEVER use erp_v_sale_orderentry" in (r.get("date_hint") or "")
+    assert "NEVER use v_sale_order" in (r.get("date_hint") or "")
 
 
 def test_sales_route_does_not_shadow_contract():

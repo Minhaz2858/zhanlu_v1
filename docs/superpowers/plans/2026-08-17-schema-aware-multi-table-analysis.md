@@ -26,7 +26,7 @@
 - [ ] **2.4** `db_tools.py`: `_describe_schema` graph fast path + `_execute_query` validator
       (behind `SCHEMA_GRAPH_ENABLED` / `SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED`);
       `nl_answer_service.py` graph context + one retry. Tests `test_describe_schema_graph.py`.
-- [ ] **2.5** `agent_prompts.py`: generic Schema-Aware Query Protocol block at ecisco
+- [ ] **2.5** `agent_prompts.py`: generic Schema-Aware Query Protocol block at acme
       injection point; confirm automation-context signal.
 - [ ] **2.6** Flags: `SCHEMA_GRAPH_ENABLED`, `SCHEMA_GRAPH_SQL_VALIDATOR_ENABLED`,
       `SCHEMA_GRAPH_AUTOJOIN_THRESHOLD=0.8`, `SCHEMA_GRAPH_SAMPLE_ROWS=3`,

@@ -38,19 +38,19 @@ class TestBuildAiContext:
         ctx = build_ai_context(
             mock_execution_chart(),
             mock_unshipped(),
-            "惠州伊斯科",
+            "示例工厂",
             "2025-07-01",
             "2025-07-31",
         )
-        assert "惠州伊斯科" in ctx
+        assert "示例工厂" in ctx
         assert "C5树脂" in ctx
         assert "间戊二烯" in ctx
         assert "76" in ctx or "76.0" in ctx
         assert "未出库" in ctx
 
     def test_empty_input_produces_header(self):
-        ctx = build_ai_context([], [], "惠州伊斯科", "2025-01-01", "2025-01-31")
-        assert "惠州伊斯科" in ctx
+        ctx = build_ai_context([], [], "示例工厂", "2025-01-01", "2025-01-31")
+        assert "示例工厂" in ctx
         assert "2025-01-01" in ctx
 
 
@@ -85,7 +85,7 @@ class TestStreamAiAnalysis:
                 "ts": __import__("time").time(),
             }
 
-        org = {"key": "huizhou", "label": "惠州伊斯科"}
+        org = {"key": "huizhou", "label": "示例工厂"}
         events: list[str] = []
         async for frame in stream_ai_analysis(
             mock_execution_chart(), mock_unshipped(),
@@ -111,7 +111,7 @@ class TestStreamAiAnalysis:
         with _ai_cache_lock:
             _ai_cache.pop(cache_key, None)
 
-        org = {"key": "huizhou", "label": "惠州伊斯科"}
+        org = {"key": "huizhou", "label": "示例工厂"}
 
         # async generator that yields some deltas
         async def mock_gen(prompt, temperature=0.7):
@@ -154,7 +154,7 @@ class TestStreamAiAnalysis:
 
 
 class TestSseContract:
-    """Verify SSE frame format matches EDIA protocol contract."""
+    """Verify SSE frame format matches Acme protocol contract."""
 
     def test_frame_ends_with_double_newline(self):
         frame = _sse("done", {"chart_top": "ok"})

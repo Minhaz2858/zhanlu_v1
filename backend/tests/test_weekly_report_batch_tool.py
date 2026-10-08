@@ -36,7 +36,7 @@ def sub_agent_results():
         },
         "intelligence": {
             "success": True,
-            "answer": "Intelligence: naphtha rally news.",
+            "answer": "Intelligence: product_c rally news.",
             "agent": "intelligence_agent",
             "iterations": 1,
         },

@@ -157,7 +157,7 @@ class TestFeatureBuilderWave5:
 
         return FeatureSpec(
             product_key="test_product",
-            feedstock_keys=["naphtha"],
+            feedstock_keys=["product_c"],
             feedstock_lags=[1, 2, 3, 4, 5, 6, 7],
             use_fx=True,
             use_event_flags=True,
@@ -266,7 +266,7 @@ class TestFeatureBuilderWave5:
         y = make_test_series(180)
         feed, fx, event = self._make_mock_loaders()
         # Enable cascade to trigger X_future construction
-        cascade = {"naphtha": [100.0 + i for i in range(7)]}
+        cascade = {"product_c": [100.0 + i for i in range(7)]}
         fm = build_features(
             "test_product", y, self._make_spec(),
             feed, fx, event, horizon=7,
@@ -288,7 +288,7 @@ class TestFeatureBuilderWave5:
 
         y = make_test_series(180)
         feed, fx, event = self._make_mock_loaders()
-        cascade = {"naphtha": [100.0 + i for i in range(7)]}
+        cascade = {"product_c": [100.0 + i for i in range(7)]}
         fm = build_features(
             "test_product", y, self._make_spec(),
             feed, fx, event, horizon=7,

@@ -35,7 +35,7 @@ def test_fenced_sql_block_removed():
 
 
 def test_plain_fence_starting_with_select_removed():
-    text = "Intro\n\n```\nSELECT FMATERIALID FROM aipdp_data_warehouse_prod LIMIT 80\n```\n\nOutro"
+    text = "Intro\n\n```\nSELECT FMATERIALID FROM demo_warehouse_prod LIMIT 80\n```\n\nOutro"
     out = _strip_sql_narration(text)
     assert "FMATERIALID" not in out
     assert "Intro" in out and "Outro" in out

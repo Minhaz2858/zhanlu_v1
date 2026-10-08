@@ -1,7 +1,7 @@
 """Tests for the stale-data freshness checks + table preference rules.
 
 `erp_product_sales_details` only holds 1.4k rows up to 2025-12-31, while
-`erp_t_sal_outstock` / `erp_v_sale_orderentry` hold ~90k rows through
+`erp_t_sal_outstock` / `v_sale_order` hold ~90k rows through
 2026-08-11. The prompts must:
 
 1. Force a ``MAX(date_column)`` freshness check before reporting date-bounded
@@ -70,8 +70,8 @@ def test_weekly_report_skill_covers_all_products_and_inventory():
     for product in (
         "碳五石油树脂",
         "双环戊二烯",
-        "异戊二烯",
-        "戊烷发泡剂",
+        "电子元件",
+        "包装材料",
         "抽余碳五",
         "间戊二烯",
         "工业用裂解碳九",
@@ -80,6 +80,6 @@ def test_weekly_report_skill_covers_all_products_and_inventory():
     # Inventory table must be named explicitly.
     assert "erp_v_stk_inventory" in body or "erp_t_stk_inventory" in body
     # Unified sales view must be named explicitly.
-    assert "erp_v_sale_orderentry" in body or "erp_t_sal_outstock" in body
+    assert "v_sale_order" in body or "erp_t_sal_outstock" in body
     # Sales and inventory must be split into two queries.
     assert "sales" in body.lower() and "inventory" in body.lower()

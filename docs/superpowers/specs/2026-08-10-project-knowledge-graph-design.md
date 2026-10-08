@@ -21,7 +21,7 @@ Two diagnosed pains in today's data-answer path, both in the database KB flow:
 `backend/app/services/db/nl_answer_service.py:59-68` — every `ask_data_agent` / `answer_from_database` call runs `schema_svc.describe_all(kb_id, max_tables=30)` **live against the remote DB** on each question. There is no caching layer: same question asked twice re-introspects 30 tables twice. Against a 139-table warehouse this is seconds of network + DDL parsing before the LLM even sees a schema.
 
 **2. Missed tables + guessed joins — raw DDL dumps with no semantics.**
-`backend/app/services/db/schema_service.py:73-96` — `describe_all` returns raw column DDL capped at `max_tables` (default 50, called with 30). Concretely, against the EDIA warehouse `aipdp_data_warehouse_prod` (139 tables), ~109 tables are **invisible to the model by construction**. Cryptic names like `erp_t_stk_instockentry` carry no business meaning. No foreign-key relationships are extracted, so joins are guesswork. The result: the Data Agent misses tables it should use and answers slowly.
+`backend/app/services/db/schema_service.py:73-96` — `describe_all` returns raw column DDL capped at `max_tables` (default 50, called with 30). Concretely, against the Acme warehouse `demo_warehouse_prod` (139 tables), ~109 tables are **invisible to the model by construction**. Cryptic names like `erp_t_stk_instockentry` carry no business meaning. No foreign-key relationships are extracted, so joins are guesswork. The result: the Data Agent misses tables it should use and answers slowly.
 
 **3. (Added in revision) No cross-resource awareness.**
 The agent cannot tell whether a question should hit a database, an uploaded file, project memory, a past decision, or a report recipe — it guesses per-tool. And the validated `nl2sql` pipeline (`backend/app/services/nl2sql/`) is orphaned: consumed only by the standalone `POST /nl2sql/ask`, never by the agent path.
@@ -46,7 +46,7 @@ The agent cannot tell whether a question should hit a database, an uploaded file
 - Deterministic routing of each question to the right resource(s), with conservative fallback to current behavior.
 - Wire the orphaned `nl2sql` validation pipeline into the agent data path (shadow mode first, serving switch on evidence).
 - Report recipes as first-class reusable objects; depth analysis loop for multi-step "why" questions grounded in evidence packs.
-- Each phase independently useful and flag-gated (safe rollout, matching the `ECISCO_BI_*` / `FORECAST_*` pattern).
+- Each phase independently useful and flag-gated (safe rollout, matching the `BI_*` / `FORECAST_*` pattern).
 
 **Non-goals (explicitly out of scope):**
 
@@ -204,7 +204,7 @@ Unique on (`project_id`, `resource_type`, `resource_id`). Visibility enforced at
 
 ## Phase 1 — Schema Catalog + Schema Linking (DBs only) — BUILT, pending eval gate
 
-Shipped: `catalog_indexer.py`, `schema_linker.py`, `resolver.py`, `graph.py`, `tool.py` under `backend/app/services/knowledge_graph/`; 139 tables / 2551 columns indexed from `aipdp_data_warehouse_prod`; Chroma `catalog_{kb_id}` with RRF; `describe_all` fallback preserved; `_safe_list_tables` re-raises connection-level failures (status truthfully `error`).
+Shipped: `catalog_indexer.py`, `schema_linker.py`, `resolver.py`, `graph.py`, `tool.py` under `backend/app/services/knowledge_graph/`; 139 tables / 2551 columns indexed from `demo_warehouse_prod`; Chroma `catalog_{kb_id}` with RRF; `describe_all` fallback preserved; `_safe_list_tables` re-raises connection-level failures (status truthfully `error`).
 
 **Acceptance gate (must pass before declaring Phase 1 done):**
 
@@ -317,11 +317,11 @@ Execution order (deterministic):
 
 ### 4.2 Seeds — `backend/app/services/report_recipes/seed_recipes.py`
 
-Five generic recipe templates (sales / weekly / monthly / inventory / customer) defined as data (JSON), with metric placeholders resolved per project — **no hardcoded schema or product names**. The EDIA weekly-report module later plugs into this foundation.
+Five generic recipe templates (sales / weekly / monthly / inventory / customer) defined as data (JSON), with metric placeholders resolved per project — **no hardcoded schema or product names**. The Acme weekly-report module later plugs into this foundation.
 
 ### 4.3 Learning hooks
 
-Connect to the experience layer: recipe selection/success feeds `.recipes.json` (`ECISCO_BI_RECIPE_LEARNING_ENABLED`), and `/feedback` adjusts recipe rankings (`adjust_recipe_feedback`).
+Connect to the experience layer: recipe selection/success feeds `.recipes.json` (`BI_RECIPE_LEARNING_ENABLED`), and `/feedback` adjusts recipe rankings (`adjust_recipe_feedback`).
 
 **Acceptance metrics:**
 
@@ -360,7 +360,7 @@ The validated `nl2sql` pipeline (`semantic_resolver`, `context_builder`, `valida
 
 ## Flags & Rollout
 
-New flags in `backend/app/config.py` (Settings fields, `ECISCO_BI_*` / `FORECAST_*` comment style), all default `False`:
+New flags in `backend/app/config.py` (Settings fields, `BI_*` / `FORECAST_*` comment style), all default `False`:
 
 | Flag | Gates |
 |---|---|
@@ -391,7 +391,7 @@ Rollout:
 - Depth loop: iteration cap, critic gate, evidence pack shape, soft-fail.
 - Overlay/registry API: write/read semantics, RBAC gating.
 
-**Integration test** (one, against the real warehouse `aipdp_data_warehouse_prod` @ 10.10.10.49:3306): indexer completes, 139 tables present, catalog_status ready, linker returns a slice.
+**Integration test** (one, against the real warehouse `demo_warehouse_prod` @ 10.10.10.49:3306): indexer completes, 139 tables present, catalog_status ready, linker returns a slice.
 
 **Eval set** (the Phase 1 acceptance criterion): 15 real NL questions with ground-truth tables; **table recall ≥ 90%**; per-query latency recorded before/after.
 

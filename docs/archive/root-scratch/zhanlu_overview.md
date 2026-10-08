@@ -90,7 +90,7 @@
 - **Document Generation** — PPT, DOCX, HTML artifacts with layout engines and chart rendering
 - **Enterprise RBAC** — Multi-tenant isolation (org_id + app_id), resource sharing, access policies
 
-The platform is designed for the Ecisco BI domain (C5/C9 petrochemicals) but is generalized for any structured-data business intelligence use case.
+The platform is designed for the Acme BI domain (C5/C9 industrials) but is generalized for any structured-data business intelligence use case.
 
 ---
 
@@ -1026,7 +1026,7 @@ automation_dispatcher.py
 
 1. **@base44/sdk compatibility** — The frontend uses the Base44 SDK for CRUD operations, which means the API must maintain compatibility with its conventions (entity endpoints, auth flow)
 
-2. **Agent loop never routes through AgentRunOrchestrator** — The main chat loop goes directly through `agents.py`; the harness (`AgentRunService`) is only used by SwarmRuntime and EDIA delegation
+2. **Agent loop never routes through AgentRunOrchestrator** — The main chat loop goes directly through `agents.py`; the harness (`AgentRunService`) is only used by SwarmRuntime and Acme delegation
 
 3. **In-process dashboard generation** — `create_fullstack_dashboard` executes in the backend process, not through sandbox. This is a performance optimization but means dashboard generation can't be isolated
 
@@ -1052,7 +1052,7 @@ automation_dispatcher.py
 
 6. **Agent JSON columns** — Normalize with `coerceStringArray`. Tenant `_apply_tenant` (org_id, app_id); owner `_apply_owner`
 
-7. **Schema pitfall** — `erp_product_sales_details` uses `FNAME` (not `material_name`). Prefer `erp_t_sal_outstock`/`erp_v_sale_orderentry`
+7. **Schema pitfall** — `erp_product_sales_details` uses `FNAME` (not `material_name`). Prefer `erp_t_sal_outstock`/`v_sale_order`
 
 8. **Model default** — `deepseek-chat` via `https://api.deepseek.com/v1` (or local Ollama qwen3.5-27b-tools)
 
@@ -1857,7 +1857,7 @@ def retrieve_with_context(query, n_results=3, max_chars=1800, collection="indust
     
     # Format for prompt injection
     return "\n".join(chunk.formatted(max_chars=600) for chunk in chunks)
-    # → "[Source: EDIA_SPEC.md](3/8) excerpt text..."
+    # → "[Source: Acme_SPEC.md](3/8) excerpt text..."
 ```
 
 #### Chat Upload RAG (Large Files)
@@ -2117,7 +2117,7 @@ User-created agents (via Agent Builder) use a **constitutional prompt** assemble
 
 | Layer | Field | Purpose | Example |
 |-------|-------|---------|---------|
-| 1 — Identity | `prompt_identity` | Who the agent is, personality, domain | "You are a C5/C9 petrochemical market analyst..." |
+| 1 — Identity | `prompt_identity` | Who the agent is, personality, domain | "You are a C5/C9 industrial market analyst..." |
 | 2 — Boundary | `prompt_boundary` | What the agent will NOT do | "Never make up data. Do not answer questions about HR." |
 | 3 — Reasoning | `prompt_reasoning` | How the agent should think | "Always verify SQL results against the original question..." |
 | 4 — Tools | `prompt_tools` | How the agent should use tools | "Prefer execute_query over web_search for data questions..." |
@@ -2362,7 +2362,7 @@ On crash recovery, `resume_run()`:
 | Budget | MAX_TOOL_ITERATIONS=40, TOOL_CALL_HARD_CAP=10 | max_iterations=8 (configurable) |
 | Forced synthesis | Not guaranteed | Always (tools=None fallback) |
 | Streaming | SSE to frontend | EventSink abstraction |
-| Use cases | User chat, research loop | EDIA ask_*, programmatic runs |
+| Use cases | User chat, research loop | Acme ask_*, programmatic runs |
 
 ### 24.7 Current Gaps & Roadmap
 
@@ -2485,7 +2485,7 @@ def estimate_messages_tokens(messages) -> int:
 ### 25.5 Cost Optimization Patterns
 
 1. **Compaction engine** — 3-layer context compression reduces token usage by 40-60% on long conversations
-2. **Qwen fast-path** — `ECISCO_BI_KG_QWEN_FAST_PATH=True` augments system prompt with cached knowledge, reducing RAG tool calls
+2. **Qwen fast-path** — `BI_KG_QWEN_FAST_PATH=True` augments system prompt with cached knowledge, reducing RAG tool calls
 3. **Per-tool caps** — `memory:1, ask_data_agent:2` prevent expensive tool loops
 4. **Data-sufficient fast-path** — skips self-eval gate after 1 nudge when answer has data + ≥200 chars
 5. **Tier routing** — simple chat uses cheap models, reasoning uses expensive ones
@@ -4209,7 +4209,7 @@ Architecture Decision Records (ADRs) document the *why* behind key technical cho
 **Rationale**:
 - **Cost** — DeepSeek is ~15× cheaper per token than GPT-4o (~$0.14/1M input vs ~$2.50/1M input)
 - **Tool calling** — DeepSeek supports structured function calling (OpenAI-compatible API)
-- **CJK support** — Strong Chinese language performance for the Ecisco BI domain
+- **CJK support** — Strong Chinese language performance for the Acme BI domain
 - **Context window** — 64K tokens (sufficient for most agent loops with compaction)
 - **OpenAI-compatible API** — Same `/v1/chat/completions` endpoint, zero migration cost for fallback
 

@@ -45,7 +45,7 @@ All timed against the ERP connector (host 10.10.10.49): every node < 30s node ti
 The 15-subselect single-node KPI (35s) was rejected; split into KPI subset + Top
 Rankings single scan.
 
-## SQL (grounded, erp_v_sale_orderentry)
+## SQL (grounded, v_sale_order)
 
 - KPI Snapshot: totals (orders/customers/materials/qty/amount), pretax, tax
   (FTAXAMOUNT), undelivered (FREMAINOUTQTY), AOV (FALLAMOUNT / DISTINCT FID).
@@ -66,7 +66,7 @@ Rankings single scan.
 
 API runs for 7 intents; per-node step statuses (completed/skipped); outputs
 cross-checked vs ground truth (¥18,410,129,637.66 / 11,855 orders / top org
-惠州伊斯科 / top customer 中国石化...华中 / top product 戊烷发泡剂 / tax
+示例工厂 / top customer 中国石化...华中 / top product 包装材料 / tax
 ¥2,109,301,218.07 / undelivered 118,630.03).
 
 **RESULTS (2026-09-01, all 7 intents completed):**
@@ -75,7 +75,7 @@ cross-checked vs ground truth (¥18,410,129,637.66 / 11,855 orders / top org
 |---|---|---|---|
 | SALES | 86.0s | n4 sales (raw ERP rows) | ✓ ¥18.41B / 11,855 / 736 |
 | CUSTOMERS | 87.3s | n5 (top cust ¥2,558M, 13.9% share) | ✓ |
-| PRODUCT | 74.5s | n7 (戊烷发泡剂 ¥4,010M, 21.8%) | ✓ |
+| PRODUCT | 74.5s | n7 (包装材料 ¥4,010M, 21.8%) | ✓ |
 | INVENTORY | 79.0s | n8 (undelivered per material) | ✓ |
 | FINANCIAL | 80.9s | n9 (tax ¥2,109M, AOV ¥1.55M, ¥6,555/ton) | ✓ exact KPI match |
 | REPORT | 48.5s | n10 (weekly report W36) | ✓ |

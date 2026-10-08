@@ -34,14 +34,14 @@ DEEP_PROBE_TABLES = [
     "erp_t_bd_supplier",
     "erp_v_sale_guangdong",
     "erp_v_sale_huizhou",
-    "erp_v_sale_orderentry",
+    "v_sale_order",
 ]
 
 
 def get_connection():
-    url = os.environ.get("EDIA_MYSQL_URL", "")
+    url = os.environ.get("Acme_MYSQL_URL", "")
     if not url:
-        print("# EDIA_MYSQL_URL not set", file=sys.stderr)
+        print("# Acme_MYSQL_URL not set", file=sys.stderr)
         sys.exit(1)
     import pymysql
     parsed = urlparse(url)
@@ -50,7 +50,7 @@ def get_connection():
         port=parsed.port or 3306,
         user=parsed.username or "root",
         password=unquote(parsed.password or ""),
-        database=(parsed.path.lstrip("/") or "aipdp_data_warehouse_prod"),
+        database=(parsed.path.lstrip("/") or "demo_warehouse_prod"),
         connect_timeout=10, charset="utf8mb4",
     )
     return conn
@@ -194,7 +194,7 @@ def probe_supplier_imports(conn):
                 intl_kw = ["llc", "ltd", "inc", "gmbh", "corp", "co.", "sa",
                            "bv", "ag", "international", "global", "trading",
                            "energy", "polymers", "chemical", "ineos", "kraton",
-                           "arlanxeo", "kolon", "lcy", "tribute", "ecisco",
+                           "arlanxeo", "kolon", "lcy", "tribute", "acme",
                            "sinopec", "import", "overseas", "korea", "japan",
                            "usa", "germany", "singapore", "thailand"]
                 intl_suppliers = []

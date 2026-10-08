@@ -187,7 +187,7 @@ def test_priority_no_overlap_disjoint_nouns() -> None:
         "Generate a Q2 sales report",
         "Show me last 30 days of inventory",
         "帮我查一下昨天的销售数据",
-        "Forecast crude oil for next week",
+        "Forecast product e for next week",
         # Empty / None
         "",
         None,
@@ -249,7 +249,7 @@ def test_shim_apply_automation_setup_routing_returns_bool() -> None:
 
     # Agent-creation message → shim returns False (rebind to agent_builder, NOT automation)
     conv2 = MagicMock()
-    conv2.agent_name = "ecisco_bi_assistant"
+    conv2.agent_name = "acme_bi_assistant"
     conv2.id = "test-conv-2"
     db2 = MagicMock()
     db2.commit = MagicMock()

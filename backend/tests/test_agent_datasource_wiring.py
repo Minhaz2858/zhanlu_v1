@@ -463,7 +463,7 @@ def test_mixed_db_and_file_kbs_both_appear_in_prompt(db_session):
 # ---------------------------------------------------------------------------
 # Contract 6: dashboard build toolset injected for data-bound agents
 # ---------------------------------------------------------------------------
-# 2026-08-27 regression (conv 3e7fa92b, C5_C9): a chat served by
+# 2026-08-27 regression (conv 3e7fa92b, SAMPLE): a chat served by
 # general_assistant (whose enabled_tools lack create_fullstack_dashboard)
 # could explore the schema via injected data tools but could NEVER call the
 # build tool — the dashboard guards are all inert when the tool is absent,

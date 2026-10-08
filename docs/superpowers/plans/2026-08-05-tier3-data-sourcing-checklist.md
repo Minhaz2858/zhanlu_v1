@@ -28,8 +28,8 @@ Status legend:
 **Why it matters:** Operating rate is the single biggest fundamental gap vs human analyst reports. It is the truest real-time demand signal — when downstream plants cut runs, feedstock demand softens *before* transaction volumes or prices reflect it. Human weekly reports lead with 开工率 for a reason.
 
 **Target products (downstream of our forecast set):**
-- SIS/SBS elastomer producers (consume isoprene, piperylene)
-- Petroleum-resin producers (consume C5 resin, DCPD)
+- SIS/SBS elastomer producers (consume product_d, product_f)
+- Petroleum-resin producers (consume C5 resin, PRODUCT_B)
 - Styrene-butadiene / EPS / PS producers (consume styrene)
 - Blowing-agent / C9 downstream producers
 
@@ -154,7 +154,7 @@ Status legend:
 
 1. **Assign an owner** for each of the three domains (likely a procurement/market-intel person on the customer side, not engineering).
 2. **Confirm existing subscriptions**: ask the customer *today* which of 隆众/卓创/ICIS/Argus/Wind they already pay for. A "yes, we get 隆众 weekly" answer unblocks T3.1 + T3.2 instantly.
-3. **HS code mapping**: for T3.3 Customs data, identify the HS codes for isoprene, piperylene, DCPD, styrene, blowing agent, C5/C9 resin. This is free data; only the mapping is needed.
+3. **HS code mapping**: for T3.3 Customs data, identify the HS codes for product_d, product_f, PRODUCT_B, styrene, blowing agent, C5/C9 resin. This is free data; only the mapping is needed.
 4. **Internal-data audit**: check whether the customer's ERP/MES already records downstream production volumes or inventory — these may be free proxies for T3.1/T3.2.
 5. **Re-scope if needed**: if all three remain `[BLOCKED]` after 2 weeks, Wave 3 should be descoped and the roadmap value reassessed — Tier 1+2 still deliver the majority of forecast + brief improvement without external feeds.
 

@@ -56,7 +56,7 @@ class TestDataSummaryForSynthesis:
             "name": "ask_data_agent",
             "results": {
                 "rows": [
-                    {"product_name": "Naphtha", "ai_price_low": 15255},
+                    {"product_name": "Product_C", "ai_price_low": 15255},
                     {"product_name": "Crude", "ai_price_low": 16513},
                 ],
                 "source_name": "decision_log",
@@ -252,7 +252,7 @@ class TestResearchAnalystFallback:
         )
         async def fake_call(system, msgs, **_):
             return {"content": (
-                "***Snapshot*** Naphtha spot $5550/t (+2.1% WoW). "
+                "***Snapshot*** Product_C spot $5550/t (+2.1% WoW). "
                 "***Market Analysis*** Strong demand from C5/C9 crackers. "
                 "***AI Decision*** HOLD with trigger at $5800."
             ), "role": "assistant"}

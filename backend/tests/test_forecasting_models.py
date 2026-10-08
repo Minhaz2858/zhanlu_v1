@@ -223,13 +223,13 @@ def test_forecast_target_crud():
     db = SessionLocal()
     try:
         target = ForecastTarget(
-            product_key="isoprene",
-            name="Isoprene",
-            aliases=["异戊二烯"],
+            product_key="product_d",
+            name="Product_D",
+            aliases=["电子元件"],
             datasource={
                 "table": "market_prices",
                 "time_col": "date",
-                "measure": "isoprene",
+                "measure": "product_d",
                 "region": "east_china",
                 "granularity": "daily",
             },
@@ -253,9 +253,9 @@ def test_forecast_target_crud():
         db.refresh(target)
 
         assert target.id is not None
-        assert target.product_key == "isoprene"
-        assert target.name == "Isoprene"
-        assert target.aliases == ["异戊二烯"]
+        assert target.product_key == "product_d"
+        assert target.name == "Product_D"
+        assert target.aliases == ["电子元件"]
         assert target.datasource["table"] == "market_prices"
         assert target.level == 2
         assert target.quality_grade == "A"
@@ -273,7 +273,7 @@ def test_forecast_target_crud():
 def test_forecast_run_crud_with_scenario_json():
     db = SessionLocal()
     try:
-        target = ForecastTarget(product_key="c5_resin", name="C5 Resin")
+        target = ForecastTarget(product_key="product_a", name="C5 Resin")
         db.add(target)
         db.commit()
         db.refresh(target)
@@ -374,7 +374,7 @@ def test_forecast_accuracy_log_crud():
 def test_forecast_business_rule_proposed_to_active_workflow():
     db = SessionLocal()
     try:
-        target = ForecastTarget(product_key="c5_resin", name="C5 Resin")
+        target = ForecastTarget(product_key="product_a", name="C5 Resin")
         db.add(target)
         db.commit()
         db.refresh(target)
@@ -438,11 +438,11 @@ def test_domain_pack_install_crud():
     db = SessionLocal()
     try:
         install = DomainPackInstall(
-            pack_key="ecisco_c5c9",
+            pack_key="acme_sample",
             pack_version="1",
             config={
                 "products": [
-                    {"product_key": "isoprene", "name": "Isoprene"},
+                    {"product_key": "product_d", "name": "Product_D"},
                 ],
                 "guardrails": {"min_history": 14},
             },
@@ -452,8 +452,8 @@ def test_domain_pack_install_crud():
         db.refresh(install)
 
         assert install.id is not None
-        assert install.pack_key == "ecisco_c5c9"
+        assert install.pack_key == "acme_sample"
         assert install.pack_version == "1"
-        assert install.config["products"][0]["product_key"] == "isoprene"
+        assert install.config["products"][0]["product_key"] == "product_d"
     finally:
         db.close()

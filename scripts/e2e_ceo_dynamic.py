@@ -2,7 +2,7 @@
 """
 Live E2E: prove the DOCX report is DYNAMIC and QUESTION-DRIVEN.
 
-Asks the real agent (C5_C9 datasource, project 07d8d339-f287-4ead-b1e2-a5733a34a239)
+Asks the real agent (SAMPLE datasource, project 07d8d339-f287-4ead-b1e2-a5733a34a239)
 a CEO-style question, waits for the artifact, downloads the DOCX via
 ?format=docx&force=true (fixed path) and verifies CEO markers:
   - cover subtitle "致：首席执行官（CEO）" (via dynamic cover subtitle)
@@ -14,7 +14,7 @@ import json, sys, time, zipfile, re, urllib.request
 API = "http://localhost:5002"
 APP = "local-zhanlu-app"
 PROJECT_ID = "07d8d339-f287-4ead-b1e2-a5733a34a239"
-PROJECT_NAME = "C5_C9"
+PROJECT_NAME = "SAMPLE"
 QUESTION = (
     "请从CEO视角生成一份2026年6月-7月销售运营分析与决策建议报告，"
     "包含月度核心指标对比、产品线与客户结构分析，以及给CEO的战略建议。"

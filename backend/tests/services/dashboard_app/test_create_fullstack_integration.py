@@ -5,7 +5,7 @@ Smoke test #5 (2026-08-21) exposed a P0: ``create_fullstack_dashboard`` ran
 verification with ``NameError: name 'Path' is not defined``
 (``dashboard_tools.py`` used ``Path("dist") / "index.html"`` without
 importing ``pathlib.Path``). The tool returned a visible error and the model
-retried into the same crash, then the turn fell through to the EDIA path.
+retried into the same crash, then the turn fell through to the Acme path.
 
 Every other dashboard test mocks away the generator/manager, so no test
 exercised the real write path. This integration test runs the REAL

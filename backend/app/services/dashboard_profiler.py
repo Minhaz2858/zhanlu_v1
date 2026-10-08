@@ -2,7 +2,7 @@
 
 HARD DB-AGNOSTIC RULE (non-negotiable):
   * ZERO hardcoded table/column identifiers. No demo/ERP table names
-    (e.g. erp_v_sale_orderentry), no PLANDATE / FALLAMOUNT / FDATE /
+    (e.g. v_sale_order), no PLANDATE / FALLAMOUNT / FDATE /
     forgid, nothing environment-specific.
   * Only standard SQL: COUNT(*), COUNT(DISTINCT c), COUNT(c), MIN(c),
     MAX(c), LIMIT n. NO DATE_FORMAT, to_char, ::date casts,

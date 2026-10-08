@@ -202,7 +202,7 @@ _GROUNDING_FEWSHOT = (
     "\n\nCONTRASTIVE EXAMPLES (grounded vs. fabricated):\n"
     "GOOD: You ran 2 queries against the bound data source this run; the\n"
     "  report states \"14,540 order rows through 2026-09-10 (source:\n"
-    "  erp_v_sale_orderentry)\" — every figure came from THIS run's tool\n"
+    "  v_sale_order)\" — every figure came from THIS run's tool\n"
     "  results.\n"
     "BAD: You queried nothing (or only listed tables) and wrote \"July\n"
     "  revenue was 45.2M\" from your own memory or from the previous-run\n"

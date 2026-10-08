@@ -45,9 +45,9 @@ Parameters:
 ```
 
 ### 3. Upload Media
-Use `GOOGLEPHOTOS_UPLOAD_MEDIA` to upload an image or video file to Google Photos.
+Use `GOOGLEPHOTOS_UPLOAD_MAcme` to upload an image or video file to Google Photos.
 ```
-Tool: GOOGLEPHOTOS_UPLOAD_MEDIA
+Tool: GOOGLEPHOTOS_UPLOAD_MAcme
 Parameters:
   - file_to_upload: Local file path to upload
   - url: URL of file to upload (alternative to file_to_upload)
@@ -56,9 +56,9 @@ Parameters:
 ```
 
 ### 4. Batch Upload and Create Media Items
-Use `GOOGLEPHOTOS_BATCH_CREATE_MEDIA_ITEMS` to upload multiple files and create media items in one operation.
+Use `GOOGLEPHOTOS_BATCH_CREATE_MAcme_ITEMS` to upload multiple files and create media items in one operation.
 ```
-Tool: GOOGLEPHOTOS_BATCH_CREATE_MEDIA_ITEMS
+Tool: GOOGLEPHOTOS_BATCH_CREATE_MAcme_ITEMS
 Parameters:
   - files: Local file paths to upload
   - urls: URLs of files to upload
@@ -68,9 +68,9 @@ Parameters:
 ```
 
 ### 5. Search Media Items
-Use `GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS` to search the user's photo library with filters.
+Use `GOOGLEPHOTOS_SEARCH_MAcme_ITEMS` to search the user's photo library with filters.
 ```
-Tool: GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS
+Tool: GOOGLEPHOTOS_SEARCH_MAcme_ITEMS
 Parameters:
   - albumId: Filter by album
   - filters: Search filters (date ranges, content categories, media types)
@@ -80,9 +80,9 @@ Parameters:
 ```
 
 ### 6. Add Items to an Album
-Use `GOOGLEPHOTOS_BATCH_ADD_MEDIA_ITEMS` to add existing media items to an album.
+Use `GOOGLEPHOTOS_BATCH_ADD_MAcme_ITEMS` to add existing media items to an album.
 ```
-Tool: GOOGLEPHOTOS_BATCH_ADD_MEDIA_ITEMS
+Tool: GOOGLEPHOTOS_BATCH_ADD_MAcme_ITEMS
 Parameters:
   - albumId (required): Target album ID
   - mediaItemIds (required): Array of media item IDs to add
@@ -90,20 +90,20 @@ Parameters:
 
 ## Common Patterns
 
-- **Create album then upload**: Use `GOOGLEPHOTOS_CREATE_ALBUM` to create an album, then `GOOGLEPHOTOS_BATCH_CREATE_MEDIA_ITEMS` with the album ID to upload and organize photos in one step.
-- **List then organize**: Use `GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS` or `GOOGLEPHOTOS_LIST_MEDIA_ITEMS` to find media item IDs, then `GOOGLEPHOTOS_BATCH_ADD_MEDIA_ITEMS` to add them to albums.
+- **Create album then upload**: Use `GOOGLEPHOTOS_CREATE_ALBUM` to create an album, then `GOOGLEPHOTOS_BATCH_CREATE_MAcme_ITEMS` with the album ID to upload and organize photos in one step.
+- **List then organize**: Use `GOOGLEPHOTOS_SEARCH_MAcme_ITEMS` or `GOOGLEPHOTOS_LIST_MAcme_ITEMS` to find media item IDs, then `GOOGLEPHOTOS_BATCH_ADD_MAcme_ITEMS` to add them to albums.
 - **Update album metadata**: Use `GOOGLEPHOTOS_UPDATE_ALBUM` to change an album's title or cover photo.
 - **Get album details**: Use `GOOGLEPHOTOS_GET_ALBUM` with an album ID to retrieve full album information.
 - **Add enrichments**: Use `GOOGLEPHOTOS_ADD_ENRICHMENT` to add text overlays, locations, or map enrichments to album positions.
-- **Upload from URLs**: Use the `url` parameter in `GOOGLEPHOTOS_UPLOAD_MEDIA` or `urls` in `GOOGLEPHOTOS_BATCH_CREATE_MEDIA_ITEMS` to upload images directly from web URLs.
+- **Upload from URLs**: Use the `url` parameter in `GOOGLEPHOTOS_UPLOAD_MAcme` or `urls` in `GOOGLEPHOTOS_BATCH_CREATE_MAcme_ITEMS` to upload images directly from web URLs.
 
 ## Known Pitfalls
 
-- `GOOGLEPHOTOS_LIST_MEDIA_ITEMS` is **deprecated** -- prefer `GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS` for listing and filtering media.
-- `GOOGLEPHOTOS_UPLOAD_MEDIA` supports images up to **200MB** and videos up to a larger limit. Exceeding these will fail.
+- `GOOGLEPHOTOS_LIST_MAcme_ITEMS` is **deprecated** -- prefer `GOOGLEPHOTOS_SEARCH_MAcme_ITEMS` for listing and filtering media.
+- `GOOGLEPHOTOS_UPLOAD_MAcme` supports images up to **200MB** and videos up to a larger limit. Exceeding these will fail.
 - Album IDs must be obtained from `GOOGLEPHOTOS_LIST_ALBUMS` or `GOOGLEPHOTOS_CREATE_ALBUM` responses -- they are opaque strings.
-- `GOOGLEPHOTOS_BATCH_ADD_MEDIA_ITEMS` can only add items to albums **created by the app** or albums the user owns.
-- The `filters` parameter in `GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS` uses a specific Google Photos API filter structure -- consult the schema for date range and content category formats.
+- `GOOGLEPHOTOS_BATCH_ADD_MAcme_ITEMS` can only add items to albums **created by the app** or albums the user owns.
+- The `filters` parameter in `GOOGLEPHOTOS_SEARCH_MAcme_ITEMS` uses a specific Google Photos API filter structure -- consult the schema for date range and content category formats.
 - Media items created via the API may not immediately appear in the Google Photos web UI due to processing delays.
 
 ## Quick Reference
@@ -113,11 +113,11 @@ Parameters:
 | Create album | `GOOGLEPHOTOS_CREATE_ALBUM` | `title` |
 | Get album | `GOOGLEPHOTOS_GET_ALBUM` | `albumId` |
 | Update album | `GOOGLEPHOTOS_UPDATE_ALBUM` | `albumId`, `title`, `coverPhotoMediaItemId` |
-| Upload media | `GOOGLEPHOTOS_UPLOAD_MEDIA` | `file_to_upload` or `url`, `description` |
-| Batch upload | `GOOGLEPHOTOS_BATCH_CREATE_MEDIA_ITEMS` | `files` or `urls`, `albumId` |
-| Search media | `GOOGLEPHOTOS_SEARCH_MEDIA_ITEMS` | `albumId`, `filters`, `pageSize` |
-| List media items | `GOOGLEPHOTOS_LIST_MEDIA_ITEMS` | `pageSize`, `pageToken` |
-| Add items to album | `GOOGLEPHOTOS_BATCH_ADD_MEDIA_ITEMS` | `albumId`, `mediaItemIds` |
+| Upload media | `GOOGLEPHOTOS_UPLOAD_MAcme` | `file_to_upload` or `url`, `description` |
+| Batch upload | `GOOGLEPHOTOS_BATCH_CREATE_MAcme_ITEMS` | `files` or `urls`, `albumId` |
+| Search media | `GOOGLEPHOTOS_SEARCH_MAcme_ITEMS` | `albumId`, `filters`, `pageSize` |
+| List media items | `GOOGLEPHOTOS_LIST_MAcme_ITEMS` | `pageSize`, `pageToken` |
+| Add items to album | `GOOGLEPHOTOS_BATCH_ADD_MAcme_ITEMS` | `albumId`, `mediaItemIds` |
 | Add enrichment | `GOOGLEPHOTOS_ADD_ENRICHMENT` | `albumId`, `newEnrichmentItem`, `albumPosition` |
 
 ---

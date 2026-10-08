@@ -158,7 +158,7 @@ class BingProvider(SearchProvider):
         url = f"https://www.bing.com/search?q={quote_plus(query)}"
         # Market/language hint so results match the query language instead of
         # the server IP's geolocation. ASCII queries → English market; CJK
-        # queries → zh-CN (without this, a Chinese petrochemical query on a
+        # queries → zh-CN (without this, a Chinese industrial query on a
         # datacenter IP gets US-market mixed-language junk).
         if query.isascii():
             url += "&setlang=en&mkt=en-US"
@@ -264,7 +264,7 @@ def _provider_for(name: str) -> SearchProvider:
 # ---------------------------------------------------------------------------
 # Poisoned-SERP failure mode: keyless HTML-scraped engines (Bing from a
 # datacenter IP) return 200 OK with plausible-looking but IRRELEVANT rows —
-# the C5/C9 petrochemical query got "C5驾驶证" (driver's license), CSGO item
+# the C5/C9 industrial query got "C5驾驶证" (driver's license), CSGO item
 # markets, and a military transport plane. The agent trusted them, spent a
 # turn extracting the wrong pages, and fell back to internal data — the
 # "not informative vs Kimi/Claude" gap. A result must share enough
@@ -287,7 +287,7 @@ def _significant_tokens(query: str) -> list[str]:
 
     ASCII: words >= 3 letters plus short alphanumerics with a digit
     ("c5", "c9", "5g").  CJK: every 2-char bigram of each Chinese run
-    ("裂解碳五" -> 裂解/解碳/碳五) — the standard Chinese relevance unit.
+    ("裂解原料A" -> 裂解/解碳/原料A) — the standard Chinese relevance unit.
     """
     tokens: list[str] = []
     for m in re.finditer(r"[A-Za-z0-9]{2,}|[\u4e00-\u9fff]{2,}", query.lower()):

@@ -13545,7 +13545,7 @@ async def add_message_stream(
         # 2026-09-03: multi-step data/report turn plans (the planner's
         # "data" kind, e.g. "weekly summary and forecast") need the same
         # report-class loop budget as explicit file-intent turns. The old
-        # 60s chat cap fired mid-data-collection on a 5-step C5C9 weekly
+        # 60s chat cap fired mid-data-collection on a 5-step SAMPLE weekly
         # plan and the post-loop synthesis had to write the report from
         # partial fetches (observed: 43% of prior-week comparables were
         # NULL — the second fetch_data_batch never ran). Plan-derived, not

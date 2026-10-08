@@ -2,8 +2,8 @@
 
 ## Purpose
 
-Generate a CEO-level weekly market report for C5/C9 petrochemical products
-(piperylene, isoprene, dcpd, c5_resin, SIS, etc.) using the Ecisco BI data
+Generate a CEO-level weekly market report for C5/C9 industrial products
+(product_f, product_d, product_b, product_a, SIS, etc.) using the Acme BI data
 pipeline. The report must be data-grounded, structured markdown with tables
 and explicit risk flags — ready to read in chat, no file generation overhead.
 
@@ -11,7 +11,7 @@ and explicit risk flags — ready to read in chat, no file generation overhead.
 
 The user's verb decides what to do. If the user asks to LIST / SHOW /
 SUMMARIZE / EXTRACT / READ the content of an EXISTING uploaded weekly
-document (e.g. a file named like "C5C9周度总结及预测…" already in the
+document (e.g. a file named like "SAMPLE周度总结及预测…" already in the
 conversation), do NOT run this pipeline:
 
 - Answer directly from the document in chat (markdown list/table).
@@ -28,7 +28,7 @@ conversation), do NOT run this pipeline:
 - The user asks for a "weekly report", "market report", "weekly summary",
   "weekly review", or "周报 / 本周报告" AND wants it generated (not just
   listed from an existing file).
-- The project is Ecisco BI (C5/C9 products).
+- The project is Acme BI (C5/C9 products).
 
 ## Critical rules
 
@@ -43,7 +43,7 @@ conversation), do NOT run this pipeline:
    "No data available" — never invent prices, volumes, or forecasts.
 3. **Schema pitfall:** `erp_product_sales_details` uses `FNAME` (NOT
    `material_name`) for the product name. Never use `material_name`.
-   Prefer the LIVE tables `erp_t_sal_outstock` / `erp_v_sale_orderentry`
+   Prefer the LIVE tables `erp_t_sal_outstock` / `v_sale_order`
    (current through 2026) over the STALE `erp_product_sales_details`
    (data ends 2025-12-31).
 4. **Data freshness check.** Before claiming "last 30 days" / recent-period
@@ -77,17 +77,17 @@ three.
 ### Step 2 — Data deep-dive (TWO `ask_data_agent` calls — sales + inventory)
 
 Query ALL C5/C9 products in ONE query using the unified LIVE views. Do NOT
-query product-specific views one at a time (`sale_erp_v_抽余碳五_data`,
-`sale_erp_v_双环戊二烯_data`, …) — each holds a single product and silently
-produces a one-product report. The C5/C9 portfolio covers: 碳五石油树脂,
-双环戊二烯, 异戊二烯, 戊烷发泡剂, 抽余碳五, 间戊二烯, 工业用裂解碳九.
+query product-specific views one at a time (`sale_erp_v_原料A_data`,
+`sale_erp_v_材料B_data`, …) — each holds a single product and silently
+produces a one-product report. The C5/C9 portfolio covers: 原料A石油树脂,
+材料B, 电子元件, 包装材料, 原料A, 材料C, 工业用裂解材料M.
 
 **Call A — Sales (ALL products):**
 `ask_data_agent("weekly sales volume, shipment quantity and revenue for ALL
-C5/C9 products in ONE query from erp_v_sale_orderentry (or erp_t_sal_outstock)
+C5/C9 products in ONE query from v_sale_order (or erp_t_sal_outstock)
 grouped by product name; include latest date via MAX(date_column); products:
-碳五石油树脂, 双环戊二烯, 异戊二烯, 戊烷发泡剂, 抽余碳五, 间戊二烯,
-工业用裂解碳九 — do not restrict to a single product")`
+原料A石油树脂, 材料B, 电子元件, 包装材料, 原料A, 材料C,
+工业用裂解材料M — do not restrict to a single product")`
 
 **Call B — Inventory (ALL products):**
 `ask_data_agent("current inventory for ALL C5/C9 products from
@@ -95,7 +95,7 @@ erp_v_stk_inventory (or erp_t_stk_inventory) — inventory quantity/position by
 product name; same product list as the sales query")`
 
 Rules:
-- ALWAYS use the unified tables (`erp_v_sale_orderentry` / `erp_t_sal_outstock`
+- ALWAYS use the unified tables (`v_sale_order` / `erp_t_sal_outstock`
   for sales; `erp_v_stk_inventory` / `erp_t_stk_inventory` for inventory).
   Never a single product-specific view — that yields a one-product report.
 - If the user says "C5/C9 products" (or the weekly report covers the C5/C9
@@ -154,5 +154,5 @@ the data is genuinely unavailable — then state "No data available"):
 ## Safety rules
 
 - Do not access raw credentials or unrestricted DB connections.
-- All data comes from the Ecisco BI delegation tools (ask_*), never from
+- All data comes from the Acme BI delegation tools (ask_*), never from
   direct SQL written by the agent.

@@ -13,7 +13,7 @@ overfits noise (large N). A binomial test at alpha=0.01 controls the
 false-positive rate regardless of N.
 
 Features: recent returns, momentum (7/14d), volatility, calendar month,
-optional exogenous signals (naphtha delta, warehouse production, inventory,
+optional exogenous signals (product_c delta, warehouse production, inventory,
 supplier dispersion).
 """
 from __future__ import annotations
@@ -52,7 +52,7 @@ def build_features(y: pd.Series, exog: pd.DataFrame | None = None) -> pd.DataFra
     """Build feature matrix from a price series.
 
     Features: ret_lag1, ret_lag3, momentum_7, momentum_14, vol_7,
-    calendar month, and optional exogenous columns (naphtha_delta).
+    calendar month, and optional exogenous columns (product_c_delta).
     """
     df = pd.DataFrame({"y": y.values})
     df["ret_lag1"] = df["y"].pct_change(1)

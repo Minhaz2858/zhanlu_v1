@@ -37,33 +37,33 @@ def _enable():
 def test_fast_path_disabled_when_flag_off(db):
     settings.PROJECT_KNOWLEDGE_QWEN_FAST_PATH = False
     settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
-    assert try_fast_path(db, "p1", "isoprene", "qwen3.6-27b") is None
+    assert try_fast_path(db, "p1", "product_d", "qwen3.6-27b") is None
 
 
 def test_fast_path_skips_non_qwen(db):
     _enable()
-    assert try_fast_path(db, "p1", "isoprene", "gpt-4") is None
+    assert try_fast_path(db, "p1", "product_d", "gpt-4") is None
 
 
 def test_fast_path_hits_on_qwen(db):
     _enable()
     # Resolver does exact-token matching; use a clean question.
-    r = try_fast_path(db, "p1", "isoprene", "qwen3.6-27b")
+    r = try_fast_path(db, "p1", "product_d", "qwen3.6-27b")
     assert r is not None
     assert r.kind == "product"
 
 
 def test_fast_path_qwen3_prefix(db):
     _enable()
-    r = try_fast_path(db, "p1", "异戊二烯", "Qwen3-Max")
+    r = try_fast_path(db, "p1", "电子元件", "Qwen3-Max")
     assert r is not None
     assert r.kind == "product"
 
 
 def test_fast_path_case_insensitive(db):
     _enable()
-    r1 = try_fast_path(db, "p1", "isoprene", "Qwen3.6-27B")
-    r2 = try_fast_path(db, "p1", "isoprene", "qwen3.6-27b")
+    r1 = try_fast_path(db, "p1", "product_d", "Qwen3.6-27B")
+    r2 = try_fast_path(db, "p1", "product_d", "qwen3.6-27b")
     assert r1 is not None and r2 is not None
 
 

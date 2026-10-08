@@ -372,7 +372,7 @@ def test_the_ratio_rules_carry_no_deployment_specific_identifier():
     code = source
     for text in docstrings:
         code = code.replace(text, "")
-    for forbidden in ("erp_", "FID", "Ecisco", "zhanlu", "10.10.10", "customer", "out_fqty"):
+    for forbidden in ("erp_", "FID", "Acme", "zhanlu", "10.10.10", "customer", "out_fqty"):
         assert forbidden not in code, (
             f"{forbidden!r} in the rules: detection must follow the SQL's shape, "
             "never a source-specific name"

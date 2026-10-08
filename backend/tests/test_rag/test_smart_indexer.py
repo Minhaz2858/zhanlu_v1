@@ -68,7 +68,7 @@ class TestIndexDecision:
         idx = SmartIndexer()
         ok = idx.index_decision({
             "decision_id": "d1",
-            "summary": "Buy DCPD",
+            "summary": "Buy PRODUCT_B",
         })
         assert ok is True
 
@@ -76,7 +76,7 @@ class TestIndexDecision:
         idx = SmartIndexer()
         ok = idx.index_decision({
             "decision_id": "d1",
-            "summary": "Buy DCPD",
+            "summary": "Buy PRODUCT_B",
             "outcome": "Profit +5%",
             "outcome_id": "o1",
         })
@@ -92,7 +92,7 @@ class TestIndexSignal:
         idx = SmartIndexer()
         ok = idx.index_signal({
             "signal_id": "s1",
-            "description": "DCPD price up 5%",
+            "description": "PRODUCT_B price up 5%",
         })
         assert ok is True
 
@@ -106,9 +106,9 @@ class TestIndexCausalChain:
         idx = SmartIndexer()
         ok = idx.index_causal_chain({
             "chain_id": "c1",
-            "description": "Naphtha price ↑ → C5 spread ↓",
-            "nodes": ["naphtha", "c5"],
-            "edges": [["naphtha", "c5"]],
+            "description": "Product_C price ↑ → C5 spread ↓",
+            "nodes": ["product_c", "c5"],
+            "edges": [["product_c", "c5"]],
         })
         assert ok is True
 
@@ -122,7 +122,7 @@ class TestIndexProduct:
         idx = SmartIndexer()
         ok = idx.index_product({
             "product_id": "p1",
-            "name": "DCPD",
+            "name": "PRODUCT_B",
             "aliases": ["dicyclopentadiene"],
             "category": "C5",
         })
@@ -148,13 +148,13 @@ class TestBridgeIntegration:
             "event_id": "ev1",
             "event_type": "supply_disruption",
             "headline": "OPEC production cut announced",
-            "affected_commodities": ["naphtha"],
+            "affected_commodities": ["product_c"],
             "direction": "down",
             "magnitude_estimate": "medium",
             "certainty": "high",
             "time_horizon": "short_term",
             "geographic_scope": "global",
-            "relevance_to_c5_c9": "high",
+            "relevance_to_sample": "high",
             "key_information": "2M bpd for Q3",
         }
         idx = SmartIndexer()

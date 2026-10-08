@@ -12,7 +12,7 @@
 
 ### Task 2: `GET /price-chain` endpoint
 - Backend: schema, service method, router
-- Returns: 3-tier price transmission chain data (crude → naphtha → cracked → derivatives)
+- Returns: 3-tier price transmission chain data (crude → product_c → cracked → derivatives)
 
 ### Task 3: API client functions
 - File: `frontend/src/api/marketDashboard.js`

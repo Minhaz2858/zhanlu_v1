@@ -40,8 +40,8 @@ to sub-agents, queries connected databases, runs sandboxed code, and produces go
 **artifacts** (PPT, DOCX, XLSX, PDF, HTML dashboards, mini-apps) that are previewed
 inline in the chat UI.
 
-It is a Chinese-market, chemical-industry-first product in practice (Ecisco BI,
-petrochemical price forecasting, market decks), but the platform itself is generic:
+It is a Chinese-market, chemical-industry-first product in practice (Acme BI,
+industrial price forecasting, market decks), but the platform itself is generic:
 any industry, any database, any model.
 
 ### Product rules (non-negotiable, from `docs/00_FINAL_READ_ME_FOR_CODING_AGENT.md`)
@@ -440,9 +440,9 @@ Scheduled task → automation_dispatcher (croniter) → AutomationExecution
 - Outputs: base/bull/bear scenarios via split-conformal intervals, `p_rise` probability, directional classifier with binomial significance test (p<0.01), trust tiers (High/Medium/Directional reference/Insufficient), **decision engine** (BUY only if p_rise ≥70% AND ≥3% move AND statistical edge; SELL ≤30%; else WATCH/HOLD — "wrong do-nothing is cheaper than wrong buy-everything"), top-5 XGBoost drivers, 7-section bilingual analyst brief (LLM writes prose; decision is 100% deterministic rules), decision log + ROI loop, nightly threshold auto-tuning (STAGED, human-promoted).
 - Accuracy tracking (2026-08-08 report, **honest negative**): 7d MAPE ~9.4% walk-forward; 30d 19.7% (poor); directional accuracy 17.9% (worse than random) at that time; ensemble beat naive on only 3/22 products — drove the regime-aware pool + feature-selection + realized-tracking overhaul.
 
-### 11.2 BI / Ecisco
+### 11.2 BI / Acme
 
-Ecisco (NOT NovaChem) is the primary BI tenant: EDIA data warehouse (`aipdp_data_warehouse_prod`, MySQL `10.10.10.49`), tier-1/tier-3 data sourcing, upstream/downstream value-chain dashboards, project knowledge cache, CEO morning digest, weekly digest, midstream decision board, SKU-level forecasting, market decks (C5/C9 hydrocarbons market analysis PPTs in repo root).
+Acme (NOT NovaChem) is the primary BI tenant: Acme data warehouse (`demo_warehouse_prod`, MySQL `10.10.10.49`), tier-1/tier-3 data sourcing, upstream/downstream value-chain dashboards, project knowledge cache, CEO morning digest, weekly digest, midstream decision board, SKU-level forecasting, market decks (C5/C9 hydrocarbons market analysis PPTs in repo root).
 
 ### 11.3 ERP & Intelligence (note)
 
@@ -508,15 +508,15 @@ Two generations coexist:
 
 **07-28/29:** Automation quality phases 0–3; runtime agent; skill-agent UX batch; tracing/RBAC/skillscan; skill marketplace; dashboards (e2e tests, interactivity, phase-2 design, phase-3 editable, dynamic dashboards); HTTP-pool async executor.
 
-**07-30/31:** Scheduled panel docked; conversational dashboard builder; media dashboard integration; intelligence layer; EDIA overview; ecisco-bi forecasting "true answers".
+**07-30/31:** Scheduled panel docked; conversational dashboard builder; media dashboard integration; intelligence layer; Acme overview; acme-bi forecasting "true answers".
 
-**08-03…08-07:** Multi-tenant RBAC; nightly forecast scheduler; forecast enhancement phase 1; ecisco-bi migration + upstream page; forecast analyst; midstream decision board; sidebar/MySpace restructure; forecasting accuracy overhaul; SKU-level forecasting; forecast MLOps + HITL; foundation-model forecasting; silent ecisco-bi agent; wave-0 loader framework + decision/ROI backtest; forecasting activation + decision loop.
+**08-03…08-07:** Multi-tenant RBAC; nightly forecast scheduler; forecast enhancement phase 1; acme-bi migration + upstream page; forecast analyst; midstream decision board; sidebar/MySpace restructure; forecasting accuracy overhaul; SKU-level forecasting; forecast MLOps + HITL; foundation-model forecasting; silent acme-bi agent; wave-0 loader framework + decision/ROI backtest; forecasting activation + decision loop.
 
 **08-10…08-17:** Knowledge graph comprehensive implementation (catalog indexer, schema linker, NL2SQL shadow, resource router, entity graph, report recipes, depth analysis, Data Map UI); CEO morning digest; LLM routing; professional PPT generation system; automation chat artifacts fix; business semantic layer; schema-aware multi-table analysis; PPT visual diff (LibreOffice preflight).
 
 **08-18…08-22:** Dashboard pipeline redesign; intelligent alerts; goal contract; pending-action sequence fix; forecast what-if agent tool.
 
-**08-24…08-25:** Qwen3 Hermes tool-call parser; session-cached re-export; gap analysis implementation (parallel tool calls, agent harness wiring, MCP client, context economics, durable memory, final-answer quality floor, realtime voice, agents.py decomposition); business-data executive pipeline; qwen3 local performance; modern PPT renderer; PPT Hermes integration; live streaming progress (4 SSE event types); ecisco-bi project knowledge cache; activity feed modernization.
+**08-24…08-25:** Qwen3 Hermes tool-call parser; session-cached re-export; gap analysis implementation (parallel tool calls, agent harness wiring, MCP client, context economics, durable memory, final-answer quality floor, realtime voice, agents.py decomposition); business-data executive pipeline; qwen3 local performance; modern PPT renderer; PPT Hermes integration; live streaming progress (4 SSE event types); acme-bi project knowledge cache; activity feed modernization.
 
 **08-28…08-29:** High-quality PPT (renderer default + blocking audit + market grounding); data-driven dashboard generation (DB-agnostic profiling gate); fullstack dashboard delete cascade; **CAD agent Tier 1 (Fusion 360)**; agent-gaps build (sub-agent visibility, eval loop, browser/GUI automation); golden-eval regression gate.
 

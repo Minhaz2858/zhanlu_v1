@@ -2,7 +2,7 @@
 """Probe the MySQL data warehouse for Tier 3 fundamental data.
 
 Discovers ALL tables via SHOW TABLES, then probes:
-  T3.1 Operating rate  → erp_v_sale_orderentry (produce_qty, plan_qty)
+  T3.1 Operating rate  → v_sale_order (produce_qty, plan_qty)
   T3.2 Inventory        → erp_v_stk_inventory (FBASEQTY), sale_erp_v_* (instock_qty)
   T3.3 Import prices    → sale_erp_v_* international supplier columns
 
@@ -24,7 +24,7 @@ TIER3_PROBES = {
         "probe_columns": ["FBASEQTY", "material_name", "FDATE", "biz_date"],
         "date_columns": ["FDATE", "biz_date", "FCREATEDATE", "FMODIFYDATE"],
     },
-    "erp_v_sale_orderentry": {
+    "v_sale_order": {
         "tier": "T3.1 Operating Rate",
         "probe_columns": ["produce_qty", "plan_qty", "material_name", "FDATE", "biz_date"],
         "date_columns": ["FDATE", "biz_date", "FCREATEDATE", "FMODIFYDATE", "FPLANDELIVERYDATE"],
@@ -33,10 +33,10 @@ TIER3_PROBES = {
 
 
 def get_connection():
-    """Connect using EDIA_MYSQL_URL from env."""
-    url = os.environ.get("EDIA_MYSQL_URL", "")
+    """Connect using Acme_MYSQL_URL from env."""
+    url = os.environ.get("Acme_MYSQL_URL", "")
     if not url:
-        print("# EDIA_MYSQL_URL not set", file=sys.stderr)
+        print("# Acme_MYSQL_URL not set", file=sys.stderr)
         sys.exit(1)
 
     import pymysql
@@ -45,7 +45,7 @@ def get_connection():
     port = parsed.port or 3306
     user = parsed.username or "root"
     password = unquote(parsed.password or "")
-    db = parsed.path.lstrip("/") or "aipdp_data_warehouse_prod"
+    db = parsed.path.lstrip("/") or "demo_warehouse_prod"
 
     print(f"# Connecting to {user}@{host}:{port}/{db}")
     conn = pymysql.connect(
@@ -193,7 +193,7 @@ def probe_sale_erp_tables(conn, tables: list[str]) -> list[dict]:
 
                 # Find international supplier columns (import prices T3.3)
                 intl_keywords = [
-                    "ecisco", "arlanxeo", "kraton", "ineos", "kolon",
+                    "acme", "arlanxeo", "kraton", "ineos", "kolon",
                     "lcy", "tribute", "import", "overseas", "foreign",
                     "international",
                 ]
@@ -276,7 +276,7 @@ def main() -> int:
     categories: dict[str, list[str]] = {
         "erp_v_*": [],
         "sale_erp_v_*": [],
-        "lz_v_*": [],
+        "v_*": [],
         "md_t_*": [],
         "v_*": [],
         "other": [],
@@ -286,8 +286,8 @@ def main() -> int:
             categories["erp_v_*"].append(t)
         elif t.startswith("sale_erp_v_"):
             categories["sale_erp_v_*"].append(t)
-        elif t.startswith("lz_v_"):
-            categories["lz_v_*"].append(t)
+        elif t.startswith("v_"):
+            categories["v_*"].append(t)
         elif t.startswith("md_t_"):
             categories["md_t_*"].append(t)
         elif t.startswith("v_"):

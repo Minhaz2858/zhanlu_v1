@@ -2,7 +2,7 @@
 must resolve a project named in the user message and bind its KBs.
 
 Covers:
-1. 'make a c5 c9 market view ppt' → resolves C5_C9 project → its KBs bound
+1. 'make a c5 c9 market view ppt' → resolves SAMPLE project → its KBs bound
 2. No project mention → zero bound KBs (anti-leakage preserved)
 3. Explicit project selected → normal scoping still works
 """
@@ -39,12 +39,12 @@ def _fake_agent(name="general_assistant", org_id="default-org", app_id="default-
 @pytest.fixture
 def db():
     kb = _fake_kb(id="kb-market", name="Market Research Data", source_kind="file",
-                  project_id="proj-c5c9", project="C5_C9")
-    kb2 = _fake_kb(id="kb-warehouse", name="aipdp_data_warehouse_prod",
-                   source_kind="database", project_id="proj-c5c9", project="C5_C9")
+                  project_id="proj-sample", project="SAMPLE")
+    kb2 = _fake_kb(id="kb-warehouse", name="demo_warehouse_prod",
+                   source_kind="database", project_id="proj-sample", project="SAMPLE")
     kb_demo = _fake_kb(id="kb-demo-001", name="Demo E2E PostgreSQL",
                        source_kind="database", project_id=None, project="global")
-    proj_c5 = _Row(id="proj-c5c9", name="C5_C9", is_deleted=False)
+    proj_c5 = _Row(id="proj-sample", name="SAMPLE", is_deleted=False)
     proj_global = _Row(id="proj-global", name="Global", is_deleted=False)
 
     m = MagicMock()
@@ -60,20 +60,20 @@ def db():
     return m
 
 
-def test_resolve_project_from_message_c5c9(db):
+def test_resolve_project_from_message_sample(db):
     pid, pname = _resolve_project_from_message(
         db, "make a c5 c9 market view ppt don't use my data use market data",
         "default-org", "default-app",
     )
-    assert pid == "proj-c5c9"
-    assert pname == "C5_C9"
+    assert pid == "proj-sample"
+    assert pname == "SAMPLE"
 
 
 def test_resolve_project_from_message_underscore(db):
     pid, pname = _resolve_project_from_message(
-        db, "show C5_C9 market", "default-org", "default-app",
+        db, "show SAMPLE market", "default-org", "default-app",
     )
-    assert pid == "proj-c5c9"
+    assert pid == "proj-sample"
 
 
 def test_resolve_project_no_mention(db):
@@ -135,8 +135,8 @@ def test_prepare_selected_project_normal(db):
         with patch("app.services.data_source_runtime.data_source_runtime._extend_with_project_kbs",
                    return_value=["kb-market"]):
             tools, prompt, extras = prepare_data_source_runtime(
-                db, agent, [], "", selected_project_id="proj-c5c9",
-                selected_project_name="C5_C9",
+                db, agent, [], "", selected_project_id="proj-sample",
+                selected_project_name="SAMPLE",
                 user_message="make a ppt",
             )
 

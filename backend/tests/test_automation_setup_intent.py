@@ -1,8 +1,8 @@
 """Regression tests for the 2026-08-25 third-pass bug.
 
 User pasted "Create a new Automation Task: ... Sync ERP sales data..."
-into a chat bound to project Ecisco BI. The conversation ran on
-``ecisco_bi_assistant`` (which has ``ask_data_agent`` but NOT
+into a chat bound to project Acme BI. The conversation ran on
+``acme_bi_assistant`` (which has ``ask_data_agent`` but NOT
 ``create_automation`` — only ``automation_agent`` has that tool). The
 LLM misread the description as a data-analysis request and called
 ``ask_data_agent``, which returned 1 row with 1 column (a placeholder
@@ -14,7 +14,7 @@ intent (EN + ZH + structural-form) and lets ``add_message`` /
 ``add_message_stream`` rebind the conversation to the dedicated
 ``automation_agent`` (which has ``create_automation`` + the right
 NO-REPORT BOUNDARY prompt). Without this rebind, the conversation
-stays on ``ecisco_bi_assistant`` and the LLM has no automation tool.
+stays on ``acme_bi_assistant`` and the LLM has no automation tool.
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ from app.routers.agents import (
             "- Type: Data Sync\n"
             "- Schedule: Daily 08:00\n"
             "- Output format: HTML report (html)\n"
-            "- Project: Ecisco BI\n"
+            "- Project: Acme BI\n"
             "- Description: Sync ERP sales data daily"
         ),
         # EN with casing typo (lowercase 'task').
@@ -64,7 +64,7 @@ from app.routers.agents import (
             "- 类型:数据同步\n"
             "- 调度规则:每天 08:00\n"
             "- 输出格式:HTML report (html)\n"
-            "- 所属项目:Ecisco BI"
+            "- 所属项目:Acme BI"
         ),
         # ZH with fullwidth colon
         (
@@ -87,7 +87,7 @@ from app.routers.agents import (
             "- Type: Data Sync\n"
             "- Schedule: Daily 08:00\n"
             "- Output format: HTML report (html)\n"
-            "- Project: Ecisco BI\n"
+            "- Project: Acme BI\n"
             "- Description: Sync ERP sales data daily"
         ),
     ],
@@ -106,7 +106,7 @@ def test_intent_detected(message: str) -> None:
         "Generate a Q2 sales report",
         "Show me last 30 days of inventory",
         "帮我查一下昨天的销售数据",
-        "Forecast crude oil for next week",
+        "Forecast product e for next week",
         "What's the price trend for cracked C5?",
         # Data intents that mention "schedule" but are NOT automation setup.
         "Schedule a meeting with the sales team at 3pm",

@@ -181,12 +181,19 @@ class TestArtifactToolHelpers:
 
 class TestPlanDAG:
     def test_default_plan_returns_list(self):
-        """_build_default_plan(task_spec: dict, agent_name: str) -> list[dict]."""
+        """_build_default_plan(task_spec: dict, agent_name: str) -> list[dict].
+
+        2026-10-08: a content_generation spec without requires_data or
+        artifact intents now yields an EMPTY plan (the fabricated
+        "Process request" placeholder node was removed — it dispatched as a
+        nonexistent tool and failed every such turn). FINALIZE answers
+        zero-node plans directly.
+        """
         from app.services.synexia.plan_dag import _build_default_plan
         spec = {"task_kind": "content_generation", "summary": "Create a sales report"}
         result = _build_default_plan(spec, "general_assistant")
         assert isinstance(result, list)
-        assert len(result) > 0, "Plan should have at least one node"
+        assert "Process request" not in str(result)
 
     def test_followup_plan_includes_edit_artifact(self):
         from app.services.synexia.plan_dag import _build_default_plan

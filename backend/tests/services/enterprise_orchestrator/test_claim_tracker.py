@@ -24,7 +24,7 @@ def _claim(
     text="Revenue fell 18% to ¥301M",
     source_facet="regional_sales",
     source_row_ids=("row_a", "row_b"),
-    source_sql="SELECT SUM(FBASEQTY) FROM erp_v_sale_orderentry",
+    source_sql="SELECT SUM(FBASEQTY) FROM v_sale_order",
     verified=False,
 ):
     return {

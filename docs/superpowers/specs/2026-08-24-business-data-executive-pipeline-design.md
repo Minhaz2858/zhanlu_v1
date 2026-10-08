@@ -47,10 +47,10 @@ a domain-adaptive 6-section report, and attach verifiable data lineage.
 
 **Critical reuse** (no new SQL needed):
 - `app/services/erp/kpi.py::ErpKpiService` — sales/inventory/customer/order
-  KPIs against `erp_v_sale_orderentry` (cols `FDELIQTY`, `PLANDATE`,
+  KPIs against `v_sale_order` (cols `FDELIQTY`, `PLANDATE`,
   `FREMAINOUTQTY`)
 - `app/services/perception/service.py::PerceptionService.build_snapshot()`
-  + `perception/impact.py::compute_impact()` — market events + naphtha
+  + `perception/impact.py::compute_impact()` — market events + product_c
   pass-through
 - `app/services/knowledge_graph/schema_linker.py` — Two-Phase NL2SQL already
   deployed (Phase A: LLM sees full TOC, picks 1-4 tables; Phase B: selected
@@ -384,7 +384,7 @@ Each facet spec becomes a `FacetResult`:
     "rows": list[dict],
     "summary": str,
     "source_sql": str,            # the executed SQL (for lineage appendix)
-    "source_label": str,          # "erp_v_sale_orderentry" / "perception_service"
+    "source_label": str,          # "v_sale_order" / "perception_service"
     "row_count": int,
     "warnings": list[str],        # ["50% of volume records null", ...]
     "available": bool,
@@ -460,7 +460,7 @@ Each narrative sentence that cites a number becomes a `Claim`:
     "text": "Revenue fell 18.0% QoQ to ¥301.9M",
     "source_facet": "regional_sales",
     "source_row_ids": ["row_3", "row_7"],   # rows in that facet
-    "source_sql": "SELECT SUM(...) FROM erp_v_sale_orderentry WHERE ...",
+    "source_sql": "SELECT SUM(...) FROM v_sale_order WHERE ...",
     "verified": True,                       # set by ClaimTracker
 }
 ```

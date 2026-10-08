@@ -2,7 +2,7 @@
 
 ROOT CAUSE FIXED
 ----------------
-Observed: a user asked for a supply-chain snapshot in the C5_C9 project.
+Observed: a user asked for a supply-chain snapshot in the SAMPLE project.
 The agent had TWO bound sources — `kb-demo-001` ("Demo E2E PostgreSQL",
 bound at the agent level) and `b1b9145d` (the real ERP, bound at the
 project level). fetch_data_batch failed twice with a generic
@@ -55,11 +55,11 @@ class TestIsDemoSourceName:
         assert is_demo_source_name("Sales Warehouse", "sales_test")
 
     def test_real_source_not_marked(self):
-        assert not is_demo_source_name("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")
+        assert not is_demo_source_name("demo_warehouse_prod", "demo_warehouse_prod")
 
-    def test_ecisco_like_name_not_marked(self):
-        # A production petrochemical source must never be flagged.
-        assert not is_demo_source_name("ecisco_sales_warehouse", "ecisco_prod")
+    def test_acme_like_name_not_marked(self):
+        # A production industrial source must never be flagged.
+        assert not is_demo_source_name("acme_sales_warehouse", "acme_prod")
 
     def test_empty_returns_false(self):
         assert not is_demo_source_name("", "")
@@ -76,7 +76,7 @@ class TestExcludeDemoSources:
         bound = ["kb-demo-001", "b1b9145d-5b6b-4c0e-ba82-919dde4620d7"]
         name_map = {
             "kb-demo-001": ("Demo E2E PostgreSQL", "demo_e2e"),
-            "b1b9145d-5b6b-4c0e-ba82-919dde4620d7": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod"),
+            "b1b9145d-5b6b-4c0e-ba82-919dde4620d7": ("demo_warehouse_prod", "demo_warehouse_prod"),
         }
         out = exclude_demo_sources_when_real_present(bound, name_map=name_map)
         assert out == ["b1b9145d-5b6b-4c0e-ba82-919dde4620d7"]
@@ -133,10 +133,10 @@ class TestPromptSectionDemoLabel:
     def test_real_source_not_labeled(self):
         meta = [{
             "id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
-            "name": "aipdp_data_warehouse_prod",
+            "name": "demo_warehouse_prod",
             "source_kind": "database",
             "db_type": "mysql",
-            "database_name": "aipdp_data_warehouse_prod",
+            "database_name": "demo_warehouse_prod",
         }]
         section = _build_data_source_prompt_section(meta)
         assert "DEMO/TEST source" not in section
@@ -152,17 +152,17 @@ class TestPromptSectionDemoLabel:
             },
             {
                 "id": "b1b9145d-5b6b-4c0e-ba82-919dde4620d7",
-                "name": "aipdp_data_warehouse_prod",
+                "name": "demo_warehouse_prod",
                 "source_kind": "database",
                 "db_type": "mysql",
-                "database_name": "aipdp_data_warehouse_prod",
+                "database_name": "demo_warehouse_prod",
             },
         ]
         section = _build_data_source_prompt_section(meta)
         assert "DEMO/TEST source" in section
         # Both source names present (label is per-source, not a filter here).
         assert "Demo E2E PostgreSQL" in section
-        assert "aipdp_data_warehouse_prod" in section
+        assert "demo_warehouse_prod" in section
 
 
 # ── fetch_data_batch: ambiguity error enumerates sources ────────────────
@@ -295,7 +295,7 @@ class TestAssertArtifactSourceProvenance:
             monkeypatch,
             {"source": "Demo E2E PostgreSQL", "summary": "snapshot"},
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
         )
         assert prov["ok"] is False
         assert prov["reason"] == "demo_source_citation"
@@ -310,7 +310,7 @@ class TestAssertArtifactSourceProvenance:
             bound_ids=["kb-0001", "kb-real-001"],
             name_map={
                 "kb-0001": ("E2E Sample DB", "sample_orders"),
-                "kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod"),
+                "kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod"),
             },
         )
         assert prov["ok"] is False
@@ -325,7 +325,7 @@ class TestAssertArtifactSourceProvenance:
             monkeypatch,
             {"summary": "x"},
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
             execution=execution,
         )
         assert prov["ok"] is False
@@ -345,11 +345,11 @@ class TestAssertArtifactSourceProvenance:
     def test_allow_real_citation_with_mixed_bindings(self, monkeypatch):
         prov = self._run(
             monkeypatch,
-            {"source": "aipdp_data_warehouse_prod"},
+            {"source": "demo_warehouse_prod"},
             bound_ids=["kb-demo-001", "kb-real-001"],
             name_map={
                 "kb-demo-001": ("Demo E2E PostgreSQL", "demo_e2e"),
-                "kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod"),
+                "kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod"),
             },
         )
         assert prov["ok"] is True
@@ -361,7 +361,7 @@ class TestAssertArtifactSourceProvenance:
             monkeypatch,
             {"title": "Notes", "summary": "no source fields"},
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
         )
         assert prov["ok"] is True
 
@@ -373,7 +373,7 @@ class TestAssertArtifactSourceProvenance:
             monkeypatch,
             {"source": "Demo E2E PostgreSQL"},
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
         )
         assert prov["ok"] is True
         assert prov["reason"] == "guard_off"
@@ -386,7 +386,7 @@ class TestAssertArtifactSourceProvenance:
             monkeypatch,
             {"source": "Demo E2E PostgreSQL"},
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
         )
         assert prov["ok"] is False
         assert prov["mode"] == "warn"
@@ -395,14 +395,14 @@ class TestAssertArtifactSourceProvenance:
         payload = {
             "sources": [
                 {"name": "Sales Test DB", "id": "kb-t-9", "database_name": "sales_test"},
-                {"name": "aipdp_data_warehouse_prod", "id": "kb-real-001"},
+                {"name": "demo_warehouse_prod", "id": "kb-real-001"},
             ]
         }
         prov = self._run(
             monkeypatch,
             payload,
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
         )
         assert prov["ok"] is False
         assert prov["demo_cited"][0]["name"] == "Sales Test DB"
@@ -413,7 +413,7 @@ class TestAssertArtifactSourceProvenance:
             monkeypatch,
             payload,
             bound_ids=["kb-real-001"],
-            name_map={"kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod")},
+            name_map={"kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod")},
         )
         assert prov["ok"] is False
 
@@ -426,7 +426,7 @@ class TestAssertArtifactSourceProvenance:
         db = _FakeDB(agent=agent)
         monkeypatch.setattr(dsr, "_resolve_kb_name_map", lambda d, ids: {
             "kb-demo-001": ("Demo E2E PostgreSQL", "demo_e2e"),
-            "kb-real-001": ("aipdp_data_warehouse_prod", "aipdp_data_warehouse_prod"),
+            "kb-real-001": ("demo_warehouse_prod", "demo_warehouse_prod"),
         })
         monkeypatch.setattr(dsr, "_extend_with_project_kbs", lambda d, a, ids, project_id=None: ids + ["kb-real-001"])
         prov = dsr.assert_artifact_source_provenance(

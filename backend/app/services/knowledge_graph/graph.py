@@ -92,18 +92,18 @@ def _load_graph_data() -> tuple[list[ProductNode], list[Relationship]]:
 
 # ── Graph Definition (loaded from domain config) ─────────────────────────
 
-_C5_C9_NODES, _C5_C9_EDGES = _load_graph_data()
+_SAMPLE_NODES, _SAMPLE_EDGES = _load_graph_data()
 
 
-def build_c5_c9_graph() -> KnowledgeGraph:
+def build_sample_graph() -> KnowledgeGraph:
     """Return a fresh instance of the product value-chain graph.
 
     Data comes from the domain config's "knowledge_graph" block; with no
     block present the returned graph is empty (fully generic behavior).
     """
     return KnowledgeGraph(
-        nodes=list(_C5_C9_NODES),
-        edges=list(_C5_C9_EDGES),
+        nodes=list(_SAMPLE_NODES),
+        edges=list(_SAMPLE_EDGES),
     )
 
 
@@ -115,7 +115,7 @@ def get_domain_graph() -> KnowledgeGraph:
     """Return the shared (lazy-singleton) domain graph."""
     global _domain_graph
     if _domain_graph is None:
-        _domain_graph = build_c5_c9_graph()
+        _domain_graph = build_sample_graph()
     return _domain_graph
 
 

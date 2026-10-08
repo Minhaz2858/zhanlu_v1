@@ -67,7 +67,10 @@ class TestDefaultPlanInputs:
             {"task_kind": "general", "requires_data": False,
              "user_signal": "default"}, "general_assistant",
         )
-        assert steps, "expected at least one step"
+        # 2026-10-08: a bare general task now yields an EMPTY plan (the
+        # fabricated "Process request" placeholder tool node was removed —
+        # it dispatched as a nonexistent tool and failed every such turn).
+        # The invariant stands: every emitted step carries an inputs dict.
         for s in steps:
             assert "inputs" in s and isinstance(s["inputs"], dict)
 

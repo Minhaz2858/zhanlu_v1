@@ -8,7 +8,7 @@
 
 ## 1. Goal
 
-Make the Ecisco BI Market Alerts panel a **decision-support surface** rather than a noisy price-tick feed. Every alert should answer three questions for the user:
+Make the Acme BI Market Alerts panel a **decision-support surface** rather than a noisy price-tick feed. Every alert should answer three questions for the user:
 
 1. **Why does this matter?** (context: how unusual is this move for *this* product?)
 2. **What's the business impact?** (¥/day at the current shipment volume)
@@ -22,7 +22,7 @@ And the user should be able to tune the **noise floor** (severity, channels, mut
 
 | Layer | Today | Gap |
 |---|---|---|
-| Detection thresholds | Static ±3% (medium) / ±6% (high) | Petrochemicals have wildly different baseline volatility — a 3% move on a stable product and on a volatile one are not equivalent signals. |
+| Detection thresholds | Static ±3% (medium) / ±6% (high) | Industrials have wildly different baseline volatility — a 3% move on a stable product and on a volatile one are not equivalent signals. |
 | Alert message | "X price dropped 8.3% in 7 days to 716.25" | No context, no "is this unusual?", no "what now?" |
 | Business impact | Only computed in the daily digest (one row per day) | Regular alert panel has no ¥/day. User can't prioritize at a glance. |
 | User preferences | One generic `alerting_enabled` flag | No severity floor, no mute list, no channel choice, no sensitivity slider. |
@@ -148,7 +148,7 @@ Output JSON (validated):
 ```json
 {
   "baseline_7d_pct": 2.5,
-  "reasoning": "石脑油 historically tracks crude oil; weekly 2-3% swings are normal; only ±5%+ is actionable"
+  "reasoning": "石脑油 historically tracks product e; weekly 2-3% swings are normal; only ±5%+ is actionable"
 }
 ```
 
@@ -180,7 +180,7 @@ arbitrage:       (spread − freight) × avg_daily_volume_tons
 
 Every newly-created `AlertLog` row carries `payload.impact_yuan_per_day` and `payload.avg_daily_volume_tons`. Panel renders a `¥X/day` chip. `null` if ERP MySQL is down or volume missing — UI shows "impact TBD" gracefully.
 
-Volume source: `erp_v_sale_orderentry.FDELIQTY` (tons) over trailing 30 days, via the canonical `_PRODUCT_MATERIAL_NAMES` map in `services/erp/kpi.py`.
+Volume source: `v_sale_order.FDELIQTY` (tons) over trailing 30 days, via the canonical `_PRODUCT_MATERIAL_NAMES` map in `services/erp/kpi.py`.
 
 ---
 

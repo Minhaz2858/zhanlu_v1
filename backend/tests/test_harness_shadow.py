@@ -347,7 +347,7 @@ def test_one_load_bearing_fire_blocks_deletion_regardless_of_sample_size():
 # ── fail-open integration with Phase 0 ───────────────────────────────────────
 
 def test_phase0_row_gains_shadow_detail():
-    bind_turn(conversation_id="conv-1", agent_name="ecisco", surface="chat.v3")
+    bind_turn(conversation_id="conv-1", agent_name="acme", surface="chat.v3")
     sh.start_trace()
     _act(("create_artifact", {"type": "docx"}))
     record_rule_event("file_turn_guard.should_force_create_file", True)

@@ -41,7 +41,7 @@ catalog_status = Column(String(16), default="pending", nullable=False, index=Tru
 - **MODIFY** `backend/app/config.py`
 
 **What**:
-Add two `Settings` fields near the existing `ECISCO_BI_*_ENABLED` block (around line 475–560):
+Add two `Settings` fields near the existing `BI_*_ENABLED` block (around line 475–560):
 
 ```python
 SEMANTIC_CATALOG_ENABLED: bool = False
@@ -83,7 +83,7 @@ WHERE kcu.TABLE_SCHEMA = DATABASE()
 
 **Postgres readiness**: add `pg_catalog` or `information_schema` equivalent (stub or full impl) so `kb_table_relation` works for Postgres KBs too. If connector abstraction already handles this, just add the method; if not, add the MySQL one and a Postgres one.
 
-**Acceptance**: `get_foreign_keys("erp_t_stk_inventory")` returns correct FK rows for the `aipdp_data_warehouse_prod` warehouse. Runs inside connector class without breaking existing methods.
+**Acceptance**: `get_foreign_keys("erp_t_stk_inventory")` returns correct FK rows for the `demo_warehouse_prod` warehouse. Runs inside connector class without breaking existing methods.
 
 **Depends on**: nothing (but catalog indexer will call it, so do this before or alongside Task 4).
 
@@ -93,7 +93,7 @@ WHERE kcu.TABLE_SCHEMA = DATABASE()
 
 **Files**:
 - **NEW** `backend/app/services/knowledge_graph/catalog_indexer.py`
-- **NEW** `backend/app/services/knowledge_graph/__init__.py` (if not present; dir already has `models.py` for ECISCO BI product graph — these are separate files, same package)
+- **NEW** `backend/app/services/knowledge_graph/__init__.py` (if not present; dir already has `models.py` for ACME BI product graph — these are separate files, same package)
 
 **What**:
 Central function:
@@ -122,7 +122,7 @@ Steps:
 - Also expose a manual trigger: `POST /api/knowledge-bases/{kb_id}/catalog/reindex` (simple — just spawns the task, returns 202).
 
 **Acceptance**:
-- Run `index_kb_catalog` against `aipdp_data_warehouse_prod` KB → `kb_table_meta` has 139 rows, each with descriptions; `kb_column_meta` has all columns; `kb_table_relation` has FKs.
+- Run `index_kb_catalog` against `demo_warehouse_prod` KB → `kb_table_meta` has 139 rows, each with descriptions; `kb_column_meta` has all columns; `kb_table_relation` has FKs.
 - Check Chroma: `catalog_{kb_id}` collection exists with 2 × 139 ≈ 278 documents (tables + columns).
 - `kb.catalog_status == "ready"`.
 - Re-run is idempotent (UPSERT works, old Chroma collection deleted beforehand).
@@ -177,8 +177,8 @@ Algorithm:
 **Fallback**: if no catalog exists for a `kb_id` (no Chroma collection, or `kb.catalog_status != "ready"`), return `None` — caller falls back to `SchemaService.describe_all()`.
 
 **Acceptance**:
-- Query "最近乙烯价格走势" against cataloged warehouse → top tables include `md_t_lz_price`, not unrelated tables. RRF scores are monotonic (better matches get higher scores).
-- Join paths from `md_t_lz_price` include linked dimension tables.
+- Query "最近乙烯价格走势" against cataloged warehouse → top tables include `md_market_price`, not unrelated tables. RRF scores are monotonic (better matches get higher scores).
+- Join paths from `md_market_price` include linked dimension tables.
 - `slice_text` ≤ ~800 tokens (verify with tiktoken).
 - No catalog → returns `None` (graceful degradation).
 - Unit-testable in isolation: mock Chroma collection + mock `kb_table_relation` query → verify RRF outputs and join expansion.
@@ -333,24 +333,24 @@ Run via `backend/venv/bin/python -m pytest tests/test_knowledge_graph/ -v` (SSH 
 - **NEW** `backend/tests/test_knowledge_graph/test_integration_warehouse.py`
 
 **What**:
-One integration test against the real `aipdp_data_warehouse_prod` MySQL warehouse (requires `EDIA_MYSQL_URL` env var + docker backend running):
+One integration test against the real `demo_warehouse_prod` MySQL warehouse (requires `Acme_MYSQL_URL` env var + docker backend running):
 
 ```python
 @pytest.mark.integration
 @pytest.mark.asyncio
 async def test_full_catalog_flow():
-    # 1. Create a KB pointing to aipdp_data_warehouse_prod
+    # 1. Create a KB pointing to demo_warehouse_prod
     # 2. Run catalog_indexer.index_kb_catalog(kb, db)
     # 3. Assert kb_table_meta.count() >= 100 (warehouse has 139 tables)
     # 4. Assert kb_column_meta.count() > kb_table_meta.count()
     # 5. Assert kb_table_relation.count() > 0 (FKs exist)
     # 6. Assert kb.catalog_status == "ready"
     # 7. Query schema linker with "最近乙烯价格走势"
-    # 8. Assert "md_t_lz_price" in linker_result["tables"][0]["table_name"] (top match)
+    # 8. Assert "md_market_price" in linker_result["tables"][0]["table_name"] (top match)
     # 9. Assert linker_result["slice_text"] is non-empty and contains DDL
 ```
 
-Skip in CI (no warehouse access). Mark with `pytest.mark.skipif` when `EDIA_MYSQL_URL` is absent.
+Skip in CI (no warehouse access). Mark with `pytest.mark.skipif` when `Acme_MYSQL_URL` is absent.
 
 **Acceptance**: Passes when run manually against the warehouse. Fails informatively (not crashes) when warehouse is down.
 
@@ -369,7 +369,7 @@ Skip in CI (no warehouse access). Mark with `pytest.mark.skipif` when `EDIA_MYSQ
 
 ```python
 EVAL_QUESTIONS: list[dict] = [
-    {"question": "最近乙烯华东市场价是多少？", "expected_tables": ["md_t_lz_price"]},
+    {"question": "最近乙烯华东市场价是多少？", "expected_tables": ["md_market_price"]},
     {"question": "上个月进口库存变化趋势", "expected_tables": ["erp_t_stk_inventory", "erp_t_stk_instock"]},
     # ... 10-15 total, covering different domains in the warehouse
 ]

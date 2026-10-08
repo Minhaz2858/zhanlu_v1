@@ -119,7 +119,7 @@ _PLAN_STEP_RE = re.compile(
 
 **Source**: SQL queries return all rows at once. `data_source_runtime/` has no streaming API.
 
-**Pragmatic approach**: Wire existing `_sse_data_offer` machinery to fire IMMEDIATELY when SQL tool returns (instead of waiting for synthesis step).
+**Pragmatic approach**: Wire existing `_sse_data_offer` machinery to fire IMMAcmeTELY when SQL tool returns (instead of waiting for synthesis step).
 
 **Effort**: ~20 lines. Not true live streaming during query, but results appear within ~1s of query completion.
 

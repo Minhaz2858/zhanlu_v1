@@ -20,11 +20,11 @@ def _trend_forecast(train_y: pd.Series, h: int) -> np.ndarray:
     return np.array([last + slope * (i + 1) for i in range(h)])
 
 
-def test_apply_overlay_zero_naphtha_is_seasonal_only():
-    """F3: causal chain returns 0 when no naphtha delta; seasonal adds separately."""
+def test_apply_overlay_zero_product_c_is_seasonal_only():
+    """F3: causal chain returns 0 when no product_c delta; seasonal adds separately."""
     base = 1000.0
     as_of = pd.Timestamp("2026-08-04")
-    out = apply_overlay(base, product_id="widget", as_of_date=as_of, naphtha_pct_change=None)
+    out = apply_overlay(base, product_id="widget", as_of_date=as_of, product_c_pct_change=None)
     # Empty domain config → no seasonal rules → total adjustment is 0.
     assert isinstance(out, float)
     assert abs(out - 1000.0) < 1.0 or out == 1000.0
@@ -34,26 +34,26 @@ def test_apply_overlay_no_config_returns_base():
     """F3: with an empty (generic) config the overlay is a no-op for any product."""
     base = 1000.0
     as_of = pd.Timestamp("2026-08-04")
-    out = apply_overlay(base, product_id="widget", as_of_date=as_of, naphtha_pct_change=10.0)
+    out = apply_overlay(base, product_id="widget", as_of_date=as_of, product_c_pct_change=10.0)
     assert abs(out - 1000.0) < 0.1
 
 
-def test_apply_overlay_with_naphtha_delta_propagates(domain_signals_config):
-    """F3: naphtha +10% → widget gets +5.0% (configured elasticity 0.5)."""
+def test_apply_overlay_with_product_c_delta_propagates(domain_signals_config):
+    """F3: product_c +10% → widget gets +5.0% (configured elasticity 0.5)."""
     base = 1000.0
     as_of = pd.Timestamp("2026-07-04")  # July — no widget seasonal rule
-    out = apply_overlay(base, product_id="widget", as_of_date=as_of, naphtha_pct_change=10.0)
+    out = apply_overlay(base, product_id="widget", as_of_date=as_of, product_c_pct_change=10.0)
     # widget: raw 0.5 × damp 1.0 → elasticity = 0.5
     # adjustment = +10% × 0.5 = +5.0% (no seasonal rule for July)
     expected = 1000.0 * (1 + 0.05)
     assert abs(out - expected) < 0.1, f"Expected {expected}, got {out}"
 
 
-def test_apply_overlay_negative_naphtha_reduces_forecast(domain_signals_config):
-    """F3: naphtha -5% → widget gets -2.5% (negative adjustment)."""
+def test_apply_overlay_negative_product_c_reduces_forecast(domain_signals_config):
+    """F3: product_c -5% → widget gets -2.5% (negative adjustment)."""
     base = 1000.0
     as_of = pd.Timestamp("2026-07-04")  # July — no widget seasonal rule
-    out = apply_overlay(base, product_id="widget", as_of_date=as_of, naphtha_pct_change=-5.0)
+    out = apply_overlay(base, product_id="widget", as_of_date=as_of, product_c_pct_change=-5.0)
     expected = 1000.0 * (1 - 0.025)
     assert abs(out - expected) < 0.1
 
@@ -62,7 +62,7 @@ def test_apply_overlay_unknown_product_returns_base():
     """F3: unknown product has no elasticity → no causal adjustment."""
     base = 1000.0
     as_of = pd.Timestamp("2026-08-04")
-    out = apply_overlay(base, product_id="nonexistent_product_xyz", as_of_date=as_of, naphtha_pct_change=10.0)
+    out = apply_overlay(base, product_id="nonexistent_product_xyz", as_of_date=as_of, product_c_pct_change=10.0)
     assert abs(out - 1000.0) < 0.1
 
 
@@ -71,8 +71,8 @@ def test_ab_evaluate_runs_and_returns_metrics():
     rng = np.random.default_rng(42)
     dates = pd.date_range("2025-06-01", periods=200, freq="D")
     y = pd.Series(1000 + np.cumsum(rng.normal(0, 5, 200)), index=dates)
-    naphtha = pd.Series(500 + np.cumsum(rng.normal(0, 2, 200)), index=dates)
-    result = ab_evaluate(y, naphtha, _trend_forecast, product_id="widget", horizons=(7,))
+    product_c = pd.Series(500 + np.cumsum(rng.normal(0, 2, 200)), index=dates)
+    result = ab_evaluate(y, product_c, _trend_forecast, product_id="widget", horizons=(7,))
     assert isinstance(result, ABResult)
     assert result.n_origins > 0
     assert result.mape_off > 0

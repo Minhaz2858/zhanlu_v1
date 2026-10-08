@@ -1,6 +1,6 @@
 """Prompt-level regression tests for the semantic foundation.
 
-Two defects were found LIVE on the aipdp warehouse (143 tables, MySQL). Neither
+Two defects were found LIVE on the acme warehouse (143 tables, MySQL). Neither
 was visible to the existing suite, because both are about *what reaches the
 model* rather than what a helper returns in isolation.
 
@@ -148,7 +148,7 @@ def _query_log(db, sql: str, n: int = 1, outcome: str = "success"):
 
 def _verbose_catalog(db, kb_id: str, n_domains: int = 4, n_tables: int = 12):
     """A catalog whose domain map alone busts the context cap."""
-    _kb(db, kb_id, "aipdp", database_name="aipdp")
+    _kb(db, kb_id, "acme", database_name="acme")
     tables = [f"erp_t_relation_{i:02d}" for i in range(n_tables)]
     for t in tables:
         _table(db, kb_id, t)
@@ -259,7 +259,7 @@ def _store(db, kb_ids, project_id: str | None = "proj1"):
 
 class TestRetrievalEvidenceAndFallback:
     def _seed(self, db):
-        _kb(db, KB, "aipdp")
+        _kb(db, KB, "acme")
         _table(db, KB, "erp_t_crm_contract", "Sales contract headers and their terms")
         _table(db, KB, "erp_t_freight_bill", "Outbound freight bills")
 
@@ -381,7 +381,7 @@ class TestRetrievalHintFormatting:
 class TestCrossSourceRanking:
     def _seed(self, db):
         _kb(db, "kb-logistics", "Logistics Warehouse", database_name="logistics")
-        _kb(db, KB, "aipdp", database_name="aipdp")
+        _kb(db, KB, "acme", database_name="acme")
         _table(db, KB, "erp_t_crm_contract", "Sales contract headers")
         _table(db, "kb-logistics", "erp_t_freight_bill", "Outbound freight bills")
 
@@ -395,7 +395,7 @@ class TestCrossSourceRanking:
 
         assert [c.kb_id for c in ranked] == [KB]
         rendered = format_source_ranking(ranked)
-        assert "aipdp" in rendered
+        assert "acme" in rendered
         assert "Logistics Warehouse" not in rendered
 
     def test_all_zero_ranking_is_suppressed(self, db):

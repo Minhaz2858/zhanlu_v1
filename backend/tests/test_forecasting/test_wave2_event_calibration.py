@@ -122,7 +122,7 @@ def test_run_event_calibration_writes_one_impact(db, monkeypatch, price_history)
         "app.services.forecasting.ops.event_calibration._get_closed_events",
         lambda db, window_days: [
             {"id": 1, "event_type": "maintenance", "event_date": event_date,
-             "headline": "Planned shutdown", "product_key": "异戊二烯",
+             "headline": "Planned shutdown", "product_key": "电子元件",
              "direction": "up", "magnitude_estimate": "moderate"},
         ],
     )
@@ -142,7 +142,7 @@ def test_run_event_calibration_writes_one_impact(db, monkeypatch, price_history)
     rows = db.query(ForecastEventImpact).all()
     assert len(rows) == 1
     assert rows[0].event_type == "maintenance"
-    assert rows[0].product_id == "异戊二烯"
+    assert rows[0].product_id == "电子元件"
     assert rows[0].price_impact_pct is not None
 
 
@@ -154,7 +154,7 @@ def test_run_event_calibration_idempotent(db, monkeypatch, price_history):
 
     # Pre-populate one row
     existing = ForecastEventImpact(
-        product_id="异戊二烯",
+        product_id="电子元件",
         event_type="maintenance",
         event_date=event_date,
         price_impact_pct=5.0,
@@ -168,7 +168,7 @@ def test_run_event_calibration_idempotent(db, monkeypatch, price_history):
         "app.services.forecasting.ops.event_calibration._get_closed_events",
         lambda db, window_days: [
             {"id": 1, "event_type": "maintenance", "event_date": event_date,
-             "headline": "Same event again", "product_key": "异戊二烯",
+             "headline": "Same event again", "product_key": "电子元件",
              "direction": "up", "magnitude_estimate": "moderate"},
         ],
     )

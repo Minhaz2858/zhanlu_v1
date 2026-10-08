@@ -24,7 +24,7 @@ class TestBuildPackExternalSignals:
     def test_default_no_external_keys(self):
         """No new kwargs → evidence pack has empty external-signal keys."""
         pack = build_pack(
-            product_id="isoprene", name_zh="异戊二烯", day=7,
+            product_id="product_d", name_zh="电子元件", day=7,
             history_rows=[], upstream_histories={},
             run_results={}, model_detail={}, explanation={},
             as_of_month=8,
@@ -41,7 +41,7 @@ class TestBuildPackExternalSignals:
         sig = {"rolling_4wk_op_rate": 75.5, "utilization_regime": "tight",
                "has_sufficient_data": True}
         pack = build_pack(
-            product_id="isoprene", name_zh="异戊二烯", day=7,
+            product_id="product_d", name_zh="电子元件", day=7,
             history_rows=[], upstream_histories={},
             run_results={}, model_detail={}, explanation={},
             as_of_month=8,
@@ -53,7 +53,7 @@ class TestBuildPackExternalSignals:
         sig = {"inventory_4wk_change_pct": 20.0, "inventory_pressure": "high",
                "has_sufficient_data": True}
         pack = build_pack(
-            product_id="isoprene", name_zh="异戊二烯", day=7,
+            product_id="product_d", name_zh="电子元件", day=7,
             history_rows=[], upstream_histories={},
             run_results={}, model_detail={}, explanation={},
             as_of_month=8,
@@ -65,7 +65,7 @@ class TestBuildPackExternalSignals:
         sig = {"import_parity_gap": 0.20, "ceiling_pressure": True,
                "import_window_open": True, "has_sufficient_data": True}
         pack = build_pack(
-            product_id="isoprene", name_zh="异戊二烯", day=7,
+            product_id="product_d", name_zh="电子元件", day=7,
             history_rows=[], upstream_histories={},
             run_results={}, model_detail={}, explanation={},
             as_of_month=8,
@@ -75,7 +75,7 @@ class TestBuildPackExternalSignals:
 
     def test_all_three_together(self):
         pack = build_pack(
-            product_id="isoprene", name_zh="异戊二烯", day=7,
+            product_id="product_d", name_zh="电子元件", day=7,
             history_rows=[], upstream_histories={},
             run_results={}, model_detail={}, explanation={},
             as_of_month=8,
@@ -105,11 +105,11 @@ class TestAnalystServiceExternalSignals:
         # Stub out the heavy deps (mds.read_product_history_rows etc.)
         from app.services.forecasting.analyst import service
         monkeypatch.setattr(service, "mds", SimpleNamespace(
-            PRODUCT_FORECAST_TARGET_KEY={"isoprene": "isoprene"},
+            PRODUCT_FORECAST_TARGET_KEY={"product_d": "product_d"},
             read_product_history_rows=lambda _p: [],
         ))
 
-        pack = service._build_pack_for("isoprene", 7, self._stub_run())
+        pack = service._build_pack_for("product_d", 7, self._stub_run())
         assert pack["downstream_utilization"] in ({}, None)
         assert pack["inventory_pressure"] in ({}, None)
         assert pack["import_pressure"] in ({}, None)
@@ -119,7 +119,7 @@ class TestAnalystServiceExternalSignals:
         # Stub mds
         from app.services.forecasting.analyst import service
         monkeypatch.setattr(service, "mds", SimpleNamespace(
-            PRODUCT_FORECAST_TARGET_KEY={"isoprene": "isoprene"},
+            PRODUCT_FORECAST_TARGET_KEY={"product_d": "product_d"},
             read_product_history_rows=lambda _p: [],
         ))
 
@@ -153,7 +153,7 @@ class TestAnalystServiceExternalSignals:
         monkeypatch.setattr(service, "ImportPriceLoader",
                             fake_loaders.ImportPriceLoader)
 
-        pack = service._build_pack_for("isoprene", 7, self._stub_run())
+        pack = service._build_pack_for("product_d", 7, self._stub_run())
         # Some external-signal data should now be present
         assert pack["downstream_utilization"] != {}
         assert pack["inventory_pressure"] != {}
@@ -165,8 +165,8 @@ class TestTemplateBriefExternalRender:
 
     def _build_pack(self, **overrides):
         pack = {
-            "product_id": "isoprene",
-            "name_zh": "异戊二烯",
+            "product_id": "product_d",
+            "name_zh": "电子元件",
             "as_of": "2025-08-05",
             "history_rows": [],
             "run_results": {},

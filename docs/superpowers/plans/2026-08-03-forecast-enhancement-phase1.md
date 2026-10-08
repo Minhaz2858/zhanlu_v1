@@ -1,10 +1,10 @@
-# Petrochemical Market-Price Forecast Enhancement — Phase 1 Implementation Plan
+# Industrial Market-Price Forecast Enhancement — Phase 1 Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Enhance the existing `ForecastEngine` with exogenous feature engineering (forecast cascade), anomaly-robust preprocessing, value-chain coherence, and continuous learning + interpretability — to lift the honesty-gate pass rate and give operators a defensible explanation of every forecast.
 
-**Architecture:** Extend the nightly pipeline (fetch → quality → models → ensemble → guard → scenarios → write) with 4 new stages: preprocess (clean), build exog features (KG-driven cascade), reconcile (spread guardrails), explain (driver attribution + NL). A new `xgboost_exog` model variant consumes exogenous features; the 7 endogenous models stay as robust baselines. The nightly batch processes targets in topological order (crude → naphtha → C5 → derivatives) so downstream products can use feedstock forecasts as future-step exogenous values.
+**Architecture:** Extend the nightly pipeline (fetch → quality → models → ensemble → guard → scenarios → write) with 4 new stages: preprocess (clean), build exog features (KG-driven cascade), reconcile (spread guardrails), explain (driver attribution + NL). A new `xgboost_exog` model variant consumes exogenous features; the 7 endogenous models stay as robust baselines. The nightly batch processes targets in topological order (crude → product_c → C5 → derivatives) so downstream products can use feedstock forecasts as future-step exogenous values.
 
 **Tech Stack:** Python 3.11, SQLAlchemy 2.0, pandas, statsmodels (STL), xgboost, pytest. Backend runs in Docker (no `--reload` — `docker compose restart backend` after service changes). Tests run via `backend/venv/bin/python -m pytest` (system has no global pytest).
 
@@ -342,7 +342,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.services.knowledge_graph.graph import build_c5_c9_graph
+from app.services.knowledge_graph.graph import build_sample_graph
 from app.services.forecasting.features.feature_registry import (
     FeatureSpec, derive_feature_spec, topological_order,
 )
@@ -350,72 +350,72 @@ from app.services.forecasting.features.feature_registry import (
 
 class TestDeriveFeatureSpec:
     def test_upstream_product_has_empty_feedstock(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("crude_oil", graph)
-        assert spec.product_key == "crude_oil"
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_e", graph)
+        assert spec.product_key == "product_e"
         assert spec.feedstock_keys == []
 
     def test_downstream_product_has_feedstock_chain(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("isoprene", graph)
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_d", graph)
         assert "cracked_c5" in spec.feedstock_keys
-        assert "naphtha" in spec.feedstock_keys
-        assert "crude_oil" in spec.feedstock_keys
+        assert "product_c" in spec.feedstock_keys
+        assert "product_e" in spec.feedstock_keys
 
     def test_spread_pairs_built_from_adjacent_feedstocks(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("isoprene", graph)
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_d", graph)
         assert len(spec.spread_pairs) >= 1
         for pair in spec.spread_pairs:
             assert isinstance(pair, tuple)
             assert len(pair) == 2
 
     def test_use_fx_true_when_chain_includes_imported(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("isoprene", graph)
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_d", graph)
         assert spec.use_fx is True
 
     def test_use_fx_false_for_no_feedstocks(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("crude_oil", graph)
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_e", graph)
         assert spec.use_fx is False
 
     def test_unknown_product_returns_empty_spec(self):
-        graph = build_c5_c9_graph()
+        graph = build_sample_graph()
         spec = derive_feature_spec("nonexistent_product", graph)
         assert spec.feedstock_keys == []
 
     def test_custom_feedstock_lags(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("isoprene", graph, feedstock_lags=[1, 7, 14])
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_d", graph, feedstock_lags=[1, 7, 14])
         assert spec.feedstock_lags == [1, 7, 14]
 
     def test_default_feedstock_lags(self):
-        graph = build_c5_c9_graph()
-        spec = derive_feature_spec("isoprene", graph)
+        graph = build_sample_graph()
+        spec = derive_feature_spec("product_d", graph)
         assert spec.feedstock_lags == [1, 2, 3, 7]
 
 
 class TestTopologicalOrder:
     def test_feedstocks_before_derivatives(self):
-        graph = build_c5_c9_graph()
-        products = ["isoprene", "crude_oil", "naphtha", "cracked_c5"]
+        graph = build_sample_graph()
+        products = ["product_d", "product_e", "product_c", "cracked_c5"]
         ordered = topological_order(products, graph)
-        assert ordered.index("crude_oil") < ordered.index("naphtha")
-        assert ordered.index("naphtha") < ordered.index("cracked_c5")
-        assert ordered.index("cracked_c5") < ordered.index("isoprene")
+        assert ordered.index("product_e") < ordered.index("product_c")
+        assert ordered.index("product_c") < ordered.index("cracked_c5")
+        assert ordered.index("cracked_c5") < ordered.index("product_d")
 
     def test_all_products_returned(self):
-        graph = build_c5_c9_graph()
-        products = ["crude_oil", "naphtha", "isoprene", "dcpd"]
+        graph = build_sample_graph()
+        products = ["product_e", "product_c", "product_d", "product_b"]
         ordered = topological_order(products, graph)
         assert set(ordered) == set(products)
 
     def test_products_not_in_graph_returned_at_end(self):
-        graph = build_c5_c9_graph()
-        products = ["crude_oil", "unknown_product"]
+        graph = build_sample_graph()
+        products = ["product_e", "unknown_product"]
         ordered = topological_order(products, graph)
-        assert ordered.index("crude_oil") < ordered.index("unknown_product")
+        assert ordered.index("product_e") < ordered.index("unknown_product")
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -582,7 +582,7 @@ class TestFeedstockLoader:
         mock_session.return_value = mock_db
         mock_target = MagicMock()
         mock_target.datasource = {
-            "source": "edia_mysql", "table": "md_t_lz_price",
+            "source": "mysql", "table": "md_market_price",
             "time_col": "FDATE", "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = 'test'",
         }
@@ -629,7 +629,7 @@ class TestEventFlagLoader:
         mock_session.return_value = mock_db
         mock_db.query.return_value.filter.return_value.all.return_value = []
         loader = EventFlagLoader()
-        df = loader.read_flags("isoprene", datetime(2026, 1, 1), datetime(2026, 1, 30))
+        df = loader.read_flags("product_d", datetime(2026, 1, 1), datetime(2026, 1, 30))
         assert "ds" in df.columns
         assert "event_flag" in df.columns
         assert (df["event_flag"] == 0.0).all()
@@ -642,11 +642,11 @@ class TestEventFlagLoader:
         mock_event.direction = "bullish"
         mock_event.impact_magnitude = 0.7
         mock_event.detected_at = (datetime.utcnow() - timedelta(days=3)).isoformat()
-        mock_event.affected_commodities = ["isoprene"]
+        mock_event.affected_commodities = ["product_d"]
         mock_db.query.return_value.filter.return_value.all.return_value = [mock_event]
 
         loader = EventFlagLoader(decay_window_days=7)
-        df = loader.read_flags("isoprene", datetime(2026, 1, 1), datetime(2026, 1, 30))
+        df = loader.read_flags("product_d", datetime(2026, 1, 1), datetime(2026, 1, 30))
         assert (df["event_flag"] != 0.0).any()
         nonzero = df[df["event_flag"] != 0.0]["event_flag"]
         assert (nonzero > 0).all()
@@ -678,7 +678,7 @@ logger = logging.getLogger(__name__)
 
 
 class FeedstockLoader:
-    """Read actual historical feedstock prices from EDIA MySQL."""
+    """Read actual historical feedstock prices from Acme MySQL."""
 
     def __init__(self, engine=None) -> None:
         self._engine = engine
@@ -814,8 +814,8 @@ class TestBuildFeaturesTraining:
     def test_x_train_has_feedstock_lag_columns(self):
         y = _make_y(60)
         spec = FeatureSpec(
-            product_key="isoprene", feedstock_keys=["cracked_c5", "naphtha"],
-            feedstock_lags=[1, 2], spread_pairs=[("cracked_c5", "naphtha")],
+            product_key="product_d", feedstock_keys=["cracked_c5", "product_c"],
+            feedstock_lags=[1, 2], spread_pairs=[("cracked_c5", "product_c")],
             use_fx=True, use_event_flags=True, calendar_features=True,
         )
         loader = MagicMock()
@@ -823,7 +823,7 @@ class TestBuildFeaturesTraining:
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
                           "cracked_c5": [800.0 + i for i in range(60)]}),
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
-                          "naphtha": [600.0 + i for i in range(60)]}),
+                          "product_c": [600.0 + i for i in range(60)]}),
         ]
         fx_loader = MagicMock()
         fx_loader.read_usd_cny.return_value = pd.DataFrame({
@@ -832,21 +832,21 @@ class TestBuildFeaturesTraining:
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
 
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_train is not None
         lag_cols = [c for c in result.X_train.columns if "lag" in c]
         assert len(lag_cols) >= 2
 
     def test_x_train_has_spread_columns(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5", "naphtha"],
-                           feedstock_lags=[1], spread_pairs=[("cracked_c5", "naphtha")])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5", "product_c"],
+                           feedstock_lags=[1], spread_pairs=[("cracked_c5", "product_c")])
         loader = MagicMock()
         loader.read_actuals.side_effect = [
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
                           "cracked_c5": [800.0 + i for i in range(60)]}),
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
-                          "naphtha": [600.0 + i for i in range(60)]}),
+                          "product_c": [600.0 + i for i in range(60)]}),
         ]
         fx_loader = MagicMock()
         fx_loader.read_usd_cny.return_value = pd.DataFrame({
@@ -854,7 +854,7 @@ class TestBuildFeaturesTraining:
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         spread_cols = [c for c in result.X_train.columns if "spread" in c]
         assert len(spread_cols) >= 1
 
@@ -873,7 +873,7 @@ class TestBuildFeaturesTraining:
 class TestBuildFeaturesFuture:
     def test_x_future_uses_cascade_values(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
         loader = MagicMock()
         loader.read_actuals.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"),
@@ -885,13 +885,13 @@ class TestBuildFeaturesFuture:
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
         cascade = {"cracked_c5": [810.0, 815.0, 820.0, 825.0, 830.0, 835.0, 840.0]}
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, cascade)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, cascade)
         assert result.X_future is not None
         assert len(result.X_future) == 7
 
     def test_x_future_none_when_no_cascade(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
         loader = MagicMock()
         loader.read_actuals.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"),
@@ -900,18 +900,18 @@ class TestBuildFeaturesFuture:
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_future is None
 
     def test_upstream_product_returns_none(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="crude_oil", feedstock_keys=[])
+        spec = FeatureSpec(product_key="product_e", feedstock_keys=[])
         loader = MagicMock()
         fx_loader = MagicMock()
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
-        result = build_features("crude_oil", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_e", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_train is None
         assert result.X_future is None
 
@@ -919,7 +919,7 @@ class TestBuildFeaturesFuture:
 class TestNoLeakage:
     def test_x_train_for_date_t_uses_only_past_feedstock(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
         dates = pd.date_range("2026-01-01", periods=60, freq="D")
         feedstock_values = [100.0 * i for i in range(60)]
         loader = MagicMock()
@@ -927,7 +927,7 @@ class TestNoLeakage:
         fx_loader = MagicMock()
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({"ds": dates, "event_flag": [0.0] * 60})
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_train is not None
         lag_col = [c for c in result.X_train.columns if "cracked_c5" in c and "lag1" in c]
         assert len(lag_col) == 1
@@ -1297,10 +1297,10 @@ from app.services.forecasting.reconcile import (
 class TestCheckCoherence:
     def test_no_violations_when_coherent(self):
         report = check_coherence(
-            product_key="isoprene",
+            product_key="product_d",
             forecast_values=[5500.0, 5520.0, 5540.0],
-            feedstock_forecast=[600.0, 605.0, 610.0],   # naphtha
-            feedstock_key="naphtha",
+            feedstock_forecast=[600.0, 605.0, 610.0],   # product_c
+            feedstock_key="product_c",
             spread_inversion_threshold=0.0,
         )
         assert report.spread_inverted is False
@@ -1311,9 +1311,9 @@ class TestCheckCoherence:
         """child < feedstock cost → spread_inverted=True."""
         report = check_coherence(
             product_key="cracked_c5",
-            forecast_values=[500.0, 505.0, 510.0],   # below naphtha cost
+            forecast_values=[500.0, 505.0, 510.0],   # below product_c cost
             feedstock_forecast=[600.0, 605.0, 610.0],
-            feedstock_key="naphtha",
+            feedstock_key="product_c",
             spread_inversion_threshold=0.0,
         )
         assert report.spread_inverted is True
@@ -1323,10 +1323,10 @@ class TestCheckCoherence:
         """Feedstock moved >5% but child didn't move commensurately."""
         # Feedstock jumped 20%, child moved <5%
         report = check_coherence(
-            product_key="isoprene",
+            product_key="product_d",
             forecast_values=[5500.0, 5505.0, 5510.0],   # ~0% move
             feedstock_forecast=[600.0, 660.0, 720.0],   # 20% jump
-            feedstock_key="naphtha",
+            feedstock_key="product_c",
             direction_threshold_pct=5.0,
         )
         assert report.direction_consistent is False
@@ -1335,10 +1335,10 @@ class TestCheckCoherence:
     def test_no_directional_mismatch_within_threshold(self):
         """Feedstock moved <5% → no directional mismatch."""
         report = check_coherence(
-            product_key="isoprene",
+            product_key="product_d",
             forecast_values=[5500.0, 5510.0, 5520.0],   # ~0.4% move
             feedstock_forecast=[600.0, 602.0, 604.0],   # ~0.7% move
-            feedstock_key="naphtha",
+            feedstock_key="product_c",
             direction_threshold_pct=5.0,
         )
         assert report.direction_consistent is True
@@ -1346,7 +1346,7 @@ class TestCheckCoherence:
     def test_no_feedstock_skips_checks(self):
         """If feedstock_forecast is None, no checks applied."""
         report = check_coherence(
-            product_key="crude_oil",
+            product_key="product_e",
             forecast_values=[500.0, 505.0, 510.0],
             feedstock_forecast=None,
             feedstock_key=None,
@@ -1359,7 +1359,7 @@ class TestApplyCoherence:
     def test_clamp_on_spread_inversion(self):
         forecast = [500.0, 505.0, 510.0]
         feedstock_forecast = [600.0, 605.0, 610.0]
-        report = check_coherence("test", forecast, feedstock_forecast, "naphtha")
+        report = check_coherence("test", forecast, feedstock_forecast, "product_c")
         clamped, new_report = apply_coherence(forecast, report, feedstock_forecast, min_margin=0.2)
         assert new_report.clamped is True
         # Clamped values should be feedstock * 1.2
@@ -1368,7 +1368,7 @@ class TestApplyCoherence:
     def test_no_clamp_when_coherent(self):
         forecast = [5500.0, 5520.0, 5540.0]
         feedstock_forecast = [600.0, 605.0, 610.0]
-        report = check_coherence("test", forecast, feedstock_forecast, "naphtha")
+        report = check_coherence("test", forecast, feedstock_forecast, "product_c")
         clamped, new_report = apply_coherence(forecast, report, feedstock_forecast, min_margin=0.2)
         assert new_report.clamped is False
         assert clamped == forecast
@@ -1377,7 +1377,7 @@ class TestApplyCoherence:
         """Directional mismatches are flags, not clamps."""
         forecast = [5500.0, 5505.0, 5510.0]
         feedstock_forecast = [600.0, 660.0, 720.0]
-        report = check_coherence("test", forecast, feedstock_forecast, "naphtha")
+        report = check_coherence("test", forecast, feedstock_forecast, "product_c")
         clamped, new_report = apply_coherence(forecast, report, feedstock_forecast, min_margin=0.2)
         assert new_report.clamped is False  # directional mismatch doesn't trigger clamp
         assert clamped == forecast
@@ -1394,7 +1394,7 @@ Expected: FAIL
 # backend/app/services/forecasting/reconcile.py
 """Value-chain coherence: spread guardrails + directional consistency.
 
-Not literal HTS reconciliation — our crude→naphtha→C5 chain is a production
+Not literal HTS reconciliation — our crude→product_c→C5 chain is a production
 chain with yield rates, not an additive disaggregation. Instead, we check:
   1. Spread guardrails — child forecast should not invert vs feedstock cost
   2. Directional consistency — flag if feedstock moved >X% but child didn't
@@ -1561,7 +1561,7 @@ class TestEvaluatePreviousRun:
         mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = mock_run
         actuals = pd.Series([5510.0, 5525.0, 5550.0, 5565.0, 5595.0, 5610.0, 5630.0])
 
-        results = evaluate_previous_run(mock_db, "isoprene", actuals)
+        results = evaluate_previous_run(mock_db, "product_d", actuals)
         # 7 evaluations
         assert len(results) == 7
         # First realized_error should be (5500-5510)/5510 ≈ -0.0018
@@ -1571,7 +1571,7 @@ class TestEvaluatePreviousRun:
     def test_empty_actuals_returns_empty(self):
         mock_db = MagicMock()
         mock_db.query.return_value.filter.return_value.order_by.return_value.first.return_value = None
-        results = evaluate_previous_run(mock_db, "isoprene", pd.Series(dtype=float))
+        results = evaluate_previous_run(mock_db, "product_d", pd.Series(dtype=float))
         assert results == []
 
 
@@ -1587,7 +1587,7 @@ class TestRollingAccuracy:
             logs.append(log)
         mock_db.query.return_value.filter.return_value.all.return_value = logs
 
-        result = rolling_accuracy(mock_db, "isoprene", window_days=30)
+        result = rolling_accuracy(mock_db, "product_d", window_days=30)
         assert "mean_mape" in result
         assert "n_evaluations" in result
         assert "trend" in result
@@ -1612,7 +1612,7 @@ class TestDetectDrift:
             all_logs.append(log)
         mock_db.query.return_value.filter.return_value.all.return_value = all_logs
 
-        result = detect_drift(mock_db, "isoprene")
+        result = detect_drift(mock_db, "product_d")
         assert result["is_drifting"] is True
         assert result["recent_mape"] == pytest.approx(0.20)
         assert result["baseline_mape"] == pytest.approx(0.10)
@@ -1627,7 +1627,7 @@ class TestDetectDrift:
             all_logs.append(log)
         mock_db.query.return_value.filter.return_value.all.return_value = all_logs
 
-        result = detect_drift(mock_db, "isoprene")
+        result = detect_drift(mock_db, "product_d")
         assert result["is_drifting"] is False
 
 
@@ -1924,11 +1924,11 @@ def _make_coherence_report():
 class TestExplainForecast:
     def test_produces_nl_summary(self):
         explanation = explain_forecast(
-            product_key="isoprene",
+            product_key="product_d",
             forecast_values=[5500.0, 5520.0, 5540.0],
             previous_forecast=[5480.0, 5500.0, 5520.0],
             xgboost_model=None,
-            feature_names=["cracked_c5_lag1", "naphtha_lag1"],
+            feature_names=["cracked_c5_lag1", "product_c_lag1"],
             cleaning_report=_make_cleaning_report(),
             coherence_report=_make_coherence_report(),
             drift_status={"is_drifting": False},
@@ -1936,11 +1936,11 @@ class TestExplainForecast:
         )
         assert isinstance(explanation, Explanation)
         assert explanation.summary
-        assert "isoprene" in explanation.summary.lower() or "2.3%" in explanation.summary or "+2.3" in explanation.summary
+        assert "product_d" in explanation.summary.lower() or "2.3%" in explanation.summary or "+2.3" in explanation.summary
 
     def test_confidence_high_when_no_gate_no_drift(self):
         explanation = explain_forecast(
-            "isoprene", [5500.0], [5480.0], None, [],
+            "product_d", [5500.0], [5480.0], None, [],
             _make_cleaning_report(), _make_coherence_report(),
             {"is_drifting": False}, honesty_gate_triggered=False,
         )
@@ -1948,7 +1948,7 @@ class TestExplainForecast:
 
     def test_confidence_medium_when_gate_triggered(self):
         explanation = explain_forecast(
-            "isoprene", [5500.0], [5480.0], None, [],
+            "product_d", [5500.0], [5480.0], None, [],
             _make_cleaning_report(), _make_coherence_report(),
             {"is_drifting": False}, honesty_gate_triggered=True,
         )
@@ -1956,7 +1956,7 @@ class TestExplainForecast:
 
     def test_confidence_low_when_drift_detected(self):
         explanation = explain_forecast(
-            "isoprene", [5500.0], [5480.0], None, [],
+            "product_d", [5500.0], [5480.0], None, [],
             _make_cleaning_report(), _make_coherence_report(),
             {"is_drifting": True}, honesty_gate_triggered=False,
         )
@@ -1964,7 +1964,7 @@ class TestExplainForecast:
 
     def test_confidence_low_when_both(self):
         explanation = explain_forecast(
-            "isoprene", [5500.0], [5480.0], None, [],
+            "product_d", [5500.0], [5480.0], None, [],
             _make_cleaning_report(), _make_coherence_report(),
             {"is_drifting": True}, honesty_gate_triggered=True,
         )
@@ -1972,7 +1972,7 @@ class TestExplainForecast:
 
     def test_cleaning_note_in_explanation(self):
         explanation = explain_forecast(
-            "isoprene", [5500.0], None, None, [],
+            "product_d", [5500.0], None, None, [],
             _make_cleaning_report(), _make_coherence_report(),
             {"is_drifting": False}, honesty_gate_triggered=False,
         )
@@ -1986,7 +1986,7 @@ class TestExplainForecast:
 
     def test_contribution_delta_none_when_no_previous(self):
         explanation = explain_forecast(
-            "isoprene", [5500.0], None, None, ["f1"],
+            "product_d", [5500.0], None, None, ["f1"],
             _make_cleaning_report(), _make_coherence_report(),
             {"is_drifting": False}, honesty_gate_triggered=False,
         )
@@ -1997,7 +1997,7 @@ class TestExplainForecast:
         coh = MagicMock(violations=[{"message": "spread inversion"}],
                          spread_inverted=True, direction_consistent=True, clamped=False)
         explanation = explain_forecast(
-            "isoprene", [5500.0], None, None, [],
+            "product_d", [5500.0], None, None, [],
             _make_cleaning_report(), coh,
             {"is_drifting": False}, honesty_gate_triggered=False,
         )
@@ -2502,19 +2502,19 @@ import pytest
 
 class TestTopologicalOrdering:
     def test_cascade_populated_in_order(self):
-        from app.services.knowledge_graph.graph import build_c5_c9_graph
+        from app.services.knowledge_graph.graph import build_sample_graph
         from app.services.forecasting.features.feature_registry import topological_order
-        graph = build_c5_c9_graph()
-        products = ["isoprene", "crude_oil", "naphtha", "cracked_c5"]
+        graph = build_sample_graph()
+        products = ["product_d", "product_e", "product_c", "cracked_c5"]
         ordered = topological_order(products, graph)
         # Verify cascade dict would be populated in order
         cascade_forecasts = {}
         for pk in ordered:
             # Simulate each product's forecast becoming available
             cascade_forecasts[pk] = [5000.0] * 7  # dummy forecast
-        assert "crude_oil" in cascade_forecasts
-        assert "naphtha" in cascade_forecasts
-        assert cascade_forecasts["crude_oil"][0] == 5000.0
+        assert "product_e" in cascade_forecasts
+        assert "product_c" in cascade_forecasts
+        assert cascade_forecasts["product_e"][0] == 5000.0
 
 
 class TestForecastRunPersistence:
@@ -2610,7 +2610,7 @@ Expected: PASS
 Run each existing test file individually (SSH RAM limited):
 ```bash
 cd /home/ysk2025/zhanlu_7_30/backend && PYTHONPATH=. ./venv/bin/python -m pytest tests/test_edia_source.py -v
-cd /home/ysk2025/zhanlu_7_30/backend && PYTHONPATH=. ./venv/bin/python -m pytest tests/test_seed_ecisco_targets.py -v
+cd /home/ysk2025/zhanlu_7_30/backend && PYTHONPATH=. ./venv/bin/python -m pytest tests/test_seed_acme_targets.py -v
 cd /home/ysk2025/zhanlu_7_30/backend && PYTHONPATH=. ./venv/bin/python -m pytest tests/test_forecast_dashboard_endpoint_v2.py -v
 cd /home/ysk2025/zhanlu_7_30/backend && PYTHONPATH=. ./venv/bin/python -m pytest tests/test_bootstrap_nightly_forecast.py -v
 ```
@@ -2635,7 +2635,7 @@ finally:
     db.close()
 "
 ```
-Expected: 12 runs, all with explanation populated, exog_degraded=True for upstream products (crude_oil, naphtha — no feedstocks).
+Expected: 12 runs, all with explanation populated, exog_degraded=True for upstream products (product_e, product_c — no feedstocks).
 
 - [ ] **Step 6: Commit**
 
@@ -2662,7 +2662,7 @@ SELECT
   (fr.coherence_report->>'spread_inverted')::bool AS spread_inv
 FROM forecast_runs fr
 JOIN forecast_targets ft ON fr.target_id = ft.id
-WHERE ft.product_key LIKE 'ecisco.%'
+WHERE ft.product_key LIKE 'acme.%'
 ORDER BY ft.product_key, fr.created_date DESC
 LIMIT 24;
 "

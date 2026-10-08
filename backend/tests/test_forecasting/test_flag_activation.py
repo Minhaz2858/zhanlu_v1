@@ -91,9 +91,9 @@ def test_domain_signals_importable_and_callable():
     from datetime import datetime
 
     rpt = compute_domain_signal_adjustment(
-        product_id="isoprene",
+        product_id="product_d",
         as_of_date=datetime.now(),
-        naphtha_pct_change=0.0,
+        product_c_pct_change=0.0,
     )
     assert isinstance(rpt, dict)
     assert "total_pct" in rpt

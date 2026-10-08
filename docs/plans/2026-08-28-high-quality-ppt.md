@@ -225,25 +225,25 @@ Expected: FAIL or the preset list needs checking — read `themes.py` preset nam
 
 ## Phase B — Market data grounding
 
-### Task B1: Bind Market Research KB to C5_C9 project
+### Task B1: Bind Market Research KB to SAMPLE project
 
-**Objective:** The C5_C9 agent can reach market data. `_bound_kbs(db, project)` filters `KnowledgeBase.project_id == project.id`, so binding = set project_id on the market KB (or a scoped copy).
+**Objective:** The SAMPLE agent can reach market data. `_bound_kbs(db, project)` filters `KnowledgeBase.project_id == project.id`, so binding = set project_id on the market KB (or a scoped copy).
 
 **Files:** none (data change) + verification test
 - Test: `backend/tests/routers/test_project_catalog_kb_binding.py` (create)
 
 **Step 1: Inspect current binding:**
 Run: `docker exec zhanlu-backend sh -c "cd /app && python -c \"from app.database import SessionLocal; from sqlalchemy import text; db=SessionLocal(); print(db.execute(text(\\\"SELECT id,name,project_id FROM knowledge_bases\\\")).fetchall())\""`
-Expected: Market Research Data (`e4032eda...`) has `project_id=be8cdaac` (Data Analysis), NOT C5_C9 (`07d8d339...`).
+Expected: Market Research Data (`e4032eda...`) has `project_id=be8cdaac` (Data Analysis), NOT SAMPLE (`07d8d339...`).
 
 **Step 2 (decision):** Prefer a **project-scoped copy** (app isolation rule — never mutate another project's KB): insert a new knowledge_bases row copying name/description/type/source_kind with `project_id=07d8d339...`. Do NOT repoint the original. If the KB content is actually a shared vector store (ChromaDB), a copy shares the underlying store but scopes access by project_id — document that.
 
-**Step 3:** Verify with a test that `_bound_kbs` returns the market KB for C5_C9 and not for Data Analysis (inverse check — original still bound there).
+**Step 3:** Verify with a test that `_bound_kbs` returns the market KB for SAMPLE and not for Data Analysis (inverse check — original still bound there).
 
 **Step 4:** Commit:
 ```bash
 git add backend/tests/routers/test_project_catalog_kb_binding.py
-git commit -m "feat(kb): bind Market Research KB to C5_C9 project (scoped copy)"
+git commit -m "feat(kb): bind Market Research KB to SAMPLE project (scoped copy)"
 ```
 
 ---
@@ -306,7 +306,7 @@ def test_market_intent_prefers_market_kb():
 
 ---
 
-## Task D: E2E verification — regenerate the C5_C9 market deck
+## Task D: E2E verification — regenerate the SAMPLE market deck
 
 **Objective:** Prove the pipeline produces a professional deck with real market data.
 
@@ -321,7 +321,7 @@ def test_market_intent_prefers_market_kb():
 - [ ] Explicit "plain data dump" → structured (A2)
 - [ ] Audit-FAIL deck → no bytes delivered (A3); blocking off → old behavior (A3)
 - [ ] Market intent → business theme (A4)
-- [ ] Market KB bound to C5_C9, not leaked to others (B1)
+- [ ] Market KB bound to SAMPLE, not leaked to others (B1)
 - [ ] Market intent → market KB rows (B2)
 - [ ] Source footers on every slide + audit rule (B3)
 - [ ] pptx → ppt-design skill (C1)

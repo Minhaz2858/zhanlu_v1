@@ -25,7 +25,7 @@ graceful handling of connection interruptions / sync errors.
   `bfab2d42-9985-4529-8a36-d6a66dbeb908`) and `test2`, both
   `db_type=mysql`, host `rm-bp1456yccem7e68zsmo.mysql.rds.aliyuncs.com:3306`.
   **RDS is REACHABLE** from the dev box.
-- `aipdp_data_warehouse_prod` (id `90e80028-...`), mysql host `10.10.10.49:3306`
+- `demo_warehouse_prod` (id `90e80028-...`), mysql host `10.10.10.49:3306`
   — **UNREACHABLE** (ideal negative fixture for the connection-interruption path).
 - Internal `Customer Database` (postgres `zhanlu-postgres:5432`) is NOT exposed
   to localhost.

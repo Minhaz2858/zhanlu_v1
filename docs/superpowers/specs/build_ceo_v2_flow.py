@@ -47,13 +47,13 @@ Sections:
 [General] {{inputs.n11.text}}
 Output a CEO-grade brief with these sections: Verdict, Key Numbers (grounded in the snapshot), Trend, Risks & Concentration, Recommended Actions. Only include sections with content; empty sections render as blank. Every number must come from the section data above — never invent figures."""
 
-KPI_SQL = """SELECT (SELECT COUNT(DISTINCT FID) FROM erp_v_sale_orderentry) AS total_orders, (SELECT COUNT(DISTINCT FCUSTID) FROM erp_v_sale_orderentry) AS total_customers, (SELECT COUNT(DISTINCT material_name) FROM erp_v_sale_orderentry) AS total_materials, (SELECT ROUND(SUM(FQTY_ORIGIN),2) FROM erp_v_sale_orderentry) AS total_qty, (SELECT ROUND(SUM(FALLAMOUNT),2) FROM erp_v_sale_orderentry) AS total_amount, (SELECT ROUND(SUM(FAMOUNT),2) FROM erp_v_sale_orderentry) AS pretax_amount, (SELECT ROUND(SUM(FTAXAMOUNT),2) FROM erp_v_sale_orderentry) AS tax_amount, (SELECT ROUND(SUM(FREMAINOUTQTY),2) FROM erp_v_sale_orderentry) AS undelivered_qty, (SELECT ROUND(SUM(FALLAMOUNT)/COUNT(DISTINCT FID),2) FROM erp_v_sale_orderentry) AS avg_order_value"""
+KPI_SQL = """SELECT (SELECT COUNT(DISTINCT FID) FROM v_sale_order) AS total_orders, (SELECT COUNT(DISTINCT FCUSTID) FROM v_sale_order) AS total_customers, (SELECT COUNT(DISTINCT material_name) FROM v_sale_order) AS total_materials, (SELECT ROUND(SUM(FQTY_ORIGIN),2) FROM v_sale_order) AS total_qty, (SELECT ROUND(SUM(FALLAMOUNT),2) FROM v_sale_order) AS total_amount, (SELECT ROUND(SUM(FAMOUNT),2) FROM v_sale_order) AS pretax_amount, (SELECT ROUND(SUM(FTAXAMOUNT),2) FROM v_sale_order) AS tax_amount, (SELECT ROUND(SUM(FREMAINOUTQTY),2) FROM v_sale_order) AS undelivered_qty, (SELECT ROUND(SUM(FALLAMOUNT)/COUNT(DISTINCT FID),2) FROM v_sale_order) AS avg_order_value"""
 
-TOP3_SQL = """SELECT org_name, CUST_NAME, material_name, ROUND(SUM(FALLAMOUNT),2) AS amount, ROUND(SUM(FQTY_ORIGIN),2) AS qty FROM erp_v_sale_orderentry GROUP BY org_name, CUST_NAME, material_name ORDER BY amount DESC LIMIT 3"""
+TOP3_SQL = """SELECT org_name, CUST_NAME, material_name, ROUND(SUM(FALLAMOUNT),2) AS amount, ROUND(SUM(FQTY_ORIGIN),2) AS qty FROM v_sale_order GROUP BY org_name, CUST_NAME, material_name ORDER BY amount DESC LIMIT 3"""
 
-WK_SQL = """SELECT DATE_FORMAT(PLANDATE, '%x-W%v') AS week, COUNT(DISTINCT FID) AS orders, COUNT(DISTINCT FCUSTID) AS customers, ROUND(SUM(FQTY_ORIGIN), 2) AS qty, ROUND(SUM(FALLAMOUNT), 2) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 8 WEEK) GROUP BY DATE_FORMAT(PLANDATE, '%x-W%v') ORDER BY week"""
+WK_SQL = """SELECT DATE_FORMAT(PLANDATE, '%x-W%v') AS week, COUNT(DISTINCT FID) AS orders, COUNT(DISTINCT FCUSTID) AS customers, ROUND(SUM(FQTY_ORIGIN), 2) AS qty, ROUND(SUM(FALLAMOUNT), 2) AS amount FROM v_sale_order WHERE PLANDATE >= DATE_SUB(CURDATE(), INTERVAL 8 WEEK) GROUP BY DATE_FORMAT(PLANDATE, '%x-W%v') ORDER BY week"""
 
-MO_SQL = """SELECT DATE_FORMAT(PLANDATE, '%Y-%m') AS month, COUNT(DISTINCT FID) AS orders, ROUND(SUM(FQTY_ORIGIN),2) AS qty, ROUND(SUM(FALLAMOUNT),2) AS amount FROM erp_v_sale_orderentry WHERE PLANDATE >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 12 MONTH), '%Y-%m-01') GROUP BY DATE_FORMAT(PLANDATE, '%Y-%m') ORDER BY month"""
+MO_SQL = """SELECT DATE_FORMAT(PLANDATE, '%Y-%m') AS month, COUNT(DISTINCT FID) AS orders, ROUND(SUM(FQTY_ORIGIN),2) AS qty, ROUND(SUM(FALLAMOUNT),2) AS amount FROM v_sale_order WHERE PLANDATE >= DATE_FORMAT(DATE_SUB(CURDATE(), INTERVAL 12 MONTH), '%Y-%m-01') GROUP BY DATE_FORMAT(PLANDATE, '%Y-%m') ORDER BY month"""
 
 
 def node(nid, ntype, config, label):
@@ -89,8 +89,8 @@ nodes = [
         ],
         "fallback_label": "more intents",
     }, "Route Intent I"),
-    nl_branch("n4", "Sales Detail", "{{inputs.n1.text}} — Answer using the ERP sales order view erp_v_sale_orderentry. Report revenue, quantities, orders and date-bucketed trends where asked. Columns available: CUST_NAME, material_name, org_name, FQTY_ORIGIN, FDELIQTY, FREMAINOUTQTY, FAMOUNT, FALLAMOUNT, FTAXAMOUNT, PLANDATE. Do NOT compute company-wide totals — the KPI snapshot node is the single source of truth for totals; add detail only."),
-    nl_branch("n5", "Customer Revenue Detail", "{{inputs.n1.text}} — Focus on CUSTOMER REVENUE: group by CUST_NAME, report revenue (FALLAMOUNT), quantity, ranking, customer count and concentration (share of total). Use the ERP sales order view erp_v_sale_orderentry. Detail only — company-wide totals come from the KPI snapshot node."),
+    nl_branch("n4", "Sales Detail", "{{inputs.n1.text}} — Answer using the ERP sales order view v_sale_order. Report revenue, quantities, orders and date-bucketed trends where asked. Columns available: CUST_NAME, material_name, org_name, FQTY_ORIGIN, FDELIQTY, FREMAINOUTQTY, FAMOUNT, FALLAMOUNT, FTAXAMOUNT, PLANDATE. Do NOT compute company-wide totals — the KPI snapshot node is the single source of truth for totals; add detail only."),
+    nl_branch("n5", "Customer Revenue Detail", "{{inputs.n1.text}} — Focus on CUSTOMER REVENUE: group by CUST_NAME, report revenue (FALLAMOUNT), quantity, ranking, customer count and concentration (share of total). Use the ERP sales order view v_sale_order. Detail only — company-wide totals come from the KPI snapshot node."),
     node("n6", "switch", {
         "cases": [
             {"field": "{{inputs.n2.text}}", "op": "contains", "value": "INVENTORY"},
@@ -99,9 +99,9 @@ nodes = [
         ],
         "fallback_label": "general",
     }, "Route Intent II"),
-    nl_branch("n7", "Product Detail", "{{inputs.n1.text}} — Focus on PRODUCTS: group by material_name, report revenue (FALLAMOUNT), quantity, ranking, share and unit prices (FPRICE). Use the ERP sales order view erp_v_sale_orderentry. Detail only — company-wide totals come from the KPI snapshot node."),
-    nl_branch("n8", "Inventory / Backlog Detail", "{{inputs.n1.text}} — Focus on INVENTORY and BACKLOG: report undelivered/remaining quantities using FREMAINOUTQTY, delivered FDELIQTY, ordered FQTY_ORIGIN, and the inventory-context columns instock_qty / produce_qty / plan_qty where present, grouped by material_name or CUST_NAME. Use the ERP sales order view erp_v_sale_orderentry. Detail only — totals come from the KPI snapshot node."),
-    nl_branch("n9", "Financial Detail", "{{inputs.n1.text}} — Focus on FINANCIAL KPIs from erp_v_sale_orderentry: tax (FTAXAMOUNT), pre-tax amount (FAMOUNT), tax-inclusive amount (FALLAMOUNT), average order value (FALLAMOUNT per distinct FID), price per ton (FALLAMOUNT / FQTY_ORIGIN), tax rate (FTAXRATE). If a metric (e.g. true profit or margin) is not derivable from these columns, say so explicitly — never invent figures. Detail only — totals come from the KPI snapshot node."),
+    nl_branch("n7", "Product Detail", "{{inputs.n1.text}} — Focus on PRODUCTS: group by material_name, report revenue (FALLAMOUNT), quantity, ranking, share and unit prices (FPRICE). Use the ERP sales order view v_sale_order. Detail only — company-wide totals come from the KPI snapshot node."),
+    nl_branch("n8", "Inventory / Backlog Detail", "{{inputs.n1.text}} — Focus on INVENTORY and BACKLOG: report undelivered/remaining quantities using FREMAINOUTQTY, delivered FDELIQTY, ordered FQTY_ORIGIN, and the inventory-context columns instock_qty / produce_qty / plan_qty where present, grouped by material_name or CUST_NAME. Use the ERP sales order view v_sale_order. Detail only — totals come from the KPI snapshot node."),
+    nl_branch("n9", "Financial Detail", "{{inputs.n1.text}} — Focus on FINANCIAL KPIs from v_sale_order: tax (FTAXAMOUNT), pre-tax amount (FAMOUNT), tax-inclusive amount (FALLAMOUNT), average order value (FALLAMOUNT per distinct FID), price per ton (FALLAMOUNT / FQTY_ORIGIN), tax rate (FTAXRATE). If a metric (e.g. true profit or margin) is not derivable from these columns, say so explicitly — never invent figures. Detail only — totals come from the KPI snapshot node."),
     node("n10", "agent", {
         "agent_id": REPORT_AGENT,
         "input_template": "User request: {{inputs.n1.text}}\n\nWeekly sales data (ERP, latest 8 weeks):\n{{inputs.n14.text}}\n\nMonthly trend (12 months):\n{{inputs.n15.text}}\n\nWrite the weekly sales report using ONLY this data.",

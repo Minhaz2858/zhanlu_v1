@@ -1,6 +1,6 @@
 """Acceptance tests for the data-agent delegation pipeline fixes (2026-08-22).
 
-Covers the five fixes from the Ecisco BI latency + empty-answer investigation:
+Covers the five fixes from the Acme BI latency + empty-answer investigation:
 
 (a) Caller-visible payload includes condensed rows — when the sub-agent has
     rows but no prose, the `answer` field carries a "DATA READY" directive

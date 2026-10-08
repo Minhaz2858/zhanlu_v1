@@ -170,7 +170,7 @@ def test_mysql_view_comment_is_not_echoed_as_a_business_label():
     conn._engine = _FakeEngine(
         {"information_schema.TABLES": [("VIEW", None, "VIEW", None, None, None)]}
     )
-    facts = conn.table_facts("erp_v_sale_orderentry")
+    facts = conn.table_facts("v_sale_order")
     assert "comment" not in facts
     assert facts["table_type"] == "VIEW"
     assert "est_rows" not in facts, "a NULL row estimate must be absent, not 0"

@@ -35,7 +35,7 @@
 | Admin user-management endpoint | **None** — registration is self-service, hardcodes `role="user"` | `backend/app/routers/` |
 | Frontend role | `AuthContext` exposes `user.role` | `frontend/src/lib/AuthContext.jsx` |
 | Frontend resource list | `MySpace.jsx` lists projects/agents | `frontend/src/pages/MySpace.jsx` |
-| Latest migration | `037_ensure_12_ecisco_forecast_targets.py` | `backend/alembic/versions/` |
+| Latest migration | `037_ensure_12_acme_forecast_targets.py` | `backend/alembic/versions/` |
 
 ---
 

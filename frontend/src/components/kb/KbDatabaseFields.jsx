@@ -32,7 +32,7 @@ function decodeToken(s) {
  * Parse a SQLAlchemy-style connection URL into the wizard's
  * database-field shape. Examples that this must handle:
  *
- *   mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/aipdp_data_warehouse_prod?charset=utf8mb4
+ *   mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/demo_warehouse_prod?charset=utf8mb4
  *   postgresql+psycopg2://user:pw@host:5432/mydb
  *   mongodb+srv://user:pw@cluster.example.com/db
  *   oracle+cx_oracle://user:pw@host:1521/?service_name=orcl

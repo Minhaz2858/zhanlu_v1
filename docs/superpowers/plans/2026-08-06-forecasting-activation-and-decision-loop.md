@@ -57,7 +57,7 @@
 - Frontend: add collapsible "预测依据" panel in DecisionBoard ExpandedCard showing top drivers with weights
 - Files: `backend/app/services/market_dashboard_service.py` (get_forecast_analysis), `DecisionBoard.jsx`
 
-**B3. Scenario Planning UI** ("what if naphtha +10%?")
+**B3. Scenario Planning UI** ("what if product_c +10%?")
 - NO stress-test module exists yet (`scenarios.py` only does base/bull/bear from residuals)
 - Backend: create `stress_test.py` — apply user-specified shock to feedstock forecast, re-run ensemble, return counterfactual
 - Frontend: add "情景模拟" button in ExpandedCard → modal with feedstock selector + shock slider + counterfactual chart
@@ -85,7 +85,7 @@
 
 **C2. HS Code Mapping for Customs Import Data** (free data, just needs mapping)
 - China customs import data is publicly available
-- Need to map petrochemical HS codes for: naphtha, styrene, isoprene, piperylene, DCPD, cracked C5/C9
+- Need to map industrial HS codes for: product_c, styrene, product_d, product_f, PRODUCT_B, cracked C5/C9
 - Deliverable: `docs/superpowers/plans/hs-code-mapping.md` with HS codes + customs data source URLs
 
 **C3. Internal ERP/MES Audit** (free proxy data)

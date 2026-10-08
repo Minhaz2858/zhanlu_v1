@@ -48,7 +48,7 @@ class TestComputeWaterfall:
             product_key="c5_cracked",
             forecast_values=[100.0, 101.0, 102.0],
             xgboost_model=None,
-            feature_names=["naphtha", "brent"],
+            feature_names=["product_c", "brent"],
         )
         assert isinstance(result, WaterfallResult)
         assert result.items == []
@@ -56,13 +56,13 @@ class TestComputeWaterfall:
 
     def test_waterfall_items_match_drivers(self):
         """Items should correspond to top-5 drivers from the model."""
-        # 3 features, importances: naphtha=0.5, brent=0.3, inventory=0.2
+        # 3 features, importances: product_c=0.5, brent=0.3, inventory=0.2
         mock_model = MockXGBForecast([0.5, 0.3, 0.2])
         result = compute_waterfall(
             product_key="c5_cracked",
             forecast_values=[100.0, 105.0],  # +5 change
             xgboost_model=mock_model,
-            feature_names=["naphtha", "brent", "inventory"],
+            feature_names=["product_c", "brent", "inventory"],
         )
         assert len(result.items) == 3
         # All should have positive contributions (forecast > base)
@@ -77,7 +77,7 @@ class TestComputeWaterfall:
             product_key="c5_cracked",
             forecast_values=[100.0, 95.0],  # -5 change
             xgboost_model=mock_model,
-            feature_names=["naphtha", "brent"],
+            feature_names=["product_c", "brent"],
         )
         for item in result.items:
             assert item.contribution < 0
@@ -90,7 +90,7 @@ class TestComputeWaterfall:
             product_key="c5_cracked",
             forecast_values=[100.0, 110.0],
             xgboost_model=mock_model,
-            feature_names=["naphtha"],
+            feature_names=["product_c"],
             base_value=90.0,  # override
         )
         assert result.base_value == 90.0
@@ -105,7 +105,7 @@ class TestComputeWaterfall:
             product_key="c5_cracked",
             forecast_values=[100.0, 108.0],  # +8 change
             xgboost_model=mock_model,
-            feature_names=["naphtha", "brent", "inventory"],
+            feature_names=["product_c", "brent", "inventory"],
         )
         total_contribution = sum(it.contribution for it in result.items)
         assert total_contribution == pytest.approx(8.0, abs=0.1)
@@ -117,9 +117,9 @@ class TestComputeWaterfall:
             product_key="c5_cracked",
             forecast_values=[100.0, 110.0],
             xgboost_model=mock_model,
-            feature_names=["naphtha", "brent", "inventory"],
+            feature_names=["product_c", "brent", "inventory"],
         )
-        # naphtha has highest importance → should have highest weight
+        # product_c has highest importance → should have highest weight
         weights = [it.weight for it in result.items]
         assert weights[0] > weights[1]
         assert weights[0] > weights[2]
@@ -131,7 +131,7 @@ class TestComputeWaterfall:
             product_key="c5_cracked",
             forecast_values=[100.0, 105.0],
             xgboost_model=mock_model,
-            feature_names=["naphtha", "brent"],
+            feature_names=["product_c", "brent"],
         )
         d = result.to_dict()
         assert "product_key" in d

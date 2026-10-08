@@ -61,7 +61,7 @@ def _make_task(
     name: str = "Daily Sales Data Sync",
     type_: str = "data_sync",
     output_format: str = "html",
-    project: str = "Ecisco BI",
+    project: str = "Acme BI",
     description: str = "Sync ERP sales data into the business database.",
 ) -> AutomationTask:
     task = AutomationTask(

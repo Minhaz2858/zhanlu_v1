@@ -9,12 +9,12 @@
 
 | Product | Len | MAPE7d | MAPE14d | MAPE30d | Dir7d | Dir30d |
 |---------|-----|--------|---------|---------|------|--------|
-| Naphtha | 110 | 7.0% | 11.2% | 19.4% | 0% | 50% |
+| Product_C | 110 | 7.0% | 11.2% | 19.4% | 0% | 50% |
 | Cracked C5 | 203 | 2.9% | 5.5% | 8.7% | 10% | 40% |
 | Cracked C9 | 73 | 19.8% | 33.8% | 44.5% | 0% | 0% |
-| Isoprene | 88 | 10.9% | 20.0% | 25.1% | 33% | 67% |
-| Piperylene | 85 | 29.6% | 42.9% | 52.4% | 50% | 50% |
-| DCPD | 74 | 1.4% | 3.8% | 11.3% | 0% | 0% |
+| Product_D | 88 | 10.9% | 20.0% | 25.1% | 33% | 67% |
+| Product F | 85 | 29.6% | 42.9% | 52.4% | 50% | 50% |
+| PRODUCT_B | 74 | 1.4% | 3.8% | 11.3% | 0% | 0% |
 | SIS | 85 | 10.0% | 12.3% | 15.4% | 100% | 100% |
 | Styrene | 69 | 9.5% | 8.7% | 11.6% | 0% | 0% |
 
@@ -27,13 +27,13 @@
 - XGBoost models returning `inf%` MAPE — failing (insufficient exog features or data issues)
 - Ensemble worse than naive for Styrene (29.0% vs 13.6%) — ensemble includes inf-MAPE models
 - Cracked C5 best performer (2.9% at 7d)
-- Piperylene worst performer (29.6% at 7d)
+- Product F worst performer (29.6% at 7d)
 - Directional accuracy generally poor (24-38%) — below 50% random baseline for 7d/14d
 
 ## Flag: FORECAST_DEMAND_SIGNAL_ENABLED=true (2026-08-06)
 
 **Status:** ON — display-only (no model impact), safe to keep.
-**Verification:** 2/4 upstream products now show demand signal in AI Brief 供需研判 section (原油, 裂解碳九 have ERP volume data).
+**Verification:** 2/4 upstream products now show demand signal in AI Brief 供需研判 section (原油, 裂解材料M have ERP volume data).
 
 ## Flag: FORECAST_DECISION_LOGGING_ENABLED=true (2026-08-06)
 

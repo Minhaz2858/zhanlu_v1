@@ -44,21 +44,21 @@ logging.basicConfig(
 )
 logger = logging.getLogger("backfill_forecast")
 
-# ── Product-level targets (SKU sub-targets like ecisco.c5_resin.* excluded) ──
+# ── Product-level targets (SKU sub-targets like acme.product_a.* excluded) ──
 PRODUCT_TARGET_KEYS = [
-    "ecisco.crude_oil",
-    "ecisco.naphtha",
-    "ecisco.cracked_c5",
-    "ecisco.mixed_c5",
-    "ecisco.cracked_c9",
-    "ecisco.isoprene",
-    "ecisco.piperylene",
-    "ecisco.dcpd",
-    "ecisco.sis",
-    "ecisco.styrene",
-    "ecisco.blowing_agent",
-    "ecisco.c5_resin",
-    "ecisco.raffinate_c5",
+    "acme.product_e",
+    "acme.product_c",
+    "acme.cracked_c5",
+    "acme.mixed_c5",
+    "acme.cracked_c9",
+    "acme.product_d",
+    "acme.product_f",
+    "acme.product_b",
+    "acme.sis",
+    "acme.styrene",
+    "acme.blowing_agent",
+    "acme.product_a",
+    "acme.feedstock_a",
 ]
 
 DEFAULT_ORIGINS = [

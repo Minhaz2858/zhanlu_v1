@@ -6,12 +6,12 @@ Run manually (needs warehouse access + a populated catalog):
     cd backend
     KG_EVAL_DATABASE_URL='postgresql+psycopg2://zhanlu:***@localhost:5400/zhanlu' \
     KG_EVAL_KB_ID=54119786-3718-40a5-b1a4-dc589944b2df \
-    EDIA_MYSQL_URL='mysql+pymysql://root:***@10.10.10.49:3306/aipdp_data_warehouse_prod?charset=utf8mb4' \
+    Acme_MYSQL_URL='mysql+pymysql://root:***@10.10.10.49:3306/demo_warehouse_prod?charset=utf8mb4' \
     HF_HOME=$PWD/data/hf_cache HF_HUB_OFFLINE=1 \
     venv/bin/python -m pytest tests/test_knowledge_graph/test_eval_table_recall.py -v -s
 
     # Mode B — fresh index into a sqlite fixture (hermetic, slow: full re-index):
-    EDIA_MYSQL_URL=... venv/bin/python -m pytest tests/test_knowledge_graph/test_eval_table_recall.py -v -s
+    Acme_MYSQL_URL=... venv/bin/python -m pytest tests/test_knowledge_graph/test_eval_table_recall.py -v -s
 
 Metrics: recall@5, recall@10, MRR for link_schema; per-question link_schema
 latency; baseline describe_all latency; before/after delta vs the raw DDL dump.
@@ -35,7 +35,7 @@ from app.services.knowledge_graph.schema_linker import link_schema
 
 from .eval_questions import EVAL_QUESTIONS
 
-EDIA_MYSQL_URL = os.getenv("EDIA_MYSQL_URL", "").strip()
+Acme_MYSQL_URL = os.getenv("Acme_MYSQL_URL", "").strip()
 EVAL_DATABASE_URL = os.getenv("KG_EVAL_DATABASE_URL", "").strip()
 EVAL_KB_ID = os.getenv("KG_EVAL_KB_ID", "").strip()
 
@@ -43,8 +43,8 @@ pytestmark = [
     pytest.mark.integration,
     pytest.mark.asyncio,
     pytest.mark.skipif(
-        not EDIA_MYSQL_URL,
-        reason="EDIA_MYSQL_URL not set — needs warehouse + populated catalog",
+        not Acme_MYSQL_URL,
+        reason="Acme_MYSQL_URL not set — needs warehouse + populated catalog",
     ),
     pytest.mark.skipif(
         bool(EVAL_DATABASE_URL) != bool(EVAL_KB_ID),
@@ -105,12 +105,12 @@ async def _get_or_build_kb(db) -> KnowledgeBase:
 
     from app.services.knowledge_graph.catalog_indexer import index_kb_catalog
 
-    conn = _parse_url(EDIA_MYSQL_URL)
+    conn = _parse_url(Acme_MYSQL_URL)
     kb = KnowledgeBase(
         id=str(uuid.uuid4()),
         app_id="test-app",
         org_id="test-org",
-        name="aipdp_data_warehouse_prod-eval",
+        name="demo_warehouse_prod-eval",
         source_kind="db",
         db_type="mysql",
         host=conn["host"],

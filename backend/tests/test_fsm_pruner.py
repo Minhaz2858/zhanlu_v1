@@ -236,7 +236,7 @@ class TestOrphanInvariant:
         )
 
     def _assert_pair_adjacency(self, out):
-        """For every assistant(tool_calls) message, the IMMEDIATELY following
+        """For every assistant(tool_calls) message, the IMMAcmeTELY following
         messages must be tool responses covering ALL its call ids — no
         non-tool message may sit between an assistant tool_call and its
         response (DeepSeek 400: 'insufficient tool messages following
@@ -252,7 +252,7 @@ class TestOrphanInvariant:
                 j += 1
             missing = need - got
             assert not missing, (
-                f"assistant tool_calls at {i} not IMMEDIATELY followed by "
+                f"assistant tool_calls at {i} not IMMAcmeTELY followed by "
                 f"their tool responses; missing={sorted(missing)}; "
                 f"next msg after tools: {out[j] if j < len(out) else 'END'}"
             )

@@ -526,7 +526,7 @@ EXTERNAL_FEED_SOURCES: tuple[str, ...] = (
 class ForecastExternalSeries(TimestampedBase):
     """Registry of externally-onboarded time-series feeds (Wave 3 T3.0).
 
-    One row per onboarded feed (e.g. ``op_rate_isoprene``). Loaders query
+    One row per onboarded feed (e.g. ``op_rate_product_d``). Loaders query
     ``forecast_external_points`` filtered by ``domain`` (and optionally
     ``product_key``) to pull the raw values needed for XGBoost exogenous
     features and AI Brief signals.
@@ -545,7 +545,7 @@ class ForecastExternalSeries(TimestampedBase):
     # ── Identity ──────────────────────────────────────────────
     series_key: Mapped[str] = mapped_column(
         String(150), nullable=False, index=True,
-        comment="Unique feed identifier within org, e.g. 'op_rate_isoprene'",
+        comment="Unique feed identifier within org, e.g. 'op_rate_product_d'",
     )
     domain: Mapped[str] = mapped_column(
         String(50), nullable=False, index=True,

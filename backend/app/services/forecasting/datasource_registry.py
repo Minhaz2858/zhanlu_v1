@@ -4,12 +4,12 @@ P1: Extracts the two data-fetching paths from ForecastEngine._fetch_series()
 into a Strategy pattern, so new source types can be registered without
 modifying the engine.
 
-- EdiaMysqlStrategy  → delegates to mysql_data_source.MysqlDataSource (fast path)
+- MysqlStrategy  → delegates to mysql_data_source.MysqlDataSource (fast path)
 - GenericKBStrategy  → generic KB-backed path via QueryService
 
 Usage::
 
-    strategy = get_datasource(ds.get("source", "edia_mysql"))
+    strategy = get_datasource(ds.get("source", "mysql"))
     series = strategy.fetch(target, db)
 """
 
@@ -76,11 +76,11 @@ class BaseDataSource(ABC):
 # ── External MySQL strategy ────────────────────────────────────────────
 
 
-class EdiaMysqlStrategy(BaseDataSource):
+class MysqlStrategy(BaseDataSource):
     """Fast path for the external MySQL mirror.
 
     Delegates to the existing mysql_data_source.MysqlDataSource, which
-    reads directly from the external MySQL mirror (md_t_lz_price etc.)
+    reads directly from the external MySQL mirror (md_market_price etc.)
     bypassing the KB/QueryService path.
     """
 
@@ -93,7 +93,7 @@ class EdiaMysqlStrategy(BaseDataSource):
             return pd.Series(df["y"].values, index=df["ds"])
         except Exception as exc:
             logger.warning(
-                "EdiaMysqlStrategy failed for target %s: %s",
+                "MysqlStrategy failed for target %s: %s",
                 target.id, exc,
             )
             return None
@@ -179,7 +179,8 @@ class GenericKBStrategy(BaseDataSource):
 # ── Registry ───────────────────────────────────────────────────────
 
 _DATASOURCE_REGISTRY: dict[str, type[BaseDataSource]] = {
-    "edia_mysql": EdiaMysqlStrategy,
+    "mysql": MysqlStrategy,
+    "mariadb": MysqlStrategy,
     "generic_kb": GenericKBStrategy,
 }
 
@@ -187,7 +188,7 @@ _DATASOURCE_REGISTRY: dict[str, type[BaseDataSource]] = {
 def get_datasource(source_type: str) -> BaseDataSource:
     """Factory: return the strategy instance for the given source type.
 
-    Unknown types fall back to EdiaMysqlStrategy for backward compatibility.
+    Unknown types fall back to MysqlStrategy for backward compatibility.
     """
-    cls = _DATASOURCE_REGISTRY.get(source_type, EdiaMysqlStrategy)
+    cls = _DATASOURCE_REGISTRY.get(source_type, MysqlStrategy)
     return cls()

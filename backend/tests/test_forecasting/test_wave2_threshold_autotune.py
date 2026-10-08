@@ -84,7 +84,7 @@ def test_threshold_config_model_exists(db):
 def test_get_thresholds_returns_default_when_no_config(db):
     """When no DB config exists, fallback to env → hardcoded defaults."""
     from app.services.forecasting.decision_engine import get_thresholds
-    th = get_thresholds(product_key="异戊二烯", db=db)
+    th = get_thresholds(product_key="电子元件", db=db)
     assert "buy" in th
     assert th["buy"] == 0.70  # default
     assert th["sell"] == 0.30
@@ -98,7 +98,7 @@ def test_get_thresholds_product_specific_overrides(db):
     from app.services.forecasting.decision_engine import get_thresholds
 
     db.add(ForecastThresholdConfig(
-        product_key="异戊二烯",
+        product_key="电子元件",
         buy_threshold=0.78,
         sell_threshold=0.22,
         buy_min_change=0.05,
@@ -110,7 +110,7 @@ def test_get_thresholds_product_specific_overrides(db):
     ))
     db.flush()
 
-    th = get_thresholds(product_key="异戊二烯", db=db)
+    th = get_thresholds(product_key="电子元件", db=db)
     assert th["buy"] == 0.78
     assert th["sell"] == 0.22
     assert th["edge"] == 0.62
@@ -122,7 +122,7 @@ def test_get_thresholds_staged_config_not_applied(db):
     from app.services.forecasting.decision_engine import get_thresholds
 
     db.add(ForecastThresholdConfig(
-        product_key="异戊二烯",
+        product_key="电子元件",
         buy_threshold=0.90,
         status="staged",
         source="autotune",
@@ -130,7 +130,7 @@ def test_get_thresholds_staged_config_not_applied(db):
     ))
     db.flush()
 
-    th = get_thresholds(product_key="异戊二烯", db=db)
+    th = get_thresholds(product_key="电子元件", db=db)
     assert th["buy"] == 0.70  # default — staged not active
 
 
@@ -155,7 +155,7 @@ def test_recommend_accepts_product_key(db):
         directional_acc=0.80,
         directional_status="edge",
         trust_tier="high",
-        product_key="异戊二烯",
+        product_key="电子元件",
     )
     assert d.action in ("buy", "sell", "hold", "watch")
 
@@ -185,7 +185,7 @@ def test_auto_tuner_stages_threshold(db, monkeypatch):
 
     # Create an active ForecastTarget
     t = ForecastTarget(
-        product_key="异戊二烯", name="异戊二烯", org_id="default-org",
+        product_key="电子元件", name="电子元件", org_id="default-org",
         status="active", source="manual",
     )
     db.add(t)
@@ -194,7 +194,7 @@ def test_auto_tuner_stages_threshold(db, monkeypatch):
     # Enough scored decisions for grid search
     for i in range(40):
         db.add(ForecastDecisionLog(
-            product_id="异戊二烯",
+            product_id="电子元件",
             horizon_day=7,
             as_of_date=datetime.date(2026, 7, 1) + datetime.timedelta(days=i),
             action="buy" if i % 2 == 0 else "sell",
@@ -223,7 +223,7 @@ def test_threshold_config_api_lists(db):
     from app.models.forecasting import ForecastThresholdConfig
 
     db.add(ForecastThresholdConfig(
-        product_key="异戊二烯",
+        product_key="电子元件",
         buy_threshold=0.78,
         status="active",
         source="manual",
@@ -246,7 +246,7 @@ def test_apply_thresholds_promotes_staged_to_active(db):
     from app.models.forecasting import ForecastThresholdConfig
 
     db.add(ForecastThresholdConfig(
-        product_key="异戊二烯",
+        product_key="电子元件",
         buy_threshold=0.80,
         status="staged",
         source="autotune",
@@ -256,7 +256,7 @@ def test_apply_thresholds_promotes_staged_to_active(db):
 
     staged = (
         db.query(ForecastThresholdConfig)
-        .filter(ForecastThresholdConfig.product_key == "异戊二烯",
+        .filter(ForecastThresholdConfig.product_key == "电子元件",
                 ForecastThresholdConfig.status == "staged")
         .first()
     )
@@ -268,7 +268,7 @@ def test_apply_thresholds_promotes_staged_to_active(db):
 
     active = (
         db.query(ForecastThresholdConfig)
-        .filter(ForecastThresholdConfig.product_key == "异戊二烯",
+        .filter(ForecastThresholdConfig.product_key == "电子元件",
                 ForecastThresholdConfig.status == "active")
         .all()
     )

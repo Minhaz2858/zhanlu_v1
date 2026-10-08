@@ -471,7 +471,7 @@ DEFAULT_TOOLS_BY_AGENT: dict[str, list[str]] = {
         "undo_dashboard_edit",
         "uiux_search",
         "uiux_design_system",
-        # What-if scenario simulation (Brent/Naphtha shocks) — the chat
+        # What-if scenario simulation (Benchmark A/Product_C shocks) — the chat
         # agent answers "what if brent rises 5%?" with the causal-chain
         # elasticity math (no dashboard UI; scenario questions in chat).
         "forecast_what_if",

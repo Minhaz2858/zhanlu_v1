@@ -231,9 +231,9 @@ def post_router_pick(
     # A single generic name token ("report") plus trigger hits ("sales",
     # "report") routinely crosses STRONG_MATCH_THRESHOLD and hijacks
     # project-specific pipelines onto unrelated chats — observed 2026-09-03:
-    # "tell me about last month sales report" forced the Ecisco
+    # "tell me about last month sales report" forced the Acme
     # weekly-report-generation skill onto the generic Data Analyst agent
-    # (score 0.70, source=db), sending it down a C5/C9 petrochemical
+    # (score 0.70, source=db), sending it down a C5/C9 industrial
     # pipeline whose tables don't exist on the bound demo datasource.
     # Requiring two name tokens (or the full normalized name) limits
     # forcing to explicit skill references ("weekly report",

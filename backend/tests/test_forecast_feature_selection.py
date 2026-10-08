@@ -27,10 +27,10 @@ class TestDeriveFeatureSpecOverride:
         empty_kg = KnowledgeGraph()  # no nodes
         spec = derive_feature_spec(
             "c5_cracked", empty_kg,
-            override_exog_features=["brent", "naphtha", "import_price"],
+            override_exog_features=["brent", "product_c", "import_price"],
         )
         assert isinstance(spec, FeatureSpec)
-        assert spec.feedstock_keys == ["brent", "naphtha", "import_price"]
+        assert spec.feedstock_keys == ["brent", "product_c", "import_price"]
         assert spec.spread_pairs == []  # no KG walk → no spread pairs
         assert spec.use_fx is False
 

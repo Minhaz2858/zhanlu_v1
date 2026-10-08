@@ -38,7 +38,7 @@ class IntelligenceEvent(TimestampedBase):
     certainty: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     time_horizon: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     geographic_scope: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    relevance_to_c5_c9: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    relevance_to_target: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     key_entities: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     key_information: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     causal_chain_hint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

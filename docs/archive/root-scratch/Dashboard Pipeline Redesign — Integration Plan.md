@@ -286,7 +286,7 @@ CHANGE SUMMARY + UNDO
 
 ## 9. Persistence — saving to "My Files" as a living app
 
-From the Ecisco AI screenshots: the platform already has an artifact system at `/my-files` with type filters (**Dashboard**, Report, HTML, PDF, PPTX, Markdown), project grouping (ECISCO BI, GLOBAL, MARKETING TEAM), Personal/Company scope, "Last Updated" sorting, and unread badges. The new pipeline must plug into this — the dashboard is saved there as a **living app artifact, not an exported snapshot**.
+From the Acme AI screenshots: the platform already has an artifact system at `/my-files` with type filters (**Dashboard**, Report, HTML, PDF, PPTX, Markdown), project grouping (ACME BI, GLOBAL, MARKETING TEAM), Personal/Company scope, "Last Updated" sorting, and unread badges. The new pipeline must plug into this — the dashboard is saved there as a **living app artifact, not an exported snapshot**.
 
 ### 9.1 What "Save to My Files" means
 
@@ -297,7 +297,7 @@ When the agent finishes (or updates) a dashboard, it registers an artifact recor
 {
   "type": "dashboard",              # shows under the "Dashboard" filter
   "title": "ERP Overview",
-  "project": "ECISCO BI",           # sidebar project grouping
+  "project": "ACME BI",           # sidebar project grouping
   "scope": "personal" | "company",  # From Personal / From Company tabs
   "owner_id": ...,
   "spec_ref": "dashboards/erp-overview@a1b2c3",   # git commit of the app
@@ -400,7 +400,7 @@ Baseline: Phase 1 complete (7/7 tasks, 15 tests passing). See docs/superpowers/s
 How to use this pack: paste the Shared Context Brief into every agent session, then paste exactly ONE task. One agent per task. Do not give two agents tasks that touch the same file.
 Shared Context Brief (paste into EVERY agent session)
 plain
-You are working in /home/ysk2025/zhanlu_7_30 on the Ecisco AI / zhanlu platform.
+You are working in /home/ysk2025/zhanlu_7_30 on the Acme AI / zhanlu platform.
 
 The dashboard system was redesigned: when a user asks for a dashboard, the agent
 builds a FULL-STACK dashboard app (FastAPI sub-app + React frontend) backed by
@@ -448,7 +448,7 @@ Touches: _template/frontend only. ~30 min.
 T3 — End-to-end smoke test (the gate for everything else)
 Goal: prove the whole pipeline works for a real user before building on it.
 Do:
-In Ecisco BI chat: "Make ERP Dashboard for me, where i can see my overall ERP data"
+In Acme BI chat: "Make ERP Dashboard for me, where i can see my overall ERP data"
 Confirm the agent asks about/confirms metric mapping (does NOT guess tables)
 Confirm the dashboard appears in My Files under the "Dashboard" filter
 Open it, note a metric value; insert a row in the source ERP table; confirm the value updates within ~2s without refresh

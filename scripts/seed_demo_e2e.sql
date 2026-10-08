@@ -46,16 +46,16 @@ INSERT INTO customers (id, name, region, revenue) VALUES
 INSERT INTO products (id, name, volume) VALUES
   (1,  'C5 Resin',          1450),
   (2,  'C9 Resin',          1320),
-  (3,  'Piperylene',        980),
-  (4,  'Isoprene',          2100),
-  (5,  'DCPD',              1650),
+  (3,  'Product F',        980),
+  (4,  'Product_D',          2100),
+  (5,  'PRODUCT_B',              1650),
   (6,  'SIS',               2600),
   (7,  'SBS',               2400),
   (8,  'Petroleum Resin',   1150),
   (9,  'Tackifier',         1280),
   (10, 'Hydrocarbon Resin', 1370),
   (11, 'Rubber Oil',        890),
-  (12, 'Solvent Naphtha',   760);
+  (12, 'Solvent Product_C',   760);
 
 -- Orders: ~640 spread across 2026-01 .. 2026-08-31 (last month = Aug 2026),
 -- weighted toward recent months so windowed queries return rich rows.

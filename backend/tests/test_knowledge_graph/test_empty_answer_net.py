@@ -20,7 +20,7 @@ class TestEmptyAnswerNeedsForce:
         # Contract tightened 2026-09-18: "non-empty" is no longer sufficient.
         # A reply that carries a figure IS an answer — do not re-synthesize.
         assert _empty_answer_needs_force(
-            "本周惠州伊斯科销售额 17,772,540 元，共 12 张单据。", False, [], 0, True
+            "本周示例工厂销售额 17,772,540 元，共 12 张单据。", False, [], 0, True
         ) is False
 
     def test_forces_even_when_content_streamed(self):

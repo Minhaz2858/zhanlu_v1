@@ -1,6 +1,6 @@
 """The artifact format a turn delivers must be the format the user asked for.
 
-Measured live on 2026-09-20, request 惠州伊斯科本周销售情况，用图表展示:
+Measured live on 2026-09-20, request 示例工厂本周销售情况，用图表展示:
 
   task_spec.artifact_intents = [sales_chart, sales_report, data_visualization]
   plan node  sandbox / output_artifact_type = "dataframe"

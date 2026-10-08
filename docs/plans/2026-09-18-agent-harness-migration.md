@@ -70,7 +70,7 @@ Authorization is not judgment. Deleting these is a security regression:
 1. Auth / tenant / org / app scope resolution.
 2. `bound_kb_ids` — the user-facing agent must physically not reach an unbound KB.
 3. Zero-domain-tokens in core (grep CI: `erp_`, `FAMOUNT`, `FALLAMOUNT`,
-   `PLANDATE`, `CUST_NAME`, `Ecisco`, `huizhou`, `双环戊二烯`, `C5`, `C9`).
+   `PLANDATE`, `CUST_NAME`, `Acme`, `huizhou`, `材料B`, `C5`, `C9`).
 4. Approval gating on destructive operations.
 5. Secret redaction / internal-plumbing hygiene (never recite harness internals).
 6. Loop bounds themselves (a bound is a primitive; only the hardcoded VALUE moves

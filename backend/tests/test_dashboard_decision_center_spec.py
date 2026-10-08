@@ -1,6 +1,6 @@
 """Decision-center info architecture spec validation (2026-08-29).
 
-The agent can now express the Ecisco CEO Command Center information
+The agent can now express the Acme CEO Command Center information
 presentation: multi-page tabs (`pages`), typed AI-analysis panels
 (`panels`: alerts / decisions / narrative / chain / customers / inventory /
 competitors / news), executive header (greeting + market snapshot) and
@@ -41,7 +41,7 @@ def test_valid_decision_center_spec():
              "items": [{"severity": "crit", "icon": "⚠", "title": "IP 报价超市场 3.1%",
                         "body": "数据 → 原因 → 建议", "cta": "批准调价 →", "time": "2 h前"}]},
             {"id": "decs-1", "type": "decisions", "page": "overview",
-             "items": [{"tag": "高 · 定价调整", "tag_tone": "down", "title": "异戊二烯 下调 ¥200/t",
+             "items": [{"tag": "高 · 定价调整", "tag_tone": "down", "title": "电子元件 下调 ¥200/t",
                         "action": "→ 调至 ¥9,200", "action_tone": "down", "body": "理由",
                         "pnl": "维持现价损失风险：−¥8,000/周", "pnl_tone": "down",
                         "buttons": ["✓ 批准", "调整", "延期"]}]},
@@ -55,7 +55,7 @@ def test_valid_decision_center_spec():
              "rows": [{"label": "裂解C5", "weeks": 6.4, "max": 8, "tone": "up"},
                       {"label": "双环戊二烯", "weeks": 1.8, "max": 8, "tone": "down", "status": "紧急"}]},
             {"id": "comp-1", "type": "competitors", "page": "weekly",
-             "rows": [{"name": "异戊二烯", "our_price": 9400, "lo": 8700, "hi": 10000,
+             "rows": [{"name": "电子元件", "our_price": 9400, "lo": 8700, "hi": 10000,
                        "comps": [{"name": "上海石化", "price": 9000}], "diff": 3.1, "diff_tone": "down"}]},
             {"id": "news-1", "type": "news", "page": "weekly",
              "rows": [{"time": "今日", "badge": "上调", "badge_tone": "up", "text": "德荣 SIS 上调 ¥300"}]},

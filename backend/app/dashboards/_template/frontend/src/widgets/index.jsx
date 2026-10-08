@@ -170,7 +170,7 @@ const CHART_ANIMATION = { animationDuration: 300, animationEasing: 'ease-out' };
 function Card({ title, children, className = '', status, hint, accent }) {
   // Design-token driven card chrome. The accent bar uses the design
   // system's primary color (falls back to a neutral slate when no design
-  // system is attached) — the same professional chrome pattern the EDIA
+  // system is attached) — the same professional chrome pattern the Acme
   // dashboards use (gradient header + status badge + subtle hover lift).
   return (
     <section
@@ -915,7 +915,7 @@ function RadarWidget({ objects }) {
 }
 
 /**
- * Sparkline — compact trend card (the Ecisco CEO "product signal card" look):
+ * Sparkline — compact trend card (the Acme CEO "product signal card" look):
  * a small no-axis line chart (with optional area fill), plus an optional
  * action pill (options.pill + options.pill_tone: up|down|warn|neutral) and
  * an optional confidence badge (options.confidence). Data = label + value cols.

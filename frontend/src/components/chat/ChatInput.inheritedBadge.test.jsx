@@ -17,7 +17,7 @@
  * Failure mode this prevents
  * --------------------------
  * `general_assistant` in a project with bound data sources silently inherits
- * `aipdp_data_warehouse_prod` (the MySQL KB). The user only learned
+ * `demo_warehouse_prod` (the MySQL KB). The user only learned
  * about it by asking the agent "what can you do for me?" — and was
  * surprised. This test pins the badge so the surprise goes away.
  */

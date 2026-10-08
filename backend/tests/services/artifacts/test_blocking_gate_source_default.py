@@ -131,7 +131,7 @@ def test_payload_source_is_preferred_over_default(
     _enable_blocking_gate(monkeypatch)
 
     payload = _rich_payload()
-    payload.source = "aipdp_data_warehouse_prod"
+    payload.source = "demo_warehouse_prod"
 
     svc = ExportService(_make_db())
     ctx = ExportContext(conversation_id="conv-1")
@@ -140,7 +140,7 @@ def test_payload_source_is_preferred_over_default(
         payload, ctx, [], user_message="deck please",
     )
     assert data  # still renders
-    assert ctx.source == "aipdp_data_warehouse_prod"
+    assert ctx.source == "demo_warehouse_prod"
 
 
 # ---------------------------------------------------------------------------

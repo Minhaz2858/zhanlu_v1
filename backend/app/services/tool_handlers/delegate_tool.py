@@ -74,6 +74,78 @@ def _normalize_subagent_schema(name: str, schema: dict, description: str = "") -
     }
 
 
+def _build_parent_context_digest(db: Session, context: dict | None) -> str:
+    """Compact digest of the parent conversation for sub-agent grounding.
+
+    IBM MAS shared-memory fix: sources, in priority order —
+    1. ContextBus sections (if the caller wired one)
+    2. The parent conversation's last exchanges (DB, bounded)
+    Bounded to ~1200 chars so fan-out of 5 sub-agents doesn't 5× the cost.
+    """
+    try:
+        ctx = context or {}
+        conv_id = ctx.get("conversation_id")
+
+        # 1. ContextBus (shared knowledge base) when the caller provided one
+        bus = ctx.get("context_bus")
+        if bus is not None:
+            try:
+                digest = bus.format_for_react()
+                if digest and digest.strip():
+                    return digest[:1200]
+            except Exception:  # noqa: BLE001
+                pass
+
+        # 2. Last exchanges from the parent conversation
+        if conv_id:
+            from app.models.agent_conversation import AgentConversation
+
+            conv = (
+                db.query(AgentConversation)
+                .filter(AgentConversation.id == conv_id)
+                .first()
+            )
+            if conv is not None:
+                msgs = conv.messages or []
+                recent = [
+                    m for m in msgs[-6:]
+                    if isinstance(m, dict) and m.get("content")
+                ]
+                lines = [
+                    f"{m.get('role', '?')}: {str(m.get('content'))[:300]}"
+                    for m in recent
+                ]
+                if lines:
+                    return "\n".join(lines)[:1200]
+    except Exception as e:  # noqa: BLE001 — inheritance is best-effort
+        logger.debug("parent context digest failed (non-fatal): %s", e)
+    return ""
+
+
+async def _verify_sub_agent_output(task: str, response: str) -> dict | None:
+    """Optional quality gate on sub-agent output (ADLC/MAS supervision).
+
+    Attaches an LLM-as-judge verdict to the delegation result. Flag-gated
+    (DELEGATE_VERIFY_ENABLED, default False — one judge call per delegation).
+    """
+    try:
+        if not getattr(settings, "DELEGATE_VERIFY_ENABLED", False):
+            return None
+        from app.services.synexia.quality_eval import evaluate_quality
+
+        result = evaluate_quality(user_message=task, assistant_text=response)
+        return {
+            "verification": {
+                "verdict": result.verdict,
+                "completeness": getattr(result, "completeness_score", None),
+                "confidence": getattr(result, "confidence", None),
+            }
+        }
+    except Exception as e:  # noqa: BLE001 — verification is advisory
+        logger.debug("sub-agent verification failed (non-fatal): %s", e)
+        return None
+
+
 async def _delegate_task(
     args: dict,
     db: Session,
@@ -94,7 +166,7 @@ async def _delegate_task(
         return await _delegate_batch(tasks, agent_name, db, user_id, max_iterations, endpoint, context)
 
     # Single task
-    result = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
+    result = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint, context=context)
     return result
 
 
@@ -133,11 +205,19 @@ async def _delegate_batch(
     for i, task in enumerate(tasks):
         _emit(f"Sub-agent {i + 1}: {task[:60]}", "running")
 
+    # IBM MAS fix (2026-10-08): batch fan-out was unbounded — every sub-agent
+    # launched at once, hammering the LLM provider and the DB pool. Bound it.
+    import asyncio as _asyncio
+
+    _max_conc = max(1, int(getattr(settings, "DELEGATE_MAX_CONCURRENT", 4)))
+    _sem = _asyncio.Semaphore(_max_conc)
+
     async def _run_one(i: int, task: str) -> dict:
-        try:
-            res = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint)
-        except Exception as exc:  # noqa: BLE001
-            res = {"success": False, "error": str(exc), "task": task}
+        async with _sem:
+            try:
+                res = await _run_sub_agent(task, agent_name, db, user_id, max_iterations, endpoint, context=context)
+            except Exception as exc:  # noqa: BLE001
+                res = {"success": False, "error": str(exc), "task": task}
         dur = int((_time.monotonic() - starts[i]) * 1000)
         _emit(
             f"Sub-agent {i + 1}: {task[:60]}",
@@ -176,6 +256,7 @@ async def _run_sub_agent(
     user_id: str | None,
     max_iterations: int,
     endpoint: LLMEndpoint | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Run a sub-agent conversation with restricted tools (recorded)."""
     from datetime import datetime, timezone
@@ -185,8 +266,14 @@ async def _run_sub_agent(
     _started = datetime.now(timezone.utc)
     try:
         result = await _run_sub_agent_inner(
-            task, agent_name, db, user_id, max_iterations, endpoint,
+            task, agent_name, db, user_id, max_iterations, endpoint, context=context,
         )
+        # MAS supervision gate (opt-in): attach an LLM-judge verdict to the
+        # sub-agent's answer before the parent consumes it.
+        if result.get("success") and result.get("response"):
+            verification = await _verify_sub_agent_output(task, result["response"])
+            if verification:
+                result.update(verification)
     except Exception as exc:  # noqa: BLE001
         result = {"success": False, "error": str(exc), "task": task}
     finally:
@@ -222,6 +309,7 @@ async def _run_sub_agent_inner(
     user_id: str | None,
     max_iterations: int,
     endpoint: LLMEndpoint | None = None,
+    context: dict | None = None,
 ) -> dict:
     """Run a sub-agent conversation with restricted tools."""
     from app.services.agent_prompts import get_system_prompt, _get_all_crud_schemas
@@ -233,6 +321,18 @@ async def _run_sub_agent_inner(
     # Add delegation context
     system_prompt += "\n\nYou are operating as a sub-agent with a restricted toolset. " \
                      "Complete the task efficiently and return your findings."
+
+    # IBM MAS fix (2026-10-08): sub-agents used to start with ZERO parent
+    # context — only the task string. Inject a compact digest of the parent
+    # conversation (shared knowledge base) so the sub-agent models the
+    # parent's goal instead of re-deriving it. Flag-gated.
+    if getattr(settings, "DELEGATE_CONTEXT_INHERITANCE", True):
+        parent_digest = _build_parent_context_digest(db, context)
+        if parent_digest:
+            system_prompt += (
+                "\n\n[PARENT CONVERSATION CONTEXT — background for your task; "
+                "do not answer it directly]\n" + parent_digest
+            )
 
     # Build available tools (exclude restricted tools)
     all_tool_names = registry.list_available()
@@ -482,4 +582,79 @@ registry.register(
     category="delegation",
     enabled_by_default=True,
     description="Delegate a task to a sub-agent with isolated context.",
+)
+
+
+# ── IBM MAS: LLM-queryable agent directory (task allocation) ────────────
+# The LLM used to pick sub-agent names from a hardcoded prompt list. This
+# tool exposes the real directory: builtin agent definitions + published
+# user agents, with capabilities, so the LLM can route by specialization.
+
+async def _list_available_agents(
+    args: dict,
+    db: Session,
+    user_id: str | None,
+    context: dict | None = None,
+) -> dict:
+    """List every agent available for delegation, with capabilities."""
+    from app.services.agent_definitions import list_agent_definitions
+    from app.models.agent_app import AgentApp
+
+    agents = []
+    for d in list_agent_definitions():
+        agents.append({
+            "name": d.name,
+            "kind": "builtin",
+            "description": (d.description or "")[:200],
+            "tools": len(d.tools) if d.tools else None,  # None = all tools
+            "source": d.source,
+        })
+
+    published = (
+        db.query(AgentApp)
+        .filter(AgentApp.status == "published", AgentApp.is_deleted == False)  # noqa: E712
+        .order_by(AgentApp.name)
+        .all()
+    )
+    for a in published:
+        agents.append({
+            "name": a.name,
+            "kind": "user_agent",
+            "agent_id": a.id,
+            "description": (a.description or "")[:200],
+            "capabilities": a.capabilities or [],
+        })
+
+    return {
+        "success": True,
+        "agents": agents,
+        "hint": (
+            "Pass one of these names as agent_name to delegate_task "
+            "(builtin names) or to swarm_spawn_agent. Pick the agent whose "
+            "specialization matches the subtask."
+        ),
+    }
+
+
+LIST_AVAILABLE_AGENTS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "list_available_agents",
+        "description": (
+            "List every agent available for delegation (builtin specialist "
+            "agents + published user agents) with their capabilities. Call "
+            "this BEFORE delegate_task / swarm_spawn_agent when unsure which "
+            "specialist fits the subtask."
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+registry.register(
+    name="list_available_agents",
+    schema=LIST_AVAILABLE_AGENTS_SCHEMA,
+    handler=_list_available_agents,
+    category="delegation",
+    enabled_by_default=True,
+    description="Directory of agents available for delegation, with capabilities.",
 )

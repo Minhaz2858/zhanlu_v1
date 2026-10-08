@@ -97,7 +97,7 @@ def _seed(db):
     """
     kb = KnowledgeBase(
         id="kb_test_1",
-        name="aipdp_data_warehouse_prod",
+        name="demo_warehouse_prod",
         project_id=None,
         db_host="127.0.0.1",
         db_port=3306,
@@ -229,13 +229,13 @@ def test_top_level_shape_still_works_unchanged():
     """
     contract = GoalContract()
     contract.record_dataset(
-        rows=[{"product": "Crude Oil", "price": 92.0}],
-        sql="SELECT product, price FROM crude_oil_today",
-        source_name="aipdp_data_warehouse_prod",
+        rows=[{"product": "Product E", "price": 92.0}],
+        sql="SELECT product, price FROM product_e_today",
+        source_name="demo_warehouse_prod",
         purpose="answer",
         tool_call_id="t1",
     )
     answers = contract.answer_datasets()
     assert len(answers) == 1
-    assert answers[0]["source_name"] == "aipdp_data_warehouse_prod"
-    assert answers[0]["rows"][0]["product"] == "Crude Oil"
+    assert answers[0]["source_name"] == "demo_warehouse_prod"
+    assert answers[0]["rows"][0]["product"] == "Product E"

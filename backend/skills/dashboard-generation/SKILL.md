@@ -86,11 +86,11 @@ Chart anti-patterns (never):
 - Red = bad / green = good is the default semantic; keep it consistent.
 
 Domain design skills (load when the project industry matches):
-- petrochemical / chemical / oil & gas → apply `petrochemical-dashboard-design`
+- industrial / chemical / oil & gas → apply `industrial-dashboard-design`
   patterns: supply-chain hierarchy views (upstream→midstream→downstream),
   gradient-header table cards, tables-as-charts, AI narrative under charts,
   price transmission chains. Never a generic flat grid for these projects.
-- Commercial/industrial in general → `edia-dashboard-design` patterns
+- Commercial/industrial in general → `industrial-dashboard-design` patterns
   (KPI sparkline cards, drill-down, dark sidebar for market indicators).
 
 ## Workflow

@@ -831,8 +831,10 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
         2. synthesize (synthesizer) — LLM writes the executive summary
         3. sandbox (presenter)    — Presentation Designer builds the file
 
-    For non-file requests, emits the existing analysis-only plan
-    (nl2sql if data needed → optional sandbox → fallback tool).
+    For non-file requests, emits the analysis-only plan (nl2sql if data
+    needed → optional sandbox). When neither applies, the plan is EMPTY —
+    zero tool nodes is a deliberate no-tool turn answered directly in
+    FINALIZE; it must NOT fall back to a placeholder tool node.
     """
     task_kind = task_spec.get("task_kind", "general")
     artifact_intents = task_spec.get("artifact_intents", [])
@@ -1009,15 +1011,24 @@ def _build_default_plan(task_spec: dict, agent_name: str) -> list[dict]:
             "inputs": {"title": _report_title or f"{artifact_type} report", "format": artifact_type},
         })
 
+    # NOTE (2026-10-08): the old fallback appended a tool node literally
+    # named "Process request" whenever the builder produced nothing — a node
+    # NAME, not a real tool. _execute_tool_node dispatched it via
+    # execute_tool → "Unknown tool: Process request" (agent_tools.py), the
+    # corrective re-plan retried and failed identically, and FINALIZE
+    # narrated the whole plumbing failure to the user ("tool Process request
+    # is not available" / "no data source is connected"). An EMPTY plan is
+    # the honest fallback: execute_plan_nodes returns zero observations and
+    # the FINALIZE prompt answers the user directly (see fsm.py
+    # _build_response_prompt, _no_tool_turn branch). Verified: every
+    # consumer of plan.nodes (execute_plan_nodes, confidence_scorer,
+    # policy_evaluator, replan collect) handles an empty node list.
     if not steps:
-        steps.append({
-            "node_type": "tool",
-            "name": "Process request",
-            "description": "Handle the user request with available tools",
-            "dependencies": [],
-            "expected_output": "Text response",
-            "inputs": {},
-        })
+        logger.info(
+            "plan: default plan is EMPTY (task_kind=%s requires_data=%s "
+            "artifacts=%s) — zero tool nodes; FINALIZE will answer directly",
+            task_kind, requires_data, artifact_intents,
+        )
 
     return steps
 

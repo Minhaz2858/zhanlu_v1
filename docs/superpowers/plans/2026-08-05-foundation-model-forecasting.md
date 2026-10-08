@@ -2,48 +2,48 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Integrate Hugging Face time-series foundation models (Chronos-Bolt, Moirai) as zero-shot ensemble members, extend backtest with probabilistic metrics, and build a fine-tuning pipeline (CPU prompt-tuning now, GPU LoRA later) to improve forecasting accuracy on petrochemical price series.
+**Goal:** Integrate Hugging Face time-series foundation models (Chronos-Bolt, Moirai) as zero-shot ensemble members, extend backtest with probabilistic metrics, and build a fine-tuning pipeline (CPU prompt-tuning now, GPU LoRA later) to improve forecasting accuracy on industrial price series.
 
-**Architecture:** Three foundation-model wrappers (`ChronosBoltModel`, `MoiraiModel`, `TimesFMModel`) are added as `ForecastModel` subclasses in the existing 8-model pool. They are lazy-imported (silently skipped if `torch` missing) and flag-gated (`FORECAST_FOUNDATION_MODELS_ENABLED`). The existing softmax ensemble, walk-forward backtest, and honesty gate treat them identically to statistical models. A data-expansion task wires up 11 unused `lz_v_*` views to roughly double the effective history. Phase B adds a pooled petrochem dataset builder and a Chronos-Bolt prompt-tuning harness (CPU-tractable), with LoRA fine-tuning deferred to GPU availability.
+**Architecture:** Three foundation-model wrappers (`ChronosBoltModel`, `MoiraiModel`, `TimesFMModel`) are added as `ForecastModel` subclasses in the existing 8-model pool. They are lazy-imported (silently skipped if `torch` missing) and flag-gated (`FORECAST_FOUNDATION_MODELS_ENABLED`). The existing softmax ensemble, walk-forward backtest, and honesty gate treat them identically to statistical models. A data-expansion task wires up 11 unused `v_*` views to roughly double the effective history. Phase B adds a pooled petrochem dataset builder and a Chronos-Bolt prompt-tuning harness (CPU-tractable), with LoRA fine-tuning deferred to GPU availability.
 
 **Tech Stack:** Python 3.11, pandas, numpy, statsmodels, xgboost (existing). New optional: `torch`, `chronos` (Chronos-Bolt), `uni2ts` (Moirai), `timesfm` (TimesFM, deferred). All new deps are lazy-imported — no hard dependency.
 
-## Data Inventory (confirmed from EDIA MySQL `aipdp_data_warehouse_prod` @ 10.10.10.49)
+## Data Inventory (confirmed from Acme MySQL `demo_warehouse_prod` @ 10.10.10.49)
 
-### `md_t_lz_price` — sparse, irregular frequency (every 2–5 days)
+### `md_market_price` — sparse, irregular frequency (every 2–5 days)
 
 | Product | Rows | Span (days) |
 |---|---|---|
 | 裂解C5-裂解C5均价 | 203 | 412 |
 | 裂解C5-日本石脑油 | 113 | 411 |
 | 裂解C5-扬子裂解C5 | 99 | 411 |
-| 异戊二烯-华东市场价 | 88 | 409 |
+| 电子元件-华东市场价 | 88 | 409 |
 | SIS-巴陵1105 | 85 | 409 |
-| 间戊二烯-华东市场价 | 85 | 409 |
-| 苯乙烯-中石化华东 | 78 | 409 |
-| 双环戊二烯-华东市场价 | 76 | 409 |
+| 材料C-华东市场价 | 85 | 409 |
+| 材料J-中石化华东 | 78 | 409 |
+| 材料B-华东市场价 | 76 | 409 |
 | 裂解C9-裂解C9均价 | 75 | 409 |
 | 裂解C5-布伦特 | 44 | 117 |
-| 戊烷发泡剂-华东市场价 | 35 | 93 |
+| 包装材料-华东市场价 | 35 | 93 |
 
-### `lz_v_*` views — rich, multiple entries per day (13 views, only 2 used)
+### `v_*` views — rich, multiple entries per day (13 views, only 2 used)
 
 | View | Rows | Span | Used? |
 |---|---|---|---|
-| lz_v_异戊二烯_data | 1443 | 509d | YES |
-| lz_v_苯乙烯_data | 992 | 509d | YES |
-| lz_v_裂解c5_data, lz_v_裂解c9_data, lz_v_间戊二烯_data, lz_v_双环戊二烯_data, lz_v_sis_data, lz_v_戊烷泡发剂_data | ~500-1500 each | ~509d | NO (Task 1 wires these) |
+| v_电子元件_data | 1443 | 509d | YES |
+| v_材料J_data | 992 | 509d | YES |
+| v_demo_data, v_材料K_data, v_材料C_data, v_材料B_data, v_sis_data, v_包装材料_data | ~500-1500 each | ~509d | NO (Task 1 wires these) |
 | (+ 5 more views for isopentane, pentane, etc.) | | | NO |
 
 ### ERP tables — longest history (12 tables, only 2 used)
 
 | Table | Top SKU rows | Span | Used? |
 |---|---|---|---|
-| sale_erp_v_碳五石油树脂_data | 1422 | 2932d (~8y) | YES |
-| sale_erp_v_抽余碳五_data | 74 | 504d | YES |
-| (+ 10 more: isoprene, piperylene, dcpd, sis, etc.) | up to 8 years | | NO |
+| sale_erp_v_原料A石油树脂_data | 1422 | 2932d (~8y) | YES |
+| sale_erp_v_原料A_data | 74 | 504d | YES |
+| (+ 10 more: product_d, product_f, product_b, sis, etc.) | up to 8 years | | NO |
 
-**Key insight:** Wiring up 6 unused `lz_v_*` views extends most products from ~80 sparse observations to ~509 daily aggregated points — a 6× improvement. This benefits ALL models, not just foundation models.
+**Key insight:** Wiring up 6 unused `v_*` views extends most products from ~80 sparse observations to ~509 daily aggregated points — a 6× improvement. This benefits ALL models, not just foundation models.
 
 ## Global Constraints
 
@@ -59,21 +59,21 @@
 
 ## Phase A: Zero-Shot Foundation Models (CPU-Now)
 
-### Task 1: Data Expansion — Wire Up Remaining `lz_v_*` Views
+### Task 1: Data Expansion — Wire Up Remaining `v_*` Views
 
 **Files:**
-- Modify: `backend/app/services/forecasting/seed_ecisco_targets.py`
+- Modify: `backend/app/services/forecasting/seed_acme_targets.py`
 - Test: `backend/tests/test_forecasting/test_seed_extra_sources.py`
 
-**Prerequisite — Discover lz_v_* view schemas:**
+**Prerequisite — Discover v_* view schemas:**
 
 Run this before coding (via `docker exec -i zhanlu-backend /app/venv/bin/python -`):
 
 ```python
 import os; from sqlalchemy import create_engine, text
-eng = create_engine(os.environ["EDIA_MYSQL_URL"])
-views = ["lz_v_裂解c5_data","lz_v_裂解c9_data","lz_v_间戊二烯_data",
-         "lz_v_双环戊二烯_data","lz_v_sis_data","lz_v_戊烷泡发剂_data"]
+eng = create_engine(os.environ["Acme_MYSQL_URL"])
+views = ["v_demo_data","v_材料K_data","v_材料C_data",
+         "v_材料B_data","v_sis_data","v_包装材料_data"]
 with eng.connect() as c:
     for v in views:
         try:
@@ -89,21 +89,21 @@ Record the `material_name` value for each view (used in the `where` clause).
 
 ```python
 # backend/tests/test_forecasting/test_seed_extra_sources.py
-from app.services.forecasting.seed_ecisco_targets import ECISCO_FORECAST_TARGETS
+from app.services.forecasting.seed_acme_targets import FORECAST_TARGETS
 
 _LZ_V_MAPPING = {
-    "ecisco.cracked_c5": "lz_v_裂解c5_data",
-    "ecisco.cracked_c9": "lz_v_裂解c9_data",
-    "ecisco.piperylene": "lz_v_间戊二烯_data",
-    "ecisco.dcpd": "lz_v_双环戊二烯_data",
-    "ecisco.sis": "lz_v_sis_data",
-    "ecisco.blowing_agent": "lz_v_戊烷泡发剂_data",
-    "ecisco.isoprene": "lz_v_异戊二烯_data",  # already wired
-    "ecisco.styrene": "lz_v_苯乙烯_data",      # already wired
+    "acme.cracked_c5": "v_demo_data",
+    "acme.cracked_c9": "v_材料K_data",
+    "acme.product_f": "v_材料C_data",
+    "acme.product_b": "v_材料B_data",
+    "acme.sis": "v_sis_data",
+    "acme.blowing_agent": "v_包装材料_data",
+    "acme.product_d": "v_电子元件_data",  # already wired
+    "acme.styrene": "v_材料J_data",      # already wired
 }
 
-def test_all_eligible_products_have_lz_v_extra_sources():
-    targets = {t["product_key"]: t for t in ECISCO_FORECAST_TARGETS}
+def test_all_eligible_products_have_v_extra_sources():
+    targets = {t["product_key"]: t for t in FORECAST_TARGETS}
     for pk, expected_table in _LZ_V_MAPPING.items():
         assert pk in targets, f"{pk} not in seed config"
         ds = targets[pk]["datasource"]
@@ -112,7 +112,7 @@ def test_all_eligible_products_have_lz_v_extra_sources():
         assert expected_table in tables, f"{pk} missing {expected_table}, has {tables}"
 
 def test_extra_sources_have_required_fields():
-    for t in ECISCO_FORECAST_TARGETS:
+    for t in FORECAST_TARGETS:
         for src in t["datasource"].get("extra_sources", []):
             assert all(k in src for k in ("table", "time_col", "measure")), \
                 f"extra_source missing field in {t['product_key']}: {src}"
@@ -124,14 +124,14 @@ Run: `docker exec zhanlu-backend /app/venv/bin/python -m pytest tests/test_forec
 
 Expected: FAIL — 6 products missing `extra_sources`.
 
-- [ ] **Step 3: Add `extra_sources` to 6 products in `seed_ecisco_targets.py`**
+- [ ] **Step 3: Add `extra_sources` to 6 products in `seed_acme_targets.py`**
 
-For each of `cracked_c5`, `cracked_c9`, `piperylene`, `dcpd`, `sis`, `blowing_agent`, add an `extra_sources` list (same format as isoprene/styrene, lines 113-120). Use the `material_name` discovered in the prerequisite step.
+For each of `cracked_c5`, `cracked_c9`, `product_f`, `product_b`, `sis`, `blowing_agent`, add an `extra_sources` list (same format as product_d/styrene, lines 113-120). Use the `material_name` discovered in the prerequisite step.
 
 Example for `cracked_c5`:
 ```python
 "extra_sources": [
-    {"table": "lz_v_裂解c5_data",
+    {"table": "v_demo_data",
      "time_col": "biz_date(业务日期)",
      "measure": "tax_price(含税单价)",
      "where": "`material_name(产品名称)` = '裂解C5'"},  # adjust per discovery
@@ -146,17 +146,17 @@ Expected: PASS
 
 - [ ] **Step 5: Regression — existing tests still pass**
 
-Run: `docker exec zhanlu-backend /app/venv/bin/python -m pytest tests/test_seed_ecisco_targets.py tests/test_edia_multi_source.py -v --no-header -x`
+Run: `docker exec zhanlu-backend /app/venv/bin/python -m pytest tests/test_seed_acme_targets.py tests/test_edia_multi_source.py -v --no-header -x`
 
 Expected: PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git add backend/app/services/forecasting/seed_ecisco_targets.py backend/tests/test_forecasting/test_seed_extra_sources.py
-git commit -m "feat(forecast): wire up 6 remaining lz_v_* views as extra_sources
+git add backend/app/services/forecasting/seed_acme_targets.py backend/tests/test_forecasting/test_seed_extra_sources.py
+git commit -m "feat(forecast): wire up 6 remaining v_* views as extra_sources
 
-Extends history for cracked_c5, cracked_c9, piperylene, dcpd, sis,
+Extends history for cracked_c5, cracked_c9, product_f, product_b, sis,
 blowing_agent from ~80 sparse rows to ~509 daily aggregated points."
 ```
 
@@ -1043,7 +1043,7 @@ Enable after installing torch/chronos/uni2ts in venv."
 - Create: `backend/app/services/forecasting/finetuning/dataset_builder.py`
 - Test: `backend/tests/test_forecasting/test_finetuning_dataset.py`
 
-**Goal:** Build a unified training dataset from ALL available history (lz_v_* + ERP tables) for cross-product fine-tuning. Each sample = (context_window, forecast_window, product_key, optional exog).
+**Goal:** Build a unified training dataset from ALL available history (v_* + ERP tables) for cross-product fine-tuning. Each sample = (context_window, forecast_window, product_key, optional exog).
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1123,7 +1123,7 @@ Expected: FAIL — module not found.
 # backend/app/services/forecasting/finetuning/dataset_builder.py
 """Pooled petrochem dataset builder for cross-product fine-tuning.
 
-Collects all available price series (lz_v_* views + ERP tables), applies
+Collects all available price series (v_* views + ERP tables), applies
 sliding-window context/target extraction, and produces PooledSample objects
 suitable for Chronos-Bolt prompt-tuning or Moirai LoRA fine-tuning.
 """
@@ -1438,7 +1438,7 @@ Simplified training loop — full embedding hook deferred to GPU phase."
 1. **Spec coverage:** Every requirement from the brainstorming spec has a task:
    - Zero-shot ensemble members → Tasks 3-7
    - MASE/CRPS/interval metrics → Task 2
-   - Data expansion (lz_v_* views) → Task 1
+   - Data expansion (v_* views) → Task 1
    - Fine-tuning pipeline → Tasks 9-10 (CPU) + 11-13 (GPU deferred)
    - Flag gating + lazy import → Tasks 5, 8
    - Temporal holdout → Task 9 (split_temporal_holdout) + Task 13 (final gate)

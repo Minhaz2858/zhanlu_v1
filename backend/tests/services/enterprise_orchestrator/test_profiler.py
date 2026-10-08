@@ -65,8 +65,8 @@ class TestProfilerPrompt:
         assert "x" * 5000 not in prompt
 
     def test_includes_schema_slice(self):
-        prompt = build_profiler_prompt("q", "erp_v_sale_orderentry")
-        assert "erp_v_sale_orderentry" in prompt
+        prompt = build_profiler_prompt("q", "v_sale_order")
+        assert "v_sale_order" in prompt
 
     def test_handles_empty_schema_slice(self):
         prompt = build_profiler_prompt("q", "")

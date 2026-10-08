@@ -19,7 +19,7 @@ def test_mysql_url_default_empty(monkeypatch):
 def test_mysql_url_set_enables(monkeypatch):
     monkeypatch.setenv(
         "MYSQL_URL",
-        "mysql+pymysql://root:***@10.10.10.49:3306/aipdp_data_warehouse_prod",
+        "mysql+pymysql://root:***@10.10.10.49:3306/demo_warehouse_prod",
     )
     s = _reload_settings()
     assert s.MYSQL_URL.startswith("mysql+pymysql://")

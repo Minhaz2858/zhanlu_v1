@@ -89,7 +89,7 @@ def _make_task_and_marker(db):
         prompt="Sync daily sales.",
         description="Sync daily sales.",
         cron_expression="0 8 * * *",
-        project="Ecisco BI",
+        project="Acme BI",
         output_format="html",
         is_deleted=False,
         notify_chat=True,

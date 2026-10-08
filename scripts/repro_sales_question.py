@@ -3,8 +3,8 @@
 the agent's answer verbatim.
 
 Failing turn (2026-09-18 03:15Z): conversation 0f14e019, agent general_assistant,
-project "Data Analysis" (d28cb0b0 — which holds the aipdp warehouse KB),
-question "本周销售情况 ，只统计 惠州伊斯科数据 ，直接输出，不要输出 文档"
+project "Data Analysis" (d28cb0b0 — which holds the acme warehouse KB),
+question "本周销售情况 ，只统计 示例工厂数据 ，直接输出，不要输出 文档"
 answer claimed 0 rows. Ground truth: erp_v_sale_huizhou has 12 rows /
 ¥17,772,540 for the same week.
 """
@@ -16,7 +16,7 @@ import urllib.request
 BASE = "http://localhost:5012"
 APP = "default-app"
 PROJECT = "d28cb0b0-fd61-453e-8967-df8953951a6d"   # "Data Analysis"
-QUESTION = sys.argv[1] if len(sys.argv) > 1 else "本周销售情况 ，只统计 惠州伊斯科数据 ，直接输出，不要输出 文档"
+QUESTION = sys.argv[1] if len(sys.argv) > 1 else "本周销售情况 ，只统计 示例工厂数据 ，直接输出，不要输出 文档"
 
 
 def call(method, path, body=None, token=None, timeout=600):
@@ -41,7 +41,7 @@ print(f"[login ok] {code}")
 
 code, conv = call("POST", f"/api/apps/{APP}/agents/conversations",
                   {"agent_name": "general_assistant",
-                   "title": f"REPRO 惠州伊斯科 thisweek {QUESTION[:12]}",
+                   "title": f"REPRO 示例工厂 thisweek {QUESTION[:12]}",
                    "project_id": PROJECT}, token)
 print(f"[create conversation] {code} id={conv.get('id') if isinstance(conv, dict) else conv}")
 conv_id = conv["id"]

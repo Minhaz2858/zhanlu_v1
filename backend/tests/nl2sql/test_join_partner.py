@@ -1,6 +1,6 @@
 """Join-partner guarantee — OCI "Table Retrieval" hardening (2026-09-22).
 
-Measured failure mode on non-Ecisco warehouses: "sales by customer" retrieves
+Measured failure mode on non-Acme warehouses: "sales by customer" retrieves
 only the sales table; the customer table never enters the DDL slice; the model
 invents a join to a table it never saw (or filters on a column that does not
 exist) and the turn fails or fabricates. When the catalog knows a relation for

@@ -1,6 +1,6 @@
 """Deterministic question↔SQL contract: the failure the other guards miss.
 
-Live context (2026-09-18, aipdp_data_warehouse_prod): "Present the contract
+Live context (2026-09-18, demo_warehouse_prod): "Present the contract
 execution status for last month using charts" was answered by a query the
 database rejected, then by one that picked an arbitrary status column. The
 guards on the data path all react to FAILURE — 0 rows, degenerate rows, a

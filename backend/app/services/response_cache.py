@@ -58,7 +58,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 def get_market_data_version() -> str:
     """Latest trading date (YYYY-MM-DD) from the market data source.
 
-    Queries ``MAX(FDATE)`` from ``md_t_lz_price`` via the shared external
+    Queries ``MAX(FDATE)`` from ``md_market_price`` via the shared external
     MySQL engine; falls back to today's UTC date on any failure.
     Best-effort — never raises.
     """
@@ -68,7 +68,7 @@ def get_market_data_version() -> str:
         eng = get_mysql_engine()
         if eng is not None:
             with eng.connect() as conn:
-                row = conn.execute(sql_text("SELECT MAX(FDATE) FROM md_t_lz_price")).fetchone()
+                row = conn.execute(sql_text("SELECT MAX(FDATE) FROM md_market_price")).fetchone()
                 if row and row[0] is not None:
                     val = str(row[0])[:10]
                     if len(val) == 10 and val.count("-") == 2:

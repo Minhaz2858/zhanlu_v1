@@ -561,7 +561,7 @@ def _format_slice(
 
     Budget policy: the detail gives way before the table does. Measured
     annotations roughly double a wide ERP table's chunk (live: 26-column
-    ``erp_v_sale_orderentry``), and the old loop ``break``-ed on the first
+    ``v_sale_order``), and the old loop ``break``-ed on the first
     over-budget candidate — so adding measurements would have turned a wide
     table's slice into a header with NO DDL at all, leaving the SQL author
     nothing to author against. Now each table is rendered WITH the measured
@@ -775,7 +775,7 @@ def _toc_line(t: dict, *, compact: bool = False) -> str:
     # Measured vocabulary. This line is what the table SELECTOR reads, and both
     # blocks of it need the hint: the ranked candidates (so the hint can confirm
     # a retrieval hit) AND the rest of the catalog, where two ERP objects are
-    # routinely named alike — erp_t_sale_orderentry vs erp_v_sale_orderentry —
+    # routinely named alike — erp_t_sale_orderentry vs v_sale_order —
     # and the only thing that separates them is which values actually occur in
     # them. The compact form still keeps its size promise, just tighter: 1
     # column / 3 values / 30 chars, against 3/4/60 for a full line.

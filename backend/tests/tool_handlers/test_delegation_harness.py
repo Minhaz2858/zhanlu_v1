@@ -1,4 +1,4 @@
-"""Parity tests: EDIA delegation harness path vs legacy path."""
+"""Parity tests: Acme delegation harness path vs legacy path."""
 from __future__ import annotations
 
 import pytest

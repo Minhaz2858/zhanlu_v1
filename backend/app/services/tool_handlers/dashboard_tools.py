@@ -617,7 +617,7 @@ FULLSTACK_ALLOWED_TYPES = {
     "kpi", "line", "bar", "pie", "table", "area", "gauge", "radar", "combo",
     # Compact dual-pane trend card (12-month + 30-day style mini charts):
     # renders a small line chart with optional action pill + confidence badge
-    # (the Ecisco CEO "product signal card" look). Data = label + value cols.
+    # (the Acme CEO "product signal card" look). Data = label + value cols.
     "sparkline",
 }
 
@@ -714,9 +714,9 @@ class CreateFullstackDashboardArgs(BaseModel):
     # Chinese BI style (dark navy glow, red-up/green-down semantics, Chinese
     # font stack, animated numbers) for China-region customers.
     # "ceo" = dark petroleum decision center (near-black ink, amber/gold
-    # accent, alert-strip insights) — the Ecisco CEO Command Center look.
+    # accent, alert-strip insights) — the Acme CEO Command Center look.
     # "editorial" = light print report (warm paper, Fraunces/Newsreader serif
-    # + IBM Plex Mono numerals, maroon accent) — the EDIA Sales Report look.
+    # + IBM Plex Mono numerals, maroon accent) — the Acme Sales Report look.
     style: str = "standard"
     # T10: "personal" (creator only) or "company" (whole org). The agent
     # should ask the user at creation time; falls back to the config default.
@@ -733,7 +733,7 @@ class CreateFullstackDashboardArgs(BaseModel):
     #                       split on wide screens; left = widgets, right = panels)
     #   "columns": 2      — force the 2-column split (default when panels given)
     layout: list[dict] = Field(default_factory=list)
-    # Multi-page tabs (the Ecisco CEO decision center has 5 pages). Each entry
+    # Multi-page tabs (the Acme CEO decision center has 5 pages). Each entry
     # {"id": "overview", "label": "CEO 总览"}. When empty, a single "Overview"
     # page is rendered (backward compatible). Panels and layout sections can
     # target a page via their "page" key; anything without a page lands on the
@@ -1450,7 +1450,7 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
                 },
                 "pages": {
                     "type": "array",
-                    "description": "Multi-page tabs — the Ecisco CEO decision center has 5 pages. Each {\"id\", \"label\"} (e.g. {\"id\": \"overview\", \"label\": \"CEO 总览\"}). Panels and layout sections target a page via their \"page\" key; entries without a page land on the first tab. Omit for a single-page dashboard.",
+                    "description": "Multi-page tabs — the Acme CEO decision center has 5 pages. Each {\"id\", \"label\"} (e.g. {\"id\": \"overview\", \"label\": \"CEO 总览\"}). Panels and layout sections target a page via their \"page\" key; entries without a page land on the first tab. Omit for a single-page dashboard.",
                     "items": {
                         "type": "object",
                         "properties": {
@@ -1461,7 +1461,7 @@ CREATE_FULLSTACK_DASHBOARD_SCHEMA = {
                 },
                 "panels": {
                     "type": "array",
-                    "description": "Typed AI-analysis panels — the decision-center information architecture (what makes an executive dashboard professional). Each panel: {\"id\", \"type\", \"page\"?, \"span\"? (full|half|third), ...fields}. NARRATE FROM REAL QUERIED DATA — compute figures via execute_query / metric deltas, NEVER invent numbers. Types: alerts {\"items\": [{severity: crit|warn|opp|info, icon, title, body, cta, time}]} — each alert body = data → why it matters → recommended action; decisions {\"items\": [{tag, tag_tone, title, action, action_tone, body, pnl, pnl_tone, buttons}]} — approval cards with quantified P&L impact badge; narrative {\"title\", \"body\"} — long-form AI analysis block; chain {\"title\", \"nodes\": [{label, value, unit, delta, delta_tone, note, note_tone}]} — cost/value cascade (e.g. Brent → Naphtha → cost baseline); customers {\"rows\": [{avatar, name, sub, revenue, status, status_tone}]} — account health; inventory {\"rows\": [{label, weeks, max, tone}]} — coverage bars; competitors {\"rows\": [{name, our_price, lo, hi, comps: [{name, price}], diff, diff_tone}]} — pricing position bands; news {\"rows\": [{time, badge, badge_tone, text}]} — activity feed.",
+                    "description": "Typed AI-analysis panels — the decision-center information architecture (what makes an executive dashboard professional). Each panel: {\"id\", \"type\", \"page\"?, \"span\"? (full|half|third), ...fields}. NARRATE FROM REAL QUERIED DATA — compute figures via execute_query / metric deltas, NEVER invent numbers. Types: alerts {\"items\": [{severity: crit|warn|opp|info, icon, title, body, cta, time}]} — each alert body = data → why it matters → recommended action; decisions {\"items\": [{tag, tag_tone, title, action, action_tone, body, pnl, pnl_tone, buttons}]} — approval cards with quantified P&L impact badge; narrative {\"title\", \"body\"} — long-form AI analysis block; chain {\"title\", \"nodes\": [{label, value, unit, delta, delta_tone, note, note_tone}]} — cost/value cascade (e.g. Benchmark A → Product_C → cost baseline); customers {\"rows\": [{avatar, name, sub, revenue, status, status_tone}]} — account health; inventory {\"rows\": [{label, weeks, max, tone}]} — coverage bars; competitors {\"rows\": [{name, our_price, lo, hi, comps: [{name, price}], diff, diff_tone}]} — pricing position bands; news {\"rows\": [{time, badge, badge_tone, text}]} — activity feed.",
                     "items": {"type": "object"},
                 },
                 "header": {

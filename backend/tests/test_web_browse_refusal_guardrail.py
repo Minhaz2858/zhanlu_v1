@@ -41,7 +41,7 @@ class TestOnlineResearchPattern:
     def test_matches_collect_news_from_website(self):
         # The exact user message from the screenshot.
         assert ONLINE_RESEARCH_PATTERN.search(
-            "can you collect some petrochemical news from website"
+            "can you collect some industrial news from website"
         )
 
     def test_matches_search_online(self):
@@ -185,7 +185,7 @@ class TestWebBrowseRefusalPattern:
 # ── Helper functions ────────────────────────────────────────────────────
 class TestExtractSearchQuery:
     def test_strips_can_you(self):
-        assert extract_search_query("can you collect some petrochemical news from website") == "some petrochemical news"
+        assert extract_search_query("can you collect some industrial news from website") == "some industrial news"
 
     def test_strips_please(self):
         # "please" is a politeness wrapper at the start
@@ -199,7 +199,7 @@ class TestExtractSearchQuery:
         assert extract_search_query("search for the weather today") == "the weather today"
 
     def test_preserves_core_query(self):
-        assert "petrochemical" in extract_search_query("petrochemical news please").lower()
+        assert "industrial" in extract_search_query("industrial news please").lower()
 
     def test_handles_empty(self):
         assert extract_search_query("") == ""
@@ -208,7 +208,7 @@ class TestExtractSearchQuery:
 
 class TestIsOnlineResearchRequest:
     def test_returns_true_for_research_request(self):
-        assert is_online_research_request("can you collect some petrochemical news from website") is True
+        assert is_online_research_request("can you collect some industrial news from website") is True
         assert is_online_research_request("search online for Python tutorials") is True
 
     def test_returns_false_for_non_research(self):
@@ -272,7 +272,7 @@ class TestCheckAndFallback:
                 new=AsyncMock(return_value={"success": True, "results": fake_results}),
             ):
                 return await check_and_fallback(
-                    user_message="can you collect some petrochemical news from website",
+                    user_message="can you collect some industrial news from website",
                     assistant_text=(
                         "I'm sorry, but I cannot browse the internet or collect "
                         "real-time news from websites. However, I can help you "
@@ -282,7 +282,7 @@ class TestCheckAndFallback:
                 )
         out = asyncio.run(main())
         assert out["triggered"] is True
-        assert "petrochemical" in out["search_query"].lower()
+        assert "industrial" in out["search_query"].lower()
         assert len(out["search_results"]) == 2
         assert out["action"] in ("append", "fallback")
 
@@ -297,7 +297,7 @@ class TestCheckAndFallback:
                 new=AsyncMock(return_value={"success": True, "results": [{"title": "x", "url": "u", "snippet": "s"}]}),
             ):
                 return await check_and_fallback(
-                    user_message="can you collect some petrochemical news from website",
+                    user_message="can you collect some industrial news from website",
                     assistant_text="I cannot browse the internet.",
                     db=MagicMock(),
                     call_llm=fake_llm,
@@ -315,7 +315,7 @@ class TestCheckAndFallback:
                 new=AsyncMock(return_value={"success": False, "error": "no api key"}),
             ):
                 return await check_and_fallback(
-                    user_message="can you collect some petrochemical news from website",
+                    user_message="can you collect some industrial news from website",
                     assistant_text="I cannot browse the internet.",
                     db=MagicMock(),
                 )
@@ -332,7 +332,7 @@ class TestCheckAndFallback:
                 new=AsyncMock(side_effect=ImportError("nope")),
             ):
                 return await check_and_fallback(
-                    user_message="can you collect some petrochemical news from website",
+                    user_message="can you collect some industrial news from website",
                     assistant_text="I cannot browse the internet.",
                     db=MagicMock(),
                 )

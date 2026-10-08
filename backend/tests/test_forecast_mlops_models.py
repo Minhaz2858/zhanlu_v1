@@ -33,10 +33,10 @@ def db():
 
 
 def test_forecast_feedback_roundtrip(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     fb = ForecastFeedback(
-        target_id=target.id, product_id="异戊二烯", ai_price=10388.0,
+        target_id=target.id, product_id="电子元件", ai_price=10388.0,
         user_price=11000.0, reason="supply tightening", author_id="u1",
         author_name="analyst", target_date=datetime(2026, 8, 10), status="pending",
         org_id="default-org",
@@ -49,7 +49,7 @@ def test_forecast_feedback_roundtrip(db):
 
 
 def test_forecast_weight_adjustment_roundtrip(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     adj = ForecastWeightAdjustment(
         target_id=target.id, triggered_by="drift",
@@ -64,7 +64,7 @@ def test_forecast_weight_adjustment_roundtrip(db):
 
 
 def test_accuracy_log_run_id_nullable(db):
-    target = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org")
+    target = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org")
     db.add(target); db.flush()
     log = ForecastAccuracyLog(
         target_id=target.id, horizon_days=7, mape=0.12, naive_mape=0.10,

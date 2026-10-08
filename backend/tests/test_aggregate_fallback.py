@@ -184,7 +184,7 @@ def test_metadata_only_row_produces_extensive_narrative():
     }]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+        "results": {"rows": rows, "source_name": "demo_warehouse_prod"},
     }]
     out = a._data_rows_fallback(
         tool_calls, user_content="give me Contract Performance for last month report",
@@ -205,7 +205,7 @@ def test_metadata_only_row_count_appears_in_narrative():
     }]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+        "results": {"rows": rows, "source_name": "demo_warehouse_prod"},
     }]
     out = a._data_rows_fallback(
         tool_calls, user_content="contract performance report",
@@ -226,7 +226,7 @@ def test_extensive_report_includes_executive_summary():
     ]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+        "results": {"rows": rows, "source_name": "demo_warehouse_prod"},
     }]
     out = a._data_rows_fallback(
         tool_calls, user_content="give me Contract Performance for last month report",
@@ -267,7 +267,7 @@ def test_extensive_report_word_count_meets_target():
     ]
     tool_calls = [{
         "name": "ask_data_agent",
-        "results": {"rows": rows, "source_name": "aipdp_data_warehouse_prod"},
+        "results": {"rows": rows, "source_name": "demo_warehouse_prod"},
     }]
     out = a._data_rows_fallback(
         tool_calls, user_content="give me Contract Performance for last month report",

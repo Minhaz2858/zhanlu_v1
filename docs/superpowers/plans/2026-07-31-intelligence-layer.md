@@ -1,10 +1,10 @@
-# EDIA Intelligence Layer Integration Plan (Phase 1)
+# Acme Intelligence Layer Integration Plan (Phase 1)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Port EDIA's 19-module intelligence pipeline into zhanlu's `backend/app/services/intelligence/` package, adapting raw MySQL/SQLite SQL to async SQLAlchemy, raw threading to asyncio scheduled tasks, and integrating with zhanlu's existing agent framework.
+**Goal:** Port Acme's 19-module intelligence pipeline into zhanlu's `backend/app/services/intelligence/` package, adapting raw MySQL/SQLite SQL to async SQLAlchemy, raw threading to asyncio scheduled tasks, and integrating with zhanlu's existing agent framework.
 
-**Architecture:** EDIA's intelligence pipeline is a set of domain-knowledge modules (event taxonomy, causal elasticities, scenario probabilities, historical impact DB) wrapped by an orchestrator that coordinates news ingestion, event extraction, causal analysis, and auto-override decisions. We port these as a new `intelligence/` service package with SQLAlchemy models (following zhanlu's `TimestampedBase` pattern), async registry methods, and a new `intelligence_agent` wired into zhanlu's existing EDIA pipeline delegation system.
+**Architecture:** Acme's intelligence pipeline is a set of domain-knowledge modules (event taxonomy, causal elasticities, scenario probabilities, historical impact DB) wrapped by an orchestrator that coordinates news ingestion, event extraction, causal analysis, and auto-override decisions. We port these as a new `intelligence/` service package with SQLAlchemy models (following zhanlu's `TimestampedBase` pattern), async registry methods, and a new `intelligence_agent` wired into zhanlu's existing Acme pipeline delegation system.
 
 **Tech Stack:** Python 3.11+, SQLAlchemy 2.0 (async), Alembic, ChromaDB, asyncio, FastAPI, Pydantic
 
@@ -16,7 +16,7 @@
 - Background tasks use zhanlu's `scheduled_tasks.py` asyncio pattern (not raw `threading.Thread`)
 - Agent definitions follow `AgentDefinition` pattern from `app.services.agent_definitions`
 - Delegation tools follow `_run_sub_agent` pattern from `app.services.tool_handlers.edia_delegation_tools`
-- EDIA source files at `/home/ysk2025/EDIA_5.1.2/backend/src/intelligence/`
+- Acme source files at `/home/ysk2025/Acme_5.1.2/backend/src/intelligence/`
 - Target zhanlu path: `/home/ysk2025/zhanlu_7_30/backend/app/services/intelligence/`
 
 ## File Structure
@@ -43,7 +43,7 @@ backend/app/models/
 └── intelligence.py                 # IntelligenceEvent + IngestionStatus SQLAlchemy models
 
 backend/app/services/intelligence/
-└── event_registry.py              # Async SQLAlchemy event registry (rewrite from EDIA's raw SQL)
+└── event_registry.py              # Async SQLAlchemy event registry (rewrite from Acme's raw SQL)
 ```
 
 ---
@@ -68,13 +68,13 @@ def test_extracted_event_creation():
     event = ExtractedEvent(
         event_type="plant_outage",
         headline="Major plant shutdown in East China",
-        affected_commodities=["mixed_c5", "isoprene"],
+        affected_commodities=["mixed_c5", "product_d"],
         direction="bullish",
         magnitude_estimate="large",
         certainty="confirmed",
         time_horizon="short",
         geographic_scope="china",
-        relevance_to_c5_c9="direct",
+        relevance_to_sample="direct",
     )
     assert event.event_id.startswith("evt_")
     assert event.impact_magnitude > 0
@@ -84,13 +84,13 @@ def test_extracted_event_impact_magnitude():
     event = ExtractedEvent(
         event_type="opec_decision",
         headline="OPEC cuts production",
-        affected_commodities=["crude_oil"],
+        affected_commodities=["product_e"],
         direction="bullish",
         magnitude_estimate="extreme",
         certainty="confirmed",
         time_horizon="medium",
         geographic_scope="global",
-        relevance_to_c5_c9="direct",
+        relevance_to_sample="direct",
     )
     # extreme=0.95, confirmed=0.95, direct=0.90
     # 0.95*0.40 + 0.95*0.35 + 0.90*0.25 = 0.38 + 0.3325 + 0.225 = 0.9375
@@ -104,15 +104,15 @@ Expected: FAIL with ModuleNotFoundError
 
 - [ ] **Step 3: Create package and port event_types.py**
 
-Copy `/home/ysk2025/EDIA_5.1.2/backend/src/intelligence/event_types.py` to `backend/app/services/intelligence/event_types.py`. Change the import path comment only — the module is pure Python with no external dependencies.
+Copy `/home/ysk2025/Acme_5.1.2/backend/src/intelligence/event_types.py` to `backend/app/services/intelligence/event_types.py`. Change the import path comment only — the module is pure Python with no external dependencies.
 
 - [ ] **Step 4: Create `__init__.py`**
 
 ```python
 # backend/app/services/intelligence/__init__.py
-"""EDIA Intelligence Layer — market event detection, causal reasoning, and scenario generation.
+"""Acme Intelligence Layer — market event detection, causal reasoning, and scenario generation.
 
-Ported from EDIA 5.1.2 with adaptations for zhanlu's async SQLAlchemy architecture.
+Ported from Acme 5.1.2 with adaptations for zhanlu's async SQLAlchemy architecture.
 """
 ```
 
@@ -125,7 +125,7 @@ Expected: PASS
 
 ```bash
 git add backend/app/services/intelligence/__init__.py backend/app/services/intelligence/event_types.py backend/tests/test_intelligence/
-git commit -m "feat(intelligence): port ExtractedEvent dataclass from EDIA"
+git commit -m "feat(intelligence): port ExtractedEvent dataclass from Acme"
 ```
 
 ---
@@ -181,7 +181,7 @@ def test_ingestion_status_model():
 # backend/app/models/intelligence.py
 """Intelligence domain models — market events and ingestion status.
 
-Ported from EDIA's raw MySQL DDL, adapted to zhanlu's SQLAlchemy + TimestampedBase pattern.
+Ported from Acme's raw MySQL DDL, adapted to zhanlu's SQLAlchemy + TimestampedBase pattern.
 """
 from datetime import datetime
 from typing import Optional
@@ -206,7 +206,7 @@ class IntelligenceEvent(TimestampedBase):
     certainty: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     time_horizon: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     geographic_scope: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
-    relevance_to_c5_c9: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    relevance_to_sample: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     key_entities: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
     key_information: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     causal_chain_hint: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
@@ -269,7 +269,7 @@ git commit -m "feat(intelligence): add SQLAlchemy models + migration for intelli
 - Consumes: `IntelligenceEvent`, `IntelligenceIngestionStatus` from Task 2; `ExtractedEvent` from Task 1
 - Produces: `IntelligenceEventRegistry` class with `upsert_event()`, `list_recent_events()`, `review_event()`, `upsert_ingestion_status()`, `get_ingestion_freshness()`
 
-**Key adaptation:** EDIA's `event_registry.py` uses raw SQL with `self.engine.begin()`. Zhanlu uses async SQLAlchemy sessions. All methods become `async def` and use `select()`, `insert()`, `update()` ORM constructs.
+**Key adaptation:** Acme's `event_registry.py` uses raw SQL with `self.engine.begin()`. Zhanlu uses async SQLAlchemy sessions. All methods become `async def` and use `select()`, `insert()`, `update()` ORM constructs.
 
 - [ ] **Step 1: Write the failing test** (test upsert + list + review)
 
@@ -277,7 +277,7 @@ git commit -m "feat(intelligence): add SQLAlchemy models + migration for intelli
 
 - [ ] **Step 3: Implement the async registry**
 
-Port from EDIA's `event_registry.py`, converting:
+Port from Acme's `event_registry.py`, converting:
 - `self.engine.begin() as conn` → `async with db.begin():` or `db.add()` / `db.execute()`
 - Raw SQL `text()` → SQLAlchemy `select()`, `insert()`, `update()` constructs
 - Module-level singleton `intelligence_event_registry` → removed (inject db session)
@@ -295,7 +295,7 @@ Port from EDIA's `event_registry.py`, converting:
 - Create: `backend/app/services/intelligence/event_extractor.py` (adapt LLM calls)
 - Test: `backend/tests/test_intelligence/test_deduplicator.py`, `test_extractor.py`
 
-**Key adaptation for extractor:** EDIA uses `self.llm.generate_json()`. Zhanlu uses `call_llm_with_reliability()` from `app.services.sub_agent_reliability`.
+**Key adaptation for extractor:** Acme uses `self.llm.generate_json()`. Zhanlu uses `call_llm_with_reliability()` from `app.services.sub_agent_reliability`.
 
 - [ ] **Step 1-5:** Write test, verify fail, implement, verify pass, commit
 
@@ -333,7 +333,7 @@ These are pure domain-knowledge modules with no external dependencies. Port dire
 - Create: `backend/app/services/intelligence/auto_override_decision.py`
 - Test: `backend/tests/test_intelligence/test_scenario_engine.py`, `test_auto_override.py`
 
-**Key adaptation for auto-override:** EDIA calls `from backend.src.service.macro_override_service import set_override`. In zhanlu, this becomes a stub or a hook into the pricing agent's override mechanism. For now, log the decision and store it in the DB.
+**Key adaptation for auto-override:** Acme calls `from backend.src.service.macro_override_service import set_override`. In zhanlu, this becomes a stub or a hook into the pricing agent's override mechanism. For now, log the decision and store it in the DB.
 
 - [ ] **Step 1-5:** Write test, verify fail, implement, verify pass, commit
 
@@ -359,7 +359,7 @@ These modules use `requests` and `feedparser` — both available in zhanlu. Port
 - Modify: `backend/app/services/scheduled_tasks.py` (add news ingestion task)
 - Test: `backend/tests/test_intelligence/test_news_agent.py`
 
-**Key adaptation:** EDIA uses `threading.Thread` with `while True: sleep()`. Zhanlu uses the `_periodic_task` asyncio pattern from `scheduled_tasks.py`. The agent becomes a class with an async `run_news_cycle()` method, wired as a scheduled task.
+**Key adaptation:** Acme uses `threading.Thread` with `while True: sleep()`. Zhanlu uses the `_periodic_task` asyncio pattern from `scheduled_tasks.py`. The agent becomes a class with an async `run_news_cycle()` method, wired as a scheduled task.
 
 - [ ] **Step 1-5:** Write test, verify fail, implement, verify pass, commit
 
@@ -373,7 +373,7 @@ These modules use `requests` and `feedparser` — both available in zhanlu. Port
 - Create: `backend/app/services/intelligence/intelligence_learning_loop.py`
 - Test: `backend/tests/test_intelligence/test_orchestrator.py`
 
-**Key adaptation:** EDIA uses module-level singletons. Zhanlu uses a class-based service that accepts a db session. The orchestrator coordinates: fetch events → run causal analysis → generate scenarios → evaluate overrides → return structured context.
+**Key adaptation:** Acme uses module-level singletons. Zhanlu uses a class-based service that accepts a db session. The orchestrator coordinates: fetch events → run causal analysis → generate scenarios → evaluate overrides → return structured context.
 
 - [ ] **Step 1-5:** Write test, verify fail, implement, verify pass, commit
 
@@ -397,7 +397,7 @@ These modules use `requests` and `feedparser` — both available in zhanlu. Port
 
 ### LLM Call Adaptation Pattern
 
-EDIA pattern:
+Acme pattern:
 ```python
 result = self.llm.generate_json(system_prompt, user_prompt)
 ```
@@ -414,7 +414,7 @@ result = await call_llm_with_reliability(
 
 ### Async DB Pattern
 
-EDIA pattern:
+Acme pattern:
 ```python
 with self.engine.begin() as conn:
     conn.execute(text("INSERT INTO ..."), payload)
@@ -430,7 +430,7 @@ async with db.begin():
 
 ### Background Task Pattern
 
-EDIA pattern:
+Acme pattern:
 ```python
 thread = threading.Thread(target=self._run_loop, daemon=True)
 thread.start()
@@ -456,6 +456,6 @@ loop.create_task(_periodic_task("news_ingestion", NEWS_INGESTION_INTERVAL, _run_
 
 After Phase 1 is complete:
 
-**Phase 2: Hybrid RAG** — Port EDIA's `hybrid_retrieval.py` (dense + sparse + RRF fusion) into zhanlu's `document_ingestion/` package. Upgrade `store.query()` to use hybrid retrieval. Add intelligence events to a dedicated ChromaDB collection.
+**Phase 2: Hybrid RAG** — Port Acme's `hybrid_retrieval.py` (dense + sparse + RRF fusion) into zhanlu's `document_ingestion/` package. Upgrade `store.query()` to use hybrid retrieval. Add intelligence events to a dedicated ChromaDB collection.
 
 **Phase 3: Forecasting Domain Logic** — Port causal elasticities and seasonal rules into a new `forecasting/domain_adjustments.py`. Add intelligence adjustment hook (calls P1's orchestrator). Add LSTM model. Add nightly self-improvement background task.

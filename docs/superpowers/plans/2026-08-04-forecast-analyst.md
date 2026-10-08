@@ -35,10 +35,10 @@
 - `run.results`: `{str(h): {"base": [...], "bull": [...], "bear": [...]}}`; board uses `base[0]` (batch v2, mds:944-952).
 - `run.model_detail`: `{models_run, models_failed, weights, ensemble_mape, naive_mape, metric}`.
 - `mds._read_product_history_rows(product_id)` → `[(date_str, price), ...]` ascending; used by `get_forecast_analysis` (mds:1902).
-- `mds.PRODUCT_FORECAST_TARGET_KEY`: product_id → `"ecisco.<pid>"` (mds:859-873).
+- `mds.PRODUCT_FORECAST_TARGET_KEY`: product_id → `"acme.<pid>"` (mds:859-873).
 - `PRODUCT_LABELS.get(pid, {}).get("label_zh", pid)` for Chinese names.
 - `forecasting/narrative.py`: `compute_trend_stats(history_rows)`, `compute_uncertainty_stats(horizon_payload)`, `compute_model_stats(model_detail, below_naive)` — reused by the pack.
-- `forecasting/domain_signals.py`: `compute_seasonal_adjustment(product_id, month)`, `compute_causal_chain_adjustment(product_id, naphtha_pct)`, private `_ELASTICITIES`.
+- `forecasting/domain_signals.py`: `compute_seasonal_adjustment(product_id, month)`, `compute_causal_chain_adjustment(product_id, product_c_pct)`, private `_ELASTICITIES`.
 - `forecasting/engine.py`: `forecasts` dict (name → pd.Series, len h_max) at :268; explanation assembly at :629; run flush at :732; `_get_config_bool(key, default)` at :1014.
 - `llm_service.chat_completion_json_sync(prompt, schema, temperature=0.0) -> dict` (returns `{}` on any error; sync; 30s timeout).
 - `decision_board_service.build_decision_board(group, day, db)` — per-product loop at :192-268; `build_narrative(...)` at :85.
@@ -65,13 +65,13 @@ from app.services.forecasting.forecast_trust_tier import compute_forecast_trust_
 
 
 def test_low_tier_sparse_data_code():
-    out = compute_forecast_trust_tier("dcpd", below_naive=False, cadence_class="sparse")
+    out = compute_forecast_trust_tier("product_b", below_naive=False, cadence_class="sparse")
     assert out["tier"] == "low"
     assert "sparse_data" in out["reason_codes"]
 
 
 def test_directional_below_naive_code():
-    out = compute_forecast_trust_tier("isoprene", below_naive=True, cadence_class="daily")
+    out = compute_forecast_trust_tier("product_d", below_naive=True, cadence_class="daily")
     assert out["tier"] == "directional"
     assert "below_naive_baseline" in out["reason_codes"]
 
@@ -83,13 +83,13 @@ def test_directional_weekly_product_has_both_codes():
 
 
 def test_high_tier_code():
-    out = compute_forecast_trust_tier("isoprene", below_naive=False, cadence_class="daily", mape=8.0)
+    out = compute_forecast_trust_tier("product_d", below_naive=False, cadence_class="daily", mape=8.0)
     assert out["tier"] == "high"
     assert out["reason_codes"] == ["model_skill_high"]
 
 
 def test_medium_weekly_code():
-    out = compute_forecast_trust_tier("raffinate_c5", below_naive=False, cadence_class="weekly")
+    out = compute_forecast_trust_tier("feedstock_a", below_naive=False, cadence_class="weekly")
     assert out["tier"] == "medium"
     assert "weekly_cadence" in out["reason_codes"]
 
@@ -152,7 +152,7 @@ Expected: PASS
 - Test: `backend/tests/test_forecast_analyst_agreement.py`
 
 **Interfaces:**
-- Produces: `get_elasticity(product_id: str) -> float | None` (e.g. dcpd → 0.663).
+- Produces: `get_elasticity(product_id: str) -> float | None` (e.g. product_b → 0.663).
 - Produces: `compute_model_agreement(forecasts: dict[str, pd.Series], horizon: int) -> dict | None` returning `{"n_models": int, "min": float, "max": float, "spread_pct": float}` (spread = (max−min)/mean of model endpoints), None when <2 usable models.
 - Produces: `explanation_dict["model_agreement"]` = `{str(h): {...}}` — consumed by Task 3 pack.
 
@@ -166,8 +166,8 @@ from app.services.forecasting.analyst.evidence_pack import compute_model_agreeme
 from app.services.forecasting.domain_signals import get_elasticity
 
 
-def test_get_elasticity_dcpd():
-    assert get_elasticity("dcpd") == 0.663
+def test_get_elasticity_product_b():
+    assert get_elasticity("product_b") == 0.663
 
 
 def test_get_elasticity_unknown():
@@ -319,7 +319,7 @@ Pack shape (all numbers raw, not formatted):
 ```
 `causal.implied_pct` = upstream[0].chg_30d_pct × elasticity (percent units). `divergent` = implied and expected_change_pct×100 differ in sign AND |implied − expected×100| > 2.0.
 `seasonal.label_zh`: adj<0 → "传统需求淡季", adj>0 → "传统需求旺季", 0 → None.
-`UPSTREAM_MAP`: dcpd/isoprene/piperylene/raffinate_c5/sis/c5_resin → ["cracked_c5"]; styrene/blowing_agent/cracked_c9 → wait, cracked_c9's upstream is naphtha: styrene/blowing_agent → ["cracked_c9"]; cracked_c5/cracked_c9 → ["naphtha"]; naphtha → ["crude_oil"]; crude_oil → [].
+`UPSTREAM_MAP`: product_b/product_d/product_f/feedstock_a/sis/product_a → ["cracked_c5"]; styrene/blowing_agent/cracked_c9 → wait, cracked_c9's upstream is product_c: styrene/blowing_agent → ["cracked_c9"]; cracked_c5/cracked_c9 → ["product_c"]; product_c → ["product_e"]; product_e → [].
 
 - [ ] **Step 1: Write the failing test**
 
@@ -354,7 +354,7 @@ def _explanation():
 
 def _pack(**over):
     kw = dict(
-        product_id="dcpd", name_zh="双环戊二烯", day=7,
+        product_id="product_b", name_zh="材料B", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
         upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
@@ -397,7 +397,7 @@ def test_pack_divergence_flag():
 
 
 def test_pack_seasonal_label():
-    p = _pack()  # dcpd month 8 → +1.5 in rules
+    p = _pack()  # product_b month 8 → +1.5 in rules
     assert p["seasonal"]["adj_pct"] == 1.5
     assert p["seasonal"]["label_zh"] == "传统需求旺季"
     p_winter = _pack(as_of_month=12)
@@ -425,8 +425,8 @@ def test_price_percentile():
 
 
 def test_upstream_map_covers_board_products():
-    for pid in ("isoprene", "piperylene", "dcpd", "raffinate_c5", "sis",
-                "c5_resin", "styrene", "blowing_agent", "cracked_c5", "cracked_c9"):
+    for pid in ("product_d", "product_f", "product_b", "feedstock_a", "sis",
+                "product_a", "styrene", "blowing_agent", "cracked_c5", "cracked_c9"):
         assert pid in UPSTREAM_MAP
 ```
 
@@ -452,17 +452,17 @@ from app.services.forecasting.domain_signals import (
 )
 
 UPSTREAM_MAP: dict[str, list[str]] = {
-    "isoprene": ["cracked_c5"], "piperylene": ["cracked_c5"],
-    "dcpd": ["cracked_c5"], "raffinate_c5": ["cracked_c5"],
-    "sis": ["cracked_c5"], "c5_resin": ["cracked_c5"],
+    "product_d": ["cracked_c5"], "product_f": ["cracked_c5"],
+    "product_b": ["cracked_c5"], "feedstock_a": ["cracked_c5"],
+    "sis": ["cracked_c5"], "product_a": ["cracked_c5"],
     "styrene": ["cracked_c9"], "blowing_agent": ["cracked_c9"],
-    "cracked_c5": ["naphtha"], "cracked_c9": ["naphtha"],
-    "naphtha": ["crude_oil"], "crude_oil": [],
+    "cracked_c5": ["product_c"], "cracked_c9": ["product_c"],
+    "product_c": ["product_e"], "product_e": [],
 }
 
 _UPSTREAM_NAME_ZH = {
-    "crude_oil": "原油", "naphtha": "石脑油",
-    "cracked_c5": "裂解碳五", "cracked_c9": "裂解碳九",
+    "product_e": "原油", "product_c": "石脑油",
+    "cracked_c5": "裂解原料A", "cracked_c9": "裂解材料M",
 }
 
 
@@ -592,15 +592,15 @@ Content rules (zh):
 - [ ] **Step 1: Write the failing test**
 
 ```python
-"""Template brief renderer — the deterministic fallback (DCPD case)."""
+"""Template brief renderer — the deterministic fallback (PRODUCT_B case)."""
 from app.services.forecasting.analyst.evidence_pack import build_pack
 from app.services.forecasting.analyst.template_brief import render_template_brief
 from tests.test_forecast_analyst_pack import _explanation, _history
 
 
-def _dcpd_pack():
+def _product_b_pack():
     return build_pack(
-        product_id="dcpd", name_zh="双环戊二烯", day=7,
+        product_id="product_b", name_zh="材料B", day=7,
         history_rows=_history(start=7000.0, step=-0.8),
         upstream_histories={"cracked_c5": _history(start=5800.0, step=-0.5)},
         run_results={"7": {"base": [6660.0, 6650.0], "bull": [6900.0, 6950.0], "bear": [6400.0, 6350.0]}},
@@ -610,7 +610,7 @@ def _dcpd_pack():
 
 
 def test_brief_schema_and_source():
-    b = render_template_brief(_dcpd_pack())
+    b = render_template_brief(_product_b_pack())
     for key in ("summary_zh", "why_price_zh", "why_action_zh",
                 "watch_triggers_zh", "risk_zh", "source", "day", "generated_at"):
         assert key in b
@@ -619,28 +619,28 @@ def test_brief_schema_and_source():
 
 
 def test_brief_explains_why_price():
-    b = render_template_brief(_dcpd_pack())
-    assert "裂解碳五" in b["why_price_zh"]        # upstream named
+    b = render_template_brief(_product_b_pack())
+    assert "裂解原料A" in b["why_price_zh"]        # upstream named
     assert "弹性" in b["why_price_zh"]            # elasticity mentioned
-    assert "传统需求旺季" in b["why_price_zh"]     # seasonal (dcpd month 8 = +1.5)
+    assert "传统需求旺季" in b["why_price_zh"]     # seasonal (product_b month 8 = +1.5)
 
 
 def test_brief_explains_why_action_low_trust():
-    b = render_template_brief(_dcpd_pack())
+    b = render_template_brief(_product_b_pack())
     assert "观望" in b["why_action_zh"]
     assert "历史数据不足" in b["why_action_zh"]    # sparse_data reason in words
     assert "55%" in b["why_action_zh"]            # edge threshold referenced
 
 
 def test_brief_watch_triggers_actionable():
-    b = render_template_brief(_dcpd_pack())
+    b = render_template_brief(_product_b_pack())
     joined = "。".join(b["watch_triggers_zh"])
     assert "55%" in joined                        # accuracy recovery trigger
-    assert "裂解碳五" in joined or "上游" in joined  # upstream stabilization trigger
+    assert "裂解原料A" in joined or "上游" in joined  # upstream stabilization trigger
 
 
 def test_brief_zero_intel_risk_note():
-    b = render_template_brief(_dcpd_pack())
+    b = render_template_brief(_product_b_pack())
     assert "近期无重大市场事件" in b["risk_zh"]
 
 
@@ -652,7 +652,7 @@ def test_brief_buy_case():
     exp["trust_tier"] = {"tier": "high", "reason_zh": "模型持续跑赢基准",
                           "reason_codes": ["model_skill_high"], "badge_label_zh": "高置信"}
     pack = build_pack(
-        product_id="isoprene", name_zh="异戊二烯", day=7,
+        product_id="product_d", name_zh="电子元件", day=7,
         history_rows=_history(start=12000.0, step=2.0),
         upstream_histories={"cracked_c5": _history(start=5800.0, step=1.0)},
         run_results={"7": {"base": [12500.0, 12600.0], "bull": [12900.0, 13100.0], "bear": [12100.0, 12000.0]}},
@@ -666,7 +666,7 @@ def test_brief_buy_case():
 
 def test_brief_missing_data_degrades():
     pack = build_pack(
-        product_id="dcpd", name_zh="双环戊二烯", day=7,
+        product_id="product_b", name_zh="材料B", day=7,
         history_rows=[], upstream_histories={},
         run_results={}, model_detail=None, explanation={}, as_of_month=8,
     )
@@ -870,13 +870,13 @@ Verifier rules:
 ```python
 """Brief output verifier — the anti-hallucination gate."""
 from app.services.forecasting.analyst.verifier import verify_brief
-from tests.test_forecast_analyst_template import _dcpd_pack
+from tests.test_forecast_analyst_template import _product_b_pack
 
 
 def _brief(**over):
     b = {
-        "summary_zh": "双环戊二烯现价 6,940 元/吨,预计未来 7 天跌至 6,660 元/吨(-4.0%)。",
-        "why_price_zh": "上游裂解碳五近30日-2.8%,按 0.66 弹性传导约 -1.9%。",
+        "summary_zh": "材料B现价 6,940 元/吨,预计未来 7 天跌至 6,660 元/吨(-4.0%)。",
+        "why_price_zh": "上游裂解原料A近30日-2.8%,按 0.66 弹性传导约 -1.9%。",
         "why_action_zh": "建议观望 —— 历史数据不足,方向准确率 51% 未达 55% 门槛。",
         "watch_triggers_zh": ["方向准确率回升至 55% 以上"],
         "risk_zh": "近期无重大市场事件。",
@@ -886,13 +886,13 @@ def _brief(**over):
 
 
 def test_valid_brief_passes():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     # numbers: 6940 (current), 6660 (base), -4.0 (exp*100), 51 (acc*100), 55 threshold
     assert verify_brief(_brief(), pack) == []
 
 
 def test_hallucinated_price_rejected():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     v = verify_brief(_brief(summary_zh="现价 7,200 元/吨,预计涨至 7,500 元/吨(+4.2%)。"), pack)
     assert any("7200" in msg or "7500" in msg for msg in v)
     assert v != []
@@ -901,16 +901,16 @@ def test_hallucinated_price_rejected():
 def test_missing_key_rejected():
     b = _brief()
     del b["why_price_zh"]
-    assert verify_brief(b, _dcpd_pack()) != []
+    assert verify_brief(b, _product_b_pack()) != []
 
 
 def test_triggers_must_be_list():
-    assert verify_brief(_brief(watch_triggers_zh="not a list"), _dcpd_pack()) != []
+    assert verify_brief(_brief(watch_triggers_zh="not a list"), _product_b_pack()) != []
 
 
 def test_small_numbers_exempt():
     # 7 (day), 8 (month), 3 (count) — all ≤12, exempt
-    assert verify_brief(_brief(why_price_zh="8 模型集成,7 日维度,3 大因素。"), _dcpd_pack()) == []
+    assert verify_brief(_brief(why_price_zh="8 模型集成,7 日维度,3 大因素。"), _product_b_pack()) == []
 ```
 
 `test_forecast_analyst_writer.py`:
@@ -919,22 +919,22 @@ def test_small_numbers_exempt():
 from app.services.forecasting.analyst.brief_writer import (
     BRIEF_JSON_SCHEMA, build_analyst_prompt, write_brief_llm,
 )
-from tests.test_forecast_analyst_template import _dcpd_pack
+from tests.test_forecast_analyst_template import _product_b_pack
 
 
 def test_prompt_contains_evidence_and_contract():
-    prompt = build_analyst_prompt(_dcpd_pack())
+    prompt = build_analyst_prompt(_product_b_pack())
     assert "只能使用" in prompt or "ONLY" in prompt.upper()
     assert "6660" in prompt or "6,660" in prompt   # forecast base in evidence
-    assert "双环戊二烯" in prompt
+    assert "材料B" in prompt
     assert "JSON" in prompt
 
 
 def test_writer_success_marks_llm_source():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     good = {
         "summary_zh": "现价 6,940 元/吨,预计 7 日跌至 6,660 元/吨(-4.0%),建议观望。",
-        "why_price_zh": "上游裂解碳五近30日下跌,按 0.66 弹性传导约 -1.9%。",
+        "why_price_zh": "上游裂解原料A近30日下跌,按 0.66 弹性传导约 -1.9%。",
         "why_action_zh": "历史数据不足,方向准确率 51% 未达 55% 门槛,观望。",
         "watch_triggers_zh": ["准确率回升至 55% 以上再评估"],
         "risk_zh": "近期无重大市场事件,价格由供需基本面驱动。",
@@ -946,11 +946,11 @@ def test_writer_success_marks_llm_source():
 
 
 def test_writer_returns_none_on_empty_llm():
-    assert write_brief_llm(_dcpd_pack(), llm_caller=lambda p, s: {}) is None
+    assert write_brief_llm(_product_b_pack(), llm_caller=lambda p, s: {}) is None
 
 
 def test_writer_returns_none_on_hallucination():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     bad = {"summary_zh": "现价 9,999 元/吨,暴涨 50%。", "why_price_zh": "x",
            "why_action_zh": "y", "watch_triggers_zh": [], "risk_zh": "z"}
     assert write_brief_llm(pack, llm_caller=lambda p, s: dict(bad)) is None
@@ -1157,9 +1157,9 @@ def _patch_reads(monkeypatch):
     monkeypatch.setattr(analyst_service.mds, "read_product_history_rows",
                         lambda pid: _history(start=7000.0, step=-0.8))
     monkeypatch.setattr(analyst_service.mds, "PRODUCT_FORECAST_TARGET_KEY",
-                        {"dcpd": "ecisco.dcpd"})
+                        {"product_b": "acme.product_b"})
     monkeypatch.setattr(analyst_service, "PRODUCT_LABELS",
-                        {"dcpd": {"label_zh": "双环戊二烯"}})
+                        {"product_b": {"label_zh": "材料B"}})
 
 
 def test_cache_hit_returns_without_llm(monkeypatch):
@@ -1168,7 +1168,7 @@ def test_cache_hit_returns_without_llm(monkeypatch):
     run = _run({**_explanation(), "analyst_brief": {"7": cached}})
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: (_ for _ in ()).throw(AssertionError("LLM called on cache hit")))
-    assert analyst_service.get_analyst_brief("dcpd", 7, db=db) == cached
+    assert analyst_service.get_analyst_brief("product_b", 7, db=db) == cached
     assert db.commits == 0
 
 
@@ -1177,7 +1177,7 @@ def test_miss_builds_template_and_persists(monkeypatch):
     run = _run(_explanation())
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: False)
-    brief = analyst_service.get_analyst_brief("dcpd", 7, db=db)
+    brief = analyst_service.get_analyst_brief("product_b", 7, db=db)
     assert brief is not None and brief["source"] == "template"
     assert run.explanation["analyst_brief"]["7"]["source"] == "template"
     assert db.commits == 1
@@ -1189,12 +1189,12 @@ def test_llm_upgrade_when_enabled(monkeypatch):
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: True)
     good = {"summary_zh": "现价 6,940 元/吨,预计跌至 6,660 元/吨。",
-            "why_price_zh": "上游裂解碳五下跌,弹性 0.66 传导。",
+            "why_price_zh": "上游裂解原料A下跌,弹性 0.66 传导。",
             "why_action_zh": "方向准确率 51% 未达 55% 门槛,观望。",
             "watch_triggers_zh": ["准确率 55% 以上再评估"], "risk_zh": "近期无重大市场事件。"}
     monkeypatch.setattr(analyst_service, "chat_completion_json_sync",
                         lambda prompt, schema: dict(good))
-    brief = analyst_service.get_analyst_brief("dcpd", 7, db=db)
+    brief = analyst_service.get_analyst_brief("product_b", 7, db=db)
     assert brief["source"] == "llm"
 
 
@@ -1204,7 +1204,7 @@ def test_llm_failure_falls_back_to_template(monkeypatch):
     db = _FakeDB(SimpleNamespace(id="t1"), run)
     monkeypatch.setattr(analyst_service, "_llm_enabled", lambda: True)
     monkeypatch.setattr(analyst_service, "chat_completion_json_sync", lambda p, s: {})
-    assert analyst_service.get_analyst_brief("dcpd", 7, db=db)["source"] == "template"
+    assert analyst_service.get_analyst_brief("product_b", 7, db=db)["source"] == "template"
 
 
 def test_unknown_product_returns_none(monkeypatch):
@@ -1359,8 +1359,8 @@ Expected: PASS
 ```python
 def test_board_attaches_analyst_brief(monkeypatch):
     brief = {
-        "summary_zh": "双环戊二烯现价 6,940 元/吨,预计跌至 6,660 元/吨。",
-        "why_price_zh": "上游裂解碳五下跌。",
+        "summary_zh": "材料B现价 6,940 元/吨,预计跌至 6,660 元/吨。",
+        "why_price_zh": "上游裂解原料A下跌。",
         "why_action_zh": "历史数据不足,观望。",
         "watch_triggers_zh": ["准确率 55% 以上再评估"],
         "risk_zh": "近期无重大市场事件。",
@@ -1369,7 +1369,7 @@ def test_board_attaches_analyst_brief(monkeypatch):
     monkeypatch.setattr(
         dbs.mds, "get_market_snapshot",
         lambda group: [_snapshot(pid, 6940.0)
-                       for pid in ("isoprene", "piperylene", "dcpd", "raffinate_c5")],
+                       for pid in ("product_d", "product_f", "product_b", "feedstock_a")],
     )
     monkeypatch.setattr(
         dbs.mds, "get_forecast_base_batch_v2",
@@ -1384,27 +1384,27 @@ def test_board_attaches_analyst_brief(monkeypatch):
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: brief)
     resp = dbs.build_decision_board("midstream", day=7)
-    p = next(p for p in resp.products if p.id == "dcpd")
+    p = next(p for p in resp.products if p.id == "product_b")
     assert p.analyst_brief is not None
-    assert p.analyst_brief.why_price_zh == "上游裂解碳五下跌。"
+    assert p.analyst_brief.why_price_zh == "上游裂解原料A下跌。"
     assert p.analyst_brief.watch_triggers_zh == ["准确率 55% 以上再评估"]
-    assert p.narrative_zh.startswith("双环戊二烯现价 6,940")
+    assert p.narrative_zh.startswith("材料B现价 6,940")
 
 
 def test_board_survives_analyst_failure(monkeypatch):
     monkeypatch.setattr(
         dbs.mds, "get_market_snapshot",
-        lambda group: [_snapshot("isoprene", 12100.0)],
+        lambda group: [_snapshot("product_d", 12100.0)],
     )
     monkeypatch.setattr(
         dbs.mds, "get_forecast_base_batch_v2",
         lambda product_ids, day=7, db=None: ForecastBaseBatchResponse(
-            day=day, base_by_product={"isoprene": 12450.0},
-            overlay_by_product={"isoprene": _overlay("isoprene")},
+            day=day, base_by_product={"product_d": 12450.0},
+            overlay_by_product={"product_d": _overlay("product_d")},
             sku_forecasts_by_product={},
         ),
     )
-    monkeypatch.setattr(dbs, "PRODUCT_GROUP_MAP", {"midstream": ["isoprene"]})
+    monkeypatch.setattr(dbs, "PRODUCT_GROUP_MAP", {"midstream": ["product_d"]})
     from app.services.forecasting.analyst import service as analyst_service
     def _boom(pid, day=7, db=None):
         raise RuntimeError("analyst down")
@@ -1493,15 +1493,15 @@ from app.services.forecasting.analyst import service as analyst_service
 
 
 def test_forecast_brief_success(monkeypatch):
-    brief = {"summary_zh": "双环戊二烯现价 6,940 元/吨。",
+    brief = {"summary_zh": "材料B现价 6,940 元/吨。",
              "why_price_zh": "上游下跌。", "why_action_zh": "观望。",
              "watch_triggers_zh": ["t1"], "risk_zh": "", "source": "template", "day": 7}
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: brief)
     out = asyncio.run(forecast_tool._forecast_brief(
-        {"product_id": "dcpd", "day": 7}, db=None, user_id=None, context=None))
+        {"product_id": "product_b", "day": 7}, db=None, user_id=None, context=None))
     assert out["success"] is True
-    assert out["brief"]["summary_zh"].startswith("双环戊二烯")
+    assert out["brief"]["summary_zh"].startswith("材料B")
     assert out["brief"]["source"] == "template"
 
 
@@ -1515,9 +1515,9 @@ def test_forecast_brief_no_data(monkeypatch):
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: None)
     out = asyncio.run(forecast_tool._forecast_brief(
-        {"product_id": "dcpd"}, db=None, user_id=None, context=None))
+        {"product_id": "product_b"}, db=None, user_id=None, context=None))
     assert out["success"] is False
-    assert "dcpd" in out["error"]
+    assert "product_b" in out["error"]
 
 
 def test_forecast_brief_registered():
@@ -1543,7 +1543,7 @@ async def _forecast_brief(
     """Return the cached evidence-grounded analyst brief for a product.
 
     Required args:
-        product_id  (str): Dashboard product_id (e.g. 'dcpd', 'isoprene').
+        product_id  (str): Dashboard product_id (e.g. 'product_b', 'product_d').
     Optional args:
         day         (int): Forecast horizon in days (default 7).
     """
@@ -1574,7 +1574,7 @@ FORECAST_BRIEF_SCHEMA = {
         "name": "forecast_brief",
         "description": (
             "Get the evidence-grounded AI analyst brief for a dashboard product "
-            "(dcpd, isoprene, piperylene, c5_resin, etc.): why the price is "
+            "(product_b, product_d, product_f, product_a, etc.): why the price is "
             "forecast to move (upstream transmission, trend, seasonality, model "
             "drivers), why the current buy/hold/sell/watch recommendation, and "
             "what triggers would change it. Use this to answer 'why' questions "
@@ -1584,7 +1584,7 @@ FORECAST_BRIEF_SCHEMA = {
             "type": "object",
             "properties": {
                 "product_id": {"type": "string",
-                               "description": "Dashboard product_id, e.g. 'dcpd'."},
+                               "description": "Dashboard product_id, e.g. 'product_b'."},
                 "day": {"type": "integer", "default": 7,
                         "description": "Forecast horizon in days (default 7)."},
             },
@@ -1634,14 +1634,14 @@ def test_section_uses_analyst_brief(monkeypatch):
     monkeypatch.setattr(wrg, "collect_all_numbers",
                         lambda pid, db: {"current_price": 6940.0, "change_7d_pct": -1.2})
     monkeypatch.setattr(wrg, "render_chart_stub", lambda *a, **k: None)
-    brief = {"summary_zh": "双环戊二烯现价 6,940 元/吨,预计下周走弱。",
-             "why_price_zh": "上游裂解碳五下跌,成本端下移。",
+    brief = {"summary_zh": "材料B现价 6,940 元/吨,预计下周走弱。",
+             "why_price_zh": "上游裂解原料A下跌,成本端下移。",
              "why_action_zh": "建议观望。", "watch_triggers_zh": [], "risk_zh": "",
              "source": "template", "day": 7}
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: brief)
     svc = wrg.WeeklyReportService(db=None)
-    section = svc._build_product_section("dcpd", "2026-08-03", "2026-08-09", {}, False, False)
+    section = svc._build_product_section("product_b", "2026-08-03", "2026-08-09", {}, False, False)
     assert "6,940" in section["narrative"]
     assert "成本端下移" in section["narrative"]
 
@@ -1653,7 +1653,7 @@ def test_section_falls_back_to_placeholder(monkeypatch):
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: None)
     svc = wrg.WeeklyReportService(db=None)
-    section = svc._build_product_section("dcpd", "2026-08-03", "2026-08-09", {}, False, False)
+    section = svc._build_product_section("product_b", "2026-08-03", "2026-08-09", {}, False, False)
     assert "市场运行平稳" in section["narrative"]  # legacy placeholder
 ```
 
@@ -1710,15 +1710,15 @@ Expected: PASS
 from app.services.forecasting import engine as engine_mod
 
 
-def test_prewarm_calls_service_for_ecisco_product(monkeypatch):
+def test_prewarm_calls_service_for_acme_product(monkeypatch):
     calls = []
     monkeypatch.setattr(engine_mod, "_get_config_bool",
                         lambda key, default=True: key == "FORECAST_ANALYST_LLM_ENABLED")
     from app.services.forecasting.analyst import service as analyst_service
     monkeypatch.setattr(analyst_service, "prewarm_brief",
                         lambda pid, day, db: calls.append((pid, day)))
-    engine_mod._prewarm_analyst_brief(db=None, product_key="ecisco.dcpd")
-    assert calls == [("dcpd", 7)]
+    engine_mod._prewarm_analyst_brief(db=None, product_key="acme.product_b")
+    assert calls == [("product_b", 7)]
 
 
 def test_prewarm_skips_when_flag_off(monkeypatch):
@@ -1727,11 +1727,11 @@ def test_prewarm_skips_when_flag_off(monkeypatch):
     from app.services.forecasting.analyst import service as analyst_service
     monkeypatch.setattr(analyst_service, "prewarm_brief",
                         lambda pid, day, db: calls.append((pid, day)))
-    engine_mod._prewarm_analyst_brief(db=None, product_key="ecisco.dcpd")
+    engine_mod._prewarm_analyst_brief(db=None, product_key="acme.product_b")
     assert calls == []
 
 
-def test_prewarm_skips_non_ecisco_keys(monkeypatch):
+def test_prewarm_skips_non_acme_keys(monkeypatch):
     calls = []
     monkeypatch.setattr(engine_mod, "_get_config_bool", lambda key, default=True: True)
     from app.services.forecasting.analyst import service as analyst_service
@@ -1748,7 +1748,7 @@ def test_prewarm_swallows_service_errors(monkeypatch):
     def _boom(pid, day, db):
         raise RuntimeError("LLM down")
     monkeypatch.setattr(analyst_service, "prewarm_brief", _boom)
-    engine_mod._prewarm_analyst_brief(db=None, product_key="ecisco.dcpd")  # must not raise
+    engine_mod._prewarm_analyst_brief(db=None, product_key="acme.product_b")  # must not raise
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1766,7 +1766,7 @@ def _prewarm_analyst_brief(db, product_key) -> None:
         if not _get_config_bool("FORECAST_ANALYST_LLM_ENABLED", False):
             return
         parts = (product_key or "").split(".")
-        if len(parts) != 2 or parts[0] != "ecisco":
+        if len(parts) != 2 or parts[0] != "acme":
             return
         from app.services.forecasting.analyst import service as analyst_service
         analyst_service.prewarm_brief(parts[1], day=7, db=db)
@@ -1830,8 +1830,8 @@ it('renders structured analyst brief sections when present', () => {
   const product = {
     /* ...existing minimal product fields per the file's fixtures... */
     analyst_brief: {
-      summary_zh: '双环戊二烯现价 6,940 元/吨,预计跌至 6,660 元/吨。',
-      why_price_zh: '上游裂解碳五近30日-2.8%。',
+      summary_zh: '材料B现价 6,940 元/吨,预计跌至 6,660 元/吨。',
+      why_price_zh: '上游裂解原料A近30日-2.8%。',
       why_action_zh: '历史数据不足,建议观望。',
       watch_triggers_zh: ['方向准确率回升至 55% 以上'],
       risk_zh: '近期无重大市场事件。',
@@ -1839,7 +1839,7 @@ it('renders structured analyst brief sections when present', () => {
     },
   };
   // render expanded row, assert:
-  // screen.getByText(/上游裂解碳五/) exists
+  // screen.getByText(/上游裂解原料A/) exists
   // screen.getByText('关注触发') exists
   // screen.getByText(/方向准确率回升至 55%/) exists
   // screen.getByText('AI 分析师撰写') exists
@@ -1849,7 +1849,7 @@ it('renders structured analyst brief sections when present', () => {
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `cd /home/ysk2025/zhanlu_7_30/frontend && node_modules/.bin/vitest run src/pages/MarketDashboard/components/__tests__/DecisionBoard.test.jsx`
-Expected: FAIL — unable to find text 上游裂解碳五
+Expected: FAIL — unable to find text 上游裂解原料A
 
 - [ ] **Step 3: Implement the JSX change above**
 
@@ -1863,7 +1863,7 @@ Same command. Expected: PASS.
 
 **Files:** none (ops/verification)
 
-- [ ] **Step 1: Run the A/B harness with real EDIA data**
+- [ ] **Step 1: Run the A/B harness with real Acme data**
 
 ```bash
 cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_domain_signals_ab.py -v -s
@@ -1875,7 +1875,7 @@ from app.services.forecasting.domain_signals_ab import ab_evaluate
 from app.services.forecasting.edia_source import EdiaMysqlDataSource
 import pandas as pd
 src = EdiaMysqlDataSource()
-for pid, table in [('dcpd','md_t_lz_price'), ('isoprene','md_t_lz_price')]:
+for pid, table in [('product_b','md_market_price'), ('product_d','md_market_price')]:
     df = src.read_history({'table': table, 'product_id': pid})
     # ... walk-forward ab_evaluate per product, print ABResult
 "
@@ -1907,7 +1907,7 @@ docker exec zhanlu-backend python -c "
 from app.database import SessionLocal
 from app.services.forecasting.analyst import service as s
 db = SessionLocal()
-b = s.get_analyst_brief('dcpd', 7, db=db)
+b = s.get_analyst_brief('product_b', 7, db=db)
 print(b['source'] if b else 'NONE'); db.close()
 "
 ```
@@ -1928,4 +1928,4 @@ Then `preview_url` the market dashboard Decision Board for visual confirmation.
 - **Spec coverage:** Section 1 signals — domain enablement (T12), price-chain divergence (T3 causal), model agreement (T2), why-low-trust (T1), drivers+seasonal surfacing (T3/T4). Section 2 writer+verifier+cache+fallback (T5/T6). Section 3 surfaces (T7/T8/T9/T11). Section 4 testing/rollout (all + T12).
 - **No import cycles:** `analyst/*` imports `forecasting.narrative`, `domain_signals`, `mds`, `llm_service` only. `decision_board_service` → `analyst.service` (not vice versa). `engine` → `analyst.service` (lazy import inside function). `weekly_report` → `analyst.service` (lazy import).
 - **Type consistency:** brief dict keys identical across template renderer, writer, verifier, `AnalystBriefMeta`, frontend. `get_analyst_brief(product_id, day, db, persist)` signature consistent in T6/T7/T8/T9/T10 (T7/T8/T9 call without `persist`; T10 via `prewarm_brief`).
-- **ERP products** (`c5_resin`, `raffinate_c5` in `_ERP_PRODUCT_KEYS`): their product-level target key exists (`ecisco.c5_resin` per PRODUCT_FORECAST_TARGET_KEY) so `_latest_run` works; SKU-level briefs are out of scope (board shows SKU table separately).
+- **ERP products** (`product_a`, `feedstock_a` in `_ERP_PRODUCT_KEYS`): their product-level target key exists (`acme.product_a` per PRODUCT_FORECAST_TARGET_KEY) so `_latest_run` works; SKU-level briefs are out of scope (board shows SKU table separately).

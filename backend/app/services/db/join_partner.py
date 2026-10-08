@@ -2,7 +2,7 @@
 
 OCI "Table Retrieval" says retrieval must select "likely tables, fields and
 validated join paths BEFORE SQL generation starts". The measured failure on
-non-Ecisco warehouses: a question like "sales by customer" retrieves only the
+non-Acme warehouses: a question like "sales by customer" retrieves only the
 sales table; the customer table never enters the DDL slice; the model then
 invents a join to a table it never saw (or filters on a column that does not
 exist) — the turn fails or fabricates.

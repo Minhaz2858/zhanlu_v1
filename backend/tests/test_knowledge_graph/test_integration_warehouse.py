@@ -1,6 +1,6 @@
-"""Integration test — full catalog flow against the real aipdp_data_warehouse_prod.
+"""Integration test — full catalog flow against the real demo_warehouse_prod.
 
-Skipped when EDIA_MYSQL_URL is absent (CI / no warehouse access).
+Skipped when Acme_MYSQL_URL is absent (CI / no warehouse access).
 Run manually with the docker backend up:
     docker restart zhanlu-backend
     backend/venv/bin/python -m pytest tests/test_knowledge_graph/test_integration_warehouse.py -v
@@ -25,14 +25,14 @@ from app.models.knowledge_catalog import KBColumnMeta, KBTableMeta, KBTableRelat
 from app.services.knowledge_graph.catalog_indexer import index_kb_catalog
 from app.services.knowledge_graph.schema_linker import link_schema
 
-EDIA_MYSQL_URL = os.getenv("EDIA_MYSQL_URL", "").strip()
+Acme_MYSQL_URL = os.getenv("Acme_MYSQL_URL", "").strip()
 
 pytestmark = [
     pytest.mark.integration,
     pytest.mark.asyncio,
     pytest.mark.skipif(
-        not EDIA_MYSQL_URL,
-        reason="EDIA_MYSQL_URL not set — warehouse not reachable in this environment",
+        not Acme_MYSQL_URL,
+        reason="Acme_MYSQL_URL not set — warehouse not reachable in this environment",
     ),
 ]
 
@@ -68,12 +68,12 @@ async def test_full_catalog_flow(db):
     """End-to-end: index the real warehouse, then link a real question."""
     from app.config import settings
 
-    conn = _parse_url(EDIA_MYSQL_URL)
+    conn = _parse_url(Acme_MYSQL_URL)
     kb = KnowledgeBase(
         id=str(uuid.uuid4()),
         app_id="test-app",
         org_id="test-org",
-        name="aipdp_data_warehouse_prod-integration",
+        name="demo_warehouse_prod-integration",
         source_kind="db",
         db_type="mysql",
         host=conn["host"],
@@ -122,12 +122,12 @@ async def test_full_catalog_flow(db):
     assert result is not None, "link_schema returned None for a populated catalog"
     assert result.get("tables"), "expected at least one retrieved table"
     top_tables = [t["table_name"] for t in result["tables"]]
-    # md_t_lz_price is the EDIA price table — should surface in the top-K results.
-    assert any("md_t_lz_price" in name for name in top_tables), (
-        f"md_t_lz_price not in top matches: {top_tables[:8]}"
+    # md_market_price is the Acme price table — should surface in the top-K results.
+    assert any("md_market_price" in name for name in top_tables), (
+        f"md_market_price not in top matches: {top_tables[:8]}"
     )
     slice_text = result.get("slice_text") or ""
     assert len(slice_text) > 0, "slice_text should be non-empty"
-    assert "CREATE TABLE" in slice_text or "md_t_lz_price" in slice_text, (
+    assert "CREATE TABLE" in slice_text or "md_market_price" in slice_text, (
         "slice_text should contain DDL or the matched table"
     )

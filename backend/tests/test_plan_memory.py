@@ -1,6 +1,6 @@
 """Plan memory — one business question must not answer differently each run.
 
-The failure this covers (2026-09-18, live, aipdp_data_warehouse_prod): "contract
+The failure this covers (2026-09-18, live, demo_warehouse_prod): "contract
 execution status" resolved to FCLOSESTATUS on one run and FDOCUMENTSTATUS on the
 next. Both plausible, only one right, two different numbers for the same
 business question. Nothing in the platform remembered how a question had been

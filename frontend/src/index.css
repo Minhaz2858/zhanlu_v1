@@ -151,7 +151,7 @@
   scrollbar-color: hsl(0 0% 22%) transparent;
 }
 
-/* ── Market Dashboard Overview (ported from EDIA_5.1.2) ───────
+/* ── Market Dashboard Overview (ported from Acme_5.1.2) ───────
    The overview UI in MarketDashboard/components/OverviewDashboard.jsx uses
    semantic class names (.overview-product-unit, .overview-regional-row, …)
    so it can be reskinned for both light and dark without rewriting JSX.

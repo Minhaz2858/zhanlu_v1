@@ -45,7 +45,7 @@ def test_fetch_series_sql_uses_mysql_backticks_for_mysql_kb(monkeypatch):
 
     fe = ForecastEngine(fake_db)
     target = _make_target(
-        "tgt-1", table="lz_v_裂解c5_data",
+        "tgt-1", table="v_demo_data",
         time_col="biz_date(业务日期)", measure="tax_price(含税单价)",
         dims=["material_name(产品名称)"],
     )

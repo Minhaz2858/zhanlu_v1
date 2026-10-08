@@ -56,7 +56,7 @@ def _make_payload():
     )
     return ReportCardPayload(
         title="E2E test — top materials",
-        source="erp_v_sale_orderentry",
+        source="v_sale_order",
         generated_at="2026-07-13T08:30:00Z",
         summary="Sample summary for the e2e test.",
         kpis=[

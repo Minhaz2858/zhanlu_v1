@@ -66,7 +66,7 @@ def _linear_slope(values: list[float]) -> float:
 def _compute_for_product(target: ForecastTarget) -> Optional[ForecastRun]:
     """Compute a simple forecast for a single product and persist it as ForecastRun."""
     db = target._sa_instance_state.session  # type: ignore[attr-defined]
-    strategy = get_datasource(target.datasource.get("source", "edia_mysql"))
+    strategy = get_datasource(target.datasource.get("source", "mysql"))
     y = strategy.fetch(target, db)
     if y is None or len(y.dropna()) < MIN_HISTORY:
         logger.warning("%s: insufficient history (%d rows, need %d) — skipping",
@@ -194,9 +194,9 @@ def main(product_keys: list[str]) -> int:
 
 if __name__ == "__main__":
     keys = sys.argv[1:] or [
-        "ecisco.crude_oil",
-        "ecisco.naphtha",
-        "ecisco.cracked_c5",
-        "ecisco.cracked_c9",
+        "acme.product_e",
+        "acme.product_c",
+        "acme.cracked_c5",
+        "acme.cracked_c9",
     ]
     main(keys)

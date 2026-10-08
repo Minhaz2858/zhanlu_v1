@@ -43,7 +43,7 @@ class TestFeedstockLoader:
 
     def test_no_engine_returns_empty_df(self):
         loader = FeedstockLoader(engine=None)
-        df = loader.load(["naphtha"], date(2026, 7, 1), date(2026, 7, 30))
+        df = loader.load(["product_c"], date(2026, 7, 1), date(2026, 7, 30))
         assert df.empty
 
     @patch("app.services.forecasting.features.exogenous_loaders._resolve_mysql_engine")
@@ -61,8 +61,8 @@ class TestFeedstockLoader:
         mock_conn.execute.return_value.fetchall.return_value = rows
 
         loader = FeedstockLoader(engine=mock_engine)
-        df = loader.load(["naphtha"], date(2026, 7, 1), date(2026, 7, 3))
-        assert "naphtha" in df.columns
+        df = loader.load(["product_c"], date(2026, 7, 1), date(2026, 7, 3))
+        assert "product_c" in df.columns
         assert len(df) == 3
 
 

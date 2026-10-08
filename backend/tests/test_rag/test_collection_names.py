@@ -26,7 +26,7 @@ from app.services.rag.collection_names import (
 
 class TestCollectionNames:
     def test_nine_collections_defined(self):
-        """Exactly 9 semantic collections per EDIA design."""
+        """Exactly 9 semantic collections per Acme design."""
         assert len(COLLECTION_SPECS) == 9
 
     def test_all_collection_names_match_specs(self):

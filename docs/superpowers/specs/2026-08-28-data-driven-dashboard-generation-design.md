@@ -57,7 +57,7 @@ The entire feature must work against ANY datasource a user binds — MySQL,
 PostgreSQL, or anything the QueryService supports. Concretely:
 
 - **No hardcoded identifiers.** No table names, column names, or schema names
-  from this project's ERP/EDIA demo data (e.g. `erp_v_sale_orderentry`,
+  from this project's ERP/Acme demo data (e.g. `v_sale_order`,
   `PLANDATE`, `FALLAMOUNT`) may appear in profiler code, prompts, or defaults.
 - **Identifiers come from the schema, at runtime.** The agent obtains real table
   and column names via `describe_schema` (existing, already DB-agnostic), then
@@ -198,8 +198,8 @@ choose chart types:
   contain ZERO hardcoded table/column identifiers (assert no demo table names in
   source). Dialect-tolerant date detection (MySQL date/datetime, Postgres
   timestamp).
-- e2e: profile `erp_v_sale_orderentry` through the tool handler against the
-  bound Ecisco datasource; assert the JSON shape (row_count, per-column
+- e2e: profile `v_sale_order` through the tool handler against the
+  bound Acme datasource; assert the JSON shape (row_count, per-column
   cardinality/null_pct/min/max/top_values/shape/status) and that a broken table
   name returns `error` status. Verify in browser that Empty cards show reasons.
 - The validation-byproduct path is covered implicitly: profiling a table the

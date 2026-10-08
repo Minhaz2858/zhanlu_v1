@@ -51,7 +51,7 @@ class TestWorkflowBuilderExemption:
         "It should have: a chat trigger node; an LLM node that classifies the question "
         "into exactly one of SALES, CUSTOMERS, or GENERAL; a switch node that routes on "
         "that classification; a database query node in natural language mode on the "
-        "aipdp_data_warehouse_prod database for the SALES branch; a database query node "
+        "demo_warehouse_prod database for the SALES branch; a database query node "
         "for the CUSTOMERS branch; an agent node using general_assistant for the GENERAL "
         "branch; an LLM node that merges the branch answer; and a markdown output node. "
         "Connect everything in order."
@@ -200,7 +200,7 @@ class TestFileArtifactCreated:
             "arguments_string": (
                 '{"name": "Daily Sales Data Sync", "type": "data_sync", '
                 '"output_format": "html", "schedule": "0 8 * * *", '
-                '"project": "Ecisco BI"}'
+                '"project": "Acme BI"}'
             ),
             "results": '{"success": true, "task": {...}}',
         }]
@@ -459,7 +459,7 @@ class TestFileTurnGuard:
             "arguments_string": (
                 '{"name": "Daily Sales Data Sync", "type": "data_sync", '
                 '"output_format": "html", "schedule": "0 8 * * *", '
-                '"project": "Ecisco BI"}'
+                '"project": "Acme BI"}'
             ),
             "results": '{"success": true, "task": {...}}',
         }]

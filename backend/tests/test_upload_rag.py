@@ -79,7 +79,7 @@ def rag_env(monkeypatch, tmp_path):
 
 
 LONG_TEXT = (
-    "The quarterly contract review covers pricing for DCPD resin across "
+    "The quarterly contract review covers pricing for PRODUCT_B resin across "
     "the C5/C9 segments. " * 40
 )
 
@@ -91,10 +91,10 @@ class TestIndexAndRetrieve:
         )
         assert n > 0
         chunks = upload_rag.retrieve_upload_chunks(
-            "sess-1", "org-1", "DCPD resin pricing C5 C9"
+            "sess-1", "org-1", "PRODUCT_B resin pricing C5 C9"
         )
         assert chunks, "expected at least one retrieved chunk"
-        assert any("DCPD" in c["text"] for c in chunks)
+        assert any("PRODUCT_B" in c["text"] for c in chunks)
         assert all(c["metadata"]["session_id"] == "sess-1" for c in chunks)
 
     def test_session_isolation(self, rag_env):
@@ -102,7 +102,7 @@ class TestIndexAndRetrieve:
             "/api/uploads/a.txt", "sess-A", "org-1", LONG_TEXT, file_name="a.txt"
         )
         chunks_b = upload_rag.retrieve_upload_chunks(
-            "sess-B", "org-1", "DCPD resin pricing"
+            "sess-B", "org-1", "PRODUCT_B resin pricing"
         )
         assert chunks_b == []
 
@@ -116,7 +116,7 @@ class TestIndexAndRetrieve:
         assert n1 > 0
         assert n2 == n1
         chunks = upload_rag.retrieve_upload_chunks(
-            "sess-1", "org-1", "DCPD resin"
+            "sess-1", "org-1", "PRODUCT_B resin"
         )
         assert len(chunks) <= n1
 
@@ -166,16 +166,16 @@ class TestBuildBlock:
     def test_formats_passages_with_index_and_file(self):
         chunks = [
             {
-                "text": "DCPD pricing rose 12%",
+                "text": "PRODUCT_B pricing rose 12%",
                 "score": 0.81,
                 "metadata": {"file_name": "a.txt", "chunk_index": 3},
             }
         ]
-        block = upload_rag.build_retrieval_block("DCPD pricing", chunks)
+        block = upload_rag.build_retrieval_block("PRODUCT_B pricing", chunks)
         assert "[1]" in block
         assert "file=a.txt" in block
         assert "chunk=3" in block
-        assert "QUESTION: DCPD pricing" in block
+        assert "QUESTION: PRODUCT_B pricing" in block
         assert "do not fabricate" in block
 
 
@@ -193,12 +193,12 @@ class TestScopeIsolation:
             file_name="b.txt", agent="agent-beta",
         )
         chunks_a = upload_rag.retrieve_upload_chunks(
-            "sess-1", "org-1", "DCPD resin", agent="agent-alpha"
+            "sess-1", "org-1", "PRODUCT_B resin", agent="agent-alpha"
         )
         assert chunks_a
         assert all(c["metadata"]["agent"] == "agent-alpha" for c in chunks_a)
         chunks_b = upload_rag.retrieve_upload_chunks(
-            "sess-1", "org-1", "DCPD resin", agent="agent-beta"
+            "sess-1", "org-1", "PRODUCT_B resin", agent="agent-beta"
         )
         assert chunks_b
         assert all(c["metadata"]["agent"] == "agent-beta" for c in chunks_b)
@@ -213,7 +213,7 @@ class TestScopeIsolation:
             file_name="b.txt", agent="agent-alpha", project_id="proj-Y",
         )
         chunks_x = upload_rag.retrieve_upload_chunks(
-            "sess-1", "org-1", "DCPD resin", project_id="proj-X"
+            "sess-1", "org-1", "PRODUCT_B resin", project_id="proj-X"
         )
         assert chunks_x
         assert all(c["metadata"]["project_id"] == "proj-X" for c in chunks_x)
@@ -231,12 +231,12 @@ class TestScopeIsolation:
             "/api/uploads/c.txt", "sess-3", "org-1", LONG_TEXT,
             file_name="c.txt", project_id="proj-Z",
         )
-        all_x = upload_rag.retrieve_project_chunks("proj-X", "org-1", "DCPD resin")
+        all_x = upload_rag.retrieve_project_chunks("proj-X", "org-1", "PRODUCT_B resin")
         assert all_x
         assert all(c["metadata"]["project_id"] == "proj-X" for c in all_x)
         sessions = {c["metadata"]["session_id"] for c in all_x}
         assert sessions == {"sess-1", "sess-2"}
-        z = upload_rag.retrieve_project_chunks("proj-Z", "org-1", "DCPD resin")
+        z = upload_rag.retrieve_project_chunks("proj-Z", "org-1", "PRODUCT_B resin")
         assert z
         assert all(c["metadata"]["session_id"] == "sess-3" for c in z)
 

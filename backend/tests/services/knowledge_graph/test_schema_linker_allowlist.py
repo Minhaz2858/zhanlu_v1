@@ -1,4 +1,4 @@
-"""Unit tests for the schema-linker allowlist (Ecisco BI 2026-08-25)."""
+"""Unit tests for the schema-linker allowlist (Acme BI 2026-08-25)."""
 from __future__ import annotations
 
 import uuid
@@ -32,7 +32,7 @@ def _enable():
     settings.SCHEMA_LINKER_ALLOWLIST_ENABLED = True
     settings.PROJECT_KNOWLEDGE_AGENT_NAMES = ["data_agent"]
     settings.SCHEMA_LINKER_TABLE_ALLOWLIST = [
-        "erp_v_sale_orderentry",
+        "v_sale_order",
         "erp_product_sales_details",
     ]
 
@@ -49,7 +49,7 @@ def test_resolve_returns_none_for_empty_kb_list(db):
     assert result is None
 
 
-def test_resolve_returns_allowlist_when_bound_to_ecisco_agent(db):
+def test_resolve_returns_allowlist_when_bound_to_acme_agent(db):
     """If any AgentApp named in ECISCO_BI_AGENT_NAMES is bound to one of
     the requested kb_ids, the allowlist is returned."""
     _enable()
@@ -59,17 +59,17 @@ def test_resolve_returns_allowlist_when_bound_to_ecisco_agent(db):
     db.add(AgentApp(
         id=agent_id,
         name="data_agent",
-        project_id="p_ecisco",
+        project_id="p_acme",
         knowledge_bases=[kb_id],
     ))
     db.commit()
     result = _resolve_table_allowlist_for_kb(db, [kb_id])
     assert result is not None
-    assert "erp_v_sale_orderentry" in result
+    assert "v_sale_order" in result
 
 
-def test_resolve_returns_none_for_non_ecisco_agent(db):
-    """A non-Ecisco-BI AgentApp bound to the KB should NOT trigger the
+def test_resolve_returns_none_for_non_acme_agent(db):
+    """A non-Acme-BI AgentApp bound to the KB should NOT trigger the
     allowlist (would constrain other projects)."""
     _enable()
     from app.models.agent_app import AgentApp
@@ -87,7 +87,7 @@ def test_resolve_returns_none_for_non_ecisco_agent(db):
 
 
 def test_resolve_uses_project_scoped_binding(db):
-    """Binding is project-scoped: an Ecisco agent whose project owns the
+    """Binding is project-scoped: an Acme agent whose project owns the
     KB triggers the allowlist even when the agent's JSON `knowledge_bases`
     column is empty (this deployment stores bindings on the KB row)."""
     _enable()
@@ -98,23 +98,23 @@ def test_resolve_uses_project_scoped_binding(db):
     db.add(AgentApp(
         id=agent_id,
         name="data_agent",
-        project_id="p_ecisco",
+        project_id="p_acme",
         knowledge_bases=[],  # empty JSON column — must still resolve
     ))
     db.add(KnowledgeBase(
         id=kb_id,
-        name="aipdp_data_warehouse_prod",
-        project_id="p_ecisco",
+        name="demo_warehouse_prod",
+        project_id="p_acme",
     ))
     db.commit()
     result = _resolve_table_allowlist_for_kb(db, [kb_id])
     assert result is not None
-    assert "erp_v_sale_orderentry" in result
+    assert "v_sale_order" in result
 
 
 def test_resolve_ignores_kbs_from_other_projects(db):
-    """A KB belonging to a different project must NOT trigger the Ecisco
-    allowlist even if the Ecisco agent row exists."""
+    """A KB belonging to a different project must NOT trigger the Acme
+    allowlist even if the Acme agent row exists."""
     _enable()
     from app.models.agent_app import AgentApp
     from app.models.knowledge_base import KnowledgeBase
@@ -123,7 +123,7 @@ def test_resolve_ignores_kbs_from_other_projects(db):
     db.add(AgentApp(
         id=agent_id,
         name="data_agent",
-        project_id="p_ecisco",
+        project_id="p_acme",
         knowledge_bases=[],
     ))
     db.add(KnowledgeBase(
@@ -149,11 +149,11 @@ def test_build_full_toc_filters_to_allowlist(db):
     db.add(AgentApp(
         id=str(uuid.uuid4()),
         name="data_agent",
-        project_id="p_ecisco",
+        project_id="p_acme",
         knowledge_bases=[],
     ))
-    db.add(KnowledgeBase(id=kb_id, name="wh", project_id="p_ecisco"))
-    for tname in ["erp_v_sale_orderentry", "erp_paez_t_lz_price", "actual_price"]:
+    db.add(KnowledgeBase(id=kb_id, name="wh", project_id="p_acme"))
+    for tname in ["v_sale_order", "erp_paez_t_lz_price", "actual_price"]:
         db.add(KBTableMeta(
             id=str(uuid.uuid4()),
             kb_id=kb_id,
@@ -165,7 +165,7 @@ def test_build_full_toc_filters_to_allowlist(db):
 
     toc = build_full_toc(db, [kb_id])
     names = [t["table_name"] for t in toc]
-    assert "erp_v_sale_orderentry" in names
+    assert "v_sale_order" in names
     # NOTE: "actual_price" IS in the reference app's 35-table allowlist;
     # the meaningful guard is the stale shadow table being excluded.
     assert "erp_paez_t_lz_price" not in names  # stale price table excluded
@@ -206,12 +206,12 @@ def test_get_selected_tables_ddl_filters_non_allowlisted(db):
     db.add(AgentApp(
         id=str(uuid.uuid4()),
         name="data_agent",
-        project_id="p_ecisco",
+        project_id="p_acme",
         knowledge_bases=[],
     ))
-    db.add(KnowledgeBase(id=kb_id, name="wh", project_id="p_ecisco"))
+    db.add(KnowledgeBase(id=kb_id, name="wh", project_id="p_acme"))
     meta_sales = KBTableMeta(
-        id=str(uuid.uuid4()), kb_id=kb_id, table_name="erp_v_sale_orderentry",
+        id=str(uuid.uuid4()), kb_id=kb_id, table_name="v_sale_order",
         schema_name="wh", table_type="VIEW",
     )
     meta_stale = KBTableMeta(
@@ -230,9 +230,9 @@ def test_get_selected_tables_ddl_filters_non_allowlisted(db):
     db.commit()
 
     ddl = get_selected_tables_ddl(
-        db, [kb_id], ["erp_v_sale_orderentry", "erp_paez_t_lz_price"]
+        db, [kb_id], ["v_sale_order", "erp_paez_t_lz_price"]
     )
-    assert "erp_v_sale_orderentry" in ddl
+    assert "v_sale_order" in ddl
     assert "erp_paez_t_lz_price" not in ddl
     assert "FAMOUNT" in ddl
     assert "F_PAEZ_DATE" not in ddl

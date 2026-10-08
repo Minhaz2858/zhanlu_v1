@@ -308,7 +308,7 @@ def db_path(tmp_path):
         INSERT INTO sales_orders VALUES
             ('C5 Resin', 120.5, '2026-01-05', 'East'),
             ('C5 Resin', 99.0, '2026-02-10', 'East'),
-            ('Isoprene', 250.0, '2026-03-15', 'West'),
+            ('Product_D', 250.0, '2026-03-15', 'West'),
             ('C5 Resin', NULL, '2026-04-20', NULL),
             ('C9 Resin', 88.0, '2026-05-25', 'East');
         """
@@ -807,7 +807,7 @@ def test_profiler_source_has_no_demo_identifiers():
     import pathlib
     src = pathlib.Path(__file__).parents[2] / "app" / "services" / "dashboard_profiler.py"
     text = src.read_text()
-    for bad in ("erp_v_sale_orderentry", "PLANDATE", "FALLAMOUNT", "FDATE", "forgid"):
+    for bad in ("v_sale_order", "PLANDATE", "FALLAMOUNT", "FDATE", "forgid"):
         assert bad not in text, f"hardcoded identifier leaked into profiler: {bad}"
 
 
@@ -835,7 +835,7 @@ git commit -m "test(profiler): DB-agnostic hardcoding guard"
 
 ## Task 8: e2e verification against the bound datasource
 
-**Objective:** Prove the tool works against the real bound Ecisco datasource and that it would have guided the existing sales dashboard.
+**Objective:** Prove the tool works against the real bound Acme datasource and that it would have guided the existing sales dashboard.
 
 **Files:**
 - None (verification only)
@@ -852,7 +852,7 @@ db = SessionLocal()
 async def main():
     r = await _profile_data(
         {'data_source_id': 'b1b9145d-5b6b-4c0e-ba82-919dde4620d7',
-         'table': 'erp_v_sale_orderentry', 'columns': ['PLANDATE', 'FALLAMOUNT', 'org_name', 'material_name']},
+         'table': 'v_sale_order', 'columns': ['PLANDATE', 'FALLAMOUNT', 'org_name', 'material_name']},
         db, '89c8dfc2-152c-423d-bc6d-44cb9e9619fd', {'conversation_id': 'x'},
     )
     import json; print(json.dumps(r, ensure_ascii=False, default=str, indent=1)[:1800])

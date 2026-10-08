@@ -132,7 +132,7 @@ class TestNightlyAutoPromotion:
         """If stacking MAPE is only marginally better, no promotion."""
         target = MagicMock()
         target.id = "t1"
-        target.product_key = "naphtha"
+        target.product_key = "product_c"
         target.model_config = {}
 
         shadow = MagicMock()
@@ -146,7 +146,7 @@ class TestNightlyAutoPromotion:
         """If stacking wins 3 consecutive nights with delta >= 1pp, promote."""
         target = MagicMock()
         target.id = "t1"
-        target.product_key = "naphtha"
+        target.product_key = "product_c"
         target.model_config = {}
 
         shadows = [
@@ -168,7 +168,7 @@ class TestNightlyAutoPromotion:
         """If the most recent run has delta < threshold, no promotion."""
         target = MagicMock()
         target.id = "t1"
-        target.product_key = "naphtha"
+        target.product_key = "product_c"
         target.model_config = {}
 
         shadows = [
@@ -185,7 +185,7 @@ class TestNightlyAutoPromotion:
         """If already promoted (ensemble_overrides source=stacking_meta), skip."""
         target = MagicMock()
         target.id = "t1"
-        target.product_key = "naphtha"
+        target.product_key = "product_c"
         target.model_config = {
             "ensemble_overrides": {"source": "stacking_meta", "weights": {"stacking": 0.6}},
         }

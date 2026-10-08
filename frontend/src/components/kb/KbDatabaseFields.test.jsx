@@ -31,7 +31,7 @@ describe('parseConnString — URL decoding', () => {
   it("decodes %40 (@) in --password= so the wizard sends the real password", () => {
     // The exact failure case from the bug report.
     const result = parseConnString(
-      'mysql -h 10.10.10.49 -P 3306 -u root --password=0Gg.B7c2%40tcX_jne6FMh aipdp_data_warehouse_prod'
+      'mysql -h 10.10.10.49 -P 3306 -u root --password=0Gg.B7c2%40tcX_jne6FMh demo_warehouse_prod'
     );
     expect(result).toEqual({
       db_type: 'mysql',
@@ -39,7 +39,7 @@ describe('parseConnString — URL decoding', () => {
       port: 3306,
       username: 'root',
       password: '0Gg.B7c2@tcX_jne6FMh',
-      database_name: 'aipdp_data_warehouse_prod',
+      database_name: 'demo_warehouse_prod',
     });
   });
 
@@ -144,10 +144,10 @@ describe('parseConnString — regression: existing behaviour still holds', () =>
 describe('parseSqlalchemyUrl — SQLAlchemy URL inputs', () => {
   it('handles mysql+pymysql URLs with URL-encoded password and query string', () => {
     // The exact failure case from the bug report: user pasted the
-    // .env's EDIA_MYSQL_URL into the wizard and the password field
+    // .env's Acme_MYSQL_URL into the wizard and the password field
     // ended up showing the literal ``%40`` instead of ``@``.
     const result = parseSqlalchemyUrl(
-      'mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/aipdp_data_warehouse_prod?charset=utf8mb4'
+      'mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/demo_warehouse_prod?charset=utf8mb4'
     );
     expect(result).toEqual({
       db_type: 'mysql',
@@ -155,13 +155,13 @@ describe('parseSqlalchemyUrl — SQLAlchemy URL inputs', () => {
       port: 3306,
       username: 'root',
       password: '0Gg.B7c2@tcX_jne6FMh',
-      database_name: 'aipdp_data_warehouse_prod',
+      database_name: 'demo_warehouse_prod',
     });
   });
 
   it('parseConnString routes SQLAlchemy URLs through parseSqlalchemyUrl', () => {
     const result = parseConnString(
-      'mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/aipdp_data_warehouse_prod?charset=utf8mb4'
+      'mysql+pymysql://root:0Gg.B7c2%40tcX_jne6FMh@10.10.10.49:3306/demo_warehouse_prod?charset=utf8mb4'
     );
     expect(result).toEqual({
       db_type: 'mysql',
@@ -169,7 +169,7 @@ describe('parseSqlalchemyUrl — SQLAlchemy URL inputs', () => {
       port: 3306,
       username: 'root',
       password: '0Gg.B7c2@tcX_jne6FMh',
-      database_name: 'aipdp_data_warehouse_prod',
+      database_name: 'demo_warehouse_prod',
     });
   });
 

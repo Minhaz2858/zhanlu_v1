@@ -28,10 +28,10 @@ class TestTopDownAllocation:
     def test_full_top_down_no_child_forecasts(self):
         """When no child forecasts, allocation uses implied forecast (parent * 1+margin)."""
         parent_forecast = [100.0, 105.0, 110.0]
-        result = allocate_top_down("naphtha", parent_forecast)
+        result = allocate_top_down("product_c", parent_forecast)
 
         assert isinstance(result, TopDownAllocationResult)
-        assert result.parent_key == "naphtha"
+        assert result.parent_key == "product_c"
         assert len(result.child_allocations) > 0
 
         # C5 cracked margin is 0.20 → implied = parent * 1.20
@@ -47,7 +47,7 @@ class TestTopDownAllocation:
             "c5_cracked": [130.0, 135.0, 140.0],  # higher than implied
         }
 
-        result = allocate_top_down("naphtha", parent_forecast, child_forecasts, blend_ratio=0.5)
+        result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=0.5)
         c5 = result.child_allocations["c5_cracked"]
 
         # implied[0] = 100 * 1.20 = 120
@@ -60,7 +60,7 @@ class TestTopDownAllocation:
         parent_forecast = [100.0]
         child_forecasts = {"c5_cracked": [150.0]}
 
-        result = allocate_top_down("naphtha", parent_forecast, child_forecasts, blend_ratio=0.0)
+        result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=0.0)
         assert result.child_allocations["c5_cracked"][0] == pytest.approx(150.0, abs=0.1)
 
     def test_blend_ratio_1_uses_implied_forecast(self):
@@ -68,7 +68,7 @@ class TestTopDownAllocation:
         parent_forecast = [100.0]
         child_forecasts = {"c5_cracked": [150.0]}
 
-        result = allocate_top_down("naphtha", parent_forecast, child_forecasts, blend_ratio=1.0)
+        result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=1.0)
         # implied = 100 * 1.20 = 120
         assert result.child_allocations["c5_cracked"][0] == pytest.approx(120.0, abs=0.1)
 
@@ -77,7 +77,7 @@ class TestTopDownAllocation:
         parent_forecast = [100.0, 105.0, 110.0]
         child_forecasts = {"c5_cracked": [130.0, 135.0]}  # length 2 vs 3
 
-        result = allocate_top_down("naphtha", parent_forecast, child_forecasts)
+        result = allocate_top_down("product_c", parent_forecast, child_forecasts)
         # Should use implied (120, 126, 132)
         assert len(result.child_allocations["c5_cracked"]) == 3
         assert result.child_allocations["c5_cracked"][0] == pytest.approx(120.0, abs=0.1)
@@ -92,7 +92,7 @@ class TestTopDownAllocation:
         custom_margins = {"custom_product": 0.30}
 
         result = allocate_top_down(
-            "naphtha", parent_forecast,
+            "product_c", parent_forecast,
             yield_ratios=custom_ratios,
             margin_premiums=custom_margins,
         )
@@ -111,7 +111,7 @@ class TestTopDownAllocation:
         parent_forecast = [100.0]
         child_forecasts = {"c5_cracked": [200.0]}  # way above implied 120
 
-        result = allocate_top_down("naphtha", parent_forecast, child_forecasts, blend_ratio=0.5)
+        result = allocate_top_down("product_c", parent_forecast, child_forecasts, blend_ratio=0.5)
         assert len(result.adjustments_made) > 0
         adj = result.adjustments_made[0]
         assert adj["type"] == "top_down_adjustment"
@@ -129,7 +129,7 @@ class TestMiddleOutConstraint:
         """Without parent forecast, only sibling ordering is checked."""
         sibling_forecasts = {
             "c5_cracked": [120.0, 125.0],
-            "isoprene": [150.0, 155.0],
+            "product_d": [150.0, 155.0],
         }
         result = constrain_middle_out("c5_derivatives", sibling_forecasts)
         assert isinstance(result, MiddleOutConstraintResult)
@@ -139,7 +139,7 @@ class TestMiddleOutConstraint:
     def test_excessive_premium_detected(self):
         """If sibling > 2x parent, flag excessive premium."""
         sibling_forecasts = {
-            "isoprene": [250.0],  # 2.5x parent
+            "product_d": [250.0],  # 2.5x parent
         }
         parent_forecast = [100.0]
 
@@ -165,8 +165,8 @@ class TestMiddleOutConstraint:
     def test_sibling_inversion_detected(self):
         """If one sibling is >3x another, flag inversion."""
         sibling_forecasts = {
-            "isoprene": [300.0, 310.0],
-            "c5_cracked": [80.0, 85.0],  # isoprene/c5 ≈ 3.75
+            "product_d": [300.0, 310.0],
+            "c5_cracked": [80.0, 85.0],  # product_d/c5 ≈ 3.75
         }
 
         result = constrain_middle_out("c5_derivatives", sibling_forecasts)
@@ -176,7 +176,7 @@ class TestMiddleOutConstraint:
         """When sibling ratio is reasonable, no inversion flag."""
         sibling_forecasts = {
             "c5_cracked": [120.0, 125.0],
-            "isoprene": [150.0, 155.0],  # ratio ≈ 0.8 (isoprene/c5)
+            "product_d": [150.0, 155.0],  # ratio ≈ 0.8 (product_d/c5)
         }
 
         result = constrain_middle_out("c5_derivatives", sibling_forecasts)
@@ -186,7 +186,7 @@ class TestMiddleOutConstraint:
         """If no clamping needed, adjusted == original."""
         sibling_forecasts = {
             "c5_cracked": [120.0, 125.0],
-            "isoprene": [150.0, 155.0],
+            "product_d": [150.0, 155.0],
         }
         result = constrain_middle_out("c5_derivatives", sibling_forecasts)
         for key in sibling_forecasts:

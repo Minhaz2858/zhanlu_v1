@@ -317,7 +317,7 @@ def backfill_realized_prices(db) -> dict:
 
     for log in null_t_logs:
         try:
-            # Use md_t_lz_price (main price table) for all products
+            # Use md_market_price (main price table) for all products
             # The product_id in decision logs maps to FMATERIAL_NAME
             target_date = log.as_of_date
             product_name = log.product_id
@@ -326,7 +326,7 @@ def backfill_realized_prices(db) -> dict:
                 from sqlalchemy import text
                 row = conn.execute(
                     text(
-                        "SELECT `FDATE`, `FTAXPRICE` FROM `md_t_lz_price` "
+                        "SELECT `FDATE`, `FTAXPRICE` FROM `md_market_price` "
                         "WHERE `FMATERIAL_NAME` = :product "
                         "AND `FDATE` <= :target_date "
                         "AND `FDATE` >= :min_date "
@@ -372,7 +372,7 @@ def backfill_realized_prices(db) -> dict:
                 from sqlalchemy import text
                 row = conn.execute(
                     text(
-                        "SELECT `FDATE`, `FTAXPRICE` FROM `md_t_lz_price` "
+                        "SELECT `FDATE`, `FTAXPRICE` FROM `md_market_price` "
                         "WHERE `FMATERIAL_NAME` = :product "
                         "AND `FDATE` <= :target_date "
                         "AND `FDATE` >= :min_date "

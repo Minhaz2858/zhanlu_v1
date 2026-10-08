@@ -183,7 +183,7 @@ def discover_and_seed_sku_targets(
                 product_key=product_key,
                 name=f"{family} SKU {code}",
                 datasource={
-                    "source": "edia_mysql",
+                    "source": "mysql",
                     "table": table_name,
                     "time_col": "PLANDATE",
                     "measure": "FTAXPRICE",

@@ -3,7 +3,7 @@
 The retriever provides a stable interface to query a RAG knowledge base
 and get back ``RetrievedChunk`` objects suitable for prompt injection.
 
-Public API (port of EDIA 5.1.2's rag_retriever, adapted to zhanlu's
+Public API (port of Acme 5.1.2's rag_retriever, adapted to zhanlu's
 ``app.services.rag.knowledge_base``):
     retrieve(query, n_results=3, collection="industry_reports")
     retrieve_rich(query, n_results=3, collection="industry_reports")
@@ -131,7 +131,7 @@ class TestRetrieve:
         assert retrieve("   ") == []
 
     def test_returns_chunks(self, mock_kb):
-        out = retrieve("what is the price of DCPD?", n_results=2)
+        out = retrieve("what is the price of PRODUCT_B?", n_results=2)
         assert len(out) > 0
         assert all(isinstance(c, RetrievedChunk) for c in out)
 
@@ -141,7 +141,7 @@ class TestRetrieve:
         assert mock_kb.collection.query.called
 
     def test_known_collections_constant(self):
-        # KNOWN_COLLECTIONS must include the 9 EDIA semantic collections
+        # KNOWN_COLLECTIONS must include the 9 Acme semantic collections
         assert "industry_reports" in KNOWN_COLLECTIONS
         assert "weekly_reports" in KNOWN_COLLECTIONS
         assert "past_decisions" in KNOWN_COLLECTIONS

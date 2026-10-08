@@ -1,6 +1,6 @@
 # Schema-Aware Multi-Table Analysis — Design
 
-**Date:** 2026-08-17 · **Scope:** `ecisco_bi_assistant` first · **Status:** accepted
+**Date:** 2026-08-17 · **Scope:** `acme_bi_assistant` first · **Status:** accepted
 
 ## Goal
 Agent discovers DB structure at runtime and reasons about joins. Zero business-keyword
@@ -60,7 +60,7 @@ router changes.
 
 ## Eval
 ~20 questions across 3 synthetic schemas (ERP / SaaS / German names) + live MySQL warehouse
-(`aipdp_data_warehouse_prod`). Metrics: hallucinated-column rate, join correctness vs gold,
+(`demo_warehouse_prod`). Metrics: hallucinated-column rate, join correctness vs gold,
 tool iterations vs `describe_all` baseline.
 
 ## §6 Ranking guard (upsert, explicit user requirement)

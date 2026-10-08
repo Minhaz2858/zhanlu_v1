@@ -74,7 +74,7 @@ def _make_series(n: int = 120, seed: int = 42) -> pd.Series:
     """Generate a deterministic daily series with seasonality + trend.
 
     Uses integer index (not DatetimeIndex) to match production: the
-    EdiaMysqlStrategy fetcher returns integer-indexed series, and
+    MysqlStrategy fetcher returns integer-indexed series, and
     SeasonalNaive has a known issue with DatetimeIndex frequency inference.
     """
     rng = np.random.RandomState(seed)

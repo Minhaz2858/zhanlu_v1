@@ -1450,6 +1450,25 @@ class Settings(BaseSettings):
     # ~len(probes) LLM calls per agent per cycle — enable in production
     # once the eval baseline is stable.
     RED_TEAM_ENABLED: bool = False
+    # ── IBM multi-agent system fixes (2026-10-08) ──
+    # PLAN_DAG_PARALLEL_ENABLED: execute independent ready plan nodes in
+    #   parallel batches (isolated DB sessions per node) instead of strictly
+    #   serially. Dependent stages, adaptive checkpoints and error-replan
+    #   still run serially. PLAN_DAG_MAX_CONCURRENT bounds each batch.
+    PLAN_DAG_PARALLEL_ENABLED: bool = True
+    PLAN_DAG_MAX_CONCURRENT: int = 4
+    # DELEGATE_MAX_CONCURRENT: bounds delegate_task batch fan-out (was
+    #   unbounded asyncio.gather — every sub-agent launched at once).
+    DELEGATE_MAX_CONCURRENT: int = 4
+    # DELEGATE_CONTEXT_INHERITANCE: inject a compact digest of the parent
+    #   conversation into every sub-agent's system prompt (shared knowledge
+    #   base — sub-agents no longer start from zero context).
+    DELEGATE_CONTEXT_INHERITANCE: bool = True
+    # DELEGATE_VERIFY_ENABLED: optional LLM-judge quality gate attached to
+    #   sub-agent results before the parent consumes them (one judge call
+    #   per delegation — enable when sub-agent quality matters more than
+    #   latency).
+    DELEGATE_VERIFY_ENABLED: bool = False
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read

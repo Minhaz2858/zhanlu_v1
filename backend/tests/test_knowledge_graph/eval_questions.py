@@ -8,7 +8,7 @@ Used by test_eval_table_recall.py — run manually, not in the CI suite.
 EVAL_QUESTIONS: list[dict] = [
     {
         "question": "最近乙烯华东市场价格走势如何？",
-        "expected_tables": ["md_t_lz_price", "sale_erp_v_ethylene_price"],
+        "expected_tables": ["md_market_price", "sale_erp_v_ethylene_price"],
     },
     {
         "question": "上个月产品库存变化趋势是怎样的？",
@@ -23,7 +23,7 @@ EVAL_QUESTIONS: list[dict] = [
         "expected_tables": ["erp_t_sp_instock", "erp_t_sp_instockentry"],
     },
     {
-        "question": "惠州工厂最近的销售量和成交价？",
+        "question": "示例工厂最近的销售量和成交价？",
         "expected_tables": ["erp_v_sale_huizhou"],
     },
     {

@@ -148,7 +148,7 @@ class TestAutoPromoteOnShare:
     def test_share_personal_project_flips_to_company(self, db):
         admin = _make_user(db, "admin@test.com", role="admin", name="Admin")
         user2 = _make_user(db, "user2@test.com", role="user", name="User2")
-        proj = _make_project(db, "Ecisco BI", admin.id, is_system=True, resource_type="personal")
+        proj = _make_project(db, "Acme BI", admin.id, is_system=True, resource_type="personal")
         assert proj.resource_type == "personal"
 
         _share_and_promote(db, proj, "project", admin.id, user2.id)

@@ -234,7 +234,7 @@ GROUP BY region
 
 | # | Item | When to ask | Example options to present |
 |---|------|-------------|----------------------------|
-| 1 | **Datasource** | >1 DB KB available and none named (or none bound to the active project) | "A) ERP  B) test2  C) aipdp_data_warehouse" |
+| 1 | **Datasource** | >1 DB KB available and none named (or none bound to the active project) | "A) ERP  B) test2  C) acme_data_warehouse" |
 | 2 | **Time window / duration** | User didn't state a range | "A) Last 7 days  B) Last 30 days  C) Last 90 days  D) This year  E) Custom" — also drives the `:from`/`:to` default the viewer opens with |
 | 3 | **Key metrics & columns** | Request is vague about what to measure ("show sales") | "Which metrics? A) Revenue + order count  B) Revenue by region  C) Top products by units" |
 | 4 | **Filter / drill dimensions** | Not stated | "Which dimensions do you want to filter/drill by? A) Region  B) Category  C) Status  D) Date" — drives `options.dimensions` + `:dim_<token>` authoring |

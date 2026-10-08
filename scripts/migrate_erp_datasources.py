@@ -21,8 +21,8 @@ os.environ.setdefault("SQLALCHEMY_WARN_20", "0")
 def main():
     from app.database import SessionLocal
     from app.models.forecasting import ForecastTarget
-    from app.services.forecasting.seed_ecisco_targets import (
-        ECISCO_FORECAST_TARGETS,
+    from app.services.forecasting.seed_acme_targets import (
+        FORECAST_TARGETS,
         discover_and_seed_sku_targets,
     )
 
@@ -34,7 +34,7 @@ def main():
         print("=" * 70)
 
         updated = 0
-        for spec in ECISCO_FORECAST_TARGETS:
+        for spec in FORECAST_TARGETS:
             pk = spec["product_key"]
             existing = db.query(ForecastTarget).filter(
                 ForecastTarget.product_key == pk,
@@ -68,8 +68,8 @@ def main():
         print("=" * 70)
         print("STEP 2: Insert missing static targets")
         print("=" * 70)
-        from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
-        n_static = seed_ecisco_forecast_targets(db)
+        from app.services.forecasting.seed_acme_targets import seed_acme_forecast_targets
+        n_static = seed_acme_forecast_targets(db)
         print(f"  Inserted {n_static} new static targets.\n")
 
         # 3. Run dynamic SKU discovery (creates targets for new ERP tables)
@@ -81,10 +81,10 @@ def main():
 
         # 4. Summary
         print("=" * 70)
-        print("SUMMARY: All ecisco.* forecast targets")
+        print("SUMMARY: All acme.* forecast targets")
         print("=" * 70)
         all_targets = db.query(ForecastTarget).filter(
-            ForecastTarget.product_key.like("ecisco.%"),
+            ForecastTarget.product_key.like("acme.%"),
             ForecastTarget.is_deleted == False,  # noqa: E712
         ).order_by(ForecastTarget.report_order, ForecastTarget.product_key).all()
 

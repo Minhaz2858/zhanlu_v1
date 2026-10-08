@@ -304,7 +304,7 @@ body {
 
 /* ═══════════════════════════════════════════════════════════════════════
    CEO STYLE (决策中心 · dark petroleum decision center) — applied via
-   .ceo-bi on <html> when spec style="ceo". Ported from the Ecisco CEO
+   .ceo-bi on <html> when spec style="ceo". Ported from the Acme CEO
    Command Center reference: near-black ink palette, amber/gold decision
    accent, subtle card rims, live-pulse header dot, and an alert-strip
    treatment for the insight cards (left-border severity rail). Western
@@ -440,7 +440,7 @@ body {
 
 /* ═══════════════════════════════════════════════════════════════════════
    EDITORIAL STYLE (light print report) — applied via .editorial-bi on
-   <html> when spec style="editorial". Ported from the EDIA Sales Report
+   <html> when spec style="editorial". Ported from the Acme Sales Report
    reference: warm paper background, cream cards, Fraunces serif display,
    Newsreader body, IBM Plex Mono numerals + labels, hairline rules, and a
    deep-maroon accent. Reads like a printed executive report.
@@ -585,7 +585,7 @@ body {
 /* ═══════════════════════════════════════════════════════════════════════
    DECISION-CENTER INFORMATION ARCHITECTURE (2026-08-29)
    Typed AI-analysis panels + multi-page tabs + executive header/footer.
-   Ported from the Ecisco CEO Command Center reference (ecisco_ceo_dashboard.html).
+   Ported from the Acme CEO Command Center reference (acme_ceo_dashboard.html).
    Token-driven (.dc-* classes use --ds-* vars) so every style inherits:
    standard / chinese_bi / ceo / editorial.
    ═══════════════════════════════════════════════════════════════════════ */

@@ -62,9 +62,9 @@ class TestForecastExternalSeries:
 
     def test_create_minimal_series(self, db):
         s = ForecastExternalSeries(
-            series_key="op_rate_isoprene",
+            series_key="op_rate_product_d",
             domain="operating_rate",
-            product_key="isoprene",
+            product_key="product_d",
             unit="%",
             source="csv_upload",
             cadence="weekly",
@@ -75,9 +75,9 @@ class TestForecastExternalSeries:
 
         assert s.id is not None
         assert len(s.id) == 36  # UUID
-        assert s.series_key == "op_rate_isoprene"
+        assert s.series_key == "op_rate_product_d"
         assert s.domain == "operating_rate"
-        assert s.product_key == "isoprene"
+        assert s.product_key == "product_d"
         assert s.unit == "%"
         assert s.source == "csv_upload"
         assert s.cadence == "weekly"
@@ -130,14 +130,14 @@ class TestForecastExternalSeries:
 
     def test_to_dict_round_trip(self, db):
         s = ForecastExternalSeries(
-            series_key="import_cfr_isoprene", domain="import_price",
-            product_key="isoprene", unit="CNY/kg", source="csv_upload",
+            series_key="import_cfr_product_d", domain="import_price",
+            product_key="product_d", unit="CNY/kg", source="csv_upload",
             cadence="daily", row_count=42,
         )
         db.add(s)
         db.commit()
         d = s.to_dict()
-        assert d["series_key"] == "import_cfr_isoprene"
+        assert d["series_key"] == "import_cfr_product_d"
         assert d["domain"] == "import_price"
         assert d["row_count"] == 42
         assert d["unit"] == "CNY/kg"
@@ -153,7 +153,7 @@ class TestForecastExternalPoint:
     def test_create_point(self, db):
         s = ForecastExternalSeries(
             series_key="op_rate_iso", domain="operating_rate",
-            product_key="isoprene", source="csv_upload",
+            product_key="product_d", source="csv_upload",
         )
         db.add(s)
         db.commit()
@@ -174,7 +174,7 @@ class TestForecastExternalPoint:
         """Two points with same (series_id, date) violate unique constraint."""
         s = ForecastExternalSeries(
             series_key="op_rate_iso2", domain="operating_rate",
-            product_key="isoprene", source="csv_upload",
+            product_key="product_d", source="csv_upload",
         )
         db.add(s)
         db.commit()
@@ -196,7 +196,7 @@ class TestForecastExternalPoint:
     def test_metadata_optional(self, db):
         s = ForecastExternalSeries(
             series_key="inv_dl_iso", domain="inventory",
-            product_key="isoprene", source="csv_upload",
+            product_key="product_d", source="csv_upload",
         )
         db.add(s)
         db.commit()
@@ -214,7 +214,7 @@ class TestForecastExternalPoint:
         """Loader queries by series_id + date range; verify the shape."""
         s = ForecastExternalSeries(
             series_key="op_rate_iso3", domain="operating_rate",
-            product_key="isoprene", source="csv_upload",
+            product_key="product_d", source="csv_upload",
         )
         db.add(s)
         db.commit()

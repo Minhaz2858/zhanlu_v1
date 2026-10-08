@@ -2,11 +2,11 @@
 
 > Status: Approved (Approach A)
 > Date: 2026-08-15
-> Owner: Ecisco BI agent (project-based)
+> Owner: Acme BI agent (project-based)
 
 ## 1. Problem
 
-The "Ecisco BI" project agent fails at CEO-level business questions. Two observed failure traces:
+The "Acme BI" project agent fails at CEO-level business questions. Two observed failure traces:
 
 1. **"Give me my supply chain data for last 15 days"** — the agent ran `MIN/MAX/COUNT` over the full-year table (196.3s), returned 1,387 records for the whole year instead of the 15-day window, and produced a defensive `DATA WARNING` artifact. The correct CEO answer was: *"no data after 2025-12-31 — ERP sync may be broken."*
 2. **"Make a weekly market report"** — 780.8s, 14 steps, a good C5/C9 report artifact was produced, but the final chat message was the generic fallback *"I gathered some information but had trouble putting it all together…"*
@@ -198,7 +198,7 @@ Extend the Data Map UI (`DataMapSection.jsx`) with a **Metrics tab**:
 
 - True video transcription (ffmpeg dependency) — separate follow-up.
 - Vision-tool auto-description at ingestion time — separate task.
-- Replacing the structural catalog or the EDIA ontology port (Approach B / C) — rejected.
+- Replacing the structural catalog or the Acme ontology port (Approach B / C) — rejected.
 - Domain few-shots in global prompts — rejected (platform convention is domain-free).
 
 ## 11. Acceptance Criteria

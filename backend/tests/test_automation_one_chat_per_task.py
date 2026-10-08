@@ -189,7 +189,7 @@ def _setup_test_assets(db, app_id: str):
     return user, agent
 
 
-def _make_project(name: str = "Ecisco BI") -> Project:
+def _make_project(name: str = "Acme BI") -> Project:
     """Optional helper for tests that need a Project row.
 
     Not used by the two existing tests, but kept here in case future
@@ -240,7 +240,7 @@ def test_reuse_conv_logic_reuses_existing_conversation(file_db):
         name="Test Automation",
         type="scheduled",
         status="active",
-        project="Ecisco BI",
+        project="Acme BI",
         session_id=None,
     )
     db.add(task); db.flush()
@@ -378,7 +378,7 @@ def test_adopts_existing_task_conversation_and_heals_link(file_db, stub_stream_a
         name="Daily Sales Data Sync",
         type="scheduled",
         status="active",
-        project="Ecisco BI",
+        project="Acme BI",
         session_id=None,
     )
     db.add(task)
@@ -389,7 +389,7 @@ def test_adopts_existing_task_conversation_and_heals_link(file_db, stub_stream_a
     old_origin_chat = ChatSession(
         title=task.name,
         project_id=None,
-        project="Ecisco BI",
+        project="Acme BI",
         conversation_id=None,
         agent_name=None,  # origin project chat
         starred=False,

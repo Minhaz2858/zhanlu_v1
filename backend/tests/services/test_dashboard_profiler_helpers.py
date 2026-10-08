@@ -99,7 +99,7 @@ def test_profiler_source_has_no_demo_identifiers():
     # docstring region before scanning so a naive scan passes only if the
     # identifiers are never USED as values in code.
     body = text.split('"""', 2)[-1]  # everything after the module docstring
-    for bad in ("erp_v_sale_orderentry", "PLANDATE", "FALLAMOUNT", "FDATE", "forgid"):
+    for bad in ("v_sale_order", "PLANDATE", "FALLAMOUNT", "FDATE", "forgid"):
         assert bad not in body, f"hardcoded identifier leaked into profiler code: {bad}"
 
 

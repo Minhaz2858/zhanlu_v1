@@ -4,7 +4,7 @@
 
 **Goal:** Add an AI Decision Board to `/market-dashboard/midstream` — a matrix showing all 4 products at once (name + code, price, 7d forecast, P(rise), plain-language AI action for next week) with expandable rows revealing a mini forecast chart + full AI narrative.
 
-**Architecture:** New backend `decision_board_service.py` composes the existing `get_market_snapshot()` (current prices, EDIA MySQL) with `get_forecast_base_batch_v2()` (forecast + Phase D/E overlays, Postgres) into per-product bundles with template-generated Chinese narratives (pure functions, no LLM). Frontend adds a self-fetching `DecisionBoard.jsx` between `ObservedDataStrip` and `ForecastTrendChart`.
+**Architecture:** New backend `decision_board_service.py` composes the existing `get_market_snapshot()` (current prices, Acme MySQL) with `get_forecast_base_batch_v2()` (forecast + Phase D/E overlays, Postgres) into per-product bundles with template-generated Chinese narratives (pure functions, no LLM). Frontend adds a self-fetching `DecisionBoard.jsx` between `ObservedDataStrip` and `ForecastTrendChart`.
 
 **Tech Stack:** FastAPI + Pydantic (backend), React + TanStack Query + recharts + Tailwind (frontend), pytest + vitest.
 
@@ -72,12 +72,12 @@ def test_one_liner_missing_data():
 
 def test_narrative_full_data():
     s = build_narrative(
-        name_zh="异戊二烯", day=7, current_price=12100.0, forecast_base=12450.0,
+        name_zh="电子元件", day=7, current_price=12100.0, forecast_base=12450.0,
         expected_change_pct=0.029, p_rise=0.68, action="buy", confidence="medium",
         directional_accuracy=0.72, intel_event_count=3, intel_bias="up",
         volatility_regime="NORMAL",
     )
-    assert "异戊二烯" in s
+    assert "电子元件" in s
     assert "12,100" in s
     assert "12,450" in s
     assert "+2.9%" in s
@@ -101,24 +101,24 @@ def test_narrative_missing_forecast():
 def test_briefing_with_strong_signal():
     products = [
         DecisionBoardProduct(
-            id="isoprene", name_zh="异戊二烯", name_en="Isoprene", code="isoprene",
+            id="product_d", name_zh="电子元件", name_en="Product_D", code="product_d",
             action="buy", confidence="medium", p_rise=0.68,
         ),
         DecisionBoardProduct(
-            id="dcpd", name_zh="双环戊二烯", name_en="DCPD", code="dcpd",
+            id="product_b", name_zh="材料B", name_en="PRODUCT_B", code="product_b",
             action="watch", confidence="low",
         ),
     ]
     s = build_briefing(products, 7)
-    assert "异戊二烯" in s
+    assert "电子元件" in s
     assert "看涨" in s
-    assert "双环戊二烯" in s   # mentioned in the tail
+    assert "材料B" in s   # mentioned in the tail
 
 
 def test_briefing_all_quiet():
     products = [
         DecisionBoardProduct(
-            id="isoprene", name_zh="异戊二烯", name_en="Isoprene", code="isoprene",
+            id="product_d", name_zh="电子元件", name_en="Product_D", code="product_d",
             action="watch", confidence="low",
         ),
     ]
@@ -397,7 +397,7 @@ def test_build_decision_board_composes(monkeypatch):
     monkeypatch.setattr(
         dbs.mds, "get_market_snapshot",
         lambda group: [_snapshot(pid, 12100.0)
-                       for pid in ("isoprene", "piperylene", "dcpd", "raffinate_c5")],
+                       for pid in ("product_d", "product_f", "product_b", "feedstock_a")],
     )
     monkeypatch.setattr(
         dbs.mds, "get_forecast_base_batch_v2",
@@ -406,7 +406,7 @@ def test_build_decision_board_composes(monkeypatch):
             base_by_product={pid: 12450.0 for pid in product_ids},
             overlay_by_product={pid: _overlay(pid) for pid in product_ids},
             sku_forecasts_by_product={
-                "raffinate_c5": [SkuForecastMeta(
+                "feedstock_a": [SkuForecastMeta(
                     material_code="C5R-001", name="抽余C5 SKU", report_order=1,
                     is_primary=True, forecast_base=8100.0,
                 )],
@@ -416,9 +416,9 @@ def test_build_decision_board_composes(monkeypatch):
     resp = dbs.build_decision_board("midstream", day=7)
     assert resp.group == "midstream"
     assert len(resp.products) == 4
-    iso = next(p for p in resp.products if p.id == "isoprene")
-    assert iso.name_zh == "异戊二烯"
-    assert iso.code == "isoprene"
+    iso = next(p for p in resp.products if p.id == "product_d")
+    assert iso.name_zh == "电子元件"
+    assert iso.code == "product_d"
     assert iso.current_price == 12100.0
     assert iso.forecast_base == 12450.0
     assert iso.p_rise == 0.68
@@ -427,27 +427,27 @@ def test_build_decision_board_composes(monkeypatch):
     assert iso.trust_label_zh == "高可信"
     assert iso.directional_accuracy == 0.72
     assert "12,100" in iso.narrative_zh
-    raf = next(p for p in resp.products if p.id == "raffinate_c5")
+    raf = next(p for p in resp.products if p.id == "feedstock_a")
     assert raf.skus[0].material_code == "C5R-001"
-    assert "异戊二烯" in resp.briefing_zh
+    assert "电子元件" in resp.briefing_zh
 
 
 def test_build_decision_board_missing_overlay(monkeypatch):
     monkeypatch.setattr(
         dbs.mds, "get_market_snapshot",
-        lambda group: [_snapshot("isoprene", None)],
+        lambda group: [_snapshot("product_d", None)],
     )
     monkeypatch.setattr(
         dbs.mds, "get_forecast_base_batch_v2",
         lambda product_ids, day=7, db=None: ForecastBaseBatchResponse(
             day=day,
-            base_by_product={"isoprene": None},
-            overlay_by_product={"isoprene": None},
+            base_by_product={"product_d": None},
+            overlay_by_product={"product_d": None},
             sku_forecasts_by_product={},
         ),
     )
     # limit group to a single product via PRODUCT_GROUP_MAP patch
-    monkeypatch.setattr(dbs, "PRODUCT_GROUP_MAP", {"midstream": ["isoprene"]})
+    monkeypatch.setattr(dbs, "PRODUCT_GROUP_MAP", {"midstream": ["product_d"]})
     resp = dbs.build_decision_board("midstream", day=7)
     p = resp.products[0]
     assert p.action == "watch"
@@ -476,7 +476,7 @@ def _pick(items, day):
 
 def build_decision_board(group: str, day: int = 7, db=None) -> DecisionBoardResponse:
     product_ids = PRODUCT_GROUP_MAP.get(group, [])
-    # get_market_snapshot enforces the EDIA fail-closed guard (503).
+    # get_market_snapshot enforces the Acme fail-closed guard (503).
     snapshots = {s.id: s for s in mds.get_market_snapshot(group)}
     batch = mds.get_forecast_base_batch_v2(product_ids, day=day, db=db)
 
@@ -605,7 +605,7 @@ def client():
 
 def test_decision_board_503_when_unconfigured(monkeypatch, client):
     monkeypatch.setattr(
-        "app.services.market_dashboard_service.settings.EDIA_MYSQL_URL", ""
+        "app.services.market_dashboard_service.settings.Acme_MYSQL_URL", ""
     )
     r = client.get("/api/market-dashboard/decision-board?group=midstream&day=7")
     assert r.status_code == 503
@@ -620,8 +620,8 @@ def test_decision_board_returns_payload(monkeypatch, client):
         group="midstream", day=7, generated_at="2026-08-04T00:00:00+00:00",
         briefing_zh="未来 7 天市场整体平稳。",
         products=[DecisionBoardProduct(
-            id="isoprene", name_zh="异戊二烯", name_en="Isoprene",
-            code="isoprene",
+            id="product_d", name_zh="电子元件", name_en="Product_D",
+            code="product_d",
         )],
     )
     monkeypatch.setattr(
@@ -631,7 +631,7 @@ def test_decision_board_returns_payload(monkeypatch, client):
     r = client.get("/api/market-dashboard/decision-board?group=midstream")
     assert r.status_code == 200
     data = r.json()
-    assert data["products"][0]["name_zh"] == "异戊二烯"
+    assert data["products"][0]["name_zh"] == "电子元件"
     assert data["briefing_zh"]
 
 
@@ -704,10 +704,10 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 const FIXTURE = {
   group: 'midstream', day: 7, generated_at: '2026-08-04T00:00:00+00:00',
-  briefing_zh: '未来 7 天重点关注:异戊二烯看涨(上涨概率 68%),建议提前备货。',
+  briefing_zh: '未来 7 天重点关注:电子元件看涨(上涨概率 68%),建议提前备货。',
   products: [
     {
-      id: 'isoprene', name_zh: '异戊二烯', name_en: 'Isoprene', code: 'isoprene',
+      id: 'product_d', name_zh: '电子元件', name_en: 'Product_D', code: 'product_d',
       current_price: 12100, price_date: '2026-08-03', forecast_base: 12450,
       expected_change_pct: 0.029, p_rise: 0.68, action: 'buy',
       action_label_zh: '建议备货', confidence: 'medium',
@@ -715,11 +715,11 @@ const FIXTURE = {
       directional_accuracy: 0.72, intel_event_count: 3, intel_bias: 'up',
       volatility_regime: 'NORMAL',
       one_liner_zh: '预计+2.9%,上涨概率 68%,建议备货',
-      narrative_zh: '异戊二烯现价 12,100 元/吨,预计未来 7 天涨至 12,450 元/吨。',
+      narrative_zh: '电子元件现价 12,100 元/吨,预计未来 7 天涨至 12,450 元/吨。',
       skus: [],
     },
     {
-      id: 'dcpd', name_zh: '双环戊二烯', name_en: 'DCPD', code: 'dcpd',
+      id: 'product_b', name_zh: '材料B', name_en: 'PRODUCT_B', code: 'product_b',
       current_price: 9800, price_date: '2026-08-03', forecast_base: null,
       expected_change_pct: null, p_rise: null, action: 'watch',
       action_label_zh: '建议观望', confidence: 'low',
@@ -727,7 +727,7 @@ const FIXTURE = {
       directional_accuracy: null, intel_event_count: 0, intel_bias: 'neutral',
       volatility_regime: null,
       one_liner_zh: '数据不足,建议观望',
-      narrative_zh: '双环戊二烯当前预测数据不足,建议保持观望。',
+      narrative_zh: '材料B当前预测数据不足,建议保持观望。',
       skus: [],
     },
   ],
@@ -736,7 +736,7 @@ const FIXTURE = {
 vi.mock('@/api/marketDashboard', () => ({
   marketDashboardApi: {
     decisionBoard: vi.fn().mockResolvedValue(FIXTURE),
-    forecastChart: vi.fn().mockResolvedValue({ product_id: 'isoprene', points: [] }),
+    forecastChart: vi.fn().mockResolvedValue({ product_id: 'product_d', points: [] }),
   },
 }));
 
@@ -755,9 +755,9 @@ describe('DecisionBoard', () => {
   it('renders briefing and product rows with name + code', async () => {
     renderBoard();
     expect(await screen.findByText(/重点关注/)).toBeInTheDocument();
-    expect(await screen.findByText('异戊二烯')).toBeInTheDocument();
-    expect(screen.getByText('isoprene')).toBeInTheDocument();
-    expect(screen.getByText('双环戊二烯')).toBeInTheDocument();
+    expect(await screen.findByText('电子元件')).toBeInTheDocument();
+    expect(screen.getByText('product_d')).toBeInTheDocument();
+    expect(screen.getByText('材料B')).toBeInTheDocument();
     expect(screen.getByText('建议备货')).toBeInTheDocument();
     expect(screen.getByText('建议观望')).toBeInTheDocument();
     expect(screen.getByText('68%')).toBeInTheDocument();
@@ -766,9 +766,9 @@ describe('DecisionBoard', () => {
   it('row click fires onSelectProduct', async () => {
     const onSelect = vi.fn();
     renderBoard({ onSelectProduct: onSelect });
-    const row = await screen.findByText('异戊二烯');
+    const row = await screen.findByText('电子元件');
     fireEvent.click(row.closest('tr'));
-    expect(onSelect).toHaveBeenCalledWith('isoprene');
+    expect(onSelect).toHaveBeenCalledWith('product_d');
   });
 });
 ```
@@ -999,15 +999,15 @@ Append to the describe block in `DecisionBoard.test.jsx`:
 ```jsx
   it('chevron expands the card showing full narrative', async () => {
     renderBoard();
-    const btn = await screen.findByLabelText('展开 异戊二烯');
+    const btn = await screen.findByLabelText('展开 电子元件');
     fireEvent.click(btn);
     expect(
-      await screen.findByText(/异戊二烯现价 12,100 元\/吨/),
+      await screen.findByText(/电子元件现价 12,100 元\/吨/),
     ).toBeInTheDocument();
     expect(screen.getByText(/方向准确率/)).toBeInTheDocument();
     // collapse again
     fireEvent.click(btn);
-    expect(screen.queryByText(/异戊二烯现价 12,100 元\/吨/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/电子元件现价 12,100 元\/吨/)).not.toBeInTheDocument();
   });
 ```
 

@@ -14,7 +14,7 @@
 - **No committed secrets:** MySQL config comes from `docker exec zhanlu-postgres psql` at run time, or `E2E_MYSQL_*` env vars for CI.
 - **No RDS mutation:** live streaming is proven with time-varying table-free SQL (`SELECT NOW(6) AS ts`), not writes.
 - **RDS skip guard:** tests `pytest.skip` with a clear reason when the RDS / live DB / app / chromium is unreachable.
-- **Real MySQL target:** host `rm-bp1456yccem7e68zsmo.mysql.rds.aliyuncs.com:3306` (KB `ERP` / `test2`). Negative fixture: host `10.10.10.49:3306` (KB `aipdp_data_warehouse_prod`, id `90e80028-8e6e-4fdf-b91c-81c73aca9932`) — unreachable.
+- **Real MySQL target:** host `rm-bp1456yccem7e68zsmo.mysql.rds.aliyuncs.com:3306` (KB `ERP` / `test2`). Negative fixture: host `10.10.10.49:3306` (KB `demo_warehouse_prod`, id `90e80028-8e6e-4fdf-b91c-81c73aca9932`) — unreachable.
 - **Test DB setup (sqlite):** `cd /root/zhanlu/backend && rm -f test_runtime.db && DATABASE_URL="sqlite:///./test_runtime.db" python3 -c "import app.models; from app.database import Base, engine; Base.metadata.create_all(engine)"`. sqlite enforces FKs — scratch KB rows must be real rows.
 - **Login:** `POST http://localhost:8000/api/apps/default-app/auth/login` `{email, password}` → `{access_token, refresh_token}`. Frontend reads token from localStorage `base44_access_token`. Dev login: `admin@zhanlu.dev` / `Test1234!`.
 - **Reuse (already built, do not re-implement):** `_create_dashboard(args, db, user_id, context)`, `run_dashboard_query(db, dashboard)`, `Dashboard`, `KnowledgeBase`.
@@ -338,7 +338,7 @@ from tests._dashboard_e2e_helpers import (
 APP = os.environ.get("E2E_APP_URL", "http://localhost:8000")
 ADMIN_EMAIL = os.environ.get("E2E_ADMIN_EMAIL", "admin@zhanlu.dev")
 ADMIN_PASS = os.environ.get("E2E_ADMIN_PASS", "Test1234!")
-BAD_KB_ID = "90e80028-8e6e-4fdf-b91c-81c73aca9932"  # aipdp_data_warehouse_prod (unreachable)
+BAD_KB_ID = "90e80028-8e6e-4fdf-b91c-81c73aca9932"  # demo_warehouse_prod (unreachable)
 
 
 def _app_up() -> bool:

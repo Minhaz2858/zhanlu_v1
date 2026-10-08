@@ -96,7 +96,31 @@ def execute_plan_nodes(
         # so decide_adaptive_revision gets a plain {"content": ...} dict.
         return _run_coro_sync(_synth_call_llm(system_prompt, messages, endpoint=endpoint))
 
+    # ── IBM MAS fix (2026-10-08): parallel ready-batch execution ────────
+    # The DAG used to execute strictly serially even when independent nodes
+    # were both ready. This pre-pass executes ready nodes in parallel
+    # batches (each in its OWN DB session — the parent session is not
+    # concurrency-safe), then the serial loop below handles whatever
+    # remains (dependent stages, adaptive replanning, error recovery).
+    _parallel_ok = (
+        getattr(settings, "PLAN_DAG_PARALLEL_ENABLED", True)
+        and not _adaptive_enabled
+        and len(plan.nodes) > 1
+    )
+    if _parallel_ok:
+        try:
+            _parallel_ready_batch_prepass(
+                db, execution, plan, ordered_nodes, user_id,
+                data_ctx_extras, endpoint, observations, _emit,
+            )
+        except Exception as e:  # noqa: BLE001 — fall back to serial, always
+            logger.warning("Parallel plan pre-pass failed (serial fallback): %s", e)
+            db.rollback()
+
     for _idx, node in enumerate(ordered_nodes):
+        # Skip nodes the parallel pre-pass already settled (done/skipped).
+        if getattr(node, "status", None) in ("completed", "skipped"):
+            continue
         # Check if dependencies are met
         if not _dependencies_met(node, plan.nodes):
             logger.warning("Skipping node %s — dependencies not met", node.name)
@@ -363,6 +387,141 @@ def _execute_single_node(
         return _execute_tool_node(db, execution, node, user_id, data_ctx_extras=data_ctx_extras)
 
 
+def _parallel_ready_batch_prepass(
+    db: Session,
+    execution: Execution,
+    plan: Plan,
+    ordered_nodes: list,
+    user_id: Optional[str],
+    data_ctx_extras: Optional[dict],
+    endpoint,
+    observations: list,
+    _emit,
+) -> None:
+    """Execute independent ready nodes in parallel batches (IBM MAS).
+
+    Each batch = nodes whose dependencies are all satisfied. Every node runs
+    in its OWN database session (SQLAlchemy sessions are not concurrency-safe)
+    via asyncio.to_thread, bounded by ``PLAN_DAG_MAX_CONCURRENT``. After each
+    batch the parent session expires its cache so dependency checks on the
+    next round see the committed statuses. The serial loop in
+    ``execute_plan_nodes`` handles whatever this leaves (dependent stages,
+    adaptive checkpoints, replanning).
+    """
+    import asyncio as _asyncio
+    from app.database import SessionLocal
+
+    max_conc = max(2, int(getattr(settings, "PLAN_DAG_MAX_CONCURRENT", 4)))
+    executed: set[str] = set()
+
+    def _exec_isolated(node_id: str) -> dict | None:
+        """Run one node in an isolated session; returns its observation id."""
+        db2 = SessionLocal()
+        try:
+            node2 = db2.query(PlanNode).filter(PlanNode.id == node_id).first()
+            exec2 = db2.query(Execution).filter(Execution.id == execution.id).first()
+            if node2 is None or exec2 is None:
+                return None
+            try:
+                obs = _execute_single_node(
+                    db2, exec2, node2, user_id,
+                    data_ctx_extras=data_ctx_extras, endpoint=endpoint,
+                )
+                node2.status = "completed" if obs.success else "failed"
+                node2.result = obs.result_data
+                node2.error = obs.error_message
+                node2.completed_at = datetime.now(timezone.utc)
+                obs.seq = 0  # renumbered by the parent after the batch
+                db2.add(obs)
+                db2.commit()
+                return {"obs_id": obs.id}
+            except Exception as e:  # noqa: BLE001 — mirror the serial error path
+                logger.error("Parallel node %s failed: %s", node2.name, e)
+                node2.status = "failed"
+                node2.error = str(e)
+                node2.completed_at = datetime.now(timezone.utc)
+                err_obs = ObservationRecord(
+                    id=str(uuid4()),
+                    execution_id=execution.id,
+                    plan_node_id=node2.id,
+                    seq=0,
+                    observation_type="error",
+                    tool_name=node2.name,
+                    success=False,
+                    error_message=str(e),
+                )
+                db2.add(err_obs)
+                db2.commit()
+                return {"obs_id": err_obs.id}
+        finally:
+            db2.close()
+
+    async def _gather_batch(batch_ids: list[str]) -> list[dict | None]:
+        sem = _asyncio.Semaphore(max_conc)
+
+        async def _one(nid: str):
+            async with sem:
+                return await _asyncio.to_thread(_exec_isolated, nid)
+
+        return list(await _asyncio.gather(*[_one(nid) for nid in batch_ids]))
+
+    for _round in range(len(ordered_nodes) + 1):
+        db.expire_all()  # see isolated sessions' committed statuses
+        ready: list = []
+        for node in ordered_nodes:
+            if node.id in executed:
+                continue
+            if not _dependencies_met(node, plan.nodes):
+                continue
+            decision = evaluate_node(node, execution.policy_decision or {})
+            if decision["decision"] == "deny":
+                node.status = "failed"
+                node.error = f"Policy denied: {decision['reason']}"
+                db.commit()
+                _emit(node, "denied", decision["reason"])
+                executed.add(node.id)
+                continue
+            ready.append(node)
+            if len(ready) >= max_conc:
+                break
+
+        if not ready:
+            return  # nothing runnable in parallel — hand off to serial loop
+
+        for node in ready:
+            node.status = "running"
+            node.started_at = datetime.now(timezone.utc)
+        db.commit()
+        for node in ready:
+            _emit(node, "running")
+
+        results = _run_coro_sync(_gather_batch([n.id for n in ready]))
+        db.expire_all()
+
+        obs_ids = [r["obs_id"] for r in results if r and r.get("obs_id")]
+        if obs_ids:
+            obs_rows = (
+                db.query(ObservationRecord)
+                .filter(ObservationRecord.id.in_(obs_ids))
+                .all()
+            )
+            by_id = {o.id: o for o in obs_rows}
+            for r in results:
+                if not r:
+                    continue
+                obs = by_id.get(r.get("obs_id"))
+                if obs is not None:
+                    obs.seq = len(observations)
+                    db.commit()
+                    observations.append(obs)
+
+        for node in ready:
+            fresh = db.query(PlanNode).filter(PlanNode.id == node.id).first()
+            if fresh is not None:
+                _emit(fresh, fresh.status or "failed", fresh.error)
+            executed.add(node.id)
+
+
 def _run_coro_sync(coro):
     """Run an async coroutine from this sync context.
 
@@ -454,7 +613,7 @@ def _execute_tool_node(db, execution, node, user_id, data_ctx_extras=None) -> Ob
 # ---------------------------------------------------------------------------
 # Market-intent KB grounding (Task B2)
 # ---------------------------------------------------------------------------
-# The C5_C9 project binds two KBs: the ERP warehouse and the Market Research
+# The SAMPLE project binds two KBs: the ERP warehouse and the Market Research
 # KB copy (name contains 'Market'). When the user intent mentions market /
 # industry keywords, the data query must ground on the Market Research KB
 # instead of blindly taking the first bound KB. Deterministic keyword

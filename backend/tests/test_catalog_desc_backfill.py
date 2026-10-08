@@ -1,6 +1,6 @@
 """Catalog description completeness — blank columns get a second, narrower pass.
 
-Evidence this covers (live KB ``aipdp_data_warehouse_prod``, 2026-09-18):
+Evidence this covers (live KB ``demo_warehouse_prod``, 2026-09-18):
 
     select count(*) filter (where description_en = '') from kb_column_meta;  -> 1361 / 2678
 

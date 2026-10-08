@@ -5,7 +5,7 @@ edia_ontology.py).  Adapted from module-level singletons and SQLite to
 class-based / function-based patterns with no external DB dependency.
 
 Provides:
-- build_c5_c9_graph()    — product graph (nodes + edges) from domain config
+- build_sample_graph()    — product graph (nodes + edges) from domain config
 - resolve_product_id()   — map user language to canonical product_id
 - extract_product_ids_in_text() — NLU multi-product extraction
 - query_upstream()       — find upstream products of a given product
@@ -20,7 +20,7 @@ from __future__ import annotations
 
 from .models import ProductNode, ProductType, Relationship, RelationshipType, KnowledgeGraph
 from .graph import (
-    build_c5_c9_graph,
+    build_sample_graph,
     get_domain_graph,
     query_upstream,
     query_downstream,
@@ -44,7 +44,7 @@ __all__ = [
     "Relationship",
     "RelationshipType",
     "KnowledgeGraph",
-    "build_c5_c9_graph",
+    "build_sample_graph",
     "get_domain_graph",
     "query_upstream",
     "query_downstream",

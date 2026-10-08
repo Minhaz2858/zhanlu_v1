@@ -58,7 +58,7 @@ def test_force_create_dashboard_false_without_dashboard_intent():
 
 
 def test_speculative_force_create_dashboard_in_bi_project_on_greeting():
-    """The agent in an Ecisco BI chat speculatively loads dashboard skills
+    """The agent in an Acme BI chat speculatively loads dashboard skills
     after the user says 'hi'. Once it has done describe_schema + a design
     tool, force create_dashboard so the user sees an actual dashboard."""
     tool_calls = [

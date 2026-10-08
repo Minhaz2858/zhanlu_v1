@@ -121,7 +121,7 @@ def sample_rows_sql(
     ``order_by`` (a column the caller established is orderable) turns this into
     a HEAD or TAIL page: the caller reads both so the sample is not one
     arbitrary page of a large table.  Live, a plain ``LIMIT 200`` on the
-    14,589-row ``erp_v_sale_orderentry`` sampled only 2018-06-01…2018-09-25 of
+    14,589-row ``v_sale_order`` sampled only 2018-06-01…2018-09-25 of
     a PLANDATE range that actually runs to 2026-09-19.
     """
     from app.services.db.dialect import maybe_profile
@@ -417,7 +417,7 @@ def profile_table_columns(
     # ── the SPREAD sample ────────────────────────────────────────────────
     # A plain ``LIMIT n`` is one arbitrary page, and on a large table that page
     # is whatever the storage engine hands back first — live, the 200-row
-    # sample of the 14,589-row ``erp_v_sale_orderentry`` covered
+    # sample of the 14,589-row ``v_sale_order`` covered
     # 2018-06-01…2018-09-25 while the column actually runs to 2026-09-19. Rows
     # only seen in the unseen tail were invisible to the vocabulary the
     # selector and the embedder read. So: a HEAD page and a TAIL page, ordered
@@ -547,7 +547,7 @@ def vocabulary_hint(
 
     Consumed by the table SELECTOR, whose prompt is budget-capped, so this is
     deliberately small: the point is that a question phrased in the customer's
-    own words ("混三甲苯 sales") can match a column's VALUES, not just its name.
+    own words ("材料H sales") can match a column's VALUES, not just its name.
     ``""`` when the table has no measured vocabulary.
     """
     if not isinstance(sample_values, dict) or not sample_values:

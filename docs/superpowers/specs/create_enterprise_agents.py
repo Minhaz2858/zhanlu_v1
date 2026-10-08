@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Create the 10-domain enterprise agent suite for local-zhanlu-app.
 
-Every agent binds the single company warehouse KB (aipdp_data_warehouse_prod)
+Every agent binds the single company warehouse KB (demo_warehouse_prod)
 so all agents speak the same data. POST via the entities CRUD API.
 """
 import json
@@ -14,7 +14,7 @@ WAREHOUSE = "b1b9145d-5b6b-4c0e-ba82-919dde4620d7"
 
 # Shared data-grounding block (ERP sales-order view + inventory context).
 GROUNDING = (
-    "Data lives in the company warehouse view erp_v_sale_orderentry. "
+    "Data lives in the company warehouse view v_sale_order. "
     "Key columns: CUST_NAME (customer), material_name (product), org_name (selling org), "
     "FQTY_ORIGIN (ordered qty), FDELIQTY (delivered qty), FREMAINOUTQTY (undelivered/backlog qty), "
     "FAMOUNT (pre-tax amount), FALLAMOUNT (tax-inclusive amount), FTAXAMOUNT (tax), FTAXRATE (tax rate), "

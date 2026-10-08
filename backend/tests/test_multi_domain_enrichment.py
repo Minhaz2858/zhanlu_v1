@@ -126,7 +126,7 @@ def test_data_domain_hint_block_no_domain_specific_tables():
         "erp_product_sales_details",
         "erp_t_sal_outstock",
         "market_daily_price",
-        "ecisco.",
+        "acme.",
         "FNAME",
         "FMATERIALID",
     ]

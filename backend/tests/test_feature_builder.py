@@ -22,8 +22,8 @@ class TestBuildFeaturesTraining:
     def test_x_train_has_feedstock_lag_columns(self):
         y = _make_y(60)
         spec = FeatureSpec(
-            product_key="isoprene", feedstock_keys=["cracked_c5", "naphtha"],
-            feedstock_lags=[1, 2], spread_pairs=[("cracked_c5", "naphtha")],
+            product_key="product_d", feedstock_keys=["cracked_c5", "product_c"],
+            feedstock_lags=[1, 2], spread_pairs=[("cracked_c5", "product_c")],
             use_fx=True, use_event_flags=True, calendar_features=True,
         )
         loader = MagicMock()
@@ -31,7 +31,7 @@ class TestBuildFeaturesTraining:
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
                           "cracked_c5": [800.0 + i for i in range(60)]}),
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
-                          "naphtha": [600.0 + i for i in range(60)]}),
+                          "product_c": [600.0 + i for i in range(60)]}),
         ]
         fx_loader = MagicMock()
         fx_loader.read_usd_cny.return_value = pd.DataFrame({
@@ -40,21 +40,21 @@ class TestBuildFeaturesTraining:
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
 
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_train is not None
         lag_cols = [c for c in result.X_train.columns if "lag" in c]
         assert len(lag_cols) >= 2
 
     def test_x_train_has_spread_columns(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5", "naphtha"],
-                           feedstock_lags=[1], spread_pairs=[("cracked_c5", "naphtha")])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5", "product_c"],
+                           feedstock_lags=[1], spread_pairs=[("cracked_c5", "product_c")])
         loader = MagicMock()
         loader.read_actuals.side_effect = [
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
                           "cracked_c5": [800.0 + i for i in range(60)]}),
             pd.DataFrame({"ds": pd.date_range("2026-01-01", periods=60, freq="D"),
-                          "naphtha": [600.0 + i for i in range(60)]}),
+                          "product_c": [600.0 + i for i in range(60)]}),
         ]
         fx_loader = MagicMock()
         fx_loader.read_usd_cny.return_value = pd.DataFrame({
@@ -62,7 +62,7 @@ class TestBuildFeaturesTraining:
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         spread_cols = [c for c in result.X_train.columns if "spread" in c]
         assert len(spread_cols) >= 1
 
@@ -84,7 +84,7 @@ class TestBuildFeaturesTraining:
 class TestBuildFeaturesFuture:
     def test_x_future_uses_cascade_values(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
         loader = MagicMock()
         loader.read_actuals.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"),
@@ -96,13 +96,13 @@ class TestBuildFeaturesFuture:
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
         cascade = {"cracked_c5": [810.0, 815.0, 820.0, 825.0, 830.0, 835.0, 840.0]}
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, cascade)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, cascade)
         assert result.X_future is not None
         assert len(result.X_future) == 7
 
     def test_x_future_none_when_no_cascade(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
         loader = MagicMock()
         loader.read_actuals.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"),
@@ -111,18 +111,18 @@ class TestBuildFeaturesFuture:
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_future is None
 
     def test_upstream_product_returns_none(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="crude_oil", feedstock_keys=[])
+        spec = FeatureSpec(product_key="product_e", feedstock_keys=[])
         loader = MagicMock()
         fx_loader = MagicMock()
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({
             "ds": pd.date_range("2026-01-01", periods=60, freq="D"), "event_flag": [0.0] * 60})
-        result = build_features("crude_oil", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_e", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_train is None
         assert result.X_future is None
 
@@ -130,7 +130,7 @@ class TestBuildFeaturesFuture:
 class TestNoLeakage:
     def test_x_train_for_date_t_uses_only_past_feedstock(self):
         y = _make_y(60)
-        spec = FeatureSpec(product_key="isoprene", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
+        spec = FeatureSpec(product_key="product_d", feedstock_keys=["cracked_c5"], feedstock_lags=[1])
         dates = pd.date_range("2026-01-01", periods=60, freq="D")
         feedstock_values = [100.0 * i for i in range(60)]
         loader = MagicMock()
@@ -138,7 +138,7 @@ class TestNoLeakage:
         fx_loader = MagicMock()
         event_loader = MagicMock()
         event_loader.read_flags.return_value = pd.DataFrame({"ds": dates, "event_flag": [0.0] * 60})
-        result = build_features("isoprene", y, spec, loader, fx_loader, event_loader, 7, None)
+        result = build_features("product_d", y, spec, loader, fx_loader, event_loader, 7, None)
         assert result.X_train is not None
         lag_col = [c for c in result.X_train.columns if "cracked_c5" in c and "lag1" in c]
         assert len(lag_col) == 1

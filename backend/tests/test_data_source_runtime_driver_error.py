@@ -104,7 +104,7 @@ class TestExecuteQueryReturnsFriendlyError(unittest.TestCase):
                 pass
 
             def list_tables(self, kb_id):
-                return {"source": {"id": kb_id}, "tables": ["erp_v_sale_orderentry"]}
+                return {"source": {"id": kb_id}, "tables": ["v_sale_order"]}
 
         async def fake_link_schema(**_kwargs):
             return {"slice_text": "-- Semantic catalog: relevant tables for this query\n"}
@@ -121,7 +121,7 @@ class TestExecuteQueryReturnsFriendlyError(unittest.TestCase):
                             result = asyncio.run(_run())
 
         self.assertTrue(result["success"])
-        self.assertEqual(result["tables"], ["erp_v_sale_orderentry"])
+        self.assertEqual(result["tables"], ["v_sale_order"])
         self.assertNotIn("schema", result)
 
     def test_answer_from_database_surfaces_driver_missing(self):

@@ -34,7 +34,7 @@ describe('runAutomationTask', () => {
     const navigate = vi.fn();
     const toast = vi.fn();
     await runAutomationTask(
-      { id: 'task-1', session_id: null, project: 'C5_C9' },
+      { id: 'task-1', session_id: null, project: 'SAMPLE' },
       { navigate, toast, lang: 'en' },
     );
 
@@ -59,7 +59,7 @@ describe('runAutomationTask', () => {
     expect(target).toContain('/chat?session=sess-123');
     expect(target).toContain('automationId=task-1');
     expect(target).toContain('agentName=automation_agent');
-    expect(target).toContain('projectName=C5_C9');
+    expect(target).toContain('projectName=SAMPLE');
     expect(target).not.toContain('prefill');
     expect(target).not.toContain('autorun');
   });

@@ -1,4 +1,4 @@
-"""Tests for EDIA-ported forecast trust tiers."""
+"""Tests for Acme-ported forecast trust tiers."""
 from __future__ import annotations
 
 import pytest
@@ -12,10 +12,10 @@ from app.services.forecasting.forecast_trust_tier import (
 
 def test_high_skill_products_includes_known_set():
     """Products with documented ARIMA skill vs naive baseline."""
-    assert "isoprene" in _HIGH_SKILL_PRODUCTS
+    assert "product_d" in _HIGH_SKILL_PRODUCTS
     assert "piperylene" in _HIGH_SKILL_PRODUCTS
-    assert "c5_resin" in _HIGH_SKILL_PRODUCTS
-    assert "dcpd" in _HIGH_SKILL_PRODUCTS
+    assert "product_a" in _HIGH_SKILL_PRODUCTS
+    assert "product_b" in _HIGH_SKILL_PRODUCTS
 
 
 def test_weekly_cadence_products_includes_known_set():
@@ -29,7 +29,7 @@ def test_weekly_cadence_products_includes_known_set():
 def test_high_tier_for_skilled_product_beating_naive():
     """High-skill product that beats naive → tier='high', green badge."""
     result = compute_forecast_trust_tier(
-        product_id="isoprene",
+        product_id="product_d",
         below_naive=False,
         cadence_class="daily",
         mape=8.0,
@@ -116,7 +116,7 @@ def test_default_medium_tier_for_daily_product():
 
 def test_return_dict_has_all_required_keys():
     """The returned dict must have all keys the frontend expects."""
-    result = compute_forecast_trust_tier("isoprene", below_naive=False, cadence_class="daily", mape=8.0)
+    result = compute_forecast_trust_tier("product_d", below_naive=False, cadence_class="daily", mape=8.0)
     for key in ("tier", "below_naive", "cadence_class", "mape",
                 "reason_zh", "reason_en", "badge_color",
                 "badge_label_zh", "badge_label_en"):
@@ -126,7 +126,7 @@ def test_return_dict_has_all_required_keys():
 def test_tier_values_are_constrained():
     """tier must be one of the 4 valid values."""
     for pid, bn, cad in [
-        ("isoprene", False, "daily"),
+        ("product_d", False, "daily"),
         ("cracked_c9", True, "weekly"),
         ("unknown", False, "sparse"),
         ("random", False, "daily"),

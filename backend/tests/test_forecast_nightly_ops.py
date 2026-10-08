@@ -49,7 +49,7 @@ def _patch_deps(monkeypatch):
 
 
 def test_nightly_runs_eval_and_drift_when_enabled(db, monkeypatch):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org",
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org",
                        status="active")
     db.add(t); db.commit()
 
@@ -73,7 +73,7 @@ def test_nightly_runs_eval_and_drift_when_enabled(db, monkeypatch):
 
 
 def test_nightly_skips_eval_when_disabled(db, monkeypatch):
-    t = ForecastTarget(product_key="异戊二烯", name="异戊二烯", org_id="default-org",
+    t = ForecastTarget(product_key="电子元件", name="电子元件", org_id="default-org",
                        status="active")
     db.add(t); db.commit()
     calls = {"eval": 0}

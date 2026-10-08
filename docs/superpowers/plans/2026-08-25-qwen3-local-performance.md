@@ -1414,5 +1414,5 @@ git commit -m "chore(env): enable qwen3 fast mode"
 ## Notes for Future Work
 
 - **Streaming synthesis:** Currently synthesis is a one-shot LLM call. For better UX on qwen3, stream the synthesis so the user sees progress. Separate task.
-- **Per-agent model override:** Some agents (e.g. `ecisco_bi_assistant`) might want a different model than the user's selected model. The `_is_qwen_local_model` check only looks at the user's model, not the agent's. Separate task.
+- **Per-agent model override:** Some agents (e.g. `acme_bi_assistant`) might want a different model than the user's selected model. The `_is_qwen_local_model` check only looks at the user's model, not the agent's. Separate task.
 - **GPU memory monitoring:** With `--max-num-seqs 16`, the GPU can run out of memory under load. Add a monitoring alert. Separate task.

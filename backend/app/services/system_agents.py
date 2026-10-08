@@ -606,7 +606,7 @@ def ensure_system_agents(db=None) -> None:
             logger.debug("System agents already present — nothing to do")
 
         # ── Purge removed default BI agent (2026-08-27) ────────────────
-        # The enterprise_bi_assistant / ecisco_bi_assistant /
+        # The enterprise_bi_assistant / acme_bi_assistant /
         # orchestrator_agent default agents were REMOVED from the platform
         # (industry-specific default). Any rows left in existing DBs
         # are hard-deleted here (plus their ProjectAgent links and the
@@ -617,7 +617,7 @@ def ensure_system_agents(db=None) -> None:
             from app.models.project_agent import ProjectAgent
 
             _REMOVED_AGENT_NAMES = (
-                "ecisco_bi_assistant",
+                "acme_bi_assistant",
                 "enterprise_bi_assistant",
                 "orchestrator_agent",
             )
@@ -643,11 +643,11 @@ def ensure_system_agents(db=None) -> None:
 
             # Delete the system projects that only existed to host the
             # removed default agents (is_system=True, created_by_id NULL).
-            # Legacy names: "Enterprise BI", "Ecisco BI".
+            # Legacy names: "Enterprise BI", "Acme BI".
             # Cascade: dependent rows reference projects via FK, so delete
             # them in dependency order first (hard delete, no orphans).
             _bi_projects = db.query(Project).filter(
-                Project.name.in_(["Enterprise BI", "Ecisco BI"]),
+                Project.name.in_(["Enterprise BI", "Acme BI"]),
                 Project.is_deleted == False,  # noqa: E712
                 Project.is_system == True,  # noqa: E712
             ).all()

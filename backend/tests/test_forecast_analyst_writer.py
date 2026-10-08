@@ -2,11 +2,11 @@
 from app.services.forecasting.analyst.brief_writer import (
     BRIEF_JSON_SCHEMA, build_analyst_prompt, write_brief_llm,
 )
-from tests.test_forecast_analyst_template import _dcpd_pack
+from tests.test_forecast_analyst_template import _product_b_pack
 
 
 def test_prompt_contains_evidence_and_contract():
-    prompt = build_analyst_prompt(_dcpd_pack())
+    prompt = build_analyst_prompt(_product_b_pack())
     assert "只能使用" in prompt or "ONLY" in prompt.upper()
     assert "6660" in prompt or "6,660" in prompt   # forecast base in evidence
     assert "双环戊二烯" in prompt
@@ -15,7 +15,7 @@ def test_prompt_contains_evidence_and_contract():
 
 
 def test_writer_success_marks_llm_source():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     good = {
         "market_update_zh": "市场动态:市场情报中性。",
         "price_data_zh": "价格数据:现价 6,940 元/吨。",
@@ -32,11 +32,11 @@ def test_writer_success_marks_llm_source():
 
 
 def test_writer_returns_none_on_empty_llm():
-    assert write_brief_llm(_dcpd_pack(), llm_caller=lambda p, s: {}) is None
+    assert write_brief_llm(_product_b_pack(), llm_caller=lambda p, s: {}) is None
 
 
 def test_writer_returns_none_on_hallucination():
-    pack = _dcpd_pack()
+    pack = _product_b_pack()
     bad = {"market_update_zh": "现价 9,999 元/吨,暴涨 50%。", "price_data_zh": "x",
            "upstream_logic_zh": "y", "supply_demand_zh": "z", "forecast_zh": "w",
            "watch_triggers_zh": [], "risk_zh": "v"}

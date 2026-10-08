@@ -1,6 +1,6 @@
 """Tests for datasource_registry.py — P1: DataSource Strategy registry.
 
-Tests the BaseDataSource ABC, EdiaMysqlStrategy, GenericKBStrategy,
+Tests the BaseDataSource ABC, MysqlStrategy, GenericKBStrategy,
 get_datasource() factory, and the engine's _fetch_series() dispatch.
 """
 
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch, PropertyMock
 
 from app.services.forecasting.datasource_registry import (
     BaseDataSource,
-    EdiaMysqlStrategy,
+    MysqlStrategy,
     GenericKBStrategy,
     get_datasource,
     quote_identifier,
@@ -31,17 +31,17 @@ def _make_target(datasource: dict) -> MagicMock:
 # ── Factory tests ───────────────────────────────────────────────────
 
 class TestGetDatasource:
-    def test_edia_mysql_returns_edia_strategy(self):
-        s = get_datasource("edia_mysql")
-        assert isinstance(s, EdiaMysqlStrategy)
+    def test_mysql_returns_mysql_strategy(self):
+        s = get_datasource("mysql")
+        assert isinstance(s, MysqlStrategy)
 
     def test_generic_kb_returns_generic_strategy(self):
         s = get_datasource("generic_kb")
         assert isinstance(s, GenericKBStrategy)
 
-    def test_unknown_source_falls_back_to_edia_strategy(self):
+    def test_unknown_source_falls_back_to_mysql_strategy(self):
         s = get_datasource("nonexistent")
-        assert isinstance(s, EdiaMysqlStrategy)
+        assert isinstance(s, MysqlStrategy)
 
 
 # ── Quote identifier tests ──────────────────────────────────────────
@@ -61,9 +61,9 @@ class TestQuoteIdentifier:
         assert quote_identifier("", "mysql") == ""
 
 
-# ── EdiaMysqlStrategy tests ─────────────────────────────────────────
+# ── MysqlStrategy tests ─────────────────────────────────────────
 
-class TestEdiaMysqlStrategy:
+class TestMysqlStrategy:
     @patch("app.services.forecasting.mysql_data_source.MysqlDataSource")
     def test_fetch_delegates_to_mysql_data_source(self, mock_mysql_cls):
         # Arrange
@@ -74,8 +74,8 @@ class TestEdiaMysqlStrategy:
         })
         mock_mysql_cls.return_value = mock_src
 
-        target = _make_target({"source": "edia_mysql", "table": "md_t_lz_price"})
-        strategy = EdiaMysqlStrategy()
+        target = _make_target({"source": "mysql", "table": "md_market_price"})
+        strategy = MysqlStrategy()
         db = MagicMock()
 
         # Act
@@ -91,8 +91,8 @@ class TestEdiaMysqlStrategy:
     @patch("app.services.forecasting.mysql_data_source.MysqlDataSource")
     def test_fetch_returns_none_on_error(self, mock_mysql_cls):
         mock_mysql_cls.side_effect = RuntimeError("connection failed")
-        target = _make_target({"source": "edia_mysql"})
-        strategy = EdiaMysqlStrategy()
+        target = _make_target({"source": "mysql"})
+        strategy = MysqlStrategy()
 
         result = strategy.fetch(target, MagicMock())
         assert result is None
@@ -185,7 +185,7 @@ class TestEngineDispatch:
 
         target = MagicMock(spec=ForecastTarget)
         target.id = "t-1"
-        target.datasource = {"source": "edia_mysql", "table": "x"}
+        target.datasource = {"source": "mysql", "table": "x"}
 
         with patch(
             "app.services.forecasting.datasource_registry.get_datasource"
@@ -201,7 +201,7 @@ class TestEngineDispatch:
             result = engine._fetch_series(target)
 
             # Must have called get_datasource with the right source type
-            mock_get.assert_called_once_with("edia_mysql")
+            mock_get.assert_called_once_with("mysql")
             mock_strategy.fetch.assert_called_once_with(target, engine._db)
             assert isinstance(result, pd.Series)
             assert len(result) == 2

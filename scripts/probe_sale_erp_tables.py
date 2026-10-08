@@ -19,9 +19,9 @@ import pymysql
 
 
 def get_connection():
-    url = os.environ.get("EDIA_MYSQL_URL", "")
+    url = os.environ.get("Acme_MYSQL_URL", "")
     if not url:
-        print("# EDIA_MYSQL_URL not set", file=sys.stderr)
+        print("# Acme_MYSQL_URL not set", file=sys.stderr)
         sys.exit(1)
     parsed = urlparse(url)
     conn = pymysql.connect(
@@ -29,7 +29,7 @@ def get_connection():
         port=parsed.port or 3306,
         user=parsed.username or "root",
         password=unquote(parsed.password or ""),
-        database=(parsed.path.lstrip("/") or "aipdp_data_warehouse_prod"),
+        database=(parsed.path.lstrip("/") or "demo_warehouse_prod"),
         connect_timeout=10, charset="utf8mb4",
     )
     return conn

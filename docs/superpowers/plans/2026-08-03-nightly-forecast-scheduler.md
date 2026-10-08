@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make the Ecisco BI `forecast_agent` run silently every night at 2 AM, producing 7-day ensemble forecasts for all 12 dashboard products, with results auto-populating the Market Dashboard UI via existing 30s polling.
+**Goal:** Make the Acme BI `forecast_agent` run silently every night at 2 AM, producing 7-day ensemble forecasts for all 12 dashboard products, with results auto-populating the Market Dashboard UI via existing 30s polling.
 
-**Architecture:** Pre-seed 12 `ForecastTarget` rows (one per dashboard product) with `datasource` descriptors pointing at the live `md_t_lz_price` EDIA MySQL table. Extend `ForecastEngine._fetch_series` to read from EDIA MySQL when `datasource.source == "edia_mysql"`. Schedule the existing `forecast_run` tool via the `automation_runtime_agent` infrastructure (cron `0 2 * * *`, `skip_confirmation=true`). Switch the dashboard's `/forecast-base-batch` endpoint to read `results["7d"]["base"][0]` from the latest `ForecastRun` rows.
+**Architecture:** Pre-seed 12 `ForecastTarget` rows (one per dashboard product) with `datasource` descriptors pointing at the live `md_market_price` Acme MySQL table. Extend `ForecastEngine._fetch_series` to read from Acme MySQL when `datasource.source == "mysql"`. Schedule the existing `forecast_run` tool via the `automation_runtime_agent` infrastructure (cron `0 2 * * *`, `skip_confirmation=true`). Switch the dashboard's `/forecast-base-batch` endpoint to read `results["7d"]["base"][0]` from the latest `ForecastRun` rows.
 
 **Tech Stack:** Python 3.11, SQLAlchemy 2.0 (sync `Session`), pandas, FastAPI, Alembic, pytest. Backend runs in Docker (`zhanlu-backend` container), no `--reload`. Tests run with `backend/venv/bin/python -m pytest`.
 
@@ -16,7 +16,7 @@
 - **Test runner:** `cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/<file>::<test> -xvs` (run ONE file at a time — SSH RAM is full).
 - **No backgrounding, no `git stash`** — user works on `main` with uncommitted changes.
 - **Backend restart after service code changes:** `cd /home/ysk2025/zhanlu_7_30 && docker compose restart backend` (no `--reload`).
-- **EDIA MySQL:** `get_mysql_engine()` from `app.core.mysql_db` returns cached engine or None. `md_t_lz_price` schema: `FDATE` (datetime), `FTAXPRICE` (VARCHAR — sentinels "F7"/"NaN" must be dropped), `FMATERIAL_NAME` (composite "{product}-{supplier}").
+- **Acme MySQL:** `get_mysql_engine()` from `app.core.mysql_db` returns cached engine or None. `md_market_price` schema: `FDATE` (datetime), `FTAXPRICE` (VARCHAR — sentinels "F7"/"NaN" must be dropped), `FMATERIAL_NAME` (composite "{product}-{supplier}").
 - **ForecastRun.results JSON format** (verified in `engine.py:240-247`): `{"7d": {"base": [list_of_floats], "bull": [...], "bear": [...]}}`. The `base` is a LIST (from `pd.Series.tolist()`). Reader must take `base[0]` for the first forecast point.
 - **AutomationTask model quirks** (verified in `automation_task.py`):
   - Field is `cron_expression` (not `cron`)
@@ -30,24 +30,24 @@
 
 | File | Responsibility | Status |
 |---|---|---|
-| `backend/app/services/forecasting/edia_source.py` | Read a time series from EDIA MySQL → `pd.DataFrame` | NEW |
-| `backend/app/services/forecasting/engine.py` | Add `edia_mysql` branch to `_fetch_series` | EXTEND (line ~388) |
-| `backend/app/services/forecasting/seed_ecisco_targets.py` | Idempotent seeder for 12 dashboard forecast targets | NEW |
-| `backend/alembic/versions/037_ensure_12_ecisco_forecast_targets.py` | SQL-level idempotent insert for existing deployments | NEW |
+| `backend/app/services/forecasting/edia_source.py` | Read a time series from Acme MySQL → `pd.DataFrame` | NEW |
+| `backend/app/services/forecasting/engine.py` | Add `mysql` branch to `_fetch_series` | EXTEND (line ~388) |
+| `backend/app/services/forecasting/seed_acme_targets.py` | Idempotent seeder for 12 dashboard forecast targets | NEW |
+| `backend/alembic/versions/037_ensure_12_acme_forecast_targets.py` | SQL-level idempotent insert for existing deployments | NEW |
 | `backend/seed.py` | Call seeder on boot | EXTEND (~5 LOC) |
 | `backend/app/services/market_dashboard_service.py` | `get_forecast_base_batch_v2` reads from `ForecastRun` | EXTEND (~50 LOC) |
 | `backend/app/routers/market_dashboard.py` | Switch `/forecast-base-batch` to call v2 | EXTEND (1 line) |
 | `backend/app/routers/automation_api.py` | `POST /bootstrap-nightly-forecast` endpoint | EXTEND (~50 LOC) |
 | `backend/app/config.py` | `NIGHTLY_FORECAST_ENABLED`, `NIGHTLY_FORECAST_CRON` flags | EXTEND (~5 LOC) |
 | `backend/tests/test_edia_source.py` | Unit tests for EdiaMysqlDataSource | NEW |
-| `backend/tests/test_forecast_engine_edia_source.py` | Integration test for engine + edia_mysql source | NEW |
-| `backend/tests/test_seed_ecisco_targets.py` | Tests for seeder idempotency | NEW |
+| `backend/tests/test_forecast_engine_edia_source.py` | Integration test for engine + mysql source | NEW |
+| `backend/tests/test_seed_acme_targets.py` | Tests for seeder idempotency | NEW |
 | `backend/tests/test_forecast_dashboard_endpoint_v2.py` | Tests for v2 forecast batch reader | NEW |
 | `backend/tests/test_bootstrap_nightly_forecast.py` | Tests for bootstrap endpoint | NEW |
 
 ---
 
-### Task 1: EdiaMysqlDataSource — read time series from EDIA MySQL
+### Task 1: EdiaMysqlDataSource — read time series from Acme MySQL
 
 **Files:**
 - Create: `backend/app/services/forecasting/edia_source.py`
@@ -62,7 +62,7 @@
 Create `backend/tests/test_edia_source.py`:
 
 ```python
-"""Tests for EdiaMysqlDataSource — reads time series from EDIA MySQL mirror."""
+"""Tests for EdiaMysqlDataSource — reads time series from Acme MySQL mirror."""
 from __future__ import annotations
 
 import pandas as pd
@@ -81,11 +81,11 @@ def _make_mock_engine(rows: list[tuple]) -> Engine:
     with eng.connect() as conn:
         from sqlalchemy import text
         conn.execute(text(
-            "CREATE TABLE md_t_lz_price (FDATE TEXT, FTAXPRICE TEXT, FMATERIAL_NAME TEXT)"
+            "CREATE TABLE md_market_price (FDATE TEXT, FTAXPRICE TEXT, FMATERIAL_NAME TEXT)"
         ))
         for ds, y, name in rows:
             conn.execute(text(
-                "INSERT INTO md_t_lz_price (FDATE, FTAXPRICE, FMATERIAL_NAME) "
+                "INSERT INTO md_market_price (FDATE, FTAXPRICE, FMATERIAL_NAME) "
                 "VALUES (:d, :p, :n)"
             ), {"d": ds, "p": str(y), "n": "裂解C5-裂解C5均价"})
         conn.commit()
@@ -101,8 +101,8 @@ def test_read_history_returns_dataframe_with_ds_y_columns():
     eng = _make_mock_engine(rows)
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history({
-        "source": "edia_mysql",
-        "table": "md_t_lz_price",
+        "source": "mysql",
+        "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
         "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
@@ -125,8 +125,8 @@ def test_read_history_drops_sentinel_values_F7_and_NaN():
     eng = _make_mock_engine(rows)
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history({
-        "source": "edia_mysql",
-        "table": "md_t_lz_price",
+        "source": "mysql",
+        "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
         "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
@@ -148,8 +148,8 @@ def test_read_history_sorted_ascending_by_ds():
     eng = _make_mock_engine(rows)
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history({
-        "source": "edia_mysql",
-        "table": "md_t_lz_price",
+        "source": "mysql",
+        "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
         "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
@@ -160,10 +160,10 @@ def test_read_history_sorted_ascending_by_ds():
 
 def test_read_history_raises_when_engine_is_none():
     src = EdiaMysqlDataSource(engine=None)
-    with pytest.raises(RuntimeError, match="EDIA MySQL unreachable"):
+    with pytest.raises(RuntimeError, match="Acme MySQL unreachable"):
         src.read_history({
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "1=1",
@@ -176,8 +176,8 @@ def test_read_history_raises_when_no_rows_returned():
     src = EdiaMysqlDataSource(engine=eng)
     with pytest.raises(RuntimeError, match="No rows"):
         src.read_history({
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = 'NONEXISTENT'",
@@ -198,17 +198,17 @@ Expected: FAIL with `ModuleNotFoundError: No module named 'app.services.forecast
 Create `backend/app/services/forecasting/edia_source.py`:
 
 ```python
-"""EDIA MySQL data source — reads time series for the forecast engine.
+"""Acme MySQL data source — reads time series for the forecast engine.
 
 The forecast engine's `_fetch_series` traditionally reads from a bound
-KnowledgeBase via QueryService. For Ecisco BI dashboard products, the
-authoritative price history lives in EDIA's MySQL mirror (`md_t_lz_price`
+KnowledgeBase via QueryService. For Acme BI dashboard products, the
+authoritative price history lives in Acme's MySQL mirror (`md_market_price`
 and ERP fallback tables at 10.10.10.49). This module provides a thin
 adapter that returns the same `pd.DataFrame` shape the engine expects
 (columns `ds` + `y`), so the downstream pipeline (quality → models →
 ensemble → guard → scenarios) runs unchanged.
 
-Sentinel handling: `md_t_lz_price.FTAXPRICE` is a VARCHAR and contains
+Sentinel handling: `md_market_price.FTAXPRICE` is a VARCHAR and contains
 "F7" / "NaN" / "" sentinels for some blowing-agent rows. These are
 dropped before coercion to float, matching `market_dashboard_service`'s
 logic.
@@ -230,7 +230,7 @@ _SENTINEL_VALUES = {"F7", "NaN", "nan", "None", "", "null", "NULL"}
 
 
 class EdiaMysqlDataSource:
-    """Read a time series from EDIA's MySQL mirror into a pandas DataFrame.
+    """Read a time series from Acme's MySQL mirror into a pandas DataFrame.
 
     Usage::
 
@@ -240,8 +240,8 @@ class EdiaMysqlDataSource:
     The `datasource` dict shape::
 
         {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
@@ -250,7 +250,7 @@ class EdiaMysqlDataSource:
     """
 
     def __init__(self, engine: Optional[Engine] = None) -> None:
-        # Inject for tests; default to the shared EDIA MySQL engine.
+        # Inject for tests; default to the shared Acme MySQL engine.
         self._engine = engine
 
     def _resolve_engine(self) -> Optional[Engine]:
@@ -263,24 +263,24 @@ class EdiaMysqlDataSource:
         """Read history rows and return a DataFrame with columns ['ds', 'y'].
 
         Raises:
-            RuntimeError: If EDIA MySQL is unreachable or the query returns
+            RuntimeError: If Acme MySQL is unreachable or the query returns
                 zero rows after sentinel filtering.
         """
         eng = self._resolve_engine()
         if eng is None:
             raise RuntimeError(
-                "EDIA MySQL unreachable: get_mysql_engine() returned None. "
-                "Check EDIA_MYSQL_URL in .env."
+                "Acme MySQL unreachable: get_mysql_engine() returned None. "
+                "Check Acme_MYSQL_URL in .env."
             )
 
-        table = datasource.get("table", "md_t_lz_price")
+        table = datasource.get("table", "md_market_price")
         time_col = datasource.get("time_col", "FDATE")
         measure = datasource.get("measure", "FTAXPRICE")
         where = datasource.get("where", "1=1")
 
         # NOTE: table/column names come from our own seeded datasource
         # descriptors (not user input), so interpolation is safe here.
-        # The `where` clause is also hardcoded in seed_ecisco_targets.py.
+        # The `where` clause is also hardcoded in seed_acme_targets.py.
         sql = text(
             f"SELECT `{time_col}` AS ds, `{measure}` AS y "
             f"FROM `{table}` "
@@ -294,7 +294,7 @@ class EdiaMysqlDataSource:
         if not rows:
             raise RuntimeError(
                 f"No rows returned from {table} WHERE {where}. "
-                "EDIA MySQL may be empty for this series."
+                "Acme MySQL may be empty for this series."
             )
 
         df = pd.DataFrame(rows, columns=["ds", "y"])
@@ -328,9 +328,9 @@ Expected: PASS (5 tests)
 ```bash
 cd /home/ysk2025/zhanlu_7_30
 git add backend/app/services/forecasting/edia_source.py backend/tests/test_edia_source.py
-git commit -m "feat(forecasting): add EdiaMysqlDataSource for reading time series from EDIA MySQL
+git commit -m "feat(forecasting): add EdiaMysqlDataSource for reading time series from Acme MySQL
 
-Thin adapter that reads md_t_lz_price (or ERP fallback) rows and returns
+Thin adapter that reads md_market_price (or ERP fallback) rows and returns
 a pandas DataFrame with ds/y columns. Drops F7/NaN sentinels before float
 coercion, matching market_dashboard_service behavior. Used by the nightly
 forecast scheduler to feed the existing 7-model ensemble engine."
@@ -338,7 +338,7 @@ forecast scheduler to feed the existing 7-model ensemble engine."
 
 ---
 
-### Task 2: Extend ForecastEngine._fetch_series with edia_mysql branch
+### Task 2: Extend ForecastEngine._fetch_series with mysql branch
 
 **Files:**
 - Modify: `backend/app/services/forecasting/engine.py` (around line 388, the `_fetch_series` method)
@@ -346,7 +346,7 @@ forecast scheduler to feed the existing 7-model ensemble engine."
 
 **Interfaces:**
 - Consumes: `EdiaMysqlDataSource` from Task 1
-- Produces: `ForecastEngine._fetch_series` now returns a `pd.Series` when `datasource.source == "edia_mysql"` (same return type as the existing KB path)
+- Produces: `ForecastEngine._fetch_series` now returns a `pd.Series` when `datasource.source == "mysql"` (same return type as the existing KB path)
 
 - [ ] **Step 1: Read the existing `_fetch_series` method to confirm exact insertion point**
 
@@ -362,7 +362,7 @@ Create `backend/tests/test_forecast_engine_edia_source.py`:
 
 ```python
 """Tests that ForecastEngine._fetch_series routes to EdiaMysqlDataSource
-when target.datasource.source == 'edia_mysql'."""
+when target.datasource.source == 'mysql'."""
 from __future__ import annotations
 
 from datetime import datetime
@@ -375,14 +375,14 @@ from app.services.forecasting.engine import ForecastEngine
 
 
 def _make_target_with_edia_source():
-    """Build a mock ForecastTarget with an edia_mysql datasource descriptor."""
+    """Build a mock ForecastTarget with an mysql datasource descriptor."""
     target = MagicMock()
     target.id = "test-target-1"
     target.org_id = "default-org"
     target.app_id = "default-app"
     target.datasource = {
-        "source": "edia_mysql",
-        "table": "md_t_lz_price",
+        "source": "mysql",
+        "table": "md_market_price",
         "time_col": "FDATE",
         "measure": "FTAXPRICE",
         "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
@@ -392,8 +392,8 @@ def _make_target_with_edia_source():
     return target
 
 
-def test_fetch_series_uses_edia_mysql_source_when_configured():
-    """When datasource.source == 'edia_mysql', _fetch_series should delegate
+def test_fetch_series_uses_mysql_source_when_configured():
+    """When datasource.source == 'mysql', _fetch_series should delegate
     to EdiaMysqlDataSource.read_history and return a pandas Series."""
     target = _make_target_with_edia_source()
     fake_df = pd.DataFrame({
@@ -425,7 +425,7 @@ def test_fetch_series_returns_none_when_edia_source_raises():
         "app.services.forecasting.engine.EdiaMysqlDataSource"
     ) as MockSrc:
         MockSrc.return_value.read_history.side_effect = RuntimeError(
-            "EDIA MySQL unreachable"
+            "Acme MySQL unreachable"
         )
         engine = ForecastEngine(db=MagicMock())
         result = engine._fetch_series(target)
@@ -434,7 +434,7 @@ def test_fetch_series_returns_none_when_edia_source_raises():
 
 
 def test_fetch_series_falls_through_to_kb_path_when_source_not_edia():
-    """When datasource has no 'source' key (or it's not 'edia_mysql'),
+    """When datasource has no 'source' key (or it's not 'mysql'),
     the existing KB-backed path should run unchanged. We verify by
     confirming EdiaMysqlDataSource is NOT instantiated."""
     target = MagicMock()
@@ -464,7 +464,7 @@ cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_for
 
 Expected: FAIL with `ImportError: cannot import name 'EdiaMysqlDataSource' from 'app.services.forecasting.engine'` (because engine.py doesn't import it yet)
 
-- [ ] **Step 4: Implement the edia_mysql branch in `_fetch_series`**
+- [ ] **Step 4: Implement the mysql branch in `_fetch_series`**
 
 First, add the import at the top of `engine.py` (after the existing `from app.services.forecasting.discovery import discover` line, around line 27):
 
@@ -478,18 +478,18 @@ Then, modify the `_fetch_series` method. Read the current method first to get th
 cd /home/ysk2025/zhanlu_7_30/backend && sed -n '388,410p' app/services/forecasting/engine.py
 ```
 
-Then use `replace_in_file` to insert the edia_mysql branch at the very start of `_fetch_series`, before `ds = target.datasource or {}`:
+Then use `replace_in_file` to insert the mysql branch at the very start of `_fetch_series`, before `ds = target.datasource or {}`:
 
 ```python
     def _fetch_series(self, target: ForecastTarget) -> pd.Series | None:
         """Pull the raw time series from the user's datasource."""
         ds = target.datasource or {}
 
-        # ── EDIA MySQL branch ─────────────────────────────────────
-        # When the datasource descriptor names edia_mysql as the source,
-        # read directly from the EDIA MySQL mirror via EdiaMysqlDataSource.
+        # ── Acme MySQL branch ─────────────────────────────────────
+        # When the datasource descriptor names mysql as the source,
+        # read directly from the Acme MySQL mirror via EdiaMysqlDataSource.
         # This bypasses the KB/QueryService path entirely.
-        if ds.get("source") == "edia_mysql":
+        if ds.get("source") == "mysql":
             try:
                 src = EdiaMysqlDataSource()
                 df = src.read_history(ds)
@@ -531,34 +531,34 @@ Expected: All existing tests still PASS (the KB-backed path is untouched).
 ```bash
 cd /home/ysk2025/zhanlu_7_30
 git add backend/app/services/forecasting/engine.py backend/tests/test_forecast_engine_edia_source.py
-git commit -m "feat(forecasting): route _fetch_series to EdiaMysqlDataSource when source='edia_mysql'
+git commit -m "feat(forecasting): route _fetch_series to EdiaMysqlDataSource when source='mysql'
 
 Adds a conditional branch at the top of ForecastEngine._fetch_series that
 delegates to EdiaMysqlDataSource when the target's datasource descriptor
-has source='edia_mysql'. The existing KB-backed QueryService path is
-untouched. Failures in the EDIA branch are caught and return None so
+has source='mysql'. The existing KB-backed QueryService path is
+untouched. Failures in the Acme branch are caught and return None so
 compute_target skips the target gracefully."
 ```
 
 ---
 
-### Task 3: seed_ecisco_targets.py — idempotent seeder for 12 dashboard products
+### Task 3: seed_acme_targets.py — idempotent seeder for 12 dashboard products
 
 **Files:**
-- Create: `backend/app/services/forecasting/seed_ecisco_targets.py`
-- Test: `backend/tests/test_seed_ecisco_targets.py`
+- Create: `backend/app/services/forecasting/seed_acme_targets.py`
+- Test: `backend/tests/test_seed_acme_targets.py`
 
 **Interfaces:**
 - Consumes: `ForecastTarget` model from `app.models.forecasting`, `Session` from SQLAlchemy
-- Produces: `ECISCO_FORECAST_TARGETS` (list of 12 dicts), `seed_ecisco_forecast_targets(db, org_id, app_id) -> int`
+- Produces: `FORECAST_TARGETS` (list of 12 dicts), `seed_acme_forecast_targets(db, org_id, app_id) -> int`
 
 - [ ] **Step 1: Write the failing test**
 
-Create `backend/tests/test_seed_ecisco_targets.py`:
+Create `backend/tests/test_seed_acme_targets.py`:
 
 ```python
-"""Tests for seed_ecisco_forecast_targets — idempotent seeder for the 12
-Ecisco BI dashboard products."""
+"""Tests for seed_acme_forecast_targets — idempotent seeder for the 12
+Acme BI dashboard products."""
 from __future__ import annotations
 
 import pytest
@@ -567,9 +567,9 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
 from app.models.forecasting import ForecastTarget
-from app.services.forecasting.seed_ecisco_targets import (
-    ECISCO_FORECAST_TARGETS,
-    seed_ecisco_forecast_targets,
+from app.services.forecasting.seed_acme_targets import (
+    FORECAST_TARGETS,
+    seed_acme_forecast_targets,
 )
 
 
@@ -586,17 +586,17 @@ def db_session():
     session.close()
 
 
-def test_ecisco_forecast_targets_has_12_entries():
-    assert len(ECISCO_FORECAST_TARGETS) == 12
+def test_acme_forecast_targets_has_12_entries():
+    assert len(FORECAST_TARGETS) == 12
 
 
 def test_each_target_has_required_fields():
-    for t in ECISCO_FORECAST_TARGETS:
+    for t in FORECAST_TARGETS:
         assert "product_key" in t
-        assert t["product_key"].startswith("ecisco.")
+        assert t["product_key"].startswith("acme.")
         assert "name" in t
         assert "datasource" in t
-        assert t["datasource"]["source"] == "edia_mysql"
+        assert t["datasource"]["source"] == "mysql"
         assert "table" in t["datasource"]
         assert "time_col" in t["datasource"]
         assert "measure" in t["datasource"]
@@ -607,7 +607,7 @@ def test_each_target_has_required_fields():
 
 
 def test_seeder_inserts_12_rows_on_first_call(db_session):
-    count = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
+    count = seed_acme_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert count == 12
     rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org"
@@ -615,7 +615,7 @@ def test_seeder_inserts_12_rows_on_first_call(db_session):
     assert len(rows) == 12
     # Spot-check one
     crude = db_session.query(ForecastTarget).filter(
-        ForecastTarget.product_key == "ecisco.crude_oil"
+        ForecastTarget.product_key == "acme.product_e"
     ).one()
     assert crude.status == "active"
     assert crude.source == "seed"
@@ -624,9 +624,9 @@ def test_seeder_inserts_12_rows_on_first_call(db_session):
 
 
 def test_seeder_is_idempotent_second_call_inserts_zero(db_session):
-    first = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
+    first = seed_acme_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert first == 12
-    second = seed_ecisco_forecast_targets(db_session, org_id="test-org", app_id="test-app")
+    second = seed_acme_forecast_targets(db_session, org_id="test-org", app_id="test-app")
     assert second == 0
     rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "test-org"
@@ -636,8 +636,8 @@ def test_seeder_is_idempotent_second_call_inserts_zero(db_session):
 
 def test_seeder_scoped_to_org_id(db_session):
     """Seeding for org-a should not affect org-b."""
-    seed_ecisco_forecast_targets(db_session, org_id="org-a", app_id="app-a")
-    seed_ecisco_forecast_targets(db_session, org_id="org-b", app_id="app-b")
+    seed_acme_forecast_targets(db_session, org_id="org-a", app_id="app-a")
+    seed_acme_forecast_targets(db_session, org_id="org-b", app_id="app-b")
     a_rows = db_session.query(ForecastTarget).filter(
         ForecastTarget.org_id == "org-a"
     ).all()
@@ -649,28 +649,28 @@ def test_seeder_scoped_to_org_id(db_session):
 
 
 def test_product_keys_are_unique():
-    keys = [t["product_key"] for t in ECISCO_FORECAST_TARGETS]
+    keys = [t["product_key"] for t in FORECAST_TARGETS]
     assert len(keys) == len(set(keys)), "Duplicate product_keys found"
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
 
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_ecisco_targets.py -xvs
+cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_acme_targets.py -xvs
 ```
 
-Expected: FAIL with `ModuleNotFoundError: No module named 'app.services.forecasting.seed_ecisco_targets'`
+Expected: FAIL with `ModuleNotFoundError: No module named 'app.services.forecasting.seed_acme_targets'`
 
 - [ ] **Step 3: Write the seeder implementation**
 
-Create `backend/app/services/forecasting/seed_ecisco_targets.py`:
+Create `backend/app/services/forecasting/seed_acme_targets.py`:
 
 ```python
-"""Idempotent seeder for the 12 Ecisco BI dashboard forecast targets.
+"""Idempotent seeder for the 12 Acme BI dashboard forecast targets.
 
-Each target maps a dashboard product_id (e.g. 'crude_oil') to a primary
-time series in EDIA's MySQL mirror (md_t_lz_price for 10 products, ERP
-sale_erp_v_*_data for raffinate_c5 and c5_resin).
+Each target maps a dashboard product_id (e.g. 'product_e') to a primary
+time series in Acme's MySQL mirror (md_market_price for 10 products, ERP
+sale_erp_v_*_data for feedstock_a and product_a).
 
 Run on boot via seed.py, or manually via the /bootstrap-nightly-forecast
 endpoint. Safe to re-run — skips targets that already exist (matched by
@@ -690,13 +690,13 @@ logger = logging.getLogger(__name__)
 # ── Product → primary series mapping ────────────────────────────────────
 # Mirrors PRODUCT_TABLE_MAP primary config in models/market_dashboard.py.
 # Each entry has a datasource descriptor that EdiaMysqlDataSource reads.
-ECISCO_FORECAST_TARGETS: list[dict] = [
+FORECAST_TARGETS: list[dict] = [
     {
-        "product_key": "ecisco.crude_oil",
-        "name": "Crude Oil (Brent)",
+        "product_key": "acme.product_e",
+        "name": "Product E (Benchmark A)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-布伦特'",
@@ -706,11 +706,11 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 1,
     },
     {
-        "product_key": "ecisco.naphtha",
-        "name": "Naphtha (Japan)",
+        "product_key": "acme.product_c",
+        "name": "Product_C (Japan)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-日本石脑油'",
@@ -720,11 +720,11 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 2,
     },
     {
-        "product_key": "ecisco.cracked_c5",
+        "product_key": "acme.cracked_c5",
         "name": "Cracked C5 (Average)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-裂解C5均价'",
@@ -734,11 +734,11 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 3,
     },
     {
-        "product_key": "ecisco.mixed_c5",
-        "name": "Mixed C5 (Yangzi)",
+        "product_key": "acme.mixed_c5",
+        "name": "Mixed fraction (Yangzi)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C5-扬子裂解C5'",
@@ -748,11 +748,11 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 4,
     },
     {
-        "product_key": "ecisco.cracked_c9",
+        "product_key": "acme.cracked_c9",
         "name": "Cracked C9 (Average)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = '裂解C9-裂解C9均价'",
@@ -762,53 +762,53 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 5,
     },
     {
-        "product_key": "ecisco.isoprene",
-        "name": "Isoprene (East China)",
+        "product_key": "acme.product_d",
+        "name": "Product_D (East China)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '异戊二烯-华东市场价'",
+            "where": "FMATERIAL_NAME = '电子元件-华东市场价'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 6,
     },
     {
-        "product_key": "ecisco.piperylene",
-        "name": "Piperylene (East China)",
+        "product_key": "acme.product_f",
+        "name": "Product F (East China)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '间戊二烯-华东市场价'",
+            "where": "FMATERIAL_NAME = '材料C-华东市场价'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 7,
     },
     {
-        "product_key": "ecisco.dcpd",
-        "name": "DCPD (East China)",
+        "product_key": "acme.product_b",
+        "name": "PRODUCT_B (East China)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '双环戊二烯-华东市场价'",
+            "where": "FMATERIAL_NAME = '材料B-华东市场价'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 8,
     },
     {
-        "product_key": "ecisco.sis",
+        "product_key": "acme.sis",
         "name": "SIS (Baling 1105)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
             "where": "FMATERIAL_NAME = 'SIS-巴陵1105'",
@@ -818,28 +818,28 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 9,
     },
     {
-        "product_key": "ecisco.styrene",
+        "product_key": "acme.styrene",
         "name": "Styrene (Sinopec East China)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '苯乙烯-中石化华东'",
+            "where": "FMATERIAL_NAME = '材料J-中石化华东'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
         "report_order": 10,
     },
     {
-        "product_key": "ecisco.blowing_agent",
+        "product_key": "acme.blowing_agent",
         "name": "Blowing Agent (East China)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "md_t_lz_price",
+            "source": "mysql",
+            "table": "md_market_price",
             "time_col": "FDATE",
             "measure": "FTAXPRICE",
-            "where": "FMATERIAL_NAME = '戊烷发泡剂-华东市场价'",
+            "where": "FMATERIAL_NAME = '包装材料-华东市场价'",
             "granularity": "day",
         },
         "include_in_weekly_report": True,
@@ -848,11 +848,11 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
     # ERP fallback products — no FMATERIAL_NAME filter; these tables have
     # PLANDATE / FTAXPRICE columns and no supplier dimension.
     {
-        "product_key": "ecisco.c5_resin",
+        "product_key": "acme.product_a",
         "name": "C5 Resin (ERP Order Book)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "sale_erp_v_碳五石油树脂_data",
+            "source": "mysql",
+            "table": "sale_erp_v_原料A石油树脂_data",
             "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
             "where": "1=1",
@@ -862,11 +862,11 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
         "report_order": 12,
     },
     {
-        "product_key": "ecisco.raffinate_c5",
-        "name": "Raffinate C5 (ERP Order Book)",
+        "product_key": "acme.feedstock_a",
+        "name": "Feedstock A (ERP Order Book)",
         "datasource": {
-            "source": "edia_mysql",
-            "table": "sale_erp_v_抽余碳五_data",
+            "source": "mysql",
+            "table": "sale_erp_v_原料A_data",
             "time_col": "PLANDATE",
             "measure": "FTAXPRICE",
             "where": "1=1",
@@ -878,18 +878,18 @@ ECISCO_FORECAST_TARGETS: list[dict] = [
 ]
 
 
-def seed_ecisco_forecast_targets(
+def seed_acme_forecast_targets(
     db: Session,
     org_id: str = "default-org",
     app_id: str = "default-app",
 ) -> int:
-    """Insert any missing Ecisco BI forecast targets. Returns count of new rows.
+    """Insert any missing Acme BI forecast targets. Returns count of new rows.
 
     Idempotent: skips targets that already exist (matched by product_key +
     org_id). Safe to call on every boot.
     """
     inserted = 0
-    for spec in ECISCO_FORECAST_TARGETS:
+    for spec in FORECAST_TARGETS:
         existing = db.query(ForecastTarget).filter(
             ForecastTarget.product_key == spec["product_key"],
             ForecastTarget.org_id == org_id,
@@ -917,7 +917,7 @@ def seed_ecisco_forecast_targets(
     if inserted:
         db.commit()
         logger.info(
-            "seed_ecisco_forecast_targets: inserted %d new targets for org=%s",
+            "seed_acme_forecast_targets: inserted %d new targets for org=%s",
             inserted, org_id,
         )
     return inserted
@@ -926,7 +926,7 @@ def seed_ecisco_forecast_targets(
 - [ ] **Step 4: Run test to verify it passes**
 
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_ecisco_targets.py -xvs
+cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_seed_acme_targets.py -xvs
 ```
 
 Expected: PASS (6 tests)
@@ -935,12 +935,12 @@ Expected: PASS (6 tests)
 
 ```bash
 cd /home/ysk2025/zhanlu_7_30
-git add backend/app/services/forecasting/seed_ecisco_targets.py backend/tests/test_seed_ecisco_targets.py
-git commit -m "feat(forecasting): add idempotent seeder for 12 Ecisco BI dashboard targets
+git add backend/app/services/forecasting/seed_acme_targets.py backend/tests/test_seed_acme_targets.py
+git commit -m "feat(forecasting): add idempotent seeder for 12 Acme BI dashboard targets
 
-ECISCO_FORECAST_TARGETS maps each dashboard product_id to a primary time
-series in EDIA MySQL (10 from md_t_lz_price, 2 from ERP sale_erp_v_*_data).
-seed_ecisco_forecast_targets() is idempotent and org-scoped — safe to call
+FORECAST_TARGETS maps each dashboard product_id to a primary time
+series in Acme MySQL (10 from md_market_price, 2 from ERP sale_erp_v_*_data).
+seed_acme_forecast_targets() is idempotent and org-scoped — safe to call
 on every boot."
 ```
 
@@ -949,10 +949,10 @@ on every boot."
 ### Task 4: Alembic migration 037 — SQL-level idempotent insert
 
 **Files:**
-- Create: `backend/alembic/versions/037_ensure_12_ecisco_forecast_targets.py`
+- Create: `backend/alembic/versions/037_ensure_12_acme_forecast_targets.py`
 
 **Interfaces:**
-- Consumes: `ECISCO_FORECAST_TARGETS` from Task 3
+- Consumes: `FORECAST_TARGETS` from Task 3
 - Produces: 12 `forecast_targets` rows (if missing) for `org_id='default-org'`
 
 - [ ] **Step 1: Find the latest migration number to confirm 037 is next**
@@ -965,16 +965,16 @@ If 036 is the latest, 037 is correct. If not, adjust the filename and `revision`
 
 - [ ] **Step 2: Write the migration**
 
-Create `backend/alembic/versions/037_ensure_12_ecisco_forecast_targets.py`:
+Create `backend/alembic/versions/037_ensure_12_acme_forecast_targets.py`:
 
 ```python
-"""ensure 12 ecisco bi forecast targets exist
+"""ensure 12 acme bi forecast targets exist
 
-Revision ID: 037_ecisco_targets
-Revises: 036_rename_ecisco_bi_agent
+Revision ID: 037_acme_targets
+Revises: 036_rename_acme_bi_agent
 Create Date: 2026-08-03
 
-Inserts the 12 Ecisco BI dashboard forecast targets (one per product) for
+Inserts the 12 Acme BI dashboard forecast targets (one per product) for
 the default org, if they don't already exist. Idempotent — uses
 ON CONFLICT DO NOTHING semantics via a NOT EXISTS guard.
 
@@ -987,29 +987,29 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision = "037_ecisco_targets"
-down_revision = "036_rename_ecisco_bi_agent"
+revision = "037_acme_targets"
+down_revision = "036_rename_acme_bi_agent"
 branch_labels = None
 depends_on = None
 
 
-# Mirrors ECISCO_FORECAST_TARGETS in seed_ecisco_targets.py. Duplicated
+# Mirrors FORECAST_TARGETS in seed_acme_targets.py. Duplicated
 # here (rather than imported) so the migration is self-contained and
 # survives refactors of the seeder module.
 _TARGETS = [
-    ("ecisco.crude_oil",     "Crude Oil (Brent)",            "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-布伦特'"),
-    ("ecisco.naphtha",       "Naphtha (Japan)",              "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-日本石脑油'"),
-    ("ecisco.cracked_c5",    "Cracked C5 (Average)",         "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-裂解C5均价'"),
-    ("ecisco.mixed_c5",      "Mixed C5 (Yangzi)",            "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-扬子裂解C5'"),
-    ("ecisco.cracked_c9",    "Cracked C9 (Average)",         "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C9-裂解C9均价'"),
-    ("ecisco.isoprene",      "Isoprene (East China)",        "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '异戊二烯-华东市场价'"),
-    ("ecisco.piperylene",    "Piperylene (East China)",      "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '间戊二烯-华东市场价'"),
-    ("ecisco.dcpd",          "DCPD (East China)",            "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '双环戊二烯-华东市场价'"),
-    ("ecisco.sis",           "SIS (Baling 1105)",            "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = 'SIS-巴陵1105'"),
-    ("ecisco.styrene",       "Styrene (Sinopec East China)", "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '苯乙烯-中石化华东'"),
-    ("ecisco.blowing_agent", "Blowing Agent (East China)",   "md_t_lz_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '戊烷发泡剂-华东市场价'"),
-    ("ecisco.c5_resin",      "C5 Resin (ERP Order Book)",    "sale_erp_v_碳五石油树脂_data", "PLANDATE", "FTAXPRICE", "1=1"),
-    ("ecisco.raffinate_c5",  "Raffinate C5 (ERP Order Book)","sale_erp_v_抽余碳五_data", "PLANDATE", "FTAXPRICE", "1=1"),
+    ("acme.product_e",     "Product E (Benchmark A)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-布伦特'"),
+    ("acme.product_c",       "Product_C (Japan)",              "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-日本石脑油'"),
+    ("acme.cracked_c5",    "Cracked C5 (Average)",         "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-裂解C5均价'"),
+    ("acme.mixed_c5",      "Mixed fraction (Yangzi)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C5-扬子裂解C5'"),
+    ("acme.cracked_c9",    "Cracked C9 (Average)",         "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '裂解C9-裂解C9均价'"),
+    ("acme.product_d",      "Product_D (East China)",        "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '电子元件-华东市场价'"),
+    ("acme.product_f",    "Product F (East China)",      "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '材料C-华东市场价'"),
+    ("acme.product_b",          "PRODUCT_B (East China)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '材料B-华东市场价'"),
+    ("acme.sis",           "SIS (Baling 1105)",            "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = 'SIS-巴陵1105'"),
+    ("acme.styrene",       "Styrene (Sinopec East China)", "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '材料J-中石化华东'"),
+    ("acme.blowing_agent", "Blowing Agent (East China)",   "md_market_price", "FDATE", "FTAXPRICE", "FMATERIAL_NAME = '包装材料-华东市场价'"),
+    ("acme.product_a",      "C5 Resin (ERP Order Book)",    "sale_erp_v_原料A石油树脂_data", "PLANDATE", "FTAXPRICE", "1=1"),
+    ("acme.feedstock_a",  "Feedstock A (ERP Order Book)","sale_erp_v_原料A_data", "PLANDATE", "FTAXPRICE", "1=1"),
 ]
 
 
@@ -1020,7 +1020,7 @@ def upgrade() -> None:
 
     for product_key, name, table, time_col, measure, where_clause in _TARGETS:
         datasource = json.dumps({
-            "source": "edia_mysql",
+            "source": "mysql",
             "table": table,
             "time_col": time_col,
             "measure": measure,
@@ -1053,7 +1053,7 @@ def upgrade() -> None:
             "report_order": _TARGETS.index((product_key, name, table, time_col, measure, where_clause)) + 1,
         })
 
-    print(f"037: ensured {len(_TARGETS)} ecisco forecast targets exist for org={org_id}")
+    print(f"037: ensured {len(_TARGETS)} acme forecast targets exist for org={org_id}")
 
 
 def downgrade() -> None:
@@ -1081,11 +1081,11 @@ If `alembic.ini` is not configured for a scratch DB, skip this step and verify a
 
 ```bash
 cd /home/ysk2025/zhanlu_7_30
-git add backend/alembic/versions/037_ensure_12_ecisco_forecast_targets.py
-git commit -m "feat(db): migration 037 — ensure 12 ecisco forecast targets exist
+git add backend/alembic/versions/037_ensure_12_acme_forecast_targets.py
+git commit -m "feat(db): migration 037 — ensure 12 acme forecast targets exist
 
 Idempotent INSERT ... WHERE NOT EXISTS for each of the 12 dashboard
-product targets. Forward-only (no downgrade). Mirrors seed_ecisco_targets
+product targets. Forward-only (no downgrade). Mirrors seed_acme_targets
 for deployments that don't re-run seed.py."
 ```
 
@@ -1109,13 +1109,13 @@ Identify the line where `ensure_system_agents(db)` is called — that's where we
 Use `replace_in_file` to add after the `ensure_system_agents(db)` call:
 
 ```python
-    # ── Ecisco BI forecast targets ──────────────────────────────
+    # ── Acme BI forecast targets ──────────────────────────────
     # Ensure the 12 dashboard product targets exist so the nightly
     # forecast scheduler has something to compute against.
-    from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
-    new_targets = seed_ecisco_forecast_targets(db)
+    from app.services.forecasting.seed_acme_targets import seed_acme_forecast_targets
+    new_targets = seed_acme_forecast_targets(db)
     if new_targets:
-        print(f"  Seeded {new_targets} new Ecisco BI forecast targets")
+        print(f"  Seeded {new_targets} new Acme BI forecast targets")
 ```
 
 - [ ] **Step 3: Verify the seeder runs without error**
@@ -1123,10 +1123,10 @@ Use `replace_in_file` to add after the `ensure_system_agents(db)` call:
 ```bash
 cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -c "
 from app.db.session import SessionLocal
-from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
+from app.services.forecasting.seed_acme_targets import seed_acme_forecast_targets
 db = SessionLocal()
 try:
-    count = seed_ecisco_forecast_targets(db)
+    count = seed_acme_forecast_targets(db)
     print(f'Seeded {count} targets (0 = already existed)')
 finally:
     db.close()
@@ -1140,7 +1140,7 @@ Expected: `Seeded 12 targets` on first run, `Seeded 0 targets` on second run.
 ```bash
 cd /home/ysk2025/zhanlu_7_30
 git add backend/seed.py
-git commit -m "feat(seed): call seed_ecisco_forecast_targets on boot
+git commit -m "feat(seed): call seed_acme_forecast_targets on boot
 
 Ensures the 12 dashboard product forecast targets exist after every
 backend start. Idempotent — no-op on subsequent boots."
@@ -1164,7 +1164,7 @@ Create `backend/tests/test_forecast_dashboard_endpoint_v2.py`:
 
 ```python
 """Tests for get_forecast_base_batch_v2 — reads forecasts from local
-ForecastRun table instead of the stale EDIA v_forecast_price view."""
+ForecastRun table instead of the stale Acme v_forecast_price view."""
 from __future__ import annotations
 
 from datetime import datetime, timezone
@@ -1198,7 +1198,7 @@ def _seed_target_and_run(db, product_key: str, base_7d: float):
         app_id="default-app",
         product_key=product_key,
         name=product_key,
-        datasource={"source": "edia_mysql"},
+        datasource={"source": "mysql"},
         level=2,
         status="active",
         source="seed",
@@ -1229,12 +1229,12 @@ def test_v2_returns_base_7d_from_latest_forecast_run(db_session, monkeypatch):
         "app.services.market_dashboard_service.SessionLocal",
         lambda: db_session,
     )
-    _seed_target_and_run(db_session, "ecisco.crude_oil", 84.5)
+    _seed_target_and_run(db_session, "acme.product_e", 84.5)
 
-    result = get_forecast_base_batch_v2(["crude_oil", "naphtha"], day=7)
+    result = get_forecast_base_batch_v2(["product_e", "product_c"], day=7)
     assert result.day == 7
-    assert result.base_by_product["crude_oil"] == 84.5
-    assert result.base_by_product["naphtha"] is None  # no run seeded
+    assert result.base_by_product["product_e"] == 84.5
+    assert result.base_by_product["product_c"] is None  # no run seeded
 
 
 def test_v2_returns_none_for_product_with_no_run(db_session, monkeypatch):
@@ -1243,8 +1243,8 @@ def test_v2_returns_none_for_product_with_no_run(db_session, monkeypatch):
         lambda: db_session,
     )
     # No targets seeded at all
-    result = get_forecast_base_batch_v2(["crude_oil"], day=7)
-    assert result.base_by_product["crude_oil"] is None
+    result = get_forecast_base_batch_v2(["product_e"], day=7)
+    assert result.base_by_product["product_e"] is None
 
 
 def test_v2_respects_day_parameter(db_session, monkeypatch):
@@ -1252,13 +1252,13 @@ def test_v2_respects_day_parameter(db_session, monkeypatch):
         "app.services.market_dashboard_service.SessionLocal",
         lambda: db_session,
     )
-    _seed_target_and_run(db_session, "ecisco.crude_oil", base_7d=84.5)
+    _seed_target_and_run(db_session, "acme.product_e", base_7d=84.5)
 
     # Request 3-day forecast instead of 7-day
-    result = get_forecast_base_batch_v2(["crude_oil"], day=3)
+    result = get_forecast_base_batch_v2(["product_e"], day=3)
     assert result.day == 3
     # 3d base was [base_7d - 50] = [34.5], so base[0] = 34.5
-    assert result.base_by_product["crude_oil"] == 34.5
+    assert result.base_by_product["product_e"] == 34.5
 
 
 def test_v2_returns_latest_run_when_multiple_exist(db_session, monkeypatch):
@@ -1269,8 +1269,8 @@ def test_v2_returns_latest_run_when_multiple_exist(db_session, monkeypatch):
     # Seed target
     target = ForecastTarget(
         org_id="default-org", app_id="default-app",
-        product_key="ecisco.crude_oil", name="Crude",
-        datasource={"source": "edia_mysql"}, level=2, status="active", source="seed",
+        product_key="acme.product_e", name="Crude",
+        datasource={"source": "mysql"}, level=2, status="active", source="seed",
     )
     db_session.add(target)
     db_session.flush()
@@ -1291,9 +1291,9 @@ def test_v2_returns_latest_run_when_multiple_exist(db_session, monkeypatch):
     db_session.add(new_run)
     db_session.commit()
 
-    result = get_forecast_base_batch_v2(["crude_oil"], day=7)
+    result = get_forecast_base_batch_v2(["product_e"], day=7)
     # Should return the newer run's base (85.0), not the old one (70.0)
-    assert result.base_by_product["crude_oil"] == 85.0
+    assert result.base_by_product["product_e"] == 85.0
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1319,21 +1319,21 @@ Then use `replace_in_file` to add the new function after the existing `get_forec
 ```python
 # ── v2: read from local ForecastRun (nightly cron output) ─────────────
 # Maps dashboard product_id → ForecastTarget.product_key (seeded by
-# seed_ecisco_targets). Used by get_forecast_base_batch_v2.
+# seed_acme_targets). Used by get_forecast_base_batch_v2.
 PRODUCT_FORECAST_TARGET_KEY: dict[str, str] = {
-    "crude_oil":      "ecisco.crude_oil",
-    "naphtha":        "ecisco.naphtha",
-    "cracked_c5":     "ecisco.cracked_c5",
-    "mixed_c5":       "ecisco.mixed_c5",
-    "cracked_c9":     "ecisco.cracked_c9",
-    "isoprene":       "ecisco.isoprene",
-    "piperylene":     "ecisco.piperylene",
-    "dcpd":           "ecisco.dcpd",
-    "sis":            "ecisco.sis",
-    "styrene":        "ecisco.styrene",
-    "blowing_agent":  "ecisco.blowing_agent",
-    "c5_resin":       "ecisco.c5_resin",
-    "raffinate_c5":   "ecisco.raffinate_c5",
+    "product_e":      "acme.product_e",
+    "product_c":        "acme.product_c",
+    "cracked_c5":     "acme.cracked_c5",
+    "mixed_c5":       "acme.mixed_c5",
+    "cracked_c9":     "acme.cracked_c9",
+    "product_d":       "acme.product_d",
+    "product_f":     "acme.product_f",
+    "product_b":           "acme.product_b",
+    "sis":            "acme.sis",
+    "styrene":        "acme.styrene",
+    "blowing_agent":  "acme.blowing_agent",
+    "product_a":       "acme.product_a",
+    "feedstock_a":   "acme.feedstock_a",
 }
 
 
@@ -1342,7 +1342,7 @@ def get_forecast_base_batch_v2(
 ) -> ForecastBaseBatchResponse:
     """Read forecast base prices from the local ForecastRun table.
 
-    Replaces the v1 reader that hit EDIA's stale v_forecast_price view.
+    Replaces the v1 reader that hit Acme's stale v_forecast_price view.
     Returns the latest `results['{day}d']['base'][0]` per product, or
     None for products with no run yet.
 
@@ -1419,7 +1419,7 @@ git add backend/app/services/market_dashboard_service.py backend/tests/test_fore
 git commit -m "feat(dashboard): add get_forecast_base_batch_v2 reading from ForecastRun
 
 Reads the latest 7-day base forecast from the local forecast_runs table
-(populated by the nightly cron) instead of EDIA's stale v_forecast_price
+(populated by the nightly cron) instead of Acme's stale v_forecast_price
 view. Returns None for products with no run yet — graceful degradation."
 ```
 
@@ -1466,7 +1466,7 @@ git add backend/app/routers/market_dashboard.py
 git commit -m "refactor(dashboard): switch /forecast-base-batch to v2 reader
 
 One-line change: calls get_forecast_base_batch_v2 (reads local
-ForecastRun) instead of get_forecast_base_batch (reads stale EDIA
+ForecastRun) instead of get_forecast_base_batch (reads stale Acme
 v_forecast_price view). Old function kept for fallback."
 ```
 
@@ -1480,7 +1480,7 @@ v_forecast_price view). Old function kept for fallback."
 - Test: `backend/tests/test_bootstrap_nightly_forecast.py`
 
 **Interfaces:**
-- Consumes: `ensure_automation_runtime_agent` from `app.services.automation_runtime`, `seed_ecisco_forecast_targets` from Task 3, `AutomationTask` model
+- Consumes: `ensure_automation_runtime_agent` from `app.services.automation_runtime`, `seed_acme_forecast_targets` from Task 3, `AutomationTask` model
 - Produces: `POST /api/automations/bootstrap-nightly-forecast` endpoint
 
 - [ ] **Step 1: Add config flags**
@@ -1583,7 +1583,7 @@ def test_bootstrap_creates_task_with_correct_cron(test_app):
     # Verify the task exists in DB
     session = Session()
     task = session.query(AutomationTask).filter(
-        AutomationTask.name == "Nightly Ecisco BI Forecast"
+        AutomationTask.name == "Nightly Acme BI Forecast"
     ).first()
     assert task is not None
     assert task.cron_expression == "0 2 * * *"
@@ -1607,7 +1607,7 @@ def test_bootstrap_is_idempotent(test_app):
 
     session = Session()
     count = session.query(AutomationTask).filter(
-        AutomationTask.name == "Nightly Ecisco BI Forecast"
+        AutomationTask.name == "Nightly Acme BI Forecast"
     ).count()
     assert count == 1  # no duplicate
     session.close()
@@ -1651,7 +1651,7 @@ def bootstrap_nightly_forecast(
     """Create the idempotent nightly forecast automation task.
 
     Ensures:
-      1. The 12 Ecisco BI forecast targets exist (via seed_ecisco_forecast_targets)
+      1. The 12 Acme BI forecast targets exist (via seed_acme_forecast_targets)
       2. The automation_runtime_agent exists for this (org, app)
       3. An AutomationTask with cron=0 2 * * *, skip_confirmation=true exists
 
@@ -1661,21 +1661,21 @@ def bootstrap_nightly_forecast(
         raise HTTPException(status_code=403, detail="Nightly forecast is disabled")
 
     from app.services.automation_runtime import ensure_automation_runtime_agent
-    from app.services.forecasting.seed_ecisco_targets import seed_ecisco_forecast_targets
+    from app.services.forecasting.seed_acme_targets import seed_acme_forecast_targets
 
     org_id = getattr(user, "org_id", "default-org") or "default-org"
     app_id = "default-app"
     cron = settings.NIGHTLY_FORECAST_CRON
 
     # 1. Ensure targets exist (idempotent)
-    seed_ecisco_forecast_targets(db, org_id=org_id, app_id=app_id)
+    seed_acme_forecast_targets(db, org_id=org_id, app_id=app_id)
 
     # 2. Ensure runtime agent exists (idempotent)
     runtime = ensure_automation_runtime_agent(db, org_id, app_id)
 
     # 3. Find or create the automation task (idempotent by name + org)
     existing = db.query(AutomationTask).filter(
-        AutomationTask.name == "Nightly Ecisco BI Forecast",
+        AutomationTask.name == "Nightly Acme BI Forecast",
         AutomationTask.org_id == org_id,
         AutomationTask.is_deleted == False,  # noqa: E712
     ).first()
@@ -1683,10 +1683,10 @@ def bootstrap_nightly_forecast(
         return {"task_id": existing.id, "status": "exists", "cron": cron}
 
     task = AutomationTask(
-        name="Nightly Ecisco BI Forecast",
+        name="Nightly Acme BI Forecast",
         type="scheduled",
         description=(
-            "Silent nightly ML forecast for all 12 Ecisco BI dashboard "
+            "Silent nightly ML forecast for all 12 Acme BI dashboard "
             "products. Writes to forecast_runs; dashboard reads via "
             "/forecast-base-batch."
         ),
@@ -1733,7 +1733,7 @@ git commit -m "feat(automation): add POST /bootstrap-nightly-forecast endpoint
 
 Creates the idempotent nightly forecast AutomationTask with cron=0 2 * * *,
 skip_confirmation=true, and a prompt that calls forecast_run with no
-target_id. Also ensures the 12 Ecisco targets and the runtime agent exist.
+target_id. Also ensures the 12 Acme targets and the runtime agent exist.
 Returns 403 when NIGHTLY_FORECAST_ENABLED=false."
 ```
 
@@ -1746,7 +1746,7 @@ Returns 403 when NIGHTLY_FORECAST_ENABLED=false."
 - [ ] **Step 1: Run all new tests together to confirm no conflicts**
 
 ```bash
-cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_edia_source.py tests/test_forecast_engine_edia_source.py tests/test_seed_ecisco_targets.py tests/test_forecast_dashboard_endpoint_v2.py -xvs 2>&1 | tail -30
+cd /home/ysk2025/zhanlu_7_30/backend && venv/bin/python -m pytest tests/test_edia_source.py tests/test_forecast_engine_edia_source.py tests/test_seed_acme_targets.py tests/test_forecast_dashboard_endpoint_v2.py -xvs 2>&1 | tail -30
 ```
 
 Expected: All PASS. (Skip `test_bootstrap_nightly_forecast.py` if it has complex fixture issues — verify manually in Step 4.)
@@ -1780,10 +1780,10 @@ from app.models.forecasting import ForecastTarget
 db = SessionLocal()
 try:
     targets = db.query(ForecastTarget).filter(
-        ForecastTarget.product_key.like('ecisco.%'),
+        ForecastTarget.product_key.like('acme.%'),
         ForecastTarget.is_deleted == False,
     ).order_by(ForecastTarget.report_order).all()
-    print(f'Found {len(targets)} Ecisco forecast targets:')
+    print(f'Found {len(targets)} Acme forecast targets:')
     for t in targets:
         print(f'  {t.report_order}. {t.product_key} — {t.name} — status={t.status}')
 finally:
@@ -1791,7 +1791,7 @@ finally:
 "
 ```
 
-Expected: `Found 12 Ecisco forecast targets:` followed by 12 lines.
+Expected: `Found 12 Acme forecast targets:` followed by 12 lines.
 
 - [ ] **Step 5: Bootstrap the nightly task via the endpoint**
 
@@ -1835,7 +1835,7 @@ from app.models.forecasting import ForecastTarget, ForecastRun
 db = SessionLocal()
 try:
     runs = db.query(ForecastRun).join(ForecastTarget).filter(
-        ForecastTarget.product_key.like('ecisco.%'),
+        ForecastTarget.product_key.like('acme.%'),
         ForecastRun.is_deleted == False,
     ).order_by(ForecastRun.created_date.desc()).limit(12).all()
     print(f'Found {len(runs)} recent forecast runs:')
@@ -1849,16 +1849,16 @@ finally:
 "
 ```
 
-Expected: 12 (or close to 12 — some may fail if EDIA MySQL is unreachable) runs with populated `base_7d` values.
+Expected: 12 (or close to 12 — some may fail if Acme MySQL is unreachable) runs with populated `base_7d` values.
 
 - [ ] **Step 7: Verify the dashboard endpoint returns fresh forecasts**
 
 ```bash
-curl -s "http://localhost:8000/api/market-dashboard/forecast-base-batch?product_ids=crude_oil,naphtha,cracked_c5,isoprene,sis,styrene&day=7" \
+curl -s "http://localhost:8000/api/market-dashboard/forecast-base-batch?product_ids=product_e,product_c,cracked_c5,product_d,sis,styrene&day=7" \
   -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 ```
 
-Expected: `{"day":7,"base_by_product":{"crude_oil":84.5,"naphtha":826.0,"cracked_c5":5685.0,"isoprene":11596.0,"sis":15000.0,"styrene":8600.0}}` (values will differ — these are examples).
+Expected: `{"day":7,"base_by_product":{"product_e":84.5,"product_c":826.0,"cracked_c5":5685.0,"product_d":11596.0,"sis":15000.0,"styrene":8600.0}}` (values will differ — these are examples).
 
 - [ ] **Step 8: Verify the dashboard UI**
 
@@ -1871,7 +1871,7 @@ http://10.10.10.51:8080/market-dashboard/overview
 The `ForecastCard` component should now show fresh 7-day base forecasts for each product. If the values are null, check backend logs:
 
 ```bash
-docker compose logs --tail=100 backend 2>&1 | grep -i "forecast\|edia_mysql\|EdiaMysqlDataSource" | tail -20
+docker compose logs --tail=100 backend 2>&1 | grep -i "forecast\|mysql\|EdiaMysqlDataSource" | tail -20
 ```
 
 - [ ] **Step 9: Final commit (if any cleanup needed)**
@@ -1890,7 +1890,7 @@ git add -A && git commit -m "chore: nightly forecast scheduler integration verif
 **Spec coverage:**
 - ✅ Section 5.1 (EdiaMysqlDataSource) → Task 1
 - ✅ Section 5.2 (engine.py extend) → Task 2
-- ✅ Section 5.3 (seed_ecisco_targets.py) → Task 3
+- ✅ Section 5.3 (seed_acme_targets.py) → Task 3
 - ✅ Section 5.4 (seed.py extend) → Task 5
 - ✅ Section 5.5 (Alembic 037) → Task 4
 - ✅ Section 5.6 (market_dashboard_service v2) → Task 6
@@ -1905,9 +1905,9 @@ git add -A && git commit -m "chore: nightly forecast scheduler integration verif
 
 **Type consistency:**
 - `EdiaMysqlDataSource.read_history(datasource: dict) -> pd.DataFrame` — consistent across Tasks 1, 2
-- `seed_ecisco_forecast_targets(db, org_id, app_id) -> int` — consistent across Tasks 3, 5, 8
+- `seed_acme_forecast_targets(db, org_id, app_id) -> int` — consistent across Tasks 3, 5, 8
 - `get_forecast_base_batch_v2(product_ids, day) -> ForecastBaseBatchResponse` — consistent across Tasks 6, 7
-- `ECISCO_FORECAST_TARGETS` list — defined in Task 3, referenced (duplicated) in Task 4 migration
+- `FORECAST_TARGETS` list — defined in Task 3, referenced (duplicated) in Task 4 migration
 - `PRODUCT_FORECAST_TARGET_KEY` dict — defined in Task 6, matches `product_key` values from Task 3
 
 **No issues found.** Plan is ready for execution.

@@ -148,7 +148,7 @@ def test_legacy_project_string_filter_does_not_match_any_column(db):
     # Filter on a column that doesn't exist on this model.
     rows = filter_records(
         AgentConversation, db,
-        json.dumps({"project": "ecisco"}),  # not a model column
+        json.dumps({"project": "acme"}),  # not a model column
         "-updated_date", 100, None,
     )
     # parse_query drops the unknown key, so the result is "no WHERE
@@ -165,7 +165,7 @@ def test_legacy_project_string_filter_does_not_match_any_column(db):
     # non-existent one is dropped.
     rows = filter_records(
         AgentConversation, db,
-        json.dumps({"project_id": "x" * 36, "project": "ecisco"}),
+        json.dumps({"project_id": "x" * 36, "project": "acme"}),
         "-updated_date", 100, None,
     )
     titles = {r["title"] for r in rows}

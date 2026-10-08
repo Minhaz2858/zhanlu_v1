@@ -982,7 +982,7 @@ def test_no_deployment_specific_routing_in_the_contract_modules():
 
     base = Path(__file__).resolve().parents[1] / "app" / "services" / "db"
     forbidden = (
-        "aipdp", "ecisco", "ecrisco", "erp_t_", "erp_v_", "sale_erp",
+        "acme", "acme", "ecrisco", "erp_t_", "erp_v_", "sale_erp",
         "is_default", "DEFAULT_KB", "default_kb_id",
     )
     for name in ("contracts.py", "grounding.py"):

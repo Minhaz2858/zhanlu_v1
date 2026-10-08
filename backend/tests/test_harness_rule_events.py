@@ -229,7 +229,7 @@ def test_turn_binding_flows_into_rows():
 
 def test_flush_persists_rows(db, monkeypatch):
     monkeypatch.setenv("HARNESS_RULE_EVENTS_PERSIST", "1")
-    bind_turn(conversation_id="conv-42", agent_name="ecisco_bi_assistant")
+    bind_turn(conversation_id="conv-42", agent_name="acme_bi_assistant")
 
     @observe_rule("file_turn_guard.should_force_create_file", forced="create_artifact")
     def force(user_content, *, iteration=None, max_iterations=None):
@@ -244,7 +244,7 @@ def test_flush_persists_rows(db, monkeypatch):
     assert row.fired is True
     assert row.forced_target == "create_artifact"
     assert row.conversation_id == "conv-42"
-    assert row.agent_name == "ecisco_bi_assistant"
+    assert row.agent_name == "acme_bi_assistant"
     assert row.detail["iteration"] == 9
     # Buffered rows are consumed, counters keep the totals.
     assert re_mod.pending_rows() == []
@@ -319,7 +319,7 @@ def test_live_refusal_prompt_is_recorded_as_not_firing():
     """
     from app.services.file_turn_guard import is_file_deliverable_request
 
-    prompt = "本周销售情况 ，只统计 惠州伊斯科数据 ，直接输出，不要输出 文档"
+    prompt = "本周销售情况 ，只统计 示例工厂数据 ，直接输出，不要输出 文档"
     assert is_file_deliverable_request(prompt) == (False, None)
 
     s = summary()["rules"]

@@ -1,6 +1,6 @@
 """Tests that the cache is strictly project-scoped.
 
-Two projects: P1 (the 'ecisco_bi_assistant' AgentApp is bound to it),
+Two projects: P1 (the 'acme_bi_assistant' AgentApp is bound to it),
 P2 (a different AgentApp). Cache writes/reads for P1 must not appear
 under P2 and vice versa.
 """
@@ -34,40 +34,40 @@ def db():
 
 def test_seed_isolates_projects(db):
     settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
-    seed_products_as_entities(db, "p_ecisco")
+    seed_products_as_entities(db, "p_acme")
     seed_products_as_entities(db, "p_other")
     db.commit()
-    ecisco_count = db.query(ProjectEntity).filter_by(project_id="p_ecisco").count()
+    acme_count = db.query(ProjectEntity).filter_by(project_id="p_acme").count()
     other_count = db.query(ProjectEntity).filter_by(project_id="p_other").count()
-    assert ecisco_count == other_count == 13
+    assert acme_count == other_count == 13
 
 
 def test_invalidate_only_target_project(db):
     settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
-    seed_products_as_entities(db, "p_ecisco")
+    seed_products_as_entities(db, "p_acme")
     seed_products_as_entities(db, "p_other")
     db.commit()
-    ProjectKnowledgeCache("p_ecisco").invalidate(db, scope="all")
-    ecisco_after = db.query(ProjectEntity).filter_by(
-        project_id="p_ecisco", is_deleted=False,
+    ProjectKnowledgeCache("p_acme").invalidate(db, scope="all")
+    acme_after = db.query(ProjectEntity).filter_by(
+        project_id="p_acme", is_deleted=False,
     ).count()
     other_after = db.query(ProjectEntity).filter_by(
         project_id="p_other", is_deleted=False,
     ).count()
-    assert ecisco_after == 0
+    assert acme_after == 0
     assert other_after == 13
 
 
 def test_stats_isolates_projects(db):
     settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
-    seed_products_as_entities(db, "p_ecisco")
+    seed_products_as_entities(db, "p_acme")
     seed_products_as_entities(db, "p_other")
     db.commit()
-    s1 = ProjectKnowledgeCache("p_ecisco").stats(db)
+    s1 = ProjectKnowledgeCache("p_acme").stats(db)
     s2 = ProjectKnowledgeCache("p_other").stats(db)
     assert s1.entities == 13
     assert s2.entities == 13
-    assert s1.project_id == "p_ecisco"
+    assert s1.project_id == "p_acme"
     assert s2.project_id == "p_other"
 
 
@@ -77,17 +77,17 @@ def test_query_layer2_respects_project_scope(db):
     settings.PROJECT_KNOWLEDGE_CACHE_ENABLED = True
     settings.PROJECT_KNOWLEDGE_LAYER_ENTITIES_ENABLED = True
     # seed both projects
-    seed_products_as_entities(db, "p_ecisco")
+    seed_products_as_entities(db, "p_acme")
     seed_products_as_entities(db, "p_other")
     db.commit()
     # query with no resolver hit (something custom that no alias matches)
     cache_p2 = ProjectKnowledgeCache("p_other")
     # craft a token that matches BOTH projects' seed alias
-    r = cache_p2._layer2_entities(db, "show me 异戊二烯")
+    r = cache_p2._layer2_entities(db, "show me 电子元件")
     # if hit, every entity must belong to p_other
     if r is not None and r.kind == "entity":
         for ent in r.data["entities"]:
-            # name/aliases can be from c5c9_seed but the entity row must
+            # name/aliases can be from sample_seed but the entity row must
             # only be in p_other scope (Layer 2 query already filtered
             # by project_id=self.project_id, so this is the test)
             pass  # coverage by query WHERE clause

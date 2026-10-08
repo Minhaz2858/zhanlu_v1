@@ -161,7 +161,7 @@ class TestPreservedRules:
 
 
 class TestFlagGatingAndScoping:
-    """The block stays flag-gated and ecisco-only."""
+    """The block stays flag-gated and acme-only."""
 
     def test_flag_off_suppresses_block(self, monkeypatch):
         from app.services.agent_prompts import settings

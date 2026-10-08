@@ -10,7 +10,7 @@ The Data Agent must work across ANY database, so its prompt must:
   4. Contain ZERO hardcoded table or column names.
 
 The main agent's `_SCHEMA_AWARE_PROTOCOL_BLOCK` (injected into
-ecisco_bi_assistant) must likewise contain zero hardcoded column names
+acme_bi_assistant) must likewise contain zero hardcoded column names
 (e.g. FPRODUCEDATE / FUPDATETIME).
 
 Follows the existing unittest patterns in test_agent_autonomy_contract.py.

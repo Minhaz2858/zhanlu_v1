@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-The customer's data warehouse (`aipdp_data_warehouse_prod` @ `10.10.10.49:3306`) contains **139 tables**. We were only reading **~5** of them. The deep probe reveals that **ALL THREE Tier 3 fundamental data feeds can be built from existing warehouse data** — no external subscriptions needed.
+The customer's data warehouse (`demo_warehouse_prod` @ `10.10.10.49:3306`) contains **139 tables**. We were only reading **~5** of them. The deep probe reveals that **ALL THREE Tier 3 fundamental data feeds can be built from existing warehouse data** — no external subscriptions needed.
 
 The procurement questionnaire is no longer blocking.
 
@@ -14,7 +14,7 @@ The procurement questionnaire is no longer blocking.
 |----------|-------|-----------------|
 | `erp_v_*` (views) | 8 | 2 of 8 |
 | `sale_erp_v_*` | 12 | qty + price only |
-| `lz_v_*` | 13 | 2 of 13 |
+| `v_*` | 13 | 2 of 13 |
 | `md_t_*` | 1 | Yes |
 | `v_*` | 5 | 0 |
 | `erp_t_*` (raw ERP) | ~25 | **0 — ALL NEW** |
@@ -60,14 +60,14 @@ The procurement questionnaire is no longer blocking.
 | `erp_t_stk_instock` | 14,334 | 2018-05 → 2026-07 | FSUPPLIERID (763 distinct) — join with supplier master |
 | `erp_t_stk_instockentry` | 42,970 | (joined via FID) | FREALQTY, FALLAMOUNTEXCEPTDISCOUNT → compute unit price = amount/qty |
 | `erp_t_bd_supplier` | 2,211 | — | FNAME (273 distinct supplier names), CURRENCY_NAME |
-| `erp_v_sale_guangdong` | 299 | 2024-09 → 2026-07 | CUST_NAME includes **"Ecisco International Investments, LLC"** (export customer) |
+| `erp_v_sale_guangdong` | 299 | 2024-09 → 2026-07 | CUST_NAME includes **"Acme International Investments, LLC"** (export customer) |
 | `erp_v_sale_huizhou` | 13,912 | 2018-06 → 2026-07 | FPRICE (986 distinct), FTAXPRICE (812), CUST_NAME |
 
 **How to build**: Join `erp_t_stk_instock` (has FSUPPLIERID + FDATE) with `erp_t_stk_instockentry` (has FREALQTY + FALLAMOUNTEXCEPTDISCOUNT) and `erp_t_bd_supplier` (has FNAME). Compute unit_price = FALLAMOUNTEXCEPTDISCOUNT / FREALQTY. Filter by supplier name keywords or CURRENCY_NAME ≠ "人民币" to identify import transactions.
 
-**Supplier analysis**: Only 1 explicitly international supplier found: "Ecisco International Investments, LLC" (which is the customer's own export arm). Most of 273 suppliers are domestic. However, major petrochemical producers like "中国石油天然气股份有限公司", "宁波金海晨光化学股份有限公司", "福建联合石化" are present — these are large-scale suppliers whose pricing reflects market conditions.
+**Supplier analysis**: Only 1 explicitly international supplier found: "Acme International Investments, LLC" (which is the customer's own export arm). Most of 273 suppliers are domestic. However, major industrial producers like "中国石油天然气股份有限公司", "宁波金海晨光化学股份有限公司", "福建联合石化" are present — these are large-scale suppliers whose pricing reflects market conditions.
 
-**Note**: The international supplier columns described in `EDIA_5.1.2/erp_mysql_schema.txt` (ARLANXEO, Kraton, Ineos, etc.) do **NOT** exist in this warehouse. That schema was from EDIA's design, not the actual database.
+**Note**: The international supplier columns described in `Acme_5.1.2/erp_mysql_schema.txt` (ARLANXEO, Kraton, Ineos, etc.) do **NOT** exist in this warehouse. That schema was from Acme's design, not the actual database.
 
 ---
 
@@ -76,11 +76,11 @@ The procurement questionnaire is no longer blocking.
 ### Upstream Market Data from 隆众资讯 (Oilchem)
 | Table | Rows | Date Range | Columns |
 |-------|------|------------|---------|
-| `oilchem_data` | 74 | 2026-04 → 2026-08 | brent_crude, japan_naphtha, industrial_cracking_c5, industrial_cracking_c9 |
+| `oilchem_data` | 74 | 2026-04 → 2026-08 | brent_crude, japan_product_c, industrial_cracking_c5, industrial_cracking_c9 |
 
 This is **daily upstream market data** scraped from oilchem.net (隆众资讯). Currently only 4 months, but actively updated (last: 2026-08-07). This provides:
-- **Brent crude** — the ultimate upstream feedstock price
-- **Japan naphtha** — Asian benchmark for petrochemical feedstock
+- **Benchmark A crude** — the ultimate upstream feedstock price
+- **Japan product_c** — Asian benchmark for industrial feedstock
 - **Cracking C5/C9** — direct feedstock for the customer's products
 
 ### Contract Data (14 years)
@@ -99,12 +99,12 @@ Contract prices (`F_PAEZ_DPRICE` 128 distinct, `F_PAEZ_PRICE_WY_PLANPRICE` 185 d
 
 This is a clean, curated sales detail table with contract prices, shipment quantities, and freight costs per ton — only 1 year but very well structured.
 
-### Additional Unused lz_v_* Views (6 products)
-We were only reading 2 of 13 `lz_v_*` views. The 11 unused views cover: SIS, 双环戊二烯, 异戊烷, 戊烷泡发剂, 正戊烷, 混三甲苯, 环戊烷, 甲基四氢苯酐, 苯乙烯, 裂解c5, 裂解c9, 间戊二烯.
+### Additional Unused v_* Views (6 products)
+We were only reading 2 of 13 `v_*` views. The 11 unused views cover: SIS, 材料B, 材料E, 包装材料, 材料F, 材料H, 材料G, 材料I, 材料J, 材料L, 材料K, 材料C.
 
 ### Additional Unused Product Tables (8 products)
 Standalone product tables with 日期Time column (2025-03 to 2026-03):
-`丁二烯 sbs`, `双环戊二烯`, `异戊二烯`, `戊烷发泡剂`, `苯乙烯`, `裂解c5`, `裂解c9`, `间戊二烯`
+`丁二烯 sbs`, `材料B`, `电子元件`, `包装材料`, `材料J`, `材料L`, `材料K`, `材料C`
 
 ### Forecast System Tables (already populated)
 | Table | Rows | Date Range |
@@ -139,7 +139,7 @@ Standalone product tables with 日期Time column (2025-03 to 2026-03):
 
 ### Priority 4: Upstream Market Data Loader
 - **Source**: `oilchem_data`
-- **Output**: Daily Brent crude, Japan naphtha, C5/C9 cracking prices
+- **Output**: Daily Benchmark A crude, Japan product_c, C5/C9 cracking prices
 - **74 rows but growing daily** — critical upstream exogenous feature
 
 ### Priority 5: Sales Volume + Price Loader (enhance existing)
@@ -156,7 +156,7 @@ Standalone product tables with 日期Time column (2025-03 to 2026-03):
 
 ## Data Quality Notes
 
-1. **`produce_qty`, `plan_qty`, `instock_qty`** in `erp_v_sale_orderentry` and `sale_erp_v_*` tables are ALL empty (varbinary(0), 0 non-null). These were EDIA-design columns that were never populated in the actual warehouse. **Do not use them.**
+1. **`produce_qty`, `plan_qty`, `instock_qty`** in `v_sale_order` and `sale_erp_v_*` tables are ALL empty (varbinary(0), 0 non-null). These were Acme-design columns that were never populated in the actual warehouse. **Do not use them.**
 
 2. **`FPRODUCEDATE`** is empty in all entry tables. Use the header table's `FDATE` instead for time-series.
 
@@ -164,4 +164,4 @@ Standalone product tables with 日期Time column (2025-03 to 2026-03):
 
 4. **`erp_t_stk_inventory.FBASEQTY`** has some negative values (min -1,390) — likely returns or adjustments. Filter or handle as signed quantities.
 
-5. **`oilchem_data`** price columns (brent_crude, japan_naphtha, etc.) appear to be NULL in the sample rows — only `source_status` (JSON with URL) is populated. Need to check if prices are in the JSON or if the scraper isn't extracting them.
+5. **`oilchem_data`** price columns (brent_crude, japan_product_c, etc.) appear to be NULL in the sample rows — only `source_status` (JSON with URL) is populated. Need to check if prices are in the JSON or if the scraper isn't extracting them.

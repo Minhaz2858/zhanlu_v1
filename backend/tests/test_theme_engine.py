@@ -36,7 +36,7 @@ def _full_payload():
     )
     return ReportCardPayload(
         title="Q3 Sales Review",
-        source="erp_v_sale_orderentry · db1",
+        source="v_sale_order · db1",
         generated_at="2026-07-22T08:30:00Z",
         summary="Top materials drive 76% of revenue.",
         methodology="Aggregated sale_orderentry rows grouped by material_name.",

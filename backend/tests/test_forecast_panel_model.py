@@ -153,7 +153,7 @@ class TestPanelModelChallenger:
 
         target = MagicMock()
         target.id = "t1"
-        target.product_key = "naphtha"
+        target.product_key = "product_c"
         target.model_config = {}
 
         panel_shadow = MagicMock()

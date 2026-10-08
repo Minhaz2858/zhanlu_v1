@@ -68,7 +68,7 @@ def test_compute_what_if_returns_full_shape(monkeypatch):
     assert result["base_forecast"] == [100.0, 101.0, 102.0]
     assert result["total_impact_pct"] == 5.0
     # The root-feedstock driver label is config-driven; empty config → generic
-    # "feedstock" (was hardcoded "naphtha" in the pre-de-hardcoding era).
+    # "feedstock" (was hardcoded "product_c" in the pre-de-hardcoding era).
     assert result["adjustments"][0]["driver"] == "feedstock"
     assert result["adjustments"][0]["impact_pct"] == 5.0
     assert result["adjusted_forecast"] == [
@@ -91,8 +91,8 @@ def test_compute_what_if_market_uses_08_elasticity_proxy(monkeypatch):
     """Market shock is converted to the root feedstock with ~0.8 elasticity before propagation."""
     calls = {}
 
-    def fake_adjustment(product_id, as_of_date, naphtha_pct_change):
-        calls["naphtha_pct_change"] = naphtha_pct_change
+    def fake_adjustment(product_id, as_of_date, product_c_pct_change):
+        calls["product_c_pct_change"] = product_c_pct_change
         return {"causal_pct": 2.0}
 
     monkeypatch.setattr(what_if, "compute_domain_signal_adjustment", fake_adjustment)
@@ -102,6 +102,6 @@ def test_compute_what_if_market_uses_08_elasticity_proxy(monkeypatch):
         feedstock_delta_pct=0.0,
         db=FakeDB(target=_target(), run=_run()),
     )
-    assert calls["naphtha_pct_change"] == 5.0 * 0.8  # 4.0
+    assert calls["product_c_pct_change"] == 5.0 * 0.8  # 4.0
     assert result["adjustments"][0]["driver"] == "market_index"
     assert result["total_impact_pct"] == 2.0

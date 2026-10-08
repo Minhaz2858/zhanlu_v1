@@ -14,7 +14,7 @@ def test_forecast_brief_success(monkeypatch):
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: brief)
     out = asyncio.run(forecast_tool._forecast_brief(
-        {"product_id": "dcpd", "day": 7}, db=None, user_id=None, context=None))
+        {"product_id": "product_b", "day": 7}, db=None, user_id=None, context=None))
     assert out["success"] is True
     assert out["brief"]["market_update_zh"].startswith("双环戊二烯")
     assert out["brief"]["source"] == "template"
@@ -30,9 +30,9 @@ def test_forecast_brief_no_data(monkeypatch):
     monkeypatch.setattr(analyst_service, "get_analyst_brief",
                         lambda pid, day=7, db=None: None)
     out = asyncio.run(forecast_tool._forecast_brief(
-        {"product_id": "dcpd"}, db=None, user_id=None, context=None))
+        {"product_id": "product_b"}, db=None, user_id=None, context=None))
     assert out["success"] is False
-    assert "dcpd" in out["error"]
+    assert "product_b" in out["error"]
 
 
 def test_forecast_brief_registered():

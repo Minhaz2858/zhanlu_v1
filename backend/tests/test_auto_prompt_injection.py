@@ -8,7 +8,7 @@ Covers:
 1. ``_post_run_request_marker`` is called at the start of the run (it
    persists a user bubble with the 5-bullet summary AND an EMPTY
    assistant bubble for the activity_steps mirror).
-2. The marker is visible to the user IMMEDIATELY (no waiting for the
+2. The marker is visible to the user IMMAcmeTELY (no waiting for the
    agent to finish).
 3. ``_persist_run_to_chat`` (called later) writes the final content
    into the pre-created assistant bubble.
@@ -59,7 +59,7 @@ def _make_task(db, name="Daily Sales Data Sync", type_="data_sync"):
         prompt="Sync ERP sales data to the business database daily.",
         description="Sync ERP sales data to the business database daily with incremental updates and anomaly alerts.",
         cron_expression="0 8 * * *",
-        project="Ecisco BI",
+        project="Acme BI",
         output_format="html",
         is_deleted=False,
         notify_chat=True,

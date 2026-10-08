@@ -16,7 +16,7 @@ Produces a comprehensive CEO-level weekly market report with:
 - Key Metrics (revenue, volume, orders, ASP)
 - Product Breakdown (8 products with detailed numbers)
 - Inventory Status (4 products with stock-out warnings)
-- Risks & Opportunities (DCPD inventory crisis)
+- Risks & Opportunities (PRODUCT_B inventory crisis)
 - Recommended Actions (3 specific actions)
 
 **Query 2 (FAILS — 335s):**

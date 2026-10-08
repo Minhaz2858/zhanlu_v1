@@ -10,7 +10,7 @@ Date: 2026-09-01 · Status: approved · Scope: backend orchestrator + chat-mode 
 | Entry point | **Dedicated chat mode** + depth selector (Quick / Balanced / Deep) |
 | Output | **Cited long-form report in chat** + Export (docx/pptx) |
 | Scope picker | **Inline chips in composer** when Deep Research mode is on |
-| Internal sources | **Current agent's bound sources only** (bound DBs/Ecisco BI + KBs + uploaded files) |
+| Internal sources | **Current agent's bound sources only** (bound DBs/Acme BI + KBs + uploaded files) |
 | Architecture | **Approach A** — in-loop research protocol (no async worker in v1) |
 
 ## 2. UX

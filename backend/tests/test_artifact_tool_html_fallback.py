@@ -109,7 +109,7 @@ async def test_html_with_reportcard_payload_renders_sidecar_html():
                             {"label": "Contracted Volume", "value": "39,769 t"},
                             {"label": "Delivered Volume", "value": "24,706 t"},
                         ],
-                        "source": "aipdp_data_warehouse_prod",
+                        "source": "demo_warehouse_prod",
                     },
                 },
                 db=object(),

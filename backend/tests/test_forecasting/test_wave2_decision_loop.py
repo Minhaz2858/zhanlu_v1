@@ -57,7 +57,7 @@ def test_log_decision_writes_row_with_actual_price_t(db):
 
     log_decision(
         session=db,
-        product_id="异戊二烯",
+        product_id="电子元件",
         horizon_day=7,
         as_of_date=datetime.date(2026, 7, 30),
         action="buy",
@@ -74,7 +74,7 @@ def test_log_decision_writes_row_with_actual_price_t(db):
     rows = db.query(ForecastDecisionLog).all()
     assert len(rows) == 1
     r = rows[0]
-    assert r.product_id == "异戊二烯"
+    assert r.product_id == "电子元件"
     assert r.horizon_day == 7
     assert r.action == "buy"
     assert r.confidence == "high"
@@ -93,7 +93,7 @@ def test_log_decision_actual_price_t_is_not_none(db):
 
     log_decision(
         session=db,
-        product_id="异戊二烯",
+        product_id="电子元件",
         horizon_day=3,
         as_of_date=datetime.date(2026, 8, 1),
         action="sell",
@@ -126,7 +126,7 @@ def test_log_decision_without_actual_price_t_not_pending(db):
     # (must still reach the db row with NULL)
     log_decision(
         session=db,
-        product_id="异戊二烯",
+        product_id="电子元件",
         horizon_day=7,
         as_of_date=datetime.date(2026, 7, 30),
         action="buy",
@@ -163,7 +163,7 @@ def test_run_decision_scoring_no_pending_returns_empty(db, monkeypatch):
 
 
 def test_run_decision_scoring_skips_when_no_mysql(db, monkeypatch):
-    """When EDIA MySQL is unavailable AND there are pending logs,
+    """When Acme MySQL is unavailable AND there are pending logs,
     the result includes error note and zero scored."""
     monkeypatch.setattr(
         "app.services.forecasting.ops.decision_loop._resolve_mysql_engine",
@@ -173,7 +173,7 @@ def test_run_decision_scoring_skips_when_no_mysql(db, monkeypatch):
     from app.services.forecasting.features.decision_logger import log_decision
     log_decision(
         session=db,
-        product_id="异戊二烯",
+        product_id="电子元件",
         horizon_day=7,
         as_of_date=datetime.date(2026, 7, 30),
         action="buy",
@@ -201,7 +201,7 @@ def test_backfill_actual_price_t_fills_null_price(db, monkeypatch):
 
     log_decision(
         session=db,
-        product_id="异戊二烯",
+        product_id="电子元件",
         horizon_day=7,
         as_of_date=datetime.date(2026, 7, 30),
         action="buy",
@@ -248,7 +248,7 @@ def test_backfill_actual_price_t_fills_null_price(db, monkeypatch):
     # Re-read — should now have actual_price_t
     updated = (
         db.query(ForecastDecisionLog)
-        .filter(ForecastDecisionLog.product_id == "异戊二烯")
+        .filter(ForecastDecisionLog.product_id == "电子元件")
         .first()
     )
     assert updated is not None
@@ -289,7 +289,7 @@ def test_decision_scoring_step_skips_when_disabled(db, monkeypatch):
 def test_decision_scoring_step_in_nightly_sync(db, monkeypatch):
     """Verify _run_decision_scoring_step is called in nightly sync when ON."""
     t = ForecastTarget(
-        product_key="异戊二烯", name="异戊二烯", org_id="default-org",
+        product_key="电子元件", name="电子元件", org_id="default-org",
         status="active",
     )
     db.add(t)
@@ -339,7 +339,7 @@ def test_decision_scoring_step_in_nightly_sync(db, monkeypatch):
 def test_decision_scoring_step_skipped_in_nightly_when_disabled(db, monkeypatch):
     """When flag OFF, nightly sync does NOT call decision scoring."""
     t = ForecastTarget(
-        product_key="异戊二烯", name="异戊二烯", org_id="default-org",
+        product_key="电子元件", name="电子元件", org_id="default-org",
         status="active",
     )
     db.add(t)

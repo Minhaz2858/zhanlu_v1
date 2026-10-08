@@ -52,7 +52,7 @@ class CalibrationResult:
 def run_calibration_backtest(
     y: pd.Series,
     product_id: str,
-    naphtha_pct_change: float | None,
+    product_c_pct_change: float | None,
     as_of_date: datetime,
     horizons: list[int] | None = None,
     min_train: int = 30,
@@ -120,7 +120,7 @@ def run_calibration_backtest(
 
         # Domain-adjusted: apply domain signal overlay to baseline
         adj_result = compute_domain_signal_adjustment(
-            product_id, as_of_date, naphtha_pct_change,
+            product_id, as_of_date, product_c_pct_change,
         )
         total_pct = adj_result["total_pct"]
         domain_fc = baseline_fc * (1.0 + total_pct / 100.0)

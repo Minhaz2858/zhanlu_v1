@@ -30,12 +30,12 @@ def mock_kb(monkeypatch):
     fake_collection = MagicMock()
     fake_collection.query.return_value = {
         "documents": [[
-            "User previously asked about DCPD price volatility.",
+            "User previously asked about PRODUCT_B price volatility.",
             "User prefers short answers.",
         ]],
         "metadatas": [[
             {"user_id": "u1", "memory_type": "preference", "topic": "format"},
-            {"user_id": "u1", "memory_type": "fact", "topic": "DCPD"},
+            {"user_id": "u1", "memory_type": "fact", "topic": "PRODUCT_B"},
         ]],
         "distances": [[0.1, 0.3]],
     }
@@ -50,7 +50,7 @@ class TestUserMemoryEntry:
             text="hello",
             memory_type="fact",
             user_id="u1",
-            topic="DCPD",
+            topic="PRODUCT_B",
             score=0.9,
         )
         out = e.formatted()
@@ -64,12 +64,12 @@ class TestUserMemoryEntry:
 
 class TestRetrieveUserMemory:
     def test_returns_entries(self, mock_kb):
-        out = retrieve_user_memory("u1", "DCPD price", top_k=3)
+        out = retrieve_user_memory("u1", "PRODUCT_B price", top_k=3)
         assert len(out) >= 1
         assert all(isinstance(e, UserMemoryEntry) for e in out)
 
     def test_populates_fields(self, mock_kb):
-        out = retrieve_user_memory("u1", "DCPD price", top_k=3)
+        out = retrieve_user_memory("u1", "PRODUCT_B price", top_k=3)
         e = out[0]
         assert e.memory_type in ("fact", "preference")
         assert e.user_id == "u1"
@@ -85,9 +85,9 @@ class TestRetrieveUserMemory:
 
 class TestBuildUserContext:
     def test_returns_header_and_chunks(self, mock_kb):
-        out = build_user_context("u1", "DCPD", max_chars=2000)
+        out = build_user_context("u1", "PRODUCT_B", max_chars=2000)
         assert "User Memory" in out
-        assert "DCPD" in out
+        assert "PRODUCT_B" in out
 
     def test_empty_query_returns_empty(self, mock_kb):
         assert build_user_context("u1", "") == ""

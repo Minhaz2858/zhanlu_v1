@@ -17,7 +17,7 @@ Today LLM model selection is a **per-user preference only**:
 **User requirements (from brainstorm):**
 
 1. **Hierarchical**: Configuration Center sets the global default; each *project* can pin its own model; each *agent* can pin its own model. When chatting inside a project + agent, the effective model is resolved from this hierarchy.
-2. **Privacy motivation**: if a project's/agent's data is private (e.g. Ecisco BI petrochemical data), bind that project/agent to a **private/self-hosted LLM** instead of a cloud model.
+2. **Privacy motivation**: if a project's/agent's data is private (e.g. Acme BI industrial data), bind that project/agent to a **private/self-hosted LLM** instead of a cloud model.
 3. **Admin lock**: `Project` and `AgentApp` already have `resource_type` = `company` (admin-created) vs `personal`. For `company` resources, normal users **cannot** change the model — only admins can. Server-side enforcement, not just UI hiding.
 4. **Chat header UX**: for a normal user in a company-locked chat, the `ModelSwitcher` renders a **read-only locked badge** instead of the dropdown, and the server rejects any `body.model` the client sends.
 

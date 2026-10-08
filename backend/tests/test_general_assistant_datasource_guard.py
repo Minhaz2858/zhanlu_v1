@@ -74,7 +74,7 @@ def test_general_assistant_with_project_inherits_project_kbs():
 
     bound_ids = _extend_with_project_kbs(
         db, agent, bound_ids=[],
-        project_id="proj-1", project_name="Ecisco BI",
+        project_id="proj-1", project_name="Acme BI",
     )
 
     assert "kb-proj-1" in bound_ids, (

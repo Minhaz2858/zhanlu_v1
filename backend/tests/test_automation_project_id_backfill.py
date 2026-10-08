@@ -183,23 +183,23 @@ def _run_migration(engine) -> None:
 
 
 def test_backfill_same_app_match(migration_db):
-    """Same-app matching: task with legacy ``project='Ecisco BI'`` in app
+    """Same-app matching: task with legacy ``project='Acme BI'`` in app
     ``local-zhanlu-app`` MUST resolve to the project with that name in
     the same app.
     """
     Session = migration_db["session_factory"]
     engine = migration_db["engine"]
-    project_id = "proj-ecisco"
-    task_id = "task-ecisco"
+    project_id = "proj-acme"
+    task_id = "task-acme"
 
     with Session() as sess:
         _seed_project(
             sess, project_id=project_id, org_id="org-1",
-            app_id="local-zhanlu-app", name="Ecisco BI",
+            app_id="local-zhanlu-app", name="Acme BI",
         )
         _seed_task(
             sess, task_id=task_id, org_id="org-1",
-            app_id="local-zhanlu-app", project="Ecisco BI",
+            app_id="local-zhanlu-app", project="Acme BI",
         )
         sess.commit()
 
@@ -212,7 +212,7 @@ def test_backfill_same_app_match(migration_db):
         ).fetchone()
     assert row is not None
     assert row[0] == project_id, (
-        f"same-app match should bind Ecisco BI to {project_id!r}; got {row[0]!r}"
+        f"same-app match should bind Acme BI to {project_id!r}; got {row[0]!r}"
     )
 
 
@@ -257,11 +257,11 @@ def test_backfill_skips_soft_deleted_project(migration_db):
     with Session() as sess:
         _seed_project(
             sess, project_id="proj-deleted", org_id="org-1",
-            app_id="local-zhanlu-app", name="Ecisco BI", is_deleted=True,
+            app_id="local-zhanlu-app", name="Acme BI", is_deleted=True,
         )
         _seed_task(
             sess, task_id="task-no-match", org_id="org-1",
-            app_id="local-zhanlu-app", project="Ecisco BI",
+            app_id="local-zhanlu-app", project="Acme BI",
         )
         sess.commit()
 
@@ -273,7 +273,7 @@ def test_backfill_skips_soft_deleted_project(migration_db):
             {"tid": "task-no-match"},
         ).fetchone()
     assert row is not None
-    # Could be NULL (no other Ecisco BI project) — must not be the
+    # Could be NULL (no other Acme BI project) — must not be the
     # soft-deleted one.
     assert row[0] != "proj-deleted"
 
@@ -289,11 +289,11 @@ def test_backfill_falls_back_across_apps(migration_db):
     with Session() as sess:
         _seed_project(
             sess, project_id="proj-bi-old", org_id="org-1",
-            app_id="other-app", name="Ecisco BI",
+            app_id="other-app", name="Acme BI",
         )
         _seed_task(
             sess, task_id="task-no-same-app", org_id="org-1",
-            app_id="local-zhanlu-app", project="Ecisco BI",
+            app_id="local-zhanlu-app", project="Acme BI",
         )
         sess.commit()
 
@@ -322,13 +322,13 @@ def test_backfill_is_idempotent(migration_db):
     with Session() as sess:
         _seed_project(
             sess, project_id="proj-a", org_id="org-1",
-            app_id="local-zhanlu-app", name="Ecisco BI",
+            app_id="local-zhanlu-app", name="Acme BI",
         )
         # The task ALREADY has project_id set (someone fixed it
         # manually). Backfill must not overwrite.
         _seed_task(
             sess, task_id="task-fixed", org_id="org-1",
-            app_id="local-zhanlu-app", project="Ecisco BI",
+            app_id="local-zhanlu-app", project="Acme BI",
             project_id="proj-manual",
         )
         sess.commit()

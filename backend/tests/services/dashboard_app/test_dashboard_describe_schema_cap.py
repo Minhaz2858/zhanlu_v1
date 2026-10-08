@@ -104,7 +104,7 @@ def test_cap_composes_with_guard_blocked_tools(fullstack_on):
 
 
 # ── Fix 3b: fetch_data_batch counts toward the EXPLORATION cap ──────────────
-# 2026-08-27 regression (conv 3e7fa92b, C5_C9): the local model explores the
+# 2026-08-27 regression (conv 3e7fa92b, SAMPLE): the local model explores the
 # schema via fetch_data_batch (SHOW TABLES / DESCRIBE / SHOW COLUMNS batched
 # per call) instead of describe_schema. That tool was NOT in
 # DASHBOARD_EXPLORATION_TOOLS, so the total-exploration cap never fired and

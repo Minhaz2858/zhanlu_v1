@@ -1,2 +1,8 @@
 # Justified survivors: "<path-substring>:<token>  # reason".
 # Target end state: this file is EMPTY.
+#
+# Historical (already-applied) migrations must name the ORIGINAL schema objects
+# so that a fresh `alembic upgrade head` still reproduces them before a later
+# migration renames them. Rewriting history would leave existing databases
+# un-migrated. Each entry must have a one-line justification.
+backend/alembic/versions/035_intelligence_tables.py:c5_c9  # creates the original column; 093_rename_relevance_to_target renames it away

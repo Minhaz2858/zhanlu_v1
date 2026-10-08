@@ -269,7 +269,7 @@ def test_prepare_runtime_includes_pinned_data_source(monkeypatch):
         id="kb-pinned",
         name="warehouse",
         db_type="mysql",
-        database_name="aipdp_data_warehouse_prod",
+        database_name="demo_warehouse_prod",
         source_kind="database",
         file_type="",
         indexing_status=None,

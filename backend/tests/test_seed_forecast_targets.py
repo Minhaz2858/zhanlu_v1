@@ -1,4 +1,4 @@
-"""The domain-config-driven seeder must register the 11 canonical Ecisco BI
+"""The domain-config-driven seeder must register the 11 canonical Acme BI
 forecast targets defined in ``app/domain_configs/default.json``.
 
 The targets were de-hardcoded out of a bespoke seed module into the per-app

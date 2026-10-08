@@ -343,7 +343,7 @@ This is the start of Section 3 (or "Method", or "Approach"). The challenge: you 
 **Pattern templates**
 - `We first [VERB] [STEP 1]. Then, we [VERB] [STEP 2]. Finally, we [VERB] [STEP 3].`
 - `The pipeline proceeds as follows: [VERB] [...], [VERB] [...], and [VERB] [...].`
-- `Concretely, [SYSTEM] [VERB] [INPUT], [VERB] [INTERMEDIATE], and [VERB] [OUTPUT].`
+- `Concretely, [SYSTEM] [VERB] [INPUT], [VERB] [INTERMAcmeTE], and [VERB] [OUTPUT].`
 
 **Verbatim examples**
 - "The robot first scans a tabletop scene by taking a sequence of photos using an RGB camera mounted on a selfie stick. These photos are used to construct a neural radiance field (NeRF) of the tabletop, which, crucially, is trained to render not just RGB colors but also image features..." [arxiv:2308.07931]

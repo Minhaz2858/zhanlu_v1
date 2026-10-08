@@ -4,7 +4,7 @@
 
 **Goal:** Transform the forecast engine from a point-estimate ensemble (11.4% / 23.5% MAPE at 7d/30d, 24-38% directional accuracy — below random) into a calibrated probabilistic + decision-support system: better point accuracy, honest prediction intervals, price-change probabilities, and buy/hold/sell signals.
 
-**Architecture:** Four independently-shippable phases layered on the existing 8-model ensemble pipeline. Phase C fixes the dishonest backtest + per-horizon weighting (foundation). Phase D adds split-conformal calibrated intervals + price-change probability. Phase E adds a directional classifier + decision engine. Phase F extends data history (mining EDIA MySQL tables that go back to 2018) + enables the causal domain-signal chain. Each phase ships with tests and a backtest A/B gate.
+**Architecture:** Four independently-shippable phases layered on the existing 8-model ensemble pipeline. Phase C fixes the dishonest backtest + per-horizon weighting (foundation). Phase D adds split-conformal calibrated intervals + price-change probability. Phase E adds a directional classifier + decision engine. Phase F extends data history (mining Acme MySQL tables that go back to 2018) + enables the causal domain-signal chain. Each phase ships with tests and a backtest A/B gate.
 
 **Tech Stack:** Python 3.11, pandas, numpy, scikit-learn (already a dependency for XGBoost features), statsmodels (ARIMA/ETS), existing `ForecastModel` base class. No new heavy deps (no torch — Chronos deferred).
 
@@ -15,7 +15,7 @@
 - **No `--reload`**: after service changes, `docker compose restart backend`. Backend exposes port **5002**.
 - **User works on `main`** directly with uncommitted changes — commit per task, do not stash.
 - **SSH RAM limited**: run test files individually (4+ files in one invocation timeout).
-- **EDIA MySQL**: `mysql+pymysql://root:...@10.10.10.49:3306/aipdp_data_warehouse_prod`, env var `EDIA_MYSQL_URL`. Password in `.env`.
+- **Acme MySQL**: `mysql+pymysql://root:...@10.10.10.49:3306/demo_warehouse_prod`, env var `Acme_MYSQL_URL`. Password in `.env`.
 - **ForecastRun model gotchas**: no `horizons` field; `confidence` is `String(50)` not float; `below_naive_baseline` is bool. Adjustment target in engine = `guard_result.published_forecast`.
 - **Engine step order** (engine.py `compute_target()`): …→ ensemble → guard → scenarios → **Step 8.5** intel overlay (~line 337, gated `FORECAST_INTELLIGENCE_OVERLAY_ENABLED`) → **Step 8.55** domain signals (gated `FORECAST_DOMAIN_SIGNALS_ENABLED`, default **False**) → **Step 8.6** policy service (~line 380) → explain (~line 449, explanation dict has `intelligence`+`policy`+`domain_signals`+`trust_tier` keys).
 - **TDD discipline**: write failing test → run (confirm fail) → implement → run (confirm pass) → commit. One logical change per commit.
@@ -46,14 +46,14 @@
 - `backend/app/services/forecasting/engine.py` — wire per-horizon ensemble, conformal, classifier, decision, multi-source (all phases)
 - `backend/app/services/forecasting/scenarios.py` — use conformal bands instead of 25/75 percentile (Phase D)
 - `backend/app/services/forecasting/edia_source.py` — add `read_history_multi()` for source concatenation (Phase F)
-- `backend/app/services/forecasting/seed_ecisco_targets.py` — add lz_v extended sources for isoprene/styrene (Phase F)
+- `backend/app/services/forecasting/seed_acme_targets.py` — add lz_v extended sources for product_d/styrene (Phase F)
 - `backend/app/services/forecasting/features/feature_builder.py` — add ERP lag features (Phase F)
 - `backend/app/schemas/market_dashboard.py` — add `prediction_interval`, `price_change_probability`, `direction`, `decision` fields (Phases D-E)
 - `frontend/src/pages/MarketDashboard/components/ForecastTrendChart.jsx` — calibrated probability bands + decision badge (Phases D-E)
 
-### Reference (read-only, EDIA source for porting)
+### Reference (read-only, Acme source for porting)
 - `backend/tests/walk_forward_backtest.py` — proven walk-forward script (port logic into `backtest.py`)
-- `EDIA_5.1.2/backend/src/service/forecasting_engine.py:113-179` — elasticities + seasonal rules (already ported to `domain_signals.py`)
+- `Acme_5.1.2/backend/src/service/forecasting_engine.py:113-179` — elasticities + seasonal rules (already ported to `domain_signals.py`)
 
 ---
 
@@ -680,7 +680,7 @@ git commit -m "feat(forecast): wire conformal intervals + price-change probabili
 
 **Interfaces:**
 - `DirectionalClassifier` — `.fit(X: pd.DataFrame, y_sign: pd.Series)` / `.predict_proba(X) -> np.ndarray` (P(up)).
-- `build_features(y: pd.Series, exog: pd.DataFrame | None) -> pd.DataFrame` — returns lag returns, momentum (3/7/14d), volatility, calendar month, naphtha delta (if exog), domain elasticity flag.
+- `build_features(y: pd.Series, exog: pd.DataFrame | None) -> pd.DataFrame` — returns lag returns, momentum (3/7/14d), volatility, calendar month, product_c delta (if exog), domain elasticity flag.
 - `backtest_directional(y, horizons=[7]) -> dict[str, float]` — walk-forward directional accuracy; returns `{model: accuracy}`. Must report `"no_edge"` if no model beats 0.55.
 
 - [ ] **Step 1: Write the failing test**
@@ -756,8 +756,8 @@ def build_features(y: pd.Series, exog: pd.DataFrame | None = None) -> pd.DataFra
     df["momentum_14"] = df["y"].pct_change(14)
     df["vol_7"] = df["ret_lag1"].rolling(7).std()
     df["month"] = pd.Series(y.index).dt.month if hasattr(y.index, "dt") else 0
-    if exog is not None and "naphtha_delta" in exog:
-        df["naphtha_delta"] = exog["naphtha_delta"].values[:len(df)]
+    if exog is not None and "product_c_delta" in exog:
+        df["product_c_delta"] = exog["product_c_delta"].values[:len(df)]
     return df.fillna(0.0)
 
 
@@ -946,31 +946,31 @@ git commit -m "feat(forecast): wire directional classifier + decision badge into
 
 ## Phase F — Data Extension + Causal Enablement
 
-**Why**: most products have 69-110 rows (13 months, weekly cadence) from `md_t_lz_price` alone. The EDIA MySQL warehouse has: (1) `lz_v_*_data` views extending isoprene/styrene back to 2025-03 with denser daily coverage, (2) `sale_erp_v_*_data` views with ERP transaction prices back to **2018** (6-8 years) usable as exogenous ML features. Plus the causal domain-signal chain (`FORECAST_DOMAIN_SIGNALS_ENABLED`) is currently OFF.
+**Why**: most products have 69-110 rows (13 months, weekly cadence) from `md_market_price` alone. The Acme MySQL warehouse has: (1) `v_*_data` views extending product_d/styrene back to 2025-03 with denser daily coverage, (2) `sale_erp_v_*_data` views with ERP transaction prices back to **2018** (6-8 years) usable as exogenous ML features. Plus the causal domain-signal chain (`FORECAST_DOMAIN_SIGNALS_ENABLED`) is currently OFF.
 
 **Data map (verified 2026-08-04):**
 
 | Table | Products | Span | Distinct dates | Use |
 |-------|----------|------|----------------|-----|
-| `md_t_lz_price` (current) | all 10 | 2025-06 → 2026-07 | 75-206 | Market quotation (primary) |
-| `lz_v_异戊二烯_data` | isoprene | 2025-03 → 2026-07 | 305 | Extend market history +3mo |
-| `lz_v_苯乙烯_data` | styrene | 2025-03 → 2026-07 | 304 | Extend market history +3mo |
-| `sale_erp_v_异戊二烯_data` | isoprene | 2018-06 → 2026-07 | 531 | Exogenous ERP features |
-| `sale_erp_v_双环戊二烯_data` | DCPD | 2018-06 → 2026-07 | 1381 | Exogenous ERP features |
-| `sale_erp_v_碳五石油树脂_data` | c5_resin | 2018-07 → 2026-07 | 2365 | Exogenous ERP features |
+| `md_market_price` (current) | all 10 | 2025-06 → 2026-07 | 75-206 | Market quotation (primary) |
+| `v_电子元件_data` | product_d | 2025-03 → 2026-07 | 305 | Extend market history +3mo |
+| `v_材料J_data` | styrene | 2025-03 → 2026-07 | 304 | Extend market history +3mo |
+| `sale_erp_v_电子元件_data` | product_d | 2018-06 → 2026-07 | 531 | Exogenous ERP features |
+| `sale_erp_v_材料B_data` | PRODUCT_B | 2018-06 → 2026-07 | 1381 | Exogenous ERP features |
+| `sale_erp_v_原料A石油树脂_data` | product_a | 2018-07 → 2026-07 | 2365 | Exogenous ERP features |
 
-**Caveat**: ERP transaction prices ≠ market quotations — never naively concatenate into the forecast target series. Use `lz_v_*` (also Longzhong market data) for target extension; use `sale_erp_v_*` only as exogenous features.
+**Caveat**: ERP transaction prices ≠ market quotations — never naively concatenate into the forecast target series. Use `v_*` (also Longzhong market data) for target extension; use `sale_erp_v_*` only as exogenous features.
 
 ### Task F1: Multi-source history concatenation (md_t_lz + lz_v)
 
 **Files:**
 - Modify: `backend/app/services/forecasting/edia_source.py`
-- Modify: `backend/app/services/forecasting/seed_ecisco_targets.py`
+- Modify: `backend/app/services/forecasting/seed_acme_targets.py`
 - Test: `backend/tests/test_edia_source_multi.py`
 
 **Interfaces:**
 - `EdiaMysqlDataSource.read_history_multi(sources: list[dict]) -> pd.DataFrame` — reads each source, concatenates, deduplicates by date (prefer the primary source on overlap), returns `df[ds, y]`.
-- Seed targets for isoprene + styrene gain a `secondary_sources` list pointing at their `lz_v_*` view.
+- Seed targets for product_d + styrene gain a `secondary_sources` list pointing at their `v_*` view.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1003,11 +1003,11 @@ class _FakeEngine:
 def test_multi_source_concatenation_prefers_primary_on_overlap():
     primary = [("2026-01-02", 100.0), ("2026-01-03", 101.0)]
     secondary = [("2025-12-30", 98.0), ("2026-01-02", 999.0)]  # 999 should be dropped (overlap)
-    eng = _FakeEngine({"md_t_lz_price": primary, "lz_v_x": secondary})
+    eng = _FakeEngine({"md_market_price": primary, "v_x": secondary})
     src = EdiaMysqlDataSource(engine=eng)
     df = src.read_history_multi([
-        {"table": "md_t_lz_price", "time_col": "FDATE", "measure": "FTAXPRICE", "where": "1=1"},
-        {"table": "lz_v_x", "time_col": "biz_date", "measure": "tax_price", "where": "1=1"},
+        {"table": "md_market_price", "time_col": "FDATE", "measure": "FTAXPRICE", "where": "1=1"},
+        {"table": "v_x", "time_col": "biz_date", "measure": "tax_price", "where": "1=1"},
     ])
     # 3 distinct dates; 2026-01-02 keeps primary value 100, not 999
     assert len(df) == 3
@@ -1040,7 +1040,7 @@ def read_history_multi(self, sources: list[dict]) -> pd.DataFrame:
     full = full.sort_values(["ds", "_src_rank"]).drop_duplicates("ds", keep="first")
     return full[["ds", "y"]].sort_values("ds").reset_index(drop=True)
 ```
-In `seed_ecisco_targets.py`: for isoprene + styrene targets, add `"secondary_sources": [{"table": "lz_v_异戊二烯_data", "time_col": "biz_date(业务日期)", "measure": "tax_price(含税单价)", "where": "1=1"}]` (and the styrene equivalent). Engine: if `target.datasource` has `secondary_sources`, call `read_history_multi([datasource, *secondary_sources])` instead of `read_history(datasource)`.
+In `seed_acme_targets.py`: for product_d + styrene targets, add `"secondary_sources": [{"table": "v_电子元件_data", "time_col": "biz_date(业务日期)", "measure": "tax_price(含税单价)", "where": "1=1"}]` (and the styrene equivalent). Engine: if `target.datasource` has `secondary_sources`, call `read_history_multi([datasource, *secondary_sources])` instead of `read_history(datasource)`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
@@ -1050,8 +1050,8 @@ Expected: PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/app/services/forecasting/edia_source.py backend/app/services/forecasting/seed_ecisco_targets.py backend/app/services/forecasting/engine.py backend/tests/test_edia_source_multi.py
-git commit -m "feat(forecast): multi-source history (md_t_lz + lz_v) for isoprene/styrene"
+git add backend/app/services/forecasting/edia_source.py backend/app/services/forecasting/seed_acme_targets.py backend/app/services/forecasting/engine.py backend/tests/test_edia_source_multi.py
+git commit -m "feat(forecast): multi-source history (md_t_lz + lz_v) for product_d/styrene"
 ```
 
 ---
@@ -1088,7 +1088,7 @@ class _FakeEngine:
 def test_erp_lags_aligned_to_market_dates():
     src = ErpFeatureSource(engine=_FakeEngine())
     market_dates = pd.date_range("2026-01-01", periods=7, freq="D")
-    df = src.read_erp_lags("ecisco.isoprene", market_dates=market_dates)
+    df = src.read_erp_lags("acme.product_d", market_dates=market_dates)
     assert "erp_ret_7" in df.columns
     assert len(df) == 7
 ```
@@ -1149,7 +1149,7 @@ Expected: all PASS.
 docker compose restart backend
 # login + hit forecast endpoint
 curl -s -X POST http://localhost:5002/api/apps/local-zhanlu-app/auth/login -H 'Content-Type: application/json' -d '{"email":"admin@zhanlu.dev","password":"admin123"}'
-# fetch forecast for isoprene, confirm prediction_interval + price_change_probability + decision present
+# fetch forecast for product_d, confirm prediction_interval + price_change_probability + decision present
 ```
 
 - [ ] **Step 3: Frontend build + preview**
@@ -1179,7 +1179,7 @@ git add -A && git commit -m "feat(forecast): accuracy overhaul Phase C-F complet
 | D | Price-change probability | none | per-horizon p_rise + thresholds |
 | E | Directional accuracy | 24-38% (below random) | >55% on products with edge; honest "no edge" otherwise |
 | E | Decision signal | none | buy/hold/sell/watch badge |
-| F | Isoprene/Styrene history | 88/78 rows (from 2025-06) | ~300+ rows (from 2025-03) |
+| F | Product_D/Styrene history | 88/78 rows (from 2025-06) | ~300+ rows (from 2025-03) |
 | F | ERP exogenous features | none | 6-8yr lag features for XGBoost |
 | F | Domain causal chain | disabled | enabled (if A/B favorable) |
 
@@ -1200,7 +1200,7 @@ git add -A && git commit -m "feat(forecast): accuracy overhaul Phase C-F complet
 - HuggingFace foundation models (Chronos-Bolt/TimesFM) — deferred; revisit for cold-start SKUs once data exhausted
 - Probabilistic ensemble (Bayesian model averaging) — conformal on point ensemble is sufficient
 - Per-product model selection meta-learner — per-horizon weights already capture most of the gain
-- LSTM / deep learning — deliberately not ported from EDIA (heavy, marginal gain)
+- LSTM / deep learning — deliberately not ported from Acme (heavy, marginal gain)
 - Automated trading execution — decision engine is advisory only
 
 ## Related Documents

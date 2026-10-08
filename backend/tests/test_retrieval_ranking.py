@@ -1,7 +1,7 @@
 """Chinese table-retrieval ranking — the fused, explainable ordering.
 
 The defect pinned here was measured live on 2026-09-19 against the 143-table
-aipdp warehouse, driving the real ``NLAnswerService.answer()``:
+acme warehouse, driving the real ``NLAnswerService.answer()``:
 
   * ``这个月的合同执行情况`` retrieved with ``method=none`` — the ENTIRE question
     came back as a single token (``_tokens`` splits on non-alphanumerics, and a
@@ -112,7 +112,7 @@ def catalog() -> list[dict]:
                en="Delivery notice line", domain=SALES_DOMAIN,
                columns=[_col("FOUTQTY", "measure", "发货数量", "吨")]),
         _entry("erp_v_sale_huizhou",
-               zh="惠州地区销售订单视图，包含物料规格、编码、单价、数量、金额",
+               zh="示例地区销售订单视图，包含物料规格、编码、单价、数量、金额",
                en="Huizhou sales order view", domain=SALES_DOMAIN,
                columns=[_col("FPRICE", "measure", "单价", "元"),
                         _col("FQTY", "measure", "数量", "吨")]),
@@ -630,7 +630,7 @@ def test_the_ranker_has_no_business_vocabulary(module):
 
 # ── coverage reroute: the verdict the pipeline measured but never acted on ──
 #
-# Measured live on 2026-09-20, question 惠州伊斯科本周销售情况，用图表展示:
+# Measured live on 2026-09-20, question 示例工厂本周销售情况，用图表展示:
 #   rank 1  erp_v_sale_huizhou    score 5.73  max_date 2026-09-16  covers TRUE
 #   chosen  forecast_accuracy_log              max_date 2026-09-05  covers FALSE
 # The selector was free to pick any catalog table, and the ONLY check applied to
@@ -657,7 +657,7 @@ def _sales_catalog(**overrides) -> list[dict]:
     forecast.update(overrides.get("forecast", {}))
     sales = _entry(
         "erp_v_sale_huizhou",
-        zh="ERP销售视图（惠州），展示惠州地区的销售数据。",
+        zh="ERP销售视图（示例），展示示例地区的销售数据。",
         en="ERP sales view (Huizhou), displays sales",
         domain="Product Sales and Pricing",
         min_date="2018-06-01", max_date="2026-09-16",
@@ -671,7 +671,7 @@ def test_a_table_ending_before_the_window_is_swapped_for_the_ranked_coverer(monk
 
     _patch_off(monkeypatch)
     toc = _sales_catalog()
-    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+    res = _retrieve(toc, "示例工厂本周销售情况，用图表展示", monkeypatch,
                     window=_last_week())
 
     # The ranking was never the defect: the sales view leads, and the table the
@@ -694,7 +694,7 @@ def test_a_covering_selection_is_left_alone(monkeypatch):
 
     _patch_off(monkeypatch)
     toc = _sales_catalog()
-    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+    res = _retrieve(toc, "示例工厂本周销售情况，用图表展示", monkeypatch,
                     window=_last_week())
     assert reroute_uncovered(["erp_v_sale_huizhou"], toc, res, _last_week()) == (
         ["erp_v_sale_huizhou"], [],
@@ -707,7 +707,7 @@ def test_an_unknown_window_is_never_convicted(monkeypatch):
 
     _patch_off(monkeypatch)
     toc = _sales_catalog(forecast={"max_date": None, "min_date": None})
-    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+    res = _retrieve(toc, "示例工厂本周销售情况，用图表展示", monkeypatch,
                     window=_last_week())
 
     # No window on the question at all → nothing to convict.
@@ -731,7 +731,7 @@ def test_the_reroute_never_empties_the_selection(monkeypatch):
 
     _patch_off(monkeypatch)
     toc = [_sales_catalog()[1]]  # the convicted table is the ONLY table
-    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+    res = _retrieve(toc, "示例工厂本周销售情况，用图表展示", monkeypatch,
                     window=_last_week())
 
     selected, swaps = reroute_uncovered(["forecast_accuracy_log"], toc, res, _last_week())
@@ -745,7 +745,7 @@ def test_the_reroute_can_only_swap_in_a_ranked_candidate(monkeypatch):
 
     _patch_off(monkeypatch)
     toc = _sales_catalog()
-    res = _retrieve(toc, "惠州伊斯科本周销售情况，用图表展示", monkeypatch,
+    res = _retrieve(toc, "示例工厂本周销售情况，用图表展示", monkeypatch,
                     window=_last_week())
     selected, swaps = reroute_uncovered(["forecast_accuracy_log"], toc, res, _last_week())
     for _dropped, added in swaps:

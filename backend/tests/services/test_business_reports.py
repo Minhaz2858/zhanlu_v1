@@ -90,7 +90,7 @@ class TestContractReport:
         out = br.try_build_business_report(
             "give me Contract Performance for last month report in docx file",
             CONTRACT_ROWS,
-            "aipdp_data_warehouse_prod",
+            "demo_warehouse_prod",
         )
         assert out is not None
         assert "# Contract Performance" in out
@@ -180,7 +180,7 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "Contract Performance for last month report in docx file",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is not None
         # total qty = 2800 + 115 + 1480 = 4395
@@ -227,7 +227,7 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "Contract Performance for last month report in docx file",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is not None
         # 38.4M + 38.15M + 32.5M = 109,050,000
@@ -255,7 +255,7 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "Contract Performance for last month report in docx file",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is not None
         # 38.4M + 38.15M = 76,550,000
@@ -282,7 +282,7 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "Contract Performance for last month report in docx file",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is not None
         # delivered qty 2650 + 100 = 2750; exec rate 2750/2915 = 94.3%
@@ -317,7 +317,7 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "give me Contract Performance for last month report in docx file",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is not None
         # contracted = SUM(contract_price) = 2,540,000+1,024,000+300,800+416,000
@@ -347,7 +347,7 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "Contract performance for last month report",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is not None
         # aggregate rate = (319.6+3420.92)/(3000+5000) = 3740.52/8000 = 46.8%
@@ -376,6 +376,6 @@ class TestContractReport:
         ]
         out = br.try_build_business_report(
             "give me Contract Performance for last month report in docx file",
-            rows, "aipdp_data_warehouse_prod",
+            rows, "demo_warehouse_prod",
         )
         assert out is None

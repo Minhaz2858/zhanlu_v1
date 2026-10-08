@@ -2,7 +2,7 @@
  * Typed AI-analysis panels — the decision-center information architecture.
  *
  * These are the presentation components that make an executive dashboard
- * professional (the Ecisco CEO Command Center patterns): a severity-rail
+ * professional (the Acme CEO Command Center patterns): a severity-rail
  * alert strip where every alert is "data → why it matters → recommended
  * action", approval decision cards with quantified P&L impact, cost/value
  * cascade chains, account-health rows, inventory coverage bars, competitor

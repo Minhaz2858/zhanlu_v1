@@ -336,7 +336,7 @@ def test_deep_research_flag_defaults_off():
 
 # ── Hybrid scope=both regression (2026-09-03) ─────────────────────────
 # User-visible bug: scope=both silently degraded to web-only; a web-only
-# plan for an internal product question (C5C9 sales/forecast) never touched
+# plan for an internal product question (SAMPLE sales/forecast) never touched
 # the bound warehouse and produced a "no data exists" report. These tests
 # pin the three fixes:
 #   B1: failure dicts are NOT evidence (they became "findings" pre-fix)
@@ -360,9 +360,9 @@ class FailingWebToolExecutor:
         if name == "ask_data_agent":
             return {
                 "success": True,
-                "answer": "C5C9 sales for Aug 24-30: 7 date rows, 73.47M CNY.",
+                "answer": "SAMPLE sales for Aug 24-30: 7 date rows, 73.47M CNY.",
                 "rows": [{"date": "2026-08-24"}],
-                "sql": "SELECT ... FROM erp_v_sale_orderentry ...",
+                "sql": "SELECT ... FROM v_sale_order ...",
             }
         return {"success": False, "error": "unsupported tool"}
 
@@ -383,14 +383,14 @@ class WebOnlyToolExecutor:
 
 @pytest.mark.asyncio
 async def test_scope_both_supplements_internal_when_web_fails():
-    """The C5C9 repro: web-only plan, web fails permanently → the internal
+    """The SAMPLE repro: web-only plan, web fails permanently → the internal
     data agent MUST still be consulted before finalize."""
     tools = FailingWebToolExecutor()
-    planner = FakePlanner(_plan([_step(q="C5C9 weekly summary?", tools=["web_search"])]))
+    planner = FakePlanner(_plan([_step(q="SAMPLE weekly summary?", tools=["web_search"])]))
     events = EventCollector()
 
     result = await run_deep_research(
-        DeepResearchRequest(question="C5C9 weekly summary and forecast Aug 24-30?",
+        DeepResearchRequest(question="SAMPLE weekly summary and forecast Aug 24-30?",
                             depth="quick", scope="both"),
         planner=planner,
         tool_executor=tools,
@@ -415,7 +415,7 @@ async def test_failure_dicts_are_not_evidence():
     tools = FailingWebToolExecutor()
     synthesizer = FakeSynthesizer("Report.")
     await run_deep_research(
-        DeepResearchRequest(question="C5C9?", depth="quick", scope="both"),
+        DeepResearchRequest(question="SAMPLE?", depth="quick", scope="both"),
         planner=FakePlanner(_plan([_step(tools=["web_search"])])),
         tool_executor=tools,
         synthesizer=synthesizer,
@@ -427,7 +427,7 @@ async def test_failure_dicts_are_not_evidence():
     # the failure text must NOT appear as evidence content
     assert "failed across providers" not in evidence_text
     # the successful internal answer IS present
-    assert "C5C9 sales" in evidence_text
+    assert "SAMPLE sales" in evidence_text
 
 
 @pytest.mark.asyncio

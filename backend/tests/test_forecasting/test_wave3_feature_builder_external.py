@@ -48,7 +48,7 @@ class TestExternalExogColumns:
 
     def test_no_exog_no_new_columns(self):
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -57,7 +57,7 @@ class TestExternalExogColumns:
         )
         y = _make_y_series(60)
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -70,7 +70,7 @@ class TestExternalExogColumns:
 
     def test_operating_rate_adds_lag_columns(self):
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -83,7 +83,7 @@ class TestExternalExogColumns:
             col_name="op_rate",
         )
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -101,7 +101,7 @@ class TestExternalExogColumns:
 
     def test_inventory_adds_lag_columns(self):
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -114,7 +114,7 @@ class TestExternalExogColumns:
             col_name="inventory_t",
         )
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -127,7 +127,7 @@ class TestExternalExogColumns:
 
     def test_import_price_adds_lag_columns(self):
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -140,7 +140,7 @@ class TestExternalExogColumns:
             col_name="import_price_cny",
         )
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -153,7 +153,7 @@ class TestExternalExogColumns:
 
     def test_all_three_exog_combined(self):
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -166,7 +166,7 @@ class TestExternalExogColumns:
         ip_df = _make_exog_df([12.0] * 120, col_name="import_price_cny")
 
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -184,7 +184,7 @@ class TestExternalExogColumns:
     def test_empty_exog_does_not_break(self):
         """Empty df should not add columns or break."""
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -194,7 +194,7 @@ class TestExternalExogColumns:
         y = _make_y_series(60)
         empty_op = pd.DataFrame(columns=["date", "op_rate"])
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -208,7 +208,7 @@ class TestExternalExogColumns:
     def test_exog_with_few_rows_skipped(self):
         """Exog df with < 8 rows should be skipped (matches volume_df pattern)."""
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -218,7 +218,7 @@ class TestExternalExogColumns:
         y = _make_y_series(60)
         small_op = _make_exog_df([75.0] * 5, col_name="op_rate")
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -231,7 +231,7 @@ class TestExternalExogColumns:
     def test_exog_lag_values_are_correct(self):
         """Verify lag values are correct for at least one column."""
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -246,7 +246,7 @@ class TestExternalExogColumns:
             col_name="op_rate", freq_days=1,
         )
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,
@@ -262,7 +262,7 @@ class TestExternalExogColumns:
     def test_exog_lag_columns_in_future(self):
         """Future horizon also gets the lag columns (with last-value fallback)."""
         spec = FeatureSpec(
-            product_key="isoprene",
+            product_key="product_d",
             feedstock_keys=[],
             feedstock_lags=[1],
             spread_pairs=[],
@@ -272,7 +272,7 @@ class TestExternalExogColumns:
         y = _make_y_series(30)
         op_df = _make_exog_df([75.0] * 60, col_name="op_rate")
         result = build_features(
-            target_product_key="isoprene",
+            target_product_key="product_d",
             y=y, spec=spec,
             feedstock_loader=_stub_loader,
             fx_loader=_stub_fx,

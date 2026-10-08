@@ -57,7 +57,7 @@ def _planner_system_prompt(scope: str) -> str:
             "Split the plan across BOTH families:\n"
             "  • Internal-data steps (ask_data_agent / sql_query / "
             "comprehensive_data) for facts that live in the bound "
-            "warehouse: product codes (e.g. C5C9), sales, forecasts, "
+            "warehouse: product codes (e.g. SAMPLE), sales, forecasts, "
             "quantities, revenue, inventory.\n"
             "  • Web steps (web_search / web_extract) for market context, "
             "industry pricing, public benchmarks.\n"
@@ -108,7 +108,7 @@ def build_planner(*, endpoint=None, timeout_s: int = 90, scope: str = "both"):
     internal-data steps (ask_data_agent / sql_query) with web steps. Before
     this fix the planner received ONLY the raw question (no tool universe,
     no scope semantics), so it defaulted to web_search for every step and a
-    C5C9-style product question never touched the bound warehouse.
+    SAMPLE-style product question never touched the bound warehouse.
 
     Tolerates JSON-schema miss: falls back to parsing ``response`` as JSON,
     then to ``{}`` (the orchestrator's fallback step covers the empty case).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run forecasts for all ecisco.* products and print results + metrics."""
+"""Run forecasts for all acme.* products and print results + metrics."""
 import logging, time, json, sys
 logging.basicConfig(level=logging.INFO, format="%(name)s | %(message)s")
 for n in ["sqlalchemy","urllib3","chromadb","sentence_transformers","httpx","httpcore"]:
@@ -12,19 +12,19 @@ from app.services.forecasting.engine import ForecastEngine
 
 PRODUCTS = [
     # Updated to ERP primary (should now have 400+ rows → XGBoost activates)
-    "ecisco.cracked_c5",
-    "ecisco.isoprene",
-    "ecisco.piperylene",
-    "ecisco.dcpd",
-    "ecisco.blowing_agent",
+    "acme.cracked_c5",
+    "acme.product_d",
+    "acme.product_f",
+    "acme.product_b",
+    "acme.blowing_agent",
     # Updated extra_sources (marginal ERP data added)
-    "ecisco.cracked_c9",
+    "acme.cracked_c9",
     # New ERP product families (dynamic SKU discovery)
-    "ecisco.ethylene_carbon_black.202000022",
-    "ecisco.industrial_hexane.202000009",
-    "ecisco.mixed_trimethylbenzene.202000014",
+    "acme.ethylene_carbon_black.202000022",
+    "acme.industrial_hexane.202000009",
+    "acme.mixed_trimethylbenzene.202000014",
     # Already working with XGBoost (baseline reference)
-    "ecisco.c5_resin.201000001",
+    "acme.product_a.201000001",
 ]
 
 db = SessionLocal()

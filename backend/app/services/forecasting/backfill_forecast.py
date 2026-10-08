@@ -62,7 +62,7 @@ def backfill_target(target: ForecastTarget, db) -> Optional[ForecastRun]:
 
     Returns the new ForecastRun (already flushed), or None on insufficient data.
     """
-    strategy = get_datasource(target.datasource.get("source", "edia_mysql"))
+    strategy = get_datasource(target.datasource.get("source", "mysql"))
     y = strategy.fetch(target, db)
     if y is None or len(y.dropna()) < MIN_HISTORY:
         logger.warning(
