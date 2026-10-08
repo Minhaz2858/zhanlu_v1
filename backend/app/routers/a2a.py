@@ -2,22 +2,28 @@
 
 Surface::
 
-  GET  /a2a/agent-card        — machine-readable AgentCard (discovery)
-  POST /a2a                   — JSON-RPC 2.0: tasks/send, tasks/get, tasks/cancel
+  GET  /a2a/agent-card            — machine-readable AgentCard (discovery)
+  GET  /.well-known/agent.json    — conventional discovery path (same card)
+  POST /a2a                       — JSON-RPC 2.0: tasks/send, tasks/get, tasks/cancel
 
 External agents (Claude, Gemini, other enterprise AI OSes) discover this
 card, then delegate tasks via ``tasks/send``. Delegations run through the
 Synexia FSM via the pluggable A2A executor.
+
+Auth (IBM agent-protocols workstream #2): ``POST /a2a`` accepts EITHER a
+user JWT (``Authorization: Bearer``, the original path) OR a server-to-server
+API key (``X-API-Key`` matching ``A2A_API_KEY``) so machine callers don't
+need an interactive login. Discovery stays public by design.
 """
 from __future__ import annotations
 
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from sqlalchemy.orm import Session
 
-from app.deps import get_current_user_required, get_db
+from app.deps import get_current_user_optional, get_db
 from app.models.agent_app import AgentApp
 from app.services.a2a import tasks as tasks_mod
 from app.services.a2a.agent_card import build_platform_card
@@ -25,13 +31,33 @@ from app.services.a2a.agent_card import build_platform_card
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/a2a")
+# Discovery must live at the conventional well-known root path.
+wellknown_router = APIRouter()
 
 _JSONRPC_VERSION = "2.0"
 
 
-def get_a2a_auth(user=Depends(get_current_user_required)) -> dict[str, str]:
-    """Authenticated caller identity for A2A tasks (overridable in tests)."""
-    return {"user_id": getattr(user, "id", "anonymous")}
+def get_a2a_auth(
+    request: Request,
+    x_api_key: str | None = Header(None, alias="X-API-Key"),
+    user=Depends(get_current_user_optional),
+) -> dict[str, str]:
+    """Authenticated caller identity for A2A tasks (overridable in tests).
+
+    Order: (1) ``X-API-Key`` matching ``A2A_API_KEY`` → machine identity
+    ``a2a-api-key``; (2) valid user JWT → the user's id; (3) 401.
+    """
+    from app.config import settings
+
+    expected_key = getattr(settings, "A2A_API_KEY", "") or ""
+    if expected_key and x_api_key and x_api_key == expected_key:
+        return {"user_id": "a2a-api-key"}
+    if user is not None:
+        return {"user_id": getattr(user, "id", "anonymous")}
+    raise HTTPException(
+        status_code=401,
+        detail="A2A auth required: provide a user token or X-API-Key",
+    )
 
 
 def _error_response(req_id: Any, code: int, message: str) -> dict[str, Any]:
@@ -42,9 +68,7 @@ def _result_response(req_id: Any, result: dict[str, Any]) -> dict[str, Any]:
     return {"jsonrpc": _JSONRPC_VERSION, "id": req_id, "result": result}
 
 
-@router.get("/agent-card")
-def agent_card(request: Request, db: Session = Depends(get_db)):
-    """A2A AgentCard for the whole platform (one skill per published agent)."""
+def _build_platform_agent_card(request: Request, db: Session) -> dict[str, Any]:
     agents = (
         db.query(AgentApp)
         .filter(AgentApp.status == "published", AgentApp.is_deleted == False)  # noqa: E712
@@ -63,6 +87,18 @@ def agent_card(request: Request, db: Session = Depends(get_db)):
         ],
         base_url=base_url,
     )
+
+
+@router.get("/agent-card")
+def agent_card(request: Request, db: Session = Depends(get_db)):
+    """A2A AgentCard for the whole platform (one skill per published agent)."""
+    return _build_platform_agent_card(request, db)
+
+
+@wellknown_router.get("/.well-known/agent.json")
+def wellknown_agent_card(request: Request, db: Session = Depends(get_db)):
+    """Conventional discovery path (IBM/A2A step 1) — same card as /a2a/agent-card."""
+    return _build_platform_agent_card(request, db)
 
 
 @router.post("")
@@ -135,4 +171,4 @@ def _tasks_cancel(req_id: Any, params: dict[str, Any], db: Session) -> dict[str,
     return _result_response(req_id, store.to_dict(task))
 
 
-__all__ = ["router", "get_a2a_auth"]
+__all__ = ["router", "wellknown_router", "get_a2a_auth"]

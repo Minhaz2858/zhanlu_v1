@@ -136,6 +136,9 @@ from app.services.tool_handlers import mcp_tool  # noqa: F401
 from app.services.tool_handlers import mcp_oauth_tool  # noqa: F401
 from app.services.tool_handlers import mcp_oauth_manager_tool  # noqa: F401
 
+# IBM agent protocols: A2A outbound delegation (invoke_external_agent)
+from app.services.tool_handlers import a2a_tool  # noqa: F401
+
 # Phase 9: multi-agent swarm tools
 # swarm_tools.py self-registers all 5 swarm_* tools via
 # `register_swarm_tools()` at module bottom; a bare import suffices.

@@ -1440,6 +1440,11 @@ class Settings(BaseSettings):
     # one extra LLM call per report — enable for deliverable-quality
     # deployments; failures are non-fatal (original prose kept).
     SYNTHESIS_REFLEXION_ENABLED: bool = False
+    # A2A_API_KEY (IBM agent-protocols #2): server-to-server key for
+    # POST /a2a (X-API-Key header). Empty = user-JWT auth only (legacy).
+    # Set to a long random string to let machine callers delegate tasks
+    # without an interactive login.
+    A2A_API_KEY: str = ""
     # ROUTING_FEEDBACK_ENABLED (IBM continuous optimization): when True,
     # routing_feedback.get_suggested_overrides may nudge the FSM-vs-ReAct
     # classifier threshold from measured per-route success/latency. Read
