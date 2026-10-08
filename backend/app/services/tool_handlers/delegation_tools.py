@@ -441,6 +441,14 @@ async def _ask_data_agent(
                 len(_swarm_result.get("rows") or []),
                 len(_swarm_result.get("answer") or ""),
             )
+            try:
+                from app.services.agent_metrics import metrics as _metrics
+                _metrics.record_delegation(
+                    "swarm", time.monotonic() - _swarm_t0,
+                    bool(_swarm_result.get("success")),
+                )
+            except Exception:
+                pass
             return _swarm_result
         logger.info("ask_data_agent swarm path returned empty — falling back to loop")
 
@@ -820,6 +828,14 @@ async def _ask_data_agent(
         len(state["last_rows"]) if state.get("last_rows") else 0,
         len(final_text),
     )
+    try:
+        from app.services.agent_metrics import metrics as _metrics
+        _metrics.record_delegation(
+            "loop", time.monotonic() - _delegation_start,
+            _initial_llm_failure is None,
+        )
+    except Exception:
+        pass
 
     # ── NL2SQL auto-retry for trivial probes / garbage data ─────────────────
     # When the sub-agent ran trivial probes (SELECT * FROM table LIMIT 1) or

@@ -134,6 +134,11 @@ class AgentMetrics:
         self.tools_selected = Histogram()
         self.tools_selection_miss = Counter()
 
+        # Data-delegation mode comparison (IBM agent-selection A/B): swarm
+        # sub-agent vs hand-rolled loop — latency/success per mode.
+        self.delegation_modes = defaultdict(Counter)
+        self.delegation_wall_s = defaultdict(Histogram)
+
     def record_guardrail_warning(self, code: str) -> None:
         self.guardrail_warnings[code].inc()
 
@@ -202,6 +207,13 @@ class AgentMetrics:
             tool_name, selected_count,
         )
 
+    def record_delegation(self, mode: str, wall_s: float, success: bool) -> None:
+        """Record one ask_data_agent delegation by mode ('swarm' | 'loop')."""
+        self.delegation_modes[mode]["total"].inc()
+        if success:
+            self.delegation_modes[mode]["success"].inc()
+        self.delegation_wall_s[mode].observe(wall_s)
+
     def get_snapshot(self) -> dict[str, Any]:
         """Return a JSON-serializable snapshot of all metrics."""
         uptime = time.time() - self._start_time
@@ -252,6 +264,14 @@ class AgentMetrics:
             "tool_selection": {
                 "selected_count": self.tools_selected.to_dict(),
                 "misses": self.tools_selection_miss.value,
+            },
+            "delegation_modes": {
+                mode: {
+                    "total": counters["total"].value,
+                    "success": counters["success"].value,
+                    "wall_s": self.delegation_wall_s[mode].to_dict(),
+                }
+                for mode, counters in self.delegation_modes.items()
             },
         }
 
